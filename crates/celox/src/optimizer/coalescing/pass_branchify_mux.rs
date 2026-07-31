@@ -1,12 +1,15 @@
 use super::pass_manager::ExecutionUnitPass;
+use super::placement_analysis::{PlacementAnalysis, ValueId, ValueOrigin, ValueSafety, ValueUse};
 use super::shared::{def_reg, normalize_branch_condition};
+use crate::ir::cfg::SirCfg;
 use crate::ir::{
     BasicBlock, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction,
     SIROffset, SIRTerminator,
 };
 use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
-use std::collections::{BTreeMap, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, VecDeque};
 
 pub(super) struct BranchifyMuxPass;
 
@@ -48,8 +51,8 @@ struct DistributedStore {
 /// function-wide: it uses the complete predecessor graph, dominators and a
 /// post-dominator tree to identify the controlled join in linear-ish time.
 struct CfgAnalysis {
-    dominators: super::pass_guarded_region_sinking::Dominators,
-    postdominators: PostDominatorTree,
+    graph: SirCfg,
+    incoming_edges: Vec<Vec<(BlockId, Option<bool>)>>,
     path_facts: PathFacts,
 }
 
@@ -69,6 +72,10 @@ struct ControlledMuxPlan {
     false_val: RegisterId,
     /// Each incoming edge is classified by the original branch's truth value.
     incoming: Vec<ControlledIncomingEdge>,
+    /// Join-local single-use definitions moved to the selected predecessor.
+    /// Moving and Mux removal are published together, so the intermediate
+    /// non-dominating SSA shape is never observable by another pass.
+    moved: Vec<ControlledMovedInstruction>,
 }
 
 #[derive(Clone, Copy)]
@@ -77,6 +84,12 @@ struct ControlledIncomingEdge {
     select_true: bool,
     /// `Some(true)`/`Some(false)` identifies a branch edge. `None` is a jump.
     edge_truth: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ControlledMovedInstruction {
+    predecessor: BlockId,
+    index: usize,
 }
 
 struct PathFacts {
@@ -143,6 +156,11 @@ struct CrossBlockPriorityChainPlan {
     first_mux_idx: usize,
     muxes: Vec<PriorityChainMux>,
     condition_defs: Vec<Vec<LocatedInstruction>>,
+    /// Closed, single-use pure DAGs for the default value followed by each
+    /// Mux's true value.  Keeping these separate from the decision DAG is
+    /// essential: a case dispatch which evaluates its payload before testing
+    /// the selector has removed Muxes without removing any dynamic work.
+    arm_defs: Vec<Vec<LocatedInstruction>>,
 }
 
 #[derive(Clone)]
@@ -164,6 +182,100 @@ struct CrossBlockGroupBranchifyPlan {
     false_defs: Vec<LocatedInstruction>,
 }
 
+#[derive(Clone)]
+struct CoupledStateUpdatePlan {
+    block_id: BlockId,
+    first_mux_idx: usize,
+    cond: RegisterId,
+    muxes: Vec<PriorityChainMux>,
+    hoisted_defs: Vec<usize>,
+    short_circuit: Option<CoupledShortCircuit>,
+}
+
+#[derive(Clone)]
+struct CoupledPriorityLevel {
+    cond: RegisterId,
+    muxes: Vec<PriorityChainMux>,
+}
+
+#[derive(Clone)]
+struct CoupledPriorityChainPlan {
+    block_id: BlockId,
+    first_mux_idx: usize,
+    levels: Vec<CoupledPriorityLevel>,
+}
+
+#[derive(Clone)]
+struct CoupledShortCircuit {
+    guard: RegisterId,
+    delayed: RegisterId,
+    removed_defs: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PriorityPlacementSite {
+    Decision(usize),
+    Leaf(usize),
+}
+#[derive(Clone)]
+struct PriorityPlacedInstruction {
+    block: BlockId,
+    index: usize,
+    site: PriorityPlacementSite,
+    instruction: SIRInstruction<RegionedAbsoluteAddr>,
+}
+
+#[derive(Clone)]
+struct WholePriorityChainPlan {
+    block_id: BlockId,
+    first_mux_idx: usize,
+    muxes: Vec<PriorityChainMux>,
+    placed: Vec<PriorityPlacedInstruction>,
+}
+
+struct WholePriorityChainCandidate {
+    plan: WholePriorityChainPlan,
+    benefit_scaled: u128,
+    depth: usize,
+    assigned_values: HashSet<ValueId>,
+}
+
+struct AtomicPriorityPlacementPlan {
+    regions: Vec<WholePriorityChainPlan>,
+}
+
+#[derive(Clone)]
+struct ExistingCfgPlacedInstruction {
+    value: ValueId,
+    source_block: BlockId,
+    source_index: usize,
+    target_block: BlockId,
+    topological_rank: usize,
+    instruction: SIRInstruction<RegionedAbsoluteAddr>,
+}
+
+struct ExistingCfgPlacementPlan {
+    placements: Vec<ExistingCfgPlacedInstruction>,
+}
+
+#[derive(Clone)]
+struct SelectorPredicateArmPlan {
+    selector_condition: RegisterId,
+    payload_condition: RegisterId,
+    decision_defs: Vec<usize>,
+    payload_defs: Vec<usize>,
+}
+
+#[derive(Clone)]
+struct SelectorPredicatePlan {
+    block_id: BlockId,
+    common_condition: RegisterId,
+    true_target: (BlockId, Vec<RegisterId>),
+    false_target: (BlockId, Vec<RegisterId>),
+    removed_defs: Vec<usize>,
+    arms: Vec<SelectorPredicateArmPlan>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct UseLocation {
     block: BlockId,
@@ -176,139 +288,1691 @@ impl ExecutionUnitPass for BranchifyMuxPass {
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
-        // A four-state Mux bitwise-merges its arms for an X/Z condition.
-        // Control flow selects only one arm, so branchification cannot preserve
-        // that behavior.
-        if options.four_state {
-            return;
-        }
-        // First consume Muxes whose arms are already guarded by an existing
-        // branch.  This is the CFG case the old block-local pass missed: no
-        // new control flow is needed, so the selected value can be carried as
-        // a block parameter and the branchless Mux can be deleted outright.
-        // Plan all such rewrites from one CFG snapshot; do not repeatedly
-        // rescan the whole function for each Mux.
-        eliminate_controlled_join_muxes(eu);
+        run_branchify_mux(eu, options, None, true, true);
+    }
+}
 
-        let stats = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
-        let stats_start = stats.then(crate::timing::now);
-        let trace_reg = std::env::var("CELOX_BRANCHIFY_TRACE_REG")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .map(RegisterId);
-        let mut use_counts = count_uses(eu);
-        let mut def_blocks = instruction_def_blocks(eu);
-        let mut next_block_id = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0) + 1;
-        let mut reg_counter = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
-        let mut applied = 0usize;
+pub(super) fn run_late_branchify_mux(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    options: &PassOptions,
+    previous_max_block: usize,
+) {
+    run_branchify_mux(eu, options, Some(previous_max_block), true, true);
+}
 
-        // A priority spine is one short-circuit expression, not a collection
-        // of independent selects.  Handle the whole spine before the
-        // single-Mux motion below so later conditions and their pure compare
-        // DAGs are evaluated only on the fall-through path.
-        while let Some(plan) = find_cross_block_priority_chain_plan(eu, &use_counts) {
-            apply_cross_block_priority_chain(eu, plan, &mut next_block_id, &mut reg_counter);
-            applied += 1;
-            use_counts = count_uses(eu);
-            def_blocks = instruction_def_blocks(eu);
+fn run_branchify_mux(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    options: &PassOptions,
+    controlled_join_after: Option<usize>,
+    recover_controlled_joins: bool,
+    enable_whole_function_rewrites: bool,
+) {
+    let stage_timing = std::env::var_os("CELOX_PASS_TIMING").is_some()
+        || std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
+    let mut previous_stage = stage_timing.then(crate::timing::now);
+    let mut report_stage = |stage: &'static str| {
+        if let Some(previous) = previous_stage.as_mut() {
+            eprintln!("[branchify-timing] {stage}: {:?}", previous.elapsed());
+            *previous = crate::timing::now();
         }
+    };
+    let verify_stage = |eu: &ExecutionUnit<RegionedAbsoluteAddr>, stage: &'static str| {
+        if std::env::var_os("CELOX_SIR_VERIFY_PASSES").is_some()
+            && let Err(error) = eu.verify_result()
+        {
+            panic!("during branchify_mux {stage}: {error}");
+        }
+    };
+    // A four-state Mux bitwise-merges its arms for an X/Z condition.
+    // Control flow selects only one arm, so branchification cannot preserve
+    // that behavior.
+    if options.four_state {
+        return;
+    }
+    // First consume Muxes whose arms are already guarded by an existing
+    // branch.  This is the CFG case the old block-local pass missed: no
+    // new control flow is needed, so the selected value can be carried as
+    // a block parameter and the branchless Mux can be deleted outright.
+    // Plan all such rewrites from one CFG snapshot; do not repeatedly
+    // rescan the whole function for each Mux.
+    if recover_controlled_joins {
+        eliminate_controlled_join_muxes(eu, controlled_join_after);
+    }
+    verify_stage(eu, "controlled-join elimination");
+    report_stage("controlled-join elimination");
 
-        // The local transform below can only move definitions from one basic
-        // block.  Before using it, repeatedly consume a conservative
-        // cross-block plan: every moved instruction must be pure, its defining
-        // block must dominate the Mux block, and every moved definition must
-        // have exactly one use in the selected arm.  This is the useful CFG
-        // region case when lowering left a straight-line DAG split over
-        // several basic blocks.
-        while let Some(plan) = find_cross_block_group_branchify_plan(eu) {
-            apply_cross_block_group_branchify(eu, plan, &mut next_block_id, &mut reg_counter);
-            applied += 1;
-            use_counts = count_uses(eu);
-            def_blocks = instruction_def_blocks(eu);
+    let stats = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
+    let stats_start = stats.then(crate::timing::now);
+    let trace_reg = std::env::var("CELOX_BRANCHIFY_TRACE_REG")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(RegisterId);
+    let mut next_block_id = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0) + 1;
+    let mut reg_counter = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
+    let mut applied = 0usize;
+    let mut use_counts = count_uses(eu);
+
+    // Recover a source-level conditional state update before treating its
+    // Muxes independently. RTL lowering commonly separates correlated
+    // updates into distant recurrence chains:
+    //
+    //   next_pri = Mux(c, candidate_pri, pri)
+    //   ...
+    //   next_id  = Mux(c, candidate_id, id)
+    //
+    // Keeping those as two selects extends `c` across the intervening
+    // dataflow and prevents the backend from representing the update as
+    // one branch carrying a state tuple. Process each resulting merge as
+    // a worklist item so a sequence is recovered in source order without
+    // repeatedly rescanning the whole execution unit.
+    if enable_whole_function_rewrites {
+        let priority_start = stage_timing.then(crate::timing::now);
+        applied += branchify_coupled_priority_chains(
+            eu,
+            &use_counts,
+            &mut next_block_id,
+            &mut reg_counter,
+        );
+        if let Some(start) = priority_start {
+            eprintln!(
+                "[branchify-timing] coupled priority chains: {:?}",
+                start.elapsed()
+            );
         }
-        while let Some(plan) = find_cross_block_branchify_plan(eu, &use_counts) {
-            apply_cross_block_branchify(eu, plan, &mut next_block_id, &mut reg_counter);
-            applied += 1;
-            use_counts = count_uses(eu);
-            def_blocks = instruction_def_blocks(eu);
+        let state_start = stage_timing.then(crate::timing::now);
+        applied +=
+            branchify_coupled_state_updates(eu, &use_counts, &mut next_block_id, &mut reg_counter);
+        if let Some(start) = state_start {
+            eprintln!(
+                "[branchify-timing] coupled state updates: {:?}",
+                start.elapsed()
+            );
         }
-        let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
-        block_ids.sort_by_key(|id| id.0);
-        let mut worklist = VecDeque::from(block_ids);
-        let mut queued = HashSet::default();
-        queued.extend(worklist.iter().copied());
-        while let Some(block_id) = worklist.pop_front() {
-            queued.remove(&block_id);
-            if !eu.blocks.contains_key(&block_id) {
-                continue;
-            }
-            while let Some(plan) =
-                find_branchify_mux_in_block(eu, block_id, &use_counts, &def_blocks)
+        verify_stage(eu, "coupled updates");
+    }
+    report_stage("coupled updates");
+    use_counts = count_uses(eu);
+    let mut def_blocks = instruction_def_blocks(eu);
+
+    // A priority spine is one short-circuit expression, not a collection
+    // of independent selects.  Handle the whole spine before the
+    // single-Mux motion below so later conditions and their pure compare
+    // DAGs are evaluated only on the fall-through path.
+    while enable_whole_function_rewrites
+        && let Some(plan) = find_cross_block_priority_chain_plan(eu, &use_counts)
+    {
+        if let Some(register) = trace_reg {
+            eprintln!(
+                "[branchify-trace] selected cross-block priority plan source=b{} first_mux={} muxes={} r{} uses={}",
+                plan.block_id.0,
+                plan.first_mux_idx,
+                plan.muxes.len(),
+                register.0,
+                use_counts.get(&register).copied().unwrap_or(0)
+            );
+            for (kind, group, definitions) in plan
+                .condition_defs
+                .iter()
+                .enumerate()
+                .map(|(index, definitions)| ("condition", index, definitions))
+                .chain(
+                    plan.arm_defs
+                        .iter()
+                        .enumerate()
+                        .map(|(index, definitions)| ("arm", index, definitions)),
+                )
             {
-                let new_blocks = apply_branchify_mux(
-                    eu,
-                    plan,
-                    &mut use_counts,
-                    &mut def_blocks,
-                    &mut next_block_id,
-                    &mut reg_counter,
-                    trace_reg,
-                );
-                applied += 1;
-                if stats && applied.is_multiple_of(1000) {
-                    let insts = eu
-                        .blocks
-                        .values()
-                        .map(|block| block.instructions.len())
-                        .sum::<usize>();
-                    eprintln!(
-                        "[branchify-stats] applied={applied} blocks={} insts={} worklist={} elapsed={:?}",
-                        eu.blocks.len(),
-                        insts,
-                        worklist.len(),
-                        stats_start.unwrap().elapsed()
-                    );
-                }
-                for new_block in new_blocks {
-                    if queued.insert(new_block) {
-                        worklist.push_back(new_block);
+                for definition in definitions {
+                    if def_reg(&definition.instruction) == Some(register)
+                        || inst_uses(&definition.instruction).contains(&register)
+                    {
+                        eprintln!(
+                            "[branchify-trace] plan {kind}[{group}] b{} i{}: {}",
+                            definition.block.0, definition.index, definition.instruction
+                        );
                     }
                 }
             }
+            for candidate in eu.blocks.values() {
+                trace_reg_in_new_block(candidate, register);
+            }
         }
-        if stats {
+        let trace_plan = trace_reg.map(|register| {
+            (
+                register,
+                plan.block_id,
+                plan.first_mux_idx,
+                plan.muxes.len(),
+            )
+        });
+        apply_cross_block_priority_chain(eu, plan, &mut next_block_id, &mut reg_counter);
+        if let Some((register, block, first_mux, muxes)) = trace_plan
+            && let Err(error) = eu.verify_result()
+        {
             eprintln!(
-                "[branchify-stats] before_pre_repair_inline applied={applied} blocks={} elapsed={:?}",
-                eu.blocks.len(),
-                stats_start.unwrap().elapsed()
+                "[branchify-trace] invalid cross-block priority plan source=b{} first_mux={} muxes={}: {error}",
+                block.0, first_mux, muxes
             );
+            for candidate in eu.blocks.values() {
+                trace_reg_in_new_block(candidate, register);
+            }
+            panic!("cross-block priority rewrite produced invalid SIR");
         }
-        inline_param_only_jump_blocks(eu);
-        inline_param_only_jump_blocks(eu);
-        if stats {
-            let insts = eu
-                .blocks
-                .values()
-                .map(|block| block.instructions.len())
-                .sum::<usize>();
-            eprintln!(
-                "[branchify-stats] done applied={applied} blocks={} insts={} elapsed={:?}",
-                eu.blocks.len(),
-                insts,
-                stats_start.unwrap().elapsed()
+        applied += 1;
+        use_counts = count_uses(eu);
+        def_blocks = instruction_def_blocks(eu);
+    }
+    verify_stage(eu, "cross-block priority chains");
+    report_stage("cross-block priority chains");
+
+    // The local transform below can only move definitions from one basic
+    // block.  Before using it, repeatedly consume the existing
+    // conservative cross-block plans: every moved instruction must be
+    // pure, its defining block must dominate the Mux block, and every
+    // moved definition must have exactly one use in the selected arm.
+    // Preserve these already-proved short-circuit regions before the
+    // whole-unit placement pass considers the residual Mux graph.
+    while enable_whole_function_rewrites
+        && let Some(plan) = find_cross_block_group_branchify_plan(eu)
+    {
+        apply_cross_block_group_branchify(eu, plan, &mut next_block_id, &mut reg_counter);
+        applied += 1;
+        use_counts = count_uses(eu);
+        def_blocks = instruction_def_blocks(eu);
+    }
+    verify_stage(eu, "cross-block groups");
+    report_stage("cross-block groups");
+    while enable_whole_function_rewrites
+        && let Some(plan) = find_cross_block_branchify_plan(eu, &use_counts)
+    {
+        apply_cross_block_branchify(eu, plan, &mut next_block_id, &mut reg_counter);
+        applied += 1;
+        use_counts = count_uses(eu);
+        def_blocks = instruction_def_blocks(eu);
+    }
+    verify_stage(eu, "cross-block muxes");
+    report_stage("cross-block muxes");
+    let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
+    block_ids.sort_by_key(|id| id.0);
+    let mut worklist = VecDeque::from(block_ids);
+    let mut queued = HashSet::default();
+    queued.extend(worklist.iter().copied());
+    while let Some(block_id) = worklist.pop_front() {
+        queued.remove(&block_id);
+        if !eu.blocks.contains_key(&block_id) {
+            continue;
+        }
+        while let Some(plan) = find_branchify_mux_in_block(eu, block_id, &use_counts, &def_blocks) {
+            let new_blocks = apply_branchify_mux(
+                eu,
+                plan,
+                &mut use_counts,
+                &mut def_blocks,
+                &mut next_block_id,
+                &mut reg_counter,
+                trace_reg,
             );
-        }
-        if std::env::var_os("CELOX_BRANCHIFY_VERIFY").is_some() {
-            verify_all_uses_have_defs(eu);
+            applied += 1;
+            if stats && applied.is_multiple_of(1000) {
+                let insts = eu
+                    .blocks
+                    .values()
+                    .map(|block| block.instructions.len())
+                    .sum::<usize>();
+                eprintln!(
+                    "[branchify-stats] applied={applied} blocks={} insts={} worklist={} elapsed={:?}",
+                    eu.blocks.len(),
+                    insts,
+                    worklist.len(),
+                    stats_start.unwrap().elapsed()
+                );
+            }
+            for new_block in new_blocks {
+                if queued.insert(new_block) {
+                    worklist.push_back(new_block);
+                }
+            }
         }
     }
+    verify_stage(eu, "local muxes");
+    report_stage("local muxes");
+
+    // The leaf fixed point has now exposed the residual nested Mux spines.
+    // Select complete priority regions from one occurrence-aware snapshot
+    // and apply the non-overlapping whole-unit plan atomically.  Running
+    // here preserves every existing CFG/block-number decision and appends
+    // only complete regions which the leaf transforms could not consume.
+    if enable_whole_function_rewrites
+        && let Ok(placement) = PlacementAnalysis::analyze(eu)
+        && let Some(plan) = find_atomic_priority_placement(eu, &placement)
+    {
+        let regions =
+            apply_atomic_priority_placement(eu, plan, &mut next_block_id, &mut reg_counter);
+        applied += regions;
+    }
+    verify_stage(eu, "atomic priority placement");
+    report_stage("atomic priority placement");
+
+    // Rebuild placement facts after the atomic CFG rewrite, then perform
+    // ordinary whole-unit ScheduleLate on the existing branch forest.
+    // This catches pure/state-versioned DAGs which feed only one existing
+    // control arm even when no Mux remains at the use site.  The complete
+    // connected move is selected and preflighted before any block changes.
+    if enable_whole_function_rewrites
+        && let Ok(placement) = PlacementAnalysis::analyze(eu)
+        && let Some(plan) = find_existing_cfg_placement(eu, &placement)
+    {
+        applied += apply_existing_cfg_placement(eu, plan);
+    }
+    verify_stage(eu, "existing CFG placement");
+    report_stage("existing CFG placement");
+
+    // A selector-disjoint Boolean sum is control flow, not a reason to
+    // evaluate every payload shape eagerly:
+    //
+    //   common && ((kind == A && payload_a) ||
+    //              (kind == B && payload_b) || ...)
+    //
+    // Lower the complete predicate after the ordinary placement pass so
+    // only the selected payload DAG executes.  Planning is whole-EU and
+    // each source block is rewritten once; newly added decision blocks do
+    // not trigger a repeated global scan.
+    if enable_whole_function_rewrites {
+        applied += branchify_selector_guarded_predicates(eu, &mut next_block_id, &mut reg_counter);
+    }
+    verify_stage(eu, "selector predicates");
+    report_stage("selector predicates");
+
+    if stats {
+        eprintln!(
+            "[branchify-stats] before_pre_repair_inline applied={applied} blocks={} elapsed={:?}",
+            eu.blocks.len(),
+            stats_start.unwrap().elapsed()
+        );
+    }
+    inline_param_only_jump_blocks(eu);
+    verify_stage(eu, "first parameter-block inline");
+    report_stage("first parameter-block inline");
+    inline_param_only_jump_blocks(eu);
+    verify_stage(eu, "second parameter-block inline");
+    report_stage("second parameter-block inline");
+    if stats {
+        let insts = eu
+            .blocks
+            .values()
+            .map(|block| block.instructions.len())
+            .sum::<usize>();
+        eprintln!(
+            "[branchify-stats] done applied={applied} blocks={} insts={} elapsed={:?}",
+            eu.blocks.len(),
+            insts,
+            stats_start.unwrap().elapsed()
+        );
+    }
+    if std::env::var_os("CELOX_BRANCHIFY_VERIFY").is_some() {
+        verify_all_uses_have_defs(eu);
+    }
+}
+
+#[derive(Clone)]
+struct ParsedSelectorArm {
+    selector_condition: RegisterId,
+    payload_condition: RegisterId,
+    selector_defs: HashSet<usize>,
+    payload_defs: HashSet<usize>,
+}
+
+fn branchify_selector_guarded_predicates(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    next_block_id: &mut usize,
+    reg_counter: &mut usize,
+) -> usize {
+    let def_locations = instruction_def_locations(eu);
+    let use_locations = register_use_locations(eu);
+    let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
+    block_ids.sort_unstable_by_key(|block| block.0);
+    let plans = block_ids
+        .into_iter()
+        .filter_map(|block| find_selector_predicate_plan(eu, &def_locations, &use_locations, block))
+        .collect::<Vec<_>>();
+    let applied = plans.len();
+    for plan in plans {
+        apply_selector_predicate_plan(eu, plan, next_block_id, reg_counter);
+    }
+    applied
+}
+
+fn find_selector_predicate_plan(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    def_locations: &HashMap<RegisterId, (BlockId, usize)>,
+    use_locations: &HashMap<RegisterId, Vec<UseLocation>>,
+    block_id: BlockId,
+) -> Option<SelectorPredicatePlan> {
+    let block = eu.blocks.get(&block_id)?;
+    let SIRTerminator::Branch {
+        cond,
+        true_block,
+        false_block,
+    } = &block.terminator
+    else {
+        return None;
+    };
+    if true_block.0 == false_block.0
+        || block.instructions.iter().any(|instruction| {
+            !matches!(
+                instruction,
+                SIRInstruction::Imm(..)
+                    | SIRInstruction::Load(..)
+                    | SIRInstruction::Binary(..)
+                    | SIRInstruction::Unary(..)
+                    | SIRInstruction::Concat(..)
+                    | SIRInstruction::Slice(..)
+                    | SIRInstruction::Mux(..)
+            )
+        })
+    {
+        // Delaying a Load is valid across pure computation, but not across an
+        // observable write, commit, or runtime event in the source block.
+        return None;
+    }
+
+    let mut root_removed = HashSet::default();
+    let root = peel_selector_boolean_alias(eu, def_locations, block_id, *cond, &mut root_removed);
+    let &(root_block, root_index) = def_locations.get(&root)?;
+    if root_block != block_id {
+        return None;
+    }
+    let SIRInstruction::Binary(_, lhs, crate::ir::BinaryOp::LogicAnd, rhs) =
+        &block.instructions[root_index]
+    else {
+        return None;
+    };
+    root_removed.insert(root_index);
+
+    for (common_condition, selector_expression) in [(*lhs, *rhs), (*rhs, *lhs)] {
+        let mut removed = root_removed.clone();
+        let Some(mut arms) = parse_selector_sum(
+            eu,
+            def_locations,
+            block_id,
+            selector_expression,
+            &mut removed,
+        ) else {
+            continue;
+        };
+
+        let edge_arguments = true_block
+            .1
+            .iter()
+            .chain(&false_block.1)
+            .copied()
+            .collect::<HashSet<_>>();
+        let removed_is_closed = removed.iter().all(|&index| {
+            let Some(dst) = def_reg(&block.instructions[index]) else {
+                return false;
+            };
+            if edge_arguments.contains(&dst) {
+                return false;
+            }
+            use_locations
+                .get(&dst)
+                .into_iter()
+                .flatten()
+                .all(|location| {
+                    location.block == block_id
+                        && match location.instruction {
+                            Some(use_index) => removed.contains(&use_index),
+                            None => dst == *cond,
+                        }
+                })
+        });
+        if !removed_is_closed {
+            continue;
+        }
+
+        for arm in &mut arms {
+            collect_selector_motion_closure(
+                eu,
+                def_locations,
+                block_id,
+                arm.selector_condition,
+                &removed,
+                &mut arm.selector_defs,
+            );
+            collect_selector_motion_closure(
+                eu,
+                def_locations,
+                block_id,
+                arm.payload_condition,
+                &removed,
+                &mut arm.payload_defs,
+            );
+        }
+
+        // An instruction reachable from more than one selector arm must stay
+        // in the head.  This keeps the transformation linear and avoids
+        // duplicating shared address or expected-value computation.
+        let mut membership = HashMap::<usize, (usize, usize)>::default();
+        for (arm_index, arm) in arms.iter().enumerate() {
+            let mut all = arm.selector_defs.clone();
+            all.extend(arm.payload_defs.iter().copied());
+            for index in all {
+                membership
+                    .entry(index)
+                    .and_modify(|(owner, count)| {
+                        if *owner != arm_index {
+                            *count += 1;
+                        }
+                    })
+                    .or_insert((arm_index, 1));
+            }
+        }
+        let mut movable = membership
+            .iter()
+            .filter_map(|(&index, &(_, count))| {
+                (count == 1 && !removed.contains(&index)).then_some(index)
+            })
+            .collect::<HashSet<_>>();
+
+        // Close the selected move set under uses.  If one candidate definition
+        // is also consumed by a head instruction, edge argument, or another
+        // block, retain it in the head and transitively retain its operands.
+        let mut reject = VecDeque::new();
+        for &index in &movable {
+            if !selector_definition_uses_are_closed(
+                block,
+                use_locations,
+                block_id,
+                index,
+                &movable,
+                &removed,
+            ) {
+                reject.push_back(index);
+            }
+        }
+        while let Some(index) = reject.pop_front() {
+            if !movable.remove(&index) {
+                continue;
+            }
+            for operand in inst_uses(&block.instructions[index]) {
+                let Some(&(definition_block, definition_index)) = def_locations.get(&operand)
+                else {
+                    continue;
+                };
+                if definition_block == block_id
+                    && movable.contains(&definition_index)
+                    && !selector_definition_uses_are_closed(
+                        block,
+                        use_locations,
+                        block_id,
+                        definition_index,
+                        &movable,
+                        &removed,
+                    )
+                {
+                    reject.push_back(definition_index);
+                }
+            }
+        }
+
+        let arms_with_delayed_load = arms
+            .iter()
+            .enumerate()
+            .filter(|(arm_index, _)| {
+                let arm_index = *arm_index;
+                movable.iter().any(|&index| {
+                    membership.get(&index) == Some(&(arm_index, 1))
+                        && matches!(block.instructions[index], SIRInstruction::Load(..))
+                })
+            })
+            .count();
+        if arms_with_delayed_load < 2 {
+            // The extra selector and payload branches must skip real memory
+            // work on at least two mutually exclusive paths.
+            continue;
+        }
+
+        let planned_arms = arms
+            .into_iter()
+            .enumerate()
+            .map(|(arm_index, arm)| {
+                let mut owned = movable
+                    .iter()
+                    .filter_map(|&index| {
+                        (membership.get(&index) == Some(&(arm_index, 1))).then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                owned.sort_unstable();
+                let (decision_defs, payload_defs) = owned
+                    .into_iter()
+                    .partition(|index| arm.selector_defs.contains(index));
+                SelectorPredicateArmPlan {
+                    selector_condition: arm.selector_condition,
+                    payload_condition: arm.payload_condition,
+                    decision_defs,
+                    payload_defs,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut removed_defs = removed.into_iter().collect::<Vec<_>>();
+        removed_defs.sort_unstable();
+        return Some(SelectorPredicatePlan {
+            block_id,
+            common_condition,
+            true_target: true_block.clone(),
+            false_target: false_block.clone(),
+            removed_defs,
+            arms: planned_arms,
+        });
+    }
+    None
+}
+
+fn peel_selector_boolean_alias(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    def_locations: &HashMap<RegisterId, (BlockId, usize)>,
+    block_id: BlockId,
+    mut register: RegisterId,
+    removed: &mut HashSet<usize>,
+) -> RegisterId {
+    let mut seen = HashSet::default();
+    while seen.insert(register) {
+        let Some(&(definition_block, index)) = def_locations.get(&register) else {
+            break;
+        };
+        if definition_block != block_id {
+            break;
+        }
+        let instruction = &eu.blocks[&block_id].instructions[index];
+        let source = match instruction {
+            SIRInstruction::Unary(
+                _,
+                crate::ir::UnaryOp::Ident | crate::ir::UnaryOp::ToTwoState,
+                source,
+            ) => Some(*source),
+            SIRInstruction::Unary(_, crate::ir::UnaryOp::And | crate::ir::UnaryOp::Or, source)
+                if eu
+                    .register_map
+                    .get(source)
+                    .is_some_and(|register| register.width() == 1) =>
+            {
+                Some(*source)
+            }
+            _ => None,
+        };
+        let Some(source) = source else {
+            break;
+        };
+        removed.insert(index);
+        register = source;
+    }
+    register
+}
+
+fn parse_selector_sum(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    def_locations: &HashMap<RegisterId, (BlockId, usize)>,
+    block_id: BlockId,
+    expression: RegisterId,
+    removed: &mut HashSet<usize>,
+) -> Option<Vec<ParsedSelectorArm>> {
+    let mut terms = Vec::new();
+    let mut seen = HashSet::default();
+    if !flatten_selector_or(
+        eu,
+        def_locations,
+        block_id,
+        expression,
+        removed,
+        &mut seen,
+        &mut terms,
+    ) || !(2..=8).contains(&terms.len())
+    {
+        return None;
+    }
+
+    let mut operands = Vec::with_capacity(terms.len());
+    for term in terms {
+        let term = peel_selector_boolean_alias(eu, def_locations, block_id, term, removed);
+        let &(definition_block, index) = def_locations.get(&term)?;
+        if definition_block != block_id {
+            return None;
+        }
+        let SIRInstruction::Binary(_, lhs, crate::ir::BinaryOp::LogicAnd, rhs) =
+            &eu.blocks[&block_id].instructions[index]
+        else {
+            return None;
+        };
+        removed.insert(index);
+        operands.push([*lhs, *rhs]);
+    }
+
+    for first_selector_side in 0..2 {
+        let Some((selector, first_constant)) =
+            selector_guard_key(eu, def_locations, operands[0][first_selector_side])
+        else {
+            continue;
+        };
+        if selector_guard_key(eu, def_locations, operands[0][1 - first_selector_side])
+            .is_some_and(|(other_selector, _)| other_selector == selector)
+        {
+            continue;
+        }
+        let mut constants = HashSet::default();
+        constants.insert(first_constant);
+        let mut arms = vec![ParsedSelectorArm {
+            selector_condition: operands[0][first_selector_side],
+            payload_condition: operands[0][1 - first_selector_side],
+            selector_defs: HashSet::default(),
+            payload_defs: HashSet::default(),
+        }];
+        let mut valid = true;
+        for pair in operands.iter().skip(1) {
+            let matches = (0..2)
+                .filter_map(|side| {
+                    let (candidate_selector, constant) =
+                        selector_guard_key(eu, def_locations, pair[side])?;
+                    (candidate_selector == selector).then_some((side, constant))
+                })
+                .collect::<Vec<_>>();
+            if matches.len() != 1 || !constants.insert(matches[0].1.clone()) {
+                valid = false;
+                break;
+            }
+            let side = matches[0].0;
+            arms.push(ParsedSelectorArm {
+                selector_condition: pair[side],
+                payload_condition: pair[1 - side],
+                selector_defs: HashSet::default(),
+                payload_defs: HashSet::default(),
+            });
+        }
+        if valid {
+            return Some(arms);
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flatten_selector_or(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    def_locations: &HashMap<RegisterId, (BlockId, usize)>,
+    block_id: BlockId,
+    expression: RegisterId,
+    removed: &mut HashSet<usize>,
+    seen: &mut HashSet<RegisterId>,
+    terms: &mut Vec<RegisterId>,
+) -> bool {
+    let expression = peel_selector_boolean_alias(eu, def_locations, block_id, expression, removed);
+    if !seen.insert(expression) {
+        return false;
+    }
+    let Some(&(definition_block, index)) = def_locations.get(&expression) else {
+        terms.push(expression);
+        return true;
+    };
+    if definition_block != block_id {
+        terms.push(expression);
+        return true;
+    }
+    let SIRInstruction::Binary(_, lhs, crate::ir::BinaryOp::LogicOr, rhs) =
+        &eu.blocks[&block_id].instructions[index]
+    else {
+        terms.push(expression);
+        return true;
+    };
+    removed.insert(index);
+    flatten_selector_or(eu, def_locations, block_id, *lhs, removed, seen, terms)
+        && flatten_selector_or(eu, def_locations, block_id, *rhs, removed, seen, terms)
+}
+
+fn selector_guard_key(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    def_locations: &HashMap<RegisterId, (BlockId, usize)>,
+    condition: RegisterId,
+) -> Option<(RegisterId, Vec<u64>)> {
+    let (key, inverted) = predicate_key(eu, def_locations, condition)?;
+    if inverted || key.kind != PredicateKind::Equal {
+        return None;
+    }
+    let PredicateRhs::Constant(payload, mask) = key.rhs else {
+        return None;
+    };
+    mask.iter()
+        .all(|word| *word == 0)
+        .then_some((key.lhs, payload))
+}
+
+fn collect_selector_motion_closure(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    def_locations: &HashMap<RegisterId, (BlockId, usize)>,
+    block_id: BlockId,
+    root: RegisterId,
+    removed: &HashSet<usize>,
+    result: &mut HashSet<usize>,
+) {
+    let Some(&(definition_block, index)) = def_locations.get(&root) else {
+        return;
+    };
+    if definition_block != block_id || removed.contains(&index) || !result.insert(index) {
+        return;
+    }
+    let instruction = &eu.blocks[&block_id].instructions[index];
+    if !matches!(
+        instruction,
+        SIRInstruction::Imm(..)
+            | SIRInstruction::Load(..)
+            | SIRInstruction::Binary(..)
+            | SIRInstruction::Unary(..)
+            | SIRInstruction::Concat(..)
+            | SIRInstruction::Slice(..)
+            | SIRInstruction::Mux(..)
+    ) {
+        result.remove(&index);
+        return;
+    }
+    for operand in inst_uses(instruction) {
+        collect_selector_motion_closure(eu, def_locations, block_id, operand, removed, result);
+    }
+}
+
+fn selector_definition_uses_are_closed(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    use_locations: &HashMap<RegisterId, Vec<UseLocation>>,
+    block_id: BlockId,
+    index: usize,
+    movable: &HashSet<usize>,
+    removed: &HashSet<usize>,
+) -> bool {
+    let Some(dst) = def_reg(&block.instructions[index]) else {
+        return false;
+    };
+    use_locations
+        .get(&dst)
+        .into_iter()
+        .flatten()
+        .all(|location| {
+            location.block == block_id
+                && location.instruction.is_some_and(|use_index| {
+                    movable.contains(&use_index) || removed.contains(&use_index)
+                })
+        })
+}
+
+fn apply_selector_predicate_plan(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plan: SelectorPredicatePlan,
+    next_block_id: &mut usize,
+    reg_counter: &mut usize,
+) {
+    let original = eu
+        .blocks
+        .remove(&plan.block_id)
+        .expect("selector-predicate source block must exist");
+    let removed = plan.removed_defs.iter().copied().collect::<HashSet<_>>();
+    let moved = plan
+        .arms
+        .iter()
+        .flat_map(|arm| arm.decision_defs.iter().chain(&arm.payload_defs))
+        .copied()
+        .collect::<HashSet<_>>();
+    debug_assert!(removed.is_disjoint(&moved));
+
+    let arm_blocks = (0..plan.arms.len())
+        .map(|_| {
+            let decision = BlockId(*next_block_id);
+            let payload = BlockId(*next_block_id + 1);
+            *next_block_id += 2;
+            (decision, payload)
+        })
+        .collect::<Vec<_>>();
+    let mut head_instructions = original
+        .instructions
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !removed.contains(index) && !moved.contains(index))
+        .map(|(_, instruction)| instruction.clone())
+        .collect::<Vec<_>>();
+    let common_condition = normalize_branch_condition(
+        &mut eu.register_map,
+        &mut head_instructions,
+        plan.common_condition,
+        reg_counter,
+    );
+    let head = BasicBlock {
+        id: original.id,
+        params: original.params.clone(),
+        instructions: head_instructions,
+        terminator: SIRTerminator::Branch {
+            cond: common_condition,
+            true_block: (arm_blocks[0].0, Vec::new()),
+            false_block: plan.false_target.clone(),
+        },
+    };
+    eu.blocks.insert(head.id, head);
+
+    for (arm_index, (arm, &(decision_id, payload_id))) in
+        plan.arms.iter().zip(&arm_blocks).enumerate()
+    {
+        let decision_false = arm_blocks
+            .get(arm_index + 1)
+            .map_or_else(|| plan.false_target.clone(), |next| (next.0, Vec::new()));
+        let mut decision_instructions = arm
+            .decision_defs
+            .iter()
+            .map(|&index| original.instructions[index].clone())
+            .collect::<Vec<_>>();
+        let selector_condition = normalize_branch_condition(
+            &mut eu.register_map,
+            &mut decision_instructions,
+            arm.selector_condition,
+            reg_counter,
+        );
+        eu.blocks.insert(
+            decision_id,
+            BasicBlock {
+                id: decision_id,
+                params: Vec::new(),
+                instructions: decision_instructions,
+                terminator: SIRTerminator::Branch {
+                    cond: selector_condition,
+                    true_block: (payload_id, Vec::new()),
+                    false_block: decision_false,
+                },
+            },
+        );
+        let mut payload_instructions = arm
+            .payload_defs
+            .iter()
+            .map(|&index| original.instructions[index].clone())
+            .collect::<Vec<_>>();
+        let payload_condition = normalize_branch_condition(
+            &mut eu.register_map,
+            &mut payload_instructions,
+            arm.payload_condition,
+            reg_counter,
+        );
+        eu.blocks.insert(
+            payload_id,
+            BasicBlock {
+                id: payload_id,
+                params: Vec::new(),
+                instructions: payload_instructions,
+                terminator: SIRTerminator::Branch {
+                    cond: payload_condition,
+                    true_block: plan.true_target.clone(),
+                    false_block: plan.false_target.clone(),
+                },
+            },
+        );
+    }
+}
+
+fn branchify_coupled_state_updates(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    use_counts: &HashMap<RegisterId, usize>,
+    next_block_id: &mut usize,
+    reg_counter: &mut usize,
+) -> usize {
+    let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
+    block_ids.sort_unstable_by_key(|block| block.0);
+    let mut applied = 0usize;
+
+    for block_id in block_ids {
+        let plans = plan_coupled_state_updates_in_block(eu, block_id, use_counts);
+        if plans.is_empty() {
+            continue;
+        }
+        applied += plans.len();
+        apply_coupled_state_update_batch(eu, plans, next_block_id, reg_counter);
+    }
+
+    applied
+}
+
+fn branchify_coupled_priority_chains(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    use_counts: &HashMap<RegisterId, usize>,
+    next_block_id: &mut usize,
+    reg_counter: &mut usize,
+) -> usize {
+    let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
+    block_ids.sort_unstable_by_key(|block| block.0);
+    let mut worklist = VecDeque::from(block_ids);
+    let mut applied = 0usize;
+
+    while let Some(block_id) = worklist.pop_front() {
+        let Some(plan) = find_coupled_priority_chain_in_block(eu, block_id, use_counts) else {
+            continue;
+        };
+        let merge = apply_coupled_priority_chain(eu, plan, next_block_id, reg_counter);
+        applied += 1;
+        worklist.push_front(merge);
+    }
+    applied
+}
+
+fn find_coupled_priority_chain_in_block(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    block_id: BlockId,
+    use_counts: &HashMap<RegisterId, usize>,
+) -> Option<CoupledPriorityChainPlan> {
+    let block = eu.blocks.get(&block_id)?;
+    let mut best = None;
+    let mut muxes = Vec::new();
+    let mut def_pos = HashMap::default();
+    for (mux_idx, instruction) in block.instructions.iter().enumerate() {
+        if let Some(register) = def_reg(instruction) {
+            def_pos.insert(register, mux_idx);
+        }
+        if let SIRInstruction::Mux(dst, cond, true_val, false_val) = instruction {
+            muxes.push(PriorityChainMux {
+                mux_idx,
+                dst: *dst,
+                cond: *cond,
+                true_val: *true_val,
+                false_val: *false_val,
+            });
+        }
+    }
+    let mut groups = HashMap::<RegisterId, Vec<PriorityChainMux>>::default();
+    for mux in &muxes {
+        groups.entry(mux.cond).or_default().push(mux.clone());
+    }
+    for group in groups.values_mut() {
+        group.sort_unstable_by_key(|mux| mux.mux_idx);
+    }
+
+    for inner in groups.values().filter(|group| group.len() >= 2) {
+        let mut levels = vec![CoupledPriorityLevel {
+            cond: inner[0].cond,
+            muxes: inner.clone(),
+        }];
+        loop {
+            let current = levels.last().unwrap();
+            let current_outputs = current.muxes.iter().map(|mux| mux.dst).collect::<Vec<_>>();
+            let mut successors = groups
+                .iter()
+                .filter(|(cond, _)| **cond != current.cond)
+                .filter_map(|(&cond, group)| {
+                    let mapped = current_outputs
+                        .iter()
+                        .map(|output| group.iter().find(|mux| mux.false_val == *output).cloned())
+                        .collect::<Option<Vec<_>>>()?;
+                    mapped
+                        .iter()
+                        .zip(&current.muxes)
+                        .all(|(next, previous)| next.mux_idx > previous.mux_idx)
+                        .then_some(CoupledPriorityLevel {
+                            cond,
+                            muxes: mapped,
+                        })
+                })
+                .collect::<Vec<_>>();
+            successors.sort_unstable_by_key(|level| {
+                level
+                    .muxes
+                    .iter()
+                    .map(|mux| mux.mux_idx)
+                    .min()
+                    .unwrap_or(usize::MAX)
+            });
+            let Some(next) = successors.into_iter().next() else {
+                break;
+            };
+            if next
+                .muxes
+                .iter()
+                .zip(&current.muxes)
+                .any(|(next, previous)| {
+                    use_counts.get(&previous.dst).copied() != Some(1)
+                        || next.false_val != previous.dst
+                })
+            {
+                break;
+            }
+            levels.push(next);
+        }
+        if levels.len() < 2 {
+            continue;
+        }
+
+        let chain_outputs = levels
+            .iter()
+            .flat_map(|level| level.muxes.iter().map(|mux| mux.dst))
+            .collect::<HashSet<_>>();
+        let first_mux_idx = levels
+            .iter()
+            .flat_map(|level| level.muxes.iter().map(|mux| mux.mux_idx))
+            .min()?;
+        let roots = levels
+            .iter()
+            .flat_map(|level| {
+                std::iter::once(level.cond).chain(level.muxes.iter().map(|mux| mux.true_val))
+            })
+            .chain(levels[0].muxes.iter().map(|mux| mux.false_val));
+        if roots.into_iter().any(|root| {
+            chain_outputs.contains(&root)
+                || def_pos
+                    .get(&root)
+                    .is_some_and(|&index| index >= first_mux_idx)
+        }) {
+            continue;
+        }
+        let candidate = CoupledPriorityChainPlan {
+            block_id,
+            first_mux_idx,
+            levels,
+        };
+        if best
+            .as_ref()
+            .is_none_or(|current: &CoupledPriorityChainPlan| {
+                candidate.levels.len() > current.levels.len()
+                    || candidate.levels.len() == current.levels.len()
+                        && (candidate.block_id, candidate.first_mux_idx)
+                            < (current.block_id, current.first_mux_idx)
+            })
+        {
+            best = Some(candidate);
+        }
+    }
+    best
+}
+
+fn apply_coupled_priority_chain(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plan: CoupledPriorityChainPlan,
+    next_block_id: &mut usize,
+    reg_counter: &mut usize,
+) -> BlockId {
+    let depth = plan.levels.len();
+    let base = *next_block_id;
+    let decision_ids = (0..depth)
+        .map(|level| {
+            if level + 1 == depth {
+                plan.block_id
+            } else {
+                BlockId(base + level)
+            }
+        })
+        .collect::<Vec<_>>();
+    let leaf_base = base + depth - 1;
+    let leaf_ids = (0..=depth)
+        .map(|leaf| BlockId(leaf_base + leaf))
+        .collect::<Vec<_>>();
+    let merge_id = BlockId(leaf_base + depth + 1);
+    *next_block_id = merge_id.0 + 1;
+
+    let original = eu.blocks.remove(&plan.block_id).unwrap();
+    let removed = plan
+        .levels
+        .iter()
+        .flat_map(|level| level.muxes.iter().map(|mux| mux.mux_idx))
+        .collect::<HashSet<_>>();
+    let head = original.instructions[..plan.first_mux_idx].to_vec();
+    let continuation = original
+        .instructions
+        .into_iter()
+        .enumerate()
+        .skip(plan.first_mux_idx)
+        .filter_map(|(index, instruction)| (!removed.contains(&index)).then_some(instruction))
+        .collect::<Vec<_>>();
+
+    for level in (0..depth).rev() {
+        let mut instructions = if level + 1 == depth {
+            head.clone()
+        } else {
+            Vec::new()
+        };
+        let cond = normalize_branch_condition(
+            &mut eu.register_map,
+            &mut instructions,
+            plan.levels[level].cond,
+            reg_counter,
+        );
+        eu.blocks.insert(
+            decision_ids[level],
+            BasicBlock {
+                id: decision_ids[level],
+                params: if level + 1 == depth {
+                    original.params.clone()
+                } else {
+                    Vec::new()
+                },
+                instructions,
+                terminator: SIRTerminator::Branch {
+                    cond,
+                    true_block: (leaf_ids[level + 1], Vec::new()),
+                    false_block: if level == 0 {
+                        (leaf_ids[0], Vec::new())
+                    } else {
+                        (decision_ids[level - 1], Vec::new())
+                    },
+                },
+            },
+        );
+    }
+    for (leaf, &leaf_id) in leaf_ids.iter().enumerate() {
+        let values = if leaf == 0 {
+            plan.levels[0]
+                .muxes
+                .iter()
+                .map(|mux| mux.false_val)
+                .collect()
+        } else {
+            plan.levels[leaf - 1]
+                .muxes
+                .iter()
+                .map(|mux| mux.true_val)
+                .collect()
+        };
+        eu.blocks.insert(
+            leaf_id,
+            BasicBlock {
+                id: leaf_id,
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(merge_id, values),
+            },
+        );
+    }
+    eu.blocks.insert(
+        merge_id,
+        BasicBlock {
+            id: merge_id,
+            params: plan
+                .levels
+                .last()
+                .unwrap()
+                .muxes
+                .iter()
+                .map(|mux| mux.dst)
+                .collect(),
+            instructions: continuation,
+            terminator: original.terminator,
+        },
+    );
+    debug_assert_eq!(eu.verify_result(), Ok(()));
+    merge_id
+}
+
+fn plan_coupled_state_updates_in_block(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    block_id: BlockId,
+    use_counts: &HashMap<RegisterId, usize>,
+) -> Vec<CoupledStateUpdatePlan> {
+    let Some(block) = eu.blocks.get(&block_id) else {
+        return Vec::new();
+    };
+    let mut all_muxes = Vec::new();
+    let mut def_pos = HashMap::default();
+    for (mux_idx, instruction) in block.instructions.iter().enumerate() {
+        if let Some(register) = def_reg(instruction) {
+            def_pos.insert(register, mux_idx);
+        }
+        if let SIRInstruction::Mux(dst, cond, true_val, false_val) = instruction {
+            all_muxes.push(PriorityChainMux {
+                mux_idx,
+                dst: *dst,
+                cond: *cond,
+                true_val: *true_val,
+                false_val: *false_val,
+            });
+        }
+    }
+    if all_muxes.len() < 2 {
+        return Vec::new();
+    }
+    let mut by_condition = HashMap::<RegisterId, Vec<usize>>::default();
+    let mut false_consumers = HashMap::<RegisterId, Vec<usize>>::default();
+    for (index, mux) in all_muxes.iter().enumerate() {
+        by_condition.entry(mux.cond).or_default().push(index);
+        false_consumers
+            .entry(mux.false_val)
+            .or_default()
+            .push(index);
+    }
+    let mut condition_groups = by_condition.into_iter().collect::<Vec<_>>();
+    condition_groups.sort_unstable_by_key(|(cond, muxes)| {
+        (
+            muxes
+                .first()
+                .map(|&index| all_muxes[index].mux_idx)
+                .unwrap_or(usize::MAX),
+            cond.0,
+        )
+    });
+
+    let mut plans = Vec::new();
+    let mut start_index = 0usize;
+    let mut removed = HashSet::default();
+    let mut params = block.params.iter().copied().collect::<HashSet<_>>();
+    while let Some(plan) = find_coupled_state_update_in_source_block(
+        eu,
+        block,
+        block_id,
+        &all_muxes,
+        &condition_groups,
+        &false_consumers,
+        &def_pos,
+        use_counts,
+        start_index,
+        &removed,
+        &params,
+    ) {
+        start_index = plan.first_mux_idx + 1;
+        params = plan.muxes.iter().map(|mux| mux.dst).collect();
+        removed.extend(plan.muxes.iter().map(|mux| mux.mux_idx));
+        removed.extend(plan.hoisted_defs.iter().copied());
+        removed.extend(
+            plan.short_circuit
+                .iter()
+                .flat_map(|short| short.removed_defs.iter().copied()),
+        );
+        plans.push(plan);
+    }
+    plans
+}
+
+#[allow(clippy::too_many_arguments)]
+fn find_coupled_state_update_in_source_block(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    block_id: BlockId,
+    all_muxes: &[PriorityChainMux],
+    condition_groups: &[(RegisterId, Vec<usize>)],
+    false_consumers: &HashMap<RegisterId, Vec<usize>>,
+    def_pos: &HashMap<RegisterId, usize>,
+    use_counts: &HashMap<RegisterId, usize>,
+    start_index: usize,
+    removed: &HashSet<usize>,
+    params: &HashSet<RegisterId>,
+) -> Option<CoupledStateUpdatePlan> {
+    for &(cond, ref group_indices) in condition_groups {
+        let group = group_indices
+            .iter()
+            .map(|&index| &all_muxes[index])
+            .filter(|mux| mux.mux_idx >= start_index && !removed.contains(&mux.mux_idx))
+            .collect::<Vec<_>>();
+        if group.len() < 2 {
+            continue;
+        }
+
+        // A non-final update is recognized by at least two state components
+        // flowing to Muxes controlled by the same next predicate. After an
+        // update has been recovered, its merge parameters identify the final
+        // update in the sequence as well.
+        let mut successor_links = HashMap::<RegisterId, HashSet<RegisterId>>::default();
+        for mux in &group {
+            for &consumer_index in false_consumers.get(&mux.dst).into_iter().flatten() {
+                let consumer = &all_muxes[consumer_index];
+                if consumer.mux_idx < start_index
+                    || removed.contains(&consumer.mux_idx)
+                    || consumer.mux_idx <= mux.mux_idx
+                    || consumer.cond == cond
+                {
+                    continue;
+                }
+                successor_links
+                    .entry(consumer.cond)
+                    .or_default()
+                    .insert(mux.dst);
+            }
+        }
+        let successor = successor_links
+            .into_iter()
+            .filter(|(_, outputs)| outputs.len() >= 2)
+            .max_by_key(|(next_cond, outputs)| (outputs.len(), Reverse(next_cond.0)));
+        let mut selected = if let Some((_, outputs)) = successor {
+            group
+                .iter()
+                .filter(|mux| outputs.contains(&mux.dst))
+                .map(|mux| (*mux).clone())
+                .collect::<Vec<_>>()
+        } else {
+            group
+                .iter()
+                .filter(|mux| params.contains(&mux.false_val))
+                .map(|mux| (*mux).clone())
+                .collect::<Vec<_>>()
+        };
+        if selected.len() < 2 {
+            continue;
+        }
+        selected.sort_unstable_by_key(|mux| mux.mux_idx);
+        let first_mux_idx = selected[0].mux_idx;
+        let selected_outputs = selected.iter().map(|mux| mux.dst).collect::<HashSet<_>>();
+        let selected_locations = selected
+            .iter()
+            .map(|mux| mux.mux_idx)
+            .collect::<HashSet<_>>();
+        let mut hoisted_defs = HashSet::default();
+        let mut visiting = HashSet::default();
+        let available = selected.iter().all(|mux| {
+            [mux.true_val, mux.false_val].into_iter().all(|root| {
+                collect_coupled_update_hoists(
+                    block,
+                    def_pos,
+                    start_index,
+                    removed,
+                    first_mux_idx,
+                    &selected_outputs,
+                    &selected_locations,
+                    root,
+                    &mut visiting,
+                    &mut hoisted_defs,
+                )
+            })
+        });
+        if !available {
+            continue;
+        }
+        let mut hoisted_defs = hoisted_defs.into_iter().collect::<Vec<_>>();
+        hoisted_defs.sort_unstable();
+        let short_circuit = find_coupled_short_circuit(
+            eu,
+            block,
+            def_pos,
+            use_counts,
+            start_index,
+            removed,
+            cond,
+            &selected_locations,
+        );
+
+        return Some(CoupledStateUpdatePlan {
+            block_id,
+            first_mux_idx,
+            cond,
+            muxes: selected,
+            hoisted_defs,
+            short_circuit,
+        });
+    }
+    None
+}
+
+fn find_coupled_short_circuit(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    def_pos: &HashMap<RegisterId, usize>,
+    use_counts: &HashMap<RegisterId, usize>,
+    start_index: usize,
+    previously_removed: &HashSet<usize>,
+    cond: RegisterId,
+    selected_locations: &HashSet<usize>,
+) -> Option<CoupledShortCircuit> {
+    let mut current = cond;
+    let mut removed_defs = Vec::new();
+    let (guard, delayed) = loop {
+        let &index = def_pos.get(&current)?;
+        if index < start_index || previously_removed.contains(&index) {
+            return None;
+        }
+        match &block.instructions[index] {
+            SIRInstruction::Unary(
+                dst,
+                crate::ir::UnaryOp::Ident | crate::ir::UnaryOp::ToTwoState,
+                source,
+            ) if *dst == current => {
+                removed_defs.push(index);
+                current = *source;
+            }
+            SIRInstruction::Unary(dst, crate::ir::UnaryOp::Or, source)
+                if *dst == current
+                    && eu
+                        .register_map
+                        .get(source)
+                        .is_some_and(|register| register.width() == 1) =>
+            {
+                removed_defs.push(index);
+                current = *source;
+            }
+            SIRInstruction::Binary(dst, lhs, crate::ir::BinaryOp::LogicAnd, rhs)
+                if *dst == current =>
+            {
+                removed_defs.push(index);
+                break (*lhs, *rhs);
+            }
+            _ => return None,
+        }
+    };
+
+    let removed_locations = removed_defs.iter().copied().collect::<HashSet<_>>();
+    let allowed_locations = removed_locations
+        .iter()
+        .chain(selected_locations)
+        .copied()
+        .collect::<HashSet<_>>();
+    for &index in &removed_defs {
+        let register = def_reg(&block.instructions[index])?;
+        let allowed_uses = allowed_locations
+            .iter()
+            .map(|&use_index| {
+                inst_uses(&block.instructions[use_index])
+                    .into_iter()
+                    .filter(|used| *used == register)
+                    .count()
+            })
+            .sum::<usize>();
+        if use_counts.get(&register).copied().unwrap_or(0) != allowed_uses {
+            return None;
+        }
+    }
+    removed_defs.sort_unstable();
+    Some(CoupledShortCircuit {
+        guard,
+        delayed,
+        removed_defs,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_coupled_update_hoists(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    def_pos: &HashMap<RegisterId, usize>,
+    start_index: usize,
+    previously_removed: &HashSet<usize>,
+    first_mux_idx: usize,
+    selected_outputs: &HashSet<RegisterId>,
+    selected_locations: &HashSet<usize>,
+    register: RegisterId,
+    visiting: &mut HashSet<RegisterId>,
+    hoisted_defs: &mut HashSet<usize>,
+) -> bool {
+    if selected_outputs.contains(&register) {
+        return false;
+    }
+    let Some(&index) = def_pos.get(&register) else {
+        return true;
+    };
+    if index < start_index || previously_removed.contains(&index) {
+        return true;
+    }
+    if index < first_mux_idx || hoisted_defs.contains(&index) {
+        return true;
+    }
+    if selected_locations.contains(&index) || !visiting.insert(register) {
+        return false;
+    }
+    let instruction = &block.instructions[index];
+    let movable = matches!(
+        instruction,
+        SIRInstruction::Imm(..)
+            | SIRInstruction::Binary(..)
+            | SIRInstruction::Unary(..)
+            | SIRInstruction::Concat(..)
+            | SIRInstruction::Slice(..)
+    );
+    let valid = movable
+        && inst_uses(instruction).into_iter().all(|operand| {
+            collect_coupled_update_hoists(
+                block,
+                def_pos,
+                start_index,
+                previously_removed,
+                first_mux_idx,
+                selected_outputs,
+                selected_locations,
+                operand,
+                visiting,
+                hoisted_defs,
+            )
+        });
+    visiting.remove(&register);
+    if valid {
+        hoisted_defs.insert(index);
+    }
+    valid
+}
+
+fn apply_coupled_state_update_batch(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plans: Vec<CoupledStateUpdatePlan>,
+    next_block_id: &mut usize,
+    reg_counter: &mut usize,
+) {
+    let source_block_id = plans[0].block_id;
+    let original = eu
+        .blocks
+        .remove(&source_block_id)
+        .expect("coupled state-update block must exist");
+    let removed = plans
+        .iter()
+        .flat_map(|plan| {
+            plan.muxes
+                .iter()
+                .map(|mux| mux.mux_idx)
+                .chain(plan.hoisted_defs.iter().copied())
+                .chain(
+                    plan.short_circuit
+                        .iter()
+                        .flat_map(|short| short.removed_defs.iter().copied()),
+                )
+        })
+        .collect::<HashSet<_>>();
+    let mut current_block_id = source_block_id;
+    let mut current_params = original.params;
+    let mut segment_start = 0usize;
+
+    for plan in &plans {
+        let guard_block_id = plan.short_circuit.as_ref().map(|_| BlockId(*next_block_id));
+        let edge_base = *next_block_id + usize::from(guard_block_id.is_some());
+        let true_block_id = BlockId(edge_base);
+        let false_block_id = BlockId(edge_base + 1);
+        let merge_block_id = BlockId(edge_base + 2);
+        *next_block_id = merge_block_id.0 + 1;
+
+        let mut head_instructions = original.instructions[segment_start..plan.first_mux_idx]
+            .iter()
+            .enumerate()
+            .filter(|(relative_index, _)| !removed.contains(&(segment_start + relative_index)))
+            .map(|(_, instruction)| instruction.clone())
+            .collect::<Vec<_>>();
+        head_instructions.extend(
+            plan.hoisted_defs
+                .iter()
+                .map(|&index| original.instructions[index].clone()),
+        );
+        let head_cond = normalize_branch_condition(
+            &mut eu.register_map,
+            &mut head_instructions,
+            plan.short_circuit
+                .as_ref()
+                .map_or(plan.cond, |short| short.guard),
+            reg_counter,
+        );
+        eu.blocks.insert(
+            current_block_id,
+            BasicBlock {
+                id: current_block_id,
+                params: current_params,
+                instructions: head_instructions,
+                terminator: SIRTerminator::Branch {
+                    cond: head_cond,
+                    true_block: (guard_block_id.unwrap_or(true_block_id), Vec::new()),
+                    false_block: (false_block_id, Vec::new()),
+                },
+            },
+        );
+        if let (Some(guard_block_id), Some(short_circuit)) =
+            (guard_block_id, plan.short_circuit.as_ref())
+        {
+            let mut instructions = Vec::new();
+            let delayed = normalize_branch_condition(
+                &mut eu.register_map,
+                &mut instructions,
+                short_circuit.delayed,
+                reg_counter,
+            );
+            eu.blocks.insert(
+                guard_block_id,
+                BasicBlock {
+                    id: guard_block_id,
+                    params: Vec::new(),
+                    instructions,
+                    terminator: SIRTerminator::Branch {
+                        cond: delayed,
+                        true_block: (true_block_id, Vec::new()),
+                        false_block: (false_block_id, Vec::new()),
+                    },
+                },
+            );
+        }
+        eu.blocks.insert(
+            true_block_id,
+            BasicBlock {
+                id: true_block_id,
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(
+                    merge_block_id,
+                    plan.muxes.iter().map(|mux| mux.true_val).collect(),
+                ),
+            },
+        );
+        eu.blocks.insert(
+            false_block_id,
+            BasicBlock {
+                id: false_block_id,
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(
+                    merge_block_id,
+                    plan.muxes.iter().map(|mux| mux.false_val).collect(),
+                ),
+            },
+        );
+        current_block_id = merge_block_id;
+        current_params = plan.muxes.iter().map(|mux| mux.dst).collect();
+        segment_start = plan.first_mux_idx + 1;
+    }
+
+    eu.blocks.insert(
+        current_block_id,
+        BasicBlock {
+            id: current_block_id,
+            params: current_params,
+            instructions: original
+                .instructions
+                .into_iter()
+                .enumerate()
+                .skip(segment_start)
+                .filter(|(index, _)| !removed.contains(index))
+                .map(|(_, instruction)| instruction)
+                .collect(),
+            terminator: original.terminator,
+        },
+    );
+    debug_assert_eq!(eu.verify_result(), Ok(()));
 }
 
 fn find_cross_block_priority_chain_plan(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     use_counts: &HashMap<RegisterId, usize>,
 ) -> Option<CrossBlockPriorityChainPlan> {
-    let cfg = CfgAnalysis::compute(eu);
+    let cfg = SirCfg::analyze_forward_structure(eu).ok()?;
     let locations = instruction_def_locations(eu);
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
     block_ids.sort_unstable_by_key(|id| id.0);
@@ -373,10 +2037,11 @@ fn find_cross_block_priority_chain_plan(
                     valid = false;
                     break;
                 };
-                let defs = defs
-                    .into_iter()
-                    .filter(|def| def.block != block_id)
-                    .collect::<Vec<_>>();
+                // Moving only the cross-block prefix of a condition DAG is
+                // not a closed rewrite.  If the root (or an intermediate)
+                // remains in the Mux block, it still uses that prefix before
+                // the newly created decision blocks execute.
+                let defs = closed_cross_block_condition_slice(defs, block_id);
                 for def in &defs {
                     if !moved_locations.insert((def.block, def.index)) {
                         valid = false;
@@ -389,6 +2054,46 @@ fn find_cross_block_priority_chain_plan(
                 condition_defs.push(defs);
             }
             if !valid || moved_locations.is_empty() || condition_defs.iter().all(Vec::is_empty) {
+                continue;
+            }
+
+            // The old cross-block priority rewrite moved only condition DAGs.
+            // It then passed every already-computed payload directly from a
+            // decision block to the merge.  Recover the disjoint arm slices
+            // while the Mux chain still records which case owns each value.
+            // Single-use closure makes the total walk linear in the number of
+            // collected def-use edges across all arms.
+            let arm_roots =
+                std::iter::once(muxes[0].false_val).chain(muxes.iter().map(|mux| mux.true_val));
+            let mut arm_defs = Vec::with_capacity(muxes.len() + 1);
+            for root in arm_roots {
+                let mut seen = HashSet::default();
+                let Some(defs) = collect_cross_arm_defs(
+                    eu,
+                    &cfg,
+                    use_counts,
+                    &locations,
+                    block_id,
+                    first_mux_idx,
+                    root,
+                    true,
+                    &mut seen,
+                ) else {
+                    valid = false;
+                    break;
+                };
+                for def in &defs {
+                    if !moved_locations.insert((def.block, def.index)) {
+                        valid = false;
+                        break;
+                    }
+                }
+                if !valid {
+                    break;
+                }
+                arm_defs.push(defs);
+            }
+            if !valid || arm_defs.len() != muxes.len() + 1 {
                 continue;
             }
 
@@ -409,6 +2114,19 @@ fn find_cross_block_priority_chain_plan(
                 .flatten()
                 .map(|def| branchified_instruction_cost(&def.instruction, &eu.register_map))
                 .sum::<u128>();
+            let arm_costs = arm_defs
+                .iter()
+                .map(|defs| {
+                    defs.iter()
+                        .map(|def| branchified_instruction_cost(&def.instruction, &eu.register_map))
+                        .sum::<u128>()
+                })
+                .collect::<Vec<_>>();
+            let avoided_arm_cost = arm_costs
+                .iter()
+                .copied()
+                .sum::<u128>()
+                .saturating_sub(arm_costs.iter().copied().max().unwrap_or(0));
             let removed_mux_cost = muxes
                 .iter()
                 .map(|mux| {
@@ -439,8 +2157,15 @@ fn find_cross_block_priority_chain_plan(
                     chunks_for(muxes.last().expect("chain has a first mux").dst)
                         .saturating_mul(PHI_COPY_COST_PER_CHUNK),
                 )
-                .saturating_add(live_through_cost);
-            if condition_cost.saturating_add(removed_mux_cost) <= introduced_cost {
+                .saturating_add(live_through_cost)
+                // At most one selected payload leaf executes, hence at most
+                // one additional arm-to-merge transfer is dynamic.
+                .saturating_add(1);
+            if condition_cost
+                .saturating_add(removed_mux_cost)
+                .saturating_add(avoided_arm_cost)
+                <= introduced_cost
+            {
                 continue;
             }
 
@@ -449,6 +2174,7 @@ fn find_cross_block_priority_chain_plan(
                 first_mux_idx,
                 muxes,
                 condition_defs,
+                arm_defs,
             });
         }
     }
@@ -461,17 +2187,22 @@ fn apply_cross_block_priority_chain(
     next_block_id: &mut usize,
     reg_counter: &mut usize,
 ) {
-    let true_leaf_id = BlockId(*next_block_id + plan.muxes.len() - 1);
-    let merge_id = BlockId(*next_block_id + plan.muxes.len());
+    let mux_count = plan.muxes.len();
     let decision_ids = (0..plan.muxes.len() - 1)
         .map(|index| BlockId(*next_block_id + index))
         .collect::<Vec<_>>();
-    *next_block_id += plan.muxes.len() + 1;
+    let leaf_base = *next_block_id + decision_ids.len();
+    let leaf_ids = (0..=mux_count)
+        .map(|index| BlockId(leaf_base + index))
+        .collect::<Vec<_>>();
+    let merge_id = BlockId(leaf_base + mux_count + 1);
+    *next_block_id = merge_id.0 + 1;
 
     let removed_locations = plan
         .condition_defs
         .iter()
         .flatten()
+        .chain(plan.arm_defs.iter().flatten())
         .map(located_instruction_key)
         .chain(plan.muxes.iter().map(|mux| (plan.block_id, mux.mux_idx)))
         .collect::<HashSet<_>>();
@@ -514,7 +2245,7 @@ fn apply_cross_block_priority_chain(
         reg_counter,
     );
     let head_false = if outer_index == 0 {
-        (merge_id, vec![outer.false_val])
+        (leaf_ids[0], Vec::new())
     } else {
         (decision_ids[outer_index - 1], Vec::new())
     };
@@ -524,7 +2255,7 @@ fn apply_cross_block_priority_chain(
         instructions: head_insts,
         terminator: SIRTerminator::Branch {
             cond: head_cond,
-            true_block: (merge_id, vec![outer.true_val]),
+            true_block: (leaf_ids[outer_index + 1], Vec::new()),
             false_block: head_false,
         },
     };
@@ -543,15 +2274,11 @@ fn apply_cross_block_priority_chain(
             reg_counter,
         );
         let false_target = if index == 0 {
-            (merge_id, vec![mux.false_val])
+            (leaf_ids[0], Vec::new())
         } else {
             (decision_ids[index - 1], Vec::new())
         };
-        let true_target = if index == 0 {
-            (true_leaf_id, Vec::new())
-        } else {
-            (merge_id, vec![mux.true_val])
-        };
+        let true_target = (leaf_ids[index + 1], Vec::new());
         eu.blocks.insert(
             decision_ids[index],
             BasicBlock {
@@ -567,16 +2294,25 @@ fn apply_cross_block_priority_chain(
         );
     }
 
-    let final_mux = &plan.muxes[0];
-    eu.blocks.insert(
-        true_leaf_id,
-        BasicBlock {
-            id: true_leaf_id,
-            params: Vec::new(),
-            instructions: Vec::new(),
-            terminator: SIRTerminator::Jump(merge_id, vec![final_mux.true_val]),
-        },
-    );
+    for (arm, leaf_id) in leaf_ids.into_iter().enumerate() {
+        let value = if arm == 0 {
+            plan.muxes[0].false_val
+        } else {
+            plan.muxes[arm - 1].true_val
+        };
+        eu.blocks.insert(
+            leaf_id,
+            BasicBlock {
+                id: leaf_id,
+                params: Vec::new(),
+                instructions: plan.arm_defs[arm]
+                    .iter()
+                    .map(|def| def.instruction.clone())
+                    .collect(),
+                terminator: SIRTerminator::Jump(merge_id, vec![value]),
+            },
+        );
+    }
 
     let suffix = original
         .instructions
@@ -601,7 +2337,7 @@ fn find_cross_block_branchify_plan(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     use_counts: &HashMap<RegisterId, usize>,
 ) -> Option<CrossBlockBranchifyPlan> {
-    let cfg = CfgAnalysis::compute(eu);
+    let cfg = SirCfg::analyze_forward_structure(eu).ok()?;
     let def_locations = instruction_def_locations(eu);
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
     block_ids.sort_unstable_by_key(|id| id.0);
@@ -626,13 +2362,10 @@ fn find_cross_block_branchify_plan(
             ) else {
                 continue;
             };
-            // Definitions already in the Mux block are kept in their original
-            // order.  Only a dominating cross-block slice is actually moved
-            // into the new branch head.
-            let condition_defs = condition_defs
-                .into_iter()
-                .filter(|def| def.block != block_id)
-                .collect::<Vec<_>>();
+            // Do not sever a cross-block producer from a condition node that
+            // remains in the Mux block.  Such a prefix is not independently
+            // movable: the local node still executes before the new branch.
+            let condition_defs = closed_cross_block_condition_slice(condition_defs, block_id);
             let head = block
                 .instructions
                 .iter()
@@ -777,6 +2510,20 @@ fn moved_defs_insertion_index(
     (insertion <= first_use).then_some(insertion)
 }
 
+fn closed_cross_block_condition_slice(
+    definitions: Vec<LocatedInstruction>,
+    mux_block: BlockId,
+) -> Vec<LocatedInstruction> {
+    if definitions
+        .iter()
+        .any(|definition| definition.block == mux_block)
+    {
+        Vec::new()
+    } else {
+        definitions
+    }
+}
+
 /// Find a group of selects driven by the same predicate.  Treating each Mux
 /// independently misses the important case where several selected values
 /// share one arm DAG:
@@ -795,7 +2542,7 @@ fn moved_defs_insertion_index(
 fn find_cross_block_group_branchify_plan(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Option<CrossBlockGroupBranchifyPlan> {
-    let cfg = CfgAnalysis::compute(eu);
+    let cfg = SirCfg::analyze_forward_structure(eu).ok()?;
     let def_locations = instruction_def_locations(eu);
     let def_blocks = all_def_blocks(eu);
     let use_locations = register_use_locations(eu);
@@ -937,25 +2684,842 @@ fn find_cross_block_group_branchify_plan(
     None
 }
 
+fn find_atomic_priority_placement(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    placement: &PlacementAnalysis,
+) -> Option<AtomicPriorityPlacementPlan> {
+    let locations = instruction_def_locations(eu);
+    let use_locations = register_use_locations(eu);
+    let mut candidates = Vec::<WholePriorityChainCandidate>::new();
+    for &block_id in &placement.cfg.block_ids {
+        let block = &eu.blocks[&block_id];
+        let mut index = 0usize;
+        while index < block.instructions.len() {
+            let SIRInstruction::Mux(dst, cond, true_val, false_val) = &block.instructions[index]
+            else {
+                index += 1;
+                continue;
+            };
+            let mut muxes = vec![PriorityChainMux {
+                mux_idx: index,
+                dst: *dst,
+                cond: *cond,
+                true_val: *true_val,
+                false_val: *false_val,
+            }];
+            let mut next = index + 1;
+            while let Some(SIRInstruction::Mux(dst, cond, true_val, false_val)) =
+                block.instructions.get(next)
+            {
+                if *false_val != muxes.last().expect("chain has a first Mux").dst {
+                    break;
+                }
+                muxes.push(PriorityChainMux {
+                    mux_idx: next,
+                    dst: *dst,
+                    cond: *cond,
+                    true_val: *true_val,
+                    false_val: *false_val,
+                });
+                next += 1;
+            }
+            if muxes.len() >= 2
+                && let Some(candidate) = build_whole_priority_chain_candidate(
+                    eu,
+                    placement,
+                    &locations,
+                    &use_locations,
+                    block_id,
+                    index,
+                    muxes,
+                )
+            {
+                candidates.push(candidate);
+            }
+            index = next;
+        }
+    }
+
+    candidates.sort_unstable_by_key(|candidate| {
+        (
+            Reverse(candidate.depth),
+            Reverse(candidate.benefit_scaled),
+            candidate.plan.block_id,
+            candidate.plan.first_mux_idx,
+        )
+    });
+
+    let mut touched_blocks = HashSet::<BlockId>::default();
+    let mut assigned_values = HashSet::<ValueId>::default();
+    let mut regions = Vec::new();
+    for candidate in candidates {
+        if touched_blocks.contains(&candidate.plan.block_id)
+            || !candidate.assigned_values.is_disjoint(&assigned_values)
+        {
+            continue;
+        }
+        touched_blocks.insert(candidate.plan.block_id);
+        assigned_values.extend(candidate.assigned_values);
+        regions.push(candidate.plan);
+    }
+    (!regions.is_empty()).then_some(AtomicPriorityPlacementPlan { regions })
+}
+
+/// Schedule movable SSA occurrences as late as the existing CFG permits.
+///
+/// The target of a producer depends on the eventual targets of its users, so
+/// this is deliberately a whole-unit reverse-topological computation.  It is
+/// not a block-local "all uses happen to be in one arm" scan.  Parameters and
+/// observable instructions break the value DAG and remain fixed anchors.
+fn find_existing_cfg_placement(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    placement: &PlacementAnalysis,
+) -> Option<ExistingCfgPlacementPlan> {
+    let mut instruction_values = HashMap::<(BlockId, usize), ValueId>::default();
+    let mut candidates = BTreeSet::<ValueId>::new();
+    for occurrence in &placement.values {
+        let ValueOrigin::Instruction { block, index } = occurrence.origin else {
+            continue;
+        };
+        let instruction = eu
+            .blocks
+            .get(&block)
+            .and_then(|block| block.instructions.get(index))?;
+        if def_reg(instruction) != Some(occurrence.register) {
+            return None;
+        }
+        instruction_values.insert((block, index), occurrence.id);
+        let movable = match occurrence.safety {
+            ValueSafety::Pure => is_cross_block_sinkable_input(instruction),
+            ValueSafety::StateRead(_) => matches!(instruction, SIRInstruction::Load(..)),
+            ValueSafety::Pinned(_) => false,
+        };
+        if movable {
+            candidates.insert(occurrence.id);
+        }
+    }
+
+    // Producer -> user edges. Repeated operands are one dependency edge, not
+    // a cycle or an inflated indegree.
+    let mut indegree = candidates
+        .iter()
+        .copied()
+        .map(|value| (value, 0usize))
+        .collect::<HashMap<_, _>>();
+    let mut users = HashMap::<ValueId, Vec<ValueId>>::default();
+    for &user in &candidates {
+        let dependencies = placement.values[user.0]
+            .operands
+            .iter()
+            .copied()
+            .filter(|operand| candidates.contains(operand))
+            .collect::<BTreeSet<_>>();
+        indegree.insert(user, dependencies.len());
+        for dependency in dependencies {
+            users.entry(dependency).or_default().push(user);
+        }
+    }
+    for value_users in users.values_mut() {
+        value_users.sort_unstable();
+        value_users.dedup();
+    }
+
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(&value, &degree)| (degree == 0).then_some(value))
+        .collect::<BTreeSet<_>>();
+    let mut topological = Vec::with_capacity(candidates.len());
+    while let Some(&value) = ready.iter().next() {
+        ready.remove(&value);
+        topological.push(value);
+        for &user in users.get(&value).into_iter().flatten() {
+            let degree = indegree.get_mut(&user)?;
+            *degree = degree.checked_sub(1)?;
+            if *degree == 0 {
+                ready.insert(user);
+            }
+        }
+    }
+    // Valid SIR SSA is acyclic after block parameters cut loop-carried value
+    // edges. Refuse the complete plan if that invariant is not represented.
+    if topological.len() != candidates.len() {
+        return None;
+    }
+
+    let mut targets = HashMap::<ValueId, BlockId>::default();
+    for &value in topological.iter().rev() {
+        let occurrence = &placement.values[value.0];
+        let origin = occurrence.origin.block();
+        let use_blocks = occurrence.uses.iter().map(|site| match *site {
+            ValueUse::Instruction { block, index, .. } => instruction_values
+                .get(&(block, index))
+                .and_then(|user| targets.get(user))
+                .copied()
+                .unwrap_or(block),
+            ValueUse::BranchCondition { block } => block,
+            ValueUse::EdgeArgument { predecessor, .. } => predecessor,
+        });
+        let target = placement
+            .sink_bounds_for_use_blocks(value, use_blocks)
+            .map(|bounds| bounds.latest)
+            .filter(|&target| target != origin)
+            .unwrap_or(origin);
+        targets.insert(value, target);
+    }
+
+    let moved = candidates
+        .iter()
+        .copied()
+        .filter(|value| {
+            let origin = placement.values[value.0].origin.block();
+            targets.get(value).is_some_and(|target| *target != origin)
+        })
+        .collect::<BTreeSet<_>>();
+    if moved.is_empty() {
+        return None;
+    }
+
+    // Profitability belongs to the connected move, not to a cheap Mux or
+    // arithmetic node viewed in isolation.  Compare work skipped on the
+    // untaken half of an existing branch with the worst-case increase in
+    // values crossing the control boundary.  No new control transfer or phi
+    // is introduced by this transform.
+    let mut neighbors = HashMap::<ValueId, Vec<ValueId>>::default();
+    for &user in &moved {
+        for &operand in &placement.values[user.0].operands {
+            if !moved.contains(&operand) {
+                continue;
+            }
+            neighbors.entry(user).or_default().push(operand);
+            neighbors.entry(operand).or_default().push(user);
+        }
+    }
+    for adjacent in neighbors.values_mut() {
+        adjacent.sort_unstable();
+        adjacent.dedup();
+    }
+
+    let mut accepted = HashSet::<ValueId>::default();
+    let mut unvisited = moved.clone();
+    while let Some(&root) = unvisited.iter().next() {
+        let mut component = BTreeSet::new();
+        let mut worklist = VecDeque::from([root]);
+        unvisited.remove(&root);
+        while let Some(value) = worklist.pop_front() {
+            component.insert(value);
+            for &neighbor in neighbors.get(&value).into_iter().flatten() {
+                if unvisited.remove(&neighbor) {
+                    worklist.push_back(neighbor);
+                }
+            }
+        }
+        if existing_cfg_component_is_profitable(
+            eu,
+            placement,
+            &instruction_values,
+            &targets,
+            &component,
+        ) {
+            accepted.extend(component);
+        }
+    }
+    if accepted.is_empty() {
+        return None;
+    }
+
+    let placements = topological
+        .into_iter()
+        .enumerate()
+        .filter_map(|(topological_rank, value)| {
+            if !accepted.contains(&value) {
+                return None;
+            }
+            let occurrence = &placement.values[value.0];
+            let ValueOrigin::Instruction {
+                block: source_block,
+                index: source_index,
+            } = occurrence.origin
+            else {
+                return None;
+            };
+            let target_block = targets[&value];
+            Some(ExistingCfgPlacedInstruction {
+                value,
+                source_block,
+                source_index,
+                target_block,
+                topological_rank,
+                instruction: eu.blocks[&source_block].instructions[source_index].clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    (!placements.is_empty()).then_some(ExistingCfgPlacementPlan { placements })
+}
+
+fn existing_cfg_component_is_profitable(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    placement: &PlacementAnalysis,
+    instruction_values: &HashMap<(BlockId, usize), ValueId>,
+    targets: &HashMap<ValueId, BlockId>,
+    component: &BTreeSet<ValueId>,
+) -> bool {
+    let mut inputs = BTreeSet::<ValueId>::new();
+    let mut outputs = BTreeSet::<ValueId>::new();
+    let mut moved_cost = 0u128;
+
+    for &value in component {
+        let occurrence = &placement.values[value.0];
+        let ValueOrigin::Instruction { block, index } = occurrence.origin else {
+            return false;
+        };
+        let Some(instruction) = eu
+            .blocks
+            .get(&block)
+            .and_then(|block| block.instructions.get(index))
+        else {
+            return false;
+        };
+        moved_cost =
+            moved_cost.saturating_add(branchified_instruction_cost(instruction, &eu.register_map));
+        inputs.extend(
+            occurrence
+                .operands
+                .iter()
+                .copied()
+                .filter(|operand| !component.contains(operand)),
+        );
+        if occurrence.uses.iter().any(|site| match *site {
+            ValueUse::Instruction { block, index, .. } => instruction_values
+                .get(&(block, index))
+                .is_none_or(|user| !component.contains(user)),
+            ValueUse::BranchCondition { .. } | ValueUse::EdgeArgument { .. } => true,
+        }) {
+            outputs.insert(value);
+        }
+    }
+
+    let chunks = |value: ValueId| {
+        eu.register_map
+            .get(&placement.values[value.0].register)
+            .map(|register| register.width().div_ceil(64).max(1))
+            .unwrap_or(1) as u128
+    };
+    let input_chunks = inputs.into_iter().map(chunks).sum::<u128>();
+    let output_chunks = outputs.into_iter().map(chunks).sum::<u128>();
+    let added_live_chunks = input_chunks.saturating_sub(output_chunks);
+
+    // ScheduleLate into a post-dominator does not skip dynamic work. It is
+    // still profitable when it replaces at least as much live output state as
+    // the inputs it carries forward. This is the ordinary live-range case,
+    // distinct from control-dependent sinking below; do not use instruction
+    // cost as if the moved operation became conditional.
+    let has_postdominating_move = component.iter().any(|value| {
+        let origin = placement.values[value.0].origin.block();
+        targets
+            .get(value)
+            .is_some_and(|&target| placement.cfg.postdominates(target, origin))
+    });
+    if has_postdominating_move {
+        return input_chunks <= output_chunks;
+    }
+
+    // Scale by two: under the same profile-free even prior used by branch
+    // selection, moving C units into one arm skips C/2 expected work, while a
+    // newly live boundary chunk is charged on the complete path.
+    moved_cost
+        > added_live_chunks
+            .saturating_mul(LIVE_THROUGH_COST_PER_CHUNK)
+            .saturating_mul(2)
+}
+
+fn apply_existing_cfg_placement(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plan: ExistingCfgPlacementPlan,
+) -> usize {
+    let mut values = HashSet::<ValueId>::default();
+    let mut definitions = HashSet::<RegisterId>::default();
+    let mut source_locations = HashSet::<(BlockId, usize)>::default();
+    for placed in &plan.placements {
+        let Some(source) = eu.blocks.get(&placed.source_block) else {
+            return 0;
+        };
+        if placed.source_block == placed.target_block
+            || !eu.blocks.contains_key(&placed.target_block)
+            || source.instructions.get(placed.source_index) != Some(&placed.instruction)
+            || !values.insert(placed.value)
+            || !source_locations.insert((placed.source_block, placed.source_index))
+            || def_reg(&placed.instruction).is_none_or(|register| !definitions.insert(register))
+        {
+            return 0;
+        }
+    }
+
+    let mut removals = HashMap::<BlockId, BTreeSet<usize>>::default();
+    let mut insertions =
+        HashMap::<BlockId, Vec<(usize, SIRInstruction<RegionedAbsoluteAddr>)>>::default();
+    let mut touched = BTreeSet::<BlockId>::new();
+    for placed in &plan.placements {
+        removals
+            .entry(placed.source_block)
+            .or_default()
+            .insert(placed.source_index);
+        insertions
+            .entry(placed.target_block)
+            .or_default()
+            .push((placed.topological_rank, placed.instruction.clone()));
+        touched.insert(placed.source_block);
+        touched.insert(placed.target_block);
+    }
+
+    // Construct every touched block from the preflighted snapshot first. No
+    // partially rewritten CFG is observable if validation above fails.
+    let mut replacements = touched
+        .iter()
+        .map(|&block| (block, eu.blocks[&block].clone()))
+        .collect::<HashMap<_, _>>();
+    for (block, indices) in removals {
+        let replacement = replacements
+            .get_mut(&block)
+            .expect("preflighted source block must have a replacement");
+        replacement.instructions = replacement
+            .instructions
+            .drain(..)
+            .enumerate()
+            .filter_map(|(index, instruction)| (!indices.contains(&index)).then_some(instruction))
+            .collect();
+    }
+    for (block, mut instructions) in insertions {
+        instructions.sort_unstable_by_key(|(rank, _)| *rank);
+        replacements
+            .get_mut(&block)
+            .expect("preflighted target block must have a replacement")
+            .instructions
+            .splice(
+                0..0,
+                instructions.into_iter().map(|(_, instruction)| instruction),
+            );
+    }
+    for block in touched {
+        *eu.blocks
+            .get_mut(&block)
+            .expect("preflighted touched block must remain present") = replacements
+            .remove(&block)
+            .expect("preflighted touched block must have a replacement");
+    }
+    debug_assert_eq!(eu.verify_result(), Ok(()));
+    plan.placements.len()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mark_priority_dependency(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    placement: &PlacementAnalysis,
+    locations: &HashMap<RegisterId, (BlockId, usize)>,
+    block_id: BlockId,
+    first_mux_idx: usize,
+    leaf_count: usize,
+    register: RegisterId,
+    leaf: usize,
+    masks: &mut HashMap<(BlockId, usize), Vec<bool>>,
+    seen: &mut HashSet<(RegisterId, usize)>,
+) {
+    if !seen.insert((register, leaf)) {
+        return;
+    }
+    let Some(&(definition_block, index)) = locations.get(&register) else {
+        return;
+    };
+    if definition_block == block_id && index >= first_mux_idx {
+        return;
+    }
+    let instruction = &eu.blocks[&definition_block].instructions[index];
+    let Some(value) = placement.value_for_register(register) else {
+        return;
+    };
+    let sinkable = match placement.value(value).map(|value| value.safety) {
+        Some(ValueSafety::Pure) => is_cross_block_sinkable_input(instruction),
+        Some(ValueSafety::StateRead(_)) => matches!(instruction, SIRInstruction::Load(..)),
+        Some(ValueSafety::Pinned(_)) | None => false,
+    };
+    if !sinkable || !placement.can_sink_to_edge(value, block_id) {
+        return;
+    }
+
+    masks
+        .entry((definition_block, index))
+        .or_insert_with(|| vec![false; leaf_count])[leaf] = true;
+    for operand in inst_uses(instruction) {
+        mark_priority_dependency(
+            eu,
+            placement,
+            locations,
+            block_id,
+            first_mux_idx,
+            leaf_count,
+            operand,
+            leaf,
+            masks,
+            seen,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_whole_priority_chain_candidate(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    placement: &PlacementAnalysis,
+    locations: &HashMap<RegisterId, (BlockId, usize)>,
+    use_locations: &HashMap<RegisterId, Vec<UseLocation>>,
+    block_id: BlockId,
+    first_mux_idx: usize,
+    muxes: Vec<PriorityChainMux>,
+) -> Option<WholePriorityChainCandidate> {
+    for (index, mux) in muxes.iter().enumerate().take(muxes.len() - 1) {
+        let uses = use_locations.get(&mux.dst)?;
+        if uses.len() != 1
+            || uses[0].block != block_id
+            || uses[0].instruction != Some(muxes[index + 1].mux_idx)
+        {
+            return None;
+        }
+    }
+
+    let chain_outputs = muxes.iter().map(|mux| mux.dst).collect::<HashSet<_>>();
+    if muxes
+        .iter()
+        .any(|mux| chain_outputs.contains(&mux.cond) || chain_outputs.contains(&mux.true_val))
+        || chain_outputs.contains(&muxes[0].false_val)
+    {
+        return None;
+    }
+
+    let leaf_count = muxes.len() + 1;
+    let mut masks = HashMap::<(BlockId, usize), Vec<bool>>::default();
+    let mut seen = HashSet::<(RegisterId, usize)>::default();
+    mark_priority_dependency(
+        eu,
+        placement,
+        locations,
+        block_id,
+        first_mux_idx,
+        leaf_count,
+        muxes[0].false_val,
+        0,
+        &mut masks,
+        &mut seen,
+    );
+    for (index, mux) in muxes.iter().enumerate() {
+        mark_priority_dependency(
+            eu,
+            placement,
+            locations,
+            block_id,
+            first_mux_idx,
+            leaf_count,
+            mux.true_val,
+            index + 1,
+            &mut masks,
+            &mut seen,
+        );
+        for leaf in 0..=index + 1 {
+            mark_priority_dependency(
+                eu,
+                placement,
+                locations,
+                block_id,
+                first_mux_idx,
+                leaf_count,
+                mux.cond,
+                leaf,
+                &mut masks,
+                &mut seen,
+            );
+        }
+    }
+
+    let chain_locations = muxes
+        .iter()
+        .map(|mux| (block_id, mux.mux_idx))
+        .collect::<HashSet<_>>();
+    let mut movable = masks
+        .iter()
+        .filter(|(_, mask)| !mask.iter().all(|needed| *needed))
+        .map(|(&location, _)| location)
+        .collect::<HashSet<_>>();
+    loop {
+        let remove = movable
+            .iter()
+            .copied()
+            .filter(|&(definition_block, index)| {
+                let register = def_reg(&eu.blocks[&definition_block].instructions[index])
+                    .expect("priority placement input defines a value");
+                use_locations
+                    .get(&register)
+                    .into_iter()
+                    .flatten()
+                    .any(|location| {
+                        location.instruction.is_none_or(|user| {
+                            let user = (location.block, user);
+                            !movable.contains(&user) && !chain_locations.contains(&user)
+                        })
+                    })
+            })
+            .collect::<Vec<_>>();
+        if remove.is_empty() {
+            break;
+        }
+        for location in remove {
+            movable.remove(&location);
+        }
+    }
+    if movable.is_empty() {
+        return None;
+    }
+
+    let placed = order_priority_placements(eu, placement, locations, &masks, &movable)?;
+    let plan = WholePriorityChainPlan {
+        block_id,
+        first_mux_idx,
+        muxes,
+        placed,
+    };
+    let benefit_scaled = whole_priority_chain_benefit(eu, &plan)?;
+    let assigned_values = plan
+        .placed
+        .iter()
+        .filter_map(|placed| def_reg(&placed.instruction))
+        .filter_map(|register| placement.value_for_register(register))
+        .chain(
+            plan.muxes
+                .iter()
+                .filter_map(|mux| placement.value_for_register(mux.dst)),
+        )
+        .collect::<HashSet<_>>();
+    Some(WholePriorityChainCandidate {
+        depth: dominator_depth(&placement.cfg, block_id),
+        plan,
+        benefit_scaled,
+        assigned_values,
+    })
+}
+
+fn order_priority_placements(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    placement: &PlacementAnalysis,
+    locations: &HashMap<RegisterId, (BlockId, usize)>,
+    masks: &HashMap<(BlockId, usize), Vec<bool>>,
+    movable: &HashSet<(BlockId, usize)>,
+) -> Option<Vec<PriorityPlacedInstruction>> {
+    let mut indegree = movable
+        .iter()
+        .copied()
+        .map(|location| (location, 0usize))
+        .collect::<HashMap<_, _>>();
+    let mut users = HashMap::<(BlockId, usize), Vec<(BlockId, usize)>>::default();
+    for &(block, index) in movable {
+        let mut dependencies = HashSet::default();
+        for operand in inst_uses(&eu.blocks[&block].instructions[index]) {
+            let Some(&dependency) = locations.get(&operand) else {
+                continue;
+            };
+            if movable.contains(&dependency) && dependencies.insert(dependency) {
+                *indegree.get_mut(&(block, index))? += 1;
+                users.entry(dependency).or_default().push((block, index));
+            }
+        }
+    }
+    for dependents in users.values_mut() {
+        dependents.sort_unstable();
+        dependents.dedup();
+    }
+
+    let order_key =
+        |(block, index): (BlockId, usize)| Some((placement.cfg.block_index(block)?, index));
+    let mut ready = BTreeSet::<(usize, usize)>::new();
+    for (&location, &degree) in &indegree {
+        if degree == 0 {
+            ready.insert(order_key(location)?);
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(movable.len());
+    while let Some(key) = ready.first().copied() {
+        ready.remove(&key);
+        let location = (placement.cfg.block_ids[key.0], key.1);
+        ordered.push(location);
+        for &user in users.get(&location).into_iter().flatten() {
+            let degree = indegree.get_mut(&user)?;
+            *degree = degree.checked_sub(1)?;
+            if *degree == 0 {
+                ready.insert(order_key(user)?);
+            }
+        }
+    }
+    if ordered.len() != movable.len() {
+        return None;
+    }
+
+    ordered
+        .into_iter()
+        .map(|(block, index)| {
+            let leaves = masks[&(block, index)]
+                .iter()
+                .enumerate()
+                .filter_map(|(leaf, needed)| needed.then_some(leaf))
+                .collect::<Vec<_>>();
+            let site = if leaves.len() == 1 {
+                PriorityPlacementSite::Leaf(leaves[0])
+            } else {
+                PriorityPlacementSite::Decision(
+                    leaves.iter().copied().max().expect("non-empty use mask") - 1,
+                )
+            };
+            Some(PriorityPlacedInstruction {
+                block,
+                index,
+                site,
+                instruction: eu.blocks.get(&block)?.instructions.get(index)?.clone(),
+            })
+        })
+        .collect()
+}
+
+fn whole_priority_chain_benefit(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    plan: &WholePriorityChainPlan,
+) -> Option<u128> {
+    const SCALE: u128 = 1 << 32;
+    let block = &eu.blocks[&plan.block_id];
+    let def_pos = block
+        .instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, instruction)| def_reg(instruction).map(|register| (register, index)))
+        .collect::<HashMap<_, _>>();
+    let probabilities = plan
+        .muxes
+        .iter()
+        .map(|mux| static_true_probability(block, &def_pos, mux.cond))
+        .collect::<Vec<_>>();
+    let mut decision_weights = vec![0u128; plan.muxes.len()];
+    let mut leaf_weights = vec![0u128; plan.muxes.len() + 1];
+    let mut reach = SCALE;
+    for index in (0..plan.muxes.len()).rev() {
+        let probability = probabilities[index];
+        decision_weights[index] = reach;
+        leaf_weights[index + 1] =
+            reach.saturating_mul(probability.true_weight) / probability.total_weight;
+        reach = reach.saturating_mul(probability.total_weight - probability.true_weight)
+            / probability.total_weight;
+    }
+    leaf_weights[0] = reach;
+
+    let instruction_cost = |instruction: &SIRInstruction<RegionedAbsoluteAddr>| {
+        branchified_instruction_cost(instruction, &eu.register_map)
+    };
+    let original_placed_cost = plan
+        .placed
+        .iter()
+        .map(|placed| instruction_cost(&placed.instruction))
+        .sum::<u128>()
+        .saturating_mul(SCALE);
+    let new_placed_cost = plan
+        .placed
+        .iter()
+        .map(|placed| {
+            let weight = match placed.site {
+                PriorityPlacementSite::Decision(index) => decision_weights[index],
+                PriorityPlacementSite::Leaf(index) => leaf_weights[index],
+            };
+            instruction_cost(&placed.instruction).saturating_mul(weight)
+        })
+        .sum::<u128>();
+    let removed_mux_cost = plan
+        .muxes
+        .iter()
+        .map(|mux| instruction_cost(&block.instructions[mux.mux_idx]))
+        .sum::<u128>()
+        .saturating_mul(SCALE);
+
+    let mut introduced = BRANCH_CONTROL_COST.saturating_mul(SCALE);
+    for (index, probability) in probabilities.iter().copied().enumerate() {
+        let reach = decision_weights[index];
+        introduced = introduced
+            .saturating_add(BRANCH_CONTROL_COST.saturating_mul(reach))
+            .saturating_add(
+                MISPREDICT_COST.saturating_mul(reach).saturating_mul(
+                    probability
+                        .true_weight
+                        .min(probability.total_weight - probability.true_weight),
+                ) / probability.total_weight,
+            );
+    }
+    let outer = plan.muxes.last().expect("priority chain is non-empty");
+    let chunks_for = |value: RegisterId| {
+        eu.register_map
+            .get(&value)
+            .map(|register| register.width().div_ceil(64).max(1))
+            .unwrap_or(1) as u128
+    };
+    introduced = introduced.saturating_add(
+        chunks_for(outer.dst)
+            .saturating_mul(PHI_COPY_COST_PER_CHUNK)
+            .saturating_mul(SCALE),
+    );
+    // Values used by the suffix were already live from their definitions to
+    // that suffix before this rewrite.  The priority region merely lies on
+    // the same path; it does not introduce a new live range for those values.
+    // The closed-placement proof above rejects any arm value with an external
+    // suffix use, so the only new region output is the outer Mux result, whose
+    // phi-copy cost is charged above.
+
+    original_placed_cost
+        .saturating_add(removed_mux_cost)
+        .checked_sub(new_placed_cost.saturating_add(introduced))
+        .filter(|benefit| *benefit != 0)
+}
+
+fn dominator_depth(cfg: &SirCfg, block: BlockId) -> usize {
+    let Some(mut block) = cfg.block_index(block) else {
+        return 0;
+    };
+    let mut depth = 0usize;
+    while let Some(parent) = cfg.dominators.idom[block] {
+        depth += 1;
+        block = parent;
+    }
+    depth
+}
+
 fn register_use_locations(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> HashMap<RegisterId, Vec<UseLocation>> {
     let mut uses = HashMap::<RegisterId, Vec<UseLocation>>::default();
     for block in eu.blocks.values() {
-        for (index, instruction) in block.instructions.iter().enumerate() {
-            for register in inst_uses(instruction) {
-                uses.entry(register).or_default().push(UseLocation {
-                    block: block.id,
-                    instruction: Some(index),
-                });
-            }
+        for (register, locations) in block_register_use_locations(block) {
+            uses.entry(register).or_default().extend(locations);
         }
-        for register in terminator_uses(&block.terminator) {
+    }
+    uses
+}
+
+fn block_register_use_locations(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+) -> HashMap<RegisterId, Vec<UseLocation>> {
+    let mut uses = HashMap::<RegisterId, Vec<UseLocation>>::default();
+    for (index, instruction) in block.instructions.iter().enumerate() {
+        for register in inst_uses(instruction) {
             uses.entry(register).or_default().push(UseLocation {
                 block: block.id,
-                instruction: None,
+                instruction: Some(index),
             });
         }
+    }
+    for register in terminator_uses(&block.terminator) {
+        uses.entry(register).or_default().push(UseLocation {
+            block: block.id,
+            instruction: None,
+        });
     }
     uses
 }
@@ -970,7 +3534,7 @@ fn located_instruction_key(instruction: &LocatedInstruction) -> (BlockId, usize)
 
 fn collect_cross_group_defs(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    cfg: &CfgAnalysis,
+    cfg: &SirCfg,
     locations: &HashMap<RegisterId, (BlockId, usize)>,
     mux_block: BlockId,
     first_mux_idx: usize,
@@ -978,7 +3542,7 @@ fn collect_cross_group_defs(
 ) -> Vec<LocatedInstruction> {
     fn visit(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-        cfg: &CfgAnalysis,
+        cfg: &SirCfg,
         locations: &HashMap<RegisterId, (BlockId, usize)>,
         mux_block: BlockId,
         first_mux_idx: usize,
@@ -992,7 +3556,7 @@ fn collect_cross_group_defs(
         if block == mux_block && index >= first_mux_idx {
             return;
         }
-        if !cfg.dominators.dominates(block, mux_block) {
+        if !cfg.dominates(block, mux_block) {
             return;
         }
         let instruction = eu.blocks[&block].instructions[index].clone();
@@ -1106,7 +3670,7 @@ fn filter_cross_group_defs(
 }
 
 fn cross_group_value_available(
-    cfg: &CfgAnalysis,
+    cfg: &SirCfg,
     def_blocks: &HashMap<RegisterId, BlockId>,
     def_locations: &HashMap<RegisterId, (BlockId, usize)>,
     mux_block: BlockId,
@@ -1118,12 +3682,11 @@ fn cross_group_value_available(
         if moved.contains(&(block, index)) {
             return true;
         }
-        return cfg.dominators.dominates(block, mux_block)
-            && (block != mux_block || index < first_mux_idx);
+        return cfg.dominates(block, mux_block) && (block != mux_block || index < first_mux_idx);
     }
     def_blocks
         .get(&register)
-        .is_some_and(|block| cfg.dominators.dominates(*block, mux_block))
+        .is_some_and(|block| cfg.dominates(*block, mux_block))
 }
 
 fn cross_group_branch_is_profitable(
@@ -1205,7 +3768,7 @@ fn cross_group_branch_is_profitable(
 /// as a live-in; SSA dominance guarantees that it is available at the Mux.
 fn collect_cross_arm_defs(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    cfg: &CfgAnalysis,
+    cfg: &SirCfg,
     use_counts: &HashMap<RegisterId, usize>,
     locations: &HashMap<RegisterId, (BlockId, usize)>,
     mux_block: BlockId,
@@ -1220,7 +3783,7 @@ fn collect_cross_arm_defs(
     if block_id == mux_block && index >= mux_idx {
         return None;
     }
-    if !cfg.dominators.dominates(block_id, mux_block) {
+    if !cfg.dominates(block_id, mux_block) {
         return None;
     }
     if use_counts.get(&root).copied().unwrap_or(0) != 1 {
@@ -1241,7 +3804,7 @@ fn collect_cross_arm_defs(
                 .get(&operand)
                 .is_some_and(|&(operand_block, operand_idx)| {
                     (operand_block != mux_block || operand_idx < mux_idx)
-                        && cfg.dominators.dominates(operand_block, mux_block)
+                        && cfg.dominates(operand_block, mux_block)
                 });
         if can_attempt_move
             && use_counts.get(&operand).copied().unwrap_or(0) == 1
@@ -1322,6 +3885,208 @@ fn cross_block_branch_is_profitable(
         live_through_cost,
     }
     .proves_expected_benefit()
+}
+
+fn apply_atomic_priority_placement(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plan: AtomicPriorityPlacementPlan,
+    next_block_id: &mut usize,
+    reg_counter: &mut usize,
+) -> usize {
+    let mut additional_blocks = 0usize;
+    for region in &plan.regions {
+        let Some(target) = eu.blocks.get(&region.block_id) else {
+            return 0;
+        };
+        if region
+            .muxes
+            .iter()
+            .any(|mux| target.instructions.get(mux.mux_idx).and_then(def_reg) != Some(mux.dst))
+            || region.placed.iter().any(|placed| {
+                eu.blocks
+                    .get(&placed.block)
+                    .and_then(|block| block.instructions.get(placed.index))
+                    .and_then(def_reg)
+                    != def_reg(&placed.instruction)
+            })
+        {
+            return 0;
+        }
+        let Some(region_blocks) = region
+            .muxes
+            .len()
+            .checked_mul(2)
+            .and_then(|blocks| blocks.checked_add(1))
+        else {
+            return 0;
+        };
+        let Some(total) = additional_blocks.checked_add(region_blocks) else {
+            return 0;
+        };
+        additional_blocks = total;
+    }
+    let Some(reserved_end) = next_block_id.checked_add(additional_blocks) else {
+        return 0;
+    };
+
+    let regions = plan.regions.len();
+    for region in plan.regions {
+        apply_whole_priority_chain(eu, region, next_block_id, reg_counter);
+    }
+    debug_assert_eq!(*next_block_id, reserved_end);
+    regions
+}
+
+fn apply_whole_priority_chain(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plan: WholePriorityChainPlan,
+    next_block_id: &mut usize,
+    reg_counter: &mut usize,
+) {
+    let mux_count = plan.muxes.len();
+    let base = *next_block_id;
+    let decision_ids = (0..mux_count)
+        .map(|index| {
+            if index + 1 == mux_count {
+                plan.block_id
+            } else {
+                BlockId(base + index)
+            }
+        })
+        .collect::<Vec<_>>();
+    let leaf_base = base + mux_count - 1;
+    let leaf_ids = (0..=mux_count)
+        .map(|index| BlockId(leaf_base + index))
+        .collect::<Vec<_>>();
+    let merge_id = BlockId(leaf_base + mux_count + 1);
+    *next_block_id = merge_id.0 + 1;
+
+    let moved_registers = plan
+        .placed
+        .iter()
+        .filter_map(|placed| def_reg(&placed.instruction))
+        .collect::<HashSet<_>>();
+    for block in eu.blocks.values_mut() {
+        if block.id != plan.block_id {
+            block.instructions.retain(|instruction| {
+                def_reg(instruction).is_none_or(|register| !moved_registers.contains(&register))
+            });
+        }
+    }
+    let original = eu
+        .blocks
+        .remove(&plan.block_id)
+        .expect("whole priority target block must exist");
+    let first_mux_position = original
+        .instructions
+        .iter()
+        .position(|instruction| def_reg(instruction) == Some(plan.muxes[0].dst))
+        .expect("whole priority first Mux must remain in its target block");
+    let outer = plan
+        .muxes
+        .last()
+        .expect("whole priority chain is non-empty");
+    let outer_mux_position = original
+        .instructions
+        .iter()
+        .position(|instruction| def_reg(instruction) == Some(outer.dst))
+        .expect("whole priority outer Mux must remain in its target block");
+    let removed_registers = moved_registers
+        .iter()
+        .copied()
+        .chain(plan.muxes.iter().map(|mux| mux.dst))
+        .collect::<HashSet<_>>();
+    let placed_for = |site| {
+        plan.placed
+            .iter()
+            .filter(|placed| placed.site == site)
+            .map(|placed| placed.instruction.clone())
+            .collect::<Vec<_>>()
+    };
+
+    for index in (0..mux_count).rev() {
+        let mux = &plan.muxes[index];
+        let mut instructions = if index + 1 == mux_count {
+            let mut head = original
+                .instructions
+                .iter()
+                .take(first_mux_position)
+                .filter(|instruction| {
+                    def_reg(instruction)
+                        .is_none_or(|register| !removed_registers.contains(&register))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            head.extend(placed_for(PriorityPlacementSite::Decision(index)));
+            head
+        } else {
+            placed_for(PriorityPlacementSite::Decision(index))
+        };
+        let cond = normalize_branch_condition(
+            &mut eu.register_map,
+            &mut instructions,
+            mux.cond,
+            reg_counter,
+        );
+        let false_block = if index == 0 {
+            leaf_ids[0]
+        } else {
+            decision_ids[index - 1]
+        };
+        eu.blocks.insert(
+            decision_ids[index],
+            BasicBlock {
+                id: decision_ids[index],
+                params: if index + 1 == mux_count {
+                    original.params.clone()
+                } else {
+                    Vec::new()
+                },
+                instructions,
+                terminator: SIRTerminator::Branch {
+                    cond,
+                    true_block: (leaf_ids[index + 1], Vec::new()),
+                    false_block: (false_block, Vec::new()),
+                },
+            },
+        );
+    }
+
+    for (leaf, &leaf_id) in leaf_ids.iter().enumerate() {
+        let value = if leaf == 0 {
+            plan.muxes[0].false_val
+        } else {
+            plan.muxes[leaf - 1].true_val
+        };
+        eu.blocks.insert(
+            leaf_id,
+            BasicBlock {
+                id: leaf_id,
+                params: Vec::new(),
+                instructions: placed_for(PriorityPlacementSite::Leaf(leaf)),
+                terminator: SIRTerminator::Jump(merge_id, vec![value]),
+            },
+        );
+    }
+
+    let suffix = original
+        .instructions
+        .iter()
+        .skip(outer_mux_position + 1)
+        .filter(|instruction| {
+            def_reg(instruction).is_none_or(|register| !removed_registers.contains(&register))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    eu.blocks.insert(
+        merge_id,
+        BasicBlock {
+            id: merge_id,
+            params: vec![outer.dst],
+            instructions: suffix,
+            terminator: original.terminator,
+        },
+    );
 }
 
 fn apply_cross_block_group_branchify(
@@ -1560,10 +4325,30 @@ fn apply_cross_block_branchify(
     eu.blocks.insert(merge_id, merge_block);
 }
 
-fn eliminate_controlled_join_muxes(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
-    let cfg = CfgAnalysis::compute(eu);
+fn eliminate_controlled_join_muxes(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    controlled_join_after: Option<usize>,
+) {
+    let Some(cfg) = CfgAnalysis::compute(eu) else {
+        return;
+    };
     let def_blocks = all_def_blocks(eu);
     let def_locations = instruction_def_locations(eu);
+    let use_counts = count_uses(eu);
+    let first_effect = eu
+        .blocks
+        .iter()
+        .map(|(&block_id, block)| {
+            let index = block
+                .instructions
+                .iter()
+                .position(|instruction| {
+                    memory_write(instruction).is_some() || is_memory_barrier(instruction)
+                })
+                .unwrap_or(block.instructions.len());
+            (block_id, index)
+        })
+        .collect::<HashMap<_, _>>();
     let mut branches_by_root = HashMap::<RegisterId, Vec<BranchInfo>>::default();
 
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
@@ -1591,6 +4376,9 @@ fn eliminate_controlled_join_muxes(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>)
 
     let mut plans = Vec::new();
     for block_id in block_ids {
+        if controlled_join_after.is_some_and(|watermark| block_id.0 <= watermark) {
+            continue;
+        }
         let block = &eu.blocks[&block_id];
         for (mux_idx, inst) in block.instructions.iter().enumerate() {
             let SIRInstruction::Mux(dst, condition, true_val, false_val) = inst else {
@@ -1614,6 +4402,8 @@ fn eliminate_controlled_join_muxes(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>)
                         *dst,
                         *true_val,
                         *false_val,
+                        &use_counts,
+                        &first_effect,
                     )
                 })
                 .or_else(|| {
@@ -1636,38 +4426,116 @@ fn eliminate_controlled_join_muxes(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>)
         }
     }
 
-    // Removing instructions changes indices, so apply plans in descending
-    // order within each join.  Edge arguments are appended in the same order
-    // as the new block parameters and therefore remain type/arity-correct.
-    plans.sort_unstable_by_key(|plan| (plan.join.0, std::cmp::Reverse(plan.mux_idx)));
+    apply_controlled_join_mux_plans(eu, plans);
+}
+
+fn apply_controlled_join_mux_plans(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plans: Vec<ControlledMuxPlan>,
+) {
+    let mut by_join = HashMap::<BlockId, Vec<ControlledMuxPlan>>::default();
     for plan in plans {
-        let Some(join) = eu.blocks.get_mut(&plan.join) else {
+        by_join.entry(plan.join).or_default().push(plan);
+    }
+    let mut joins = by_join.keys().copied().collect::<Vec<_>>();
+    joins.sort_unstable_by_key(|block| block.0);
+
+    for join_id in joins {
+        let Some(mut plans) = by_join.remove(&join_id) else {
             continue;
         };
-        if plan.mux_idx >= join.instructions.len()
-            || !matches!(
-                join.instructions[plan.mux_idx],
-                SIRInstruction::Mux(dst, ..) if dst == plan.dst
-            )
+        plans.sort_unstable_by_key(|plan| plan.mux_idx);
+        let Some(original) = eu.blocks.get(&join_id).cloned() else {
+            continue;
+        };
+
+        let mut removed = BTreeSet::new();
+        let mut moved_by_predecessor = HashMap::<BlockId, BTreeSet<usize>>::default();
+        let mut valid = true;
+        for plan in &plans {
+            if !matches!(
+                original.instructions.get(plan.mux_idx),
+                Some(SIRInstruction::Mux(dst, ..)) if *dst == plan.dst
+            ) || !removed.insert(plan.mux_idx)
+            {
+                valid = false;
+                break;
+            }
+            for moved in &plan.moved {
+                if removed.contains(&moved.index)
+                    || !moved_by_predecessor
+                        .entry(moved.predecessor)
+                        .or_default()
+                        .insert(moved.index)
+                {
+                    valid = false;
+                    break;
+                }
+                removed.insert(moved.index);
+            }
+            if !valid {
+                break;
+            }
+        }
+        if !valid
+            || moved_by_predecessor.iter().any(|(&predecessor, _)| {
+                !matches!(
+                    eu.blocks.get(&predecessor).map(|block| &block.terminator),
+                    Some(SIRTerminator::Jump(target, _)) if *target == join_id
+                )
+            })
         {
             continue;
         }
-        join.instructions.remove(plan.mux_idx);
-        join.params.push(plan.dst);
 
-        for edge in plan.incoming {
-            let value = if edge.select_true {
-                plan.true_val
-            } else {
-                plan.false_val
-            };
-            append_controlled_edge_argument(
-                eu,
-                edge.predecessor,
-                plan.join,
-                edge.edge_truth,
-                value,
-            );
+        let mut predecessors = moved_by_predecessor.keys().copied().collect::<Vec<_>>();
+        predecessors.sort_unstable_by_key(|block| block.0);
+        for predecessor in predecessors {
+            let instructions = moved_by_predecessor[&predecessor]
+                .iter()
+                .map(|&index| original.instructions[index].clone())
+                .collect::<Vec<_>>();
+            eu.blocks
+                .get_mut(&predecessor)
+                .expect("preflighted controlled predecessor must remain present")
+                .instructions
+                .extend(instructions);
+        }
+
+        {
+            let join = eu
+                .blocks
+                .get_mut(&join_id)
+                .expect("controlled join must remain present");
+            join.instructions = original
+                .instructions
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, instruction)| {
+                    (!removed.contains(&index)).then_some(instruction)
+                })
+                .collect();
+            join.params.extend(plans.iter().map(|plan| plan.dst));
+        }
+
+        // Parameter order and edge-argument order are both the ascending Mux
+        // order above.  This publishes the edge-sunk definitions and the
+        // select-to-phi rewrite as one valid SSA change.
+        for plan in plans {
+            for edge in plan.incoming {
+                let value = if edge.select_true {
+                    plan.true_val
+                } else {
+                    plan.false_val
+                };
+                append_controlled_edge_argument(
+                    eu,
+                    edge.predecessor,
+                    plan.join,
+                    edge.edge_truth,
+                    value,
+                );
+            }
         }
     }
 }
@@ -1684,11 +4552,13 @@ fn plan_controlled_join_mux(
     dst: RegisterId,
     true_val: RegisterId,
     false_val: RegisterId,
+    use_counts: &HashMap<RegisterId, usize>,
+    first_effect: &HashMap<BlockId, usize>,
 ) -> Option<ControlledMuxPlan> {
     if branch.source == join
-        || !cfg.dominators.dominates(branch.source, join)
-        || !cfg.postdominators.postdominates(join, branch.true_target)
-        || !cfg.postdominators.postdominates(join, branch.false_target)
+        || !cfg.graph.dominates(branch.source, join)
+        || !cfg.graph.postdominates(join, branch.true_target)
+        || !cfg.graph.postdominates(join, branch.false_target)
     {
         return None;
     }
@@ -1703,13 +4573,14 @@ fn plan_controlled_join_mux(
         return None;
     }
 
-    let incoming_edges = incoming_edges_to(eu, join);
+    let incoming_edges = cfg.incoming_edges(join)?.to_vec();
     if incoming_edges.is_empty() {
         return None;
     }
 
     let mut incoming = Vec::with_capacity(incoming_edges.len());
     let mut seen_predecessors = HashSet::default();
+    let mut moved = HashMap::<usize, BlockId>::default();
     for (predecessor, edge_truth) in incoming_edges {
         // A block with two edges to the same join has no unambiguous edge
         // classification for this transform.  Leave it to the general
@@ -1727,9 +4598,26 @@ fn plan_controlled_join_mux(
                 .facts_on_edge(eu, def_locations, predecessor, join, edge_truth)?;
         let selected = known_condition_truth(eu, def_locations, &facts, condition)?;
         let selected_value = if selected { true_val } else { false_val };
-        let def_block = def_blocks.get(&selected_value)?;
-        if !cfg.dominators.dominates(*def_block, predecessor) {
-            return None;
+        for definition in controlled_value_availability(
+            eu,
+            cfg,
+            def_blocks,
+            def_locations,
+            use_counts,
+            first_effect,
+            join,
+            mux_idx,
+            predecessor,
+            selected_value,
+        )? {
+            if moved
+                .insert(definition.index, definition.predecessor)
+                .is_some_and(|owner| owner != definition.predecessor)
+            {
+                // One SSA definition cannot be moved to two predecessor
+                // blocks without cloning and renaming its complete DAG.
+                return None;
+            }
         }
 
         incoming.push(ControlledIncomingEdge {
@@ -1746,7 +4634,134 @@ fn plan_controlled_join_mux(
         true_val,
         false_val,
         incoming,
+        moved: moved
+            .into_iter()
+            .map(|(index, predecessor)| ControlledMovedInstruction { predecessor, index })
+            .collect(),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn controlled_value_availability(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &CfgAnalysis,
+    def_blocks: &HashMap<RegisterId, BlockId>,
+    def_locations: &HashMap<RegisterId, (BlockId, usize)>,
+    use_counts: &HashMap<RegisterId, usize>,
+    first_effect: &HashMap<BlockId, usize>,
+    join: BlockId,
+    mux_idx: usize,
+    predecessor: BlockId,
+    value: RegisterId,
+) -> Option<Vec<ControlledMovedInstruction>> {
+    let &definition_block = def_blocks.get(&value)?;
+    if cfg.graph.dominates(definition_block, predecessor) {
+        return Some(Vec::new());
+    }
+    if definition_block != join
+        || !matches!(
+            eu.blocks.get(&predecessor).map(|block| &block.terminator),
+            Some(SIRTerminator::Jump(target, _)) if *target == join
+        )
+    {
+        return None;
+    }
+
+    let block = eu.blocks.get(&join)?;
+    let mut definitions = HashSet::default();
+    collect_controlled_edge_defs(
+        block,
+        join,
+        def_locations,
+        use_counts,
+        mux_idx,
+        value,
+        &mut definitions,
+    );
+    let &(_, root_index) = def_locations.get(&value)?;
+    if !definitions.contains(&root_index) {
+        return None;
+    }
+
+    let moved_values = definitions
+        .iter()
+        .filter_map(|&index| def_reg(&block.instructions[index]))
+        .collect::<HashSet<_>>();
+    for &index in &definitions {
+        let instruction = &block.instructions[index];
+        // A state read can move from the join entry to the predecessor edge
+        // only if it crosses no write or runtime-observation point.  The first
+        // effect index is one scalar per block, avoiding a dense per-load
+        // prefix table on very large EUs.
+        if matches!(instruction, SIRInstruction::Load(..))
+            && index >= first_effect.get(&join).copied().unwrap_or(0)
+        {
+            return None;
+        }
+        for operand in inst_uses(instruction) {
+            if moved_values.contains(&operand) {
+                continue;
+            }
+            let &operand_block = def_blocks.get(&operand)?;
+            if !cfg.graph.dominates(operand_block, predecessor) {
+                return None;
+            }
+        }
+    }
+
+    let mut definitions = definitions.into_iter().collect::<Vec<_>>();
+    definitions.sort_unstable();
+    Some(
+        definitions
+            .into_iter()
+            .map(|index| ControlledMovedInstruction { predecessor, index })
+            .collect(),
+    )
+}
+
+fn collect_controlled_edge_defs(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    block_id: BlockId,
+    def_locations: &HashMap<RegisterId, (BlockId, usize)>,
+    use_counts: &HashMap<RegisterId, usize>,
+    user_index: usize,
+    value: RegisterId,
+    definitions: &mut HashSet<usize>,
+) {
+    if use_counts.get(&value).copied().unwrap_or(0) != 1 {
+        return;
+    }
+    let Some(&(definition_block, index)) = def_locations.get(&value) else {
+        return;
+    };
+    if definition_block != block_id || index >= user_index || definitions.contains(&index) {
+        return;
+    }
+    let instruction = &block.instructions[index];
+    if !matches!(
+        instruction,
+        SIRInstruction::Imm(..)
+            | SIRInstruction::Binary(..)
+            | SIRInstruction::Unary(..)
+            | SIRInstruction::Load(..)
+            | SIRInstruction::Concat(..)
+            | SIRInstruction::Slice(..)
+    ) {
+        return;
+    }
+
+    definitions.insert(index);
+    for operand in inst_uses(instruction) {
+        collect_controlled_edge_defs(
+            block,
+            block_id,
+            def_locations,
+            use_counts,
+            index,
+            operand,
+            definitions,
+        );
+    }
 }
 
 fn plan_path_conditioned_join_mux(
@@ -1769,7 +4784,7 @@ fn plan_path_conditioned_join_mux(
     {
         return None;
     }
-    let incoming_edges = incoming_edges_to(eu, join);
+    let incoming_edges = cfg.incoming_edges(join)?.to_vec();
     if incoming_edges.is_empty() {
         return None;
     }
@@ -1790,7 +4805,7 @@ fn plan_path_conditioned_join_mux(
         let select_true = condition_truth ^ condition_inverted;
         let selected_value = if select_true { true_val } else { false_val };
         let def_block = def_blocks.get(&selected_value)?;
-        if !cfg.dominators.dominates(*def_block, predecessor) {
+        if !cfg.graph.dominates(*def_block, predecessor) {
             return None;
         }
         incoming.push(ControlledIncomingEdge {
@@ -1806,6 +4821,7 @@ fn plan_path_conditioned_join_mux(
         true_val,
         false_val,
         incoming,
+        moved: Vec::new(),
     })
 }
 
@@ -1832,37 +4848,6 @@ fn append_controlled_edge_argument(
         },
         _ => {}
     }
-}
-
-fn incoming_edges_to(
-    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-    target: BlockId,
-) -> Vec<(BlockId, Option<bool>)> {
-    let mut edges = Vec::new();
-    let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
-    block_ids.sort_unstable_by_key(|id| id.0);
-    for block_id in block_ids {
-        match &eu.blocks[&block_id].terminator {
-            SIRTerminator::Jump(destination, _) if *destination == target => {
-                edges.push((block_id, None));
-            }
-            SIRTerminator::Branch {
-                true_block,
-                false_block,
-                ..
-            } => {
-                if true_block.0 == target {
-                    edges.push((block_id, Some(true)));
-                }
-                if false_block.0 == target {
-                    edges.push((block_id, Some(false)));
-                }
-            }
-            SIRTerminator::Return | SIRTerminator::Error(_) => {}
-            _ => {}
-        }
-    }
-    edges
 }
 
 fn all_def_blocks(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<RegisterId, BlockId> {
@@ -1924,85 +4909,101 @@ fn resolve_boolean_alias(
 }
 
 impl CfgAnalysis {
-    fn compute(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Self {
-        let predecessors = super::pass_guarded_region_sinking::predecessor_map(eu);
-        let dominators = super::pass_guarded_region_sinking::Dominators::compute(eu, &predecessors);
+    fn compute(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Option<Self> {
+        let stats = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
+        // Controlled-join recovery needs predecessor, dominance, and
+        // post-dominance queries, but not the potentially dense dominance
+        // frontiers or control-dependence tables of the full analysis.
+        let graph = SirCfg::analyze_structure(eu).ok()?;
+        if stats {
+            eprintln!("[branchify-stats] controlled_join cfg");
+        }
         let def_locations = instruction_def_locations(eu);
-        let mut successors = BTreeMap::<BlockId, Vec<BlockId>>::new();
-        for (&block_id, block) in &eu.blocks {
-            let mut outgoing = match &block.terminator {
-                SIRTerminator::Jump(target, _) => vec![*target],
+        if stats {
+            eprintln!("[branchify-stats] controlled_join defs");
+        }
+        let incoming_edges = indexed_incoming_edges(eu, &graph);
+        if stats {
+            eprintln!("[branchify-stats] controlled_join incoming");
+        }
+        let path_facts = PathFacts::compute(eu, &def_locations, &graph, &incoming_edges);
+        if stats {
+            eprintln!("[branchify-stats] controlled_join path_facts");
+        }
+
+        Some(Self {
+            graph,
+            incoming_edges,
+            path_facts,
+        })
+    }
+
+    fn incoming_edges(&self, target: BlockId) -> Option<&[(BlockId, Option<bool>)]> {
+        self.graph
+            .block_index(target)
+            .and_then(|block| self.incoming_edges.get(block))
+            .map(Vec::as_slice)
+    }
+}
+
+fn indexed_incoming_edges(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    graph: &SirCfg,
+) -> Vec<Vec<(BlockId, Option<bool>)>> {
+    let mut incoming = vec![Vec::new(); graph.block_ids.len()];
+    for (target, predecessors) in graph.predecessors.iter().enumerate() {
+        let target_id = graph.block_ids[target];
+        for &predecessor in predecessors {
+            let predecessor_id = graph.block_ids[predecessor];
+            match &eu.blocks[&predecessor_id].terminator {
+                SIRTerminator::Jump(destination, _) if *destination == target_id => {
+                    incoming[target].push((predecessor_id, None));
+                }
                 SIRTerminator::Branch {
                     true_block,
                     false_block,
                     ..
-                } => vec![true_block.0, false_block.0],
-                SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
-            };
-            outgoing.sort_unstable_by_key(|id| id.0);
-            outgoing.dedup();
-            successors.insert(block_id, outgoing);
-        }
-
-        let virtual_exit = BlockId(
-            eu.blocks
-                .keys()
-                .map(|id| id.0)
-                .max()
-                .unwrap_or(0)
-                .saturating_add(1),
-        );
-        let exits = successors
-            .iter()
-            .filter_map(|(&block, outgoing)| outgoing.is_empty().then_some(block))
-            .collect::<Vec<_>>();
-        let mut reverse_successors = BTreeMap::<BlockId, Vec<BlockId>>::new();
-        reverse_successors.insert(virtual_exit, exits);
-        for (&block, outgoing) in &successors {
-            reverse_successors.entry(block).or_default();
-            for &successor in outgoing {
-                reverse_successors.entry(successor).or_default().push(block);
+                } => {
+                    if true_block.0 == target_id {
+                        incoming[target].push((predecessor_id, Some(true)));
+                    }
+                    if false_block.0 == target_id {
+                        incoming[target].push((predecessor_id, Some(false)));
+                    }
+                }
+                _ => {}
             }
         }
-        let postdominators = PostDominatorTree::compute(virtual_exit, reverse_successors);
-        let path_facts = PathFacts::compute(eu, &def_locations);
-
-        Self {
-            dominators,
-            postdominators,
-            path_facts,
-        }
     }
+    incoming
 }
 
 impl PathFacts {
     fn compute(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
         def_locations: &HashMap<RegisterId, (BlockId, usize)>,
+        graph: &SirCfg,
+        indexed_incoming: &[Vec<(BlockId, Option<bool>)>],
     ) -> Self {
-        let reachable = reachable_block_ids(eu);
         let mut entry_facts = HashMap::<BlockId, HashMap<PathFactKey, bool>>::default();
-        for block_id in &reachable {
-            entry_facts.insert(*block_id, HashMap::default());
+        for &block_id in &graph.block_ids {
+            entry_facts.insert(block_id, HashMap::default());
         }
 
         let mut incoming = HashMap::<BlockId, Vec<(BlockId, Option<bool>)>>::default();
         let mut successors = HashMap::<BlockId, Vec<BlockId>>::default();
-        for &block_id in &reachable {
-            let edges = incoming_edges_to(eu, block_id)
-                .into_iter()
-                .filter(|(predecessor, _)| reachable.contains(predecessor))
-                .collect::<Vec<_>>();
-            incoming.insert(block_id, edges);
-            successors.entry(block_id).or_default();
-        }
-        for (&target, edges) in &incoming {
-            for &(predecessor, _) in edges {
-                successors.entry(predecessor).or_default().push(target);
-            }
+        for (block, &block_id) in graph.block_ids.iter().enumerate() {
+            incoming.insert(block_id, indexed_incoming[block].clone());
+            successors.insert(
+                block_id,
+                graph.successors[block]
+                    .iter()
+                    .map(|&successor| graph.block_ids[successor])
+                    .collect(),
+            );
         }
 
-        let mut worklist = VecDeque::from_iter(reachable.iter().copied());
+        let mut worklist = VecDeque::from_iter(graph.block_ids.iter().copied());
         while let Some(predecessor) = worklist.pop_front() {
             let targets = successors.get(&predecessor).cloned().unwrap_or_default();
             for target in targets {
@@ -2253,203 +5254,6 @@ fn immediate_value(
         }
     }
     None
-}
-
-fn reachable_block_ids(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashSet<BlockId> {
-    let mut reachable = HashSet::default();
-    let mut worklist = vec![eu.entry_block_id];
-    while let Some(block_id) = worklist.pop() {
-        if !reachable.insert(block_id) {
-            continue;
-        }
-        let Some(block) = eu.blocks.get(&block_id) else {
-            continue;
-        };
-        match &block.terminator {
-            SIRTerminator::Jump(target, _) => worklist.push(*target),
-            SIRTerminator::Branch {
-                true_block,
-                false_block,
-                ..
-            } => {
-                worklist.push(true_block.0);
-                worklist.push(false_block.0);
-            }
-            SIRTerminator::Return | SIRTerminator::Error(_) => {}
-        }
-    }
-    reachable
-}
-
-struct PostDominatorTree {
-    virtual_exit: BlockId,
-    tree: SimpleDominatorTree,
-}
-
-impl PostDominatorTree {
-    fn compute(entry: BlockId, successors: BTreeMap<BlockId, Vec<BlockId>>) -> Self {
-        let mut predecessors = BTreeMap::<BlockId, Vec<BlockId>>::new();
-        for (&block, outgoing) in &successors {
-            predecessors.entry(block).or_default();
-            for &successor in outgoing {
-                predecessors.entry(successor).or_default().push(block);
-            }
-        }
-        let tree = SimpleDominatorTree::compute(entry, successors, predecessors);
-        Self {
-            virtual_exit: entry,
-            tree,
-        }
-    }
-
-    fn postdominates(&self, postdominator: BlockId, block: BlockId) -> bool {
-        self.tree.dominates(postdominator, block)
-    }
-
-    #[allow(dead_code)]
-    fn common_postdominator(&self, left: BlockId, right: BlockId) -> Option<BlockId> {
-        let candidate = self.tree.lca(left, right)?;
-        (candidate != self.virtual_exit).then_some(candidate)
-    }
-}
-
-struct SimpleDominatorTree {
-    idom: HashMap<BlockId, BlockId>,
-    rpo_index: HashMap<BlockId, usize>,
-    depth: HashMap<BlockId, usize>,
-}
-
-impl SimpleDominatorTree {
-    fn compute(
-        entry: BlockId,
-        successors: BTreeMap<BlockId, Vec<BlockId>>,
-        predecessors: BTreeMap<BlockId, Vec<BlockId>>,
-    ) -> Self {
-        let mut postorder = Vec::new();
-        let mut visited = HashSet::default();
-        let mut stack = vec![(entry, 0usize)];
-        visited.insert(entry);
-        while let Some((block, next_successor)) = stack.last_mut() {
-            let outgoing = successors.get(block).map(Vec::as_slice).unwrap_or(&[]);
-            if *next_successor == outgoing.len() {
-                postorder.push(*block);
-                stack.pop();
-                continue;
-            }
-            let successor = outgoing[*next_successor];
-            *next_successor += 1;
-            if visited.insert(successor) {
-                stack.push((successor, 0));
-            }
-        }
-        postorder.reverse();
-        let rpo_index = postorder
-            .iter()
-            .enumerate()
-            .map(|(index, &block)| (block, index))
-            .collect::<HashMap<_, _>>();
-        let mut idom = HashMap::default();
-        idom.insert(entry, entry);
-
-        loop {
-            let mut changed = false;
-            for &block in postorder.iter().skip(1) {
-                let mut processed = predecessors
-                    .get(&block)
-                    .into_iter()
-                    .flatten()
-                    .filter(|predecessor| idom.contains_key(predecessor));
-                let Some(first) = processed.next().copied() else {
-                    continue;
-                };
-                let next = processed.fold(first, |current, predecessor| {
-                    intersect_idoms(current, *predecessor, &idom, &rpo_index)
-                });
-                if idom.insert(block, next) != Some(next) {
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-
-        let mut depth = HashMap::default();
-        depth.insert(entry, 0);
-        for &block in postorder.iter().skip(1) {
-            let mut current = block;
-            let mut distance = 0usize;
-            while current != entry {
-                let Some(&parent) = idom.get(&current) else {
-                    break;
-                };
-                current = parent;
-                distance += 1;
-            }
-            depth.insert(block, distance);
-        }
-
-        Self {
-            idom,
-            rpo_index,
-            depth,
-        }
-    }
-
-    fn dominates(&self, dominator: BlockId, block: BlockId) -> bool {
-        if !self.rpo_index.contains_key(&dominator) || !self.idom.contains_key(&block) {
-            return false;
-        }
-        let mut candidate = block;
-        loop {
-            if candidate == dominator {
-                return true;
-            }
-            let Some(&parent) = self.idom.get(&candidate) else {
-                return false;
-            };
-            if parent == candidate {
-                return false;
-            }
-            candidate = parent;
-        }
-    }
-
-    fn lca(&self, left: BlockId, right: BlockId) -> Option<BlockId> {
-        if !self.depth.contains_key(&left) || !self.depth.contains_key(&right) {
-            return None;
-        }
-        let mut left = left;
-        let mut right = right;
-        while self.depth[&left] > self.depth[&right] {
-            left = *self.idom.get(&left)?;
-        }
-        while self.depth[&right] > self.depth[&left] {
-            right = *self.idom.get(&right)?;
-        }
-        while left != right {
-            left = *self.idom.get(&left)?;
-            right = *self.idom.get(&right)?;
-        }
-        Some(left)
-    }
-}
-
-fn intersect_idoms(
-    mut left: BlockId,
-    mut right: BlockId,
-    idom: &HashMap<BlockId, BlockId>,
-    rpo_index: &HashMap<BlockId, usize>,
-) -> BlockId {
-    while left != right {
-        while rpo_index[&left] > rpo_index[&right] {
-            left = idom[&left];
-        }
-        while rpo_index[&right] > rpo_index[&left] {
-            right = idom[&right];
-        }
-    }
-    left
 }
 
 fn find_branchify_mux_in_block(
@@ -2991,7 +5795,9 @@ fn memory_write(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<MemAccess
 fn offset_static(offset: &SIROffset) -> Option<usize> {
     match offset {
         SIROffset::Static(offset) => Some(*offset),
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::PackedElements { .. } => {
+            None
+        }
     }
 }
 
@@ -3495,6 +6301,41 @@ fn inline_param_only_jump_blocks(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
             break;
         }
 
+        // Do not remove adjacent candidates from the same predecessor
+        // snapshot.  Given A -> B, removing A can create new predecessors of
+        // B which are absent from `jump_preds`; removing B afterwards would
+        // then leave those predecessors targeting a deleted block.  A greedy
+        // independent set still removes a constant fraction of a long chain,
+        // so the number of whole-CFG rebuilds remains logarithmic.
+        let mut selected = HashSet::default();
+        let eligible = eligible
+            .into_iter()
+            .filter(|block_id| {
+                let adjacent_to_selected_predecessor = jump_preds
+                    .get(block_id)
+                    .is_some_and(|preds| preds.iter().any(|pred| selected.contains(pred)));
+                let adjacent_to_selected_successor = match &eu.blocks[block_id].terminator {
+                    SIRTerminator::Jump(target, _) => selected.contains(target),
+                    SIRTerminator::Branch {
+                        true_block,
+                        false_block,
+                        ..
+                    } => selected.contains(&true_block.0) || selected.contains(&false_block.0),
+                    SIRTerminator::Switch { cases, default, .. } => {
+                        selected.contains(default)
+                            || cases.iter().any(|case| selected.contains(&case.target))
+                    }
+                    SIRTerminator::Return | SIRTerminator::Error(_) => false,
+                };
+                if adjacent_to_selected_predecessor || adjacent_to_selected_successor {
+                    false
+                } else {
+                    selected.insert(*block_id);
+                    true
+                }
+            })
+            .collect::<Vec<_>>();
+
         for block_id in eligible {
             if !eu.blocks.contains_key(&block_id) {
                 continue;
@@ -3544,7 +6385,9 @@ fn param_only_replacement(
         return None;
     }
     match &block.terminator {
-        SIRTerminator::Jump(_, _) | SIRTerminator::Branch { .. } => Some(block.terminator.clone()),
+        SIRTerminator::Jump(_, _) | SIRTerminator::Branch { .. } | SIRTerminator::Switch { .. } => {
+            Some(block.terminator.clone())
+        }
         SIRTerminator::Return | SIRTerminator::Error(_) => None,
     }
 }
@@ -3585,6 +6428,12 @@ fn predecessor_info(
                 *pred_counts.entry(true_block.0).or_default() += 1;
                 *pred_counts.entry(false_block.0).or_default() += 1;
             }
+            SIRTerminator::Switch { cases, default, .. } => {
+                for case in cases {
+                    *pred_counts.entry(case.target).or_default() += 1;
+                }
+                *pred_counts.entry(*default).or_default() += 1;
+            }
             SIRTerminator::Return | SIRTerminator::Error(_) => {}
         }
     }
@@ -3617,6 +6466,15 @@ fn substitute_terminator(
                 false_block.0,
                 false_block.1.iter().copied().map(replace).collect(),
             ),
+        },
+        SIRTerminator::Switch {
+            selector,
+            cases,
+            default,
+        } => SIRTerminator::Switch {
+            selector: replace(*selector),
+            cases: cases.clone(),
+            default: *default,
         },
         SIRTerminator::Return => SIRTerminator::Return,
         SIRTerminator::Error(code) => SIRTerminator::Error(*code),
@@ -3763,6 +6621,7 @@ fn terminator_uses(term: &SIRTerminator) -> Vec<RegisterId> {
             uses.extend(false_block.1.iter().copied());
             uses
         }
+        SIRTerminator::Switch { selector, .. } => vec![*selector],
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }
@@ -3816,6 +6675,31 @@ mod tests {
         SIRInstruction::Imm(RegisterId(dst), SIRValue::new(BigUint::from(value)))
     }
 
+    #[test]
+    fn does_not_sever_cross_block_condition_prefix_from_local_user() {
+        let definitions = vec![
+            LocatedInstruction {
+                block: BlockId(0),
+                index: 0,
+                instruction: imm(0, 1),
+            },
+            LocatedInstruction {
+                block: BlockId(1),
+                index: 0,
+                instruction: SIRInstruction::Unary(
+                    RegisterId(1),
+                    crate::ir::UnaryOp::Ident,
+                    RegisterId(0),
+                ),
+            },
+        ];
+
+        assert!(
+            closed_cross_block_condition_slice(definitions, BlockId(1)).is_empty(),
+            "a producer cannot move below the local condition node which still uses it"
+        );
+    }
+
     fn append_mul_chain(
         instructions: &mut Vec<SIRInstruction<RegionedAbsoluteAddr>>,
         initial: usize,
@@ -3832,6 +6716,45 @@ mod tests {
             ));
             lhs = RegisterId(output);
         }
+    }
+
+    fn cfg_unit(
+        register_count: usize,
+        one_bit_registers: &[usize],
+        blocks: Vec<BasicBlock<RegionedAbsoluteAddr>>,
+    ) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let one_bit_registers = one_bit_registers.iter().copied().collect::<HashSet<_>>();
+        let register_map = (0..register_count)
+            .map(|register| {
+                (
+                    RegisterId(register),
+                    RegisterType::Bit {
+                        width: if one_bit_registers.contains(&register) {
+                            1
+                        } else {
+                            64
+                        },
+                        signed: false,
+                    },
+                )
+            })
+            .collect();
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: blocks.into_iter().map(|block| (block.id, block)).collect(),
+            register_map,
+        }
+    }
+
+    fn store(instance: usize, source: usize) -> SIRInstruction<RegionedAbsoluteAddr> {
+        SIRInstruction::Store(
+            addr(instance),
+            SIROffset::Static(0),
+            64,
+            RegisterId(source),
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     fn profitability(
@@ -3985,6 +6908,250 @@ mod tests {
         }
         assert_eq!(branchified_instruction_cost(&mul, &register_map), 20);
         assert_eq!(branchified_instruction_cost(&div, &register_map), 48);
+    }
+
+    fn selector_predicate_unit(
+        duplicate_last_selector: bool,
+        add_store: bool,
+    ) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let mut instructions = vec![imm(3, 0), imm(4, 1), imm(5, 2)];
+        if duplicate_last_selector {
+            instructions[2] = imm(5, 1);
+        }
+        instructions.extend([
+            SIRInstruction::Binary(
+                RegisterId(6),
+                RegisterId(1),
+                crate::ir::BinaryOp::Eq,
+                RegisterId(3),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(7),
+                RegisterId(1),
+                crate::ir::BinaryOp::Eq,
+                RegisterId(4),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(8),
+                RegisterId(1),
+                crate::ir::BinaryOp::Eq,
+                RegisterId(5),
+            ),
+            SIRInstruction::Load(RegisterId(9), addr(10), SIROffset::Static(0), 64),
+            SIRInstruction::Load(RegisterId(10), addr(11), SIROffset::Static(0), 64),
+            SIRInstruction::Load(RegisterId(11), addr(12), SIROffset::Static(0), 64),
+            SIRInstruction::Binary(
+                RegisterId(15),
+                RegisterId(9),
+                crate::ir::BinaryOp::Eq,
+                RegisterId(12),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(16),
+                RegisterId(10),
+                crate::ir::BinaryOp::Eq,
+                RegisterId(13),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(17),
+                RegisterId(11),
+                crate::ir::BinaryOp::Eq,
+                RegisterId(14),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(18),
+                RegisterId(6),
+                crate::ir::BinaryOp::LogicAnd,
+                RegisterId(15),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(19),
+                RegisterId(7),
+                crate::ir::BinaryOp::LogicAnd,
+                RegisterId(16),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(20),
+                RegisterId(8),
+                crate::ir::BinaryOp::LogicAnd,
+                RegisterId(17),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(21),
+                RegisterId(18),
+                crate::ir::BinaryOp::LogicOr,
+                RegisterId(19),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(22),
+                RegisterId(21),
+                crate::ir::BinaryOp::LogicOr,
+                RegisterId(20),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(23),
+                RegisterId(0),
+                crate::ir::BinaryOp::LogicAnd,
+                RegisterId(22),
+            ),
+            SIRInstruction::Unary(
+                RegisterId(24),
+                crate::ir::UnaryOp::ToTwoState,
+                RegisterId(23),
+            ),
+        ]);
+        if add_store {
+            instructions.push(store(20, 12));
+        }
+        cfg_unit(
+            25,
+            &[0, 6, 7, 8, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24],
+            vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    params: Vec::new(),
+                    instructions,
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(24),
+                        true_block: (BlockId(1), Vec::new()),
+                        false_block: (BlockId(2), Vec::new()),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: Vec::new(),
+                    instructions: Vec::new(),
+                    terminator: SIRTerminator::Return,
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: Vec::new(),
+                    instructions: Vec::new(),
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn selector_disjoint_payload_loads_become_control_dependent() {
+        let mut eu = selector_predicate_unit(false, false);
+        let mut next_block_id = 3;
+        let mut reg_counter = 24;
+
+        assert_eq!(
+            branchify_selector_guarded_predicates(&mut eu, &mut next_block_id, &mut reg_counter,),
+            1
+        );
+
+        let head = &eu.blocks[&BlockId(0)];
+        assert!(
+            !head
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, SIRInstruction::Load(..)))
+        );
+        let SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } = &head.terminator
+        else {
+            panic!("expected common guard branch");
+        };
+        assert_eq!(*cond, RegisterId(0));
+        assert_eq!(true_block.0, BlockId(3));
+        assert_eq!(false_block.0, BlockId(2));
+
+        let mut decision = true_block.0;
+        let mut payload_loads = Vec::new();
+        for expected_selector in [RegisterId(6), RegisterId(7), RegisterId(8)] {
+            let block = &eu.blocks[&decision];
+            let SIRTerminator::Branch {
+                cond,
+                true_block,
+                false_block,
+            } = &block.terminator
+            else {
+                panic!("expected selector decision");
+            };
+            assert_eq!(*cond, expected_selector);
+            let payload = &eu.blocks[&true_block.0];
+            payload_loads.extend(payload.instructions.iter().filter_map(|instruction| {
+                let SIRInstruction::Load(dst, ..) = instruction else {
+                    return None;
+                };
+                Some(*dst)
+            }));
+            decision = false_block.0;
+        }
+        assert_eq!(
+            payload_loads,
+            vec![RegisterId(9), RegisterId(10), RegisterId(11)]
+        );
+        assert_eq!(decision, BlockId(2));
+    }
+
+    #[test]
+    fn selector_dispatch_rejects_overlapping_selector_values() {
+        let mut eu = selector_predicate_unit(true, false);
+        let mut next_block_id = 3;
+        let mut reg_counter = 24;
+
+        assert_eq!(
+            branchify_selector_guarded_predicates(&mut eu, &mut next_block_id, &mut reg_counter,),
+            0
+        );
+        assert_eq!(eu.blocks.len(), 3);
+        assert_eq!(
+            eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, SIRInstruction::Load(..)))
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn selector_dispatch_normalizes_each_logic_condition() {
+        let mut eu = selector_predicate_unit(false, false);
+        for register in [0, 6, 7, 8, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24] {
+            eu.register_map
+                .insert(RegisterId(register), RegisterType::Logic { width: 1 });
+        }
+        let mut next_block_id = 3;
+        let mut reg_counter = 24;
+
+        assert_eq!(
+            branchify_selector_guarded_predicates(&mut eu, &mut next_block_id, &mut reg_counter,),
+            1
+        );
+        for block in eu.blocks.values() {
+            let SIRTerminator::Branch { cond, .. } = block.terminator else {
+                continue;
+            };
+            assert_eq!(
+                eu.register_map[&cond],
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn selector_dispatch_does_not_delay_loads_across_a_store() {
+        let mut eu = selector_predicate_unit(false, true);
+        let mut next_block_id = 3;
+        let mut reg_counter = 24;
+
+        assert_eq!(
+            branchify_selector_guarded_predicates(&mut eu, &mut next_block_id, &mut reg_counter,),
+            0
+        );
+        assert_eq!(eu.blocks.len(), 3);
     }
 
     #[test]
@@ -4388,6 +7555,156 @@ mod tests {
     }
 
     #[test]
+    fn controlled_join_sinks_multiple_join_loads_to_the_selected_predecessor() {
+        let element = |index| SIROffset::Element {
+            index: RegisterId(index),
+            element_width: 64,
+            bit_offset: 0,
+            dynamic_bit_offset: None,
+        };
+        let blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                params: vec![RegisterId(0), RegisterId(1), RegisterId(2), RegisterId(3)],
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Branch {
+                    cond: RegisterId(0),
+                    true_block: (BlockId(1), Vec::new()),
+                    false_block: (BlockId(2), Vec::new()),
+                },
+            },
+            BasicBlock {
+                id: BlockId(1),
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+            },
+            BasicBlock {
+                id: BlockId(2),
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+            },
+            BasicBlock {
+                id: BlockId(3),
+                params: Vec::new(),
+                instructions: vec![
+                    SIRInstruction::Load(RegisterId(4), addr(0), element(1), 64),
+                    SIRInstruction::Load(RegisterId(6), addr(1), element(1), 64),
+                    SIRInstruction::Mux(RegisterId(5), RegisterId(0), RegisterId(4), RegisterId(2)),
+                    SIRInstruction::Mux(RegisterId(7), RegisterId(0), RegisterId(6), RegisterId(3)),
+                    SIRInstruction::Concat(RegisterId(8), vec![RegisterId(5), RegisterId(7)]),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        ];
+        let mut eu = cfg_unit(9, &[0], blocks);
+        eu.register_map.insert(
+            RegisterId(8),
+            RegisterType::Bit {
+                width: 128,
+                signed: false,
+            },
+        );
+
+        eliminate_controlled_join_muxes(&mut eu, None);
+
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert_eq!(
+            eu.blocks[&BlockId(3)].params,
+            vec![RegisterId(5), RegisterId(7)]
+        );
+        assert!(
+            eu.blocks[&BlockId(3)]
+                .instructions
+                .iter()
+                .all(|instruction| !matches!(
+                    instruction,
+                    SIRInstruction::Load(..) | SIRInstruction::Mux(..)
+                ))
+        );
+        assert!(matches!(
+            &eu.blocks[&BlockId(1)].instructions[..],
+            [
+                SIRInstruction::Load(RegisterId(4), ..),
+                SIRInstruction::Load(RegisterId(6), ..)
+            ]
+        ));
+        assert!(eu.blocks[&BlockId(2)].instructions.is_empty());
+        assert!(matches!(
+            &eu.blocks[&BlockId(1)].terminator,
+            SIRTerminator::Jump(BlockId(3), args)
+                if args == &vec![RegisterId(4), RegisterId(6)]
+        ));
+        assert!(matches!(
+            &eu.blocks[&BlockId(2)].terminator,
+            SIRTerminator::Jump(BlockId(3), args)
+                if args == &vec![RegisterId(2), RegisterId(3)]
+        ));
+    }
+
+    #[test]
+    fn controlled_join_does_not_move_a_load_before_a_join_write() {
+        let blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Branch {
+                    cond: RegisterId(0),
+                    true_block: (BlockId(1), Vec::new()),
+                    false_block: (BlockId(2), Vec::new()),
+                },
+            },
+            BasicBlock {
+                id: BlockId(1),
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+            },
+            BasicBlock {
+                id: BlockId(2),
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+            },
+            BasicBlock {
+                id: BlockId(3),
+                params: Vec::new(),
+                instructions: vec![
+                    store(0, 1),
+                    SIRInstruction::Load(RegisterId(3), addr(0), SIROffset::Static(0), 64),
+                    SIRInstruction::Mux(RegisterId(4), RegisterId(0), RegisterId(3), RegisterId(2)),
+                    store(1, 4),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        ];
+        let mut eu = cfg_unit(5, &[0], blocks);
+
+        eliminate_controlled_join_muxes(&mut eu, None);
+
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert!(eu.blocks[&BlockId(1)].instructions.is_empty());
+        assert!(
+            eu.blocks[&BlockId(3)]
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    matches!(
+                        instruction,
+                        SIRInstruction::Mux(
+                            RegisterId(4),
+                            RegisterId(0),
+                            RegisterId(3),
+                            RegisterId(2)
+                        )
+                    )
+                })
+        );
+    }
+
+    #[test]
     fn uses_per_edge_path_facts_for_reconvergent_mux() {
         let mut register_map = HashMap::default();
         for reg in 0..6 {
@@ -4491,12 +7808,12 @@ mod tests {
     }
 
     #[test]
-    fn does_not_use_an_ancestor_branch_for_a_repeated_mux_predicate() {
+    fn repeated_predicate_sinks_the_join_value_to_the_actual_selected_edge() {
         // `b0` and `b2` branch on the same SSA predicate.  Structurally, b2
         // dominates b3, so an ancestor-only arm classification would label
         // b3 as b0's false arm.  But b3 is reached on b2's true edge, where
-        // the Mux must select r6.  r6 is defined in the join itself and
-        // therefore cannot be passed on b3's incoming edge.
+        // the Mux must select r6.  The join-local definition of r6 must move
+        // to b3, never to the infeasible ancestor classification.
         let mut register_map = HashMap::default();
         for reg in 0..8 {
             register_map.insert(
@@ -4580,28 +7897,48 @@ mod tests {
             register_map,
         };
 
-        eliminate_controlled_join_muxes(&mut eu);
+        eliminate_controlled_join_muxes(&mut eu, None);
 
         assert_eq!(eu.verify_result(), Ok(()));
-        assert!(eu.blocks[&BlockId(5)].params.is_empty());
+        assert_eq!(eu.blocks[&BlockId(5)].params, vec![RegisterId(7)]);
         assert!(
-            eu.blocks[&BlockId(5)]
+            !eu.blocks[&BlockId(5)]
                 .instructions
                 .iter()
                 .any(|instruction| {
                     matches!(instruction, SIRInstruction::Mux(RegisterId(7), ..))
                 })
         );
+        assert!(
+            eu.blocks[&BlockId(3)]
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    matches!(
+                        instruction,
+                        SIRInstruction::Unary(
+                            RegisterId(6),
+                            crate::ir::UnaryOp::BitNot,
+                            RegisterId(1)
+                        )
+                    )
+                })
+        );
+        assert!(eu.blocks[&BlockId(4)].instructions.is_empty());
         assert!(matches!(
             &eu.blocks[&BlockId(3)].terminator,
-            SIRTerminator::Jump(BlockId(5), args) if args.is_empty()
+            SIRTerminator::Jump(BlockId(5), args) if args == &vec![RegisterId(6)]
+        ));
+        assert!(matches!(
+            &eu.blocks[&BlockId(4)].terminator,
+            SIRTerminator::Jump(BlockId(5), args) if args == &vec![RegisterId(1)]
         ));
     }
 
     #[test]
     fn short_circuits_a_cross_block_priority_chain() {
         let mut register_map = HashMap::default();
-        for reg in 0..18 {
+        for reg in 0..21 {
             register_map.insert(
                 RegisterId(reg),
                 RegisterType::Bit {
@@ -4654,22 +7991,42 @@ mod tests {
                 id: BlockId(1),
                 params: Vec::new(),
                 instructions: vec![
+                    SIRInstruction::Unary(
+                        RegisterId(17),
+                        crate::ir::UnaryOp::BitNot,
+                        RegisterId(12),
+                    ),
+                    SIRInstruction::Unary(
+                        RegisterId(18),
+                        crate::ir::UnaryOp::BitNot,
+                        RegisterId(1),
+                    ),
+                    SIRInstruction::Unary(
+                        RegisterId(19),
+                        crate::ir::UnaryOp::BitNot,
+                        RegisterId(2),
+                    ),
+                    SIRInstruction::Unary(
+                        RegisterId(20),
+                        crate::ir::UnaryOp::BitNot,
+                        RegisterId(3),
+                    ),
                     SIRInstruction::Mux(
                         RegisterId(13),
                         RegisterId(6),
-                        RegisterId(1),
-                        RegisterId(12),
+                        RegisterId(18),
+                        RegisterId(17),
                     ),
                     SIRInstruction::Mux(
                         RegisterId(14),
                         RegisterId(8),
-                        RegisterId(2),
+                        RegisterId(19),
                         RegisterId(13),
                     ),
                     SIRInstruction::Mux(
                         RegisterId(15),
                         RegisterId(10),
-                        RegisterId(3),
+                        RegisterId(20),
                         RegisterId(14),
                     ),
                     SIRInstruction::Unary(
@@ -4709,6 +8066,711 @@ mod tests {
                 SIRInstruction::Binary(RegisterId(6) | RegisterId(8) | RegisterId(10), ..)
             )
         }));
+        let cfg = SirCfg::analyze(&eu).unwrap();
+        for payload in 17..=20 {
+            let payload_block = eu
+                .blocks
+                .values()
+                .find(|block| {
+                    block
+                        .instructions
+                        .iter()
+                        .any(|instruction| def_reg(instruction) == Some(RegisterId(payload)))
+                })
+                .expect("each selected payload must retain one definition");
+            assert!(matches!(payload_block.terminator, SIRTerminator::Jump(..)));
+            assert!(
+                !cfg.controllers[cfg.block_index(payload_block.id).unwrap()].is_empty(),
+                "payload r{payload} must execute only below its selector edge"
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_priority_does_not_charge_preexisting_suffix_live_ranges() {
+        let mut register_map = HashMap::default();
+        for reg in 0..60 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: 64,
+                    signed: false,
+                },
+            );
+        }
+        let mut instructions = vec![imm(7, 3)];
+        append_mul_chain(&mut instructions, 6, 7, &[8, 9, 10, 11, 12, 13, 14, 15]);
+        instructions.extend([
+            SIRInstruction::Mux(RegisterId(16), RegisterId(2), RegisterId(5), RegisterId(15)),
+            SIRInstruction::Mux(RegisterId(17), RegisterId(1), RegisterId(4), RegisterId(16)),
+            SIRInstruction::Mux(RegisterId(18), RegisterId(0), RegisterId(3), RegisterId(17)),
+            SIRInstruction::Unary(RegisterId(19), crate::ir::UnaryOp::BitNot, RegisterId(18)),
+        ]);
+        // These values are live from entry to the suffix both before and
+        // after priority-region formation.  They must not be treated as
+        // newly introduced live-through pressure.
+        instructions.extend((20..60).map(|register| {
+            SIRInstruction::Store(
+                addr(register),
+                SIROffset::Static(0),
+                64,
+                RegisterId(register),
+                Vec::new(),
+                Vec::new(),
+            )
+        }));
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: (0..=6).chain(20..60).map(RegisterId).collect(),
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map,
+        };
+
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_atomic_priority_placement(&eu, &placement).unwrap();
+        assert_eq!(plan.regions.len(), 1);
+        assert_eq!(plan.regions[0].muxes.len(), 3);
+        let mut next_block_id = 1;
+        let mut reg_counter = 19;
+        assert_eq!(
+            apply_atomic_priority_placement(&mut eu, plan, &mut next_block_id, &mut reg_counter,),
+            1
+        );
+
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert!(!eu.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, SIRInstruction::Mux(..)))
+        }));
+        assert_eq!(
+            eu.blocks
+                .values()
+                .filter(|block| matches!(block.terminator, SIRTerminator::Branch { .. }))
+                .count(),
+            3
+        );
+        assert!(
+            !eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    matches!(
+                        instruction,
+                        SIRInstruction::Binary(_, _, crate::ir::BinaryOp::Mul, _)
+                    )
+                })
+        );
+    }
+
+    #[test]
+    fn branchifies_coupled_state_updates_with_interleaved_conditions() {
+        let mut eu = cfg_unit(
+            23,
+            &[2, 4, 6, 8, 9, 11, 12, 14, 15],
+            vec![BasicBlock {
+                id: BlockId(0),
+                params: (0..=7).map(RegisterId).collect(),
+                instructions: vec![
+                    SIRInstruction::Binary(
+                        RegisterId(8),
+                        RegisterId(3),
+                        crate::ir::BinaryOp::GtU,
+                        RegisterId(0),
+                    ),
+                    SIRInstruction::Binary(
+                        RegisterId(9),
+                        RegisterId(2),
+                        crate::ir::BinaryOp::LogicAnd,
+                        RegisterId(8),
+                    ),
+                    SIRInstruction::Mux(
+                        RegisterId(10),
+                        RegisterId(9),
+                        RegisterId(3),
+                        RegisterId(0),
+                    ),
+                    SIRInstruction::Binary(
+                        RegisterId(11),
+                        RegisterId(5),
+                        crate::ir::BinaryOp::GtU,
+                        RegisterId(10),
+                    ),
+                    SIRInstruction::Binary(
+                        RegisterId(12),
+                        RegisterId(4),
+                        crate::ir::BinaryOp::LogicAnd,
+                        RegisterId(11),
+                    ),
+                    SIRInstruction::Mux(
+                        RegisterId(13),
+                        RegisterId(12),
+                        RegisterId(5),
+                        RegisterId(10),
+                    ),
+                    SIRInstruction::Binary(
+                        RegisterId(14),
+                        RegisterId(7),
+                        crate::ir::BinaryOp::GtU,
+                        RegisterId(13),
+                    ),
+                    SIRInstruction::Binary(
+                        RegisterId(15),
+                        RegisterId(6),
+                        crate::ir::BinaryOp::LogicAnd,
+                        RegisterId(14),
+                    ),
+                    SIRInstruction::Mux(
+                        RegisterId(16),
+                        RegisterId(15),
+                        RegisterId(7),
+                        RegisterId(13),
+                    ),
+                    imm(17, 1),
+                    imm(18, 2),
+                    imm(19, 3),
+                    SIRInstruction::Mux(
+                        RegisterId(20),
+                        RegisterId(9),
+                        RegisterId(17),
+                        RegisterId(1),
+                    ),
+                    SIRInstruction::Mux(
+                        RegisterId(21),
+                        RegisterId(12),
+                        RegisterId(18),
+                        RegisterId(20),
+                    ),
+                    SIRInstruction::Mux(
+                        RegisterId(22),
+                        RegisterId(15),
+                        RegisterId(19),
+                        RegisterId(21),
+                    ),
+                    store(0, 16),
+                    store(1, 22),
+                ],
+                terminator: SIRTerminator::Return,
+            }],
+        );
+
+        BranchifyMuxPass.run(&mut eu, &PassOptions::default());
+
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert!(!eu.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, SIRInstruction::Mux(..)))
+        }));
+        assert_eq!(
+            eu.blocks
+                .values()
+                .filter(|block| matches!(block.terminator, SIRTerminator::Branch { .. }))
+                .count(),
+            6
+        );
+        for (guard, delayed) in [(2, 8), (4, 11), (6, 14)] {
+            let guard_block = eu
+                .blocks
+                .values()
+                .find(|block| {
+                    matches!(
+                        block.terminator,
+                        SIRTerminator::Branch {
+                            cond,
+                            ..
+                        } if cond == RegisterId(guard)
+                    )
+                })
+                .expect("eligibility guard must become the first branch");
+            let delayed_block_id = match &guard_block.terminator {
+                SIRTerminator::Branch { true_block, .. } => true_block.0,
+                _ => unreachable!(),
+            };
+            let delayed_block = &eu.blocks[&delayed_block_id];
+            assert!(delayed_block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Binary(dst, _, crate::ir::BinaryOp::GtU, _)
+                        if *dst == RegisterId(delayed)
+                )
+            }));
+            assert!(matches!(
+                delayed_block.terminator,
+                SIRTerminator::Branch {
+                    cond,
+                    ..
+                } if cond == RegisterId(delayed)
+            ));
+        }
+        for outputs in [
+            [RegisterId(10), RegisterId(20)],
+            [RegisterId(13), RegisterId(21)],
+            [RegisterId(16), RegisterId(22)],
+        ] {
+            assert!(eu.blocks.values().any(|block| block.params == outputs));
+        }
+    }
+
+    #[test]
+    fn branchifies_a_coupled_priority_chain_outermost_first() {
+        let mut eu = cfg_unit(
+            10,
+            &[0, 1],
+            vec![BasicBlock {
+                id: BlockId(0),
+                params: (0..=5).map(RegisterId).collect(),
+                instructions: vec![
+                    SIRInstruction::Mux(RegisterId(6), RegisterId(0), RegisterId(4), RegisterId(2)),
+                    SIRInstruction::Mux(RegisterId(7), RegisterId(1), RegisterId(4), RegisterId(6)),
+                    store(0, 7),
+                    SIRInstruction::Mux(RegisterId(8), RegisterId(0), RegisterId(5), RegisterId(3)),
+                    SIRInstruction::Mux(RegisterId(9), RegisterId(1), RegisterId(5), RegisterId(8)),
+                    store(1, 9),
+                ],
+                terminator: SIRTerminator::Return,
+            }],
+        );
+
+        BranchifyMuxPass.run(&mut eu, &PassOptions::default());
+
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert!(matches!(
+            eu.blocks[&BlockId(0)].terminator,
+            SIRTerminator::Branch {
+                cond: RegisterId(1),
+                ..
+            }
+        ));
+        assert!(!eu.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, SIRInstruction::Mux(..)))
+        }));
+        assert!(
+            eu.blocks
+                .values()
+                .any(|block| block.params == [RegisterId(7), RegisterId(9)])
+        );
+    }
+
+    #[test]
+    fn atomic_priority_moves_cross_block_occurrences_with_valid_state_versions() {
+        let mut register_map = HashMap::default();
+        for reg in 0..24 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: if matches!(reg, 4 | 6) { 1 } else { 64 },
+                    signed: false,
+                },
+            );
+        }
+        let mut source = vec![
+            imm(3, 1),
+            SIRInstruction::Binary(
+                RegisterId(4),
+                RegisterId(0),
+                crate::ir::BinaryOp::Eq,
+                RegisterId(3),
+            ),
+            imm(5, 2),
+            SIRInstruction::Binary(
+                RegisterId(6),
+                RegisterId(0),
+                crate::ir::BinaryOp::Eq,
+                RegisterId(5),
+            ),
+            SIRInstruction::Load(RegisterId(7), addr(0), SIROffset::Static(0), 64),
+            imm(8, 3),
+        ];
+        append_mul_chain(
+            &mut source,
+            7,
+            8,
+            &[9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                (
+                    BlockId(0),
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                        instructions: source,
+                        terminator: SIRTerminator::Jump(BlockId(1), vec![]),
+                    },
+                ),
+                (
+                    BlockId(1),
+                    BasicBlock {
+                        id: BlockId(1),
+                        params: vec![],
+                        instructions: vec![
+                            SIRInstruction::Mux(
+                                RegisterId(21),
+                                RegisterId(4),
+                                RegisterId(20),
+                                RegisterId(1),
+                            ),
+                            SIRInstruction::Mux(
+                                RegisterId(22),
+                                RegisterId(6),
+                                RegisterId(2),
+                                RegisterId(21),
+                            ),
+                            SIRInstruction::Unary(
+                                RegisterId(23),
+                                crate::ir::UnaryOp::BitNot,
+                                RegisterId(22),
+                            ),
+                        ],
+                        terminator: SIRTerminator::Return,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            register_map,
+        };
+
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_atomic_priority_placement(&eu, &placement).unwrap();
+        assert_eq!(plan.regions.len(), 1);
+        let moved_load = plan.regions[0]
+            .placed
+            .iter()
+            .find(|placed| def_reg(&placed.instruction) == Some(RegisterId(7)))
+            .unwrap();
+        assert_eq!(moved_load.block, BlockId(0));
+        assert_eq!(moved_load.site, PriorityPlacementSite::Leaf(1));
+        let moved_inner_condition = plan.regions[0]
+            .placed
+            .iter()
+            .find(|placed| def_reg(&placed.instruction) == Some(RegisterId(4)))
+            .unwrap();
+        assert_eq!(
+            moved_inner_condition.site,
+            PriorityPlacementSite::Decision(0)
+        );
+
+        let mut next_block_id = 2;
+        let mut reg_counter = 23;
+        assert_eq!(
+            apply_atomic_priority_placement(&mut eu, plan, &mut next_block_id, &mut reg_counter),
+            1
+        );
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert!(
+            !eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    matches!(instruction, SIRInstruction::Load(RegisterId(7), ..))
+                        || def_reg(instruction) == Some(RegisterId(4))
+                })
+        );
+        let load_block = eu
+            .blocks
+            .values()
+            .find(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(instruction, SIRInstruction::Load(RegisterId(7), ..))
+                })
+            })
+            .unwrap();
+        let cfg = SirCfg::analyze(&eu).unwrap();
+        assert!(!cfg.controllers[cfg.block_index(load_block.id).unwrap()].is_empty());
+        let condition_block = eu
+            .blocks
+            .values()
+            .find(|block| {
+                block
+                    .instructions
+                    .iter()
+                    .any(|instruction| def_reg(instruction) == Some(RegisterId(4)))
+            })
+            .unwrap();
+        assert!(matches!(
+            condition_block.terminator,
+            SIRTerminator::Branch {
+                cond: RegisterId(4),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn whole_priority_places_a_shared_descendant_once_at_its_lca() {
+        let mut register_map = HashMap::default();
+        for reg in 0..48 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: if reg <= 2 { 1 } else { 64 },
+                    signed: false,
+                },
+            );
+        }
+        let mut instructions = vec![imm(3, 3), imm(4, 5), imm(5, 7), imm(6, 11)];
+        let shared_outputs = (7..=38).collect::<Vec<_>>();
+        append_mul_chain(&mut instructions, 3, 4, &shared_outputs);
+        instructions.extend([
+            SIRInstruction::Binary(
+                RegisterId(39),
+                RegisterId(38),
+                crate::ir::BinaryOp::Add,
+                RegisterId(5),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(40),
+                RegisterId(38),
+                crate::ir::BinaryOp::Sub,
+                RegisterId(6),
+            ),
+            SIRInstruction::Mux(RegisterId(41), RegisterId(2), RegisterId(39), RegisterId(3)),
+            SIRInstruction::Mux(
+                RegisterId(42),
+                RegisterId(1),
+                RegisterId(40),
+                RegisterId(41),
+            ),
+            SIRInstruction::Mux(RegisterId(43), RegisterId(0), RegisterId(4), RegisterId(42)),
+            SIRInstruction::Unary(RegisterId(44), crate::ir::UnaryOp::BitNot, RegisterId(43)),
+        ]);
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map,
+        };
+
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_atomic_priority_placement(&eu, &placement).unwrap();
+        let shared = plan.regions[0]
+            .placed
+            .iter()
+            .find(|placed| def_reg(&placed.instruction) == Some(RegisterId(38)))
+            .unwrap();
+        assert_eq!(shared.site, PriorityPlacementSite::Decision(1));
+
+        let mut next_block_id = 1;
+        let mut reg_counter = 47;
+        apply_atomic_priority_placement(&mut eu, plan, &mut next_block_id, &mut reg_counter);
+        assert_eq!(eu.verify_result(), Ok(()));
+        let definition_blocks = eu
+            .blocks
+            .values()
+            .filter(|block| {
+                block
+                    .instructions
+                    .iter()
+                    .any(|instruction| def_reg(instruction) == Some(RegisterId(38)))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(definition_blocks.len(), 1);
+        assert!(matches!(
+            definition_blocks[0].terminator,
+            SIRTerminator::Branch {
+                cond: RegisterId(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn whole_priority_pins_a_definition_with_an_external_use() {
+        let mut register_map = HashMap::default();
+        for reg in 0..40 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: if reg <= 2 { 1 } else { 64 },
+                    signed: false,
+                },
+            );
+        }
+        let mut instructions = vec![imm(3, 3), imm(4, 5), imm(5, 7), imm(6, 11)];
+        append_mul_chain(&mut instructions, 3, 4, &(7..=18).collect::<Vec<_>>());
+        append_mul_chain(&mut instructions, 5, 6, &(19..=30).collect::<Vec<_>>());
+        instructions.extend([
+            SIRInstruction::Mux(
+                RegisterId(31),
+                RegisterId(2),
+                RegisterId(30),
+                RegisterId(18),
+            ),
+            SIRInstruction::Mux(RegisterId(32), RegisterId(1), RegisterId(4), RegisterId(31)),
+            SIRInstruction::Mux(RegisterId(33), RegisterId(0), RegisterId(3), RegisterId(32)),
+            SIRInstruction::Binary(
+                RegisterId(34),
+                RegisterId(33),
+                crate::ir::BinaryOp::Add,
+                RegisterId(18),
+            ),
+        ]);
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map,
+        };
+
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_atomic_priority_placement(&eu, &placement).unwrap();
+        assert!(
+            !plan.regions[0]
+                .placed
+                .iter()
+                .any(|placed| def_reg(&placed.instruction) == Some(RegisterId(18)))
+        );
+
+        let mut next_block_id = 1;
+        let mut reg_counter = 39;
+        apply_atomic_priority_placement(&mut eu, plan, &mut next_block_id, &mut reg_counter);
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert!(
+            eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| def_reg(instruction) == Some(RegisterId(18)))
+        );
+    }
+
+    #[test]
+    fn whole_priority_delays_an_inner_condition_dag_until_fallthrough() {
+        let mut register_map = HashMap::default();
+        for reg in 0..30 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: if reg <= 1 || reg == 22 { 1 } else { 64 },
+                    signed: false,
+                },
+            );
+        }
+        let mut instructions = vec![imm(2, 3), imm(3, 5), imm(4, 7), imm(5, 11)];
+        append_mul_chain(&mut instructions, 2, 3, &(6..=21).collect::<Vec<_>>());
+        instructions.extend([
+            SIRInstruction::Binary(
+                RegisterId(22),
+                RegisterId(21),
+                crate::ir::BinaryOp::Eq,
+                RegisterId(4),
+            ),
+            SIRInstruction::Mux(RegisterId(23), RegisterId(22), RegisterId(4), RegisterId(5)),
+            SIRInstruction::Mux(RegisterId(24), RegisterId(1), RegisterId(2), RegisterId(23)),
+            SIRInstruction::Mux(RegisterId(25), RegisterId(0), RegisterId(3), RegisterId(24)),
+            SIRInstruction::Unary(RegisterId(26), crate::ir::UnaryOp::BitNot, RegisterId(25)),
+        ]);
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1)],
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map,
+        };
+
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_atomic_priority_placement(&eu, &placement).unwrap();
+        let condition = plan.regions[0]
+            .placed
+            .iter()
+            .find(|placed| def_reg(&placed.instruction) == Some(RegisterId(22)))
+            .unwrap();
+        assert_eq!(condition.site, PriorityPlacementSite::Decision(0));
+
+        let mut next_block_id = 1;
+        let mut reg_counter = 29;
+        apply_atomic_priority_placement(&mut eu, plan, &mut next_block_id, &mut reg_counter);
+        assert_eq!(eu.verify_result(), Ok(()));
+        let condition_block = eu
+            .blocks
+            .values()
+            .find(|block| {
+                block
+                    .instructions
+                    .iter()
+                    .any(|instruction| def_reg(instruction) == Some(RegisterId(22)))
+            })
+            .unwrap();
+        assert_ne!(condition_block.id, BlockId(0));
+        assert!(matches!(
+            condition_block.terminator,
+            SIRTerminator::Branch {
+                cond: RegisterId(22),
+                ..
+            }
+        ));
+        let middle_block = eu
+            .blocks
+            .values()
+            .find(|block| {
+                matches!(
+                    block.terminator,
+                    SIRTerminator::Branch {
+                        cond: RegisterId(1),
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let SIRTerminator::Branch {
+            false_block: middle_fallthrough,
+            ..
+        } = &middle_block.terminator
+        else {
+            unreachable!()
+        };
+        assert_eq!(middle_fallthrough.0, condition_block.id);
+        let SIRTerminator::Branch {
+            cond: RegisterId(0),
+            false_block: outer_fallthrough,
+            ..
+        } = &eu.blocks[&BlockId(0)].terminator
+        else {
+            panic!("expected the outer priority decision")
+        };
+        assert_eq!(outer_fallthrough.0, middle_block.id);
     }
 
     #[test]
@@ -4928,6 +8990,851 @@ mod tests {
                 )
             )
         }));
+    }
+
+    #[test]
+    fn existing_cfg_moves_a_state_read_only_with_memoryssa_proof() {
+        let mut register_map = HashMap::default();
+        for reg in 0..17 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: if reg == 0 { 1 } else { 64 },
+                    signed: false,
+                },
+            );
+        }
+        let mut source = vec![
+            SIRInstruction::Load(RegisterId(1), addr(0), SIROffset::Static(0), 64),
+            imm(2, 3),
+            imm(13, 5),
+        ];
+        append_mul_chain(&mut source, 1, 2, &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        let mut blocks = HashMap::default();
+        blocks.insert(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: vec![RegisterId(0)],
+                instructions: source,
+                terminator: SIRTerminator::Jump(BlockId(1), vec![]),
+            },
+        );
+        blocks.insert(
+            BlockId(1),
+            BasicBlock {
+                id: BlockId(1),
+                params: vec![],
+                instructions: vec![
+                    SIRInstruction::Mux(
+                        RegisterId(14),
+                        RegisterId(0),
+                        RegisterId(12),
+                        RegisterId(13),
+                    ),
+                    SIRInstruction::Mux(
+                        RegisterId(15),
+                        RegisterId(0),
+                        RegisterId(12),
+                        RegisterId(13),
+                    ),
+                    SIRInstruction::Binary(
+                        RegisterId(16),
+                        RegisterId(14),
+                        crate::ir::BinaryOp::Add,
+                        RegisterId(15),
+                    ),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+
+        BranchifyMuxPass.run(&mut eu, &PassOptions::default());
+
+        assert_eq!(eu.verify_result(), Ok(()));
+        let load_blocks = eu
+            .blocks
+            .values()
+            .filter(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(instruction, SIRInstruction::Load(RegisterId(1), ..))
+                })
+            })
+            .map(|block| block.id)
+            .collect::<Vec<_>>();
+        assert_eq!(load_blocks.len(), 1);
+        let cfg = SirCfg::analyze(&eu).unwrap();
+        let load_block = cfg.block_index(load_blocks[0]).unwrap();
+        assert!(
+            !cfg.controllers[load_block].is_empty(),
+            "an unchanged versioned state read should execute only in its selected arm"
+        );
+    }
+
+    #[test]
+    fn atomic_placement_keeps_a_load_before_a_reaching_write() {
+        let mut register_map = HashMap::default();
+        for reg in 0..17 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: if reg == 0 { 1 } else { 64 },
+                    signed: false,
+                },
+            );
+        }
+        let mut source = vec![
+            SIRInstruction::Load(RegisterId(1), addr(0), SIROffset::Static(0), 64),
+            imm(2, 3),
+            imm(13, 5),
+            SIRInstruction::Store(
+                addr(0),
+                SIROffset::Static(0),
+                64,
+                RegisterId(13),
+                vec![],
+                vec![],
+            ),
+        ];
+        append_mul_chain(&mut source, 1, 2, &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        let mut blocks = HashMap::default();
+        blocks.insert(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: vec![RegisterId(0)],
+                instructions: source,
+                terminator: SIRTerminator::Jump(BlockId(1), vec![]),
+            },
+        );
+        blocks.insert(
+            BlockId(1),
+            BasicBlock {
+                id: BlockId(1),
+                params: vec![],
+                instructions: vec![
+                    SIRInstruction::Mux(
+                        RegisterId(14),
+                        RegisterId(0),
+                        RegisterId(12),
+                        RegisterId(13),
+                    ),
+                    SIRInstruction::Mux(
+                        RegisterId(15),
+                        RegisterId(0),
+                        RegisterId(12),
+                        RegisterId(13),
+                    ),
+                    SIRInstruction::Binary(
+                        RegisterId(16),
+                        RegisterId(14),
+                        crate::ir::BinaryOp::Add,
+                        RegisterId(15),
+                    ),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        if let Some(plan) = find_atomic_priority_placement(&eu, &placement) {
+            assert!(
+                !plan
+                    .regions
+                    .iter()
+                    .flat_map(|region| &region.placed)
+                    .any(|placed| matches!(
+                        placed.instruction,
+                        SIRInstruction::Load(RegisterId(1), ..)
+                    ))
+            );
+        }
+
+        BranchifyMuxPass.run(&mut eu, &PassOptions::default());
+
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert!(
+            eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    matches!(instruction, SIRInstruction::Load(RegisterId(1), ..))
+                })
+        );
+    }
+
+    #[test]
+    fn one_atomic_plan_selects_disjoint_regions_bottom_up() {
+        let mut register_map = HashMap::default();
+        register_map.insert(
+            RegisterId(0),
+            RegisterType::Bit {
+                width: 1,
+                signed: false,
+            },
+        );
+        register_map.insert(
+            RegisterId(1),
+            RegisterType::Bit {
+                width: 1,
+                signed: false,
+            },
+        );
+        for reg in 2..32 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: 64,
+                    signed: false,
+                },
+            );
+        }
+        let mut true_instructions = vec![imm(2, 3), imm(3, 5), imm(12, 7)];
+        append_mul_chain(&mut true_instructions, 2, 3, &[4, 5, 6, 7, 8, 9, 10, 11]);
+        true_instructions.extend([
+            SIRInstruction::Mux(
+                RegisterId(13),
+                RegisterId(1),
+                RegisterId(11),
+                RegisterId(12),
+            ),
+            SIRInstruction::Mux(
+                RegisterId(14),
+                RegisterId(1),
+                RegisterId(12),
+                RegisterId(13),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(15),
+                RegisterId(12),
+                crate::ir::BinaryOp::Add,
+                RegisterId(14),
+            ),
+        ]);
+        let mut false_instructions = vec![imm(16, 11), imm(17, 13), imm(26, 17)];
+        append_mul_chain(
+            &mut false_instructions,
+            16,
+            17,
+            &[18, 19, 20, 21, 22, 23, 24, 25],
+        );
+        false_instructions.extend([
+            SIRInstruction::Mux(
+                RegisterId(27),
+                RegisterId(1),
+                RegisterId(25),
+                RegisterId(26),
+            ),
+            SIRInstruction::Mux(
+                RegisterId(28),
+                RegisterId(1),
+                RegisterId(26),
+                RegisterId(27),
+            ),
+            SIRInstruction::Binary(
+                RegisterId(29),
+                RegisterId(26),
+                crate::ir::BinaryOp::Add,
+                RegisterId(28),
+            ),
+        ]);
+        let eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                (
+                    BlockId(0),
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: vec![RegisterId(0), RegisterId(1)],
+                        instructions: vec![],
+                        terminator: SIRTerminator::Branch {
+                            cond: RegisterId(0),
+                            true_block: (BlockId(1), vec![]),
+                            false_block: (BlockId(2), vec![]),
+                        },
+                    },
+                ),
+                (
+                    BlockId(1),
+                    BasicBlock {
+                        id: BlockId(1),
+                        params: vec![],
+                        instructions: true_instructions,
+                        terminator: SIRTerminator::Return,
+                    },
+                ),
+                (
+                    BlockId(2),
+                    BasicBlock {
+                        id: BlockId(2),
+                        params: vec![],
+                        instructions: false_instructions,
+                        terminator: SIRTerminator::Return,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            register_map,
+        };
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_atomic_priority_placement(&eu, &placement).unwrap();
+        let mut heads = plan
+            .regions
+            .iter()
+            .map(|region| region.block_id)
+            .collect::<Vec<_>>();
+        heads.sort_unstable();
+
+        assert_eq!(heads, vec![BlockId(1), BlockId(2)]);
+    }
+
+    #[test]
+    fn atomic_apply_handles_disjoint_regions_sharing_a_definition_block() {
+        let mut register_map = HashMap::default();
+        for reg in 0..30 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: if reg <= 2 { 1 } else { 64 },
+                    signed: false,
+                },
+            );
+        }
+        let mut source = vec![imm(4, 3), imm(5, 5)];
+        append_mul_chain(&mut source, 4, 5, &[6, 7, 8, 9, 10, 11, 12, 13]);
+        source.extend([imm(14, 7), imm(15, 11)]);
+        append_mul_chain(&mut source, 14, 15, &[16, 17, 18, 19, 20, 21, 22, 23]);
+        let priority_block = |id, inner, outer, result, value| BasicBlock {
+            id: BlockId(id),
+            params: vec![],
+            instructions: vec![
+                SIRInstruction::Mux(
+                    RegisterId(inner),
+                    RegisterId(2),
+                    RegisterId(value),
+                    RegisterId(3),
+                ),
+                SIRInstruction::Mux(
+                    RegisterId(outer),
+                    RegisterId(1),
+                    RegisterId(3),
+                    RegisterId(inner),
+                ),
+                SIRInstruction::Unary(
+                    RegisterId(result),
+                    crate::ir::UnaryOp::BitNot,
+                    RegisterId(outer),
+                ),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                (
+                    BlockId(0),
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: vec![RegisterId(0), RegisterId(1), RegisterId(2), RegisterId(3)],
+                        instructions: source,
+                        terminator: SIRTerminator::Branch {
+                            cond: RegisterId(0),
+                            true_block: (BlockId(1), vec![]),
+                            false_block: (BlockId(2), vec![]),
+                        },
+                    },
+                ),
+                (BlockId(1), priority_block(1, 24, 25, 26, 13)),
+                (BlockId(2), priority_block(2, 27, 28, 29, 23)),
+            ]
+            .into_iter()
+            .collect(),
+            register_map,
+        };
+
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_atomic_priority_placement(&eu, &placement).unwrap();
+        assert_eq!(plan.regions.len(), 2);
+        let mut next_block_id = 3;
+        let mut reg_counter = 29;
+        assert_eq!(
+            apply_atomic_priority_placement(&mut eu, plan, &mut next_block_id, &mut reg_counter),
+            2
+        );
+
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert!(!eu.blocks.values().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, SIRInstruction::Mux(..)))
+        }));
+        assert!(
+            !eu.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    def_reg(instruction).is_some_and(|register| (4..=23).contains(&register.0))
+                })
+        );
+        for register in [RegisterId(13), RegisterId(23)] {
+            assert_eq!(
+                eu.blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .filter(|instruction| def_reg(instruction) == Some(register))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn existing_cfg_places_complete_dags_in_their_used_arms() {
+        let mut eu = cfg_unit(
+            10,
+            &[0],
+            vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                    instructions: vec![
+                        SIRInstruction::Binary(
+                            RegisterId(3),
+                            RegisterId(1),
+                            crate::ir::BinaryOp::Mul,
+                            RegisterId(2),
+                        ),
+                        SIRInstruction::Binary(
+                            RegisterId(4),
+                            RegisterId(3),
+                            crate::ir::BinaryOp::Mul,
+                            RegisterId(2),
+                        ),
+                        SIRInstruction::Binary(
+                            RegisterId(5),
+                            RegisterId(1),
+                            crate::ir::BinaryOp::Mul,
+                            RegisterId(2),
+                        ),
+                        SIRInstruction::Binary(
+                            RegisterId(6),
+                            RegisterId(5),
+                            crate::ir::BinaryOp::Mul,
+                            RegisterId(2),
+                        ),
+                        SIRInstruction::Binary(
+                            RegisterId(7),
+                            RegisterId(1),
+                            crate::ir::BinaryOp::Add,
+                            RegisterId(2),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![store(10, 4), store(11, 7)],
+                    terminator: SIRTerminator::Return,
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![store(12, 6), store(13, 7)],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+        );
+        assert_eq!(eu.verify_result(), Ok(()));
+
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_existing_cfg_placement(&eu, &placement).unwrap();
+        assert_eq!(apply_existing_cfg_placement(&mut eu, plan), 4);
+
+        let definitions = |block: BlockId| {
+            eu.blocks[&block]
+                .instructions
+                .iter()
+                .filter_map(def_reg)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(definitions(BlockId(0)), vec![RegisterId(7)]);
+        assert_eq!(definitions(BlockId(1)), vec![RegisterId(3), RegisterId(4)]);
+        assert_eq!(definitions(BlockId(2)), vec![RegisterId(5), RegisterId(6)]);
+        assert_eq!(eu.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn existing_cfg_schedules_pure_dags_into_a_postdominating_use_block() {
+        let mut eu = cfg_unit(
+            6,
+            &[1],
+            vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1)],
+                    instructions: vec![
+                        SIRInstruction::Unary(
+                            RegisterId(2),
+                            crate::ir::UnaryOp::BitNot,
+                            RegisterId(0),
+                        ),
+                        SIRInstruction::Binary(
+                            RegisterId(3),
+                            RegisterId(2),
+                            crate::ir::BinaryOp::Add,
+                            RegisterId(0),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(1),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![]),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![]),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    params: vec![],
+                    instructions: vec![store(0, 3)],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+        );
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_existing_cfg_placement(&eu, &placement).unwrap();
+
+        assert_eq!(apply_existing_cfg_placement(&mut eu, plan), 2);
+        assert!(eu.blocks[&BlockId(0)].instructions.is_empty());
+        assert_eq!(
+            eu.blocks[&BlockId(3)]
+                .instructions
+                .iter()
+                .filter_map(def_reg)
+                .collect::<Vec<_>>(),
+            vec![RegisterId(2), RegisterId(3)]
+        );
+        assert_eq!(eu.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn existing_cfg_sinks_a_dynamic_load_within_the_same_loop_iteration() {
+        let mut eu = cfg_unit(
+            5,
+            &[1, 2],
+            vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![imm(0, 0), imm(1, 1), imm(2, 0)],
+                    terminator: SIRTerminator::Jump(BlockId(1), vec![]),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Load(
+                        RegisterId(3),
+                        addr(0),
+                        SIROffset::Dynamic(RegisterId(0)),
+                        64,
+                    )],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(1),
+                        true_block: (BlockId(2), vec![]),
+                        false_block: (BlockId(3), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Unary(
+                        RegisterId(4),
+                        crate::ir::UnaryOp::Ident,
+                        RegisterId(3),
+                    )],
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![]),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(2),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(4), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(4),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+        );
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_existing_cfg_placement(&eu, &placement).unwrap();
+
+        assert_eq!(apply_existing_cfg_placement(&mut eu, plan), 1);
+        assert!(eu.blocks[&BlockId(1)].instructions.is_empty());
+        assert!(matches!(
+            eu.blocks[&BlockId(2)].instructions.first(),
+            Some(SIRInstruction::Load(RegisterId(3), _, _, 64))
+        ));
+        assert_eq!(eu.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn existing_cfg_uses_edge_arguments_and_preserves_dependency_order() {
+        let mut eu = cfg_unit(
+            5,
+            &[0],
+            vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1)],
+                    instructions: vec![
+                        SIRInstruction::Binary(
+                            RegisterId(2),
+                            RegisterId(1),
+                            crate::ir::BinaryOp::Mul,
+                            RegisterId(1),
+                        ),
+                        SIRInstruction::Binary(
+                            RegisterId(3),
+                            RegisterId(2),
+                            crate::ir::BinaryOp::Mul,
+                            RegisterId(2),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Jump(BlockId(3), vec![RegisterId(3)]),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Return,
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    params: vec![RegisterId(4)],
+                    instructions: vec![store(0, 4)],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+        );
+        let placement = PlacementAnalysis::analyze(&eu).unwrap();
+        let plan = find_existing_cfg_placement(&eu, &placement).unwrap();
+
+        assert_eq!(apply_existing_cfg_placement(&mut eu, plan), 2);
+        assert_eq!(
+            eu.blocks[&BlockId(1)]
+                .instructions
+                .iter()
+                .filter_map(def_reg)
+                .collect::<Vec<_>>(),
+            vec![RegisterId(2), RegisterId(3)]
+        );
+        assert_eq!(eu.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn existing_cfg_sinks_only_loads_with_the_same_state_version() {
+        let make_unit = |intervening_write: bool| {
+            let mut instructions = vec![
+                SIRInstruction::Load(RegisterId(3), addr(0), SIROffset::Static(0), 64),
+                SIRInstruction::Binary(
+                    RegisterId(4),
+                    RegisterId(3),
+                    crate::ir::BinaryOp::Mul,
+                    RegisterId(1),
+                ),
+            ];
+            if intervening_write {
+                instructions.push(store(0, 2));
+            }
+            cfg_unit(
+                5,
+                &[0],
+                vec![
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                        instructions,
+                        terminator: SIRTerminator::Branch {
+                            cond: RegisterId(0),
+                            true_block: (BlockId(1), vec![]),
+                            false_block: (BlockId(2), vec![]),
+                        },
+                    },
+                    BasicBlock {
+                        id: BlockId(1),
+                        params: vec![],
+                        instructions: vec![],
+                        terminator: SIRTerminator::Return,
+                    },
+                    BasicBlock {
+                        id: BlockId(2),
+                        params: vec![],
+                        instructions: vec![store(1, 4)],
+                        terminator: SIRTerminator::Return,
+                    },
+                ],
+            )
+        };
+
+        let mut unchanged = make_unit(false);
+        let placement = PlacementAnalysis::analyze(&unchanged).unwrap();
+        let plan = find_existing_cfg_placement(&unchanged, &placement).unwrap();
+        assert_eq!(apply_existing_cfg_placement(&mut unchanged, plan), 2);
+        assert!(matches!(
+            unchanged.blocks[&BlockId(2)].instructions.first(),
+            Some(SIRInstruction::Load(RegisterId(3), _, _, _))
+        ));
+        assert_eq!(unchanged.verify_result(), Ok(()));
+
+        let mut changed = make_unit(true);
+        let placement = PlacementAnalysis::analyze(&changed).unwrap();
+        let plan = find_existing_cfg_placement(&changed, &placement).unwrap();
+        assert_eq!(apply_existing_cfg_placement(&mut changed, plan), 1);
+        assert!(
+            changed.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| matches!(
+                    instruction,
+                    SIRInstruction::Load(RegisterId(3), _, _, _)
+                ))
+        );
+        assert!(
+            changed.blocks[&BlockId(0)]
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, SIRInstruction::Store(_, _, _, _, _, _)))
+        );
+        assert_eq!(changed.verify_result(), Ok(()));
+    }
+
+    #[test]
+    fn existing_cfg_rejects_cyclic_targets_and_unprofitable_fan_in() {
+        let loop_unit = cfg_unit(
+            6,
+            &[0, 5],
+            vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1), RegisterId(2), RegisterId(5)],
+                    instructions: vec![SIRInstruction::Binary(
+                        RegisterId(3),
+                        RegisterId(1),
+                        crate::ir::BinaryOp::Mul,
+                        RegisterId(2),
+                    )],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(3), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![store(0, 3)],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(5),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Return,
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+        );
+        let placement = PlacementAnalysis::analyze(&loop_unit).unwrap();
+        assert!(find_existing_cfg_placement(&loop_unit, &placement).is_none());
+
+        let cheap = cfg_unit(
+            4,
+            &[0],
+            vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                    instructions: vec![SIRInstruction::Binary(
+                        RegisterId(3),
+                        RegisterId(1),
+                        crate::ir::BinaryOp::And,
+                        RegisterId(2),
+                    )],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), vec![]),
+                        false_block: (BlockId(2), vec![]),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    instructions: vec![store(0, 3)],
+                    terminator: SIRTerminator::Return,
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+        );
+        let placement = PlacementAnalysis::analyze(&cheap).unwrap();
+        assert!(find_existing_cfg_placement(&cheap, &placement).is_none());
     }
 
     #[test]
@@ -5169,6 +10076,73 @@ mod tests {
                 ..
             } if true_block.1 == vec![RegisterId(1)] && false_block.1 == vec![RegisterId(1)]
         ));
+    }
+
+    #[test]
+    fn inlines_chained_param_only_blocks_without_dangling_targets() {
+        let mut register_map = HashMap::default();
+        for reg in 0..4 {
+            register_map.insert(
+                RegisterId(reg),
+                RegisterType::Bit {
+                    width: 64,
+                    signed: false,
+                },
+            );
+        }
+        let mut blocks = HashMap::default();
+        blocks.insert(
+            BlockId(0),
+            BasicBlock {
+                id: BlockId(0),
+                params: Vec::new(),
+                instructions: vec![imm(0, 3)],
+                terminator: SIRTerminator::Jump(BlockId(1), vec![RegisterId(0)]),
+            },
+        );
+        blocks.insert(
+            BlockId(1),
+            BasicBlock {
+                id: BlockId(1),
+                params: vec![RegisterId(1)],
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(BlockId(2), vec![RegisterId(1)]),
+            },
+        );
+        blocks.insert(
+            BlockId(2),
+            BasicBlock {
+                id: BlockId(2),
+                params: vec![RegisterId(2)],
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Jump(BlockId(3), vec![RegisterId(2)]),
+            },
+        );
+        blocks.insert(
+            BlockId(3),
+            BasicBlock {
+                id: BlockId(3),
+                params: vec![RegisterId(3)],
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Return,
+            },
+        );
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+
+        inline_param_only_jump_blocks(&mut eu);
+
+        assert!(!eu.blocks.contains_key(&BlockId(1)));
+        assert!(!eu.blocks.contains_key(&BlockId(2)));
+        assert!(matches!(
+            &eu.blocks[&BlockId(0)].terminator,
+            SIRTerminator::Jump(target, args)
+                if *target == BlockId(3) && args == &vec![RegisterId(0)]
+        ));
+        eu.verify();
     }
 
     #[test]

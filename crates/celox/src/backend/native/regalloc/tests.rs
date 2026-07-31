@@ -40,6 +40,91 @@ fn cssa_error_mapping_preserves_structured_context() {
     assert_eq!(mapped.message, "test CSSA failure");
 }
 
+#[test]
+fn allocation_boundary_removes_single_use_compare_results() {
+    let mut vregs = VRegAllocator::new();
+    let lhs = vregs.alloc();
+    let rhs = vregs.alloc();
+    let condition = vregs.alloc();
+    let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+
+    let mut entry = MBlock::new(BlockId(0));
+    entry.push(MInst::LoadImm { dst: lhs, value: 1 });
+    entry.push(MInst::LoadImm { dst: rhs, value: 2 });
+    entry.push(MInst::Cmp {
+        dst: condition,
+        lhs,
+        rhs,
+        kind: CmpKind::LtU,
+    });
+    entry.push(MInst::Branch {
+        cond: condition,
+        true_bb: BlockId(1),
+        false_bb: BlockId(2),
+    });
+    let mut true_block = MBlock::new(BlockId(1));
+    true_block.push(MInst::Return);
+    let mut false_block = MBlock::new(BlockId(2));
+    false_block.push(MInst::Return);
+    func.blocks = vec![entry, true_block, false_block];
+
+    run_regalloc(&mut func).unwrap();
+
+    assert!(
+        !func
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .any(|instruction| instruction.def() == Some(condition))
+    );
+    assert!(matches!(
+        func.blocks[0].terminator(),
+        Some(MInst::BranchPred {
+            predicate: BranchPredicate::Compare {
+                kind: CmpKind::LtU,
+                ..
+            },
+            ..
+        })
+    ));
+}
+
+#[test]
+fn trace_captures_regalloc_owned_memory_folds_before_scheduling() {
+    let mut vregs = VRegAllocator::new();
+    let loaded = vregs.alloc();
+    let masked = vregs.alloc();
+    let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+    let mut block = MBlock::new(BlockId(0));
+    block.push(MInst::Load {
+        dst: loaded,
+        base: BaseReg::SimState,
+        offset: 37,
+        size: OpSize::S8,
+    });
+    block.push(MInst::AndImm {
+        dst: masked,
+        src: loaded,
+        imm: 0xfc,
+    });
+    block.push(MInst::Store {
+        base: BaseReg::SimState,
+        offset: 37,
+        src: masked,
+        size: OpSize::S8,
+    });
+    block.push(MInst::Return);
+    func.push_block(block);
+    let mut trace = RegallocTrace::default();
+
+    run_regalloc_with_label_and_trace(&mut func, "late-fold-trace-test", Some(&mut trace)).unwrap();
+
+    assert!(trace.mir_after_late_memory_folds.contains("and_store.i8"));
+    assert!(!trace.mir_after_late_memory_folds.contains("load.i8"));
+    assert!(!trace.mir_after_late_memory_folds.is_empty());
+    assert!(!trace.mir_after_scheduling.is_empty());
+}
+
 /// Build a simple MFunction with one block, run regalloc, verify.
 fn run_and_verify(insts: Vec<MInst>, mut spill_descs: Vec<SpillDesc>) -> AssignmentMap {
     // Find the max VReg number used in instructions
@@ -70,8 +155,7 @@ fn run_and_verify(insts: Vec<MInst>, mut spill_descs: Vec<SpillDesc>) -> Assignm
     let result = run_regalloc(&mut func).unwrap();
 
     // Re-verify on final instructions
-    let analysis = analysis::analyze(&func);
-    super::verify_assignment(&func, &analysis, &result.assignment).unwrap();
+    super::verify_assignment(&func, &result.assignment).unwrap();
 
     result.assignment
 }
@@ -313,8 +397,7 @@ fn test_shift_with_pressure() {
     }
 
     // Verify
-    let analysis = analysis::analyze(&func);
-    super::verify_assignment(&func, &analysis, &assignment).unwrap();
+    super::verify_assignment(&func, &assignment).unwrap();
 }
 
 #[test]
@@ -462,8 +545,7 @@ fn test_phi_dst_gets_register_under_entry_pressure() {
 
     let result = run_regalloc(&mut func).unwrap();
     assert!(result.assignment.get(VReg(13)).is_some());
-    let analysis = analysis::analyze(&func);
-    super::verify_assignment(&func, &analysis, &result.assignment).unwrap();
+    super::verify_assignment(&func, &result.assignment).unwrap();
 }
 
 #[test]
@@ -555,8 +637,7 @@ fn test_many_phi_edge_sources_are_materialized_without_pin_overflow() {
 
     let result = run_regalloc(&mut func).unwrap();
     assert_eq!(func.verify_result(), Ok(()));
-    let analysis = analysis::analyze(&func);
-    super::verify_assignment(&func, &analysis, &result.assignment).unwrap();
+    super::verify_assignment(&func, &result.assignment).unwrap();
     let emitted = emit::emit(&func, &result.assignment, result.spill_frame_size).unwrap();
     let jit = jit_mem::JitCode::new(&emitted.code).unwrap();
 

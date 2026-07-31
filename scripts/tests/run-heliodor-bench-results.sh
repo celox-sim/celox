@@ -32,14 +32,56 @@ write_log() {
 pass_log="$TMP/pass.log"
 write_log "$pass_log" \
     'diagnostic before result' \
+    'CELOX_TEST_TIMING test=boot compile_ns=4 execute_ns=5' \
     'CELOX_TEST_RESULT test=boot status=pass elapsed_ns=11'
 classify_celox_result "$pass_log" boot 0 0 \
     || fail "well-formed pass marker was rejected: $CELOX_RESULT_DIAGNOSTIC"
 assert_eq "$CELOX_SEMANTIC_STATUS" pass "pass semantic status"
 assert_eq "$CELOX_REPORTED_ELAPSED_NS" 11 "pass reported elapsed"
+assert_eq "$CELOX_COMPILE_ELAPSED_NS" 4 "pass compile elapsed"
+assert_eq "$CELOX_EXECUTE_ELAPSED_NS" 5 "pass execute elapsed"
+
+cpu_timed_log="$TMP/cpu-timed.log"
+write_log "$cpu_timed_log" \
+    'CELOX_TEST_TIMING test=boot_cpu compile_ns=6 execute_ns=7 execute_cpu_ns=8' \
+    'CELOX_TEST_RESULT test=boot_cpu status=pass elapsed_ns=15'
+classify_celox_result "$cpu_timed_log" boot_cpu 0 0 \
+    || fail "timing marker with CPU time was rejected: $CELOX_RESULT_DIAGNOSTIC"
+assert_eq "$CELOX_COMPILE_ELAPSED_NS" 6 "CPU-timed compile elapsed"
+assert_eq "$CELOX_EXECUTE_ELAPSED_NS" 7 "CPU-timed execute elapsed"
+
+timed_veryl_log="$TMP/timed-veryl.log"
+write_log "$timed_veryl_log" \
+    'VERYL_TEST_TIMING test=boot compile_ns=6 execute_ns=7' \
+    'VERYL_TEST_RESULT test=boot status=pass elapsed_ns=15'
+classify_timed_veryl_result "$timed_veryl_log" boot 0 \
+    || fail "well-formed timed Veryl result was rejected: $VERYL_TIMED_RESULT_DIAGNOSTIC"
+assert_eq "$VERYL_TIMED_SEMANTIC_STATUS" pass "timed Veryl semantic status"
+assert_eq "$VERYL_TIMED_REPORTED_ELAPSED_NS" 15 "timed Veryl reported elapsed"
+assert_eq "$VERYL_TIMED_COMPILE_ELAPSED_NS" 6 "timed Veryl compile elapsed"
+assert_eq "$VERYL_TIMED_EXECUTE_ELAPSED_NS" 7 "timed Veryl execute elapsed"
+
+wrong_timed_veryl_log="$TMP/wrong-timed-veryl.log"
+write_log "$wrong_timed_veryl_log" \
+    'VERYL_TEST_TIMING test=other compile_ns=6 execute_ns=7' \
+    'VERYL_TEST_RESULT test=boot status=pass elapsed_ns=15'
+if classify_timed_veryl_result "$wrong_timed_veryl_log" boot 0; then
+    fail "timed Veryl result with a mismatched timing test was accepted"
+fi
+assert_eq "$VERYL_TIMED_SEMANTIC_STATUS" invalid \
+    "wrong timed Veryl test semantic status"
+
+missing_timing_log="$TMP/missing-timing.log"
+write_log "$missing_timing_log" 'CELOX_TEST_RESULT test=boot status=pass elapsed_ns=11'
+if classify_celox_result "$missing_timing_log" boot 0 0; then
+    fail "current result without split timing was accepted"
+fi
+assert_eq "$CELOX_SEMANTIC_STATUS" invalid "missing timing semantic status"
 
 compile_log="$TMP/compile.log"
-write_log "$compile_log" 'CELOX_TEST_RESULT test=boot_compile status=compile-only elapsed_ns=22'
+write_log "$compile_log" \
+    'CELOX_TEST_TIMING test=boot_compile compile_ns=20 execute_ns=0' \
+    'CELOX_TEST_RESULT test=boot_compile status=compile-only elapsed_ns=22'
 classify_celox_result "$compile_log" boot_compile 0 1 \
     || fail "well-formed compile-only marker was rejected: $CELOX_RESULT_DIAGNOSTIC"
 assert_eq "$CELOX_SEMANTIC_STATUS" compile-only "compile-only semantic status"
@@ -47,7 +89,9 @@ assert_eq "$(full_pass_elapsed_ns "$CELOX_SEMANTIC_STATUS" 0 50)" NA \
     "compile-only must not expose a speed elapsed value"
 
 fail_log="$TMP/fail.log"
-write_log "$fail_log" 'CELOX_TEST_RESULT test=boot_fail status=fail elapsed_ns=33'
+write_log "$fail_log" \
+    'CELOX_TEST_TIMING test=boot_fail compile_ns=10 execute_ns=20' \
+    'CELOX_TEST_RESULT test=boot_fail status=fail elapsed_ns=33'
 classify_celox_result "$fail_log" boot_fail 1 0 \
     || fail "well-formed fail marker was rejected: $CELOX_RESULT_DIAGNOSTIC"
 assert_eq "$CELOX_SEMANTIC_STATUS" fail "fail semantic status"
@@ -123,56 +167,68 @@ ensure_results_schema "$results"
 cmp -s "$TMP/original-v1.tsv" "${results}.v1.bak" \
     || fail "v1 migration backup differs from the original"
 
-expected="$TMP/expected-v2.tsv"
+expected="$TMP/expected-v3.tsv"
 cat >"$expected" <<EOF
-$RESULTS_HEADER_V2
-celox	boot	0	100	$pass_log	pass	0	100	11
-celox	boot_compile	0	NA	$compile_log	compile-only	0	50	22
-celox	boot_timeout	124	NA	$missing_log	unreported	124	30	NA
-celox	boot_zero_unreported	0	NA	$missing_log	unreported	0	40	NA
-veryl-cc	boot	0	200	$TMP/veryl-pass.log	pass	0	200	NA
-veryl-cc	boot_fail	1	NA	$TMP/veryl-fail.log	fail	1	25	NA
+$RESULTS_HEADER_V3
+celox	boot	0	100	$pass_log	pass	0	100	11	4	5
+celox	boot_compile	0	NA	$compile_log	compile-only	0	50	22	20	0
+celox	boot_timeout	124	NA	$missing_log	unreported	124	30	NA	NA	NA
+celox	boot_zero_unreported	0	NA	$missing_log	unreported	0	40	NA	NA	NA
+veryl-cc	boot	0	200	$TMP/veryl-pass.log	pass	0	200	NA	NA	NA
+veryl-cc	boot_fail	1	NA	$TMP/veryl-fail.log	fail	1	25	NA	NA	NA
 EOF
 cmp -s "$expected" "$results" || {
     diff -u "$expected" "$results" >&2 || true
-    fail "migrated v2 results differ from expected"
+    fail "migrated v3 results differ from expected"
 }
 
 cp "$results" "$TMP/before-idempotent.tsv"
 ensure_results_schema "$results"
 cmp -s "$TMP/before-idempotent.tsv" "$results" \
-    || fail "ensuring an existing v2 schema is not idempotent"
+    || fail "ensuring an existing v3 schema is not idempotent"
+
+v2_results="$TMP/v2-results.tsv"
+printf '%s\n%s\n' "$RESULTS_HEADER_V2" \
+    $'celox\tboot\t0\t100\t'"$pass_log"$'\tpass\t0\t100\t11' \
+    >"$v2_results"
+ensure_results_schema "$v2_results"
+[[ -f "${v2_results}.v2.bak" ]] || fail "v2 migration did not create a backup"
+assert_eq "$(sed -n '1p' "$v2_results")" "$RESULTS_HEADER_V3" "v2 migration header"
+assert_eq "$(awk -F '\t' 'NR == 2 { print $10 }' "$v2_results")" 4 \
+    "v2 migration recovered compile elapsed"
+assert_eq "$(awk -F '\t' 'NR == 2 { print $11 }' "$v2_results")" 5 \
+    "v2 migration recovered execute elapsed"
 
 new_results="$TMP/new-results.tsv"
 ensure_results_schema "$new_results"
-assert_eq "$(sed -n '1p' "$new_results")" "$RESULTS_HEADER_V2" "new results header"
+assert_eq "$(sed -n '1p' "$new_results")" "$RESULTS_HEADER_V3" "new results header"
 assert_eq "$(wc -l <"$new_results")" 1 "new results line count"
 
 append_result_row "$new_results" celox boot_compile 0 NA "$compile_log" \
-    compile-only 50 22 >/dev/null
-assert_eq "$(awk -F '\t' 'NR == 2 { print NF }' "$new_results")" 9 \
-    "appended v2 field count"
+    compile-only 50 22 20 0 >/dev/null
+assert_eq "$(awk -F '\t' 'NR == 2 { print NF }' "$new_results")" 11 \
+    "appended v3 field count"
 assert_eq "$(awk -F '\t' 'NR == 2 { print $4 }' "$new_results")" NA \
     "compile-only appended speed elapsed"
 before_invalid_append="$(wc -l <"$new_results")"
 if append_result_row "$new_results" celox impossible 0 1 "$compile_log" \
-    compile-only 1 1 >/dev/null 2>&1; then
+    compile-only 1 1 1 0 >/dev/null 2>&1; then
     fail "append accepted compile-only with a numeric speed elapsed"
 fi
 assert_eq "$(wc -l <"$new_results")" "$before_invalid_append" \
     "invalid append changed the results file"
 
 bad_results="$TMP/bad-results.tsv"
-printf '%s\n%s\n' "$RESULTS_HEADER_V2" $'celox\tboot\t0\t100\tlog' >"$bad_results"
+printf '%s\n%s\n' "$RESULTS_HEADER_V3" $'celox\tboot\t0\t100\tlog' >"$bad_results"
 if ensure_results_schema "$bad_results" 2>/dev/null; then
-    fail "v2 header with a legacy-width row was accepted"
+    fail "v3 header with a legacy-width row was accepted"
 fi
 
 bad_semantics="$TMP/bad-semantics.tsv"
-printf '%s\n%s\n' "$RESULTS_HEADER_V2" \
-    $'celox\tboot\t0\t100\tlog\tcompile-only\t0\t100\t50' >"$bad_semantics"
+printf '%s\n%s\n' "$RESULTS_HEADER_V3" \
+    $'celox\tboot\t0\t100\tlog\tcompile-only\t0\t100\t50\t40\t0' >"$bad_semantics"
 if ensure_results_schema "$bad_semantics" 2>/dev/null; then
-    fail "v2 compile-only row with a numeric speed elapsed was accepted"
+    fail "v3 compile-only row with a numeric speed elapsed was accepted"
 fi
 
 # Exercise run_one without Heliodor or either compiler. These overrides emit
@@ -181,10 +237,13 @@ integration_results="$TMP/integration-results"
 mkdir -p "$integration_results"
 HELIODOR_RESULTS_DIR="$integration_results"
 CELOX_RUNNER_BIN=/bin/true
+VERYL_TIMED_RUNNER_BIN=/bin/true
+RESOLVED_VERYL_BIN=/bin/true
 CELOX_SIR_PASS_OVERRIDES=""
 HELIODOR_CELOX_COMPILE_TIMEOUT_SEC=""
 FIXTURE_RESULT_LINE=""
 FIXTURE_EXIT_STATUS=0
+FIXTURE_AOT_CACHE_DIR=""
 
 test_source_files() {
     printf '%s\n' dummy.veryl
@@ -197,6 +256,12 @@ timeout_sec_for() {
 run_in_heliodor() {
     local _timeout="$1"
     local log="$2"
+    shift 2
+    if [[ "${1:-}" == env && "${2:-}" == VERYL_AOT_CACHE_DIR=* ]]; then
+        FIXTURE_AOT_CACHE_DIR="${2#VERYL_AOT_CACHE_DIR=}"
+        [[ -d "$FIXTURE_AOT_CACHE_DIR" ]] \
+            || fail "run_one did not create the isolated Veryl AOT cache"
+    fi
     if [[ -n "$FIXTURE_RESULT_LINE" ]]; then
         printf '%s\n' "$FIXTURE_RESULT_LINE" >"$log"
     else
@@ -207,16 +272,20 @@ run_in_heliodor() {
 
 ensure_results_schema "$integration_results/results.tsv"
 HELIODOR_CELOX_COMPILE_ONLY=0
-FIXTURE_RESULT_LINE='CELOX_TEST_RESULT test=integration_pass status=pass elapsed_ns=71'
+FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_pass compile_ns=20 execute_ns=30\nCELOX_TEST_RESULT test=integration_pass status=pass elapsed_ns=71'
 run_one celox integration_pass >/dev/null \
     || fail "run_one rejected a fixture full pass"
 assert_eq "$(awk -F '\t' 'NR == 2 { print $6 }' "$integration_results/results.tsv")" pass \
     "run_one pass semantic status"
 [[ "$(awk -F '\t' 'NR == 2 { print $4 }' "$integration_results/results.tsv")" =~ ^[0-9]+$ ]] \
     || fail "run_one full pass did not expose a numeric speed elapsed"
+assert_eq "$(awk -F '\t' 'NR == 2 { print $10 }' "$integration_results/results.tsv")" 20 \
+    "run_one pass compile elapsed"
+assert_eq "$(awk -F '\t' 'NR == 2 { print $11 }' "$integration_results/results.tsv")" 30 \
+    "run_one pass execute elapsed"
 
 HELIODOR_CELOX_COMPILE_ONLY=1
-FIXTURE_RESULT_LINE='CELOX_TEST_RESULT test=integration_compile status=compile-only elapsed_ns=72'
+FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_compile compile_ns=70 execute_ns=0\nCELOX_TEST_RESULT test=integration_compile status=compile-only elapsed_ns=72'
 run_one celox integration_compile >/dev/null \
     || fail "run_one rejected a fixture compile-only completion"
 assert_eq "$(awk -F '\t' 'NR == 3 { print $6 }' "$integration_results/results.tsv")" \
@@ -226,7 +295,7 @@ assert_eq "$(awk -F '\t' 'NR == 3 { print $4 }' "$integration_results/results.ts
 
 HELIODOR_CELOX_COMPILE_ONLY=0
 FIXTURE_EXIT_STATUS=1
-FIXTURE_RESULT_LINE='CELOX_TEST_RESULT test=integration_fail status=fail elapsed_ns=73'
+FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_fail compile_ns=20 execute_ns=30\nCELOX_TEST_RESULT test=integration_fail status=fail elapsed_ns=73'
 if run_one celox integration_fail >/dev/null 2>&1; then
     fail "run_one returned success for a semantic test failure"
 fi
@@ -244,5 +313,37 @@ assert_eq "$(awk -F '\t' 'NR == 5 { print $6 }' "$integration_results/results.ts
     unreported "run_one missing-result semantic status"
 assert_eq "$(awk -F '\t' 'NR == 5 { print $4 }' "$integration_results/results.tsv")" NA \
     "run_one missing-result speed elapsed"
+
+FIXTURE_RESULT_LINE=$'VERYL_TEST_TIMING test=integration_veryl compile_ns=40 execute_ns=50\nVERYL_TEST_RESULT test=integration_veryl status=pass elapsed_ns=91'
+# Exercise the real runner's path handling with a relative results directory;
+# the cache passed through a Heliodor chdir must still be absolute.
+HELIODOR_RESULTS_DIR="$(realpath --relative-to="$PWD" "$integration_results")"
+run_one veryl-cc-sync integration_veryl >/dev/null \
+    || fail "run_one rejected a fixture timed Veryl pass"
+[[ -n "$FIXTURE_AOT_CACHE_DIR" ]] \
+    || fail "run_one did not pass an isolated cache to timed Veryl"
+[[ "$FIXTURE_AOT_CACHE_DIR" == /* ]] \
+    || fail "run_one passed a relative Veryl AOT cache path"
+[[ ! -e "$FIXTURE_AOT_CACHE_DIR" ]] \
+    || fail "run_one did not remove the isolated Veryl AOT cache"
+assert_eq "$(awk -F '\t' 'NR == 6 { print $6 }' "$integration_results/results.tsv")" pass \
+    "run_one timed Veryl semantic status"
+assert_eq "$(awk -F '\t' 'NR == 6 { print $10 }' "$integration_results/results.tsv")" 40 \
+    "run_one timed Veryl compile elapsed"
+assert_eq "$(awk -F '\t' 'NR == 6 { print $11 }' "$integration_results/results.tsv")" 50 \
+    "run_one timed Veryl execute elapsed"
+
+FIXTURE_AOT_CACHE_DIR=""
+FIXTURE_RESULT_LINE=$'[INFO ]    Succeeded test (integration_veryl_cli)\n[INFO ]    Completed tests : 1 passed, 0 failed'
+run_one veryl-cc integration_veryl_cli >/dev/null \
+    || fail "run_one rejected a fixture Veryl CLI pass"
+[[ "$FIXTURE_AOT_CACHE_DIR" == /* ]] \
+    || fail "run_one did not pass an absolute isolated cache to the Veryl CLI"
+[[ ! -e "$FIXTURE_AOT_CACHE_DIR" ]] \
+    || fail "run_one did not remove the Veryl CLI AOT cache"
+assert_eq "$(awk -F '\t' 'NR == 7 { print $10 }' "$integration_results/results.tsv")" NA \
+    "run_one Veryl CLI compile elapsed"
+assert_eq "$(awk -F '\t' 'NR == 7 { print $11 }' "$integration_results/results.tsv")" NA \
+    "run_one Veryl CLI execute elapsed"
 
 echo "run-heliodor-bench result fixture tests: PASS"

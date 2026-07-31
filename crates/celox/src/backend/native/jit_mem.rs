@@ -1,8 +1,10 @@
 //! JIT memory: load emitted machine code into executable memory and call it.
 
-use std::io::Write;
+use std::{io::Write, sync::Mutex};
 
 use memmap2::{Mmap, MmapMut};
+
+static PERF_MAP_INITIALIZED: Mutex<bool> = Mutex::new(false);
 
 /// Optional subrange symbol for Linux perf JIT maps.
 pub struct JitSymbol {
@@ -62,7 +64,23 @@ impl JitCode {
     /// The caller must ensure `state` points to a valid simulation state
     /// buffer of sufficient size, and the JIT code is correct.
     pub unsafe fn call(&self, state: &mut [u8]) -> i64 {
-        unsafe { (self.fn_ptr)(state.as_mut_ptr()) }
+        // Standalone emitter/ISel tests pass only their semantic state bytes,
+        // while native functions use the following memory as a private
+        // spill/scratch/save arena. Production NativeBackend calls `fn_ptr`
+        // directly with its already-extended per-instance allocation.
+        const STANDALONE_ARENA_BYTES: usize = 1024 * 1024;
+        let total_bytes = state
+            .len()
+            .checked_add(STANDALONE_ARENA_BYTES)
+            .expect("standalone native state size overflow");
+        let mut owned = vec![0u64; total_bytes.div_ceil(8)];
+        let owned_bytes = unsafe {
+            std::slice::from_raw_parts_mut(owned.as_mut_ptr().cast::<u8>(), owned.len() * 8)
+        };
+        owned_bytes[..state.len()].copy_from_slice(state);
+        let result = unsafe { (self.fn_ptr)(owned_bytes.as_mut_ptr()) };
+        state.copy_from_slice(&owned_bytes[..state.len()]);
+        result
     }
 }
 
@@ -77,10 +95,22 @@ fn write_perf_map_entries(
     }
 
     let path = format!("/tmp/perf-{}.map", std::process::id());
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    // Containerized runs can reuse a PID while the previous process's map is
+    // still present in /tmp.  Retaining those entries makes perf resolve an
+    // address to an unrelated block from an older compilation.  Truncate once
+    // per process, then append the remaining native functions to the same map.
+    let mut initialized = PERF_MAP_INITIALIZED
+        .lock()
+        .map_err(|_| std::io::Error::other("perf map initialization lock was poisoned"))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true);
+    if *initialized {
+        options.append(true);
+    } else {
+        options.truncate(true);
+    }
+    let mut file = options.open(path)?;
+    *initialized = true;
     if symbols.is_empty() {
         writeln!(file, "{addr:x} {size:x} {}", sanitize_perf_symbol(name))?;
     } else {

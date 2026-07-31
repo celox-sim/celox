@@ -145,7 +145,9 @@ bash scripts/run-verilator-bench.sh
 bash scripts/run-heliodor-bench.sh run
 ```
 
-初回は Heliodor checkout のために network access が必要です。Veryl runner には `veryl` も必要です。Celox runner はこの workspace から build します。
+初回は Heliodor checkout のために network access が必要です。デフォルトの同期
+Veryl timing runner と Celox runner はこの workspace から build します。任意指定の
+Veryl CLI runner には別途 `veryl` が必要です。
 
 ## CI 環境
 

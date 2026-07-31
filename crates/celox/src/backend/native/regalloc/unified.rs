@@ -27,12 +27,12 @@ use super::spilling::{SpillSlotAllocator, make_reload, make_spill};
 
 #[derive(Clone)]
 struct RegFile {
-    preg_to_vreg: [Option<VReg>; 14],
+    preg_to_vreg: [Option<VReg>; NUM_REGS],
     vreg_to_preg: HashMap<VReg, PhysReg>,
 }
 
 /// Map a PhysReg discriminant (which may have gaps, e.g. RSI=6) to a dense
-/// index in 0..14 for the preg_to_vreg array.
+/// Index in 0..NUM_REGS for the preg_to_vreg array.
 const fn preg_dense_index(preg: PhysReg) -> usize {
     match preg {
         PhysReg::RAX => 0,
@@ -49,13 +49,14 @@ const fn preg_dense_index(preg: PhysReg) -> usize {
         PhysReg::R12 => 11,
         PhysReg::R13 => 12,
         PhysReg::R14 => 13,
+        PhysReg::R15 => 14,
     }
 }
 
 impl RegFile {
     fn new() -> Self {
         Self {
-            preg_to_vreg: [None; 14],
+            preg_to_vreg: [None; NUM_REGS],
             vreg_to_preg: HashMap::default(),
         }
     }
@@ -368,13 +369,21 @@ fn next_use_bucket(next_use: u32) -> &'static str {
 
 fn inst_opcode(inst: &MInst) -> &'static str {
     match inst {
+        MInst::X86Simd(X86SimdInst::Zero128 { .. }) => "x86_zero_v128",
+        MInst::X86Simd(X86SimdInst::Pack128 { .. }) => "x86_pack_v2i64",
+        MInst::X86Simd(X86SimdInst::Load128 { .. }) => "x86_load_v128",
+        MInst::X86Simd(X86SimdInst::Binary128 { .. }) => "x86_binary_v128",
+        MInst::X86Simd(X86SimdInst::Store128 { .. }) => "x86_store_v128",
         MInst::Mov { .. } => "mov.w64",
         MInst::Mov32 { .. } => "mov.w32",
         MInst::LoadImm { .. } => "imm",
+        MInst::Scratch { .. } => "scratch",
         MInst::LoadConstantTableAddr { .. } => "constant_table_addr",
         MInst::Load { .. } => "load",
         MInst::LoadPtr { .. } => "load_ptr",
         MInst::LoadIndexed { .. } => "load_indexed",
+        MInst::PackedLaneCompare { .. } => "packed_lane_compare",
+        MInst::PackedByteAffineCompare { .. } => "packed_byte_affine_compare",
         MInst::LoadPtrIndexed { .. } => "load_ptr_indexed",
         MInst::Add { .. } => "add.w64",
         MInst::Add32 { .. } => "add.w32",
@@ -409,6 +418,7 @@ fn inst_opcode(inst: &MInst) -> &'static str {
         MInst::BitNot { .. } => "not",
         MInst::Neg { .. } => "neg",
         MInst::Popcnt { .. } => "popcnt",
+        MInst::Bsf { .. } => "bsf",
         MInst::Bsr { .. } => "bsr",
         MInst::BsrOr { .. } => "bsr_or",
         MInst::Pext { .. } => "pext",
@@ -418,16 +428,22 @@ fn inst_opcode(inst: &MInst) -> &'static str {
         MInst::CmpImmSelect { .. } => "cmp_imm_select",
         MInst::GuardedCmpSelect { .. } => "guarded_cmp_select",
         MInst::Store { .. }
+        | MInst::AndStoreImm { .. }
+        | MInst::OrStoreImm { .. }
         | MInst::StorePtr { .. }
         | MInst::ReleaseStorePtr { .. }
         | MInst::StoreIndexed { .. }
+        | MInst::OrStoreIndexed { .. }
         | MInst::StorePtrIndexed { .. }
         | MInst::ReleaseStorePtrIndexed { .. }
         | MInst::MemCopy { .. }
+        | MInst::MemFill { .. }
         | MInst::SparseCommit { .. }
         | MInst::SparseMarkActive { .. }
         | MInst::SparseCommitWorklist { .. }
         | MInst::Branch { .. }
+        | MInst::BranchPred { .. }
+        | MInst::JumpTable { .. }
         | MInst::Jump { .. }
         | MInst::Return
         | MInst::ReturnError { .. } => "none",
@@ -449,7 +465,7 @@ pub fn unified_alloc_with_label(
     label: &str,
 ) -> (AssignmentMap, u32) {
     let num_blocks = func.blocks.len();
-    let k = NUM_REGS;
+    let k = func.target_features.allocatable_register_count();
     let mut result = AssignmentMap::default();
     let mut slots = SpillSlotAllocator::new();
     let mut trace = RegallocTrace::new_if_enabled(label, func);

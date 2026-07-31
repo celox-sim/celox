@@ -15,7 +15,9 @@ use std::fmt;
 use crate::backend::native::mir::{BlockId, MFunction, SpillKind, VReg};
 
 use super::cfg::NormalizedCfg;
-use super::spill_plan::{LogicalValue, PlannedOp, ProgramPoint, SpillHome, SpillPlan};
+use super::spill_plan::{
+    LogicalValue, PlannedEdgeOp, PlannedOp, ProgramPoint, SpillHome, SpillPlan,
+};
 
 const RELOAD_RULE: &str = "HOME.RELOAD_ALL_PATH_STORE";
 const SPILL_PHI_RULE: &str = "HOME.SPILL_PHI_ALL_PATH_STORE";
@@ -169,7 +171,7 @@ fn verify_with_work(
         }
     }
 
-    let mut edge_ops = HashMap::<(usize, usize), Vec<PlannedOp>>::new();
+    let mut edge_ops = HashMap::<(usize, usize), Vec<PlannedEdgeOp>>::new();
     for (&(predecessor, successor), operations) in &plan.edge_ops {
         let Some(successors) = cfg.successors.get(predecessor) else {
             return Err(structural_error(
@@ -188,41 +190,76 @@ fn verify_with_work(
             successor: func.blocks[successor].id,
         };
         for &operation in operations {
-            if matches!(operation, PlannedOp::SpillPhi { .. }) {
-                return Err(operation_error(
-                    "HOME.EDGE_SPILL_PHI",
-                    Some(location),
-                    operation,
-                    "SpillPhi is a block-entry operation, not an edge operation",
-                ));
+            verify_edge_operation_home(func, plan, operation, location)?;
+            match operation {
+                PlannedEdgeOp::Reload { source_home, .. } => {
+                    universe.insert(source_home);
+                }
+                PlannedEdgeOp::Spill {
+                    destination_home, ..
+                } => {
+                    universe.insert(destination_home);
+                }
             }
-            verify_operation_home(func, plan, operation, location)?;
-            universe.insert(operation_home(operation));
         }
         edge_ops.insert((predecessor, successor), operations.clone());
     }
-    let rematerializable_homes = universe
+    let mut rematerializable_homes = universe
         .iter()
         .copied()
         .filter(|home| is_rematerializable_home(func, plan, *home))
         .collect::<BTreeSet<_>>();
-    let required_homes = point_ops
+    rematerializable_homes.extend(plan.recipe_homes.iter().copied());
+    let non_stack_homes = &rematerializable_homes;
+    let mut required_homes = point_ops
         .iter()
-        .flat_map(|points| points.values().flatten())
-        .chain(edge_ops.values().flatten())
-        .filter_map(|operation| match operation {
-            PlannedOp::Reload { value, home } if !is_rematerialized_logical(func, *value) => {
-                Some(*home)
-            }
-            _ => None,
+        .enumerate()
+        .flat_map(|(block, points)| {
+            points.iter().flat_map(move |(&instruction, operations)| {
+                operations
+                    .iter()
+                    .filter_map(move |operation| match operation {
+                        PlannedOp::Reload { value, home }
+                            if !is_rematerialized_logical(func, *value)
+                                && !non_stack_homes.contains(home)
+                                && !plan.recipe_reloads.contains(&(
+                                    func.blocks[block].id,
+                                    instruction,
+                                    *value,
+                                )) =>
+                        {
+                            Some(*home)
+                        }
+                        _ => None,
+                    })
+            })
         })
-        .chain(
-            spilled_phis
-                .iter()
-                .filter(|phi| !is_rematerialized_logical(func, phi.value))
-                .map(|phi| phi.home),
-        )
         .collect::<BTreeSet<_>>();
+    required_homes.extend(
+        edge_ops
+            .values()
+            .flatten()
+            .filter_map(|operation| match operation {
+                PlannedEdgeOp::Reload {
+                    source,
+                    source_home,
+                    ..
+                } if !is_rematerialized_logical(func, *source)
+                    && !non_stack_homes.contains(source_home) =>
+                {
+                    Some(*source_home)
+                }
+                _ => None,
+            }),
+    );
+    required_homes.extend(
+        spilled_phis
+            .iter()
+            .filter(|phi| {
+                !is_rematerialized_logical(func, phi.value) && !non_stack_homes.contains(&phi.home)
+            })
+            .map(|phi| phi.home),
+    );
 
     // Reconstruction turns a spilled phi into one store per incoming edge
     // unless the source's S_exit says that the shared congruence home is
@@ -250,19 +287,21 @@ fn verify_with_work(
                 });
             }
             let source_logical = LogicalValue(source.0);
-            if source.0 >= func.vregs.count() || plan.homes.of_vreg(source) != spilled_phi.home {
+            if source.0 >= func.vregs.count() {
                 return Err(HomeVerifyError {
-                    rule: "HOME.SPILL_PHI_CLASS",
+                    rule: "HOME.VALUE_RANGE",
                     location: Some(HomeLocation::Edge {
                         predecessor: predecessor_id,
                         successor: func.blocks[spilled_phi.block].id,
                     }),
                     value: Some(source_logical),
                     home: Some(spilled_phi.home),
-                    message: "phi source and destination do not share the planned home".into(),
+                    message: "phi source is outside the original VReg domain".into(),
                 });
             }
-            if !plan.s_exit[predecessor].contains(&source_logical)
+            let source_home = plan.homes.of_vreg(source);
+            if (source_home != spilled_phi.home
+                || !plan.s_exit[predecessor].contains(&source_logical))
                 && !rematerializable_homes.contains(&spilled_phi.home)
             {
                 implicit_edge_stores
@@ -291,7 +330,7 @@ fn verify_with_work(
         for &successor in successors {
             if let Some(operations) = edge_ops.get(&(predecessor, successor)) {
                 let stores = edge_stores.entry((predecessor, successor)).or_default();
-                collect_actual_stores(operations, &rematerializable_homes, stores);
+                collect_actual_edge_stores(operations, &rematerializable_homes, stores);
             }
         }
     }
@@ -300,23 +339,28 @@ fn verify_with_work(
         !stores.is_empty()
     });
 
-    // An edge definition can be represented without expanding the CFG.  If
-    // the predecessor has one successor, the store is a block-exit
-    // definition.  Otherwise normalization guarantees a dedicated
-    // one-predecessor successor, where it is a block-entry definition.
+    // An edge definition can be represented without expanding the CFG at the
+    // same semantic insertion point used by reconstruction.
     let mut entry_stores = vec![BTreeSet::<SpillHome>::new(); func.blocks.len()];
     let mut exit_stores = vec![BTreeSet::<SpillHome>::new(); func.blocks.len()];
     for (&(predecessor, successor), stores) in &edge_stores {
-        let definition_block = if cfg.successors[predecessor].len() == 1 {
+        let insertion = super::cfg::edge_insertion_point(func, cfg, predecessor, successor)
+            .ok_or_else(|| {
+                structural_error(
+                    "HOME.EDGE_NOT_ISOLATED",
+                    "edge store has no single-edge materialization point",
+                )
+            })?;
+        let definition_block = if insertion.block == predecessor {
             exit_stores[predecessor].extend(stores.iter().copied());
             predecessor
-        } else if cfg.predecessors[successor].as_slice() == [predecessor] {
+        } else if insertion.block == successor {
             entry_stores[successor].extend(stores.iter().copied());
             successor
         } else {
             return Err(structural_error(
                 "HOME.EDGE_NOT_ISOLATED",
-                "edge store is neither on a single-successor predecessor nor a dedicated edge block",
+                "edge store materialization point is not owned by either edge endpoint",
             ));
         };
         for &home in stores {
@@ -343,6 +387,7 @@ fn verify_with_work(
         &exit_stores,
         &rematerializable_homes,
         &required_homes,
+        &plan.recipe_reloads,
         &spilled_phis,
         &phis_by_block,
         &mut phis,
@@ -437,12 +482,13 @@ fn rename_and_collect_queries(
     func: &MFunction,
     cfg: &NormalizedCfg,
     point_ops: &[BTreeMap<usize, Vec<PlannedOp>>],
-    edge_ops: &HashMap<(usize, usize), Vec<PlannedOp>>,
+    edge_ops: &HashMap<(usize, usize), Vec<PlannedEdgeOp>>,
     edge_stores: &HashMap<(usize, usize), BTreeSet<SpillHome>>,
     entry_stores: &[BTreeSet<SpillHome>],
     exit_stores: &[BTreeSet<SpillHome>],
     rematerializable_homes: &BTreeSet<SpillHome>,
     required_homes: &BTreeSet<SpillHome>,
+    recipe_reloads: &BTreeSet<(BlockId, usize, LogicalValue)>,
     spilled_phis: &[SpilledPhi],
     phis_by_block: &[Vec<(SpillHome, usize)>],
     phis: &mut [SparsePhi],
@@ -511,7 +557,9 @@ fn rename_and_collect_queries(
         // but not ordinary point stores before instruction zero.
         for &spilled_index in &spilled_by_block[block] {
             let spilled = &spilled_phis[spilled_index];
-            if !is_rematerialized_logical(func, spilled.value) {
+            if !is_rematerialized_logical(func, spilled.value)
+                && !rematerializable_homes.contains(&spilled.home)
+            {
                 pending.push(PendingQuery {
                     rule: SPILL_PHI_RULE,
                     location: HomeLocation::Point(spilled.point),
@@ -546,6 +594,8 @@ fn rename_and_collect_queries(
                 work,
                 false,
                 None,
+                rematerializable_homes,
+                recipe_reloads,
             );
         }
 
@@ -565,7 +615,7 @@ fn rename_and_collect_queries(
         for &successor in &cfg.successors[block] {
             let stores = edge_stores.get(&(block, successor));
             if let Some(operations) = edge_ops.get(&(block, successor)) {
-                collect_reload_queries(
+                collect_edge_reload_queries(
                     func,
                     operations,
                     &current,
@@ -575,8 +625,8 @@ fn rename_and_collect_queries(
                     },
                     &mut pending,
                     work,
-                    true,
                     stores,
+                    rematerializable_homes,
                 );
             }
             for &(home, phi) in &phis_by_block[successor] {
@@ -654,12 +704,21 @@ fn collect_reload_queries(
     work: &mut HomeVerifyWork,
     edge: bool,
     edge_stores: Option<&BTreeSet<SpillHome>>,
+    rematerializable_homes: &BTreeSet<SpillHome>,
+    recipe_reloads: &BTreeSet<(BlockId, usize, LogicalValue)>,
 ) {
     for &operation in operations {
         let PlannedOp::Reload { value, home } = operation else {
             continue;
         };
-        if is_rematerialized_logical(func, value) {
+        if matches!(
+            location,
+            HomeLocation::Point(point)
+                if recipe_reloads.contains(&(point.block, point.instruction, value))
+        ) {
+            continue;
+        }
+        if is_rematerialized_logical(func, value) || rematerializable_homes.contains(&home) {
             continue;
         }
         let definition = if edge_stores.is_some_and(|stores| stores.contains(&home)) {
@@ -756,6 +815,64 @@ fn collect_actual_stores(
     }
 }
 
+fn collect_actual_edge_stores(
+    operations: &[PlannedEdgeOp],
+    rematerializable_homes: &BTreeSet<SpillHome>,
+    stores: &mut BTreeSet<SpillHome>,
+) {
+    for &operation in operations {
+        if let PlannedEdgeOp::Spill {
+            destination_home, ..
+        } = operation
+            && !rematerializable_homes.contains(&destination_home)
+        {
+            stores.insert(destination_home);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_edge_reload_queries(
+    func: &MFunction,
+    operations: &[PlannedEdgeOp],
+    current: &HashMap<SpillHome, SparseDefinition>,
+    location: HomeLocation,
+    pending: &mut Vec<PendingQuery>,
+    work: &mut HomeVerifyWork,
+    edge_stores: Option<&BTreeSet<SpillHome>>,
+    rematerializable_homes: &BTreeSet<SpillHome>,
+) {
+    for &operation in operations {
+        let PlannedEdgeOp::Reload {
+            source,
+            source_home,
+            ..
+        } = operation
+        else {
+            continue;
+        };
+        if is_rematerialized_logical(func, source) || rematerializable_homes.contains(&source_home)
+        {
+            continue;
+        }
+        let definition = if edge_stores.is_some_and(|stores| stores.contains(&source_home)) {
+            SparseDefinition::True
+        } else {
+            current_definition(current, source_home)
+        };
+        pending.push(PendingQuery {
+            rule: RELOAD_RULE,
+            location,
+            value: source,
+            home: source_home,
+            definition,
+            message: "edge reload is reachable without a prior source-home store",
+        });
+        work.query_checks += 1;
+        work.edge_query_checks += 1;
+    }
+}
+
 fn verify_operation_home(
     func: &MFunction,
     plan: &SpillPlan,
@@ -779,6 +896,57 @@ fn verify_operation_home(
             operation,
             "operation home differs from its phi-congruence home",
         ));
+    }
+    Ok(())
+}
+
+fn verify_edge_operation_home(
+    func: &MFunction,
+    plan: &SpillPlan,
+    operation: PlannedEdgeOp,
+    location: HomeLocation,
+) -> Result<(), HomeVerifyError> {
+    let (source, destination, home, expected) = match operation {
+        PlannedEdgeOp::Reload {
+            source,
+            source_home,
+            destination,
+        } => (
+            source,
+            destination,
+            source_home,
+            plan.homes.of_logical(source),
+        ),
+        PlannedEdgeOp::Spill {
+            source,
+            destination,
+            destination_home,
+        } => (
+            source,
+            destination,
+            destination_home,
+            plan.homes.of_logical(destination),
+        ),
+    };
+    if source.0 >= func.vregs.count() || destination.0 >= func.vregs.count() {
+        return Err(HomeVerifyError {
+            rule: "HOME.VALUE_RANGE",
+            location: Some(location),
+            value: Some(source),
+            home: Some(home),
+            message: "edge operation value is outside the original VReg domain".into(),
+        });
+    }
+    if home != expected {
+        return Err(HomeVerifyError {
+            rule: "HOME.CLASS_MISMATCH",
+            location: Some(location),
+            value: Some(source),
+            home: Some(home),
+            message: format!(
+                "edge transfer home differs from the relevant endpoint home {expected:?}"
+            ),
+        });
     }
     Ok(())
 }
@@ -858,6 +1026,10 @@ mod tests {
         let mut plan = spill_plan::plan(func, cfg, &next_use, 32).unwrap();
         plan.point_ops.clear();
         plan.edge_ops.clear();
+        plan.recipe_reloads.clear();
+        plan.recipe_homes.clear();
+        plan.state_homes.clear();
+        plan.state_reload_recipes.clear();
         for state in plan
             .w_entry
             .iter_mut()
@@ -997,9 +1169,10 @@ mod tests {
         let join = cfg.block_index[&BlockId(3)];
         plan.edge_ops.insert(
             (left, join),
-            vec![PlannedOp::Spill {
-                value: logical,
-                home,
+            vec![PlannedEdgeOp::Spill {
+                source: logical,
+                destination: logical,
+                destination_home: home,
             }],
         );
         plan.point_ops.push((
@@ -1025,9 +1198,10 @@ mod tests {
             let predecessor = cfg.block_index[&predecessor];
             plan.edge_ops.insert(
                 (predecessor, join),
-                vec![PlannedOp::Spill {
-                    value: logical,
-                    home,
+                vec![PlannedEdgeOp::Spill {
+                    source: logical,
+                    destination: logical,
+                    destination_home: home,
                 }],
             );
         }
@@ -1058,13 +1232,15 @@ mod tests {
         plan.edge_ops.insert(
             (entry, exit),
             vec![
-                PlannedOp::Reload {
-                    value: logical,
-                    home,
+                PlannedEdgeOp::Reload {
+                    source: logical,
+                    source_home: home,
+                    destination: logical,
                 },
-                PlannedOp::Spill {
-                    value: logical,
-                    home,
+                PlannedEdgeOp::Spill {
+                    source: logical,
+                    destination: logical,
+                    destination_home: home,
                 },
             ],
         );
@@ -1089,7 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn spilled_phi_rejects_a_falsely_claimed_incoming_home() {
+    fn spilled_phi_transfers_from_a_distinct_source_home() {
         let mut vregs = VRegAllocator::new();
         let condition = vregs.alloc();
         let left_value = vregs.alloc();
@@ -1141,8 +1317,7 @@ mod tests {
                 home,
             },
         ));
-        let error = verify(&func, &cfg, &plan).unwrap_err();
-        assert_eq!(error.rule, SPILL_PHI_RULE);
+        verify(&func, &cfg, &plan).unwrap();
     }
 
     fn loop_function() -> (MFunction, VReg) {
@@ -1185,9 +1360,10 @@ mod tests {
         let header = cfg.block_index[&BlockId(1)];
         plan.edge_ops.insert(
             (body, header),
-            vec![PlannedOp::Spill {
-                value: logical,
-                home,
+            vec![PlannedEdgeOp::Spill {
+                source: logical,
+                destination: logical,
+                destination_home: home,
             }],
         );
         plan.point_ops.push((

@@ -5,8 +5,8 @@ use veryl_analyzer::ir::VarId;
 
 use crate::HashMap;
 use crate::ir::{
-    AbsoluteAddr, BitAccess, CombObserver, GlueAddr, GlueBlock, InstanceId, InstancePath,
-    RelocationModule, SimModule, VarAtomBase,
+    AbsoluteAddr, BinaryOp, BitAccess, CombObserver, GlueAddr, GlueBlock, InstanceId, InstancePath,
+    RelocationModule, SimModule, UnaryOp, VarAtomBase,
 };
 use crate::logic_tree::{
     LogicPath, LogicPathTarget, NodeId, SLTNode, SLTNodeArena, SLTNodeFactsError, get_width,
@@ -17,6 +17,7 @@ pub fn flatting(
     path: &InstancePath,
     instance_ids: &HashMap<InstancePath, InstanceId>,
     global_boundaries: &HashMap<AbsoluteAddr, BTreeSet<usize>>,
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
     arena: &mut SLTNodeArena<AbsoluteAddr>,
     trace_opts: &crate::debug::TraceOptions,
     mut trace: Option<&mut crate::debug::CompilationTrace>,
@@ -68,7 +69,12 @@ pub fn flatting(
     }
 
     // Atomize logic paths
-    let atomized_comb_blocks = atomize_logic_paths(&comb_blocks, global_boundaries, arena)?;
+    let atomized_comb_blocks = atomize_logic_paths(
+        &comb_blocks,
+        global_boundaries,
+        unpacked_element_widths,
+        arena,
+    )?;
 
     if let Some(t) = trace
         && trace_opts.atomized_comb_blocks
@@ -95,6 +101,7 @@ pub fn flatting(
 fn atomize_logic_paths(
     paths: &Vec<LogicPath<AbsoluteAddr>>,
     boundaries: &HashMap<AbsoluteAddr, BTreeSet<usize>>,
+    unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
     arena: &mut SLTNodeArena<AbsoluteAddr>,
 ) -> Result<Vec<LogicPath<AbsoluteAddr>>, SLTNodeFactsError> {
     let mut atomized_paths = Vec::new();
@@ -104,9 +111,22 @@ fn atomize_logic_paths(
             atomized_paths.push(path.clone());
             continue;
         };
-        if let Some(bounds) = boundaries.get(&target_var.id) {
+        let element_width = unpacked_element_widths.get(&target_var.id).copied();
+        let mut effective_boundaries = boundaries.get(&target_var.id).cloned().unwrap_or_default();
+        if let Some(element_width) = element_width {
+            let mut boundary =
+                (target_var.access.lsb / element_width + 1).saturating_mul(element_width);
+            while boundary <= target_var.access.msb {
+                effective_boundaries.insert(boundary);
+                let Some(next) = boundary.checked_add(element_width) else {
+                    break;
+                };
+                boundary = next;
+            }
+        }
+        if !effective_boundaries.is_empty() {
             // This variable has defined boundaries, so we need to split it.
-            let atoms = target_var.access.calculate_atoms(bounds);
+            let atoms = target_var.access.calculate_atoms(&effective_boundaries);
 
             // Extract the set of variable IDs that were originally declared as sources.
             // This acts as a "source mask" to filter out unintended dependencies.
@@ -123,10 +143,7 @@ fn atomize_logic_paths(
                     atom_access.lsb - target_var.access.lsb,
                     atom_access.msb - target_var.access.lsb,
                 );
-                let new_expr = arena.alloc(SLTNode::Slice {
-                    expr: path.expr,
-                    access: relative_atom_access,
-                })?;
+                let new_expr = project_logic_path_expr(path.expr, relative_atom_access, arena)?;
                 let mut expr_inputs = crate::HashSet::default();
                 collect_inputs(new_expr, arena, &mut expr_inputs);
                 let filtered_sources: crate::HashSet<_> = expr_inputs
@@ -141,7 +158,11 @@ fn atomize_logic_paths(
             while i < atom_infos.len() {
                 let group_start = i;
                 let group_source_ids = &atom_infos[i].1;
-                while i + 1 < atom_infos.len() && atom_infos[i + 1].1 == *group_source_ids {
+                while i + 1 < atom_infos.len()
+                    && atom_infos[i + 1].1 == *group_source_ids
+                    && element_width
+                        .is_none_or(|width| !atom_infos[i + 1].0.lsb.is_multiple_of(width))
+                {
                     i += 1;
                 }
                 let group_end = i;
@@ -162,10 +183,7 @@ fn atomize_logic_paths(
                     // Covers the full original range — use the expression directly.
                     path.expr
                 } else {
-                    arena.alloc(SLTNode::Slice {
-                        expr: path.expr,
-                        access: relative_access,
-                    })?
+                    project_logic_path_expr(path.expr, relative_access, arena)?
                 };
 
                 // Collect the actual bit-level sources for the merged range.
@@ -198,6 +216,7 @@ fn atomize_logic_paths(
 
                 let target = VarAtomBase::new(target_var.id, merged_lsb, merged_msb);
                 atomized_paths.push(LogicPath {
+                    semantic_region: path.semantic_region,
                     target: LogicPathTarget::Var(target),
                     sources: filtered_sources,
                     previous_sources: filtered_previous_sources,
@@ -217,12 +236,44 @@ fn atomize_logic_paths(
     Ok(atomized_paths)
 }
 
+fn project_logic_path_expr(
+    expression: NodeId,
+    access: BitAccess,
+    arena: &mut SLTNodeArena<AbsoluteAddr>,
+) -> Result<NodeId, SLTNodeFactsError> {
+    match arena.get(expression).clone() {
+        SLTNode::Input {
+            variable,
+            signed,
+            index,
+            access: input_access,
+        } if access.msb <= input_access.msb - input_access.lsb => arena.alloc(SLTNode::Input {
+            variable,
+            signed,
+            index,
+            access: BitAccess::new(input_access.lsb + access.lsb, input_access.lsb + access.msb),
+        }),
+        SLTNode::Slice {
+            expr: inner,
+            access: inner_access,
+        } if access.msb <= inner_access.msb - inner_access.lsb => project_logic_path_expr(
+            inner,
+            BitAccess::new(inner_access.lsb + access.lsb, inner_access.lsb + access.msb),
+            arena,
+        ),
+        _ => arena.alloc(SLTNode::Slice {
+            expr: expression,
+            access,
+        }),
+    }
+}
+
 pub fn collect_inputs<A: Hash + Eq + Clone + Debug>(
     expr: NodeId,
     arena: &SLTNodeArena<A>,
     set: &mut crate::HashSet<VarAtomBase<A>>,
 ) {
-    let mut visited = crate::HashSet::default();
+    let mut visited = HashMap::default();
     collect_inputs_with_window(expr, None, arena, set, &mut visited);
 }
 
@@ -231,190 +282,258 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
     window: Option<BitAccess>,
     arena: &SLTNodeArena<A>,
     set: &mut crate::HashSet<VarAtomBase<A>>,
-    visited: &mut crate::HashSet<NodeId>,
+    visited: &mut HashMap<NodeId, Vec<BitAccess>>,
 ) {
-    // For nodes that drop the window (Binary, Unary, Mux), the result depends
-    // only on the NodeId.  When window is None, we can skip nodes already
-    // visited — their inputs are already in `set`.
-    if window.is_none() && !visited.insert(expr) {
-        return;
-    }
+    let requested = window.unwrap_or_else(|| BitAccess::new(0, get_width(expr, arena) - 1));
+    let uncovered = claim_uncovered_window(visited.entry(expr).or_default(), requested);
 
-    match arena.get(expr) {
-        SLTNode::Input {
-            variable,
-            access,
-            index,
-            ..
-        } => {
-            // Register the variable and its bit range as an input.
-            if !index.is_empty() {
-                // --- Dynamic Indexing Case ---
-                // For scheduling safety, we MUST ignore the `window` here.
-                // Dynamic access can point to different bits within the range,
-                // so we need to cover the entire reachable bounding box.
+    // Shared DAG nodes are often reached through overlapping slices.  Process
+    // only the newly requested portions so both traversal work and memoized
+    // state are bounded by the union of bit ranges, not the number of paths.
+    for window in uncovered.into_iter().map(Some) {
+        match arena.get(expr) {
+            SLTNode::Input {
+                variable,
+                access,
+                index,
+                ..
+            } => {
+                // Register the variable and its bit range as an input.
+                if !index.is_empty() {
+                    // --- Dynamic Indexing Case ---
+                    // For scheduling safety, we MUST ignore the `window` here.
+                    // Dynamic access can point to different bits within the range,
+                    // so we need to cover the entire reachable bounding box.
 
-                let element_width = get_width(expr, arena);
-                let full_width = access.msb - access.lsb + 1;
+                    let element_width = get_width(expr, arena);
+                    let full_width = access.msb - access.lsb + 1;
 
-                let mut max_reachable_elements = 1usize;
-                for idx in index {
-                    let idx_width = get_width(idx.node, arena);
-                    let reachable = 1usize.checked_shl(idx_width as u32).unwrap_or(usize::MAX);
-                    max_reachable_elements = max_reachable_elements.saturating_mul(reachable);
-                }
-
-                // Clamp by the actual number of elements in the variable.
-                let actual_elements = full_width / element_width;
-                let effective_elements = std::cmp::min(max_reachable_elements, actual_elements);
-
-                // Calculate the bounding box:
-                // LSB: Always the start of the first element (access.lsb).
-                // MSB: The end of the last reachable element.
-                let reachable_lsb = access.lsb;
-                let reachable_msb = access.lsb + (effective_elements * element_width) - 1;
-
-                set.insert(VarAtomBase::new(
-                    variable.clone(),
-                    reachable_lsb,
-                    std::cmp::min(reachable_msb, access.msb),
-                ));
-            } else {
-                // If the index is empty, it means the variable is statically indexed.
-                // In this case, we can apply the window to minimize the dependencies.
-                let full_width = access.msb - access.lsb + 1;
-                let win = window.unwrap_or(BitAccess::new(0, full_width - 1));
-
-                set.insert(VarAtomBase::new(
-                    variable.clone(),
-                    access.lsb + win.lsb,
-                    access.lsb + win.msb,
-                ));
-            }
-
-            // Also collect inputs from the index expressions (dynamic indexing).
-            for idx in index {
-                collect_inputs_with_window(idx.node, None, arena, set, visited);
-            }
-        }
-        SLTNode::Slice { expr, access } => {
-            let composed = if let Some(win) = window {
-                BitAccess::new(access.lsb + win.lsb, access.lsb + win.msb)
-            } else {
-                *access
-            };
-            collect_inputs_with_window(*expr, Some(composed), arena, set, visited)
-        }
-        SLTNode::Concat(parts) => {
-            if let Some(win) = window {
-                // Concat bit layout: LSB is at the end of `parts`.
-                // Walk from LSB side to map the requested window to each part.
-                let mut part_lsb = 0usize;
-                for (part, width) in parts.iter().rev() {
-                    let part_msb = part_lsb + width - 1;
-                    if win.overlaps(&BitAccess::new(part_lsb, part_msb)) {
-                        let ov_lsb = std::cmp::max(win.lsb, part_lsb);
-                        let ov_msb = std::cmp::min(win.msb, part_msb);
-                        let local = BitAccess::new(ov_lsb - part_lsb, ov_msb - part_lsb);
-                        collect_inputs_with_window(*part, Some(local), arena, set, visited);
+                    let mut max_reachable_elements = 1usize;
+                    for idx in index {
+                        let idx_width = get_width(idx.node, arena);
+                        let reachable = 1usize.checked_shl(idx_width as u32).unwrap_or(usize::MAX);
+                        max_reachable_elements = max_reachable_elements.saturating_mul(reachable);
                     }
-                    part_lsb += width;
+
+                    // Clamp by the actual number of elements in the variable.
+                    let actual_elements = full_width / element_width;
+                    let effective_elements = std::cmp::min(max_reachable_elements, actual_elements);
+
+                    // Calculate the bounding box:
+                    // LSB: Always the start of the first element (access.lsb).
+                    // MSB: The end of the last reachable element.
+                    let reachable_lsb = access.lsb;
+                    let reachable_msb = access.lsb + (effective_elements * element_width) - 1;
+
+                    set.insert(VarAtomBase::new(
+                        variable.clone(),
+                        reachable_lsb,
+                        std::cmp::min(reachable_msb, access.msb),
+                    ));
+                } else {
+                    // If the index is empty, it means the variable is statically indexed.
+                    // In this case, we can apply the window to minimize the dependencies.
+                    let full_width = access.msb - access.lsb + 1;
+                    let win = window.unwrap_or(BitAccess::new(0, full_width - 1));
+
+                    set.insert(VarAtomBase::new(
+                        variable.clone(),
+                        access.lsb + win.lsb,
+                        access.lsb + win.msb,
+                    ));
                 }
-            } else {
-                for (part, _) in parts {
-                    collect_inputs_with_window(*part, None, arena, set, visited);
-                }
-            }
-        }
-        SLTNode::Binary(lhs, _, rhs) => {
-            collect_inputs_with_window(*lhs, None, arena, set, visited);
-            collect_inputs_with_window(*rhs, None, arena, set, visited);
-        }
-        SLTNode::Unary(_, inner) => collect_inputs_with_window(*inner, None, arena, set, visited),
-        SLTNode::Mux {
-            cond,
-            then_expr,
-            else_expr,
-        } => {
-            collect_inputs_with_window(*cond, None, arena, set, visited);
-            collect_inputs_with_window(*then_expr, None, arena, set, visited);
-            collect_inputs_with_window(*else_expr, None, arena, set, visited);
-        }
-        SLTNode::ForFold {
-            loop_var,
-            start,
-            end,
-            initials,
-            updates,
-            effects,
-            continue_cond,
-            ..
-        } => {
-            if let crate::logic_tree::SLTLoopBound::Expr(node) = start {
-                collect_inputs_with_window(*node, None, arena, set, visited);
-            }
-            if let crate::logic_tree::SLTLoopBound::Expr(node) = end {
-                collect_inputs_with_window(*node, None, arena, set, visited);
-            }
-            for init in initials {
-                collect_inputs_with_window(init.expr, None, arena, set, visited);
-            }
-            for update in updates {
-                collect_inputs_with_window(update.expr, None, arena, set, visited);
-            }
-            for effect in effects {
-                if let Some(guard) = effect.guard {
-                    collect_inputs_with_window(guard, None, arena, set, visited);
-                }
-                for arg in &effect.args {
-                    collect_inputs_with_window(*arg, None, arena, set, visited);
+
+                // Also collect inputs from the index expressions (dynamic indexing).
+                for idx in index {
+                    collect_inputs_with_window(idx.node, None, arena, set, visited);
                 }
             }
-            collect_inputs_with_window(*continue_cond, None, arena, set, visited);
-            set.retain(|atom| atom.id != *loop_var);
-        }
-        SLTNode::ForFoldGroup {
-            loop_var,
-            entry_guard,
-            states,
-            ..
-        } => {
-            let mut group_inputs = crate::HashSet::default();
-            let mut group_visited = crate::HashSet::default();
-            collect_inputs_with_window(
-                *entry_guard,
-                None,
-                arena,
-                &mut group_inputs,
-                &mut group_visited,
-            );
-            for state in states {
+            SLTNode::Slice { expr, access } => {
+                let composed = if let Some(win) = window {
+                    BitAccess::new(access.lsb + win.lsb, access.lsb + win.msb)
+                } else {
+                    *access
+                };
+                collect_inputs_with_window(*expr, Some(composed), arena, set, visited)
+            }
+            SLTNode::Concat(parts) => {
+                if let Some(win) = window {
+                    // Concat bit layout: LSB is at the end of `parts`.
+                    // Walk from LSB side to map the requested window to each part.
+                    let mut part_lsb = 0usize;
+                    for (part, width) in parts.iter().rev() {
+                        let part_msb = part_lsb + width - 1;
+                        if win.overlaps(&BitAccess::new(part_lsb, part_msb)) {
+                            let ov_lsb = std::cmp::max(win.lsb, part_lsb);
+                            let ov_msb = std::cmp::min(win.msb, part_msb);
+                            let local = BitAccess::new(ov_lsb - part_lsb, ov_msb - part_lsb);
+                            collect_inputs_with_window(*part, Some(local), arena, set, visited);
+                        }
+                        part_lsb += width;
+                    }
+                } else {
+                    for (part, _) in parts {
+                        collect_inputs_with_window(*part, None, arena, set, visited);
+                    }
+                }
+            }
+            SLTNode::Binary(lhs, op, rhs) => {
+                let pointwise = matches!(op, BinaryOp::And | BinaryOp::Or | BinaryOp::Xor);
+                let lhs_window = pointwise
+                    .then(|| dependency_window(window, *lhs, arena))
+                    .flatten();
+                let rhs_window = pointwise
+                    .then(|| dependency_window(window, *rhs, arena))
+                    .flatten();
+                collect_inputs_with_window(*lhs, lhs_window, arena, set, visited);
+                collect_inputs_with_window(*rhs, rhs_window, arena, set, visited);
+            }
+            SLTNode::Unary(op, inner) => {
+                let pointwise =
+                    matches!(op, UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::BitNot);
+                let inner_window = pointwise
+                    .then(|| dependency_window(window, *inner, arena))
+                    .flatten();
+                collect_inputs_with_window(*inner, inner_window, arena, set, visited);
+            }
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                collect_inputs_with_window(*cond, None, arena, set, visited);
+                let then_window = dependency_window(window, *then_expr, arena);
+                let else_window = dependency_window(window, *else_expr, arena);
+                collect_inputs_with_window(*then_expr, then_window, arena, set, visited);
+                collect_inputs_with_window(*else_expr, else_window, arena, set, visited);
+            }
+            SLTNode::ForFold {
+                loop_var,
+                start,
+                end,
+                initials,
+                updates,
+                effects,
+                continue_cond,
+                ..
+            } => {
+                if let crate::logic_tree::SLTLoopBound::Expr(node) = start {
+                    collect_inputs_with_window(*node, None, arena, set, visited);
+                }
+                if let crate::logic_tree::SLTLoopBound::Expr(node) = end {
+                    collect_inputs_with_window(*node, None, arena, set, visited);
+                }
+                for init in initials {
+                    collect_inputs_with_window(init.expr, None, arena, set, visited);
+                }
+                for update in updates {
+                    collect_inputs_with_window(update.expr, None, arena, set, visited);
+                }
+                for effect in effects {
+                    if let Some(guard) = effect.guard {
+                        collect_inputs_with_window(guard, None, arena, set, visited);
+                    }
+                    for arg in &effect.args {
+                        collect_inputs_with_window(*arg, None, arena, set, visited);
+                    }
+                }
+                collect_inputs_with_window(*continue_cond, None, arena, set, visited);
+                set.retain(|atom| atom.id != *loop_var);
+            }
+            SLTNode::ForFoldGroup {
+                loop_var,
+                entry_guard,
+                states,
+                ..
+            } => {
+                let mut group_inputs = crate::HashSet::default();
+                let mut group_visited = HashMap::default();
                 collect_inputs_with_window(
-                    state.initial,
+                    *entry_guard,
                     None,
                     arena,
                     &mut group_inputs,
                     &mut group_visited,
                 );
+                for state in states {
+                    collect_inputs_with_window(
+                        state.initial,
+                        None,
+                        arena,
+                        &mut group_inputs,
+                        &mut group_visited,
+                    );
+                }
+                let mut update_inputs = crate::HashSet::default();
+                let mut update_visited = HashMap::default();
+                for state in states {
+                    collect_inputs_with_window(
+                        state.update,
+                        None,
+                        arena,
+                        &mut update_inputs,
+                        &mut update_visited,
+                    );
+                }
+                update_inputs.retain(|atom| {
+                    atom.id != *loop_var && !carried_states_cover_atom(atom, states)
+                });
+                group_inputs.extend(update_inputs);
+                set.extend(group_inputs);
             }
-            let mut update_inputs = crate::HashSet::default();
-            let mut update_visited = crate::HashSet::default();
-            for state in states {
-                collect_inputs_with_window(
-                    state.update,
-                    None,
-                    arena,
-                    &mut update_inputs,
-                    &mut update_visited,
-                );
-            }
-            update_inputs
-                .retain(|atom| atom.id != *loop_var && !carried_states_cover_atom(atom, states));
-            group_inputs.extend(update_inputs);
-            set.extend(group_inputs);
+            SLTNode::Constant(_, _, _, _) => {}
         }
-        SLTNode::Constant(_, _, _, _) => {}
     }
+}
+
+/// Add `requested` to a sorted union of covered intervals and return only the
+/// portions which were not already covered.
+fn claim_uncovered_window(covered: &mut Vec<BitAccess>, requested: BitAccess) -> Vec<BitAccess> {
+    let mut uncovered = Vec::new();
+    let mut cursor = requested.lsb;
+    for range in covered.iter().copied() {
+        if range.msb < cursor {
+            continue;
+        }
+        if range.lsb > requested.msb {
+            break;
+        }
+        if range.lsb > cursor {
+            uncovered.push(BitAccess::new(cursor, requested.msb.min(range.lsb - 1)));
+        }
+        cursor = cursor.max(range.msb.saturating_add(1));
+        if cursor > requested.msb {
+            break;
+        }
+    }
+    if cursor <= requested.msb {
+        uncovered.push(BitAccess::new(cursor, requested.msb));
+    }
+    if uncovered.is_empty() {
+        return uncovered;
+    }
+
+    let mut merged = requested;
+    let start = covered.partition_point(|range| range.msb.saturating_add(1) < merged.lsb);
+    let mut end = start;
+    while end < covered.len() && covered[end].lsb <= merged.msb.saturating_add(1) {
+        merged.lsb = merged.lsb.min(covered[end].lsb);
+        merged.msb = merged.msb.max(covered[end].msb);
+        end += 1;
+    }
+    covered.splice(start..end, std::iter::once(merged));
+    uncovered
+}
+
+/// Preserve a result bit window only when it is also a valid operand window.
+/// Width-changing operands may use extension bits, so falling back to the full
+/// operand is the conservative answer in that case.
+fn dependency_window<A: Hash + Eq + Clone + Debug>(
+    window: Option<BitAccess>,
+    operand: NodeId,
+    arena: &SLTNodeArena<A>,
+) -> Option<BitAccess> {
+    window.filter(|window| window.msb < get_width(operand, arena))
 }
 
 /// Return whether the union of loop-carried ranges covers every bit of an
@@ -573,7 +692,7 @@ fn convert_glue_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{BinaryOp, ModuleId};
+    use crate::ir::ModuleId;
     use crate::logic_tree::SLTForFoldGroupState;
     use crate::parser::module::ModuleParser;
     use num_bigint::{BigInt, BigUint};
@@ -643,6 +762,118 @@ mod tests {
         }
 
         (sim_modules, name_to_id, ir)
+    }
+
+    #[test]
+    fn atomization_does_not_remerge_unpacked_elements() {
+        let address = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(0),
+        };
+        let source = AbsoluteAddr {
+            instance_id: InstanceId(1),
+            var_id: VarId::from_raw(1),
+        };
+        let mut arena = SLTNodeArena::new();
+        let expression = arena
+            .alloc(SLTNode::Input {
+                variable: source,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 23),
+            })
+            .unwrap();
+        let mut sources = crate::HashSet::default();
+        sources.insert(VarAtomBase::new(source, 0, 23));
+        let path = LogicPath {
+            semantic_region: None,
+            target: LogicPathTarget::Var(VarAtomBase::new(address, 0, 23)),
+            sources,
+            previous_sources: crate::HashSet::default(),
+            address_sources: crate::HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: crate::HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            pre_lower_nodes: Vec::new(),
+            expr: expression,
+        };
+        let mut element_widths = HashMap::default();
+        element_widths.insert(address, 6);
+
+        let atomized = atomize_logic_paths(
+            &vec![path],
+            &HashMap::default(),
+            &element_widths,
+            &mut arena,
+        )
+        .unwrap();
+        let accesses = atomized
+            .iter()
+            .map(|path| path.target.var().unwrap().access)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            accesses,
+            vec![
+                BitAccess::new(0, 5),
+                BitAccess::new(6, 11),
+                BitAccess::new(12, 17),
+                BitAccess::new(18, 23),
+            ]
+        );
+        for (path, expected) in atomized.iter().zip(accesses) {
+            assert!(matches!(
+                arena.get(path.expr),
+                SLTNode::Input {
+                    variable,
+                    access,
+                    ..
+                } if *variable == source && *access == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn collect_inputs_preserves_slice_window_through_bitwise_mux() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let input = |arena: &mut SLTNodeArena<u32>, variable, msb| {
+            arena
+                .alloc(SLTNode::Input {
+                    variable,
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, msb),
+                })
+                .unwrap()
+        };
+        let old = input(&mut arena, 1, 15);
+        let replacement = input(&mut arena, 2, 15);
+        let condition = input(&mut arena, 3, 0);
+        let merged = arena
+            .alloc(SLTNode::Binary(old, BinaryOp::Or, replacement))
+            .unwrap();
+        let selected = arena
+            .alloc(SLTNode::Mux {
+                cond: condition,
+                then_expr: merged,
+                else_expr: old,
+            })
+            .unwrap();
+        let upper = arena
+            .alloc(SLTNode::Slice {
+                expr: selected,
+                access: BitAccess::new(8, 15),
+            })
+            .unwrap();
+
+        let mut inputs = crate::HashSet::default();
+        collect_inputs(upper, &arena, &mut inputs);
+
+        assert!(inputs.contains(&VarAtomBase::new(1, 8, 15)));
+        assert!(inputs.contains(&VarAtomBase::new(2, 8, 15)));
+        assert!(inputs.contains(&VarAtomBase::new(3, 0, 0)));
+        assert!(!inputs.contains(&VarAtomBase::new(1, 0, 15)));
+        assert!(!inputs.contains(&VarAtomBase::new(2, 0, 15)));
     }
 
     #[test]
@@ -739,6 +970,7 @@ mod tests {
             top_module_sim,
             &top_path,
             &instance_ids,
+            &HashMap::default(),
             &HashMap::default(),
             &mut arena,
             &crate::debug::TraceOptions::default(),

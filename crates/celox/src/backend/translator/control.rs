@@ -1,4 +1,5 @@
 use cranelift::{codegen::ir::BlockArg, prelude::*};
+use cranelift_frontend::Switch;
 
 use crate::HashMap;
 
@@ -172,6 +173,24 @@ impl SIRTranslator {
                     block_map[f_id],
                     &cl_f_args,
                 );
+            }
+            crate::ir::SIRTerminator::Switch {
+                selector,
+                cases,
+                default,
+            } => {
+                let selector = state.regs[selector].first_value(state.builder);
+                let mut switch = Switch::new();
+                for case in cases {
+                    let digits = case.value.to_u64_digits();
+                    let value = match digits.as_slice() {
+                        [] => 0,
+                        [value] => *value as u128,
+                        _ => unreachable!("verified switch key fits eight bits"),
+                    };
+                    switch.set_entry(value, block_map[&case.target]);
+                }
+                switch.emit(state.builder, selector, block_map[default]);
             }
             crate::ir::SIRTerminator::Return => {
                 if let Some(next_block) = next_unit_entry {

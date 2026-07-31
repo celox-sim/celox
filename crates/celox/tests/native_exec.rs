@@ -76,7 +76,7 @@ fn compile_and_run_inner(
     if debug {
         eprintln!(
             "=== Disassembly ===\n{}",
-            emit::disassemble(&emit_result.code, 0)
+            emit::disassemble(&emit_result.code[..emit_result.text_size], 0)
         );
     }
 
@@ -472,7 +472,7 @@ fn test_debug_let_bitslice_write() {
             emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size).expect("emit failed");
         eprintln!(
             "=== EU {eu_idx} Disassembly ===\n{}",
-            emit::disassemble(&emit_result.code, 0)
+            emit::disassemble(&emit_result.code[..emit_result.text_size], 0)
         );
     }
 

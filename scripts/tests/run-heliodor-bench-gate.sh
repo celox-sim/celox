@@ -26,14 +26,24 @@ assert_eq() {
 
 write_valid_gate_logs() {
     local directory="$1"
+    local veryl_compile="${2:-30}"
+    local veryl_execute="${3:-40}"
+    local celox_compile="${4:-10}"
+    local celox_execute="${5:-20}"
+    local veryl_reported="$((veryl_compile + veryl_execute + 1))"
+    local celox_reported="$((celox_compile + celox_execute + 1))"
     mkdir -p "$directory"
-    printf '%s\n%s\n' \
-        "[INFO ]    Succeeded test ($GATE_TEST)" \
-        '[INFO ]    Completed tests : 1 passed, 0 failed' \
+    printf '%s\n%s\n%s\n%s\n' \
+        "v4 SoC linux boot smoke: cy=009ae070 x3=00000000000000aa pass=1" \
+        "VERYL_TEST_CONFIG test=$GATE_TEST backend=cc aot_c_async=false" \
+        "VERYL_TEST_TIMING test=$GATE_TEST compile_ns=$veryl_compile execute_ns=$veryl_execute" \
+        "VERYL_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=$veryl_reported" \
         >"$directory/veryl.log"
-    printf '%s\n%s\n' \
+    printf '%s\n%s\n%s\n%s\n' \
+        "v4 SoC linux boot smoke: cy=9ae070 x3=aa pass=1" \
         "CELOX_TEST_CONFIG test=$GATE_TEST backend=native opt_level=O2 four_state=false compile_only=false" \
-        "CELOX_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=31" \
+        "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$celox_compile execute_ns=$celox_execute" \
+        "CELOX_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=$celox_reported" \
         >"$directory/celox.log"
 }
 
@@ -41,26 +51,37 @@ write_gate_results() {
     local directory="$1"
     local veryl_elapsed="$2"
     local celox_elapsed="$3"
-    write_valid_gate_logs "$directory"
-    printf '%s\n' "$RESULTS_HEADER_V2" >"$directory/results.tsv"
-    append_result_row "$directory/results.tsv" veryl-cc "$GATE_TEST" 0 \
-        "$veryl_elapsed" "$directory/veryl.log" pass "$veryl_elapsed" NA >/dev/null
+    local veryl_compile="${4:-30}"
+    local veryl_execute="${5:-40}"
+    local celox_compile="${6:-10}"
+    local celox_execute="${7:-20}"
+    local veryl_reported="$((veryl_compile + veryl_execute + 1))"
+    local celox_reported="$((celox_compile + celox_execute + 1))"
+    write_valid_gate_logs "$directory" "$veryl_compile" "$veryl_execute" \
+        "$celox_compile" "$celox_execute"
+    printf '%s\n' "$RESULTS_HEADER_V3" >"$directory/results.tsv"
+    append_result_row "$directory/results.tsv" veryl-cc-sync "$GATE_TEST" 0 \
+        "$veryl_elapsed" "$directory/veryl.log" pass "$veryl_elapsed" \
+        "$veryl_reported" "$veryl_compile" "$veryl_execute" >/dev/null
     append_result_row "$directory/results.tsv" celox "$GATE_TEST" 0 \
-        "$celox_elapsed" "$directory/celox.log" pass "$celox_elapsed" 31 >/dev/null
+        "$celox_elapsed" "$directory/celox.log" pass "$celox_elapsed" \
+        "$celox_reported" "$celox_compile" "$celox_execute" >/dev/null
 }
 
 unit="$TMP/unit"
 write_gate_results "$unit" 200 100
 validate_gate_results "$unit/results.tsv" "$unit" \
     || fail "valid paired gate result was rejected"
-assert_eq "$GATE_VERYL_ELAPSED_NS" 200 "Veryl gate elapsed"
-assert_eq "$GATE_CELOX_ELAPSED_NS" 100 "Celox gate elapsed"
+assert_eq "$GATE_VERYL_COMPILE_NS" 30 "Veryl gate compile interval"
+assert_eq "$GATE_VERYL_EXECUTE_NS" 40 "Veryl gate execute interval"
+assert_eq "$GATE_CELOX_COMPILE_NS" 10 "Celox gate compile interval"
+assert_eq "$GATE_CELOX_EXECUTE_NS" 20 "Celox gate execute interval"
 
 trailing_empty="$TMP/trailing-empty"
 write_gate_results "$trailing_empty" 200 100
 sed -i $'2s/$/\t/' "$trailing_empty/results.tsv"
 if validate_gate_results "$trailing_empty/results.tsv" "$trailing_empty" 2>/dev/null; then
-    fail "gate accepted an empty tenth TSV field"
+    fail "gate accepted an empty trailing TSV field"
 fi
 
 leading_empty="$TMP/leading-empty"
@@ -78,28 +99,39 @@ traversal="$TMP/traversal"
 outside="$TMP/outside"
 mkdir -p "$traversal" "$outside"
 write_valid_gate_logs "$outside"
-printf '%s\n' "$RESULTS_HEADER_V2" >"$traversal/results.tsv"
-append_result_row "$traversal/results.tsv" veryl-cc "$GATE_TEST" 0 200 \
-    "$traversal/../outside/veryl.log" pass 200 NA >/dev/null
+printf '%s\n' "$RESULTS_HEADER_V3" >"$traversal/results.tsv"
+append_result_row "$traversal/results.tsv" veryl-cc-sync "$GATE_TEST" 0 200 \
+    "$traversal/../outside/veryl.log" pass 200 71 30 40 >/dev/null
 append_result_row "$traversal/results.tsv" celox "$GATE_TEST" 0 100 \
-    "$traversal/../outside/celox.log" pass 100 31 >/dev/null
+    "$traversal/../outside/celox.log" pass 100 31 10 20 >/dev/null
 if validate_gate_results "$traversal/results.tsv" "$traversal" 2>/dev/null; then
     fail "gate accepted path traversal to logs outside the invocation"
 fi
 
-slower="$TMP/slower"
-write_gate_results "$slower" 100 101
-if validate_gate_results "$slower/results.tsv" "$slower" 2>/dev/null; then
-    fail "gate accepted Celox slower than Veryl"
+slower_execute="$TMP/slower-execute"
+write_gate_results "$slower_execute" 200 100 30 40 10 41
+if validate_gate_results "$slower_execute/results.tsv" "$slower_execute" 2>/dev/null; then
+    fail "gate accepted slower Celox execution because its total process was faster"
+fi
+
+slower_compile="$TMP/slower-compile"
+write_gate_results "$slower_compile" 200 100 30 40 50 20
+validate_gate_results "$slower_compile/results.tsv" "$slower_compile" \
+    || fail "gate conflated slower Celox code generation with execution throughput"
+
+zero_execute="$TMP/zero-execute"
+write_gate_results "$zero_execute" 200 100 30 40 10 0
+if validate_gate_results "$zero_execute/results.tsv" "$zero_execute" 2>/dev/null; then
+    fail "gate accepted a zero-length full-test execution interval"
 fi
 
 reversed="$TMP/reversed"
 write_valid_gate_logs "$reversed"
-printf '%s\n' "$RESULTS_HEADER_V2" >"$reversed/results.tsv"
+printf '%s\n' "$RESULTS_HEADER_V3" >"$reversed/results.tsv"
 append_result_row "$reversed/results.tsv" celox "$GATE_TEST" 0 100 \
-    "$reversed/celox.log" pass 100 31 >/dev/null
-append_result_row "$reversed/results.tsv" veryl-cc "$GATE_TEST" 0 200 \
-    "$reversed/veryl.log" pass 200 NA >/dev/null
+    "$reversed/celox.log" pass 100 31 10 20 >/dev/null
+append_result_row "$reversed/results.tsv" veryl-cc-sync "$GATE_TEST" 0 200 \
+    "$reversed/veryl.log" pass 200 71 30 40 >/dev/null
 if validate_gate_results "$reversed/results.tsv" "$reversed" 2>/dev/null; then
     fail "gate accepted reversed runner order"
 fi
@@ -107,7 +139,7 @@ fi
 extra="$TMP/extra"
 write_gate_results "$extra" 200 100
 append_result_row "$extra/results.tsv" celox "$GATE_TEST" 0 100 \
-    "$extra/celox.log" pass 100 31 >/dev/null
+    "$extra/celox.log" pass 100 31 10 20 >/dev/null
 if validate_gate_results "$extra/results.tsv" "$extra" 2>/dev/null; then
     fail "gate accepted an extra result row"
 fi
@@ -121,43 +153,79 @@ fi
 
 duplicate_config="$TMP/duplicate-config"
 write_gate_results "$duplicate_config" 200 100
-sed -n '1p' "$duplicate_config/celox.log" >>"$duplicate_config/celox.log"
+sed -n '2p' "$duplicate_config/celox.log" >>"$duplicate_config/celox.log"
 if validate_gate_results "$duplicate_config/results.tsv" "$duplicate_config" 2>/dev/null; then
     fail "gate accepted duplicate Celox config records"
 fi
 
+bad_veryl_config="$TMP/bad-veryl-config"
+write_gate_results "$bad_veryl_config" 200 100
+sed -i 's/aot_c_async=false/aot_c_async=true/' "$bad_veryl_config/veryl.log"
+if validate_gate_results "$bad_veryl_config/results.tsv" "$bad_veryl_config" 2>/dev/null; then
+    fail "gate accepted asynchronous timed Veryl configuration"
+fi
+
+duplicate_veryl_config="$TMP/duplicate-veryl-config"
+write_gate_results "$duplicate_veryl_config" 200 100
+sed -n '2p' "$duplicate_veryl_config/veryl.log" >>"$duplicate_veryl_config/veryl.log"
+if validate_gate_results "$duplicate_veryl_config/results.tsv" "$duplicate_veryl_config" 2>/dev/null; then
+    fail "gate accepted duplicate timed Veryl config records"
+fi
+
 compile_only="$TMP/compile-only"
 write_valid_gate_logs "$compile_only"
-printf '%s\n%s\n' \
+printf '%s\n%s\n%s\n' \
     "CELOX_TEST_CONFIG test=$GATE_TEST backend=native opt_level=O2 four_state=false compile_only=true" \
+    "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=30 execute_ns=0" \
     "CELOX_TEST_RESULT test=$GATE_TEST status=compile-only elapsed_ns=31" \
     >"$compile_only/celox.log"
-printf '%s\n' "$RESULTS_HEADER_V2" >"$compile_only/results.tsv"
-append_result_row "$compile_only/results.tsv" veryl-cc "$GATE_TEST" 0 200 \
-    "$compile_only/veryl.log" pass 200 NA >/dev/null
+printf '%s\n' "$RESULTS_HEADER_V3" >"$compile_only/results.tsv"
+append_result_row "$compile_only/results.tsv" veryl-cc-sync "$GATE_TEST" 0 200 \
+    "$compile_only/veryl.log" pass 200 71 30 40 >/dev/null
 append_result_row "$compile_only/results.tsv" celox "$GATE_TEST" 0 NA \
-    "$compile_only/celox.log" compile-only 100 31 >/dev/null
+    "$compile_only/celox.log" compile-only 100 31 30 0 >/dev/null
 if validate_gate_results "$compile_only/results.tsv" "$compile_only" 2>/dev/null; then
     fail "gate accepted compile-only Celox"
 fi
 
 bad_veryl="$TMP/bad-veryl"
 write_gate_results "$bad_veryl" 200 100
-sed -i 's/1 passed, 0 failed/2 passed, 0 failed/' "$bad_veryl/veryl.log"
+sed -i 's/status=pass/status=fail/' "$bad_veryl/veryl.log"
 if validate_gate_results "$bad_veryl/results.tsv" "$bad_veryl" 2>/dev/null; then
-    fail "gate accepted the wrong Veryl completion count"
+    fail "gate accepted a contradictory timed Veryl result"
 fi
 
 duplicate_veryl="$TMP/duplicate-veryl"
 write_gate_results "$duplicate_veryl" 200 100
-sed -n '1p' "$duplicate_veryl/veryl.log" >>"$duplicate_veryl/veryl.log"
+sed -n '4p' "$duplicate_veryl/veryl.log" >>"$duplicate_veryl/veryl.log"
 if validate_gate_results "$duplicate_veryl/results.tsv" "$duplicate_veryl" 2>/dev/null; then
-    fail "gate accepted duplicate Veryl success records"
+    fail "gate accepted duplicate timed Veryl result records"
+fi
+
+bad_veryl_cycle="$TMP/bad-veryl-cycle"
+write_gate_results "$bad_veryl_cycle" 200 100
+sed -i 's/cy=009ae070/cy=009ab960/' "$bad_veryl_cycle/veryl.log"
+if validate_gate_results "$bad_veryl_cycle/results.tsv" "$bad_veryl_cycle" 2>/dev/null; then
+    fail "gate accepted the wrong Veryl architectural completion cycle"
+fi
+
+bad_celox_cycle="$TMP/bad-celox-cycle"
+write_gate_results "$bad_celox_cycle" 200 100
+sed -i 's/cy=9ae070/cy=9ab960/' "$bad_celox_cycle/celox.log"
+if validate_gate_results "$bad_celox_cycle/results.tsv" "$bad_celox_cycle" 2>/dev/null; then
+    fail "gate accepted the wrong Celox architectural completion cycle"
+fi
+
+duplicate_celox_cycle="$TMP/duplicate-celox-cycle"
+write_gate_results "$duplicate_celox_cycle" 200 100
+sed -n '1p' "$duplicate_celox_cycle/celox.log" >>"$duplicate_celox_cycle/celox.log"
+if validate_gate_results "$duplicate_celox_cycle/results.tsv" "$duplicate_celox_cycle" 2>/dev/null; then
+    fail "gate accepted duplicate Celox architectural completion records"
 fi
 
 reported_mismatch="$TMP/reported-mismatch"
 write_gate_results "$reported_mismatch" 200 100
-sed -i $'s/\t31$/\t32/' "$reported_mismatch/results.tsv"
+sed -i $'s/\t31\t10\t20$/\t32\t10\t20/' "$reported_mismatch/results.tsv"
 if validate_gate_results "$reported_mismatch/results.tsv" "$reported_mismatch" 2>/dev/null; then
     fail "gate accepted a Celox row/log reported-time mismatch"
 fi
@@ -287,26 +355,11 @@ mv "$TMP/git-index" "$git_fixture/.git/index"
 GATE_WORKTREE_REPO="$git_fixture"
 GATE_WORKTREE_ROOT="$TMP/git-worktrees"
 mkdir -p "$GATE_WORKTREE_ROOT"
-git -C "$git_fixture" worktree add -q --detach "$GATE_WORKTREE_ROOT/veryl-cc" HEAD
+git -C "$git_fixture" worktree add -q --detach "$GATE_WORKTREE_ROOT/veryl-cc-sync" HEAD
 git -C "$git_fixture" worktree add -q --detach "$GATE_WORKTREE_ROOT/celox" HEAD
 gate_cleanup_worktrees
-[[ ! -e "$TMP/git-worktrees/veryl-cc" && ! -e "$TMP/git-worktrees/celox" ]] \
+[[ ! -e "$TMP/git-worktrees/veryl-cc-sync" && ! -e "$TMP/git-worktrees/celox" ]] \
     || fail "gate cleanup left detached worktrees behind"
-
-# The real resolver must ignore PATH/VERYL_BIN and accept only the exact
-# benchmark-owned versioned executable.
-(
-    HELIODOR_TOOLS_DIR="$TMP/version-tools"
-    HELIODOR_RESULTS_DIR="$TMP/version-results"
-    HELIODOR_VERYL_VERSION="$GATE_VERYL_VERSION"
-    VERYL_BIN="$TMP/hostile-veryl"
-    owned_bin="$HELIODOR_TOOLS_DIR/veryl-$GATE_VERYL_VERSION/bin/veryl"
-    mkdir -p "$(dirname "$owned_bin")" "$HELIODOR_RESULTS_DIR"
-    printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'veryl $GATE_VERYL_VERSION'" >"$owned_bin"
-    chmod +x "$owned_bin"
-    assert_eq "$(resolve_gate_veryl_bin)" "$owned_bin" \
-        "benchmark-owned pinned Veryl resolution"
-)
 
 # Full run_gate fixture. Replace every external boundary while retaining the
 # fixed configuration, runner order, manifest/hash checks, result validation,
@@ -320,6 +373,8 @@ mkdir -p "$CELOX_ROOT/target/release/examples" "$HELIODOR_DIR" "$HELIODOR_TOOLS_
 
 MOCK_RUNNERS=""
 MOCK_CELOX_ELAPSED=100
+MOCK_CELOX_COMPILE=10
+MOCK_CELOX_EXECUTE=20
 MOCK_CELOX_STATUS=pass
 MOCK_MUTATE_SOURCE=0
 MOCK_MUTATE_RUNNER=0
@@ -357,12 +412,13 @@ build_celox_runner() {
     chmod +x "$CELOX_RUNNER_BIN"
 }
 
-resolve_gate_veryl_bin() {
-    local bin="$HELIODOR_TOOLS_DIR/veryl-$GATE_VERYL_VERSION/bin/veryl"
-    mkdir -p "$(dirname "$bin")"
-    printf '%s\n' '#!/bin/sh' 'exit 0' >"$bin"
-    chmod +x "$bin"
-    printf '%s\n' "$bin"
+build_timed_veryl_runner() {
+    assert_eq "$VERYL_TIMED_RUNNER_BIN" \
+        "$HELIODOR_CELOX_TARGET_DIR/release/examples/run_veryl_project_test_timed" \
+        "gate executes the just-built timed Veryl target-dir artifact"
+    mkdir -p "$(dirname "$VERYL_TIMED_RUNNER_BIN")"
+    printf '%s\n' '#!/bin/sh' 'exit 0' >"$VERYL_TIMED_RUNNER_BIN"
+    chmod +x "$VERYL_TIMED_RUNNER_BIN"
 }
 
 monotonic_ns() {
@@ -370,7 +426,7 @@ monotonic_ns() {
 }
 
 gate_create_worktrees() {
-    mkdir -p "$GATE_WORKTREE_ROOT/veryl-cc" "$GATE_WORKTREE_ROOT/celox"
+    mkdir -p "$GATE_WORKTREE_ROOT/veryl-cc-sync" "$GATE_WORKTREE_ROOT/celox"
 }
 
 gate_cleanup_worktrees() {
@@ -395,10 +451,11 @@ run_one() {
     local test="$2"
     local log="$HELIODOR_RESULTS_DIR/$runner.log"
     local process_status=0 semantic_status=pass elapsed reported=NA
+    local compile_elapsed=NA execute_elapsed=NA
 
     assert_eq "$test" "$GATE_TEST" "fixed gate test"
     assert_eq "$HELIODOR_TESTS" "$GATE_TEST" "fixed test list"
-    assert_eq "$HELIODOR_RUNNERS" "veryl-cc celox" "fixed runner list"
+    assert_eq "$HELIODOR_RUNNERS" "veryl-cc-sync celox" "fixed runner list"
     assert_eq "$HELIODOR_REPO" "https://github.com/dalance/heliodor.git" \
         "fixed Heliodor repository"
     assert_eq "$HELIODOR_REF" "$GATE_HELIODOR_REF" "pinned Heliodor commit"
@@ -408,30 +465,35 @@ run_one() {
     assert_eq "$HELIODOR_CELOX_COMPILE_ONLY" 0 "full Celox execution"
     assert_eq "$CELOX_OPT_LEVEL" O2 "fixed Celox optimization"
     assert_eq "$CELOX_SIR_PASS_OVERRIDES" "" "no pass overrides"
-    assert_eq "$HELIODOR_VERYL_VERSION" "$GATE_VERYL_VERSION" "pinned Veryl version"
     [[ "$HELIODOR_DIR" == "$HELIODOR_RESULTS_DIR/worktrees/$runner" ]] \
         || fail "$runner did not use its isolated Heliodor worktree: $HELIODOR_DIR"
-    assert_eq "$RESOLVED_VERYL_BIN" \
-        "$CELOX_ROOT/target/heliodor/tools/veryl-$GATE_VERYL_VERSION/bin/veryl" \
-        "PATH/VERYL_BIN-independent gate Veryl"
     case "$runner" in
-        veryl-cc)
+        veryl-cc-sync)
             elapsed=200
-            printf '%s\n%s\n' \
-                "[INFO ]    Succeeded test ($GATE_TEST)" \
-                '[INFO ]    Completed tests : 1 passed, 0 failed' >"$log"
+            reported=71
+            compile_elapsed=30
+            execute_elapsed=40
+            printf '%s\n%s\n%s\n%s\n' \
+                'v4 SoC linux boot smoke: cy=009ae070 x3=00000000000000aa pass=1' \
+                "VERYL_TEST_CONFIG test=$GATE_TEST backend=cc aot_c_async=false" \
+                "VERYL_TEST_TIMING test=$GATE_TEST compile_ns=$compile_elapsed execute_ns=$execute_elapsed" \
+                "VERYL_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=$reported" >"$log"
             ;;
         celox)
             elapsed="$MOCK_CELOX_ELAPSED"
-            reported=31
+            compile_elapsed="$MOCK_CELOX_COMPILE"
+            execute_elapsed="$MOCK_CELOX_EXECUTE"
+            reported="$((compile_elapsed + execute_elapsed + 1))"
             if [[ "$MOCK_CELOX_STATUS" == fail ]]; then
                 process_status=1
                 semantic_status=fail
                 elapsed=NA
             fi
-            printf '%s\n%s\n' \
+            printf '%s\n%s\n%s\n%s\n' \
+                'v4 SoC linux boot smoke: cy=9ae070 x3=aa pass=1' \
                 "CELOX_TEST_CONFIG test=$GATE_TEST backend=native opt_level=O2 four_state=false compile_only=false" \
-                "CELOX_TEST_RESULT test=$GATE_TEST status=$MOCK_CELOX_STATUS elapsed_ns=31" >"$log"
+                "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$compile_elapsed execute_ns=$execute_elapsed" \
+                "CELOX_TEST_RESULT test=$GATE_TEST status=$MOCK_CELOX_STATUS elapsed_ns=$reported" >"$log"
             if [[ "$MOCK_MUTATE_SOURCE" == 1 ]]; then
                 : >"$HELIODOR_DIR/.fixture-mutated"
             fi
@@ -444,7 +506,7 @@ run_one() {
     MOCK_RUNNERS="${MOCK_RUNNERS:+$MOCK_RUNNERS }$runner"
     append_result_row "$HELIODOR_RESULTS_DIR/results.tsv" "$runner" "$test" \
         "$process_status" "$elapsed" "$log" "$semantic_status" \
-        "${elapsed/NA/100}" "$reported" >/dev/null
+        "${elapsed/NA/100}" "$reported" "$compile_elapsed" "$execute_elapsed" >/dev/null
     [[ "$process_status" == 0 ]]
 }
 
@@ -479,7 +541,7 @@ run_gate_fixture() {
             fail "$name unexpectedly failed"
         }
     fi
-    assert_eq "$MOCK_RUNNERS" "veryl-cc celox" "$name runner order"
+    assert_eq "$MOCK_RUNNERS" "veryl-cc-sync celox" "$name runner order"
 }
 
 run_gate_fixture success 1
@@ -488,9 +550,9 @@ assert_eq "$(find "$LAST_GATE_RESULTS_ROOT" -name results.tsv | wc -l)" 1 \
 success_results="$(find "$LAST_GATE_RESULTS_ROOT" -name results.tsv)"
 assert_eq "$(wc -l <"$success_results")" 3 "exact paired result rows"
 
-MOCK_CELOX_ELAPSED=201
+MOCK_CELOX_EXECUTE=41
 run_gate_fixture slower-integration 0
-MOCK_CELOX_ELAPSED=100
+MOCK_CELOX_EXECUTE=20
 
 MOCK_CELOX_STATUS=fail
 run_gate_fixture semantic-failure 0

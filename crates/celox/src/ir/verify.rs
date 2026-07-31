@@ -226,6 +226,50 @@ fn verify_edges<A>(eu: &ExecutionUnit<A>, block: &BasicBlock<A>) -> Result<(), S
                 (false_block.0, false_block.1.as_slice()),
             ]
         }
+        SIRTerminator::Switch {
+            selector,
+            cases,
+            default,
+        } => {
+            let selector_ty = register_type(eu, block.id, None, *selector)?;
+            let width = selector_ty.width();
+            if width == 0 || width > 8 {
+                return Err(SirVerifyError::block(
+                    "TYPE.SWITCH_SELECTOR",
+                    block.id,
+                    format!(
+                        "switch selector r{} has width {}, expected 1..=8",
+                        selector.0, width
+                    ),
+                ));
+            }
+            let limit = BigUint::from(1u8) << width;
+            let mut values = crate::HashSet::default();
+            for case in cases {
+                if case.value >= limit {
+                    return Err(SirVerifyError::block(
+                        "TYPE.SWITCH_CASE",
+                        block.id,
+                        format!(
+                            "switch case {:#x} does not fit selector width {}",
+                            case.value, width
+                        ),
+                    ));
+                }
+                if !values.insert(case.value.clone()) {
+                    return Err(SirVerifyError::block(
+                        "CFG.SWITCH_DUPLICATE",
+                        block.id,
+                        format!("duplicate switch case {:#x}", case.value),
+                    ));
+                }
+            }
+            cases
+                .iter()
+                .map(|case| (case.target, &[][..]))
+                .chain(std::iter::once((*default, &[][..])))
+                .collect()
+        }
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     };
 
@@ -556,6 +600,37 @@ fn verify_offset<A>(
 ) -> Result<(), SirVerifyError> {
     match offset {
         SIROffset::Static(_) => {}
+        SIROffset::PackedElements {
+            bit_offset,
+            element_width,
+        } => {
+            if *element_width == 0 {
+                return Err(SirVerifyError::instruction(
+                    "MEMORY.PACKED_ELEMENTS_WIDTH_NON_ZERO",
+                    block,
+                    index,
+                    "packed-elements element width is zero",
+                ));
+            }
+            let Some(access_end) = bit_offset.checked_add(access_width) else {
+                return Err(SirVerifyError::instruction(
+                    "MEMORY.PACKED_ELEMENTS_ACCESS_IN_BOUNDS",
+                    block,
+                    index,
+                    "packed-elements access range overflows usize",
+                ));
+            };
+            if *bit_offset % *element_width != 0 || access_end % *element_width != 0 {
+                return Err(SirVerifyError::instruction(
+                    "MEMORY.PACKED_ELEMENTS_ACCESS_ALIGNED",
+                    block,
+                    index,
+                    format!(
+                        "packed-elements access [{bit_offset}..{access_end}) is not aligned to element width {element_width}"
+                    ),
+                ));
+            }
+        }
         SIROffset::Dynamic(reg) => {
             register_type(eu, block, Some(index), *reg)?;
         }
@@ -773,6 +848,7 @@ fn terminator_uses(term: &SIRTerminator) -> Vec<RegisterId> {
             uses.extend(false_block.1.iter().copied());
             uses
         }
+        SIRTerminator::Switch { selector, .. } => vec![*selector],
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }
@@ -785,6 +861,11 @@ fn successor_ids(term: &SIRTerminator) -> Vec<BlockId> {
             false_block,
             ..
         } => vec![true_block.0, false_block.0],
+        SIRTerminator::Switch { cases, default, .. } => cases
+            .iter()
+            .map(|case| case.target)
+            .chain(std::iter::once(*default))
+            .collect(),
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }

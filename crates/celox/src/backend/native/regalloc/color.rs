@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::backend::native::mir::{BlockId, MFunction, MInst, VReg};
+use crate::backend::native::mir::{BlockId, MFunction, MInst, PhiNode, VReg};
 
 use super::analysis::AnalysisResult;
 use super::assignment::{
@@ -130,7 +130,7 @@ pub(super) fn color_ssa(
     let registers = &ALLOCATABLE_REGS[..register_count];
     let required = required_colors(func)?;
     let forbidden = forbidden_colors(func, analysis)?;
-    let preferences = phi_preferences(func);
+    let preferences = phi_preferences(func, cfg);
     let mut colors = vec![None; func.vregs.count() as usize];
     let mut perm_matching = HashMap::<VReg, PhysReg>::new();
     let mut boundary_for_block = HashMap::<BlockId, &PermBoundary>::new();
@@ -258,12 +258,22 @@ pub(super) fn color_ssa(
             }
         }
 
-        // Phi/Perm results are simultaneous definitions at block entry.  The
-        // local matching is installed first, then ordinary phi definitions use
-        // the remaining live colors.
+        // Phi/Perm results are simultaneous definitions at block entry. Dead
+        // ordinary phis need a complete assignment for verification but do not
+        // interfere with any live value, so color them before installing the
+        // live bundle. Perm rows are already matched as one constrained bundle.
         for phi in &block.phis {
             let is_perm = perm_rows.iter().any(|row| row.destination == phi.dst);
-            if !is_perm {
+            let is_live = is_live_after_entry(phi.dst, &last_use, live_out);
+            if is_perm && !is_live {
+                return Err(ColorError::at_value(
+                    "color.dead-perm-row",
+                    block.id,
+                    None,
+                    phi.dst,
+                ));
+            }
+            if !is_perm && !is_live {
                 let register = choose_color(
                     block.id,
                     None,
@@ -285,19 +295,48 @@ pub(super) fn color_ssa(
                     "color.phi-out-of-range",
                 )?;
             }
-            if is_live_after_entry(phi.dst, &last_use, live_out) {
-                let register = color_of(&colors, phi.dst).ok_or_else(|| {
-                    ColorError::at_value("color.phi-without-color", block.id, None, phi.dst)
-                })?;
-                active.add(block.id, None, phi.dst, register)?;
-            } else if is_perm {
-                return Err(ColorError::at_value(
-                    "color.dead-perm-row",
-                    block.id,
-                    None,
-                    phi.dst,
-                ));
+        }
+
+        for phi in &block.phis {
+            if !is_live_after_entry(phi.dst, &last_use, live_out)
+                || !perm_rows.iter().any(|row| row.destination == phi.dst)
+            {
+                continue;
             }
+            let register = color_of(&colors, phi.dst).ok_or_else(|| {
+                ColorError::at_value("color.phi-without-color", block.id, None, phi.dst)
+            })?;
+            active.add(block.id, None, phi.dst, register)?;
+        }
+
+        let ordinary_live_phis = block
+            .phis
+            .iter()
+            .filter(|phi| {
+                is_live_after_entry(phi.dst, &last_use, live_out)
+                    && !perm_rows.iter().any(|row| row.destination == phi.dst)
+            })
+            .collect::<Vec<_>>();
+        let ordinary_live_colors = choose_phi_bundle_colors(
+            block.id,
+            &ordinary_live_phis,
+            registers,
+            &required,
+            &forbidden,
+            &preferences,
+            &colors,
+            &active,
+        )?;
+        for (phi, register) in ordinary_live_phis.into_iter().zip(ordinary_live_colors) {
+            set_color(
+                &mut colors,
+                block.id,
+                None,
+                phi.dst,
+                register,
+                "color.phi-out-of-range",
+            )?;
+            active.add(block.id, None, phi.dst, register)?;
         }
 
         for (instruction, inst) in block.insts.iter().enumerate() {
@@ -506,17 +545,24 @@ fn forbid(
     Ok(())
 }
 
-fn phi_preferences(func: &MFunction) -> HashMap<VReg, Vec<VReg>> {
+fn phi_preferences(func: &MFunction, cfg: &NormalizedCfg) -> HashMap<VReg, Vec<VReg>> {
     let mut preferences = HashMap::<VReg, Vec<VReg>>::new();
     for block in &func.blocks {
         for phi in &block.phis {
             for &(_, source) in &phi.sources {
-                preferences.entry(phi.dst).or_default().push(source);
-                preferences.entry(source).or_default().push(phi.dst);
+                add_preference(&mut preferences, phi.dst, source);
             }
         }
     }
+    for affinity in super::cssa::loop_backedge_snapshot_affinities(func, cfg) {
+        add_preference(&mut preferences, affinity.source, affinity.destination);
+    }
     preferences
+}
+
+fn add_preference(preferences: &mut HashMap<VReg, Vec<VReg>>, left: VReg, right: VReg) {
+    preferences.entry(left).or_default().push(right);
+    preferences.entry(right).or_default().push(left);
 }
 
 /// x86 two-address affinity for a definition whose operand dies at the same
@@ -525,7 +571,9 @@ fn phi_preferences(func: &MFunction) -> HashMap<VReg, Vec<VReg>> {
 fn definition_preferences(inst: &MInst) -> [Option<VReg>; 2] {
     match inst {
         MInst::Mov { src, .. }
+        | MInst::Mov32 { src, .. }
         | MInst::AndImm { src, .. }
+        | MInst::AndImm32 { src, .. }
         | MInst::OrImm { src, .. }
         | MInst::ShrImm { src, .. }
         | MInst::ShlImm { src, .. }
@@ -535,14 +583,21 @@ fn definition_preferences(inst: &MInst) -> [Option<VReg>; 2] {
         | MInst::BitNot { src, .. }
         | MInst::Neg { src, .. }
         | MInst::Popcnt { src, .. }
+        | MInst::Bsf { src, .. }
         | MInst::Bsr { src, .. }
         | MInst::BsrOr { src, .. } => [Some(*src), None],
         MInst::Add { lhs, rhs, .. }
+        | MInst::Add32 { lhs, rhs, .. }
         | MInst::Mul { lhs, rhs, .. }
+        | MInst::Mul32 { lhs, rhs, .. }
         | MInst::And { lhs, rhs, .. }
+        | MInst::And32 { lhs, rhs, .. }
         | MInst::Or { lhs, rhs, .. }
-        | MInst::Xor { lhs, rhs, .. } => [Some(*lhs), Some(*rhs)],
+        | MInst::Or32 { lhs, rhs, .. }
+        | MInst::Xor { lhs, rhs, .. }
+        | MInst::Xor32 { lhs, rhs, .. } => [Some(*lhs), Some(*rhs)],
         MInst::Sub { lhs, .. }
+        | MInst::Sub32 { lhs, .. }
         | MInst::Shr { lhs, .. }
         | MInst::Shl { lhs, .. }
         | MInst::Sar { lhs, .. } => [Some(*lhs), None],
@@ -641,6 +696,151 @@ fn choose_color(
         instruction,
         value,
     ))
+}
+
+/// Color the simultaneously-live ordinary phi definitions as one bundle.
+///
+/// Greedy row-by-row coloring can consume the only incoming source color of a
+/// later phi even when the earlier row has an equally good alternative.  The
+/// resulting avoidable edge copies are especially expensive when the join
+/// dominates a large switch.  With at most the target's physical register
+/// count of live rows, an exact subset dynamic program is small and makes the
+/// same standard coalescing decision for the complete bundle: maximize the
+/// number of already-colored incoming sources which become identity copies.
+/// Register order is the deterministic lexicographic tie-breaker.
+#[allow(clippy::too_many_arguments)]
+fn choose_phi_bundle_colors(
+    block: BlockId,
+    phis: &[&PhiNode],
+    registers: &[PhysReg],
+    required: &[Option<PhysReg>],
+    forbidden: &[ColorMask],
+    preferences: &HashMap<VReg, Vec<VReg>>,
+    colors: &[Option<PhysReg>],
+    active: &ActiveColors,
+) -> Result<Vec<PhysReg>, ColorError> {
+    if phis.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut candidates = Vec::<Vec<(usize, i64)>>::with_capacity(phis.len());
+    for phi in phis {
+        let Some(&required) = required.get(phi.dst.0 as usize) else {
+            return Err(ColorError::at_value(
+                "color.value-out-of-range",
+                block,
+                None,
+                phi.dst,
+            ));
+        };
+        let Some(&forbidden) = forbidden.get(phi.dst.0 as usize) else {
+            return Err(ColorError::at_value(
+                "color.value-out-of-range",
+                block,
+                None,
+                phi.dst,
+            ));
+        };
+        let mut row = Vec::new();
+        for (register_index, &register) in registers.iter().enumerate() {
+            if active.contains(register)
+                || forbidden.contains(register)
+                || required.is_some_and(|required| required != register)
+            {
+                continue;
+            }
+            let affinity = preferences.get(&phi.dst).map_or(0, |neighbors| {
+                neighbors
+                    .iter()
+                    .filter(|&&neighbor| color_of(colors, neighbor) == Some(register))
+                    .count() as i64
+            });
+            row.push((register_index, affinity));
+        }
+        if row.is_empty() {
+            return Err(ColorError::at_value(
+                "color.no-available-register",
+                block,
+                None,
+                phi.dst,
+            ));
+        }
+        candidates.push(row);
+    }
+
+    let state_count = 1usize << registers.len();
+    let mut memo = vec![i64::MIN; phis.len() * state_count];
+    let optimum = best_phi_bundle_score(0, 0, &candidates, state_count, &mut memo);
+    if optimum < 0 {
+        return Err(ColorError::at_value(
+            "color.no-available-register",
+            block,
+            None,
+            phis[0].dst,
+        ));
+    }
+
+    let mut result = Vec::with_capacity(phis.len());
+    let mut row = 0usize;
+    let mut used = 0usize;
+    let mut remaining = optimum;
+    while row < phis.len() {
+        let mut selected = None;
+        for &(register_index, affinity) in &candidates[row] {
+            let bit = 1usize << register_index;
+            if used & bit != 0 {
+                continue;
+            }
+            let suffix =
+                best_phi_bundle_score(row + 1, used | bit, &candidates, state_count, &mut memo);
+            if suffix >= 0 && affinity + suffix == remaining {
+                selected = Some((register_index, affinity));
+                break;
+            }
+        }
+        let Some((register_index, affinity)) = selected else {
+            return Err(ColorError::at_value(
+                "color.phi-bundle-reconstruction",
+                block,
+                None,
+                phis[row].dst,
+            ));
+        };
+        result.push(registers[register_index]);
+        used |= 1usize << register_index;
+        remaining -= affinity;
+        row += 1;
+    }
+    Ok(result)
+}
+
+fn best_phi_bundle_score(
+    row: usize,
+    used: usize,
+    candidates: &[Vec<(usize, i64)>],
+    state_count: usize,
+    memo: &mut [i64],
+) -> i64 {
+    if row == candidates.len() {
+        return 0;
+    }
+    let slot = row * state_count + used;
+    if memo[slot] != i64::MIN {
+        return memo[slot];
+    }
+    let mut best = -1i64;
+    for &(register, affinity) in &candidates[row] {
+        let bit = 1usize << register;
+        if used & bit != 0 {
+            continue;
+        }
+        let suffix = best_phi_bundle_score(row + 1, used | bit, candidates, state_count, memo);
+        if suffix >= 0 {
+            best = best.max(affinity + suffix);
+        }
+    }
+    memo[slot] = best;
+    best
 }
 
 fn is_live_after_entry(
@@ -856,6 +1056,72 @@ mod tests {
     }
 
     #[test]
+    fn word32_instructions_expose_their_destructive_operand_affinities() {
+        let unary = [
+            MInst::Mov32 {
+                dst: VReg(2),
+                src: VReg(0),
+            },
+            MInst::AndImm32 {
+                dst: VReg(2),
+                src: VReg(0),
+                imm: 0xff,
+            },
+        ];
+        for instruction in &unary {
+            assert_eq!(
+                definition_preferences(instruction),
+                [Some(VReg(0)), None],
+                "{instruction}"
+            );
+        }
+
+        let commutative = [
+            MInst::Add32 {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::Mul32 {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::And32 {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::Or32 {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+            MInst::Xor32 {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            },
+        ];
+        for instruction in &commutative {
+            assert_eq!(
+                definition_preferences(instruction),
+                [Some(VReg(0)), Some(VReg(1))],
+                "{instruction}"
+            );
+        }
+
+        assert_eq!(
+            definition_preferences(&MInst::Sub32 {
+                dst: VReg(2),
+                lhs: VReg(0),
+                rhs: VReg(1),
+            }),
+            [Some(VReg(0)), None]
+        );
+    }
+
+    #[test]
     fn instruction_affinity_beats_the_first_free_color() {
         let source = VReg(0);
         let destination = VReg(1);
@@ -879,6 +1145,206 @@ mod tests {
         .unwrap();
 
         assert_eq!(color, PhysReg::R14);
+    }
+
+    #[test]
+    fn phi_bundle_matching_avoids_a_greedy_copy() {
+        let first_rax = VReg(0);
+        let first_rdx = VReg(1);
+        let second_rax = VReg(2);
+        let first_destination = VReg(3);
+        let second_destination = VReg(4);
+        let first = PhiNode {
+            dst: first_destination,
+            sources: vec![(BlockId(0), first_rax), (BlockId(1), first_rdx)],
+        };
+        let second = PhiNode {
+            dst: second_destination,
+            sources: vec![(BlockId(0), second_rax)],
+        };
+        let required = vec![None; 5];
+        let forbidden = vec![ColorMask::empty(); 5];
+        let preferences = HashMap::from([
+            (first_destination, vec![first_rax, first_rdx]),
+            (second_destination, vec![second_rax]),
+        ]);
+        let colors = vec![
+            Some(PhysReg::RAX),
+            Some(PhysReg::RDX),
+            Some(PhysReg::RAX),
+            None,
+            None,
+        ];
+
+        let result = choose_phi_bundle_colors(
+            BlockId(2),
+            &[&first, &second],
+            &[PhysReg::RAX, PhysReg::RDX],
+            &required,
+            &forbidden,
+            &preferences,
+            &colors,
+            &ActiveColors::default(),
+        )
+        .unwrap();
+
+        assert_eq!(result, vec![PhysReg::RDX, PhysReg::RAX]);
+    }
+
+    #[test]
+    fn loop_phi_bundle_sees_through_an_exact_backedge_snapshot() {
+        let mut vregs = VRegAllocator::new();
+        let initial = vregs.alloc();
+        let loop_condition = vregs.alloc();
+        let intermediate = vregs.alloc();
+        let snapshot = vregs.alloc();
+        let outer_destination = vregs.alloc();
+        let left_source = vregs.alloc();
+        let right_source = vregs.alloc();
+        let inner = PhiNode {
+            dst: intermediate,
+            sources: vec![(BlockId(10), left_source), (BlockId(11), right_source)],
+        };
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 7]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: initial,
+            value: 0,
+        });
+        entry.push(MInst::LoadImm {
+            dst: loop_condition,
+            value: 1,
+        });
+        entry.push(MInst::LoadImm {
+            dst: left_source,
+            value: 2,
+        });
+        entry.push(MInst::LoadImm {
+            dst: right_source,
+            value: 3,
+        });
+        entry.push(MInst::Jump { target: BlockId(1) });
+        func.push_block(entry);
+
+        let mut outer_header = MBlock::new(BlockId(1));
+        outer_header.phis.push(PhiNode {
+            dst: outer_destination,
+            sources: vec![(BlockId(0), initial), (BlockId(2), snapshot)],
+        });
+        outer_header.push(MInst::Branch {
+            cond: loop_condition,
+            true_bb: BlockId(2),
+            false_bb: BlockId(3),
+        });
+        func.push_block(outer_header);
+
+        let mut backedge = MBlock::new(BlockId(2));
+        backedge.push(MInst::LoadImm {
+            dst: intermediate,
+            value: 4,
+        });
+        backedge.push(MInst::Mov {
+            dst: snapshot,
+            src: intermediate,
+        });
+        backedge.push(MInst::Jump { target: BlockId(1) });
+        func.push_block(backedge);
+
+        let mut exit = MBlock::new(BlockId(3));
+        exit.push(MInst::Return);
+        func.push_block(exit);
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let preferences = phi_preferences(&func, &cfg);
+        assert!(
+            preferences
+                .get(&intermediate)
+                .is_some_and(|neighbors| neighbors.contains(&outer_destination))
+        );
+
+        let required = vec![None; 7];
+        let forbidden = vec![ColorMask::empty(); 7];
+        let colors = vec![
+            None,
+            None,
+            None,
+            None,
+            Some(PhysReg::RAX),
+            Some(PhysReg::RDX),
+            Some(PhysReg::RBX),
+        ];
+        let result = choose_phi_bundle_colors(
+            BlockId(2),
+            &[&inner],
+            &[PhysReg::RAX, PhysReg::RDX, PhysReg::RBX],
+            &required,
+            &forbidden,
+            &preferences,
+            &colors,
+            &ActiveColors::default(),
+        )
+        .unwrap();
+
+        assert_eq!(result, vec![PhysReg::RAX]);
+    }
+
+    #[test]
+    fn ordinary_join_does_not_contract_an_edge_snapshot() {
+        let mut vregs = VRegAllocator::new();
+        let condition = vregs.alloc();
+        let original = vregs.alloc();
+        let snapshot = vregs.alloc();
+        let other = vregs.alloc();
+        let destination = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::LoadImm {
+            dst: original,
+            value: 2,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        func.push_block(entry);
+
+        let mut true_block = MBlock::new(BlockId(1));
+        true_block.push(MInst::Mov {
+            dst: snapshot,
+            src: original,
+        });
+        true_block.push(MInst::Jump { target: BlockId(3) });
+        func.push_block(true_block);
+
+        let mut false_block = MBlock::new(BlockId(2));
+        false_block.push(MInst::LoadImm {
+            dst: other,
+            value: 3,
+        });
+        false_block.push(MInst::Jump { target: BlockId(3) });
+        func.push_block(false_block);
+
+        let mut join = MBlock::new(BlockId(3));
+        join.phis.push(PhiNode {
+            dst: destination,
+            sources: vec![(BlockId(1), snapshot), (BlockId(2), other)],
+        });
+        join.push(MInst::Return);
+        func.push_block(join);
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let preferences = phi_preferences(&func, &cfg);
+        let destination_preferences = preferences.get(&destination).unwrap();
+        assert!(destination_preferences.contains(&snapshot));
+        assert!(destination_preferences.contains(&other));
+        assert!(!destination_preferences.contains(&original));
     }
 
     #[test]
@@ -951,8 +1417,12 @@ mod tests {
         func.push_block(block);
 
         let initial_cfg = super::super::cfg::normalize(&mut func).unwrap();
-        let (cfg, perms) =
-            super::super::legalize::materialize_constraint_perms(&mut func, &initial_cfg).unwrap();
+        let (cfg, perms) = super::super::legalize::materialize_constraint_perms(
+            &mut func,
+            &initial_cfg,
+            super::super::NUM_REGS,
+        )
+        .unwrap();
         let analysis = super::super::analysis::analyze(&func);
         let colored = color_ssa(&func, &cfg, &analysis, &perms, super::super::NUM_REGS).unwrap();
         let boundary = &perms.boundaries[0];

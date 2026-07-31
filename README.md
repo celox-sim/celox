@@ -16,9 +16,10 @@ whole-design performance:
 
 Celox has not yet produced a fast successful full Linux-boot result on the
 pinned Heliodor gate. Project-wide performance remains an open engineering
-target and is accepted only when the same-input full run completes no slower
-than `veryl-cc`; compile-only results, partial timing windows, and projected
-times are not performance results.
+target and is accepted only when the same-input full run executes the already
+generated simulator no slower than synchronous `veryl-cc`. Code-generation
+latency is measured separately; compile-only results, partial timing windows,
+and projected times are not execution-performance results.
 
 ## Features
 

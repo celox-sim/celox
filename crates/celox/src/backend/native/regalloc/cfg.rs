@@ -2,14 +2,11 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::backend::native::mir::{BlockId, MBlock, MFunction, MInst};
+use celox_analysis::cfg::ForwardControlFlowGraph;
+pub(super) use celox_analysis::cfg::NaturalLoop;
+use celox_analysis::ssa::SsaCfg;
 
-#[derive(Debug)]
-pub(super) struct NaturalLoop {
-    pub header: usize,
-    pub blocks: BTreeSet<usize>,
-    pub parent: Option<usize>,
-}
+use crate::backend::native::mir::{BlockId, MBlock, MFunction, MInst};
 
 #[derive(Debug)]
 pub(super) struct NormalizedCfg {
@@ -17,9 +14,75 @@ pub(super) struct NormalizedCfg {
     pub predecessors: Vec<Vec<usize>>,
     pub successors: Vec<Vec<usize>>,
     pub idom: Vec<Option<usize>>,
+    pub dominator_children: Vec<Vec<usize>>,
     pub dominance_frontier: Vec<BTreeSet<usize>>,
     pub loops: Vec<NaturalLoop>,
     pub loop_for_header: HashMap<usize, usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct EdgeInsertionPoint {
+    pub block: usize,
+    pub instruction: usize,
+}
+
+/// Return the concrete point that executes on exactly one normalized CFG edge.
+/// A single-successor predecessor uses its terminator; a branch edge uses the
+/// entry of its dedicated single-predecessor successor block.  CSSA may place
+/// phi-source copies in that successor, so its edge identity must not depend on
+/// the block remaining syntactically Jump-only.
+pub(super) fn edge_insertion_point(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    predecessor: usize,
+    successor: usize,
+) -> Option<EdgeInsertionPoint> {
+    if !cfg.successors.get(predecessor)?.contains(&successor) {
+        return None;
+    }
+    if cfg.successors[predecessor].len() == 1 {
+        return Some(EdgeInsertionPoint {
+            block: predecessor,
+            instruction: func.blocks.get(predecessor)?.insts.len().checked_sub(1)?,
+        });
+    }
+    if cfg.predecessors.get(successor)?.as_slice() == [predecessor]
+        && !func.blocks.get(successor)?.insts.is_empty()
+    {
+        return Some(EdgeInsertionPoint {
+            block: successor,
+            instruction: 0,
+        });
+    }
+    None
+}
+
+impl SsaCfg for NormalizedCfg {
+    type FrontierIter<'a> = std::iter::Copied<std::collections::btree_set::Iter<'a, usize>>;
+
+    fn root(&self) -> usize {
+        0
+    }
+
+    fn predecessors(&self) -> &[Vec<usize>] {
+        &self.predecessors
+    }
+
+    fn successors(&self) -> &[Vec<usize>] {
+        &self.successors
+    }
+
+    fn dominator_children(&self) -> &[Vec<usize>] {
+        &self.dominator_children
+    }
+
+    fn dominance_frontier_len(&self) -> usize {
+        self.dominance_frontier.len()
+    }
+
+    fn dominance_frontier(&self, block: usize) -> Self::FrontierIter<'_> {
+        self.dominance_frontier[block].iter().copied()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +116,7 @@ impl NormalizedCfg {
             || self.predecessors.len() != blocks
             || self.successors.len() != blocks
             || self.idom.len() != blocks
+            || self.dominator_children.len() != blocks
             || self.dominance_frontier.len() != blocks
         {
             return Err(CfgError::new(
@@ -191,12 +255,19 @@ impl NormalizedCfg {
                 ));
             }
         }
-        let expected_idom = immediate_dominators(&self.predecessors)?;
-        if self.idom != expected_idom {
+        let expected = analyze_shared_graph(self.successors.clone())?;
+        if self.idom != expected.dominators.idom {
             return Err(CfgError::new(
                 "CFG.IDOM_MATCHES_GRAPH",
                 None,
                 "immediate-dominator table does not match the normalized graph",
+            ));
+        }
+        if self.dominator_children != expected.dominators.children {
+            return Err(CfgError::new(
+                "CFG.DOMINATOR_CHILDREN_MATCH_GRAPH",
+                None,
+                "dominator-tree children do not match the normalized graph",
             ));
         }
         for (block, frontier) in self.dominance_frontier.iter().enumerate() {
@@ -208,7 +279,11 @@ impl NormalizedCfg {
                 ));
             }
         }
-        let expected_frontier = dominance_frontiers(&self.predecessors, &self.idom)?;
+        let expected_frontier = expected
+            .dominance_frontier
+            .iter()
+            .map(|frontier| frontier.iter().copied().collect::<BTreeSet<_>>())
+            .collect::<Vec<_>>();
         if self.dominance_frontier != expected_frontier {
             return Err(CfgError::new(
                 "CFG.DOMINANCE_FRONTIER_MATCHES_GRAPH",
@@ -266,6 +341,13 @@ impl NormalizedCfg {
                 }
             }
         }
+        if self.loops != expected.loops {
+            return Err(CfgError::new(
+                "CFG.LOOPS_MATCH_GRAPH",
+                None,
+                "natural-loop forest does not match the normalized graph",
+            ));
+        }
         for (block, successors) in self.successors.iter().enumerate() {
             if successors.len() < 2 {
                 continue;
@@ -313,34 +395,47 @@ pub(super) fn normalize(func: &mut MFunction) -> Result<NormalizedCfg, CfgError>
     split_critical_edges(func)?;
     super::reorder_blocks_rpo(func)
         .map_err(|message| CfgError::new("CFG.RPO_BIJECTION", None, message))?;
-    let (block_index, predecessors, successors) = graph(func);
-    let idom = immediate_dominators(&predecessors)?;
-    let dominance_frontier = dominance_frontiers(&predecessors, &idom)?;
-    let loops = natural_loops(&predecessors, &successors, &idom)?;
-    let loop_for_header = loops
+    let (block_index, _, successors) = graph(func);
+    let analysis = analyze_shared_graph(successors)?;
+    let dominance_frontier = analysis
+        .dominance_frontier
+        .iter()
+        .map(|frontier| frontier.iter().copied().collect::<BTreeSet<_>>())
+        .collect();
+    let loop_for_header = analysis
+        .loops
         .iter()
         .enumerate()
         .map(|(loop_index, natural_loop)| (natural_loop.header, loop_index))
         .collect();
     Ok(NormalizedCfg {
         block_index,
-        predecessors,
-        successors,
-        idom,
+        predecessors: analysis.predecessors,
+        successors: analysis.successors,
+        idom: analysis.dominators.idom,
+        dominator_children: analysis.dominators.children,
         dominance_frontier,
-        loops,
+        loops: analysis.loops,
         loop_for_header,
+    })
+}
+
+fn analyze_shared_graph(successors: Vec<Vec<usize>>) -> Result<ForwardControlFlowGraph, CfgError> {
+    ForwardControlFlowGraph::analyze(successors, 0).map_err(|error| {
+        CfgError::new(
+            "CFG.SHARED_ANALYSIS",
+            None,
+            format!("IR-independent CFG analysis failed: {error}"),
+        )
     })
 }
 
 fn split_critical_edges(func: &mut MFunction) -> Result<(), CfgError> {
     for block in &mut func.blocks {
-        if let Some(MInst::Branch {
-            true_bb, false_bb, ..
-        }) = block.insts.last()
+        if let Some((true_bb, false_bb)) = block.insts.last().and_then(MInst::branch_targets)
             && true_bb == false_bb
         {
-            let target = *true_bb;
+            let target = true_bb;
             if let Some(terminator) = block.insts.last_mut() {
                 *terminator = MInst::Jump { target };
             }
@@ -438,25 +533,21 @@ fn rewrite_target(
     new: BlockId,
     predecessor: BlockId,
 ) -> Result<(), CfgError> {
-    match terminator {
-        MInst::Branch {
-            true_bb, false_bb, ..
-        } => {
-            if *true_bb == old {
-                *true_bb = new;
-            }
-            if *false_bb == old {
-                *false_bb = new;
-            }
+    let mut rewritten = false;
+    terminator.rewrite_successors(|target| {
+        if target == old {
+            rewritten = true;
+            new
+        } else {
+            target
         }
-        MInst::Jump { target } if *target == old => *target = new,
-        _ => {
-            return Err(CfgError::new(
-                "CFG.TERMINATOR_NAMES_SPLIT_EDGE",
-                Some(predecessor),
-                "branch edge is not named by predecessor terminator",
-            ));
-        }
+    });
+    if !rewritten {
+        return Err(CfgError::new(
+            "CFG.TERMINATOR_NAMES_SPLIT_EDGE",
+            Some(predecessor),
+            "branch edge is not named by predecessor terminator",
+        ));
     }
     Ok(())
 }
@@ -480,343 +571,6 @@ fn graph(func: &MFunction) -> (HashMap<BlockId, usize>, Vec<Vec<usize>>, Vec<Vec
         }
     }
     (block_index, predecessors, successors)
-}
-
-fn immediate_dominators(predecessors: &[Vec<usize>]) -> Result<Vec<Option<usize>>, CfgError> {
-    if predecessors.is_empty() {
-        return Err(CfgError::new(
-            "CFG.NON_EMPTY",
-            None,
-            "cannot construct dominators for an empty graph",
-        ));
-    }
-    if predecessors
-        .iter()
-        .flatten()
-        .any(|predecessor| *predecessor >= predecessors.len())
-    {
-        return Err(CfgError::new(
-            "CFG.PREDECESSOR_RANGE",
-            None,
-            "cannot construct dominators with an out-of-range predecessor",
-        ));
-    }
-    let mut idom = vec![None; predecessors.len()];
-    idom[0] = Some(0);
-    loop {
-        let mut changed = false;
-        for block in 1..predecessors.len() {
-            let mut processed = predecessors[block]
-                .iter()
-                .copied()
-                .filter(|predecessor| idom[*predecessor].is_some());
-            let Some(first) = processed.next() else {
-                continue;
-            };
-            let mut next = first;
-            for predecessor in processed {
-                next = intersect(next, predecessor, &idom)?;
-            }
-            if idom[block] != Some(next) {
-                idom[block] = Some(next);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    idom[0] = None;
-    Ok(idom)
-}
-
-fn intersect(mut left: usize, mut right: usize, idom: &[Option<usize>]) -> Result<usize, CfgError> {
-    while left != right {
-        while left > right {
-            let Some(parent) = idom.get(left).copied().flatten() else {
-                return Err(CfgError::new(
-                    "CFG.DOMINATOR_STATE",
-                    None,
-                    format!("processed block index {left} has no immediate dominator"),
-                ));
-            };
-            left = parent;
-        }
-        while right > left {
-            let Some(parent) = idom.get(right).copied().flatten() else {
-                return Err(CfgError::new(
-                    "CFG.DOMINATOR_STATE",
-                    None,
-                    format!("processed block index {right} has no immediate dominator"),
-                ));
-            };
-            right = parent;
-        }
-    }
-    Ok(left)
-}
-
-fn dominance_frontiers(
-    predecessors: &[Vec<usize>],
-    idom: &[Option<usize>],
-) -> Result<Vec<BTreeSet<usize>>, CfgError> {
-    if predecessors.len() != idom.len() {
-        return Err(CfgError::new(
-            "CFG.MODEL_SHAPE",
-            None,
-            "predecessor and dominator tables have different lengths",
-        ));
-    }
-    let mut frontiers = vec![BTreeSet::new(); predecessors.len()];
-    for block in 0..predecessors.len() {
-        if predecessors[block].len() < 2 {
-            continue;
-        }
-        let Some(immediate) = idom[block] else {
-            return Err(CfgError::new(
-                "CFG.DOMINANCE_FRONTIER_STATE",
-                None,
-                format!("join block index {block} has no immediate dominator"),
-            ));
-        };
-        for &predecessor in &predecessors[block] {
-            let mut runner = predecessor;
-            let mut steps = 0usize;
-            while runner != immediate {
-                let Some(frontier) = frontiers.get_mut(runner) else {
-                    return Err(CfgError::new(
-                        "CFG.PREDECESSOR_RANGE",
-                        None,
-                        format!("join predecessor index {runner} is outside the graph"),
-                    ));
-                };
-                frontier.insert(block);
-                let Some(parent) = idom.get(runner).copied().flatten() else {
-                    return Err(CfgError::new(
-                        "CFG.DOMINANCE_FRONTIER_STATE",
-                        None,
-                        format!("join predecessor index {runner} is not dominated by the entry"),
-                    ));
-                };
-                runner = parent;
-                steps += 1;
-                if steps > idom.len() {
-                    return Err(CfgError::new(
-                        "CFG.IDOM_TREE",
-                        None,
-                        "immediate-dominator links contain a cycle",
-                    ));
-                }
-            }
-        }
-    }
-    Ok(frontiers)
-}
-
-fn natural_loops(
-    predecessors: &[Vec<usize>],
-    successors: &[Vec<usize>],
-    idom: &[Option<usize>],
-) -> Result<Vec<NaturalLoop>, CfgError> {
-    Ok(natural_loops_with_work(predecessors, successors, idom)?.0)
-}
-
-#[derive(Default)]
-struct NaturalLoopWork {
-    #[cfg(test)]
-    dominator_nodes: usize,
-    #[cfg(test)]
-    dominance_queries: usize,
-    #[cfg(test)]
-    backedges: usize,
-    #[cfg(test)]
-    reverse_blocks_inserted: usize,
-    #[cfg(test)]
-    predecessor_edges_visited: usize,
-    #[cfg(test)]
-    parent_header_lookups: usize,
-    #[cfg(test)]
-    parent_membership_updates: usize,
-}
-
-impl NaturalLoopWork {
-    fn record_dominator_node(&mut self) {
-        #[cfg(test)]
-        {
-            self.dominator_nodes += 1;
-        }
-    }
-
-    fn record_dominance_query(&mut self) {
-        #[cfg(test)]
-        {
-            self.dominance_queries += 1;
-        }
-    }
-
-    fn record_backedge(&mut self) {
-        #[cfg(test)]
-        {
-            self.backedges += 1;
-        }
-    }
-
-    fn record_reverse_block(&mut self) {
-        #[cfg(test)]
-        {
-            self.reverse_blocks_inserted += 1;
-        }
-    }
-
-    fn record_predecessor_edges(&mut self, edges: usize) {
-        #[cfg(test)]
-        {
-            self.predecessor_edges_visited += edges;
-        }
-        #[cfg(not(test))]
-        let _ = edges;
-    }
-
-    fn record_parent_header_lookup(&mut self) {
-        #[cfg(test)]
-        {
-            self.parent_header_lookups += 1;
-        }
-    }
-
-    fn record_parent_membership_update(&mut self) {
-        #[cfg(test)]
-        {
-            self.parent_membership_updates += 1;
-        }
-    }
-}
-
-/// Dominator-tree preorder intervals.  Dominance is an O(1) containment query,
-/// and the iterative event walk is safe for arbitrarily deep CFGs.
-struct DominanceIntervals {
-    preorder: Vec<usize>,
-    subtree_end: Vec<usize>,
-}
-
-impl DominanceIntervals {
-    fn build(idom: &[Option<usize>], work: &mut NaturalLoopWork) -> Self {
-        let mut children = vec![Vec::<usize>::new(); idom.len()];
-        for (block, parent) in idom.iter().enumerate().skip(1) {
-            if let Some(parent) = parent {
-                children[*parent].push(block);
-            }
-        }
-
-        enum Event {
-            Enter(usize),
-            Exit(usize),
-        }
-        let mut preorder = vec![usize::MAX; idom.len()];
-        let mut subtree_end = vec![usize::MAX; idom.len()];
-        let mut next_preorder = 0usize;
-        let mut events = (!idom.is_empty())
-            .then_some(Event::Enter(0))
-            .into_iter()
-            .collect::<Vec<_>>();
-        while let Some(event) = events.pop() {
-            match event {
-                Event::Enter(block) => {
-                    preorder[block] = next_preorder;
-                    next_preorder += 1;
-                    work.record_dominator_node();
-                    events.push(Event::Exit(block));
-                    events.extend(children[block].iter().rev().copied().map(Event::Enter));
-                }
-                Event::Exit(block) => subtree_end[block] = next_preorder,
-            }
-        }
-        Self {
-            preorder,
-            subtree_end,
-        }
-    }
-
-    fn dominates(&self, dominator: usize, block: usize) -> bool {
-        let dominator_preorder = self.preorder[dominator];
-        let block_preorder = self.preorder[block];
-        dominator_preorder != usize::MAX
-            && block_preorder != usize::MAX
-            && dominator_preorder <= block_preorder
-            && block_preorder < self.subtree_end[dominator]
-    }
-}
-
-/// Construct natural loops in O(B + E + output log B), then derive the loop
-/// forest in O(output) rather than comparing every pair of loop block sets.
-///
-/// Natural loops form a laminar family after backedges with the same header are
-/// merged.  Processing that family outer-to-inner means the innermost loop
-/// currently recorded for a child's header is exactly its immediate parent.
-/// `output` is the total number of materialized `(loop, block)` memberships,
-/// which the public `NaturalLoop::blocks` representation necessarily stores.
-fn natural_loops_with_work(
-    predecessors: &[Vec<usize>],
-    successors: &[Vec<usize>],
-    idom: &[Option<usize>],
-) -> Result<(Vec<NaturalLoop>, NaturalLoopWork), CfgError> {
-    let mut work = NaturalLoopWork::default();
-    let dominance = DominanceIntervals::build(idom, &mut work);
-    let mut by_header = (0..successors.len())
-        .map(|_| None::<BTreeSet<usize>>)
-        .collect::<Vec<_>>();
-    for (tail, tail_successors) in successors.iter().enumerate() {
-        for &header in tail_successors {
-            work.record_dominance_query();
-            if !dominance.dominates(header, tail) {
-                continue;
-            }
-            work.record_backedge();
-            let blocks = by_header[header].get_or_insert_with(BTreeSet::new);
-            if blocks.insert(header) {
-                work.record_reverse_block();
-            }
-            let mut stack = vec![tail];
-            while let Some(block) = stack.pop() {
-                if blocks.insert(block) {
-                    work.record_reverse_block();
-                    work.record_predecessor_edges(predecessors[block].len());
-                    stack.extend(predecessors[block].iter().copied());
-                }
-            }
-        }
-    }
-    let mut loops = by_header
-        .into_iter()
-        .enumerate()
-        .filter_map(|(header, blocks)| {
-            blocks.map(|blocks| NaturalLoop {
-                header,
-                blocks,
-                parent: None,
-            })
-        })
-        .collect::<Vec<_>>();
-    loops.sort_by_key(|natural_loop| (natural_loop.blocks.len(), natural_loop.header));
-
-    let mut innermost_for_block = vec![None::<usize>; successors.len()];
-    for child in (0..loops.len()).rev() {
-        work.record_parent_header_lookup();
-        let parent = innermost_for_block[loops[child].header];
-        if parent.is_some_and(|parent| !loops[parent].blocks.is_superset(&loops[child].blocks)) {
-            return Err(CfgError::new(
-                "CFG.LOOP_FOREST",
-                None,
-                format!("natural loop {child} overlaps its candidate parent without nesting"),
-            ));
-        }
-        loops[child].parent = parent;
-        for &block in &loops[child].blocks {
-            innermost_for_block[block] = Some(child);
-            work.record_parent_membership_update();
-        }
-    }
-    Ok((loops, work))
 }
 
 #[cfg(test)]
@@ -1066,6 +820,16 @@ mod tests {
 
         let cfg = normalize(&mut func).unwrap();
         assert_eq!(func.blocks.len(), 9);
+        let entry = cfg.block_index[&BlockId(0)];
+        for &successor in &cfg.successors[entry] {
+            assert_eq!(
+                edge_insertion_point(&func, &cfg, entry, successor),
+                Some(EdgeInsertionPoint {
+                    block: successor,
+                    instruction: 0,
+                })
+            );
+        }
         let join = &func.blocks[cfg.block_index[&BlockId(3)]];
         let split_predecessor = join.phis[0]
             .sources
@@ -1075,93 +839,5 @@ mod tests {
             .0;
         assert_ne!(split_predecessor, BlockId(2));
         assert_eq!(cfg.predecessors[cfg.block_index[&BlockId(3)]].len(), 2);
-    }
-
-    #[test]
-    fn deep_acyclic_cfg_uses_one_interval_query_per_edge() {
-        const BLOCKS: usize = 20_000;
-
-        let mut predecessors = vec![Vec::new(); BLOCKS];
-        let mut successors = vec![Vec::new(); BLOCKS];
-        let mut idom = vec![None; BLOCKS];
-        for block in 1..BLOCKS {
-            predecessors[block].push(block - 1);
-            successors[block - 1].push(block);
-            idom[block] = Some(block - 1);
-        }
-
-        let (loops, work) = natural_loops_with_work(&predecessors, &successors, &idom).unwrap();
-
-        assert!(loops.is_empty());
-        assert_eq!(work.dominator_nodes, BLOCKS);
-        assert_eq!(work.dominance_queries, BLOCKS - 1);
-        assert_eq!(work.backedges, 0);
-        assert_eq!(work.reverse_blocks_inserted, 0);
-        assert_eq!(work.predecessor_edges_visited, 0);
-        assert_eq!(work.parent_header_lookups, 0);
-        assert_eq!(work.parent_membership_updates, 0);
-    }
-
-    #[test]
-    fn multiple_backedges_to_one_header_form_their_union() {
-        let predecessors = vec![vec![], vec![0, 2, 3], vec![1], vec![1]];
-        let successors = vec![vec![1], vec![2, 3], vec![1], vec![1]];
-        let idom = vec![None, Some(0), Some(1), Some(1)];
-
-        let (loops, work) = natural_loops_with_work(&predecessors, &successors, &idom).unwrap();
-
-        assert_eq!(loops.len(), 1);
-        assert_eq!(loops[0].header, 1);
-        assert_eq!(loops[0].blocks, BTreeSet::from([1, 2, 3]));
-        assert_eq!(loops[0].parent, None);
-        assert_eq!(work.dominance_queries, 5);
-        assert_eq!(work.backedges, 2);
-        assert_eq!(work.reverse_blocks_inserted, 3);
-        assert_eq!(work.parent_header_lookups, 1);
-        assert_eq!(work.parent_membership_updates, 3);
-    }
-
-    #[test]
-    fn deeply_nested_loop_forest_is_output_linear_not_all_pairs() {
-        const DEPTH: usize = 512;
-        const BLOCKS: usize = DEPTH + 1;
-
-        // A dominator chain followed by one tail edge to every header creates
-        // DEPTH perfectly nested natural loops.  Materializing their block sets
-        // necessarily produces DEPTH * (DEPTH + 1) / 2 memberships; parent
-        // discovery must add only one lookup per loop, not DEPTH^2 set tests.
-        let mut predecessors = vec![Vec::new(); BLOCKS];
-        let mut successors = vec![Vec::new(); BLOCKS];
-        let mut idom = vec![None; BLOCKS];
-        for block in 1..BLOCKS {
-            predecessors[block].push(block - 1);
-            successors[block - 1].push(block);
-            idom[block] = Some(block - 1);
-        }
-        let tail = DEPTH;
-        for (header, header_predecessors) in
-            predecessors.iter_mut().enumerate().take(DEPTH + 1).skip(1)
-        {
-            successors[tail].push(header);
-            header_predecessors.push(tail);
-        }
-
-        let (loops, work) = natural_loops_with_work(&predecessors, &successors, &idom).unwrap();
-
-        let memberships = DEPTH * (DEPTH + 1) / 2;
-        assert_eq!(loops.len(), DEPTH);
-        assert_eq!(work.dominator_nodes, BLOCKS);
-        assert_eq!(work.dominance_queries, DEPTH * 2);
-        assert_eq!(work.backedges, DEPTH);
-        assert_eq!(work.reverse_blocks_inserted, memberships);
-        assert!(work.predecessor_edges_visited <= memberships * 2);
-        assert_eq!(work.parent_header_lookups, DEPTH);
-        assert_eq!(work.parent_membership_updates, memberships);
-        for (child, loop_info) in loops.iter().enumerate().take(DEPTH - 1) {
-            assert_eq!(loop_info.parent, Some(child + 1));
-            assert_eq!(loop_info.header, DEPTH - child);
-        }
-        assert_eq!(loops[DEPTH - 1].header, 1);
-        assert_eq!(loops[DEPTH - 1].parent, None);
     }
 }

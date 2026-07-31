@@ -90,6 +90,7 @@ impl PartialOrd for NextUseDistance {
 pub(super) struct NextUseAnalysis {
     pub entry: Vec<HashMap<VReg, NextUseDistance>>,
     pub exit: Vec<HashMap<VReg, NextUseDistance>>,
+    anticipated_after_phis: Vec<HashSet<VReg>>,
     pub block_max_pressure: Vec<usize>,
     pub loop_regions: Vec<LoopRegionFacts>,
     entry_region: Vec<Option<usize>>,
@@ -194,6 +195,7 @@ pub(super) fn analyze(
     let edge_loop_exits = &region_topology.edge_exits;
     let mut entry: Vec<HashMap<VReg, NextUseDistance>> = vec![HashMap::new(); func.blocks.len()];
     let mut exit: Vec<HashMap<VReg, NextUseDistance>> = vec![HashMap::new(); func.blocks.len()];
+    let mut anticipated_after_phis = vec![HashSet::<VReg>::new(); func.blocks.len()];
     let mut queue = (0..func.blocks.len()).rev().collect::<VecDeque<_>>();
     let mut queued = vec![true; func.blocks.len()];
     while let Some(block) = queue.pop_front() {
@@ -246,9 +248,21 @@ pub(super) fn analyze(
         for &(value, position) in &transfer.local_uses {
             next_entry.insert(value, NextUseDistance::local(position));
         }
-        if next_entry != entry[block] || next_exit != exit[block] {
+        let mut next_anticipated = anticipated_on_all_successors(
+            &cfg.successors[block],
+            &anticipated_after_phis,
+            &transfers,
+            &phi_uses[block],
+        );
+        next_anticipated.retain(|value| !transfer.instruction_definitions.contains(value));
+        next_anticipated.extend(transfer.after_phi_uses.iter().copied());
+        if next_entry != entry[block]
+            || next_exit != exit[block]
+            || next_anticipated != anticipated_after_phis[block]
+        {
             entry[block] = next_entry;
             exit[block] = next_exit;
+            anticipated_after_phis[block] = next_anticipated;
             for &predecessor in &cfg.predecessors[block] {
                 if !queued[predecessor] {
                     queue.push_back(predecessor);
@@ -284,6 +298,7 @@ pub(super) fn analyze(
     Ok(NextUseAnalysis {
         entry,
         exit,
+        anticipated_after_phis,
         block_max_pressure,
         loop_regions,
         entry_region: region_topology.entry_region,
@@ -299,6 +314,7 @@ impl NextUseAnalysis {
         let block_count = func.blocks.len();
         if self.entry.len() != block_count
             || self.exit.len() != block_count
+            || self.anticipated_after_phis.len() != block_count
             || self.block_max_pressure.len() != block_count
             || self.entry_region.len() != block_count
             || self.use_positions.len() != block_count
@@ -309,9 +325,10 @@ impl NextUseAnalysis {
                 None,
                 Vec::new(),
                 format!(
-                    "next-use block tables must all contain {block_count} rows (entry={}, exit={}, pressure={}, entry_region={}, use_positions={})",
+                    "next-use block tables must all contain {block_count} rows (entry={}, exit={}, anticipated={}, pressure={}, entry_region={}, use_positions={})",
                     self.entry.len(),
                     self.exit.len(),
+                    self.anticipated_after_phis.len(),
                     self.block_max_pressure.len(),
                     self.entry_region.len(),
                     self.use_positions.len()
@@ -360,6 +377,7 @@ impl NextUseAnalysis {
                 .keys()
                 .chain(self.exit[block].keys())
                 .chain(self.use_positions[block].keys())
+                .chain(self.anticipated_after_phis[block].iter())
             {
                 if value.0 >= value_count {
                     return Err(NextUseError::new(
@@ -388,6 +406,7 @@ impl NextUseAnalysis {
         }
 
         verify_use_positions_match_mir(self, func)?;
+        verify_anticipated_equations(self, func, cfg)?;
         let topology = RegionTopology::build(cfg)?;
         verify_dataflow_equations(self, func, cfg, &topology)?;
         if self.entry_region != topology.entry_region {
@@ -495,8 +514,55 @@ impl NextUseAnalysis {
             .unwrap_or(NextUseDistance::Dead)
     }
 
+    /// Return the first ordinary MIR use in this block at or after
+    /// `instruction`.  Cross-block next uses deliberately return `None`: a
+    /// path-specific reload cost is valid only when its concrete use point is
+    /// known.
+    pub(super) fn next_local_use(
+        &self,
+        block: usize,
+        instruction: usize,
+        value: VReg,
+    ) -> Option<usize> {
+        let positions = self.use_positions.get(block)?.get(&value)?;
+        positions
+            .get(positions.partition_point(|position| *position < instruction))
+            .copied()
+    }
+
+    /// Return every ordinary MIR use in this block at or after
+    /// `instruction`.  A basic block is a linear execution region, so all
+    /// returned positions execute whenever control reaches the first one.
+    /// Cross-block uses remain excluded: pricing those requires edge and loop
+    /// frequency rather than pretending that every CFG continuation executes.
+    pub(super) fn local_uses_from(
+        &self,
+        block: usize,
+        instruction: usize,
+        value: VReg,
+    ) -> &[usize] {
+        let Some(positions) = self
+            .use_positions
+            .get(block)
+            .and_then(|positions| positions.get(&value))
+        else {
+            return &[];
+        };
+        &positions[positions.partition_point(|position| *position < instruction)..]
+    }
+
     pub(super) fn region_at_entry(&self, block: usize) -> Option<usize> {
         self.entry_region[block]
+    }
+
+    /// Whether a value available immediately after block phis is guaranteed
+    /// to be used on every continuation before an ordinary MIR definition can
+    /// replace that SSA name.  This is an anticipatability fact, not liveness:
+    /// a value used on only one branch is deliberately false.
+    pub(super) fn anticipated_at_entry(&self, block: usize, value: VReg) -> bool {
+        self.anticipated_after_phis
+            .get(block)
+            .is_some_and(|values| values.contains(&value))
     }
 
     pub(super) fn used_in_region(&self, region: usize, value: VReg) -> bool {
@@ -557,6 +623,76 @@ fn verify_use_positions_match_mir(
                     ),
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Independently check the anticipatability equations from MIR operands and
+/// CFG edges.  Unlike next-use distance, successor facts are intersected: a
+/// use on one branch does not justify keeping a value resident at the branch
+/// head.  Phi destinations are removed at the successor boundary and their
+/// actual incoming sources are added on the corresponding edges.
+fn verify_anticipated_equations(
+    analysis: &NextUseAnalysis,
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+) -> Result<(), NextUseError> {
+    let phi_uses = verifier_phi_edge_uses(func, cfg)?;
+    let phi_definitions = func
+        .blocks
+        .iter()
+        .map(|block| block.phis.iter().map(|phi| phi.dst).collect::<HashSet<_>>())
+        .collect::<Vec<_>>();
+    for (block, mir_block) in func.blocks.iter().enumerate() {
+        let mut expected_exit = if let Some(&successor) = cfg.successors[block].first() {
+            let mut values = analysis.anticipated_after_phis[successor]
+                .iter()
+                .copied()
+                .filter(|value| !phi_definitions[successor].contains(value))
+                .collect::<HashSet<_>>();
+            values.extend(phi_uses[block][0].iter().copied());
+            values
+        } else {
+            HashSet::new()
+        };
+        for (edge, &successor) in cfg.successors[block].iter().enumerate().skip(1) {
+            expected_exit.retain(|value| {
+                (analysis.anticipated_after_phis[successor].contains(value)
+                    && !phi_definitions[successor].contains(value))
+                    || phi_uses[block][edge].contains(value)
+            });
+        }
+
+        let mut instruction_definitions = HashSet::<VReg>::new();
+        let mut after_phi_uses = HashSet::<VReg>::new();
+        for inst in &mir_block.insts {
+            for value in inst.uses() {
+                if !instruction_definitions.contains(&value) {
+                    after_phi_uses.insert(value);
+                }
+            }
+            if let Some(definition) = inst.def() {
+                instruction_definitions.insert(definition);
+            }
+        }
+        expected_exit.retain(|value| !instruction_definitions.contains(value));
+        expected_exit.extend(after_phi_uses);
+
+        let actual = &analysis.anticipated_after_phis[block];
+        if actual != &expected_exit {
+            let value = actual.symmetric_difference(&expected_exit).next().copied();
+            return Err(NextUseError::new(
+                "NEXT_USE.ANTICIPATED_EQUATION",
+                Some(mir_block.id),
+                Some(0),
+                value.into_iter().collect(),
+                format!(
+                    "anticipated-after-phi values differ from the CFG equation (actual={}, expected={})",
+                    actual.len(),
+                    expected_exit.len()
+                ),
+            ));
         }
     }
     Ok(())
@@ -1555,33 +1691,84 @@ struct BlockTransfer {
     length: usize,
     definitions: HashSet<VReg>,
     local_uses: Vec<(VReg, usize)>,
+    phi_definitions: HashSet<VReg>,
+    instruction_definitions: HashSet<VReg>,
+    after_phi_uses: Vec<VReg>,
 }
 
 fn block_transfers(func: &MFunction) -> Vec<BlockTransfer> {
     func.blocks
         .iter()
         .map(|block| {
-            let mut definitions = block.phis.iter().map(|phi| phi.dst).collect::<HashSet<_>>();
+            let phi_definitions = block.phis.iter().map(|phi| phi.dst).collect::<HashSet<_>>();
+            let mut definitions = phi_definitions.clone();
+            let mut instruction_definitions = HashSet::<VReg>::new();
             let mut local_uses = HashMap::<VReg, usize>::new();
+            let mut after_phi_uses = HashSet::<VReg>::new();
             for (position, inst) in block.insts.iter().enumerate() {
                 for used in inst.uses() {
                     if !definitions.contains(&used) {
                         local_uses.entry(used).or_insert(position);
                     }
+                    if !instruction_definitions.contains(&used) {
+                        after_phi_uses.insert(used);
+                    }
                 }
                 if let Some(definition) = inst.def() {
                     definitions.insert(definition);
+                    instruction_definitions.insert(definition);
                 }
             }
             let mut local_uses = local_uses.into_iter().collect::<Vec<_>>();
             local_uses.sort_by_key(|(value, _)| *value);
+            let mut after_phi_uses = after_phi_uses.into_iter().collect::<Vec<_>>();
+            after_phi_uses.sort_unstable();
             BlockTransfer {
                 length: block.insts.len(),
                 definitions,
                 local_uses,
+                phi_definitions,
+                instruction_definitions,
+                after_phi_uses,
             }
         })
         .collect()
+}
+
+/// Intersect guaranteed uses over all outgoing edges.  Phi destinations are
+/// defined at the successor and therefore do not propagate backwards; their
+/// corresponding source is represented by the edge-local phi use instead.
+fn anticipated_on_all_successors(
+    successors: &[usize],
+    anticipated_after_phis: &[HashSet<VReg>],
+    transfers: &[BlockTransfer],
+    phi_edge_uses: &[Vec<VReg>],
+) -> HashSet<VReg> {
+    let Some(seed_edge) = (0..successors.len()).min_by_key(|edge| {
+        anticipated_after_phis[successors[*edge]]
+            .len()
+            .saturating_add(phi_edge_uses[*edge].len())
+    }) else {
+        return HashSet::new();
+    };
+    let seed_successor = successors[seed_edge];
+    let mut result = anticipated_after_phis[seed_successor]
+        .iter()
+        .copied()
+        .filter(|value| !transfers[seed_successor].phi_definitions.contains(value))
+        .collect::<HashSet<_>>();
+    result.extend(phi_edge_uses[seed_edge].iter().copied());
+    for (edge, &successor) in successors.iter().enumerate() {
+        if edge == seed_edge {
+            continue;
+        }
+        result.retain(|value| {
+            (anticipated_after_phis[successor].contains(value)
+                && !transfers[successor].phi_definitions.contains(value))
+                || phi_edge_uses[edge].contains(value)
+        });
+    }
+    result
 }
 
 fn phi_edge_uses(
@@ -1640,7 +1827,173 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::backend::native::mir::{BlockId, MBlock, MInst, PhiNode, SpillDesc, VRegAllocator};
+    use crate::backend::native::mir::{
+        BaseReg, BlockId, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator,
+    };
+
+    #[test]
+    fn anticipatability_intersects_branch_paths_and_verifies_its_equation() {
+        let mut vregs = VRegAllocator::new();
+        let condition = vregs.alloc();
+        let one_arm = vregs.alloc();
+        let after_join = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 3]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::LoadImm {
+            dst: one_arm,
+            value: 2,
+        });
+        entry.push(MInst::LoadImm {
+            dst: after_join,
+            value: 3,
+        });
+        entry.push(MInst::Jump { target: BlockId(1) });
+
+        let mut decision = MBlock::new(BlockId(1));
+        decision.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(2),
+            false_bb: BlockId(3),
+        });
+
+        let mut left = MBlock::new(BlockId(2));
+        left.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: one_arm,
+            size: OpSize::S64,
+        });
+        left.push(MInst::Jump { target: BlockId(4) });
+
+        let mut right = MBlock::new(BlockId(3));
+        right.push(MInst::Jump { target: BlockId(4) });
+
+        let mut join = MBlock::new(BlockId(4));
+        join.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: after_join,
+            size: OpSize::S64,
+        });
+        join.push(MInst::Return);
+        func.blocks = vec![entry, decision, left, right, join];
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let decision = cfg.block_index[&BlockId(1)];
+        let analysis = analyze(&func, &cfg).unwrap();
+
+        assert!(analysis.anticipated_at_entry(decision, condition));
+        assert!(!analysis.anticipated_at_entry(decision, one_arm));
+        assert!(analysis.anticipated_at_entry(decision, after_join));
+        analysis.verify(&func, &cfg).unwrap();
+
+        let mut stale = analysis;
+        stale.anticipated_after_phis[decision].insert(one_arm);
+        let error = stale.verify(&func, &cfg).unwrap_err();
+        assert_eq!(error.rule, "NEXT_USE.ANTICIPATED_EQUATION");
+        assert_eq!(error.block, Some(BlockId(1)));
+        assert_eq!(error.values, vec![one_arm]);
+    }
+
+    #[test]
+    fn phi_destination_is_anticipated_after_the_phi_not_on_predecessor_edges() {
+        let mut vregs = VRegAllocator::new();
+        let condition = vregs.alloc();
+        let left_value = vregs.alloc();
+        let right_value = vregs.alloc();
+        let merged = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 4]);
+
+        let mut entry = MBlock::new(BlockId(0));
+        entry.push(MInst::LoadImm {
+            dst: condition,
+            value: 1,
+        });
+        entry.push(MInst::Branch {
+            cond: condition,
+            true_bb: BlockId(1),
+            false_bb: BlockId(2),
+        });
+        let mut left = MBlock::new(BlockId(1));
+        left.push(MInst::LoadImm {
+            dst: left_value,
+            value: 2,
+        });
+        left.push(MInst::Jump { target: BlockId(3) });
+        let mut right = MBlock::new(BlockId(2));
+        right.push(MInst::LoadImm {
+            dst: right_value,
+            value: 3,
+        });
+        right.push(MInst::Jump { target: BlockId(3) });
+        let mut join = MBlock::new(BlockId(3));
+        join.phis.push(PhiNode {
+            dst: merged,
+            sources: vec![(BlockId(1), left_value), (BlockId(2), right_value)],
+        });
+        join.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: merged,
+            size: OpSize::S64,
+        });
+        join.push(MInst::Return);
+        func.blocks = vec![entry, left, right, join];
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let analysis = analyze(&func, &cfg).unwrap();
+        let join = cfg.block_index[&BlockId(3)];
+
+        assert!(analysis.anticipated_at_entry(join, merged));
+        assert!(!analysis.anticipated_at_entry(join, left_value));
+        assert!(!analysis.anticipated_at_entry(join, right_value));
+        analysis.verify(&func, &cfg).unwrap();
+    }
+
+    #[test]
+    fn local_use_slice_contains_every_distinct_straight_line_use() {
+        let mut vregs = VRegAllocator::new();
+        let value = vregs.alloc();
+        let copy = vregs.alloc();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: value,
+            value: 1,
+        });
+        block.push(MInst::Add {
+            dst: copy,
+            lhs: value,
+            rhs: value,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: copy,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 8,
+            src: value,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.blocks.push(block);
+
+        let cfg = super::super::cfg::normalize(&mut func).unwrap();
+        let analysis = analyze(&func, &cfg).unwrap();
+
+        assert_eq!(analysis.local_uses_from(0, 0, value), &[1, 3]);
+        assert_eq!(analysis.local_uses_from(0, 2, value), &[3]);
+        assert!(analysis.local_uses_from(0, 4, value).is_empty());
+        analysis.verify(&func, &cfg).unwrap();
+    }
 
     #[test]
     fn missing_phi_edge_source_is_a_structured_analysis_error() {
@@ -1661,6 +2014,7 @@ mod tests {
             predecessors: vec![vec![], vec![0]],
             successors: vec![vec![1], vec![]],
             idom: vec![None, Some(0)],
+            dominator_children: vec![vec![1], vec![]],
             dominance_frontier: vec![BTreeSet::new(); 2],
             loops: Vec::new(),
             loop_for_header: HashMap::new(),
@@ -1843,6 +2197,7 @@ mod tests {
             predecessors: vec![vec![], vec![0, 2], vec![0, 1], vec![1, 2]],
             successors: vec![vec![1, 2], vec![2, 3], vec![1, 3], vec![]],
             idom: vec![None, Some(0), Some(0), Some(0)],
+            dominator_children: vec![vec![1, 2, 3], vec![], vec![], vec![]],
             dominance_frontier: vec![BTreeSet::new(); 4],
             loops: Vec::new(),
             loop_for_header: HashMap::new(),

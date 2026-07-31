@@ -43,6 +43,52 @@ fn test_ff_nonblocking(sim) {
     assert_eq!(sim.get(q), 0x11111111u32.into());
 }
 
+fn test_ff_static_and_dynamic_writes_share_sparse_state(sim) {
+    @omit_veryl;
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            use_static: input logic,
+            index: input logic<2>,
+            value: input logic<8>,
+            q: output logic<8>
+        ) {
+            var state: logic<8> [4];
+            always_ff (clk) {
+                if use_static {
+                    state[0] = value;
+                } else {
+                    state[index] = value;
+                }
+                q = state[0];
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let use_static = sim.signal("use_static");
+    let index = sim.signal("index");
+    let value = sim.signal("value");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(use_static, 1u8);
+        io.set(value, 0x5au8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0u8.into());
+
+    sim.modify(|io| {
+        io.set(use_static, 0u8);
+        io.set(index, 1u8);
+        io.set(value, 0xa5u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0x5au8.into());
+}
+
 fn test_ff_runtime_display_and_assert_continue(sim) {
     @omit_veryl;
     @ignore_on(wasm);

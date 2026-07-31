@@ -9,6 +9,8 @@ use std::collections::VecDeque;
 use crate::backend::native::mir::*;
 use crate::{HashMap, HashSet};
 
+use super::assignment::{AssignmentMap, EdgeLocation};
+
 /// Large constant used as edge length for loop-exit edges.
 /// Ensures that uses behind loops have larger distances than uses inside loops.
 const LOOP_EXIT_LENGTH: u32 = 100_000;
@@ -30,12 +32,49 @@ pub struct AnalysisResult {
 
 /// Compute liveness and next-use distances for the entire MFunction.
 pub fn analyze(func: &MFunction) -> AnalysisResult {
-    analyze_ignoring_phi_sources(func, &HashSet::default())
+    analyze_ignoring_phi_sources(func, &HashSet::default(), &HashSet::default())
 }
 
-pub(super) fn analyze_ignoring_phi_sources(
+/// Rebuild verifier liveness from destination-qualified phi locations.
+/// Semantic source VRegs remain in MIR for out-of-SSA identity, but an exact
+/// stack/immediate row is not a register use on that edge. A stack-resident
+/// phi value likewise remains a location value until an explicit reload
+/// defines a new machine VReg.
+pub(super) fn analyze_for_assignment(
     func: &MFunction,
-    ignored_phi_sources: &HashSet<VReg>,
+    assignment: &AssignmentMap,
+) -> AnalysisResult {
+    let mut ignored_phi_sources = assignment
+        .phi_edge_locations
+        .iter()
+        .filter_map(|(&edge, &location)| {
+            (!matches!(location, EdgeLocation::Register(_))).then_some(edge)
+        })
+        .collect::<HashSet<_>>();
+    for block in &func.blocks {
+        for phi in &block.phis {
+            if assignment.is_semantic_phi_definition(phi.dst) {
+                ignored_phi_sources.extend(
+                    phi.sources
+                        .iter()
+                        .map(|&(predecessor, source)| (predecessor, block.id, phi.dst, source)),
+                );
+            }
+        }
+    }
+    let stack_values = assignment
+        .edge_spill_slots
+        .keys()
+        .copied()
+        .filter(|value| assignment.get(*value).is_none())
+        .collect::<HashSet<_>>();
+    analyze_ignoring_phi_sources(func, &ignored_phi_sources, &stack_values)
+}
+
+fn analyze_ignoring_phi_sources(
+    func: &MFunction,
+    ignored_phi_sources: &HashSet<(BlockId, BlockId, VReg, VReg)>,
+    stack_values: &HashSet<VReg>,
 ) -> AnalysisResult {
     let num_blocks = func.blocks.len();
 
@@ -60,7 +99,13 @@ pub(super) fn analyze_ignoring_phi_sources(
     let backedge_successors = compute_backedge_successors(&successors);
     let backedge_successor_edges =
         compute_backedge_successor_edges(&successors, &backedge_successors);
-    let phi_edge_uses = compute_phi_edge_uses(func, &block_order, &successors, ignored_phi_sources);
+    let phi_edge_uses = compute_phi_edge_uses(
+        func,
+        &block_order,
+        &successors,
+        ignored_phi_sources,
+        stack_values,
+    );
     let block_transfers = compute_block_transfers(func);
 
     // Initialize next-use distance maps
@@ -215,7 +260,8 @@ fn compute_phi_edge_uses(
     func: &MFunction,
     block_order: &[BlockId],
     successors: &[Vec<usize>],
-    ignored: &HashSet<VReg>,
+    ignored: &HashSet<(BlockId, BlockId, VReg, VReg)>,
+    stack_values: &HashSet<VReg>,
 ) -> Vec<Vec<Vec<VReg>>> {
     let mut phi_edge_uses = successors
         .iter()
@@ -228,7 +274,10 @@ fn compute_phi_edge_uses(
             let succ_block = &func.blocks[succ_idx];
             for phi in &succ_block.phis {
                 for (source_pred, source) in &phi.sources {
-                    if *source_pred == pred_id && !ignored.contains(source) {
+                    if *source_pred == pred_id
+                        && !ignored.contains(&(pred_id, succ_block.id, phi.dst, *source))
+                        && !stack_values.contains(source)
+                    {
                         phi_edge_uses[pred_idx][edge_idx].push(*source);
                     }
                 }
@@ -344,5 +393,52 @@ mod tests {
             analysis.entry_distances[block_count - 1].contains_key(&live),
             "live value should propagate to BlockId(0) through the long DAG"
         );
+    }
+
+    #[test]
+    fn completed_assignment_filters_phi_sources_by_exact_destination_row() {
+        let mut predecessor = MBlock::new(BlockId(0));
+        predecessor.push(MInst::LoadImm {
+            dst: VReg(0),
+            value: 7,
+        });
+        predecessor.push(MInst::Jump { target: BlockId(1) });
+        let mut successor = MBlock::new(BlockId(1));
+        successor.phis.push(PhiNode {
+            dst: VReg(1),
+            sources: vec![(BlockId(0), VReg(0))],
+        });
+        successor.phis.push(PhiNode {
+            dst: VReg(2),
+            sources: vec![(BlockId(0), VReg(0))],
+        });
+        successor.push(MInst::Return);
+        let mut values = VRegAllocator::new();
+        for _ in 0..3 {
+            values.alloc();
+        }
+        let mut function = MFunction::new(values, vec![SpillDesc::transient(); 3]);
+        function.blocks = vec![predecessor, successor];
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set_phi_edge_location(
+            BlockId(0),
+            BlockId(1),
+            VReg(1),
+            VReg(0),
+            EdgeLocation::Stack(0),
+        );
+        let one_register_row = analyze_for_assignment(&function, &assignment);
+        assert!(one_register_row.exit_distances[0].contains_key(&VReg(0)));
+
+        assignment.set_phi_edge_location(
+            BlockId(0),
+            BlockId(1),
+            VReg(2),
+            VReg(0),
+            EdgeLocation::Immediate(7),
+        );
+        let no_register_rows = analyze_for_assignment(&function, &assignment);
+        assert!(!no_register_rows.exit_distances[0].contains_key(&VReg(0)));
     }
 }

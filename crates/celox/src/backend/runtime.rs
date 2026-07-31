@@ -311,7 +311,10 @@ impl JitBackend {
                     match super::native::emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size) {
                         Ok(result) => {
                             mir_output.push_str("  x86-64 disassembly:\n");
-                            mir_output.push_str(&super::native::emit::disassemble(&result.code, 0));
+                            mir_output.push_str(&super::native::emit::disassemble(
+                                &result.code[..result.text_size],
+                                0,
+                            ));
                         }
                         Err(e) => {
                             mir_output.push_str(&format!("  emit error: {e}\n"));

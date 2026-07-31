@@ -141,6 +141,18 @@ export default defineConfig({
             { text: "IR Reference", link: "/internals/ir-reference" },
             { text: "Optimizations", link: "/internals/optimizations" },
             { text: "JIT Roadmap", link: "/internals/jit-roadmap" },
+            {
+              text: "Native Throughput Plan",
+              link: "/internals/native-throughput-execution-plan",
+            },
+            {
+              text: "Native Register Allocation",
+              link: "/internals/native-register-allocation",
+            },
+            {
+              text: "Fused State SSA and Placement",
+              link: "/internals/fused-state-ssa-placement",
+            },
             { text: "4-State Simulation", link: "/internals/four-state" },
             {
               text: "Combinational Analysis",

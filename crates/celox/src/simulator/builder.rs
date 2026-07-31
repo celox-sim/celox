@@ -30,6 +30,7 @@ fn analyze(
     reset_type: Option<ResetType>,
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
+    preserve_element_storage_layout: bool,
 ) -> (Result<Program, ParserError>, Vec<AnalyzerError>) {
     symbol_table::clear();
     attribute_table::clear();
@@ -100,6 +101,7 @@ fn analyze(
         trace_opts,
         trace_out,
         optimize_options,
+        preserve_element_storage_layout,
     );
     (sir, errors)
 }
@@ -129,6 +131,45 @@ pub fn compile_to_sir(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
 ) -> Result<(Program, Vec<AnalyzerError>), SimulatorError> {
+    compile_to_sir_with_layout_mode(
+        sources,
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        param_overrides,
+        optimize_options,
+        crate::backend::memory_layout::MemoryLayoutMode::Packed,
+    )
+}
+
+fn compile_to_sir_with_layout_mode(
+    sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+) -> Result<(Program, Vec<AnalyzerError>), SimulatorError> {
     let (sir, errors) = analyze(
         sources,
         top,
@@ -142,6 +183,7 @@ pub fn compile_to_sir(
         reset_type,
         param_overrides,
         optimize_options,
+        layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
     );
     let (real_errors, warnings): (Vec<_>, Vec<_>) = errors.into_iter().partition(|e| e.is_error());
     if !real_errors.is_empty() {
@@ -435,6 +477,26 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self
     }
 
+    /// Add one profile-selected native JIT block to state-layout feasibility
+    /// analysis. The analysis is captured by [`Self::build_with_trace`] from
+    /// the exact merged SIR passed to native instruction selection.
+    pub fn trace_native_profile_block(
+        mut self,
+        function: impl Into<String>,
+        block: u32,
+        samples: u64,
+    ) -> Self {
+        self.options
+            .trace
+            .native_profile_blocks
+            .push(crate::debug::NativeProfileBlock {
+                function: function.into(),
+                block,
+                samples,
+            });
+        self
+    }
+
     pub fn trace_on_build(mut self) -> Self {
         self.options.trace.output_to_stdout = true;
         self
@@ -514,7 +576,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     > {
         let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
         let compile_start = phase_timing.then(crate::timing::now);
-        let (mut program, warnings) = compile_to_sir(
+        let (mut program, warnings) = compile_to_sir_with_layout_mode(
             &self.sources,
             self.top,
             &self.ignored_loops,
@@ -527,6 +589,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             self.reset_type,
             &self.param_overrides,
             &self.options.optimize_options,
+            layout_mode,
         )?;
         if let Some(start) = compile_start {
             eprintln!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
@@ -701,7 +764,11 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     /// while capturing compilation trace data as configured by TraceOptions.
     pub fn build_with_trace(self) -> crate::debug::CompilationTraceResult {
         let mut trace = crate::debug::CompilationTrace::default();
-        let program_res = compile_to_sir(
+        #[cfg(target_arch = "x86_64")]
+        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
+        #[cfg(not(target_arch = "x86_64"))]
+        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
+        let program_res = compile_to_sir_with_layout_mode(
             &self.sources,
             self.top,
             &self.ignored_loops,
@@ -714,38 +781,35 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             self.reset_type,
             &self.param_overrides,
             &self.options.optimize_options,
+            layout_mode,
         );
 
         let sim_res = program_res.and_then(|(mut program, warnings)| {
             // Register testbench runtime-event sites before layout fixes the ring geometry.
             crate::testbench::register_runtime_event_sites(&mut program);
 
-            #[cfg(target_arch = "x86_64")]
-            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
-            #[cfg(not(target_arch = "x86_64"))]
-            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
             program.build_layout_with_mode(self.options.four_state, layout_mode);
 
             if self.options.dead_store_policy != DeadStorePolicy::Off {
                 run_dead_store_elimination(&mut program, &self.live_signals, &self.options);
             }
 
-            // Run MIR trace if requested (generates MIR output before/after optimization + regalloc)
             #[cfg(target_arch = "x86_64")]
-            if self.options.trace.mir {
-                let layout = program
-                    .layout
-                    .as_ref()
-                    .expect("layout must be built before MIR trace");
-                trace.mir = Some(format_native_mir(
-                    &program,
-                    layout,
-                    self.options.four_state,
-                )?);
-            }
-
-            #[cfg(target_arch = "x86_64")]
-            let backend = crate::backend::native::NativeBackend::new(&program, &self.options)?;
+            let backend =
+                if self.options.trace.mir || !self.options.trace.native_profile_blocks.is_empty() {
+                    let (backend, native_trace) =
+                        crate::backend::native::NativeBackend::new_with_codegen_trace(
+                            &program,
+                            &self.options,
+                        )?;
+                    trace.native_optimized_sir = Some(native_trace.optimized_sir);
+                    trace.mir = Some(native_trace.mir);
+                    trace.reactive_event_graph = Some(native_trace.reactive_graph);
+                    trace.native_state_layout = Some(native_trace.state_layout);
+                    backend
+                } else {
+                    crate::backend::native::NativeBackend::new(&program, &self.options)?
+                };
             #[cfg(not(target_arch = "x86_64"))]
             let backend = JitBackend::new(&program, &self.options, None)?;
 
@@ -764,81 +828,6 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             trace,
         }
     }
-}
-
-/// Format every native MIR execution unit in the compiled Program.
-///
-/// This is deliberately behind the explicit `trace_mir` option.  The normal
-/// build path does not stringify or duplicate MIR.  Keep the group order and
-/// trigger labels here in sync with the native backend's three FF maps.
-#[cfg(target_arch = "x86_64")]
-fn format_native_mir(
-    program: &Program,
-    layout: &crate::backend::MemoryLayout,
-    four_state: bool,
-) -> Result<String, SimulatorError> {
-    let mut output = String::new();
-    output.push_str("=== MIR (all native execution units) ===\n");
-
-    output.push_str("=== MIR (eval_comb) ===\n");
-    for (idx, eu) in program.eval_comb.iter().enumerate() {
-        append_native_mir_unit(&mut output, "eval_comb", idx, eu, layout, four_state)?;
-    }
-
-    for (group, groups) in [
-        ("eval_apply_ffs", &program.eval_apply_ffs),
-        ("eval_only_ffs", &program.eval_only_ffs),
-        ("apply_ffs", &program.apply_ffs),
-    ] {
-        let mut entries = groups.iter().collect::<Vec<_>>();
-        entries.sort_by_key(|(addr, _)| **addr);
-        for (addr, units) in entries {
-            output.push_str(&format!(
-                "=== MIR ({group}) Trigger: {} ===\n",
-                program.get_path(addr)
-            ));
-            for (idx, eu) in units.iter().enumerate() {
-                append_native_mir_unit(&mut output, group, idx, eu, layout, four_state)?;
-            }
-        }
-    }
-
-    Ok(output)
-}
-
-#[cfg(target_arch = "x86_64")]
-fn append_native_mir_unit(
-    output: &mut String,
-    group: &str,
-    index: usize,
-    eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>,
-    layout: &crate::backend::MemoryLayout,
-    four_state: bool,
-) -> Result<(), SimulatorError> {
-    use crate::backend::native::{emit, isel, mir_opt, regalloc};
-
-    let mut mfunc = isel::lower_execution_unit(eu, layout, four_state);
-    crate::backend::native::mir_legalize::legalize(&mut mfunc);
-    mir_opt::optimize(&mut mfunc);
-    output.push_str(&format!(
-        "Execution Unit {group}[{index}] (before regalloc):\n{mfunc}\n"
-    ));
-    let label = format!("trace_{group}_{index}");
-    let ra = regalloc::run_regalloc_with_label(&mut mfunc, &label)
-        .map_err(|error| SimulatorError::from(error.to_string()))?;
-    output.push_str(&format!(
-        "Execution Unit {group}[{index}] (after regalloc):\n{mfunc}"
-    ));
-    output.push_str("  Register assignment:\n");
-    for (vreg, preg) in ra.assignment.sorted_entries() {
-        output.push_str(&format!("    {vreg} -> {preg}\n"));
-    }
-    if let Ok(result) = emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size) {
-        output.push_str("  x86-64 disassembly:\n");
-        output.push_str(&emit::disassemble(&result.code, 0));
-    }
-    output.push('\n');
-    Ok(())
 }
 
 fn run_test_with_sim<B: crate::backend::SimBackend>(
@@ -900,7 +889,11 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
     /// Compiles the Veryl source and constructs the timed simulation wrapper.
     pub fn build(mut self) -> Result<crate::Simulation, SimulatorError> {
         self.options.emit_triggers = true;
-        let (mut program, warnings) = compile_to_sir(
+        #[cfg(target_arch = "x86_64")]
+        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
+        #[cfg(not(target_arch = "x86_64"))]
+        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
+        let (mut program, warnings) = compile_to_sir_with_layout_mode(
             &self.sources,
             self.top,
             &self.ignored_loops,
@@ -913,11 +906,8 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             self.reset_type,
             &self.param_overrides,
             &self.options.optimize_options,
+            layout_mode,
         )?;
-        #[cfg(target_arch = "x86_64")]
-        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
-        #[cfg(not(target_arch = "x86_64"))]
-        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
         program.build_layout_with_mode(self.options.four_state, layout_mode);
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {

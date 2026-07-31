@@ -85,10 +85,38 @@ fn partial_forward_block(
                     {
                         let rel_off = *off - state.base_off;
                         let store_end = rel_off + *width;
-                        state.overlays.retain(|(o, w, _)| {
-                            let end = *o + *w;
-                            store_end <= *o || end <= rel_off
-                        });
+                        let old_overlays = std::mem::take(&mut state.overlays);
+                        for (old_off, old_width, old_reg) in old_overlays {
+                            let old_end = old_off + old_width;
+                            if store_end <= old_off || old_end <= rel_off {
+                                state.overlays.push((old_off, old_width, old_reg));
+                                continue;
+                            }
+                            if old_off < rel_off {
+                                let preserved_width = rel_off - old_off;
+                                let preserved =
+                                    alloc_reg(register_map, reg_counter, preserved_width);
+                                new_instructions.push(SIRInstruction::Slice(
+                                    preserved,
+                                    old_reg,
+                                    0,
+                                    preserved_width,
+                                ));
+                                state.overlays.push((old_off, preserved_width, preserved));
+                            }
+                            if store_end < old_end {
+                                let preserved_width = old_end - store_end;
+                                let preserved =
+                                    alloc_reg(register_map, reg_counter, preserved_width);
+                                new_instructions.push(SIRInstruction::Slice(
+                                    preserved,
+                                    old_reg,
+                                    store_end - old_off,
+                                    preserved_width,
+                                ));
+                                state.overlays.push((store_end, preserved_width, preserved));
+                            }
+                        }
                         state.overlays.push((rel_off, *width, *src));
                         new_instructions.push(inst);
                         continue;
@@ -225,4 +253,178 @@ fn alloc_reg(
     let reg = RegisterId(*counter);
     register_map.insert(reg, RegisterType::Logic { width });
     reg
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{AbsoluteAddr, InstanceId, STABLE_REGION};
+    use veryl_analyzer::ir::VarId;
+
+    fn address() -> RegionedAbsoluteAddr {
+        RegionedAbsoluteAddr::from_absolute_addr(
+            STABLE_REGION,
+            AbsoluteAddr {
+                instance_id: InstanceId(0),
+                var_id: VarId::from_raw(0),
+            },
+        )
+    }
+
+    fn logic(width: usize) -> RegisterType {
+        RegisterType::Logic { width }
+    }
+
+    #[test]
+    fn forwards_a_narrow_store_into_a_following_full_load() {
+        let base = RegisterId(0);
+        let overlay = RegisterId(1);
+        let result = RegisterId(2);
+        let mut block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Load(base, address(), SIROffset::Static(0), 8),
+                SIRInstruction::Store(
+                    address(),
+                    SIROffset::Static(2),
+                    2,
+                    overlay,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                SIRInstruction::Load(result, address(), SIROffset::Static(0), 8),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let mut registers = [(base, logic(8)), (overlay, logic(2)), (result, logic(8))]
+            .into_iter()
+            .collect();
+        let mut next = 2;
+
+        partial_forward_block(&mut block, &mut registers, &mut next);
+
+        assert_eq!(
+            block
+                .instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, SIRInstruction::Load(..)))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            block.instructions.last(),
+            Some(SIRInstruction::Concat(dst, arguments))
+                if *dst == result && arguments.contains(&overlay)
+        ));
+    }
+
+    #[test]
+    fn a_partially_overlapping_store_preserves_both_sides_of_the_old_overlay() {
+        let base = RegisterId(0);
+        let old = RegisterId(1);
+        let new = RegisterId(2);
+        let result = RegisterId(3);
+        let mut block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Load(base, address(), SIROffset::Static(0), 8),
+                SIRInstruction::Store(
+                    address(),
+                    SIROffset::Static(2),
+                    3,
+                    old,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                SIRInstruction::Store(
+                    address(),
+                    SIROffset::Static(3),
+                    1,
+                    new,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                SIRInstruction::Load(result, address(), SIROffset::Static(0), 8),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let mut registers = [
+            (base, logic(8)),
+            (old, logic(3)),
+            (new, logic(1)),
+            (result, logic(8)),
+        ]
+        .into_iter()
+        .collect();
+        let mut next = 3;
+
+        partial_forward_block(&mut block, &mut registers, &mut next);
+
+        let preserved = block
+            .instructions
+            .iter()
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Slice(_, source, offset, width) if *source == old => {
+                    Some((*offset, *width))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(preserved, vec![(0, 1), (2, 1)]);
+        assert_eq!(
+            block
+                .instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, SIRInstruction::Load(..)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_dynamic_store_invalidates_the_forwarding_state() {
+        let base = RegisterId(0);
+        let offset = RegisterId(1);
+        let overlay = RegisterId(2);
+        let result = RegisterId(3);
+        let mut block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Load(base, address(), SIROffset::Static(0), 8),
+                SIRInstruction::Store(
+                    address(),
+                    SIROffset::Dynamic(offset),
+                    1,
+                    overlay,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                SIRInstruction::Load(result, address(), SIROffset::Static(0), 8),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let mut registers = [
+            (base, logic(8)),
+            (offset, logic(3)),
+            (overlay, logic(1)),
+            (result, logic(8)),
+        ]
+        .into_iter()
+        .collect();
+        let mut next = 3;
+
+        partial_forward_block(&mut block, &mut registers, &mut next);
+
+        assert_eq!(
+            block
+                .instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, SIRInstruction::Load(..)))
+                .count(),
+            2
+        );
+    }
 }

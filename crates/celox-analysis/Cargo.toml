@@ -1,0 +1,11 @@
+[package]
+name                  = "celox-analysis"
+version.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+license.workspace     = true
+description           = "IR-independent compiler analyses used by Celox"
+edition.workspace     = true
+
+[lints]
+workspace = true

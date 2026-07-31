@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
-use super::mir::{BlockId, MFunction, MInst, SparseCommitDescriptor, VReg};
+use super::mir::{BlockId, MFunction, MInst, OpSize, SparseCommitDescriptor, VReg, X86VecReg};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirVerifyError {
@@ -249,6 +249,70 @@ pub fn verify_function(func: &MFunction) -> Result<(), MirVerifyError> {
             }
         }
     }
+    verify_x86_vector_ssa(func)?;
+    Ok(())
+}
+
+fn verify_x86_vector_ssa(func: &MFunction) -> Result<(), MirVerifyError> {
+    let mut globally_defined = BTreeSet::<X86VecReg>::new();
+    for block in &func.blocks {
+        let mut locally_defined = BTreeSet::<X86VecReg>::new();
+        for (instruction, inst) in block.insts.iter().enumerate() {
+            for used in inst.x86_vec_uses().into_iter().flatten() {
+                if used.0 >= func.x86_vec_count() {
+                    return Err(MirVerifyError::instruction(
+                        "X86_VECTOR.ALLOCATED",
+                        block.id,
+                        instruction,
+                        format!(
+                            "{used} is outside allocated vector range 0..{}",
+                            func.x86_vec_count()
+                        ),
+                    ));
+                }
+                if !locally_defined.contains(&used) {
+                    return Err(MirVerifyError::instruction(
+                        "X86_VECTOR.BLOCK_LOCAL_DOMINANCE",
+                        block.id,
+                        instruction,
+                        format!("{used} has no earlier definition in this block"),
+                    ));
+                }
+            }
+            if let Some(defined) = inst.x86_vec_def() {
+                if defined.0 >= func.x86_vec_count() {
+                    return Err(MirVerifyError::instruction(
+                        "X86_VECTOR.ALLOCATED",
+                        block.id,
+                        instruction,
+                        format!(
+                            "{defined} is outside allocated vector range 0..{}",
+                            func.x86_vec_count()
+                        ),
+                    ));
+                }
+                if !globally_defined.insert(defined) {
+                    return Err(MirVerifyError::instruction(
+                        "X86_VECTOR.SINGLE_DEFINITION",
+                        block.id,
+                        instruction,
+                        format!("{defined} has more than one definition"),
+                    ));
+                }
+                locally_defined.insert(defined);
+            }
+        }
+    }
+    if globally_defined.len() != func.x86_vec_count() as usize {
+        return Err(MirVerifyError::function(
+            "X86_VECTOR.ALL_ALLOCATED_VALUES_DEFINED",
+            format!(
+                "{} vector values were allocated but {} were defined",
+                func.x86_vec_count(),
+                globally_defined.len()
+            ),
+        ));
+    }
     Ok(())
 }
 
@@ -290,11 +354,40 @@ fn verify_instruction_constraints(
                 format!("or immediate {imm:#x} is not encodable as sign-extended imm32"),
             ))
         }
+        MInst::AndStoreImm { size, imm, .. } | MInst::OrStoreImm { size, imm, .. }
+            if match size {
+                OpSize::S8 => *imm > u64::from(u8::MAX),
+                OpSize::S16 => *imm > u64::from(u16::MAX),
+                OpSize::S32 => *imm > u64::from(u32::MAX),
+                OpSize::S64 => (*imm as i32 as i64 as u64) != *imm,
+            } =>
+        {
+            Err(MirVerifyError::instruction(
+                "OPCODE.NARROW_STORE_IMMEDIATE_WIDTH",
+                block,
+                index,
+                format!("direct-memory immediate {imm:#x} is invalid for {size}"),
+            ))
+        }
+        MInst::LoadIndexed { scale, .. } if !matches!(scale, 1 | 2 | 4 | 8) => {
+            Err(MirVerifyError::instruction(
+                "OPCODE.INDEX_SCALE",
+                block,
+                index,
+                format!("indexed-memory scale {scale} is not one of 1, 2, 4, or 8"),
+            ))
+        }
         MInst::MemCopy { byte_len: 0, .. } => Err(MirVerifyError::instruction(
             "OPCODE.MEMCOPY_NON_ZERO",
             block,
             index,
             "zero-length memcpy must be eliminated before MIR",
+        )),
+        MInst::MemFill { byte_len: 0, .. } => Err(MirVerifyError::instruction(
+            "OPCODE.MEMFILL_NON_ZERO",
+            block,
+            index,
+            "zero-length memfill must be eliminated before MIR",
         )),
         MInst::LoadConstantTableAddr { table, .. } if func.constant_table(*table).is_none() => {
             Err(MirVerifyError::instruction(
@@ -304,6 +397,28 @@ fn verify_instruction_constraints(
                 format!(
                     "{table} is outside constant table range 0..{}",
                     func.constant_tables().len()
+                ),
+            ))
+        }
+        MInst::JumpTable {
+            index: selector,
+            table_base,
+            target,
+            targets,
+        } if targets.len() < 4
+            || targets.len() > 256
+            || !targets.len().is_power_of_two()
+            || selector == table_base
+            || selector == target
+            || table_base == target =>
+        {
+            Err(MirVerifyError::instruction(
+                "OPCODE.JUMP_TABLE_SHAPE",
+                block,
+                index,
+                format!(
+                    "jump table needs 4..=256 power-of-two entries and three distinct operands, got {} entries and ({selector}, {table_base}, {target})",
+                    targets.len()
                 ),
             ))
         }

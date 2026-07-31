@@ -857,6 +857,7 @@ fn estimate_block_cost(
     cost += match &block.terminator {
         SIRTerminator::Jump(_, _) => 1,
         SIRTerminator::Branch { .. } => 2,
+        SIRTerminator::Switch { .. } => 2,
         SIRTerminator::Return => 2,
         SIRTerminator::Error(_) => 2,
     };
@@ -875,7 +876,7 @@ fn estimate_block_value_count(
         count += estimate_clif_cost(inst, &eu.register_map, four_state);
     }
     count += match &block.terminator {
-        SIRTerminator::Branch { .. } => 1,
+        SIRTerminator::Branch { .. } | SIRTerminator::Switch { .. } => 1,
         _ => 0,
     };
     count
@@ -949,6 +950,11 @@ fn block_successors(term: &SIRTerminator) -> Vec<BlockId> {
             false_block,
             ..
         } => vec![true_block.0, false_block.0],
+        SIRTerminator::Switch { cases, default, .. } => cases
+            .iter()
+            .map(|case| case.target)
+            .chain(std::iter::once(*default))
+            .collect(),
         SIRTerminator::Return | SIRTerminator::Error(_) => vec![],
     }
 }
@@ -965,6 +971,11 @@ fn terminator_targets_with_args(term: &SIRTerminator) -> Vec<(BlockId, Vec<Regis
             (true_block.0, true_block.1.clone()),
             (false_block.0, false_block.1.clone()),
         ],
+        SIRTerminator::Switch { cases, default, .. } => cases
+            .iter()
+            .map(|case| (case.target, Vec::new()))
+            .chain(std::iter::once((*default, Vec::new())))
+            .collect(),
         SIRTerminator::Return | SIRTerminator::Error(_) => vec![],
     }
 }

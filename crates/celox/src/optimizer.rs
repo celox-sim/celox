@@ -172,6 +172,9 @@ pub enum SirPass {
     ConcatFolding,
     XorChainFolding,
     VectorizeConcat,
+    MaskedArrayAny,
+    CircularPriority,
+    IndexedStoreRecovery,
     BranchifyMux,
     SplitCoalescedStores,
     PartialForward,
@@ -197,6 +200,9 @@ impl SirPass {
         SirPass::ConcatFolding,
         SirPass::XorChainFolding,
         SirPass::VectorizeConcat,
+        SirPass::MaskedArrayAny,
+        SirPass::CircularPriority,
+        SirPass::IndexedStoreRecovery,
         SirPass::BranchifyMux,
         SirPass::SplitCoalescedStores,
         SirPass::PartialForward,
@@ -222,6 +228,9 @@ impl SirPass {
             SirPass::ConcatFolding => "concat_folding",
             SirPass::XorChainFolding => "xor_chain_folding",
             SirPass::VectorizeConcat => "vectorize_concat",
+            SirPass::MaskedArrayAny => "masked_array_any",
+            SirPass::CircularPriority => "circular_priority",
+            SirPass::IndexedStoreRecovery => "indexed_store_recovery",
             SirPass::BranchifyMux => "branchify_mux",
             SirPass::SplitCoalescedStores => "split_coalesced_stores",
             SirPass::PartialForward => "partial_forward",
@@ -248,6 +257,9 @@ impl SirPass {
             "concat_folding" => Some(SirPass::ConcatFolding),
             "xor_chain_folding" => Some(SirPass::XorChainFolding),
             "vectorize_concat" => Some(SirPass::VectorizeConcat),
+            "masked_array_any" => Some(SirPass::MaskedArrayAny),
+            "circular_priority" => Some(SirPass::CircularPriority),
+            "indexed_store_recovery" => Some(SirPass::IndexedStoreRecovery),
             "branchify_mux" => Some(SirPass::BranchifyMux),
             "split_coalesced_stores" => Some(SirPass::SplitCoalescedStores),
             "partial_forward" => Some(SirPass::PartialForward),
@@ -283,6 +295,8 @@ pub struct OptimizeOptions {
     opt_level: OptLevel,
     enabled: crate::HashSet<SirPass>,
     disabled: crate::HashSet<SirPass>,
+    max_native_memory_width: usize,
+    x86_slp: bool,
 }
 
 impl Default for OptimizeOptions {
@@ -298,6 +312,12 @@ impl OptimizeOptions {
             opt_level: level,
             enabled: crate::HashSet::default(),
             disabled: crate::HashSet::default(),
+            max_native_memory_width: if cfg!(target_arch = "x86_64") {
+                128
+            } else {
+                64
+            },
+            x86_slp: cfg!(target_arch = "x86_64"),
         }
     }
 
@@ -323,6 +343,35 @@ impl OptimizeOptions {
         self.enabled.remove(&pass);
         self.disabled.insert(pass);
         self
+    }
+
+    /// Set the largest contiguous Store represented as one SIR value.
+    ///
+    /// 64 preserves scalar word-sized placement. 128 exposes one x86 vector
+    /// to target SLP while wider stores are still split before lowering.
+    pub fn with_max_native_memory_width(mut self, width: usize) -> Self {
+        assert!(
+            matches!(width, 64 | 128),
+            "coalesced Store width must be 64 or 128 bits"
+        );
+        self.max_native_memory_width = width;
+        self
+    }
+
+    pub fn max_native_memory_width(&self) -> usize {
+        self.max_native_memory_width
+    }
+
+    /// Enable or disable target-owned x86 SLP selection after scalar MIR
+    /// optimization. This is independent of SIR memory coalescing width so
+    /// profitability can be measured without conflating the two transforms.
+    pub fn with_x86_slp(mut self, enable: bool) -> Self {
+        self.x86_slp = enable;
+        self
+    }
+
+    pub fn x86_slp_enabled(&self) -> bool {
+        self.x86_slp
     }
 
     /// Query whether a specific pass is active.
@@ -354,6 +403,9 @@ pub struct PassOptions {
     pub max_inflight_loads: usize,
     pub four_state: bool,
     pub optimize_options: OptimizeOptions,
+    /// Preserve source array element boundaries for a backend layout that
+    /// stores each element in its own naturally sized scalar slot.
+    pub preserve_element_storage_layout: bool,
 }
 
 impl Default for PassOptions {
@@ -362,6 +414,7 @@ impl Default for PassOptions {
             max_inflight_loads: 8,
             four_state: false,
             optimize_options: OptimizeOptions::default(),
+            preserve_element_storage_layout: false,
         }
     }
 }
@@ -397,6 +450,23 @@ impl PassManager {
 }
 
 pub fn optimize(program: &mut Program, four_state: bool, optimize_options: &OptimizeOptions) {
+    optimize_impl(program, four_state, optimize_options, false);
+}
+
+pub(crate) fn optimize_preserving_element_storage(
+    program: &mut Program,
+    four_state: bool,
+    optimize_options: &OptimizeOptions,
+) {
+    optimize_impl(program, four_state, optimize_options, true);
+}
+
+fn optimize_impl(
+    program: &mut Program,
+    four_state: bool,
+    optimize_options: &OptimizeOptions,
+    preserve_element_storage_layout: bool,
+) {
     let mut manager = PassManager::new();
     manager.add_pass(coalescing::CoalescingPass);
     manager.run(
@@ -404,6 +474,7 @@ pub fn optimize(program: &mut Program, four_state: bool, optimize_options: &Opti
         &PassOptions {
             four_state,
             optimize_options: optimize_options.clone(),
+            preserve_element_storage_layout,
             ..PassOptions::default()
         },
     );
@@ -425,5 +496,49 @@ mod tests {
         assert!(OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::ControlFlowSimplify));
         assert!(OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::ControlFlowSimplify));
         assert!(!OptimizeOptions::new(OptLevel::O0).is_enabled(SirPass::ControlFlowSimplify));
+    }
+
+    #[test]
+    fn masked_array_any_is_cli_addressable_and_a_production_default() {
+        assert_eq!(
+            SirPass::parse("masked_array_any"),
+            Some(SirPass::MaskedArrayAny)
+        );
+        assert_eq!(SirPass::MaskedArrayAny.as_str(), "masked_array_any");
+        assert!(OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::MaskedArrayAny));
+        assert!(OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::MaskedArrayAny));
+        assert!(!OptimizeOptions::new(OptLevel::O0).is_enabled(SirPass::MaskedArrayAny));
+    }
+
+    #[test]
+    fn circular_priority_is_cli_addressable_and_a_production_default() {
+        assert_eq!(
+            SirPass::parse("circular_priority"),
+            Some(SirPass::CircularPriority)
+        );
+        assert_eq!(SirPass::CircularPriority.as_str(), "circular_priority");
+        assert!(OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::CircularPriority));
+        assert!(OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::CircularPriority));
+        assert!(!OptimizeOptions::new(OptLevel::O0).is_enabled(SirPass::CircularPriority));
+    }
+
+    #[test]
+    fn indexed_store_recovery_is_cli_addressable_and_a_production_default() {
+        assert_eq!(
+            SirPass::parse("indexed_store_recovery"),
+            Some(SirPass::IndexedStoreRecovery)
+        );
+        assert_eq!(
+            SirPass::IndexedStoreRecovery.as_str(),
+            "indexed_store_recovery"
+        );
+        assert!(OptimizeOptions::new(OptLevel::O1).is_enabled(SirPass::IndexedStoreRecovery));
+        assert!(OptimizeOptions::new(OptLevel::O2).is_enabled(SirPass::IndexedStoreRecovery));
+        assert!(!OptimizeOptions::new(OptLevel::O0).is_enabled(SirPass::IndexedStoreRecovery));
+        assert!(
+            !OptimizeOptions::new(OptLevel::O2)
+                .disable(SirPass::IndexedStoreRecovery)
+                .is_enabled(SirPass::IndexedStoreRecovery)
+        );
     }
 }

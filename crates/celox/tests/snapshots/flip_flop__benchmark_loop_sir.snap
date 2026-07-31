@@ -32,23 +32,26 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       r39: logic<32>
       r40: logic<32>
       r42: logic<32>
+      r43: bit<128>
+      r44: bit<128>
+      r45: bit<64>
+      r46: bit<128>
+      r47: bit<128>
+      r48: bit<64>
     b0:
+      Commit(src=cnt (region=0), dst=cnt (region=1), offset=0, bits=320)
       r0 = Load(addr=rst (region=0), offset=0, bits=1)
       r1 = LogicNot r0
       r2 = ToTwoState r1
       Branch(r2 ? b1 : b2)
     b1:
       r3 = SIRValue(0x0)
-      Store(addr=cnt (region=0), offset=0, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=32, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=64, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=96, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=128, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=160, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=192, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=224, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=256, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=288, bits=32, src_reg = 3)
+      r46 = Concat(r3, r3, r3, r3)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=0, element_width=32), bits=128, src_reg = 46)
+      r47 = Concat(r3, r3, r3, r3)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=128, element_width=32), bits=128, src_reg = 47)
+      r48 = Concat(r3, r3)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=256, element_width=32), bits=64, src_reg = 48)
       Jump(b3)
     b2:
       r13 = Load(addr=cnt (region=0), offset=0, bits=32)
@@ -61,29 +64,26 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       r34 = Load(addr=cnt (region=0), offset=224, bits=32)
       r14 = SIRValue(0x1)
       r15 = r13 Add r14
-      Store(addr=cnt (region=0), offset=0, bits=32, src_reg = 15)
       r37 = Load(addr=cnt (region=0), offset=256, bits=32)
       r18 = r16 Add r14
-      Store(addr=cnt (region=0), offset=32, bits=32, src_reg = 18)
       r40 = Load(addr=cnt (region=0), offset=288, bits=32)
       r21 = r19 Add r14
-      Store(addr=cnt (region=0), offset=64, bits=32, src_reg = 21)
       r24 = r22 Add r14
-      Store(addr=cnt (region=0), offset=96, bits=32, src_reg = 24)
+      r43 = Concat(r24, r21, r18, r15)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=0, element_width=32), bits=128, src_reg = 43)
       r27 = r25 Add r14
-      Store(addr=cnt (region=0), offset=128, bits=32, src_reg = 27)
       r30 = r28 Add r14
-      Store(addr=cnt (region=0), offset=160, bits=32, src_reg = 30)
       r33 = r31 Add r14
-      Store(addr=cnt (region=0), offset=192, bits=32, src_reg = 33)
       r36 = r34 Add r14
-      Store(addr=cnt (region=0), offset=224, bits=32, src_reg = 36)
+      r44 = Concat(r36, r33, r30, r27)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=128, element_width=32), bits=128, src_reg = 44)
       r39 = r37 Add r14
-      Store(addr=cnt (region=0), offset=256, bits=32, src_reg = 39)
       r42 = r40 Add r14
-      Store(addr=cnt (region=0), offset=288, bits=32, src_reg = 42)
+      r45 = Concat(r42, r39)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=256, element_width=32), bits=64, src_reg = 45)
       Jump(b3)
     b3:
+      Commit(src=cnt (region=1), dst=cnt (region=0), offset=0, bits=320)
       Return
 Trigger Group: rst (AbsoluteAddr(inst0, var2))
   Execution Unit 0:
@@ -114,23 +114,26 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       r39: logic<32>
       r40: logic<32>
       r42: logic<32>
+      r43: bit<128>
+      r44: bit<128>
+      r45: bit<64>
+      r46: bit<128>
+      r47: bit<128>
+      r48: bit<64>
     b0:
+      Commit(src=cnt (region=0), dst=cnt (region=1), offset=0, bits=320)
       r0 = Load(addr=rst (region=0), offset=0, bits=1)
       r1 = LogicNot r0
       r2 = ToTwoState r1
       Branch(r2 ? b1 : b2)
     b1:
       r3 = SIRValue(0x0)
-      Store(addr=cnt (region=0), offset=0, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=32, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=64, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=96, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=128, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=160, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=192, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=224, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=256, bits=32, src_reg = 3)
-      Store(addr=cnt (region=0), offset=288, bits=32, src_reg = 3)
+      r46 = Concat(r3, r3, r3, r3)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=0, element_width=32), bits=128, src_reg = 46)
+      r47 = Concat(r3, r3, r3, r3)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=128, element_width=32), bits=128, src_reg = 47)
+      r48 = Concat(r3, r3)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=256, element_width=32), bits=64, src_reg = 48)
       Jump(b3)
     b2:
       r13 = Load(addr=cnt (region=0), offset=0, bits=32)
@@ -143,29 +146,26 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       r34 = Load(addr=cnt (region=0), offset=224, bits=32)
       r14 = SIRValue(0x1)
       r15 = r13 Add r14
-      Store(addr=cnt (region=0), offset=0, bits=32, src_reg = 15)
       r37 = Load(addr=cnt (region=0), offset=256, bits=32)
       r18 = r16 Add r14
-      Store(addr=cnt (region=0), offset=32, bits=32, src_reg = 18)
       r40 = Load(addr=cnt (region=0), offset=288, bits=32)
       r21 = r19 Add r14
-      Store(addr=cnt (region=0), offset=64, bits=32, src_reg = 21)
       r24 = r22 Add r14
-      Store(addr=cnt (region=0), offset=96, bits=32, src_reg = 24)
+      r43 = Concat(r24, r21, r18, r15)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=0, element_width=32), bits=128, src_reg = 43)
       r27 = r25 Add r14
-      Store(addr=cnt (region=0), offset=128, bits=32, src_reg = 27)
       r30 = r28 Add r14
-      Store(addr=cnt (region=0), offset=160, bits=32, src_reg = 30)
       r33 = r31 Add r14
-      Store(addr=cnt (region=0), offset=192, bits=32, src_reg = 33)
       r36 = r34 Add r14
-      Store(addr=cnt (region=0), offset=224, bits=32, src_reg = 36)
+      r44 = Concat(r36, r33, r30, r27)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=128, element_width=32), bits=128, src_reg = 44)
       r39 = r37 Add r14
-      Store(addr=cnt (region=0), offset=256, bits=32, src_reg = 39)
       r42 = r40 Add r14
-      Store(addr=cnt (region=0), offset=288, bits=32, src_reg = 42)
+      r45 = Concat(r42, r39)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=256, element_width=32), bits=64, src_reg = 45)
       Jump(b3)
     b3:
+      Commit(src=cnt (region=1), dst=cnt (region=0), offset=0, bits=320)
       Return
 
 === Evaluation Flip-Flops (eval_only_ffs) ===
@@ -198,6 +198,12 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       r39: logic<32>
       r40: logic<32>
       r42: logic<32>
+      r43: bit<128>
+      r44: bit<128>
+      r45: bit<64>
+      r46: bit<128>
+      r47: bit<128>
+      r48: bit<64>
     b0:
       Commit(src=cnt (region=0), dst=cnt (region=1), offset=0, bits=320)
       r0 = Load(addr=rst (region=0), offset=0, bits=1)
@@ -206,16 +212,12 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       Branch(r2 ? b1 : b2)
     b1:
       r3 = SIRValue(0x0)
-      Store(addr=cnt (region=1), offset=0, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=32, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=64, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=96, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=128, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=160, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=192, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=224, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=256, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=288, bits=32, src_reg = 3)
+      r46 = Concat(r3, r3, r3, r3)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=0, element_width=32), bits=128, src_reg = 46)
+      r47 = Concat(r3, r3, r3, r3)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=128, element_width=32), bits=128, src_reg = 47)
+      r48 = Concat(r3, r3)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=256, element_width=32), bits=64, src_reg = 48)
       Jump(b3)
     b2:
       r13 = Load(addr=cnt (region=0), offset=0, bits=32)
@@ -228,27 +230,23 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       r34 = Load(addr=cnt (region=0), offset=224, bits=32)
       r14 = SIRValue(0x1)
       r15 = r13 Add r14
-      Store(addr=cnt (region=1), offset=0, bits=32, src_reg = 15)
       r37 = Load(addr=cnt (region=0), offset=256, bits=32)
       r18 = r16 Add r14
-      Store(addr=cnt (region=1), offset=32, bits=32, src_reg = 18)
       r40 = Load(addr=cnt (region=0), offset=288, bits=32)
       r21 = r19 Add r14
-      Store(addr=cnt (region=1), offset=64, bits=32, src_reg = 21)
       r24 = r22 Add r14
-      Store(addr=cnt (region=1), offset=96, bits=32, src_reg = 24)
+      r43 = Concat(r24, r21, r18, r15)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=0, element_width=32), bits=128, src_reg = 43)
       r27 = r25 Add r14
-      Store(addr=cnt (region=1), offset=128, bits=32, src_reg = 27)
       r30 = r28 Add r14
-      Store(addr=cnt (region=1), offset=160, bits=32, src_reg = 30)
       r33 = r31 Add r14
-      Store(addr=cnt (region=1), offset=192, bits=32, src_reg = 33)
       r36 = r34 Add r14
-      Store(addr=cnt (region=1), offset=224, bits=32, src_reg = 36)
+      r44 = Concat(r36, r33, r30, r27)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=128, element_width=32), bits=128, src_reg = 44)
       r39 = r37 Add r14
-      Store(addr=cnt (region=1), offset=256, bits=32, src_reg = 39)
       r42 = r40 Add r14
-      Store(addr=cnt (region=1), offset=288, bits=32, src_reg = 42)
+      r45 = Concat(r42, r39)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=256, element_width=32), bits=64, src_reg = 45)
       Jump(b3)
     b3:
       Return
@@ -281,6 +279,12 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       r39: logic<32>
       r40: logic<32>
       r42: logic<32>
+      r43: bit<128>
+      r44: bit<128>
+      r45: bit<64>
+      r46: bit<128>
+      r47: bit<128>
+      r48: bit<64>
     b0:
       Commit(src=cnt (region=0), dst=cnt (region=1), offset=0, bits=320)
       r0 = Load(addr=rst (region=0), offset=0, bits=1)
@@ -289,16 +293,12 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       Branch(r2 ? b1 : b2)
     b1:
       r3 = SIRValue(0x0)
-      Store(addr=cnt (region=1), offset=0, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=32, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=64, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=96, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=128, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=160, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=192, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=224, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=256, bits=32, src_reg = 3)
-      Store(addr=cnt (region=1), offset=288, bits=32, src_reg = 3)
+      r46 = Concat(r3, r3, r3, r3)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=0, element_width=32), bits=128, src_reg = 46)
+      r47 = Concat(r3, r3, r3, r3)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=128, element_width=32), bits=128, src_reg = 47)
+      r48 = Concat(r3, r3)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=256, element_width=32), bits=64, src_reg = 48)
       Jump(b3)
     b2:
       r13 = Load(addr=cnt (region=0), offset=0, bits=32)
@@ -311,27 +311,23 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       r34 = Load(addr=cnt (region=0), offset=224, bits=32)
       r14 = SIRValue(0x1)
       r15 = r13 Add r14
-      Store(addr=cnt (region=1), offset=0, bits=32, src_reg = 15)
       r37 = Load(addr=cnt (region=0), offset=256, bits=32)
       r18 = r16 Add r14
-      Store(addr=cnt (region=1), offset=32, bits=32, src_reg = 18)
       r40 = Load(addr=cnt (region=0), offset=288, bits=32)
       r21 = r19 Add r14
-      Store(addr=cnt (region=1), offset=64, bits=32, src_reg = 21)
       r24 = r22 Add r14
-      Store(addr=cnt (region=1), offset=96, bits=32, src_reg = 24)
+      r43 = Concat(r24, r21, r18, r15)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=0, element_width=32), bits=128, src_reg = 43)
       r27 = r25 Add r14
-      Store(addr=cnt (region=1), offset=128, bits=32, src_reg = 27)
       r30 = r28 Add r14
-      Store(addr=cnt (region=1), offset=160, bits=32, src_reg = 30)
       r33 = r31 Add r14
-      Store(addr=cnt (region=1), offset=192, bits=32, src_reg = 33)
       r36 = r34 Add r14
-      Store(addr=cnt (region=1), offset=224, bits=32, src_reg = 36)
+      r44 = Concat(r36, r33, r30, r27)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=128, element_width=32), bits=128, src_reg = 44)
       r39 = r37 Add r14
-      Store(addr=cnt (region=1), offset=256, bits=32, src_reg = 39)
       r42 = r40 Add r14
-      Store(addr=cnt (region=1), offset=288, bits=32, src_reg = 42)
+      r45 = Concat(r42, r39)
+      Store(addr=cnt (region=1), offset=packed_elements(bit=256, element_width=32), bits=64, src_reg = 45)
       Jump(b3)
     b3:
       Return

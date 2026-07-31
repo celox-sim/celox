@@ -1,8 +1,9 @@
 use crate::{
-    HashMap,
+    HashMap, HashSet,
     logic_tree::{LogicPath, SLTNodeArena, SymbolicStore},
 };
 use num_bigint::BigUint;
+use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::{collections::BTreeSet, fmt::Display};
@@ -163,9 +164,15 @@ pub struct CombObserver<A = AbsoluteAddr> {
 #[derive(Clone)]
 pub struct Program {
     pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    /// Native fast path in which the required comb LogicPaths and one FF
+    /// domain were scheduled and lowered through the same SIRBuilder.
+    pub eval_comb_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+    /// Semantic comb process for each exact published range. Physical
+    /// ExecutionUnit boundaries deliberately do not define these regions.
+    pub comb_semantic_regions: HashMap<VarAtomBase<AbsoluteAddr>, u64>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
     pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
@@ -234,11 +241,12 @@ impl Program {
                 !comb_capture_enable_needs_unaliased_old_value(&self.eval_comb, *alias_addr)
             });
         }
+        crate::optimizer::coalescing::retain_final_identity_aliases(self, four_state);
         let layout = crate::backend::MemoryLayout::build(self, four_state, mode);
 
         // Remove identity Stores for aliases validated by the layout
         if !self.address_aliases.is_empty() {
-            let aliased: crate::HashSet<AbsoluteAddr> = self
+            let aliased: crate::HashMap<AbsoluteAddr, AbsoluteAddr> = self
                 .address_aliases
                 .iter()
                 .filter(|(alias_addr, canonical_addr)| {
@@ -248,34 +256,12 @@ impl Program {
                         .zip(layout.offsets.get(canonical_addr))
                         .is_some_and(|(a, c)| a == c)
                 })
-                .map(|(addr, _)| *addr)
+                .map(|(&alias, &canonical)| (alias, canonical))
                 .collect();
             if !aliased.is_empty() {
-                for eu in &mut self.eval_comb {
-                    for block in eu.blocks.values_mut() {
-                        for inst in &mut block.instructions {
-                            if let SIRInstruction::Store(addr, _, width, _, triggers, _) = inst {
-                                if aliased.contains(&addr.absolute_addr()) {
-                                    if triggers.is_empty() {
-                                        // Mark for removal
-                                        *width = 0;
-                                    } else {
-                                        // Self-copy: set width=0 so backend skips
-                                        // the Load+Store but still emits trigger code.
-                                        *width = 0;
-                                    }
-                                }
-                            }
-                        }
-                        block.instructions.retain(|inst| {
-                            !matches!(
-                                inst,
-                                SIRInstruction::Store(_, _, 0, _, triggers, _)
-                                    if triggers.is_empty()
-                            )
-                        });
-                    }
-                }
+                crate::optimizer::coalescing::remove_final_identity_alias_stores(
+                    self, &aliased, four_state,
+                );
             }
         }
 
@@ -407,6 +393,7 @@ impl Program {
             };
 
         scan_units(&self.eval_apply_ffs, &mut addrs);
+        scan_units(&self.eval_comb_apply_ffs, &mut addrs);
         scan_units(&self.eval_only_ffs, &mut addrs);
         scan_units(&self.apply_ffs, &mut addrs);
 
@@ -418,6 +405,7 @@ impl Program {
         for units in self
             .eval_apply_ffs
             .values()
+            .chain(self.eval_comb_apply_ffs.values())
             .chain(self.eval_only_ffs.values())
         {
             for eu in units {
@@ -537,6 +525,7 @@ where
 pub type VarAtom = VarAtomBase<VarId>;
 mod builder;
 pub(crate) use builder::SIRBuilder;
+pub(crate) mod cfg;
 pub(crate) mod verify;
 use veryl_parser::resource_table::StrId;
 /// Block identifier
@@ -695,7 +684,7 @@ impl fmt::Debug for RelocationModule {
             .finish()
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound(serialize = "A: Serialize", deserialize = "A: Deserialize<'de>"))]
 pub struct ExecutionUnit<A> {
     pub entry_block_id: BlockId,
@@ -733,6 +722,11 @@ impl<A: Display> Display for ExecutionUnit<A> {
                     false_block,
                     ..
                 } => vec![true_block.0, false_block.0],
+                SIRTerminator::Switch { cases, default, .. } => cases
+                    .iter()
+                    .map(|case| case.target)
+                    .chain(std::iter::once(*default))
+                    .collect(),
                 SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
             },
         );
@@ -747,6 +741,7 @@ impl<A: Display> Display for ExecutionUnit<A> {
 pub struct SimModule {
     pub name: StrId,
     pub variables: HashMap<VarId, Variable>,
+    pub ff_access_summaries: HashMap<TriggerSet<VarId>, FfAccessSummary<RegionedVarAddr>>,
     pub eval_only_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
     pub apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
     pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
@@ -768,6 +763,7 @@ impl fmt::Debug for SimModule {
         f.debug_struct("SimModule")
             .field("name", &self.name)
             .field("variables", &"<omitted>")
+            .field("ff_access_summaries", &self.ff_access_summaries)
             .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
             .field("apply_ff_blocks", &self.apply_ff_blocks)
             .field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
@@ -779,6 +775,19 @@ impl fmt::Debug for SimModule {
             .field("reset_clock_map", &self.reset_clock_map)
             .finish()
     }
+}
+
+/// Sparse scheduler-facing memory effects for one same-trigger FF group.
+///
+/// These ranges describe the event-entry/current-state values consumed while
+/// lowering the group and the next-state ranges it may update. They deliberately
+/// retain no lowered SIR so the comb scheduler can reason about FF placement
+/// before choosing one shared lowering order.
+#[derive(Debug, Clone, Default)]
+pub struct FfAccessSummary<A> {
+    pub reads: Vec<VarAtomBase<A>>,
+    pub writes: Vec<VarAtomBase<A>>,
+    pub dynamic_writes: HashSet<A>,
 }
 
 impl SimModule {
@@ -798,12 +807,54 @@ impl SimModule {
 /// BlockId of the i-th EU's entry block in the merged EU (for i > 0).
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>, Vec<BlockId>) {
+    let units = units.iter().collect::<Vec<_>>();
+    merge_sir_eu_refs(&units)
+}
+
+/// Exact source-unit provenance for a merged SIR function.
+///
+/// Unlike a list of boundary block IDs, this remains valid when an input
+/// execution unit has a nonzero entry ID or sparse block IDs.
+#[derive(Debug, Clone)]
+pub(crate) struct SirMergeProvenance {
+    pub unit_entries: Vec<BlockId>,
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    pub block_units: crate::HashMap<BlockId, usize>,
+}
+
+/// Reference-based variant of [`merge_sir_eus`] used when one compilation
+/// unit is assembled from multiple Program-owned EU slices.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub(crate) fn merge_sir_eu_refs<A: Clone>(
+    units: &[&ExecutionUnit<A>],
+) -> (ExecutionUnit<A>, Vec<BlockId>) {
+    let (merged, provenance) = merge_sir_eu_refs_with_provenance(units);
+    (merged, provenance.unit_entries[1..].to_vec())
+}
+
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub(crate) fn merge_sir_eu_refs_with_provenance<A: Clone>(
+    units: &[&ExecutionUnit<A>],
+) -> (ExecutionUnit<A>, SirMergeProvenance) {
+    assert!(!units.is_empty(), "cannot merge an empty SIR EU list");
     if units.len() == 1 {
-        return (units[0].clone(), vec![]);
+        return (
+            (*units[0]).clone(),
+            SirMergeProvenance {
+                unit_entries: vec![units[0].entry_block_id],
+                block_units: units[0]
+                    .blocks
+                    .keys()
+                    .copied()
+                    .map(|block| (block, 0))
+                    .collect(),
+            },
+        );
     }
 
     let mut merged_blocks = crate::HashMap::default();
     let mut merged_regs = crate::HashMap::default();
+    let mut block_units = crate::HashMap::default();
 
     // Compute offsets for renumbering
     let mut reg_offset = 0usize;
@@ -845,6 +896,7 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
         // Copy blocks with renumbering
         for (&block_id, block) in &eu.blocks {
             let new_block_id = BlockId(block_id.0 + bo);
+            block_units.insert(new_block_id, eu_idx);
             let r = |reg: RegisterId| RegisterId(reg.0 + ro);
             let b = |bid: BlockId| BlockId(bid.0 + bo);
 
@@ -883,6 +935,21 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
                         false_block.1.iter().map(|a| r(*a)).collect(),
                     ),
                 },
+                SIRTerminator::Switch {
+                    selector,
+                    cases,
+                    default,
+                } => SIRTerminator::Switch {
+                    selector: r(*selector),
+                    cases: cases
+                        .iter()
+                        .map(|case| SIRSwitchCase {
+                            value: case.value.clone(),
+                            target: b(case.target),
+                        })
+                        .collect(),
+                    default: b(*default),
+                },
             };
 
             merged_blocks.insert(
@@ -897,15 +964,269 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
         }
     }
 
-    let eu_boundary_blocks: Vec<BlockId> = entry_blocks[1..].to_vec();
     (
         ExecutionUnit {
             entry_block_id: entry_blocks[0],
             blocks: merged_blocks,
             register_map: merged_regs,
         },
-        eu_boundary_blocks,
+        SirMergeProvenance {
+            unit_entries: entry_blocks,
+            block_units,
+        },
     )
+}
+
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub(crate) fn inline_single_predecessor_jumps<A: Clone>(
+    eu: &mut ExecutionUnit<A>,
+) -> Result<bool, crate::ir::verify::SirVerifyError> {
+    fn successors(terminator: &SIRTerminator) -> Vec<BlockId> {
+        match terminator {
+            SIRTerminator::Jump(target, _) => vec![*target],
+            SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } => vec![true_block.0, false_block.0],
+            SIRTerminator::Switch { cases, default, .. } => cases
+                .iter()
+                .map(|case| case.target)
+                .chain(std::iter::once(*default))
+                .collect(),
+            SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+        }
+    }
+
+    let mut changed = false;
+    let mut parameter_replacements = crate::HashMap::<RegisterId, RegisterId>::default();
+    let mut predecessor_count = crate::HashMap::<BlockId, usize>::default();
+    for block in eu.blocks.values() {
+        for successor in successors(&block.terminator) {
+            *predecessor_count.entry(successor).or_default() += 1;
+        }
+    }
+
+    // Inlining `source -> target` replaces every outgoing edge of `target`
+    // with the corresponding edge from `source`. Therefore predecessor edge
+    // counts of all surviving blocks stay unchanged. Only `source` gets a new
+    // terminator and can become a new candidate. A deterministic worklist
+    // avoids rebuilding and sorting the whole CFG after every inlining step.
+    let mut candidates = eu.blocks.keys().copied().collect::<BTreeSet<_>>();
+    while let Some(block_id) = candidates.pop_first() {
+        let Some(block) = eu.blocks.get(&block_id) else {
+            continue;
+        };
+        let SIRTerminator::Jump(target, args) = &block.terminator else {
+            continue;
+        };
+        if *target == block_id
+            || *target == eu.entry_block_id
+            || predecessor_count.get(target).copied().unwrap_or(0) != 1
+        {
+            continue;
+        }
+        let Some(target_block) = eu.blocks.get(target) else {
+            continue;
+        };
+        if target_block.params.len() != args.len() {
+            continue;
+        }
+        let target_id = *target;
+        let args = args.clone();
+
+        let target = eu
+            .blocks
+            .remove(&target_id)
+            .expect("inline target exists when selected");
+        candidates.remove(&target_id);
+        for (parameter, argument) in target.params.iter().copied().zip(args) {
+            parameter_replacements.insert(parameter, argument);
+        }
+
+        let block = eu
+            .blocks
+            .get_mut(&block_id)
+            .expect("inline predecessor exists when selected");
+        block.instructions.extend(target.instructions);
+        block.terminator = target.terminator;
+        candidates.insert(block_id);
+        changed = true;
+    }
+
+    // A block parameter is an SSA definition whose uses may appear in any
+    // block dominated by the removed block. Resolve chains of removed
+    // parameters once, then rewrite the surviving unit in one linear pass.
+    let mut flattened = crate::HashMap::<RegisterId, RegisterId>::default();
+    let mut parameters = parameter_replacements.keys().copied().collect::<Vec<_>>();
+    parameters.sort_unstable();
+    for parameter in parameters {
+        if flattened.contains_key(&parameter) {
+            continue;
+        }
+        let mut path = Vec::new();
+        let mut on_path = crate::HashSet::default();
+        let mut current = parameter;
+        let resolved = loop {
+            if let Some(&resolved) = flattened.get(&current) {
+                break resolved;
+            }
+            let Some(&next) = parameter_replacements.get(&current) else {
+                break current;
+            };
+            if !on_path.insert(current) {
+                return Err(crate::ir::verify::SirVerifyError {
+                    invariant: "SSA.INLINE_PARAMETER_ACYCLIC",
+                    block: None,
+                    instruction: None,
+                    message: format!("single-predecessor parameter cycle reaches r{}", current.0),
+                });
+            }
+            path.push(current);
+            current = next;
+        };
+        for register in path {
+            flattened.insert(register, resolved);
+        }
+    }
+    if !flattened.is_empty() {
+        for block in eu.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                replace_sir_uses(instruction, &flattened);
+            }
+            replace_sir_terminator_uses(&mut block.terminator, &flattened);
+        }
+    }
+    if let Err(mut error) = eu.verify_result() {
+        error.message = format!("after single-predecessor inlining: {}", error.message);
+        return Err(error);
+    }
+    Ok(changed)
+}
+
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+fn replace_sir_offset_uses(
+    offset: &mut SIROffset,
+    replacements: &crate::HashMap<RegisterId, RegisterId>,
+) {
+    match offset {
+        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
+        SIROffset::Dynamic(register) => {
+            if let Some(&replacement) = replacements.get(register) {
+                *register = replacement;
+            }
+        }
+        SIROffset::Element {
+            index,
+            dynamic_bit_offset,
+            ..
+        } => {
+            if let Some(&replacement) = replacements.get(index) {
+                *index = replacement;
+            }
+            if let Some(register) = dynamic_bit_offset {
+                if let Some(&replacement) = replacements.get(register) {
+                    *register = replacement;
+                }
+            }
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+fn replace_sir_uses<A>(
+    instruction: &mut SIRInstruction<A>,
+    replacements: &crate::HashMap<RegisterId, RegisterId>,
+) {
+    let replace = |register: &mut RegisterId| {
+        if let Some(&replacement) = replacements.get(register) {
+            *register = replacement;
+        }
+    };
+    match instruction {
+        SIRInstruction::Imm(..) => {}
+        SIRInstruction::Binary(_, lhs, _, rhs) => {
+            replace(lhs);
+            replace(rhs);
+        }
+        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
+            replace(source);
+        }
+        SIRInstruction::Load(_, _, offset, _) => {
+            replace_sir_offset_uses(offset, replacements);
+        }
+        SIRInstruction::Store(_, offset, _, source, _, _) => {
+            replace_sir_offset_uses(offset, replacements);
+            replace(source);
+        }
+        SIRInstruction::Commit(_, _, offset, _, _) => {
+            replace_sir_offset_uses(offset, replacements);
+        }
+        SIRInstruction::Concat(_, sources) => {
+            for source in sources {
+                replace(source);
+            }
+        }
+        SIRInstruction::Mux(_, condition, then_value, else_value) => {
+            replace(condition);
+            replace(then_value);
+            replace(else_value);
+        }
+        SIRInstruction::RuntimeEvent { args, .. } => {
+            for arg in args {
+                replace(arg);
+            }
+        }
+        SIRInstruction::CombCaptureEvent { args, .. } => {
+            for arg in args {
+                replace(arg);
+            }
+        }
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            replace(old);
+            replace(new);
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+fn replace_sir_terminator_uses(
+    terminator: &mut SIRTerminator,
+    replacements: &crate::HashMap<RegisterId, RegisterId>,
+) {
+    let replace = |register: &mut RegisterId| {
+        if let Some(&replacement) = replacements.get(register) {
+            *register = replacement;
+        }
+    };
+    match terminator {
+        SIRTerminator::Jump(_, args) => {
+            for arg in args {
+                replace(arg);
+            }
+        }
+        SIRTerminator::Branch {
+            cond,
+            true_block,
+            false_block,
+        } => {
+            replace(cond);
+            for arg in &mut true_block.1 {
+                replace(arg);
+            }
+            for arg in &mut false_block.1 {
+                replace(arg);
+            }
+        }
+        SIRTerminator::Switch {
+            selector,
+            cases: _,
+            default: _,
+        } => {
+            replace(selector);
+        }
+        SIRTerminator::Return | SIRTerminator::Error(_) => {}
+    }
 }
 
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
@@ -928,6 +1249,13 @@ fn renumber_sir_inst<A: Clone>(
             element_width: *element_width,
             bit_offset: *bit_offset,
             dynamic_bit_offset: dynamic_bit_offset.map(r),
+        },
+        SIROffset::PackedElements {
+            bit_offset,
+            element_width,
+        } => SIROffset::PackedElements {
+            bit_offset: *bit_offset,
+            element_width: *element_width,
         },
     };
 
@@ -1024,7 +1352,7 @@ impl<A: Display> fmt::Display for BasicBlock<A> {
 }
 
 /// Terminator instruction: Determines control flow
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SIRTerminator {
     /// Unconditional transition to the next block
     Jump(BlockId, Vec<RegisterId>),
@@ -1034,9 +1362,23 @@ pub enum SIRTerminator {
         true_block: (BlockId, Vec<RegisterId>),
         false_block: (BlockId, Vec<RegisterId>),
     },
+    /// Exact multiway dispatch for a selector of at most eight bits. Cases are
+    /// tested against the declared bit width; values not listed take `default`.
+    Switch {
+        selector: RegisterId,
+        cases: Vec<SIRSwitchCase>,
+        default: BlockId,
+    },
     /// End of module execution
     Return,
     Error(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SIRSwitchCase {
+    #[serde(with = "crate::serde_helpers::biguint")]
+    pub value: BigUint,
+    pub target: BlockId,
 }
 
 impl fmt::Display for SIRTerminator {
@@ -1075,13 +1417,30 @@ impl fmt::Display for SIRTerminator {
                 fmt_target(f, false_block.0, &false_block.1)?;
                 write!(f, ")")
             }
+            SIRTerminator::Switch {
+                selector,
+                cases,
+                default,
+            } => {
+                write!(f, "Switch(r{}; ", selector.0)?;
+                for (index, case) in cases.iter().enumerate() {
+                    if index != 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{:#x} => ", case.value)?;
+                    fmt_target(f, case.target, &[])?;
+                }
+                write!(f, "; default => ")?;
+                fmt_target(f, *default, &[])?;
+                write!(f, ")")
+            }
             SIRTerminator::Return => write!(f, "Return"),
             SIRTerminator::Error(code) => write!(f, "Error({})", code),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RegisterType {
     Logic { width: usize },
     Bit { width: usize, signed: bool },
@@ -1252,7 +1611,7 @@ impl fmt::Display for UnaryOp {
         write!(f, "{}", op_str)
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 
 pub struct SIRValue {
     #[serde(with = "crate::serde_helpers::biguint")]
@@ -1303,6 +1662,15 @@ pub enum SIROffset {
         bit_offset: usize,
         dynamic_bit_offset: Option<RegisterId>,
     },
+    /// A vectorized read or write of consecutive unpacked elements through
+    /// their packed logical representation.
+    ///
+    /// Unlike `Static`, this explicitly permits crossing element boundaries.
+    /// A backend may require the addressed object to use packed storage.
+    PackedElements {
+        bit_offset: usize,
+        element_width: usize,
+    },
 }
 
 impl fmt::Display for SIROffset {
@@ -1326,11 +1694,34 @@ impl fmt::Display for SIROffset {
                 }
                 write!(f, ")")
             }
+            SIROffset::PackedElements {
+                bit_offset,
+                element_width,
+            } => write!(
+                f,
+                "packed_elements(bit={}, element_width={})",
+                bit_offset, element_width
+            ),
         }
     }
 }
 
 impl SIROffset {
+    /// Returns the constant offset in the object's packed logical bit space.
+    ///
+    /// `PackedElements` differs from `Static` in the physical layouts a
+    /// backend may select, but both name an exact logical range. Analyses
+    /// which only reason about aliasing must not treat `PackedElements` as a
+    /// dynamic or unknown access.
+    pub fn constant_bit_offset(&self) -> Option<usize> {
+        match self {
+            SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
+                Some(*bit_offset)
+            }
+            SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
+        }
+    }
+
     pub fn dynamic_registers(&self) -> [Option<RegisterId>; 2] {
         match self {
             SIROffset::Static(_) => [None, None],
@@ -1340,15 +1731,16 @@ impl SIROffset {
                 dynamic_bit_offset,
                 ..
             } => [Some(*index), *dynamic_bit_offset],
+            SIROffset::PackedElements { .. } => [None, None],
         }
     }
 
     pub fn is_dynamic(&self) -> bool {
-        !matches!(self, SIROffset::Static(_))
+        matches!(self, SIROffset::Dynamic(_) | SIROffset::Element { .. })
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(bound(serialize = "Addr: Serialize", deserialize = "Addr: Deserialize<'de>"))]
 pub enum SIRInstruction<Addr> {
     Imm(RegisterId, SIRValue),
@@ -1499,6 +1891,23 @@ impl<A: Display> fmt::Display for SIRInstruction<A> {
     }
 }
 impl<A> SIRInstruction<A> {
+    pub(crate) fn defined_register(&self) -> Option<RegisterId> {
+        match self {
+            SIRInstruction::Imm(dst, _)
+            | SIRInstruction::Binary(dst, _, _, _)
+            | SIRInstruction::Unary(dst, _, _)
+            | SIRInstruction::Load(dst, _, _, _)
+            | SIRInstruction::Concat(dst, _)
+            | SIRInstruction::Slice(dst, _, _, _)
+            | SIRInstruction::Mux(dst, _, _, _) => Some(*dst),
+            SIRInstruction::Store(..)
+            | SIRInstruction::Commit(..)
+            | SIRInstruction::RuntimeEvent { .. }
+            | SIRInstruction::CombCaptureEvent { .. }
+            | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
+        }
+    }
+
     pub fn into_map_addr<B>(self, mut f: impl FnMut(A) -> B) -> SIRInstruction<B> {
         match self {
             SIRInstruction::Imm(register_id, value) => SIRInstruction::Imm(register_id, value),
@@ -1596,6 +2005,137 @@ impl<A> SIRInstruction<A> {
         }
     }
 }
+
+fn visit_exact_zero_dependencies<A>(
+    instruction: &SIRInstruction<A>,
+    mut visit: impl FnMut(RegisterId),
+) -> Option<usize> {
+    let mut count = 0usize;
+    let mut dependency = |register| {
+        count += 1;
+        visit(register);
+    };
+    match instruction {
+        SIRInstruction::Binary(
+            _,
+            lhs,
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::And
+            | BinaryOp::Or
+            | BinaryOp::Xor
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+            | BinaryOp::Sar,
+            rhs,
+        ) => {
+            dependency(*lhs);
+            dependency(*rhs);
+        }
+        SIRInstruction::Unary(
+            _,
+            UnaryOp::Ident
+            | UnaryOp::ToTwoState
+            | UnaryOp::Minus
+            | UnaryOp::Or
+            | UnaryOp::Xor
+            | UnaryOp::PopCount,
+            source,
+        ) => {
+            dependency(*source);
+        }
+        SIRInstruction::Concat(_, sources) => {
+            for &source in sources {
+                dependency(source);
+            }
+        }
+        SIRInstruction::Slice(_, source, _, _) => dependency(*source),
+        // Equal exact-zero arms make an unknown four-state condition
+        // irrelevant too, so the condition is not a dependency.
+        SIRInstruction::Mux(_, _, then_value, else_value) => {
+            dependency(*then_value);
+            dependency(*else_value);
+        }
+        _ => return None,
+    }
+    Some(count)
+}
+
+/// Prove exact all-zero values reachable from selected roots without
+/// materializing their potentially enormous bit representation or building a
+/// reverse-use graph for unrelated SIR. The explicit stack also avoids host
+/// recursion on deep expression chains.
+pub(crate) fn collect_exact_zero_registers<A>(
+    eu: &ExecutionUnit<A>,
+    roots: impl IntoIterator<Item = RegisterId>,
+) -> HashSet<RegisterId> {
+    let mut definitions = HashMap::<RegisterId, Option<&SIRInstruction<A>>>::default();
+    for block in eu.blocks.values() {
+        for instruction in &block.instructions {
+            if let Some(dst) = instruction.defined_register() {
+                if let Some(definition) = definitions.get_mut(&dst) {
+                    *definition = None;
+                } else {
+                    definitions.insert(dst, Some(instruction));
+                }
+            }
+        }
+    }
+
+    let mut result = HashMap::<RegisterId, bool>::default();
+    let mut visiting = HashSet::default();
+    for root in roots {
+        let mut work = vec![(root, false)];
+        while let Some((register, expanded)) = work.pop() {
+            if result.contains_key(&register) {
+                visiting.remove(&register);
+                continue;
+            }
+            let Some(instruction) = definitions.get(&register).copied().flatten() else {
+                result.insert(register, false);
+                visiting.remove(&register);
+                continue;
+            };
+            if expanded {
+                let mut all_zero = true;
+                let count = visit_exact_zero_dependencies(instruction, |dependency| {
+                    all_zero &= result.get(&dependency) == Some(&true);
+                });
+                result.insert(register, count.is_some_and(|count| count != 0) && all_zero);
+                visiting.remove(&register);
+                continue;
+            }
+            if let SIRInstruction::Imm(_, value) = instruction {
+                result.insert(register, value.payload.is_zero() && value.mask.is_zero());
+                continue;
+            }
+            if !visiting.insert(register) {
+                result.insert(register, false);
+                continue;
+            }
+            let mut count = 0usize;
+            work.push((register, true));
+            if visit_exact_zero_dependencies(instruction, |dependency| {
+                count += 1;
+                if !result.contains_key(&dependency) {
+                    work.push((dependency, false));
+                }
+            })
+            .is_none()
+                || count == 0
+            {
+                work.pop();
+                result.insert(register, false);
+                visiting.remove(&register);
+            }
+        }
+    }
+    result
+        .into_iter()
+        .filter_map(|(register, zero)| zero.then_some(register))
+        .collect()
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum GlueAddrBase<V> {
     Parent(V),
@@ -1625,6 +2165,43 @@ impl<V: fmt::Display> fmt::Display for GlueAddrBase<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_zero_analysis_collapses_repeated_concat_dependencies() {
+        let zero = RegisterId(0);
+        let wide_zero = RegisterId(1);
+        let sliced_zero = RegisterId(2);
+        let nonzero = RegisterId(3);
+        let mixed = RegisterId(4);
+        let eu: ExecutionUnit<()> = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(
+                BlockId(0),
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                        SIRInstruction::Concat(wide_zero, vec![zero; 4096]),
+                        SIRInstruction::Slice(sliced_zero, wide_zero, 0, 64),
+                        SIRInstruction::Imm(nonzero, SIRValue::new(1u8)),
+                        SIRInstruction::Concat(mixed, vec![zero, nonzero]),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: HashMap::default(),
+        };
+
+        let zeros = collect_exact_zero_registers(&eu, [sliced_zero, mixed]);
+        assert!(zeros.contains(&zero));
+        assert!(zeros.contains(&wide_zero));
+        assert!(zeros.contains(&sliced_zero));
+        assert!(!zeros.contains(&nonzero));
+        assert!(!zeros.contains(&mixed));
+    }
 
     #[test]
     fn test_sirvalue_display() {
@@ -1793,5 +2370,98 @@ mod tests {
         assert!(block_display.contains("r1"));
         assert!(block_display.contains("Add"));
         assert!(block_display.contains("Return"));
+    }
+
+    #[test]
+    fn single_predecessor_inlining_rewrites_dominated_parameter_uses() {
+        let mut eu: ExecutionUnit<()> = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0)],
+                    instructions: Vec::new(),
+                    terminator: SIRTerminator::Jump(BlockId(1), vec![RegisterId(0)]),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![RegisterId(1)],
+                    instructions: Vec::new(),
+                    terminator: SIRTerminator::Jump(BlockId(2), Vec::new()),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: Vec::new(),
+                    instructions: vec![SIRInstruction::Unary(
+                        RegisterId(2),
+                        UnaryOp::Ident,
+                        RegisterId(1),
+                    )],
+                    terminator: SIRTerminator::Return,
+                },
+            ]
+            .into_iter()
+            .map(|block| (block.id, block))
+            .collect(),
+            register_map: (0..3)
+                .map(|register| {
+                    (
+                        RegisterId(register),
+                        RegisterType::Bit {
+                            width: 8,
+                            signed: false,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        eu.verify_result().unwrap();
+
+        assert!(inline_single_predecessor_jumps(&mut eu).unwrap());
+        eu.verify_result().unwrap();
+        assert_eq!(eu.blocks.len(), 1);
+        assert!(matches!(
+            eu.blocks[&BlockId(0)].instructions.as_slice(),
+            [SIRInstruction::Unary(
+                RegisterId(2),
+                UnaryOp::Ident,
+                RegisterId(0)
+            )]
+        ));
+    }
+
+    #[test]
+    fn single_predecessor_inlining_handles_deep_linear_cfg() {
+        const BLOCK_COUNT: usize = 20_000;
+
+        let mut eu: ExecutionUnit<()> = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: (0..BLOCK_COUNT)
+                .map(|index| {
+                    let id = BlockId(index);
+                    let terminator = if index + 1 == BLOCK_COUNT {
+                        SIRTerminator::Return
+                    } else {
+                        SIRTerminator::Jump(BlockId(index + 1), Vec::new())
+                    };
+                    (
+                        id,
+                        BasicBlock {
+                            id,
+                            params: Vec::new(),
+                            instructions: Vec::new(),
+                            terminator,
+                        },
+                    )
+                })
+                .collect(),
+            register_map: crate::HashMap::default(),
+        };
+        eu.verify_result().unwrap();
+
+        assert!(inline_single_predecessor_jumps(&mut eu).unwrap());
+        assert_eq!(eu.blocks.len(), 1);
+        assert_eq!(eu.blocks[&BlockId(0)].terminator, SIRTerminator::Return);
+        eu.verify_result().unwrap();
     }
 }

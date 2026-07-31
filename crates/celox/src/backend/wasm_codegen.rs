@@ -3648,7 +3648,10 @@ fn compile_logical_bit_offset(
 ) -> u32 {
     let result = locals.alloc(1);
     match offset {
-        SIROffset::Static(value) => instrs.push(Instruction::I64Const(*value as i64)),
+        SIROffset::Static(value)
+        | SIROffset::PackedElements {
+            bit_offset: value, ..
+        } => instrs.push(Instruction::I64Const(*value as i64)),
         SIROffset::Dynamic(reg) => {
             instrs.push(Instruction::LocalGet(locals.reg_map[reg].value_idx));
         }
@@ -3694,7 +3697,11 @@ fn compile_load(
     let var_byte_size = get_byte_size(var_width);
 
     match offset {
-        SIROffset::Static(bit_off) => {
+        SIROffset::Static(bit_off)
+        | SIROffset::PackedElements {
+            bit_offset: bit_off,
+            ..
+        } => {
             let byte_off = bit_off / 8;
             let bit_shift = bit_off % 8;
             let load_offset = base_offset + byte_off;
@@ -4168,7 +4175,11 @@ fn compile_store(
     };
 
     match offset {
-        SIROffset::Static(bit_off) => {
+        SIROffset::Static(bit_off)
+        | SIROffset::PackedElements {
+            bit_offset: bit_off,
+            ..
+        } => {
             let byte_off = bit_off / 8;
             let bit_shift = bit_off % 8;
             let store_offset = base_offset + byte_off;
@@ -4300,7 +4311,11 @@ fn emit_load_store_value(
     instrs: &mut Vec<Instruction<'static>>,
 ) -> Option<()> {
     match offset {
-        SIROffset::Static(bit_off) => {
+        SIROffset::Static(bit_off)
+        | SIROffset::PackedElements {
+            bit_offset: bit_off,
+            ..
+        } => {
             let byte_off = bit_off / 8;
             let bit_shift = bit_off % 8;
             if bit_shift != 0 && op_width > 64 {
@@ -4499,8 +4514,58 @@ fn compile_store_at_offset(
             }
         }
     } else {
-        // Multi-chunk bit-offset store: complex.
-        // TODO: implement multi-chunk bit-offset RMW store
+        // Unaligned wide store.  Build each affected destination word from
+        // the adjacent source chunks, then preserve every memory bit outside
+        // the exact logical store range.  Starting the words at byte_offset
+        // is intentional: WebAssembly permits unaligned i64 accesses, and it
+        // keeps bit_shift bounded to the sub-byte part of the SIR offset.
+        let affected_bits = bit_shift + op_width;
+        let affected_bytes = affected_bits.div_ceil(8);
+        let destination_chunks = affected_bits.div_ceil(64);
+        for chunk in 0..destination_chunks {
+            let chunk_bit = chunk * 64;
+            let field_start = bit_shift.saturating_sub(chunk_bit);
+            let field_end = affected_bits.saturating_sub(chunk_bit).min(64);
+            if field_start >= field_end {
+                continue;
+            }
+            let field_width = field_end - field_start;
+            let field_mask = if field_width == 64 {
+                u64::MAX
+            } else {
+                ((1u64 << field_width) - 1) << field_start
+            };
+
+            let assembled = locals.alloc(1);
+            if chunk < src.num_chunks {
+                instrs.push(Instruction::LocalGet(src.value_idx + chunk as u32));
+                instrs.push(Instruction::I64Const(bit_shift as i64));
+                instrs.push(Instruction::I64Shl);
+            } else {
+                instrs.push(Instruction::I64Const(0));
+            }
+            if chunk > 0 && chunk - 1 < src.num_chunks {
+                instrs.push(Instruction::LocalGet(src.value_idx + (chunk - 1) as u32));
+                instrs.push(Instruction::I64Const((64 - bit_shift) as i64));
+                instrs.push(Instruction::I64ShrU);
+                instrs.push(Instruction::I64Or);
+            }
+            instrs.push(Instruction::LocalSet(assembled));
+
+            let byte_len = affected_bytes.saturating_sub(chunk * 8).min(8);
+            let merged = locals.alloc(1);
+            emit_load_small_word(byte_offset + chunk * 8, byte_len, instrs);
+            instrs.push(Instruction::I64Const(
+                (mask_for_bytes(byte_len) & !field_mask) as i64,
+            ));
+            instrs.push(Instruction::I64And);
+            instrs.push(Instruction::LocalGet(assembled));
+            instrs.push(Instruction::I64Const(field_mask as i64));
+            instrs.push(Instruction::I64And);
+            instrs.push(Instruction::I64Or);
+            instrs.push(Instruction::LocalSet(merged));
+            emit_store_small_word(byte_offset + chunk * 8, byte_len, merged, instrs);
+        }
     }
 }
 
@@ -4852,7 +4917,11 @@ fn compile_commit(
     let dst_base = compute_byte_offset(layout, &dst_abs, dst_addr.region);
 
     match offset {
-        SIROffset::Static(bit_off) => {
+        SIROffset::Static(bit_off)
+        | SIROffset::PackedElements {
+            bit_offset: bit_off,
+            ..
+        } => {
             let byte_off = bit_off / 8;
             let bit_shift = bit_off % 8;
             let copy_bytes = get_byte_size(op_width);
@@ -5237,6 +5306,31 @@ fn compile_terminator(
             instrs.push(Instruction::End); // end if
 
             instrs.push(Instruction::Br(br_dispatch_depth)); // br $dispatch
+        }
+        SIRTerminator::Switch {
+            selector,
+            cases,
+            default,
+        } => {
+            instrs.push(Instruction::I64Const(block_index[default] as i64));
+            instrs.push(Instruction::LocalSet(block_id_local));
+            let selector = &locals.reg_map[selector];
+            for case in cases {
+                let digits = case.value.to_u64_digits();
+                let value = match digits.as_slice() {
+                    [] => 0,
+                    [value] => *value,
+                    _ => unreachable!("verified switch key fits eight bits"),
+                };
+                instrs.push(Instruction::LocalGet(selector.value_idx));
+                instrs.push(Instruction::I64Const(value as i64));
+                instrs.push(Instruction::I64Eq);
+                instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+                instrs.push(Instruction::I64Const(block_index[&case.target] as i64));
+                instrs.push(Instruction::LocalSet(block_id_local));
+                instrs.push(Instruction::End);
+            }
+            instrs.push(Instruction::Br(br_dispatch_depth));
         }
         SIRTerminator::Return => {
             // Break out of dispatch loop and unit.
@@ -5728,9 +5822,7 @@ mod bit_count_tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: working_base_offset,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: working_base_offset,
-            sparse_active_flags_offset: working_base_offset,
-            sparse_active_list_offset: working_base_offset,
+            sparse_active_bits_offset: working_base_offset,
             sparse_active_capacity: 0,
             merged_total_size: 65_536,
             triggered_bits_offset: working_base_offset,

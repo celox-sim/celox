@@ -1,27 +1,40 @@
 //! Verified SSA register allocator based on Braun & Hack's extended MIN.
 //!
-//! The pipeline schedules pure DAG regions, constructs CSSA, plans spilling,
-//! reconstructs strict SSA, materializes late full-live Perm boundaries, and
-//! colors chordal SSA live ranges without an explicit interference graph.
+//! The pipeline schedules pure DAG regions, plans explicit per-value homes and
+//! phi-edge transfers, reconstructs strict SSA, materializes late full-live
+//! Perm boundaries, and colors chordal SSA live ranges without an explicit
+//! interference graph.
 
+#[allow(dead_code)]
+mod allocation_ir;
 mod analysis;
 pub mod assignment;
 mod cfg;
 mod color;
 mod constraints;
+mod cost;
 #[allow(dead_code)]
 mod cssa;
 #[allow(dead_code)]
+mod home_graph;
+#[allow(dead_code)]
 mod home_verify;
+#[allow(dead_code)]
+mod interval_union;
 mod legalize;
+#[allow(dead_code)]
+mod live_interval;
 mod next_use;
 mod pressure;
 mod reconstruct;
+mod reload;
 mod schedule;
 mod spill_plan;
 #[cfg(test)]
 mod spilling;
 mod ssa;
+mod ssa_state_home;
+mod stack_color;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -33,20 +46,30 @@ use std::fmt;
 use super::mir::{BaseReg, BlockId, MFunction, MInst, VReg};
 pub use assignment::AssignmentMap;
 
-/// Number of available general-purpose registers for allocation.
-/// x86-64: 16 GPRs - RSP - SimState base = 14.
+/// Maximum number of available general-purpose registers for allocation.
+/// x86-64: 16 GPRs - architectural stack pointer = 15. R15 is excluded at
+/// runtime when the host cannot use GS-base instructions.
+pub const NUM_REGS: usize = 15;
+
+/// Enable allocator-internal exhaustive consistency checks.
 ///
-/// RBP is callee-saved, but the native backend does not use it as a frame
-/// pointer; spill slots are addressed relative to RSP after the prologue.
-pub const NUM_REGS: usize = 14;
+/// Repeating whole-session proofs after every incremental liveness edit is
+/// intentionally kept out of optimized compilation.
+pub(super) fn exhaustive_verification_enabled() -> bool {
+    cfg!(debug_assertions) || std::env::var_os("CELOX_REGALLOC_VERIFY").is_some()
+}
 
 /// Result of register allocation: assignment map + spill frame size.
 pub struct RegallocResult {
     pub assignment: AssignmentMap,
     /// Bytes of stack frame needed for spill slots.
     pub spill_frame_size: u32,
-    /// Complete, independently verified phi-edge parallel-copy plan.
-    pub(crate) ssa_destruction: super::ssa_destroy::SsaDestructionPlan,
+}
+
+#[derive(Default)]
+pub(crate) struct RegallocTrace {
+    pub mir_after_late_memory_folds: String,
+    pub mir_after_scheduling: String,
 }
 
 /// Structured failure from a verified register-allocation phase.
@@ -109,12 +132,12 @@ impl fmt::Display for RegallocError {
 
 impl std::error::Error for RegallocError {}
 
-fn verify_assignment(
+pub(crate) fn verify_assignment(
     func: &MFunction,
-    analysis: &analysis::AnalysisResult,
     assignment: &assignment::AssignmentMap,
 ) -> Result<(), RegallocError> {
-    verify::verify(func, analysis, assignment).map_err(|error| {
+    let analysis = analysis::analyze_for_assignment(func, assignment);
+    verify::verify(func, &analysis, assignment).map_err(|error| {
         RegallocError::new(
             "completed-assignment verification",
             "ASSIGNMENT.INVALID",
@@ -123,7 +146,42 @@ fn verify_assignment(
             Vec::new(),
             error.message,
         )
-    })
+    })?;
+    if assignment.x86_vector_count() != func.x86_vec_count() as usize {
+        return Err(RegallocError::new(
+            "completed-assignment verification",
+            "ASSIGNMENT.X86_VECTOR_COMPLETE",
+            None,
+            None,
+            Vec::new(),
+            format!(
+                "{} x86 vector values exist but {} have assignments",
+                func.x86_vec_count(),
+                assignment.x86_vector_count()
+            ),
+        ));
+    }
+    for block in &func.blocks {
+        for (instruction, inst) in block.insts.iter().enumerate() {
+            for value in inst
+                .x86_vec_def()
+                .into_iter()
+                .chain(inst.x86_vec_uses().into_iter().flatten())
+            {
+                if assignment.x86_vector(value).is_none() {
+                    return Err(RegallocError::new(
+                        "completed-assignment verification",
+                        "ASSIGNMENT.X86_VECTOR_MISSING",
+                        Some(block.id),
+                        Some(instruction),
+                        Vec::new(),
+                        format!("{value} has no XMM assignment"),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn constraint_error(phase: &'static str, error: constraints::ConstraintError) -> RegallocError {
@@ -159,6 +217,18 @@ fn next_use_error(phase: &'static str, error: next_use::NextUseError) -> Regallo
     )
 }
 
+fn reload_recipe_error(phase: &'static str, error: reload::ReloadRecipeError) -> RegallocError {
+    RegallocError::new(
+        phase,
+        error.rule,
+        error.block,
+        error.instruction,
+        error.value.into_iter().collect(),
+        error.message,
+    )
+}
+
+#[cfg(test)]
 fn cssa_error(phase: &'static str, error: cssa::CssaError) -> RegallocError {
     RegallocError::new(
         phase,
@@ -167,32 +237,6 @@ fn cssa_error(phase: &'static str, error: cssa::CssaError) -> RegallocError {
         error.instruction,
         error.values,
         error.message,
-    )
-}
-
-fn ssa_destruction_error(
-    phase: &'static str,
-    error: super::ssa_destroy::SsaDestructionError,
-) -> RegallocError {
-    let mut values = Vec::with_capacity(2);
-    if let Some(destination) = error.phi_destination {
-        values.push(destination);
-    }
-    if let Some(source) = error.source_value {
-        values.push(source);
-    }
-    let edge = match (error.predecessor, error.successor) {
-        (Some(predecessor), Some(successor)) => format!(" on {predecessor} -> {successor}"),
-        (None, Some(successor)) => format!(" at {successor}"),
-        _ => String::new(),
-    };
-    RegallocError::new(
-        phase,
-        error.rule,
-        error.successor.or(error.predecessor),
-        None,
-        values,
-        format!("{}{edge}", error.message),
     )
 }
 
@@ -207,22 +251,18 @@ pub fn run_regalloc_with_label(
     func: &mut MFunction,
     label: &str,
 ) -> Result<RegallocResult, RegallocError> {
-    let requested = std::env::var("CELOX_REGALLOC_IMPL").unwrap_or_else(|_| "auto".into());
-    if !matches!(requested.as_str(), "auto" | "ssa") {
-        return Err(RegallocError::new(
-            "configuration",
-            "CONFIG.IMPLEMENTATION",
-            None,
-            None,
-            Vec::new(),
-            format!("unknown CELOX_REGALLOC_IMPL={requested:?}; expected auto or ssa"),
-        ));
-    }
+    run_regalloc_with_label_and_trace(func, label, None)
+}
 
+pub(crate) fn run_regalloc_with_label_and_trace(
+    func: &mut MFunction,
+    label: &str,
+    trace: Option<&mut RegallocTrace>,
+) -> Result<RegallocResult, RegallocError> {
     // Build the complete result privately. A structured error cannot expose
     // CFG/scheduling/SSA mutations from a failed phase to the caller.
     let mut working = func.clone();
-    let allocation = run_regalloc_in_place(&mut working, label)?;
+    let allocation = run_regalloc_in_place(&mut working, label, trace)?;
     *func = working;
     Ok(allocation)
 }
@@ -230,9 +270,18 @@ pub fn run_regalloc_with_label(
 fn run_regalloc_in_place(
     func: &mut MFunction,
     label: &str,
+    mut trace: Option<&mut RegallocTrace>,
 ) -> Result<RegallocResult, RegallocError> {
+    let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
+        || std::env::var_os("CELOX_PHASE_TIMING").is_some();
+    // Allocation must never depend on callers having run the optional MIR
+    // optimization pipeline. Select flag-consuming register branches at the
+    // allocation boundary so their unmaterialized boolean result cannot
+    // acquire a live range.
+    super::mir_opt::fold_register_branch_predicates(func);
     func.verify_result()
         .map_err(|error| RegallocError::mir("input MIR verification", error))?;
+    let cfg_start = timing.then(crate::timing::now);
     let normalized_cfg =
         cfg::normalize(func).map_err(|error| cfg_error("CFG normalization", error))?;
     normalized_cfg
@@ -240,8 +289,13 @@ fn run_regalloc_in_place(
         .map_err(|error| cfg_error("CFG normalization verification", error))?;
     func.verify_result()
         .map_err(|error| RegallocError::mir("CFG normalization verification", error))?;
-    let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
-        || std::env::var_os("CELOX_PHASE_TIMING").is_some();
+    if let Some(start) = cfg_start {
+        eprintln!(
+            "[regalloc-timing] label={label} cfg_normalize blocks={} elapsed={:?}",
+            func.blocks.len(),
+            start.elapsed()
+        );
+    }
     let total_start = timing.then(crate::timing::now);
     let stats_start = timing.then(crate::timing::now);
     let before_stats = std::env::var_os("CELOX_REGALLOC_STATS")
@@ -254,60 +308,98 @@ fn run_regalloc_in_place(
         );
     }
 
-    let scheduling_constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
-        .map_err(|error| constraint_error("scheduling constraint construction", error))?;
-    scheduling_constraints
-        .verify(func)
-        .map_err(|error| constraint_error("scheduling constraint verification", error))?;
-    let schedule_analysis = analysis::analyze(func);
-    let schedule_start = timing.then(crate::timing::now);
-    let schedule_stats = schedule::schedule_for_pressure(
-        func,
-        &normalized_cfg,
-        &scheduling_constraints,
-        &schedule_analysis,
-    )
-    .map_err(|error| {
-        RegallocError::new(
-            "pressure scheduling",
-            error.rule,
-            Some(error.block),
-            None,
-            Vec::new(),
-            error.reason,
-        )
-    })?;
-    if let Some(start) = schedule_start {
+    let late_memory_fold_start = timing.then(crate::timing::now);
+    // These folds run before pressure scheduling. They only remove local
+    // instructions and never replace a load with a new cross-block VReg.
+    super::mir_opt::eliminate_redundant_local_stores(func);
+    let folded_direct_immediate_stores = super::mir_opt::fold_direct_immediate_stores(func);
+    let folded_memory_branches = super::mir_opt::fold_memory_branch_predicates(func);
+    func.verify_result()
+        .map_err(|error| RegallocError::mir("late memory-fold verification", error))?;
+    if let Some(trace) = trace.as_deref_mut() {
+        trace.mir_after_late_memory_folds = func.to_string();
+    }
+    if let Some(start) = late_memory_fold_start {
         eprintln!(
-            "[regalloc-timing] label={label} pressure_schedule changed_blocks={} max_before={} max_after={} elapsed={:?}",
-            schedule_stats.changed_blocks,
-            schedule_stats.maximum_before,
-            schedule_stats.maximum_after,
+            "[regalloc-timing] label={label} late_memory_fold folded_direct_immediate_stores={folded_direct_immediate_stores} folded_memory_branches={folded_memory_branches} elapsed={:?}",
             start.elapsed()
         );
     }
-    func.verify_result()
-        .map_err(|error| RegallocError::mir("pressure scheduling verification", error))?;
-    let cssa = cssa::normalize_to_cssa(func, &normalized_cfg)
-        .map_err(|error| cssa_error("CSSA normalization", error))?;
-    cssa::verify_cssa(func, &normalized_cfg, &cssa)
-        .map_err(|error| cssa_error("CSSA verification", error))?;
-    func.verify_result()
-        .map_err(|error| RegallocError::mir("CSSA structural verification", error))?;
-    let constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
-        .map_err(|error| constraint_error("allocation constraint construction", error))?;
-    constraints
+    let allocation_constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
+        .map_err(|error| constraint_error("placement constraint construction", error))?;
+    allocation_constraints
         .verify(func)
-        .map_err(|error| constraint_error("allocation constraint verification", error))?;
+        .map_err(|error| constraint_error("placement constraint verification", error))?;
+    // W/S planning owns independent homes, explicit phi-edge transfers, and
+    // the one authoritative dependency-ready instruction order. Inserting
+    // CSSA snapshots before that walk would lengthen the ranges it is meant
+    // to split and would make the snapshot order independently authoritative.
+    let reload_recipe_start = timing.then(crate::timing::now);
+    let planning_recipes = reload::analyze_for_planning(func, &normalized_cfg)
+        .map_err(|error| reload_recipe_error("reload-recipe planning analysis", error))?;
+    if let Some(start) = reload_recipe_start {
+        eprintln!(
+            "[regalloc-timing] label={label} reload_recipe_plan_analyze elapsed={:?}",
+            start.elapsed()
+        );
+    }
+    let next_use_start = timing.then(crate::timing::now);
     let next_use = next_use::analyze(func, &normalized_cfg)
         .map_err(|error| next_use_error("next-use analysis", error))?;
+    if let Some(start) = next_use_start {
+        eprintln!(
+            "[regalloc-timing] label={label} next_use_analyze elapsed={:?}",
+            start.elapsed()
+        );
+    }
+    let next_use_verify_start = timing.then(crate::timing::now);
     next_use
         .verify(func, &normalized_cfg)
         .map_err(|error| next_use_error("next-use verification", error))?;
+    if let Some(start) = next_use_verify_start {
+        eprintln!(
+            "[regalloc-timing] label={label} next_use_verify elapsed={:?}",
+            start.elapsed()
+        );
+    }
     let alloc_start = timing.then(crate::timing::now);
-    let allocation = ssa::allocate(func, &normalized_cfg, &next_use)?;
-    let assignment = allocation.assignment;
-    let spill_frame_size = allocation.spill_frame_size;
+    let allocation = ssa::allocate(
+        func,
+        &normalized_cfg,
+        &next_use,
+        &planning_recipes,
+        &allocation_constraints,
+        trace,
+    )?;
+    let mut assignment = allocation.assignment;
+    let mut spill_frame_size = allocation.spill_frame_size;
+    let tick_loop = label == "eval_comb_apply_ff" && super::native_tick_loop_enabled();
+    let vector_allocation = super::x86_slp::allocate(func, spill_frame_size, tick_loop);
+    for (value, location) in vector_allocation.assignments {
+        assignment.set_x86_vector(value, location);
+    }
+    if vector_allocation.spill_bytes != 0 {
+        spill_frame_size = spill_frame_size
+            .checked_add(15)
+            .map(|size| size & !15)
+            .and_then(|base| base.checked_add(vector_allocation.spill_bytes))
+            .ok_or_else(|| {
+                RegallocError::new(
+                    "x86 vector coloring",
+                    "ASSIGNMENT.X86_VECTOR_SPILL_FRAME",
+                    None,
+                    None,
+                    Vec::new(),
+                    "x86 vector spill frame size overflow",
+                )
+            })?;
+    }
+    if timing && vector_allocation.spilled_values != 0 {
+        eprintln!(
+            "[regalloc-timing] label={label} x86_vector_spills={} spill_bytes={}",
+            vector_allocation.spilled_values, vector_allocation.spill_bytes
+        );
+    }
     if let Some(start) = alloc_start {
         eprintln!(
             "[regalloc-timing] label={label} implementation=ssa-split-color blocks={} insts={} vregs={} spill_frame={} elapsed={:?}",
@@ -323,13 +415,7 @@ fn run_regalloc_in_place(
     }
 
     let verify_start = timing.then(crate::timing::now);
-    let analysis = analysis::analyze(func);
-    verify_assignment(func, &analysis, &assignment)?;
-    let ssa_destruction = super::ssa_destroy::SsaDestructionPlan::build(func, &assignment)
-        .map_err(|error| ssa_destruction_error("SSA destruction planning", error))?;
-    ssa_destruction
-        .verify(func, &assignment, spill_frame_size)
-        .map_err(|error| ssa_destruction_error("SSA destruction verification", error))?;
+    verify_assignment(func, &assignment)?;
     if let Some(start) = verify_start {
         eprintln!(
             "[regalloc-timing] label={label} verify elapsed={:?}",
@@ -357,7 +443,6 @@ fn run_regalloc_in_place(
     Ok(RegallocResult {
         assignment,
         spill_frame_size,
-        ssa_destruction,
     })
 }
 

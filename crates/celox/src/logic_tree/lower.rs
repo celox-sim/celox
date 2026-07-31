@@ -84,14 +84,65 @@ fn try_const_eval<A: Hash + Eq + Clone>(
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone)]
 enum SLTBitOrigin<A: Hash + Eq + Clone> {
     Node(NodeId),
     Input {
+        /// One representative input node. This is provenance for memory type
+        /// lookup and deliberately does not participate in origin identity:
+        /// unrolled lanes have distinct nodes but the same logical input.
+        node: NodeId,
         variable: A,
         signed: bool,
         index: Vec<crate::logic_tree::comb::SLTIndex>,
     },
+}
+
+impl<A: Hash + Eq + Clone> PartialEq for SLTBitOrigin<A> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Node(lhs), Self::Node(rhs)) => lhs == rhs,
+            (
+                Self::Input {
+                    variable: lhs_variable,
+                    signed: lhs_signed,
+                    index: lhs_index,
+                    ..
+                },
+                Self::Input {
+                    variable: rhs_variable,
+                    signed: rhs_signed,
+                    index: rhs_index,
+                    ..
+                },
+            ) => lhs_variable == rhs_variable && lhs_signed == rhs_signed && lhs_index == rhs_index,
+            _ => false,
+        }
+    }
+}
+
+impl<A: Hash + Eq + Clone> Eq for SLTBitOrigin<A> {}
+
+impl<A: Hash + Eq + Clone> Hash for SLTBitOrigin<A> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Node(node) => {
+                0u8.hash(state);
+                node.hash(state);
+            }
+            Self::Input {
+                variable,
+                signed,
+                index,
+                ..
+            } => {
+                1u8.hash(state);
+                variable.hash(state);
+                signed.hash(state);
+                index.hash(state);
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -113,6 +164,7 @@ enum SLTVectorExpr<A: Hash + Eq + Clone> {
     StaticInput {
         variable: A,
         access: BitAccess,
+        unpacked_element_width: Option<usize>,
     },
     Broadcast(NodeId),
     LowOnes {
@@ -229,6 +281,7 @@ fn resolve_slt_bit_origin<A: Hash + Eq + Clone>(
             access,
         } if access.msb == access.lsb => Some((
             SLTBitOrigin::Input {
+                node,
                 variable: variable.clone(),
                 signed: *signed,
                 index: index.clone(),
@@ -1178,6 +1231,7 @@ impl MuxLowerStats {
 
 pub struct SLTToSIRLowerer {
     four_state: bool,
+    unpacked_input_element_widths: crate::HashMap<NodeId, usize>,
     cost_cache: RefCell<LoweringCostCache>,
     cache_insert_log: RefCell<Vec<NodeId>>,
     mux_stats: Option<RefCell<MuxLowerStats>>,
@@ -1421,9 +1475,14 @@ fn match_slt_scan_indexed_input<A: Hash + Eq + Clone>(
     } else {
         return None;
     };
+    let unpacked_element_width = match entry.kind {
+        crate::logic_tree::comb::SLTIndexKind::Unpacked { element_width } => Some(element_width),
+        crate::logic_tree::comb::SLTIndexKind::Packed => None,
+    };
     Some(SLTVectorExpr::StaticInput {
         variable: variable.clone(),
         access: packed_access,
+        unpacked_element_width,
     })
 }
 
@@ -1816,11 +1875,103 @@ impl SLTToSIRLowerer {
     pub fn new(four_state: bool) -> Self {
         Self {
             four_state,
+            unpacked_input_element_widths: crate::HashMap::default(),
             cost_cache: RefCell::new(LoweringCostCache::default()),
             cache_insert_log: RefCell::new(Vec::new()),
             mux_stats: std::env::var_os("CELOX_MUX_LOWER_STATS")
                 .is_some()
                 .then(|| RefCell::new(MuxLowerStats::default())),
+        }
+    }
+
+    pub fn with_unpacked_input_types<A: Hash + Eq + Clone>(
+        mut self,
+        arena: &SLTNodeArena<A>,
+        element_widths: &crate::HashMap<A, usize>,
+    ) -> Self {
+        for (index, node) in arena.iter().enumerate() {
+            let SLTNode::Input { variable, .. } = node else {
+                continue;
+            };
+            if let Some(&element_width) = element_widths.get(variable) {
+                self.unpacked_input_element_widths
+                    .insert(NodeId(index), element_width);
+            }
+        }
+        self
+    }
+
+    fn lower_compacted_input<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        node: NodeId,
+        variable: &A,
+        index: &[crate::logic_tree::comb::SLTIndex],
+        width: usize,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+    ) -> RegisterId {
+        if index.is_empty()
+            && let Some(&element_width) = self.unpacked_input_element_widths.get(&node)
+            && width.is_multiple_of(element_width)
+        {
+            let destination = builder.alloc_logic(width);
+            builder.emit(SIRInstruction::Load(
+                destination,
+                variable.clone(),
+                SIROffset::PackedElements {
+                    bit_offset: 0,
+                    element_width,
+                },
+                width,
+            ));
+            destination
+        } else {
+            self.lower_input_for_node(
+                builder,
+                node,
+                variable,
+                index,
+                &BitAccess::new(0, width - 1),
+                arena,
+                cache,
+                None,
+            )
+        }
+    }
+
+    fn lower_input_for_node<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        node: NodeId,
+        id: &A,
+        index: &[crate::logic_tree::comb::SLTIndex],
+        access: &BitAccess,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+        env: Option<&LowerEnv<'_, A>>,
+    ) -> RegisterId {
+        let width = access.msb - access.lsb + 1;
+        if index.is_empty()
+            && let Some(&element_width) = self.unpacked_input_element_widths.get(&node)
+            && element_width != 0
+            && width > element_width
+            && access.lsb.is_multiple_of(element_width)
+            && width.is_multiple_of(element_width)
+        {
+            let destination = builder.alloc_logic(width);
+            builder.emit(SIRInstruction::Load(
+                destination,
+                id.clone(),
+                SIROffset::PackedElements {
+                    bit_offset: access.lsb,
+                    element_width,
+                },
+                width,
+            ));
+            destination
+        } else {
+            self.lower_input(builder, id, index, access, arena, cache, env)
         }
     }
 
@@ -2076,21 +2227,32 @@ impl SLTToSIRLowerer {
                 self.lower_inner(builder, source, arena, cache, None, allow_cache)
             }
             SLTVectorExpr::Origin(SLTBitOrigin::Input {
+                node,
                 variable,
                 signed: _,
                 index,
-            }) => self.lower_input(
-                builder,
-                &variable,
-                &index,
-                &BitAccess::new(0, width - 1),
-                arena,
-                cache,
-                None,
-            ),
-            SLTVectorExpr::StaticInput { variable, access } => {
-                self.lower_input(builder, &variable, &[], &access, arena, cache, None)
-            }
+            }) => self.lower_compacted_input(builder, node, &variable, &index, width, arena, cache),
+            SLTVectorExpr::StaticInput {
+                variable,
+                access,
+                unpacked_element_width,
+            } => match unpacked_element_width {
+                Some(element_width) => {
+                    let width = access.msb - access.lsb + 1;
+                    let destination = builder.alloc_logic(width);
+                    builder.emit(SIRInstruction::Load(
+                        destination,
+                        variable,
+                        SIROffset::PackedElements {
+                            bit_offset: access.lsb,
+                            element_width,
+                        },
+                        width,
+                    ));
+                    destination
+                }
+                None => self.lower_input(builder, &variable, &[], &access, arena, cache, None),
+            },
             SLTVectorExpr::Broadcast(bit) => {
                 let bit = self.lower_inner(builder, bit, arena, cache, None, allow_cache);
                 if width == 1 {
@@ -2203,17 +2365,18 @@ impl SLTToSIRLowerer {
                 self.lower_inner(builder, source, arena, cache, None, allow_cache)
             }
             SLTCountInput::Origin(SLTBitOrigin::Input {
+                node,
                 variable,
                 signed: _,
                 index,
-            }) => self.lower_input(
+            }) => self.lower_compacted_input(
                 builder,
+                node,
                 &variable,
                 &index,
-                &BitAccess::new(0, plan.input_width - 1),
+                plan.input_width,
                 arena,
                 cache,
-                None,
             ),
             SLTCountInput::Vector(expr) => self.lower_slt_vector_expr(
                 builder,
@@ -2317,6 +2480,7 @@ impl SLTToSIRLowerer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn lower_region_slice<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
@@ -2331,6 +2495,24 @@ impl SLTToSIRLowerer {
             return self.lower(builder, node, arena, cache);
         }
         self.lower_region_slice_inner(builder, node, &access, arena, cache)
+    }
+
+    /// Project a value which has already been lowered without retaining every
+    /// projection at once.  Grouped folds use this after the packed result has
+    /// been computed, immediately before the corresponding state Store.
+    pub(crate) fn project_materialized<A>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        value: RegisterId,
+        access: BitAccess,
+    ) -> RegisterId {
+        let source_width = builder.register(&value).width();
+        debug_assert!(access.msb < source_width);
+        if access.lsb == 0 && access.msb + 1 == source_width {
+            value
+        } else {
+            self.slice_reg(builder, value, &access)
+        }
     }
 
     fn lower_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
@@ -2368,11 +2550,11 @@ impl SLTToSIRLowerer {
             } => {
                 if let Some(env) = env
                     && let Some(reg) =
-                        self.lookup_override(builder, arena, cache, env, id, index, access)
+                        self.lookup_override(builder, node, arena, cache, env, id, index, access)
                 {
                     reg
                 } else {
-                    self.lower_input(builder, id, index, access, arena, cache, env)
+                    self.lower_input_for_node(builder, node, id, index, access, arena, cache, env)
                 }
             }
             SLTNode::Constant(val, mask, width, _signed) => {
@@ -2725,6 +2907,7 @@ impl SLTToSIRLowerer {
     fn rebuild_override_range<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
+        node: NodeId,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
         env: &LowerEnv<'_, A>,
@@ -2806,7 +2989,16 @@ impl SLTToSIRLowerer {
                 layer = current.parent;
             }
             let reg = part_reg.unwrap_or_else(|| {
-                self.lower_input(builder, id, index, &part_access, arena, cache, None)
+                self.lower_input_for_node(
+                    builder,
+                    node,
+                    id,
+                    index,
+                    &part_access,
+                    arena,
+                    cache,
+                    None,
+                )
             });
             part_regs.push(reg);
         }
@@ -2823,6 +3015,7 @@ impl SLTToSIRLowerer {
     fn lookup_override<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
+        node: NodeId,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
         env: &LowerEnv<'_, A>,
@@ -2925,7 +3118,7 @@ impl SLTToSIRLowerer {
             }
             return Some(result);
         }
-        self.rebuild_override_range(builder, arena, cache, env, id, index, access)
+        self.rebuild_override_range(builder, node, arena, cache, env, id, index, access)
     }
 
     /// Get width (references information from veryl-analyzer)
@@ -3015,23 +3208,32 @@ impl SLTToSIRLowerer {
         env: Option<&LowerEnv<'_, A>>,
         allow_cache: bool,
     ) -> RegisterId {
+        // A cached value is a snapshot at the point where the scheduler first
+        // lowered this node.  Preserve that snapshot instead of introducing a
+        // later memory read which could cross an intervening Store.
+        if allow_cache && let Some(&inner_reg) = cache.get(&expr) {
+            return self.slice_reg(builder, inner_reg, access);
+        }
+
         if let SLTNode::Input {
             variable,
             index,
             access: input_access,
             ..
         } = arena.get(expr)
-            && !index.is_empty()
             && access.msb <= input_access.msb - input_access.lsb
         {
             let composed =
                 BitAccess::new(input_access.lsb + access.lsb, input_access.lsb + access.msb);
-            if let Some(env) = env {
-                return self
-                    .lookup_override(builder, arena, cache, env, variable, index, &composed)
-                    .expect("dynamic input lookup always produces a memory fallback");
+            if let Some(env) = env
+                && let Some(reg) = self
+                    .lookup_override(builder, expr, arena, cache, env, variable, index, &composed)
+            {
+                return reg;
             }
-            return self.lower_input(builder, variable, index, &composed, arena, cache, None);
+            return self.lower_input_for_node(
+                builder, expr, variable, index, &composed, arena, cache, env,
+            );
         }
 
         let inner_reg = self.lower_inner(builder, expr, arena, cache, env, allow_cache);
@@ -3062,7 +3264,9 @@ impl SLTToSIRLowerer {
             } if access.msb <= input_access.msb - input_access.lsb => {
                 let composed =
                     BitAccess::new(input_access.lsb + access.lsb, input_access.lsb + access.msb);
-                self.lower_input(builder, variable, index, &composed, arena, cache, None)
+                self.lower_input_for_node(
+                    builder, expr, variable, index, &composed, arena, cache, None,
+                )
             }
             SLTNode::Slice {
                 expr: inner,
@@ -5860,6 +6064,113 @@ mod tests {
         eu
     }
 
+    #[test]
+    fn static_input_slice_lowers_to_an_exact_range_load() {
+        let mut arena = SLTNodeArena::new();
+        let packed = arena
+            .alloc(SLTNode::Input {
+                variable: 10,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(100, 938),
+            })
+            .unwrap();
+        let field = arena
+            .alloc(SLTNode::Slice {
+                expr: packed,
+                access: BitAccess::new(33, 37),
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            field,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+        let instructions = &eu.blocks[&eu.entry_block_id].instructions;
+
+        assert!(matches!(
+            instructions.as_slice(),
+            [SIRInstruction::Load(_, 10, SIROffset::Static(133), 5)]
+        ));
+    }
+
+    #[test]
+    fn static_input_slice_preserves_a_cached_snapshot() {
+        let mut arena = SLTNodeArena::new();
+        let packed = input(&mut arena, 10, 839);
+        let field = arena
+            .alloc(SLTNode::Slice {
+                expr: packed,
+                access: BitAccess::new(133, 133),
+            })
+            .unwrap();
+
+        let lowerer = SLTToSIRLowerer::new(false);
+        let mut builder = SIRBuilder::new();
+        let mut cache = crate::HashMap::default();
+        let snapshot = lowerer.lower(&mut builder, packed, &arena, &mut cache);
+        lowerer.lower(&mut builder, field, &arena, &mut cache);
+        let eu = finish_lowering(builder);
+        let instructions = &eu.blocks[&eu.entry_block_id].instructions;
+
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, SIRInstruction::Load(..)))
+                .count(),
+            1
+        );
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Load(_, 10, SIROffset::Static(0), 839)
+        )));
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Binary(_, source, BinaryOp::Shr, _) if *source == snapshot
+        )));
+    }
+
+    #[test]
+    fn static_input_slice_uses_an_exact_override_range() {
+        let mut arena = SLTNodeArena::new();
+        let packed = input(&mut arena, 10, 16);
+        let field = arena
+            .alloc(SLTNode::Slice {
+                expr: packed,
+                access: BitAccess::new(4, 7),
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        let materialized = builder.alloc_logic(16);
+        builder.emit(SIRInstruction::Imm(materialized, SIRValue::new(0xabcdu16)));
+        let mut inputs = crate::HashMap::default();
+        inputs.insert(VarAtomBase::new(10, 0, 15), materialized);
+        SLTToSIRLowerer::new(false).lower_with_inputs(
+            &mut builder,
+            field,
+            &arena,
+            &mut crate::HashMap::default(),
+            inputs,
+        );
+        let eu = finish_lowering(builder);
+        let instructions = &eu.blocks[&eu.entry_block_id].instructions;
+
+        assert!(
+            instructions
+                .iter()
+                .all(|instruction| !matches!(instruction, SIRInstruction::Load(..)))
+        );
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Binary(_, source, BinaryOp::Shr, _) if *source == materialized
+        )));
+    }
+
     fn instruction_count(
         eu: &ExecutionUnit<u32>,
         predicate: impl Fn(&SIRInstruction<u32>) -> bool,
@@ -6055,7 +6366,10 @@ mod tests {
                     }
                     SIRInstruction::Load(dst, address, offset, width) => {
                         let offset = match offset {
-                            SIROffset::Static(offset) => *offset,
+                            SIROffset::Static(offset)
+                            | SIROffset::PackedElements {
+                                bit_offset: offset, ..
+                            } => *offset,
                             SIROffset::Dynamic(offset) => values[offset]
                                 .payload
                                 .to_u64_digits()
@@ -6159,6 +6473,9 @@ mod tests {
                         (true_block.0, &true_block.1)
                     }
                 }
+                SIRTerminator::Switch { .. } => {
+                    panic!("unexpected Switch in grouped-fold lowering test")
+                }
                 SIRTerminator::Return => return values,
                 SIRTerminator::Error(code) => panic!("unexpected Error({code})"),
             };
@@ -6201,6 +6518,7 @@ mod tests {
         loop_value: NodeId,
         width: usize,
         stride: usize,
+        unpacked: bool,
     ) -> NodeId {
         let _ = width;
         arena
@@ -6210,7 +6528,11 @@ mod tests {
                 index: vec![crate::logic_tree::comb::SLTIndex {
                     node: loop_value,
                     stride,
-                    kind: crate::logic_tree::comb::SLTIndexKind::Packed,
+                    kind: if unpacked {
+                        crate::logic_tree::comb::SLTIndexKind::Unpacked { element_width: 1 }
+                    } else {
+                        crate::logic_tree::comb::SLTIndexKind::Packed
+                    },
                 }],
                 access: BitAccess::new(0, 0),
             })
@@ -6220,6 +6542,14 @@ mod tests {
     fn synthetic_or_scan_group(
         width: usize,
         mutation: ScanMutation,
+    ) -> (SLTNodeArena<u32>, NodeId) {
+        synthetic_or_scan_group_with_layout(width, mutation, false)
+    }
+
+    fn synthetic_or_scan_group_with_layout(
+        width: usize,
+        mutation: ScanMutation,
+        unpacked: bool,
     ) -> (SLTNodeArena<u32>, NodeId) {
         let mut arena = SLTNodeArena::new();
         let loop_value = input(&mut arena, SCAN_LOOP, 64);
@@ -6235,8 +6565,9 @@ mod tests {
             } else {
                 1
             },
+            unpacked,
         );
-        let mask = scan_dynamic_bit(&mut arena, SCAN_MASK, loop_value, width, 1);
+        let mask = scan_dynamic_bit(&mut arena, SCAN_MASK, loop_value, width, 1, unpacked);
         let bound = input(&mut arena, SCAN_BOUND, 8);
         let unmasked = input(&mut arena, SCAN_UNMASKED, 1);
         let mode = input(&mut arena, SCAN_MODE, 2);
@@ -6470,6 +6801,41 @@ mod tests {
             )),
             1
         );
+    }
+
+    #[test]
+    fn unpacked_bit_scan_uses_explicit_packed_elements_loads() {
+        let width = 32;
+        let (arena, group) = synthetic_or_scan_group_with_layout(width, ScanMutation::None, true);
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            group,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+        let packed_loads = eu
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Load(
+                        _,
+                        SCAN_SOURCE | SCAN_MASK,
+                        SIROffset::PackedElements {
+                            bit_offset: 0,
+                            element_width: 1
+                        },
+                        32
+                    )
+                )
+            })
+            .count();
+
+        assert_eq!(packed_loads, 2);
     }
 
     #[test]
@@ -7794,6 +8160,51 @@ mod tests {
             )),
             1
         );
+    }
+
+    #[test]
+    fn compacted_unpacked_input_preserves_packed_elements_provenance() {
+        let variable = 42u32;
+        let mut arena = SLTNodeArena::new();
+        let representative = arena
+            .alloc(SLTNode::Input {
+                variable,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let element_widths = crate::HashMap::from_iter([(variable, 1)]);
+        let lowerer =
+            SLTToSIRLowerer::new(false).with_unpacked_input_types(&arena, &element_widths);
+        let mut builder = SIRBuilder::new();
+        lowerer.lower_slt_vector_expr(
+            &mut builder,
+            SLTVectorExpr::Origin(SLTBitOrigin::Input {
+                node: representative,
+                variable,
+                signed: false,
+                index: Vec::new(),
+            }),
+            32,
+            &arena,
+            &mut crate::HashMap::default(),
+            true,
+        );
+        let eu = finish_lowering(builder);
+
+        assert!(matches!(
+            eu.blocks[&eu.entry_block_id].instructions.as_slice(),
+            [SIRInstruction::Load(
+                _,
+                42,
+                SIROffset::PackedElements {
+                    bit_offset: 0,
+                    element_width: 1,
+                },
+                32,
+            )]
+        ));
     }
 
     #[test]

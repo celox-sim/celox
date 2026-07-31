@@ -1,5 +1,20 @@
 use crate::HashMap;
-use crate::ir::{AbsoluteAddr, Program, SIRInstruction, SIROffset};
+use crate::ir::{
+    AbsoluteAddr, Program, RegionedAbsoluteAddr, RegisterId, SIRInstruction, SIROffset,
+    STABLE_REGION, collect_exact_zero_registers,
+};
+
+type LayoutVariable = (AbsoluteAddr, usize, bool, usize, usize);
+
+fn sort_layout_variables(variables: &mut [LayoutVariable]) {
+    // Packing by decreasing alignment avoids padding.  Equal-alignment values
+    // must also have a stable order: both Program maps use randomized hashers,
+    // and preserving their iteration order makes every physical offset (and
+    // consequently native MIR/code shape) vary between identical builds.
+    variables.sort_unstable_by_key(|(address, _, _, _, alignment)| {
+        (std::cmp::Reverse(*alignment), *address)
+    });
+}
 
 pub const RUNTIME_EVENT_CAPACITY: usize = 1024;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -7,8 +22,14 @@ pub const RUNTIME_EVENT_WRITING: u64 = u64::MAX;
 pub const STATE_HEADER_SIZE: usize = 32;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET: usize = 0;
+/// Remaining iterations for an in-function native tick loop.
+#[cfg(target_arch = "x86_64")]
+pub const STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET: usize = 8;
+#[cfg(target_arch = "x86_64")]
+pub const STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET: usize = 24;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET: usize = 16;
+/// Runtime-event write sequence observed when a native tick batch starts.
 pub const RUNTIME_EVENT_HEADER_SIZE: usize = 8;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const RUNTIME_EVENT_SLOT_SEQ_OFFSET: usize = 0;
@@ -76,11 +97,9 @@ pub struct MemoryLayout {
     pub sparse_offsets: HashMap<AbsoluteAddr, usize>,
     pub sparse_base_offset: usize,
     pub sparse_layouts: HashMap<AbsoluteAddr, SparseWorkingLayout>,
-    /// Fixed-capacity worklist of sparse regions touched by the current FF
-    /// evaluation.  A region appears at most once, guarded by its active byte.
-    pub sparse_active_count_offset: usize,
-    pub sparse_active_flags_offset: usize,
-    pub sparse_active_list_offset: usize,
+    /// Event-local bitmap of sparse regions touched by the current FF
+    /// evaluation. One bit per descriptor makes repeated marks idempotent.
+    pub sparse_active_bits_offset: usize,
     pub sparse_active_capacity: usize,
     /// Unified memory buffer size in bytes (stable + working).
     pub merged_total_size: usize,
@@ -134,7 +153,7 @@ impl MemoryLayout {
             }
         }
 
-        stable_vars_to_layout.sort_by_key(|&(_, _, _, _, align)| std::cmp::Reverse(align));
+        sort_layout_variables(&mut stable_vars_to_layout);
 
         let mut offsets = HashMap::default();
         let mut widths = HashMap::default();
@@ -166,25 +185,24 @@ impl MemoryLayout {
 
         // Compact working region: only variables actually written in WORKING region.
         let working_addrs = program.collect_working_region_addrs();
-        let mut working_vars_to_layout: Vec<(AbsoluteAddr, usize, bool, usize, usize)> =
-            working_addrs
-                .iter()
-                .map(|addr| {
-                    let width = widths[addr];
-                    let is_4state = is_4states[addr];
-                    let size = unpacked_arrays
-                        .get(addr)
-                        .map(|layout| layout.plane_size)
-                        .unwrap_or_else(|| get_byte_size(width));
-                    let align = unpacked_arrays
-                        .get(addr)
-                        .map(|layout| layout.element_stride.min(8))
-                        .unwrap_or_else(|| get_alignment(width));
-                    (*addr, width, is_4state, size, align)
-                })
-                .collect();
+        let mut working_vars_to_layout: Vec<LayoutVariable> = working_addrs
+            .iter()
+            .map(|addr| {
+                let width = widths[addr];
+                let is_4state = is_4states[addr];
+                let size = unpacked_arrays
+                    .get(addr)
+                    .map(|layout| layout.plane_size)
+                    .unwrap_or_else(|| get_byte_size(width));
+                let align = unpacked_arrays
+                    .get(addr)
+                    .map(|layout| layout.element_stride.min(8))
+                    .unwrap_or_else(|| get_alignment(width));
+                (*addr, width, is_4state, size, align)
+            })
+            .collect();
 
-        working_vars_to_layout.sort_by_key(|&(_, _, _, _, align)| std::cmp::Reverse(align));
+        sort_layout_variables(&mut working_vars_to_layout);
 
         let mut working_offsets = HashMap::default();
         let mut working_current_offset = 0;
@@ -200,23 +218,22 @@ impl MemoryLayout {
         }
 
         let sparse_addrs = program.collect_sparse_working_region_addrs();
-        let mut sparse_vars_to_layout: Vec<(AbsoluteAddr, usize, bool, usize, usize)> =
-            sparse_addrs
-                .iter()
-                .map(|addr| {
-                    let width = widths[addr];
-                    let size = unpacked_arrays
-                        .get(addr)
-                        .map(|layout| layout.plane_size)
-                        .unwrap_or_else(|| get_byte_size(width));
-                    let align = unpacked_arrays
-                        .get(addr)
-                        .map(|layout| layout.element_stride.min(8))
-                        .unwrap_or_else(|| get_alignment(width));
-                    (*addr, width, is_4states[addr], size, align)
-                })
-                .collect();
-        sparse_vars_to_layout.sort_by_key(|&(_, _, _, _, align)| std::cmp::Reverse(align));
+        let mut sparse_vars_to_layout: Vec<LayoutVariable> = sparse_addrs
+            .iter()
+            .map(|addr| {
+                let width = widths[addr];
+                let size = unpacked_arrays
+                    .get(addr)
+                    .map(|layout| layout.plane_size)
+                    .unwrap_or_else(|| get_byte_size(width));
+                let align = unpacked_arrays
+                    .get(addr)
+                    .map(|layout| layout.element_stride.min(8))
+                    .unwrap_or_else(|| get_alignment(width));
+                (*addr, width, is_4states[addr], size, align)
+            })
+            .collect();
+        sort_layout_variables(&mut sparse_vars_to_layout);
         let mut sparse_offsets = HashMap::default();
         let mut sparse_current_offset = 0usize;
         for (addr, _width, _is_4state, size, align) in sparse_vars_to_layout {
@@ -263,11 +280,9 @@ impl MemoryLayout {
             );
         }
 
-        let sparse_active_count_offset = (sparse_metadata_offset + 7) & !7;
-        let sparse_active_flags_offset = sparse_active_count_offset + 8;
-        let sparse_active_list_offset =
-            (sparse_active_flags_offset + sparse_active_capacity + 3) & !3;
-        sparse_metadata_offset = sparse_active_list_offset + sparse_active_capacity * 4;
+        let sparse_active_bits_offset = (sparse_metadata_offset + 7) & !7;
+        sparse_metadata_offset =
+            sparse_active_bits_offset + sparse_active_capacity.div_ceil(64) * 8;
 
         // Triggered bits region (1 bit per event canonical ID)
         let num_potential_triggers = program.num_events();
@@ -284,8 +299,11 @@ impl MemoryLayout {
         // - Both variables have the same 4-state mode
         // - Alias width fits within canonical width
         // - Neither address is used in FF execution units (FF timing requires separate storage)
-        let ff_addrs = collect_ff_addresses(program);
-        for (alias_addr, canonical_addr) in &program.address_aliases {
+        let ff_addrs = collect_ff_referenced_addresses(program);
+        let mut address_aliases = program.address_aliases.iter().collect::<Vec<_>>();
+        address_aliases
+            .sort_unstable_by_key(|(alias_addr, canonical_addr)| (**alias_addr, **canonical_addr));
+        for (alias_addr, canonical_addr) in address_aliases {
             // In 4-state mode, skip 4-state variables: aliasing only shares
             // the value offset, but 4-state also needs mask offset sharing.
             // In 2-state mode (four_state=false), masks are not allocated so all types are safe.
@@ -320,9 +338,7 @@ impl MemoryLayout {
             sparse_offsets,
             sparse_base_offset,
             sparse_layouts,
-            sparse_active_count_offset,
-            sparse_active_flags_offset,
-            sparse_active_list_offset,
+            sparse_active_bits_offset,
             sparse_active_capacity,
             merged_total_size,
             triggered_bits_offset,
@@ -343,6 +359,17 @@ impl MemoryLayout {
             .unwrap_or_else(|| get_byte_size(self.widths[addr]))
     }
 
+    pub(crate) fn region_base_offset(&self, addr: &RegionedAbsoluteAddr) -> usize {
+        let absolute = addr.absolute_addr();
+        match addr.region {
+            STABLE_REGION => self.offsets[&absolute],
+            crate::ir::SPARSE_WORKING_REGION => {
+                self.sparse_base_offset + self.sparse_offsets[&absolute]
+            }
+            _ => self.working_base_offset + self.working_offsets[&absolute],
+        }
+    }
+
     pub fn map_static_bit_offset(&self, addr: &AbsoluteAddr, bit_offset: usize) -> (usize, usize) {
         let Some(array) = self.unpacked_arrays.get(addr) else {
             return (bit_offset / 8, bit_offset % 8);
@@ -353,6 +380,24 @@ impl MemoryLayout {
             element * array.element_stride + intra_element / 8,
             intra_element % 8,
         )
+    }
+
+    #[cfg(any(target_arch = "x86_64", test))]
+    pub(crate) fn regioned_static_byte_and_intra(
+        &self,
+        addr: &RegionedAbsoluteAddr,
+        bit_offset: usize,
+    ) -> Option<(i32, usize)> {
+        let absolute = addr.absolute_addr();
+        let base = match addr.region {
+            STABLE_REGION => *self.offsets.get(&absolute).unwrap_or(&0),
+            crate::ir::SPARSE_WORKING_REGION => {
+                self.sparse_base_offset + *self.sparse_offsets.get(&absolute).unwrap_or(&0)
+            }
+            _ => self.working_base_offset + *self.working_offsets.get(&absolute).unwrap_or(&0),
+        };
+        let (byte, intra) = self.map_static_bit_offset(&absolute, bit_offset);
+        Some((i32::try_from(base.checked_add(byte)?).ok()?, intra))
     }
 }
 
@@ -388,43 +433,63 @@ fn declared_strided_array_layouts(program: &Program) -> HashMap<AbsoluteAddr, Un
     layouts
 }
 
-fn collect_strided_array_layouts(program: &Program) -> HashMap<AbsoluteAddr, UnpackedArrayLayout> {
+fn supports_strided_access(
+    layout: UnpackedArrayLayout,
+    offset: &SIROffset,
+    width: usize,
+    whole_object_transfer: bool,
+) -> bool {
+    match offset {
+        SIROffset::Element {
+            element_width,
+            bit_offset,
+            ..
+        } => {
+            *element_width == layout.element_width
+                && bit_offset
+                    .checked_add(width)
+                    .is_some_and(|end| end <= layout.element_width)
+        }
+        SIROffset::Static(start) => {
+            let physically_contiguous = layout.element_stride * 8 == layout.element_width;
+            let whole = *start == 0 && width == layout.element_width * layout.element_count;
+            let single_element = start
+                .checked_add(width.saturating_sub(1))
+                .is_some_and(|end| *start / layout.element_width == end / layout.element_width);
+            physically_contiguous || single_element || (whole_object_transfer && whole)
+        }
+        SIROffset::PackedElements {
+            bit_offset,
+            element_width,
+        } => {
+            let whole = *bit_offset == 0 && width == layout.element_width * layout.element_count;
+            *element_width == layout.element_width
+                && ((layout.element_stride * 8 == layout.element_width
+                    && bit_offset
+                        .checked_add(width)
+                        .is_some_and(|end| end <= layout.element_width * layout.element_count))
+                    || (whole_object_transfer && whole))
+        }
+        SIROffset::Dynamic(_) => false,
+    }
+}
+
+pub(crate) fn collect_strided_array_layouts(
+    program: &Program,
+) -> HashMap<AbsoluteAddr, UnpackedArrayLayout> {
     let mut candidates = declared_strided_array_layouts(program);
 
-    let mut inspect = |inst: &SIRInstruction<crate::ir::RegionedAbsoluteAddr>| {
+    let mut inspect = |inst: &SIRInstruction<crate::ir::RegionedAbsoluteAddr>,
+                       exact_zeros: &crate::HashSet<RegisterId>| {
         let mut check = |addr: &crate::ir::RegionedAbsoluteAddr,
                          offset: &SIROffset,
                          width: usize,
-                         whole_commit: bool| {
+                         whole_object_transfer: bool| {
             let abs = addr.absolute_addr();
             let Some(layout) = candidates.get(&abs).copied() else {
                 return;
             };
-            let supported = match offset {
-                SIROffset::Element {
-                    element_width,
-                    bit_offset,
-                    ..
-                } => {
-                    *element_width == layout.element_width
-                        && bit_offset
-                            .checked_add(width)
-                            .is_some_and(|end| end <= layout.element_width)
-                }
-                SIROffset::Static(start) => {
-                    let physically_contiguous = layout.element_stride * 8 == layout.element_width;
-                    let whole = *start == 0 && width == layout.element_width * layout.element_count;
-                    let single_element =
-                        start
-                            .checked_add(width.saturating_sub(1))
-                            .is_some_and(|end| {
-                                *start / layout.element_width == end / layout.element_width
-                            });
-                    physically_contiguous || single_element || (whole_commit && whole)
-                }
-                SIROffset::Dynamic(_) => false,
-            };
-            if !supported {
+            if !supports_strided_access(layout, offset, width, whole_object_transfer) {
                 candidates.remove(&abs);
             }
         };
@@ -432,8 +497,14 @@ fn collect_strided_array_layouts(program: &Program) -> HashMap<AbsoluteAddr, Unp
             SIRInstruction::Load(_, addr, offset, width) => {
                 check(addr, offset, *width, false);
             }
-            SIRInstruction::Store(addr, offset, width, ..) => {
-                check(addr, offset, *width, false);
+            SIRInstruction::Store(addr, offset, width, source, triggers, capture_sites) => {
+                let state_bulk_zero = matches!(
+                    addr.region,
+                    STABLE_REGION | crate::ir::SPARSE_WORKING_REGION
+                ) && triggers.is_empty()
+                    && capture_sites.is_empty()
+                    && exact_zeros.contains(source);
+                check(addr, offset, *width, state_bulk_zero);
             }
             SIRInstruction::Commit(src, dst, offset, width, _) => {
                 check(src, offset, *width, true);
@@ -446,12 +517,33 @@ fn collect_strided_array_layouts(program: &Program) -> HashMap<AbsoluteAddr, Unp
         .eval_comb
         .iter()
         .chain(program.eval_apply_ffs.values().flatten())
+        .chain(program.eval_comb_apply_ffs.values().flatten())
         .chain(program.eval_only_ffs.values().flatten())
         .chain(program.apply_ffs.values().flatten())
     {
+        let mut zero_roots = eu
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(address, offset, width, source, ..)
+                    if matches!(
+                        address.region,
+                        STABLE_REGION | crate::ir::SPARSE_WORKING_REGION
+                    ) && offset.constant_bit_offset() == Some(0)
+                        && *width > 64 =>
+                {
+                    Some(*source)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        zero_roots.sort_unstable();
+        zero_roots.dedup();
+        let exact_zeros = collect_exact_zero_registers(eu, zero_roots);
         for block in eu.blocks.values() {
             for inst in &block.instructions {
-                inspect(inst);
+                inspect(inst, &exact_zeros);
             }
         }
     }
@@ -488,9 +580,16 @@ fn build_runtime_event_site_layouts(program: &Program) -> Vec<RuntimeEventSiteLa
         .collect()
 }
 
-/// Collect all absolute addresses referenced in FF execution units.
-fn collect_ff_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
+/// Collect whole objects referenced by FF.
+///
+/// FF reads cannot share a persistent home without a phase-correct StateSSA
+/// proof that the identity definition precedes the read on every event path.
+fn collect_ff_referenced_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
     let mut addrs = crate::HashSet::default();
+    // eval_comb_apply_ffs contains the complete comb graph, not just FF
+    // state.  The split FF forms are retained as the authoritative inventory;
+    // scanning the fused form would conservatively reject every useful comb
+    // identity alias.
     let ff_eus = program
         .eval_apply_ffs
         .values()
@@ -529,5 +628,123 @@ fn get_alignment(width: usize) -> usize {
         size.next_power_of_two()
     } else {
         8
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::InstanceId;
+    use veryl_analyzer::ir::VarId;
+
+    fn variable(instance: usize, variable: u32, alignment: usize) -> LayoutVariable {
+        (
+            AbsoluteAddr {
+                instance_id: InstanceId(instance),
+                var_id: VarId::from_raw(variable),
+            },
+            alignment * 8,
+            false,
+            alignment,
+            alignment,
+        )
+    }
+
+    #[test]
+    fn layout_order_is_independent_of_hash_iteration_order() {
+        let high_address = variable(3, 9, 8);
+        let low_address = variable(1, 2, 8);
+        let less_aligned = variable(0, 0, 4);
+        let mut forward = vec![high_address, less_aligned, low_address];
+        let mut reverse = forward.iter().copied().rev().collect::<Vec<_>>();
+
+        sort_layout_variables(&mut forward);
+        sort_layout_variables(&mut reverse);
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward, vec![low_address, high_address, less_aligned]);
+    }
+
+    #[test]
+    fn padded_array_accepts_only_semantic_whole_object_transfers() {
+        let layout = UnpackedArrayLayout {
+            element_width: 51,
+            element_count: 4096,
+            element_stride: 8,
+            plane_size: 4096 * 8,
+        };
+        let whole_width = 51 * 4096;
+
+        assert!(!supports_strided_access(
+            layout,
+            &SIROffset::Static(0),
+            whole_width,
+            false,
+        ));
+        assert!(supports_strided_access(
+            layout,
+            &SIROffset::Static(0),
+            whole_width,
+            true,
+        ));
+        assert!(!supports_strided_access(
+            layout,
+            &SIROffset::Static(51),
+            whole_width - 51,
+            true,
+        ));
+    }
+
+    #[test]
+    fn packed_elements_access_requires_physically_packed_storage() {
+        let padded = UnpackedArrayLayout {
+            element_width: 1,
+            element_count: 32,
+            element_stride: 1,
+            plane_size: 32,
+        };
+        let packed = UnpackedArrayLayout {
+            element_width: 8,
+            element_count: 4,
+            element_stride: 1,
+            plane_size: 4,
+        };
+
+        assert!(!supports_strided_access(
+            padded,
+            &SIROffset::PackedElements {
+                bit_offset: 0,
+                element_width: 1,
+            },
+            32,
+            false,
+        ));
+        assert!(supports_strided_access(
+            packed,
+            &SIROffset::PackedElements {
+                bit_offset: 0,
+                element_width: 8,
+            },
+            32,
+            false,
+        ));
+        assert!(supports_strided_access(
+            padded,
+            &SIROffset::PackedElements {
+                bit_offset: 0,
+                element_width: 1,
+            },
+            32,
+            true,
+        ));
+        assert!(!supports_strided_access(
+            padded,
+            &SIROffset::PackedElements {
+                bit_offset: 1,
+                element_width: 1,
+            },
+            31,
+            true,
+        ));
     }
 }

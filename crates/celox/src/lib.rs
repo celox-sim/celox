@@ -57,7 +57,7 @@ pub use backend::{JitBackend, SimBackend};
 pub use celox_macros::veryl_test;
 #[cfg(not(target_arch = "wasm32"))]
 pub use debug::CompilationTraceResult;
-pub use debug::{CompilationTrace, TraceOptions};
+pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
 pub(crate) use fxhash::FxHashMap as HashMap;
 pub(crate) use fxhash::FxHashSet as HashSet;
 pub use ir::{AbsoluteAddr, AddrLookupError, PortTypeKind, Program, RuntimeErrorInfo, SignalRef};

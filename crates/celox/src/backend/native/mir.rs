@@ -10,13 +10,15 @@ use std::{collections::HashMap, fmt};
 use crate::ir::RegionedAbsoluteAddr;
 
 // ────────────────────────────────────────────────────────────────
-// Uses: stack-allocated list of VReg operands (no heap allocation)
+// Uses: fixed-size operand list
 // ────────────────────────────────────────────────────────────────
 
-/// Stack-allocated list of up to 5 VReg uses. Avoids Vec heap allocation
-/// in the regalloc inner loop.
+const MAX_USES: usize = 5;
+
+/// Stack-allocated VReg operands for one MIR instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Uses {
-    buf: [VReg; 5],
+    buf: [VReg; MAX_USES],
     len: u8,
 }
 
@@ -24,48 +26,41 @@ impl Uses {
     #[inline]
     pub fn none() -> Self {
         Self {
-            buf: [VReg(0); 5],
+            buf: [VReg(0); MAX_USES],
             len: 0,
         }
     }
     #[inline]
+    pub fn from_slice(values: &[VReg]) -> Self {
+        assert!(values.len() <= MAX_USES, "MIR operand capacity exceeded");
+        let mut result = Self::none();
+        result.buf[..values.len()].copy_from_slice(values);
+        result.len = values.len() as u8;
+        result
+    }
+    #[inline]
     pub fn one(a: VReg) -> Self {
-        Self {
-            buf: [a, VReg(0), VReg(0), VReg(0), VReg(0)],
-            len: 1,
-        }
+        Self::from_slice(&[a])
     }
     #[inline]
     pub fn two(a: VReg, b: VReg) -> Self {
-        Self {
-            buf: [a, b, VReg(0), VReg(0), VReg(0)],
-            len: 2,
-        }
+        Self::from_slice(&[a, b])
     }
     #[inline]
     pub fn three(a: VReg, b: VReg, c: VReg) -> Self {
-        Self {
-            buf: [a, b, c, VReg(0), VReg(0)],
-            len: 3,
-        }
+        Self::from_slice(&[a, b, c])
     }
     #[inline]
     pub fn four(a: VReg, b: VReg, c: VReg, d: VReg) -> Self {
-        Self {
-            buf: [a, b, c, d, VReg(0)],
-            len: 4,
-        }
+        Self::from_slice(&[a, b, c, d])
     }
     #[inline]
     pub fn five(a: VReg, b: VReg, c: VReg, d: VReg, e: VReg) -> Self {
-        Self {
-            buf: [a, b, c, d, e],
-            len: 5,
-        }
+        Self::from_slice(&[a, b, c, d, e])
     }
     #[inline]
     pub fn len(&self) -> usize {
-        self.len as usize
+        usize::from(self.len)
     }
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -73,18 +68,33 @@ impl Uses {
     }
     #[inline]
     pub fn contains(&self, v: &VReg) -> bool {
-        self.iter().any(|u| u == v)
+        self.iter().any(|value| value == v)
     }
     #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = &VReg> {
-        self.buf[..self.len as usize].iter()
+    pub fn iter(&self) -> std::slice::Iter<'_, VReg> {
+        self.buf[..usize::from(self.len)].iter()
+    }
+    #[inline]
+    pub fn as_slice(&self) -> &[VReg] {
+        &self.buf[..usize::from(self.len)]
+    }
+
+    pub(crate) fn replace(&mut self, old: VReg, new: VReg) -> bool {
+        let mut changed = false;
+        for value in &mut self.buf[..usize::from(self.len)] {
+            if *value == old {
+                *value = new;
+                changed = true;
+            }
+        }
+        changed
     }
 }
 
 impl std::ops::Deref for Uses {
     type Target = [VReg];
     fn deref(&self) -> &[VReg] {
-        &self.buf[..self.len as usize]
+        self.as_slice()
     }
 }
 
@@ -92,15 +102,16 @@ impl<'a> IntoIterator for &'a Uses {
     type Item = &'a VReg;
     type IntoIter = std::slice::Iter<'a, VReg>;
     fn into_iter(self) -> Self::IntoIter {
-        self.buf[..self.len as usize].iter()
+        self.as_slice().iter()
     }
 }
 
 impl IntoIterator for Uses {
     type Item = VReg;
-    type IntoIter = std::iter::Take<std::array::IntoIter<VReg, 5>>;
+    type IntoIter = std::iter::Take<std::array::IntoIter<VReg, MAX_USES>>;
+
     fn into_iter(self) -> Self::IntoIter {
-        self.buf.into_iter().take(self.len as usize)
+        self.buf.into_iter().take(usize::from(self.len))
     }
 }
 
@@ -121,6 +132,26 @@ impl fmt::Debug for VReg {
 impl fmt::Display for VReg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "v{}", self.0)
+    }
+}
+
+/// Virtual 128-bit x86 vector register.
+///
+/// Vector values deliberately have a namespace and register class separate
+/// from scalar [`VReg`]s.  Treating an XMM-resident value as a scalar VReg
+/// would make the GPR allocator create pointless copies and spills.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct X86VecReg(pub u32);
+
+impl fmt::Debug for X86VecReg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "xv{}", self.0)
+    }
+}
+
+impl fmt::Display for X86VecReg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "xv{}", self.0)
     }
 }
 
@@ -220,6 +251,50 @@ pub enum SpillKind {
     Remat { value: u64 },
 }
 
+/// Version identity for one allocator-created packed-state home.
+///
+/// The identity is distinct from the physical address: two SSA versions may
+/// use the same packed word at different points, but a reload is valid only
+/// for the exact version which most recently established that home.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct StateHomeId(pub u32);
+
+/// One full machine-accessible packed-state word.  This is allocator metadata
+/// over target-relevant 8/16/32/64-bit operations, not an HDL value width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct PackedStateHome {
+    pub id: StateHomeId,
+    pub offset: i32,
+    pub size: OpSize,
+    pub live_on_entry: bool,
+}
+
+impl PackedStateHome {
+    pub(crate) fn byte_range(self) -> Option<std::ops::Range<i64>> {
+        let start = i64::from(self.offset);
+        let end = start.checked_add(i64::from(self.size.bytes()))?;
+        Some(start..end)
+    }
+}
+
+/// Semantic subvalue inserted into the machine word produced by a static
+/// state-store read-modify-write. This is per-definition provenance for
+/// MemorySSA, not a width or type attached to the referenced VReg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StateInsertDesc {
+    pub value: VReg,
+    /// First bit of `value` represented by this stored fragment.  This is a
+    /// relation between two machine values, not an HDL width attached to the
+    /// VReg.
+    pub value_bit_offset: usize,
+    /// First bit within the physical word written by the store.
+    pub bit_offset: usize,
+    pub width_bits: usize,
+    /// The fragment alone contains every significant bit of `value` expected
+    /// by the legacy single-load reload path.
+    pub complete_value: bool,
+}
+
 /// Cost information for spilling / reloading a virtual register.
 #[derive(Debug, Clone)]
 pub struct SpillDesc {
@@ -229,6 +304,12 @@ pub struct SpillDesc {
     /// Estimated cost to spill. 0 if the value is already in memory
     /// (store-back-only or rematerializable).
     pub spill_cost: u8,
+    /// Optional relation established only when this definition is stored.
+    pub(crate) state_insert: Option<StateInsertDesc>,
+    /// Optional allocator-created physical spill home for this complete
+    /// 32/64-bit machine value.  The store is deferred until allocation
+    /// actually chooses this home.
+    pub(crate) deferred_state_home: Option<PackedStateHome>,
 }
 
 impl SpillDesc {
@@ -238,6 +319,8 @@ impl SpillDesc {
             kind: SpillKind::Remat { value },
             reload_cost: 1,
             spill_cost: 0,
+            state_insert: None,
+            deferred_state_home: None,
         }
     }
 
@@ -262,6 +345,8 @@ impl SpillDesc {
             },
             reload_cost,
             spill_cost: if store_back_only { 0 } else { reload_cost },
+            state_insert: None,
+            deferred_state_home: None,
         }
     }
 
@@ -286,6 +371,8 @@ impl SpillDesc {
             },
             reload_cost,
             spill_cost: if store_back_only { 0 } else { reload_cost },
+            state_insert: None,
+            deferred_state_home: None,
         }
     }
 
@@ -293,7 +380,11 @@ impl SpillDesc {
     pub fn copy_for_snapshot(&self) -> Self {
         match self.kind {
             SpillKind::Remat { .. } => self.clone(),
-            _ => Self::transient(),
+            _ => self
+                .deferred_state_home
+                .map_or_else(Self::transient, |home| {
+                    Self::transient().with_deferred_state_home(home)
+                }),
         }
     }
 
@@ -303,7 +394,49 @@ impl SpillDesc {
             kind: SpillKind::Stack,
             reload_cost: 2,
             spill_cost: 2,
+            state_insert: None,
+            deferred_state_home: None,
         }
+    }
+
+    pub(crate) fn with_deferred_state_home(mut self, home: PackedStateHome) -> Self {
+        self.deferred_state_home = Some(home);
+        self
+    }
+
+    pub(crate) fn with_state_insert(
+        mut self,
+        value: VReg,
+        bit_offset: usize,
+        width_bits: usize,
+    ) -> Self {
+        self.state_insert = Some(StateInsertDesc {
+            value,
+            value_bit_offset: 0,
+            bit_offset,
+            width_bits,
+            complete_value: true,
+        });
+        self
+    }
+
+    /// Record one physical fragment of a 32/64-bit machine value committed by
+    /// a later static SimState store.
+    pub(crate) fn with_state_insert_fragment(
+        mut self,
+        value: VReg,
+        value_bit_offset: usize,
+        bit_offset: usize,
+        width_bits: usize,
+    ) -> Self {
+        self.state_insert = Some(StateInsertDesc {
+            value,
+            value_bit_offset,
+            bit_offset,
+            width_bits,
+            complete_value: false,
+        });
+        self
     }
 }
 
@@ -330,7 +463,7 @@ impl fmt::Display for BlockId {
 // ────────────────────────────────────────────────────────────────
 
 /// Operand size for memory and ALU operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum OpSize {
     S8,
     S16,
@@ -372,6 +505,44 @@ pub enum BaseReg {
     StackFrame,
 }
 
+/// Closed-open physical-state byte envelope which may be observed or changed
+/// by a register-indexed access.
+///
+/// A read-modify-write may use a wider machine access while preserving bytes
+/// outside this envelope. This range describes its semantic memory effect,
+/// not every byte touched by that machine access. It is alias-analysis
+/// metadata on the memory operation, not a bit width or range type attached to
+/// the index VReg. `None` means that the whole base remains the conservative
+/// alias set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MemoryAliasRange {
+    offset: i32,
+    byte_len: usize,
+}
+
+impl MemoryAliasRange {
+    pub fn new(offset: i32, byte_len: usize) -> Option<Self> {
+        if byte_len == 0 {
+            return None;
+        }
+        i64::from(offset)
+            .checked_add(i64::try_from(byte_len).ok()?)
+            .map(|_| Self { offset, byte_len })
+    }
+
+    pub fn end(self) -> i64 {
+        i64::from(self.offset) + self.byte_len as i64
+    }
+
+    pub fn offset(self) -> i32 {
+        self.offset
+    }
+
+    pub fn byte_len(self) -> usize {
+        self.byte_len
+    }
+}
+
 // ────────────────────────────────────────────────────────────────
 // Comparison kinds
 // ────────────────────────────────────────────────────────────────
@@ -390,6 +561,36 @@ pub enum CmpKind {
     GeS,
 }
 
+/// A condition consumed directly by a machine branch without first
+/// materializing a zero/one SSA value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BranchPredicate {
+    Compare {
+        lhs: VReg,
+        rhs: VReg,
+        kind: CmpKind,
+    },
+    CompareImm {
+        lhs: VReg,
+        imm: i32,
+        kind: CmpKind,
+    },
+    MemoryNonZero {
+        base: BaseReg,
+        offset: i32,
+        size: OpSize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PackedLaneCompareRhs {
+    Scalar(VReg),
+    Memory {
+        offset: i32,
+        alias_range: Option<MemoryAliasRange>,
+    },
+}
+
 /// One immutable row consumed by the sparse-region worklist commit loop.
 /// Rows are stored as eight u64 values in a function-local constant table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -402,6 +603,13 @@ pub struct SparseCommitDescriptor {
     pub summary_words_offset: u64,
     pub summary_word_count: u64,
     pub four_state: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum X86SimdBinaryOp {
+    And,
+    Or,
+    Xor,
 }
 
 impl SparseCommitDescriptor {
@@ -421,6 +629,62 @@ impl SparseCommitDescriptor {
     }
 }
 
+/// Target-owned SIMD operations selected from scalar MIR.
+///
+/// These are executable x86 recipes, not architecture-neutral vector
+/// semantics. Scalar MIR remains the semantic fallback when a pack is not
+/// legal or profitable for this target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum X86SimdInst {
+    /// `dst = <0, 0>`, emitted with a dependency-breaking x86 zero idiom.
+    Zero128 { dst: X86VecReg },
+    /// `dst = <low, high>`, with each scalar becoming one 64-bit lane.
+    Pack128 {
+        dst: X86VecReg,
+        low: VReg,
+        high: VReg,
+    },
+    /// `dst = load 16 bytes [base + offset]`.
+    Load128 {
+        dst: X86VecReg,
+        base: BaseReg,
+        offset: i32,
+    },
+    /// `dst = op(lhs, rhs)` over two independent 64-bit lanes.
+    Binary128 {
+        op: X86SimdBinaryOp,
+        dst: X86VecReg,
+        lhs: X86VecReg,
+        rhs: X86VecReg,
+    },
+    /// `store 16 bytes [base + offset] = src`.
+    Store128 {
+        base: BaseReg,
+        offset: i32,
+        src: X86VecReg,
+    },
+}
+
+impl X86SimdInst {
+    pub fn def(self) -> Option<X86VecReg> {
+        match self {
+            Self::Zero128 { dst }
+            | Self::Pack128 { dst, .. }
+            | Self::Load128 { dst, .. }
+            | Self::Binary128 { dst, .. } => Some(dst),
+            Self::Store128 { .. } => None,
+        }
+    }
+
+    pub fn uses(self) -> [Option<X86VecReg>; 2] {
+        match self {
+            Self::Zero128 { .. } | Self::Pack128 { .. } | Self::Load128 { .. } => [None, None],
+            Self::Binary128 { lhs, rhs, .. } => [Some(lhs), Some(rhs)],
+            Self::Store128 { src, .. } => [Some(src), None],
+        }
+    }
+}
+
 // ────────────────────────────────────────────────────────────────
 // MIR instructions
 // ────────────────────────────────────────────────────────────────
@@ -431,6 +695,9 @@ impl SparseCommitDescriptor {
 /// handles x86-64's 2-operand constraint by inserting mov when needed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MInst {
+    /// Explicit target-specific SIMD instruction with its own register class.
+    X86Simd(X86SimdInst),
+
     // ── Data movement ──────────────────────────────────────────
     /// dst = src (full 64-bit word copy)
     Mov { dst: VReg, src: VReg },
@@ -438,6 +705,10 @@ pub enum MInst {
     Mov32 { dst: VReg, src: VReg },
     /// dst = immediate
     LoadImm { dst: VReg, value: u64 },
+    /// Define an arbitrary machine-register value without emitting code.
+    /// The sole purpose is to reserve one explicit temporary for a following
+    /// pseudo instruction instead of hiding a post-RA scratch clobber.
+    Scratch { dst: VReg },
     /// dst = address of an immutable function-local constant table
     LoadConstantTableAddr { dst: VReg, table: ConstantTableId },
 
@@ -456,14 +727,33 @@ pub enum MInst {
         src: VReg,
         size: OpSize,
     },
-    /// dst = load [ptr + offset]
+    /// Non-atomic `memory &= immediate` over simulator-owned direct memory.
+    ///
+    /// This target operation is selected from an exact load/and/store chain.
+    /// `imm` is truncated to the memory access width by construction.
+    AndStoreImm {
+        base: BaseReg,
+        offset: i32,
+        size: OpSize,
+        imm: u64,
+    },
+    /// Non-atomic `memory |= immediate` over simulator-owned direct memory.
+    OrStoreImm {
+        base: BaseReg,
+        offset: i32,
+        size: OpSize,
+        imm: u64,
+    },
+    /// dst = load [ptr + offset] in the runtime-owned indirect-memory domain.
+    /// This domain is disjoint from SimState and StackFrame.
     LoadPtr {
         dst: VReg,
         ptr: VReg,
         offset: i32,
         size: OpSize,
     },
-    /// store [ptr + offset] = src
+    /// store [ptr + offset] = src in the runtime-owned indirect-memory domain.
+    /// This domain is disjoint from SimState and StackFrame.
     StorePtr {
         ptr: VReg,
         offset: i32,
@@ -481,13 +771,47 @@ pub enum MInst {
         src: VReg,
         size: OpSize,
     },
-    /// dst = load [base + offset + index]  (register-indexed memory access)
+    /// dst = load [base + offset + index * scale].
+    ///
+    /// `scale` is an x86 addressing-mode scale (1, 2, 4, or 8). It is not a
+    /// value-width annotation: selecting a scale requires a prior proof that
+    /// the corresponding RTL offset computation cannot wrap differently.
     LoadIndexed {
         dst: VReg,
         base: BaseReg,
         offset: i32,
         index: VReg,
+        scale: u8,
         size: OpSize,
+        /// Conservative physical envelope for every possible indexed read.
+        /// `None` means the complete direct-addressed base may be observed.
+        alias_range: Option<MemoryAliasRange>,
+    },
+    /// Compare a byte-addressable lane sequence against either one scalar or a
+    /// second identically-shaped lane sequence and return one predicate bit per
+    /// lane in the low bits of `dst`.
+    ///
+    /// The physical element slots are 1, 2, or 4 bytes wide. Keeping this as
+    /// one memory-reading MIR operation lets the emitter use packed SIMD
+    /// comparisons without first rebuilding the logical packed array.
+    PackedLaneCompare {
+        dst: VReg,
+        rhs: PackedLaneCompareRhs,
+        kind: CmpKind,
+        offset: i32,
+        lane_count: u8,
+        element_stride: u8,
+        bit_offset: u8,
+        field_width: u8,
+        alias_range: Option<MemoryAliasRange>,
+    },
+    /// Compare the byte lanes `(base + 0..15) mod 256` with one scalar byte
+    /// and return the sixteen predicate bits in `dst`.
+    PackedByteAffineCompare {
+        dst: VReg,
+        base: VReg,
+        rhs: VReg,
+        kind: CmpKind,
     },
     /// store [base + offset + index] = src  (register-indexed memory access)
     StoreIndexed {
@@ -496,8 +820,24 @@ pub enum MInst {
         index: VReg,
         src: VReg,
         size: OpSize,
+        alias_range: Option<MemoryAliasRange>,
     },
-    /// dst = load [ptr + offset + index]
+    /// [base + offset + index] |= src.
+    ///
+    /// This is a non-atomic read-modify-write used for simulator-owned
+    /// metadata.  Its memory effect is both a read and a write; keeping the
+    /// operation explicit avoids extending a loaded metadata value through
+    /// the surrounding RTL dataflow graph.
+    OrStoreIndexed {
+        base: BaseReg,
+        offset: i32,
+        index: VReg,
+        src: VReg,
+        size: OpSize,
+        alias_range: Option<MemoryAliasRange>,
+    },
+    /// dst = load [ptr + offset + index] in the runtime-owned indirect-memory
+    /// domain, which is disjoint from SimState and StackFrame.
     LoadPtrIndexed {
         dst: VReg,
         ptr: VReg,
@@ -505,7 +845,8 @@ pub enum MInst {
         index: VReg,
         size: OpSize,
     },
-    /// store [ptr + offset + index] = src
+    /// store [ptr + offset + index] = src in the runtime-owned indirect-memory
+    /// domain, which is disjoint from SimState and StackFrame.
     StorePtrIndexed {
         ptr: VReg,
         offset: i32,
@@ -530,6 +871,15 @@ pub enum MInst {
         dst_offset: i32,
         byte_len: usize,
     },
+    /// Fill a contiguous simulator-state byte range with one byte value.
+    ///
+    /// This remains one MIR memory operation so reset/bulk initialization does
+    /// not create one register-allocation node per logical array element.
+    MemFill {
+        dst_offset: i32,
+        byte_len: usize,
+        value: u8,
+    },
     /// Commit dirty chunks from a sparse FF next-state region.  This is kept
     /// as one MIR memory barrier and expanded to a bitmap-scanning machine-code
     /// loop by the emitter.
@@ -543,22 +893,18 @@ pub enum MInst {
         summary_word_count: usize,
         four_state: bool,
     },
-    /// Add one sparse region to the fixed-capacity active-region worklist.
-    /// The active byte makes repeated stores to the same region idempotent.
+    /// Mark one sparse region active in the event-local bitmap. Repeated marks
+    /// are naturally idempotent and need no temporary register.
     SparseMarkActive {
         active_index: u32,
-        active_count_offset: i32,
-        active_flags_offset: i32,
-        active_list_offset: i32,
+        active_bits_offset: i32,
         active_capacity: usize,
     },
-    /// Drain active sparse regions and commit their dirty chunks through one
+    /// Drain the sparse active bitmap and commit dirty chunks through one
     /// shared generated loop. Descriptor rows are indexed by active_index.
     SparseCommitWorklist {
         descriptor_table: ConstantTableId,
-        active_count_offset: i32,
-        active_flags_offset: i32,
-        active_list_offset: i32,
+        active_bits_offset: i32,
         active_capacity: usize,
     },
 
@@ -649,6 +995,11 @@ pub enum MInst {
     Neg { dst: VReg, src: VReg },
     /// dst = popcnt(src) (population count — number of set bits)
     Popcnt { dst: VReg, src: VReg },
+    /// dst = bsf(src). The result is unspecified when src == 0.
+    ///
+    /// This is intended for guarded lowering where the result is consumed only
+    /// on a path or select arm that has already proven src != 0.
+    Bsf { dst: VReg, src: VReg },
     /// dst = bsr(src). The result is unspecified when src == 0.
     ///
     /// This is intended for guarded lowering where the result is consumed only
@@ -715,6 +1066,21 @@ pub enum MInst {
         true_bb: BlockId,
         false_bb: BlockId,
     },
+    /// Conditional branch which consumes flags directly. Unlike `Branch`,
+    /// this instruction deliberately has no predicate-result VReg.
+    BranchPred {
+        predicate: BranchPredicate,
+        true_bb: BlockId,
+        false_bb: BlockId,
+    },
+    /// Dense full-domain dispatch through signed offsets relative to
+    /// `table_base`. The index is proven to be within `targets`.
+    JumpTable {
+        index: VReg,
+        table_base: VReg,
+        target: VReg,
+        targets: Box<[BlockId]>,
+    },
     /// Unconditional jump
     Jump { target: BlockId },
     /// Return from function (success, code 0)
@@ -726,9 +1092,25 @@ pub enum MInst {
 impl fmt::Display for MInst {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            MInst::X86Simd(X86SimdInst::Zero128 { dst }) => {
+                write!(f, "{dst} = x86.zero.v128")
+            }
+            MInst::X86Simd(X86SimdInst::Pack128 { dst, low, high }) => {
+                write!(f, "{dst} = x86.pack.v2i64 {low}, {high}")
+            }
+            MInst::X86Simd(X86SimdInst::Load128 { dst, base, offset }) => {
+                write!(f, "{dst} = x86.load.v128 [{base} + {offset}]")
+            }
+            MInst::X86Simd(X86SimdInst::Binary128 { op, dst, lhs, rhs }) => {
+                write!(f, "{dst} = x86.{op:?}.v2i64 {lhs}, {rhs}")
+            }
+            MInst::X86Simd(X86SimdInst::Store128 { base, offset, src }) => {
+                write!(f, "x86.store.v128 [{base} + {offset}], {src}")
+            }
             MInst::Mov { dst, src } => write!(f, "{dst} = mov.w64 {src}"),
             MInst::Mov32 { dst, src } => write!(f, "{dst} = mov.w32 {src}"),
             MInst::LoadImm { dst, value } => write!(f, "{dst} = imm {value:#x}"),
+            MInst::Scratch { dst } => write!(f, "{dst} = scratch"),
             MInst::LoadConstantTableAddr { dst, table } => {
                 write!(f, "{dst} = constant_table_addr {table}")
             }
@@ -744,6 +1126,18 @@ impl fmt::Display for MInst {
                 src,
                 size,
             } => write!(f, "store.{size} [{base} + {offset}], {src}"),
+            MInst::AndStoreImm {
+                base,
+                offset,
+                size,
+                imm,
+            } => write!(f, "and_store.{size} [{base} + {offset}], {imm:#x}"),
+            MInst::OrStoreImm {
+                base,
+                offset,
+                size,
+                imm,
+            } => write!(f, "or_store_imm.{size} [{base} + {offset}], {imm:#x}"),
             MInst::LoadPtr {
                 dst,
                 ptr,
@@ -767,15 +1161,64 @@ impl fmt::Display for MInst {
                 base,
                 offset,
                 index,
+                scale,
                 size,
-            } => write!(f, "{dst} = load.{size} [{base} + {offset} + {index}]"),
+                ..
+            } => write!(
+                f,
+                "{dst} = load.{size} [{base} + {offset} + {index}*{scale}]"
+            ),
+            MInst::PackedLaneCompare {
+                dst,
+                rhs,
+                kind,
+                offset,
+                lane_count,
+                element_stride,
+                bit_offset,
+                field_width,
+                ..
+            } => write!(
+                f,
+                "{dst} = packed_lane_compare.{kind:?} [sim + {offset}], {rhs:?}, lanes={lane_count}, stride={element_stride}, field={bit_offset}:{field_width}"
+            ),
+            MInst::PackedByteAffineCompare {
+                dst,
+                base,
+                rhs,
+                kind,
+            } => write!(
+                f,
+                "{dst} = packed_byte_affine_compare.{kind:?} base={base}, rhs={rhs}, lanes=16"
+            ),
             MInst::StoreIndexed {
                 base,
                 offset,
                 index,
                 src,
                 size,
-            } => write!(f, "store.{size} [{base} + {offset} + {index}], {src}"),
+                alias_range,
+            } => {
+                write!(f, "store.{size} [{base} + {offset} + {index}], {src}")?;
+                if let Some(range) = alias_range {
+                    write!(f, " ; aliases [{base} + {}..{})", range.offset, range.end())?;
+                }
+                Ok(())
+            }
+            MInst::OrStoreIndexed {
+                base,
+                offset,
+                index,
+                src,
+                size,
+                alias_range,
+            } => {
+                write!(f, "or_store.{size} [{base} + {offset} + {index}], {src}")?;
+                if let Some(range) = alias_range {
+                    write!(f, " ; aliases [{base} + {}..{})", range.offset, range.end())?;
+                }
+                Ok(())
+            }
             MInst::LoadPtrIndexed {
                 dst,
                 ptr,
@@ -808,6 +1251,11 @@ impl fmt::Display for MInst {
                 f,
                 "memcopy [sim + {dst_offset}], [sim + {src_offset}], {byte_len}"
             ),
+            MInst::MemFill {
+                dst_offset,
+                byte_len,
+                value,
+            } => write!(f, "memfill [sim + {dst_offset}], {byte_len}, {value:#04x}"),
             MInst::SparseCommit {
                 src_offset,
                 dst_offset,
@@ -876,6 +1324,7 @@ impl fmt::Display for MInst {
             MInst::BitNot { dst, src } => write!(f, "{dst} = not {src}"),
             MInst::Neg { dst, src } => write!(f, "{dst} = neg {src}"),
             MInst::Popcnt { dst, src } => write!(f, "{dst} = popcnt {src}"),
+            MInst::Bsf { dst, src } => write!(f, "{dst} = bsf {src}"),
             MInst::Bsr { dst, src } => write!(f, "{dst} = bsr {src}"),
             MInst::BsrOr {
                 dst,
@@ -929,6 +1378,21 @@ impl fmt::Display for MInst {
                 true_bb,
                 false_bb,
             } => write!(f, "br {cond}, {true_bb}, {false_bb}"),
+            MInst::BranchPred {
+                predicate,
+                true_bb,
+                false_bb,
+            } => write!(f, "br_pred {predicate:?}, {true_bb}, {false_bb}"),
+            MInst::JumpTable { index, targets, .. } => {
+                write!(f, "jmp_table {index}, [")?;
+                for (position, target) in targets.iter().enumerate() {
+                    if position != 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{target}")?;
+                }
+                write!(f, "]")
+            }
             MInst::Jump { target } => write!(f, "jmp {target}"),
             MInst::Return => write!(f, "ret"),
             MInst::ReturnError { code } => write!(f, "ret_error {code}"),
@@ -991,16 +1455,33 @@ impl fmt::Display for MFunction {
 }
 
 impl MInst {
+    pub fn x86_vec_def(&self) -> Option<X86VecReg> {
+        match self {
+            Self::X86Simd(inst) => inst.def(),
+            _ => None,
+        }
+    }
+
+    pub fn x86_vec_uses(&self) -> [Option<X86VecReg>; 2] {
+        match self {
+            Self::X86Simd(inst) => inst.uses(),
+            _ => [None, None],
+        }
+    }
+
     /// Returns the destination VReg, if any.
     pub fn def(&self) -> Option<VReg> {
         match self {
             MInst::Mov { dst, .. }
             | MInst::Mov32 { dst, .. }
             | MInst::LoadImm { dst, .. }
+            | MInst::Scratch { dst }
             | MInst::LoadConstantTableAddr { dst, .. }
             | MInst::Load { dst, .. }
             | MInst::LoadPtr { dst, .. }
             | MInst::LoadIndexed { dst, .. }
+            | MInst::PackedLaneCompare { dst, .. }
+            | MInst::PackedByteAffineCompare { dst, .. }
             | MInst::LoadPtrIndexed { dst, .. }
             | MInst::Add { dst, .. }
             | MInst::Add32 { dst, .. }
@@ -1035,6 +1516,7 @@ impl MInst {
             | MInst::BitNot { dst, .. }
             | MInst::Neg { dst, .. }
             | MInst::Popcnt { dst, .. }
+            | MInst::Bsf { dst, .. }
             | MInst::Bsr { dst, .. }
             | MInst::BsrOr { dst, .. }
             | MInst::Pext { dst, .. }
@@ -1045,16 +1527,108 @@ impl MInst {
             | MInst::GuardedCmpSelect { dst, .. } => Some(*dst),
 
             MInst::Store { .. }
+            | MInst::X86Simd(_)
+            | MInst::AndStoreImm { .. }
+            | MInst::OrStoreImm { .. }
             | MInst::StorePtr { .. }
             | MInst::ReleaseStorePtr { .. }
             | MInst::StoreIndexed { .. }
+            | MInst::OrStoreIndexed { .. }
             | MInst::StorePtrIndexed { .. }
             | MInst::ReleaseStorePtrIndexed { .. }
             | MInst::MemCopy { .. }
+            | MInst::MemFill { .. }
             | MInst::SparseCommit { .. }
             | MInst::SparseMarkActive { .. }
             | MInst::SparseCommitWorklist { .. }
             | MInst::Branch { .. }
+            | MInst::BranchPred { .. }
+            | MInst::JumpTable { .. }
+            | MInst::Jump { .. }
+            | MInst::Return
+            | MInst::ReturnError { .. } => None,
+        }
+    }
+
+    /// Returns the destination VReg by mutable reference, if any.
+    ///
+    /// This is used by whole-function VReg renumbering. Keeping destination
+    /// mutation beside [`Self::def`] makes it impossible for the compactor to
+    /// silently omit a defining opcode while still compiling successfully.
+    pub fn def_mut(&mut self) -> Option<&mut VReg> {
+        match self {
+            MInst::Mov { dst, .. }
+            | MInst::Mov32 { dst, .. }
+            | MInst::LoadImm { dst, .. }
+            | MInst::Scratch { dst }
+            | MInst::LoadConstantTableAddr { dst, .. }
+            | MInst::Load { dst, .. }
+            | MInst::LoadPtr { dst, .. }
+            | MInst::LoadIndexed { dst, .. }
+            | MInst::PackedLaneCompare { dst, .. }
+            | MInst::PackedByteAffineCompare { dst, .. }
+            | MInst::LoadPtrIndexed { dst, .. }
+            | MInst::Add { dst, .. }
+            | MInst::Add32 { dst, .. }
+            | MInst::Sub { dst, .. }
+            | MInst::Sub32 { dst, .. }
+            | MInst::Mul { dst, .. }
+            | MInst::Mul32 { dst, .. }
+            | MInst::UMulHi { dst, .. }
+            | MInst::And { dst, .. }
+            | MInst::And32 { dst, .. }
+            | MInst::Or { dst, .. }
+            | MInst::Or32 { dst, .. }
+            | MInst::Xor { dst, .. }
+            | MInst::Xor32 { dst, .. }
+            | MInst::Shr { dst, .. }
+            | MInst::Shl { dst, .. }
+            | MInst::Sar { dst, .. }
+            | MInst::AndImm { dst, .. }
+            | MInst::AndImm32 { dst, .. }
+            | MInst::OrImm { dst, .. }
+            | MInst::ShrImm { dst, .. }
+            | MInst::ShlImm { dst, .. }
+            | MInst::SarImm { dst, .. }
+            | MInst::AddImm { dst, .. }
+            | MInst::SubImm { dst, .. }
+            | MInst::Cmp { dst, .. }
+            | MInst::CmpImm { dst, .. }
+            | MInst::UDiv { dst, .. }
+            | MInst::URem { dst, .. }
+            | MInst::SDiv { dst, .. }
+            | MInst::SRem { dst, .. }
+            | MInst::BitNot { dst, .. }
+            | MInst::Neg { dst, .. }
+            | MInst::Popcnt { dst, .. }
+            | MInst::Bsf { dst, .. }
+            | MInst::Bsr { dst, .. }
+            | MInst::BsrOr { dst, .. }
+            | MInst::Pext { dst, .. }
+            | MInst::Pdep { dst, .. }
+            | MInst::Select { dst, .. }
+            | MInst::CmpSelect { dst, .. }
+            | MInst::CmpImmSelect { dst, .. }
+            | MInst::GuardedCmpSelect { dst, .. } => Some(dst),
+
+            MInst::Store { .. }
+            | MInst::X86Simd(_)
+            | MInst::AndStoreImm { .. }
+            | MInst::OrStoreImm { .. }
+            | MInst::StorePtr { .. }
+            | MInst::ReleaseStorePtr { .. }
+            | MInst::StoreIndexed { .. }
+            | MInst::OrStoreIndexed { .. }
+            | MInst::StorePtrIndexed { .. }
+            | MInst::ReleaseStorePtrIndexed { .. }
+            | MInst::MemCopy { .. }
+            | MInst::MemFill { .. }
+            | MInst::SparseCommit { .. }
+            | MInst::SparseMarkActive { .. }
+            | MInst::SparseCommitWorklist { .. }
+            | MInst::Branch { .. }
+            | MInst::BranchPred { .. }
+            | MInst::JumpTable { .. }
             | MInst::Jump { .. }
             | MInst::Return
             | MInst::ReturnError { .. } => None,
@@ -1066,10 +1640,19 @@ impl MInst {
     pub fn uses(&self) -> Uses {
         match self {
             MInst::Mov { src, .. } | MInst::Mov32 { src, .. } => Uses::one(*src),
+            MInst::X86Simd(X86SimdInst::Pack128 { low, high, .. }) => Uses::two(*low, *high),
             MInst::LoadImm { .. }
+            | MInst::X86Simd(X86SimdInst::Zero128 { .. })
+            | MInst::X86Simd(X86SimdInst::Load128 { .. })
+            | MInst::X86Simd(X86SimdInst::Binary128 { .. })
+            | MInst::X86Simd(X86SimdInst::Store128 { .. })
+            | MInst::Scratch { .. }
             | MInst::LoadConstantTableAddr { .. }
             | MInst::Load { .. }
+            | MInst::AndStoreImm { .. }
+            | MInst::OrStoreImm { .. }
             | MInst::MemCopy { .. }
+            | MInst::MemFill { .. }
             | MInst::SparseCommit { .. }
             | MInst::SparseMarkActive { .. }
             | MInst::SparseCommitWorklist { .. } => Uses::none(),
@@ -1078,7 +1661,18 @@ impl MInst {
             MInst::StorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
             MInst::ReleaseStorePtr { ptr, src, .. } => Uses::two(*ptr, *src),
             MInst::LoadIndexed { index, .. } => Uses::one(*index),
-            MInst::StoreIndexed { index, src, .. } => Uses::two(*index, *src),
+            MInst::PackedLaneCompare {
+                rhs: PackedLaneCompareRhs::Scalar(value),
+                ..
+            } => Uses::one(*value),
+            MInst::PackedLaneCompare {
+                rhs: PackedLaneCompareRhs::Memory { .. },
+                ..
+            } => Uses::none(),
+            MInst::PackedByteAffineCompare { base, rhs, .. } => Uses::two(*base, *rhs),
+            MInst::StoreIndexed { index, src, .. } | MInst::OrStoreIndexed { index, src, .. } => {
+                Uses::two(*index, *src)
+            }
             MInst::LoadPtrIndexed { ptr, index, .. } => Uses::two(*ptr, *index),
             MInst::StorePtrIndexed {
                 ptr, index, src, ..
@@ -1119,6 +1713,7 @@ impl MInst {
             | MInst::BitNot { src, .. }
             | MInst::Neg { src, .. }
             | MInst::Popcnt { src, .. }
+            | MInst::Bsf { src, .. }
             | MInst::Bsr { src, .. }
             | MInst::BsrOr { src, .. } => Uses::one(*src),
             MInst::CmpImm { lhs, .. } => Uses::one(*lhs),
@@ -1150,6 +1745,24 @@ impl MInst {
                 ..
             } => Uses::five(*guard, *lhs, *rhs, *true_val, *false_val),
             MInst::Branch { cond, .. } => Uses::one(*cond),
+            MInst::BranchPred {
+                predicate: BranchPredicate::Compare { lhs, rhs, .. },
+                ..
+            } => Uses::two(*lhs, *rhs),
+            MInst::BranchPred {
+                predicate: BranchPredicate::CompareImm { lhs, .. },
+                ..
+            } => Uses::one(*lhs),
+            MInst::BranchPred {
+                predicate: BranchPredicate::MemoryNonZero { .. },
+                ..
+            } => Uses::none(),
+            MInst::JumpTable {
+                index,
+                table_base,
+                target,
+                ..
+            } => Uses::three(*index, *table_base, *target),
             MInst::Jump { .. } | MInst::Return | MInst::ReturnError { .. } => Uses::none(),
         }
     }
@@ -1160,6 +1773,14 @@ impl MInst {
             MInst::Mov { src, .. } | MInst::Mov32 { src, .. } => {
                 if *src == old {
                     *src = new;
+                }
+            }
+            MInst::X86Simd(X86SimdInst::Pack128 { low, high, .. }) => {
+                if *low == old {
+                    *low = new;
+                }
+                if *high == old {
+                    *high = new;
                 }
             }
             MInst::Store { src, .. } => {
@@ -1193,7 +1814,27 @@ impl MInst {
                     *index = new;
                 }
             }
-            MInst::StoreIndexed { index, src, .. } => {
+            MInst::PackedLaneCompare {
+                rhs: PackedLaneCompareRhs::Scalar(value),
+                ..
+            } => {
+                if *value == old {
+                    *value = new;
+                }
+            }
+            MInst::PackedLaneCompare {
+                rhs: PackedLaneCompareRhs::Memory { .. },
+                ..
+            } => {}
+            MInst::PackedByteAffineCompare { base, rhs, .. } => {
+                if *base == old {
+                    *base = new;
+                }
+                if *rhs == old {
+                    *rhs = new;
+                }
+            }
+            MInst::StoreIndexed { index, src, .. } | MInst::OrStoreIndexed { index, src, .. } => {
                 if *index == old {
                     *index = new;
                 }
@@ -1274,6 +1915,7 @@ impl MInst {
             | MInst::BitNot { src, .. }
             | MInst::Neg { src, .. }
             | MInst::Popcnt { src, .. }
+            | MInst::Bsf { src, .. }
             | MInst::Bsr { src, .. }
             | MInst::BsrOr { src, .. } => {
                 if *src == old {
@@ -1374,10 +2016,50 @@ impl MInst {
                     *cond = new;
                 }
             }
+            MInst::BranchPred { predicate, .. } => match predicate {
+                BranchPredicate::Compare { lhs, rhs, .. } => {
+                    if *lhs == old {
+                        *lhs = new;
+                    }
+                    if *rhs == old {
+                        *rhs = new;
+                    }
+                }
+                BranchPredicate::CompareImm { lhs, .. } => {
+                    if *lhs == old {
+                        *lhs = new;
+                    }
+                }
+                BranchPredicate::MemoryNonZero { .. } => {}
+            },
+            MInst::JumpTable {
+                index,
+                table_base,
+                target,
+                ..
+            } => {
+                if *index == old {
+                    *index = new;
+                }
+                if *table_base == old {
+                    *table_base = new;
+                }
+                if *target == old {
+                    *target = new;
+                }
+            }
             MInst::LoadImm { .. }
+            | MInst::X86Simd(X86SimdInst::Zero128 { .. })
+            | MInst::X86Simd(X86SimdInst::Load128 { .. })
+            | MInst::X86Simd(X86SimdInst::Binary128 { .. })
+            | MInst::X86Simd(X86SimdInst::Store128 { .. })
+            | MInst::Scratch { .. }
             | MInst::LoadConstantTableAddr { .. }
             | MInst::Load { .. }
+            | MInst::AndStoreImm { .. }
+            | MInst::OrStoreImm { .. }
             | MInst::MemCopy { .. }
+            | MInst::MemFill { .. }
             | MInst::SparseCommit { .. }
             | MInst::SparseMarkActive { .. }
             | MInst::SparseCommitWorklist { .. }
@@ -1391,8 +2073,46 @@ impl MInst {
     pub fn is_terminator(&self) -> bool {
         matches!(
             self,
-            MInst::Branch { .. } | MInst::Jump { .. } | MInst::Return | MInst::ReturnError { .. }
+            MInst::Branch { .. }
+                | MInst::BranchPred { .. }
+                | MInst::JumpTable { .. }
+                | MInst::Jump { .. }
+                | MInst::Return
+                | MInst::ReturnError { .. }
         )
+    }
+
+    pub fn branch_targets(&self) -> Option<(BlockId, BlockId)> {
+        match self {
+            MInst::Branch {
+                true_bb, false_bb, ..
+            }
+            | MInst::BranchPred {
+                true_bb, false_bb, ..
+            } => Some((*true_bb, *false_bb)),
+            _ => None,
+        }
+    }
+
+    pub fn rewrite_successors(&mut self, mut rewrite: impl FnMut(BlockId) -> BlockId) {
+        match self {
+            MInst::Branch {
+                true_bb, false_bb, ..
+            }
+            | MInst::BranchPred {
+                true_bb, false_bb, ..
+            } => {
+                *true_bb = rewrite(*true_bb);
+                *false_bb = rewrite(*false_bb);
+            }
+            MInst::JumpTable { targets, .. } => {
+                for target in targets {
+                    *target = rewrite(*target);
+                }
+            }
+            MInst::Jump { target } => *target = rewrite(*target),
+            _ => {}
+        }
     }
 }
 
@@ -1440,7 +2160,11 @@ impl MBlock {
         match self.terminator() {
             Some(MInst::Branch {
                 true_bb, false_bb, ..
+            })
+            | Some(MInst::BranchPred {
+                true_bb, false_bb, ..
             }) => vec![*true_bb, *false_bb],
+            Some(MInst::JumpTable { targets, .. }) => targets.to_vec(),
             Some(MInst::Jump { target }) => vec![*target],
             _ => vec![],
         }
@@ -1462,6 +2186,8 @@ pub struct MFunction {
     pub spill_descs: Vec<SpillDesc>,
     /// VReg allocator (for the spilling phase to allocate reload regs).
     pub vregs: VRegAllocator,
+    /// Number of target-specific virtual XMM values allocated by x86 SLP.
+    x86_vec_count: u32,
     /// Immutable u64 lookup tables embedded in the emitted function body.
     constant_tables: Vec<Vec<u64>>,
     /// Target facts shared by optimization, register allocation, and emission.
@@ -1474,9 +2200,23 @@ impl MFunction {
             blocks: Vec::new(),
             spill_descs,
             vregs,
+            x86_vec_count: 0,
             constant_tables: Vec::new(),
             target_features: super::features::X86Features::detect(),
         }
+    }
+
+    pub fn alloc_x86_vec(&mut self) -> X86VecReg {
+        let value = X86VecReg(self.x86_vec_count);
+        self.x86_vec_count = self
+            .x86_vec_count
+            .checked_add(1)
+            .expect("x86 vector VReg overflow");
+        value
+    }
+
+    pub fn x86_vec_count(&self) -> u32 {
+        self.x86_vec_count
     }
 
     /// Return the stable identity of `values`, reusing an identical table.
@@ -1535,6 +2275,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn uses_keeps_all_machine_operands_inline() {
+        let values = (0..MAX_USES as u32).map(VReg).collect::<Vec<_>>();
+        let mut uses = Uses::from_slice(&values);
+        assert_eq!(uses.as_slice(), values);
+        assert!(uses.replace(VReg(4), VReg(99)));
+        assert_eq!(uses.into_iter().next_back(), Some(VReg(99)));
+    }
+
+    #[test]
+    fn uses_does_not_inflate_the_previous_inline_representation() {
+        #[allow(dead_code)]
+        struct PreviousUses {
+            buf: [VReg; 16],
+            len: u8,
+        }
+
+        assert!(
+            std::mem::size_of::<Uses>() <= std::mem::size_of::<PreviousUses>(),
+            "Uses grew from {} to {} bytes",
+            std::mem::size_of::<PreviousUses>(),
+            std::mem::size_of::<Uses>(),
+        );
+    }
+
+    #[test]
+    fn memory_alias_range_must_be_nonempty() {
+        assert_eq!(MemoryAliasRange::new(8, 0), None);
+        assert_eq!(MemoryAliasRange::new(8, 1).unwrap().end(), 9);
+    }
+
+    #[test]
     fn try_alloc_reports_exhaustion_without_changing_state() {
         let mut allocator = VRegAllocator::new();
         allocator.set_next_for_test(u32::MAX);
@@ -1572,6 +2343,11 @@ mod tests {
             UseCase {
                 name: "LoadImm",
                 inst: MInst::LoadImm { dst, value: 42 },
+                expected: vec![],
+            },
+            UseCase {
+                name: "Scratch",
+                inst: MInst::Scratch { dst },
                 expected: vec![],
             },
             UseCase {
@@ -1639,7 +2415,9 @@ mod tests {
                     base: BaseReg::SimState,
                     offset: 8,
                     index: a,
+                    scale: 1,
                     size: OpSize::S64,
+                    alias_range: None,
                 },
                 expected: vec![a],
             },
@@ -1651,6 +2429,19 @@ mod tests {
                     index: a,
                     src: b,
                     size: OpSize::S64,
+                    alias_range: None,
+                },
+                expected: vec![a, b],
+            },
+            UseCase {
+                name: "OrStoreIndexed",
+                inst: MInst::OrStoreIndexed {
+                    base: BaseReg::SimState,
+                    offset: 8,
+                    index: a,
+                    src: b,
+                    size: OpSize::S64,
+                    alias_range: None,
                 },
                 expected: vec![a, b],
             },
@@ -1693,6 +2484,24 @@ mod tests {
                     src_offset: 0,
                     dst_offset: 8,
                     byte_len: 16,
+                },
+                expected: vec![],
+            },
+            UseCase {
+                name: "MemFill",
+                inst: MInst::MemFill {
+                    dst_offset: 0,
+                    byte_len: 16,
+                    value: 0x5a,
+                },
+                expected: vec![],
+            },
+            UseCase {
+                name: "SparseMarkActive",
+                inst: MInst::SparseMarkActive {
+                    active_index: 0,
+                    active_bits_offset: 8,
+                    active_capacity: 1,
                 },
                 expected: vec![],
             },
@@ -1921,6 +2730,11 @@ mod tests {
                 expected: vec![a],
             },
             UseCase {
+                name: "Bsf",
+                inst: MInst::Bsf { dst, src: a },
+                expected: vec![a],
+            },
+            UseCase {
                 name: "Bsr",
                 inst: MInst::Bsr { dst, src: a },
                 expected: vec![a],
@@ -2031,7 +2845,7 @@ mod tests {
         let cases = use_cases();
         assert_eq!(
             cases.len(),
-            52,
+            57,
             "the MInst variant table must stay exhaustive"
         );
 

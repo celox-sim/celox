@@ -116,20 +116,22 @@ compile-only reduction, a smaller SIR/MIR count, or a partial runtime window is
 not an acceptance result. The sole performance gate is the pinned same-input
 full Heliodor Linux-boot run implemented by
 `scripts/run-heliodor-bench.sh gate`: both `veryl-cc` and Celox must report
-`status=pass`, Celox must report `compile_only=false`, and Celox wall time must
-not exceed the corresponding Veryl wall time.
+`status=pass`, both must report the exact `cy=9ae070 x3=aa pass=1`
+architectural marker, Celox must report `compile_only=false`, and Celox wall
+time must not exceed the corresponding Veryl wall time. The Celox runner is
+built once with the locked release/LTO profile for this final gate; iterative
+development runs use `heliodor-dev` without LTO.
 
-## Current boundary and next region transform
+The fixed gate on clean Celox commit `e917489e` passed both semantic checks and
+the exact `cy=9ae070 x3=aa pass=1` markers. Veryl-CC took `68.409 s` and Celox
+took `178.223 s`; the resulting `2.605x` gap failed only the performance
+condition. Branch-aware placement is therefore retained as tested compiler
+infrastructure, but it has not closed the end-to-end throughput target.
 
-Binary reverse if-conversion is only the leaf mechanism. On the pinned
-Heliodor input it converts 2,579 of 22,344 muxes and improves the partial-run
-`avg_comb_us` from roughly 48 us to 36.3 us, but it does not make the full run
-competitive. Another 3,227 muxes already pass the expected-runtime cost test
-and are rejected solely because a nontrivial DAG node is shared below the arm
-roots. Treating those as independent diamonds would either duplicate code or
-lose CSE.
+## Current boundary
 
-The production replacement is whole-unit, occurrence- and token-aware DAG
+Binary reverse if-conversion remains only the leaf mechanism. The production
+pipeline now includes whole-unit, occurrence- and token-aware DAG
 placement. Source provenance and the occurrence action skeleton are verified
 first; token SSA then creates versioned `InstValue`s, execution-safety analysis
 limits their legal domains, and ScheduleEarly/ScheduleLate derives
@@ -141,10 +143,12 @@ owns shared pure work. Raw `NodeId` reachability or nearest-common-dominator
 placement is not the final value identity. The design uses no mux, block,
 iteration, or traversal cap.
 
-Long mutually exclusive equality chains form a higher-level `DecisionRegion`.
-After proving selector identity, key width, uniqueness/mask overlap, priority,
-default behavior, arm purity, and successor argument types, target lowering
-may select a value lookup table, jump table, balanced comparison tree, ordered
-early-exit chain, or branchless tail. This does not compete with binary mux
-lowering: a decision region owns the tests, dominance-aware placement owns its
-shared DAG, and ordinary mux lowering handles the residual leaves.
+The retained implementation recovers complete residual priority regions,
+moves legal cross-block value and exact-state-load occurrences, and places
+connected pure DAGs in their latest existing control region. A grouped
+multi-output fusion trial also passed correctness testing, but extended live
+ranges and slowed two complete Heliodor runs, so it was reverted. The remaining
+work is target-cost selection for broader multiway `DecisionRegion` forms,
+including value tables, jump tables, balanced comparison trees, ordered
+wildcard chains, and small branchless tails. Detailed retained/rejected results
+are in [Native throughput execution plan](./native-throughput-execution-plan.md).

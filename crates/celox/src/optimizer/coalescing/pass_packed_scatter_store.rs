@@ -1389,6 +1389,7 @@ fn terminator_uses(terminator: &SIRTerminator) -> Vec<RegisterId> {
             result.extend(false_block.1.iter().copied());
             result
         }
+        SIRTerminator::Switch { selector, .. } => vec![*selector],
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }
@@ -1716,7 +1717,10 @@ mod tests {
                     SIRInstruction::Store(address, offset, width, source, triggers, captures) => {
                         assert!(triggers.is_empty() && captures.is_empty());
                         let offset = match offset {
-                            SIROffset::Static(offset) => *offset,
+                            SIROffset::Static(offset)
+                            | SIROffset::PackedElements {
+                                bit_offset: offset, ..
+                            } => *offset,
                             SIROffset::Dynamic(offset) => registers[offset].to_usize().unwrap(),
                             SIROffset::Element {
                                 index,
@@ -1763,6 +1767,9 @@ mod tests {
                     };
                     assert!(target.1.is_empty());
                     block = target.0;
+                }
+                SIRTerminator::Switch { .. } => {
+                    panic!("unexpected Switch in packed-scatter test")
                 }
                 SIRTerminator::Error(code) => panic!("unexpected Error({code})"),
             }

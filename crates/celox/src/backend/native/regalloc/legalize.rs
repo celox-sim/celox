@@ -60,6 +60,31 @@ impl PermError {
 pub(super) fn materialize_constraint_perms(
     func: &mut MFunction,
     initial_cfg: &NormalizedCfg,
+    register_count: usize,
+) -> Result<(NormalizedCfg, PermModel), PermError> {
+    let (cfg, model) = materialize_constraint_perms_unchecked(func, initial_cfg)?;
+    model.verify(func, &cfg, register_count)?;
+    Ok((cfg, model))
+}
+
+/// Split every machine-constraint point into an explicit SSA permutation
+/// boundary before allocation. Unlike the post-spill entry point above, this
+/// accepts more than K live rows: stack/home selection and joint allocation
+/// are responsible for reducing that pressure. Structural and target-mask
+/// invariants are still verified immediately.
+#[cfg(test)]
+pub(super) fn materialize_allocation_constraint_perms(
+    func: &mut MFunction,
+    initial_cfg: &NormalizedCfg,
+) -> Result<(NormalizedCfg, PermModel), PermError> {
+    let (cfg, model) = materialize_constraint_perms_unchecked(func, initial_cfg)?;
+    model.verify_allocation_input(func, &cfg)?;
+    Ok((cfg, model))
+}
+
+fn materialize_constraint_perms_unchecked(
+    func: &mut MFunction,
+    initial_cfg: &NormalizedCfg,
 ) -> Result<(NormalizedCfg, PermModel), PermError> {
     if func.blocks.len() != initial_cfg.predecessors.len() {
         return Err(PermError::new(
@@ -85,7 +110,6 @@ pub(super) fn materialize_constraint_perms(
         insert_permutation_merge_phis(func, &cfg, &boundary_blocks, &mut logical_for_vreg)?;
     rename_permutation_representatives(func, &cfg, &logical_for_vreg, &merge_phis)?;
     let model = PermModel::build(func, &cfg, &boundary_blocks)?;
-    model.verify(func, &cfg, super::NUM_REGS)?;
     Ok((cfg, model))
 }
 
@@ -284,6 +308,24 @@ impl PermModel {
         cfg: &NormalizedCfg,
         registers: usize,
     ) -> Result<(), PermError> {
+        self.verify_impl(func, cfg, Some(registers))
+    }
+
+    #[cfg(test)]
+    fn verify_allocation_input(
+        &self,
+        func: &MFunction,
+        cfg: &NormalizedCfg,
+    ) -> Result<(), PermError> {
+        self.verify_impl(func, cfg, None)
+    }
+
+    fn verify_impl(
+        &self,
+        func: &MFunction,
+        cfg: &NormalizedCfg,
+        post_spill_registers: Option<usize>,
+    ) -> Result<(), PermError> {
         let analysis = super::analysis::analyze(func);
         let mut seen = BTreeSet::new();
         for boundary in &self.boundaries {
@@ -317,7 +359,8 @@ impl PermModel {
                     "Perm model predecessor does not match the CFG edge",
                 ));
             }
-            if boundary.rows.len() > registers {
+            if post_spill_registers.is_some_and(|registers| boundary.rows.len() > registers) {
+                let registers = post_spill_registers.unwrap();
                 return Err(PermError::new(
                     "PERM.PRESSURE_BOUND",
                     Some(boundary.block),
@@ -424,7 +467,7 @@ impl PermModel {
                     "Perm row has no allowed physical color",
                 ));
             }
-            if boundary.match_colors(|_| None).is_none() {
+            if post_spill_registers.is_some() && boundary.match_colors(|_| None).is_none() {
                 return Err(PermError::new(
                     "PERM.PERFECT_MATCHING",
                     Some(boundary.block),
@@ -888,7 +931,7 @@ fn perm_logical(logical_for_vreg: &[VReg], value: VReg, block: BlockId) -> Resul
 mod tests {
     use super::*;
     use crate::backend::native::features::X86Features;
-    use crate::backend::native::mir::{SpillDesc, VRegAllocator};
+    use crate::backend::native::mir::{BaseReg, OpSize, SpillDesc, VRegAllocator};
 
     fn select_legacy_shifts(func: &mut MFunction) {
         func.target_features = X86Features::for_test(false);
@@ -928,7 +971,8 @@ mod tests {
         func.push_block(block);
 
         let initial = super::super::cfg::normalize(&mut func).unwrap();
-        let (cfg, model) = materialize_constraint_perms(&mut func, &initial).unwrap();
+        let (cfg, model) =
+            materialize_constraint_perms(&mut func, &initial, super::super::NUM_REGS).unwrap();
         func.verify();
         let constrained = func
             .blocks
@@ -970,7 +1014,8 @@ mod tests {
         let original_vregs = func.vregs.count();
 
         let initial = super::super::cfg::normalize(&mut func).unwrap();
-        let (_cfg, model) = materialize_constraint_perms(&mut func, &initial).unwrap();
+        let (_cfg, model) =
+            materialize_constraint_perms(&mut func, &initial, super::super::NUM_REGS).unwrap();
 
         assert!(model.boundaries.is_empty());
         assert_eq!(func.blocks.len(), 1);
@@ -1000,7 +1045,8 @@ mod tests {
         block.push(MInst::Return);
         func.push_block(block);
         let initial = super::super::cfg::normalize(&mut func).unwrap();
-        let (cfg, mut model) = materialize_constraint_perms(&mut func, &initial).unwrap();
+        let (cfg, mut model) =
+            materialize_constraint_perms(&mut func, &initial, super::super::NUM_REGS).unwrap();
         model.boundaries[0].rows.pop();
 
         let error = model
@@ -1040,7 +1086,8 @@ mod tests {
         func.blocks = vec![entry, left, other, join];
 
         let initial = super::super::cfg::normalize(&mut func).unwrap();
-        let (cfg, model) = materialize_constraint_perms(&mut func, &initial).unwrap();
+        let (cfg, model) =
+            materialize_constraint_perms(&mut func, &initial, super::super::NUM_REGS).unwrap();
         let constrained = func
             .blocks
             .iter()
@@ -1097,7 +1144,8 @@ mod tests {
         func.blocks = vec![entry, constrained_arm, other_arm, join];
 
         let initial = super::super::cfg::normalize(&mut func).unwrap();
-        let (_cfg, model) = materialize_constraint_perms(&mut func, &initial).unwrap();
+        let (_cfg, model) =
+            materialize_constraint_perms(&mut func, &initial, super::super::NUM_REGS).unwrap();
         func.verify();
 
         let constrained = func
@@ -1183,7 +1231,8 @@ mod tests {
         func.blocks = vec![entry, header, body, exit];
 
         let initial = super::super::cfg::normalize(&mut func).unwrap();
-        let (_cfg, model) = materialize_constraint_perms(&mut func, &initial).unwrap();
+        let (_cfg, model) =
+            materialize_constraint_perms(&mut func, &initial, super::super::NUM_REGS).unwrap();
         func.verify();
 
         let constrained = func
@@ -1225,5 +1274,60 @@ mod tests {
             Some(MInst::Mov { src, .. }) if *src == merge.dst
         ));
         assert_eq!(model.boundaries.len(), 1);
+    }
+
+    #[test]
+    fn allocation_perm_accepts_pre_spill_pressure_above_the_register_count() {
+        const LIVE: usize = super::super::NUM_REGS + 2;
+        let mut vregs = VRegAllocator::new();
+        let inputs = (0..LIVE).map(|_| vregs.alloc()).collect::<Vec<_>>();
+        let quotient = vregs.alloc();
+        let mut sums = Vec::new();
+        for _ in 2..LIVE {
+            sums.push(vregs.alloc());
+        }
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); LIVE + 1 + sums.len()]);
+        let mut block = MBlock::new(BlockId(0));
+        for (value, &destination) in inputs.iter().enumerate() {
+            block.push(MInst::LoadImm {
+                dst: destination,
+                value: value as u64 + 1,
+            });
+        }
+        block.push(MInst::UDiv {
+            dst: quotient,
+            lhs: inputs[0],
+            rhs: inputs[1],
+        });
+        let mut sum = quotient;
+        for (&input, &destination) in inputs[2..].iter().zip(&sums) {
+            block.push(MInst::Add {
+                dst: destination,
+                lhs: sum,
+                rhs: input,
+            });
+            sum = destination;
+        }
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: sum,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        let mut post_spill = func.clone();
+        let cfg = super::super::cfg::normalize(&mut post_spill).unwrap();
+        let error = materialize_constraint_perms(&mut post_spill, &cfg, super::super::NUM_REGS)
+            .unwrap_err();
+        assert_eq!(error.rule, "PERM.PRESSURE_BOUND");
+
+        let mut allocation_input = func;
+        let cfg = super::super::cfg::normalize(&mut allocation_input).unwrap();
+        let (_cfg, model) =
+            materialize_allocation_constraint_perms(&mut allocation_input, &cfg).unwrap();
+        assert_eq!(model.boundaries.len(), 1);
+        assert!(model.boundaries[0].rows.len() > super::super::NUM_REGS);
     }
 }

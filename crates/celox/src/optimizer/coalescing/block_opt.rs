@@ -3,6 +3,8 @@ use crate::ir::*;
 use crate::{HashMap, HashSet};
 use num_bigint::BigUint;
 
+const MAX_SCALAR_COALESCED_STORE_BITS: usize = 64;
+
 fn union_u32<I: IntoIterator<Item = u32>>(items: I) -> Vec<u32> {
     let mut out = Vec::new();
     for item in items {
@@ -11,6 +13,39 @@ fn union_u32<I: IntoIterator<Item = u32>>(items: I) -> Vec<u32> {
         }
     }
     out
+}
+
+pub(super) fn aggregate_static_offset(
+    bit_offset: usize,
+    width: usize,
+    element_width: Option<usize>,
+) -> Option<SIROffset> {
+    match element_width {
+        Some(0) => None,
+        Some(element_width) if width != 0 => {
+            let end = bit_offset.checked_add(width)?;
+            if bit_offset / element_width == end.saturating_sub(1) / element_width {
+                Some(SIROffset::Static(bit_offset))
+            } else if bit_offset.is_multiple_of(element_width)
+                && width.is_multiple_of(element_width)
+            {
+                Some(SIROffset::PackedElements {
+                    bit_offset,
+                    element_width,
+                })
+            } else {
+                None
+            }
+        }
+        _ => Some(SIROffset::Static(bit_offset)),
+    }
+}
+
+fn is_complete_element_access(bit_offset: usize, width: usize, element_width: usize) -> bool {
+    element_width != 0
+        && width != 0
+        && bit_offset.is_multiple_of(element_width)
+        && width.is_multiple_of(element_width)
 }
 
 fn collect_used_regs<A>(inst: &SIRInstruction<A>, out: &mut Vec<RegisterId>) {
@@ -66,12 +101,23 @@ fn mem_access_info<A>(inst: &SIRInstruction<A>) -> Option<(&A, Option<usize>, us
         SIRInstruction::Load(_, addr, SIROffset::Static(off), bits) => {
             Some((addr, Some(*off), *bits, false))
         }
+        SIRInstruction::Load(_, addr, SIROffset::PackedElements { bit_offset, .. }, bits) => {
+            Some((addr, Some(*bit_offset), *bits, false))
+        }
         SIRInstruction::Load(_, addr, SIROffset::Dynamic(_) | SIROffset::Element { .. }, bits) => {
             Some((addr, None, *bits, false))
         }
         SIRInstruction::Store(addr, SIROffset::Static(off), bits, _, _, _) => {
             Some((addr, Some(*off), *bits, true))
         }
+        SIRInstruction::Store(
+            addr,
+            SIROffset::PackedElements { bit_offset, .. },
+            bits,
+            _,
+            _,
+            _,
+        ) => Some((addr, Some(*bit_offset), *bits, true)),
         SIRInstruction::Store(
             addr,
             SIROffset::Dynamic(_) | SIROffset::Element { .. },
@@ -285,6 +331,7 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
     instructions: &mut Vec<SIRInstruction<A>>,
     register_map: &mut HashMap<RegisterId, RegisterType>,
     reg_counter: &mut usize,
+    element_widths: &HashMap<A, usize>,
 ) -> bool {
     let next_id = reg_counter;
     let mut replaced_indices = std::collections::HashSet::new();
@@ -310,6 +357,12 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                     .entry(addr.clone())
                     .or_default()
                     .push((idx, Some(*off), *w));
+            }
+            SIRInstruction::Load(_, addr, SIROffset::PackedElements { bit_offset, .. }, w) => {
+                load_index
+                    .entry(addr.clone())
+                    .or_default()
+                    .push((idx, Some(*bit_offset), *w));
             }
             SIRInstruction::Load(_, addr, SIROffset::Dynamic(_) | SIROffset::Element { .. }, w) => {
                 load_index
@@ -390,10 +443,25 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                 details[segment_start].offset + details[segment_start].width;
 
             for (k, detail) in details.iter().enumerate().skip(segment_start + 1) {
-                if detail.offset == expected_next_offset {
+                if detail.offset != expected_next_offset {
+                    break;
+                }
+                expected_next_offset += detail.width;
+                let aggregate_width = expected_next_offset - details[segment_start].offset;
+                if aggregate_width > MAX_SCALAR_COALESCED_STORE_BITS {
+                    break;
+                }
+                if aggregate_static_offset(
+                    details[segment_start].offset,
+                    aggregate_width,
+                    element_widths.get(&addr).copied(),
+                )
+                .is_some()
+                {
                     segment_end = k;
-                    expected_next_offset += detail.width;
-                } else {
+                } else if element_widths.get(&addr).is_some_and(|element_width| {
+                    !details[segment_start].offset.is_multiple_of(*element_width)
+                }) {
                     break;
                 }
             }
@@ -460,11 +528,19 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                         replaced_indices.insert(s.index);
                     }
 
+                    let Some(offset) = aggregate_static_offset(
+                        start_offset,
+                        total_width,
+                        element_widths.get(&addr).copied(),
+                    ) else {
+                        segment_start = segment_end + 1;
+                        continue;
+                    };
                     let new_ops = vec![
                         SIRInstruction::Concat(new_reg_id, args),
                         SIRInstruction::Store(
                             addr.clone(),
-                            SIROffset::Static(start_offset),
+                            offset,
                             total_width,
                             new_reg_id,
                             triggers,
@@ -647,10 +723,13 @@ fn subsume_static_loads<A: Clone + Eq + std::hash::Hash>(
             }
             SIRInstruction::Load(_, _, SIROffset::Dynamic(_), _)
             | SIRInstruction::Load(_, _, SIROffset::Element { .. }, _)
+            | SIRInstruction::Load(_, _, SIROffset::PackedElements { .. }, _)
             | SIRInstruction::Store(_, SIROffset::Dynamic(_), _, _, _, _)
             | SIRInstruction::Store(_, SIROffset::Element { .. }, _, _, _, _)
+            | SIRInstruction::Store(_, SIROffset::PackedElements { .. }, _, _, _, _)
             | SIRInstruction::Commit(_, _, SIROffset::Dynamic(_), _, _)
-            | SIRInstruction::Commit(_, _, SIROffset::Element { .. }, _, _) => {
+            | SIRInstruction::Commit(_, _, SIROffset::Element { .. }, _, _)
+            | SIRInstruction::Commit(_, _, SIROffset::PackedElements { .. }, _, _) => {
                 // Dynamic ranges are deliberately a global barrier. The address
                 // is known, but keeping this rule conservative avoids depending
                 // on alias properties not represented in SIR.
@@ -707,12 +786,25 @@ pub(super) fn optimize_block<
     unit_replacement_map: &mut HashMap<RegisterId, RegisterId>,
     reg_counter: &mut usize,
     skip_final_schedule: bool,
+    four_state: bool,
+    element_widths: &HashMap<A, usize>,
 ) {
     const MAX_INFLIGHT_LOADS: usize = 8;
-    coalesce_static_loads(&mut block.instructions, register_map, reg_counter);
+    coalesce_static_loads(
+        &mut block.instructions,
+        register_map,
+        reg_counter,
+        four_state,
+        element_widths,
+    );
 
     // First pass: coalesce stores that are safe even with intermediate loads present
-    coalesce_static_stores(&mut block.instructions, register_map, reg_counter);
+    coalesce_static_stores(
+        &mut block.instructions,
+        register_map,
+        reg_counter,
+        element_widths,
+    );
 
     // Reuse already-loaded wide static regions before exact-load forwarding.
     // Turning contained loads into pure Slices can also make more store groups
@@ -728,7 +820,12 @@ pub(super) fn optimize_block<
 
     // Second pass: after eliminate_redundant_loads removed store-forwarded loads,
     // previously-unsafe store groups may now be safe to coalesce
-    coalesce_static_stores(&mut block.instructions, register_map, reg_counter);
+    coalesce_static_stores(
+        &mut block.instructions,
+        register_map,
+        reg_counter,
+        element_widths,
+    );
 
     for (from, to) in local_replacement_map {
         unit_replacement_map.insert(from, to);
@@ -745,6 +842,8 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
     instructions: &mut Vec<SIRInstruction<A>>,
     register_map: &mut HashMap<RegisterId, RegisterType>,
     reg_counter: &mut usize,
+    four_state: bool,
+    element_widths: &HashMap<A, usize>,
 ) {
     #[derive(Clone)]
     struct LoadInfo {
@@ -814,43 +913,61 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
             continue;
         }
 
-        let mut sorted = seg.loads.clone();
-        sorted.sort_by_key(|x| x.offset);
-
-        let mut overlap = false;
-        for i in 1..sorted.len() {
-            let Some(prev_end) = sorted[i - 1].offset.checked_add(sorted[i - 1].width) else {
-                overlap = true;
-                break;
-            };
-            if sorted[i].offset < prev_end {
-                overlap = true;
-                break;
-            }
-        }
-        if overlap {
-            continue;
-        }
-
-        let mut by_word: HashMap<usize, Vec<LoadInfo>> = HashMap::default();
+        let element_width = element_widths.get(&seg.addr).copied();
+        let mut by_word: HashMap<(usize, usize), Vec<LoadInfo>> = HashMap::default();
         for ld in seg.loads {
             if ld.width == 0 || ld.width > 64 {
                 continue;
             }
-            let word_base = (ld.offset / 64) * 64;
-            if ld
-                .offset
-                .checked_add(ld.width)
-                .zip(word_base.checked_add(64))
-                .is_some_and(|(load_end, word_end)| load_end <= word_end)
+            let (word_base, word_width) = if element_width.is_some_and(|element_width| {
+                is_complete_element_access(ld.offset, ld.width, element_width)
+            }) {
+                // Keep the bucket bounded, then choose the exact covered span
+                // below. Unlike an ordinary Static load, the resulting
+                // PackedElements access may legally cross semantic elements.
+                ((ld.offset / 64) * 64, 0)
+            } else if let Some(element_width) = element_width {
+                if element_width == 0 {
+                    continue;
+                }
+                let element_base = (ld.offset / element_width) * element_width;
+                let within_element = ld.offset - element_base;
+                let chunk_base = (within_element / 64) * 64;
+                (
+                    element_base + chunk_base,
+                    (element_width - chunk_base).min(64),
+                )
+            } else {
+                ((ld.offset / 64) * 64, 64)
+            };
+            if word_width == 0
+                || ld
+                    .offset
+                    .checked_add(ld.width)
+                    .zip(word_base.checked_add(word_width))
+                    .is_some_and(|(load_end, word_end)| load_end <= word_end)
             {
-                by_word.entry(word_base).or_default().push(ld);
+                by_word.entry((word_base, word_width)).or_default().push(ld);
             }
         }
 
-        for (word_base, mut loads) in by_word {
+        for ((mut word_base, mut word_width), mut loads) in by_word {
             if loads.len() < 2 {
                 continue;
+            }
+            if word_width == 0 {
+                word_base = loads.iter().map(|load| load.offset).min().unwrap();
+                let Some(word_end) = loads
+                    .iter()
+                    .filter_map(|load| load.offset.checked_add(load.width))
+                    .max()
+                else {
+                    continue;
+                };
+                word_width = word_end - word_base;
+                if word_width == 0 || word_width > 64 {
+                    continue;
+                }
             }
 
             let all_native = loads
@@ -863,20 +980,30 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
             loads.sort_by_key(|x| x.index);
             let insert_idx = loads[0].index;
 
+            let Some(offset) = aggregate_static_offset(word_base, word_width, element_width) else {
+                continue;
+            };
             let wide_reg = next_reg_id(register_map, reg_counter);
-            register_map.insert(wide_reg, RegisterType::Logic { width: 64 });
+            register_map.insert(wide_reg, RegisterType::Logic { width: word_width });
             insertions
                 .entry(insert_idx)
                 .or_default()
                 .push(SIRInstruction::Load(
                     wide_reg,
                     seg.addr.clone(),
-                    SIROffset::Static(word_base),
-                    64,
+                    offset,
+                    word_width,
                 ));
 
             for ld in loads {
                 let rel_off = ld.offset - word_base;
+                if four_state || element_width.is_some() {
+                    replacements.insert(
+                        ld.index,
+                        vec![SIRInstruction::Slice(ld.dst, wide_reg, rel_off, ld.width)],
+                    );
+                    continue;
+                }
                 let mut ops: Vec<SIRInstruction<A>> = Vec::new();
                 let mut source_reg = wide_reg;
 
@@ -1006,7 +1133,7 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
             }
             SIRInstruction::Load(_, _, offset, _) | SIRInstruction::Commit(_, _, offset, _, _) => {
                 match offset {
-                    SIROffset::Static(_) => {}
+                    SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
                     SIROffset::Dynamic(register) => {
                         if let Some(replacement) = replacement_map.get(register) {
                             *register = *replacement;
@@ -1151,7 +1278,12 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
 
 #[cfg(test)]
 mod tests {
-    use super::{optimize_block, subsume_static_loads as subsume_static_loads_with_types};
+    use super::{
+        MAX_SCALAR_COALESCED_STORE_BITS, aggregate_static_offset,
+        coalesce_static_loads as coalesce_static_loads_with_types,
+        coalesce_static_stores as coalesce_static_stores_with_types, optimize_block,
+        subsume_static_loads as subsume_static_loads_with_types,
+    };
     use crate::HashMap;
     use crate::ir::{
         BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
@@ -1230,6 +1362,233 @@ mod tests {
             1_018
         );
         verify(instructions, registers);
+    }
+
+    #[test]
+    fn covering_wide_load_does_not_disable_word_load_coalescing() {
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 7u32, SIROffset::Static(0), 128),
+            SIRInstruction::Load(RegisterId(1), 7, SIROffset::Static(65), 3),
+            SIRInstruction::Load(RegisterId(2), 7, SIROffset::Static(66), 2),
+        ];
+        let mut register_map = [
+            (RegisterId(0), logic(128)),
+            (RegisterId(1), logic(3)),
+            (RegisterId(2), logic(2)),
+        ]
+        .into_iter()
+        .collect();
+        let mut reg_counter = 2;
+
+        coalesce_static_loads_with_types(
+            &mut instructions,
+            &mut register_map,
+            &mut reg_counter,
+            false,
+            &HashMap::default(),
+        );
+
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, SIRInstruction::Load(..)))
+                .count(),
+            2
+        );
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Load(_, 7, SIROffset::Static(64), 64)
+        )));
+        assert!(instructions.iter().all(|instruction| !matches!(
+            instruction,
+            SIRInstruction::Load(RegisterId(1) | RegisterId(2), _, _, _)
+        )));
+        verify(instructions, register_map);
+    }
+
+    #[test]
+    fn unpacked_array_load_coalescing_uses_explicit_packed_elements() {
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 7u32, SIROffset::Static(0), 12),
+            SIRInstruction::Load(RegisterId(1), 7, SIROffset::Static(12), 12),
+        ];
+        let mut register_map = [(RegisterId(0), logic(12)), (RegisterId(1), logic(12))]
+            .into_iter()
+            .collect();
+        let mut reg_counter = 1;
+
+        coalesce_static_loads_with_types(
+            &mut instructions,
+            &mut register_map,
+            &mut reg_counter,
+            false,
+            &[(7u32, 12usize)].into_iter().collect(),
+        );
+
+        assert_eq!(
+            instructions,
+            vec![
+                SIRInstruction::Load(
+                    RegisterId(2),
+                    7,
+                    SIROffset::PackedElements {
+                        bit_offset: 0,
+                        element_width: 12,
+                    },
+                    24,
+                ),
+                SIRInstruction::Slice(RegisterId(0), RegisterId(2), 0, 12),
+                SIRInstruction::Slice(RegisterId(1), RegisterId(2), 12, 12),
+            ]
+        );
+        verify(instructions, register_map);
+    }
+
+    #[test]
+    fn four_state_load_coalescing_extracts_with_slices() {
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 7u32, SIROffset::Static(0), 5),
+            SIRInstruction::Load(RegisterId(1), 7, SIROffset::Static(4), 1),
+        ];
+        let mut register_map = [(RegisterId(0), logic(5)), (RegisterId(1), logic(1))]
+            .into_iter()
+            .collect();
+        let mut reg_counter = 1;
+
+        coalesce_static_loads_with_types(
+            &mut instructions,
+            &mut register_map,
+            &mut reg_counter,
+            true,
+            &HashMap::default(),
+        );
+
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, SIRInstruction::Slice(..)))
+                .count(),
+            2
+        );
+        assert!(
+            instructions
+                .iter()
+                .all(|instruction| !matches!(instruction, SIRInstruction::Binary(..)))
+        );
+        verify(instructions, register_map);
+    }
+
+    #[test]
+    fn store_coalescing_marks_cross_element_transfer_explicitly() {
+        let mut instructions = (0..4)
+            .map(|index| SIRInstruction::Imm(RegisterId(index), SIRValue::new(index as u8)))
+            .chain((0..4).map(|index| {
+                SIRInstruction::Store(
+                    7u32,
+                    SIROffset::Static(index * 6),
+                    6,
+                    RegisterId(index),
+                    vec![],
+                    vec![],
+                )
+            }))
+            .collect::<Vec<_>>();
+        let mut register_map = (0..4).map(|index| (RegisterId(index), logic(6))).collect();
+        let mut reg_counter = 3;
+
+        assert!(coalesce_static_stores_with_types(
+            &mut instructions,
+            &mut register_map,
+            &mut reg_counter,
+            &[(7u32, 12usize)].into_iter().collect(),
+        ));
+
+        let stores = instructions
+            .iter()
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(
+                    _,
+                    SIROffset::PackedElements {
+                        bit_offset,
+                        element_width,
+                    },
+                    width,
+                    ..,
+                ) => Some((*bit_offset, *element_width, *width)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stores, vec![(0, 12, 24)]);
+        verify(instructions, register_map);
+    }
+
+    #[test]
+    fn scalar_store_coalescing_stops_at_64_bits() {
+        let mut instructions = (0..8)
+            .map(|index| SIRInstruction::Imm(RegisterId(index), SIRValue::new(index as u8)))
+            .chain((0..8).map(|index| {
+                SIRInstruction::Store(
+                    7u32,
+                    SIROffset::Static(index * 10),
+                    10,
+                    RegisterId(index),
+                    vec![],
+                    vec![],
+                )
+            }))
+            .collect::<Vec<_>>();
+        let mut register_map = (0..8).map(|index| (RegisterId(index), logic(10))).collect();
+        let mut reg_counter = 7;
+
+        assert!(coalesce_static_stores_with_types(
+            &mut instructions,
+            &mut register_map,
+            &mut reg_counter,
+            &[(7u32, 10usize)].into_iter().collect(),
+        ));
+
+        let stores = instructions
+            .iter()
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(_, _, width, ..) => Some(*width),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stores, vec![60, 20]);
+        assert!(
+            stores
+                .iter()
+                .all(|width| *width <= MAX_SCALAR_COALESCED_STORE_BITS)
+        );
+        verify(instructions, register_map);
+    }
+
+    #[test]
+    fn packed_element_aggregate_requires_complete_aligned_elements() {
+        assert_eq!(
+            aggregate_static_offset(27, 54, Some(27)),
+            Some(SIROffset::PackedElements {
+                bit_offset: 27,
+                element_width: 27,
+            })
+        );
+        assert_eq!(
+            aggregate_static_offset(774, 63, Some(27)),
+            None,
+            "a partial first and last element is not an array-copy operation"
+        );
+        assert_eq!(
+            aggregate_static_offset(774, 9, Some(27)),
+            Some(SIROffset::Static(774)),
+            "an ordinary access within one element remains static"
+        );
+        assert_eq!(
+            aggregate_static_offset(0, 64, Some(1)),
+            Some(SIROffset::PackedElements {
+                bit_offset: 0,
+                element_width: 1,
+            })
+        );
     }
 
     #[test]
@@ -1447,6 +1806,8 @@ mod tests {
             &mut replacements,
             &mut reg_counter,
             true,
+            false,
+            &HashMap::default(),
         );
 
         assert!(replacements.is_empty());
@@ -1489,6 +1850,8 @@ mod tests {
             &mut replacements,
             &mut reg_counter,
             true,
+            false,
+            &HashMap::default(),
         );
 
         assert!(replacements.is_empty());
@@ -1526,6 +1889,8 @@ mod tests {
                 &mut replacements,
                 &mut reg_counter,
                 true,
+                false,
+                &HashMap::default(),
             );
             verify(block.instructions.clone(), register_map);
             block.instructions

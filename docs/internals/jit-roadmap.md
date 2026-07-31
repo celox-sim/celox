@@ -59,29 +59,36 @@ start quickly with a Cranelift backend, then switch to a GCC-optimized backend
 when the compiled binary becomes available:
 <https://veryl-lang.org/blog/veryl-simulator-performance/>.
 
-Local Celox measurements on `test_soc_linux_boot` show a different bottleneck
-from the small `linear_sec` kernels:
+The corrected end-to-end qualification on the pinned `test_soc_linux_boot`
+source now gives concrete iterative and final-gate baselines:
 
-- Veryl `cc` baseline for the pinned Heliodor checkout completes the single
-  Linux boot in roughly 66--70 s.
-- Celox has never completed this full gate quickly. Earlier successful Celox
-  records were compile-only, not Linux-boot completions. Before control-aware
-  lowering, a representative partial run measured about 48 us per
-  `eval_comb`. The current verified binary-CFG lowering measures about 36.3 us
-  in a same-build 60-second window, but still reaches only about 700k of the
-  observed 10.15M ticks. It therefore remains several times too slow and is
-  not an accepted end-to-end result.
-- Celox Cranelift is not a viable replacement for the custom native backend on
-  this workload; its JIT/backend phase was substantially slower than native.
-- The hot Celox native unit is `eval_comb`, not `eval_apply`. With the current
-  binary-CFG lowering, a representative allocated `eval_comb` has about 202k
-  MIR instructions, including about 21.5k stack loads and 10.5k stack stores.
-- The largest `eval_comb` blocks are dominated by long mux chains. Some are
-  direct case/decode chains, but the hottest 172-arm chains in blocks 432 and
-  0 are accumulator-guarded priority encoders of the form
-  `acc = mux(guard && acc == default, value, acc)`. In block 432, the SIR dump
-  after the current stable optimizations still shows about 15k `Mux`, 8k
-  `LogicAnd`, 8k equality checks, and 4k `Concat` operations.
+- In the paired iterative non-LTO run, Veryl-CC completed the
+  `cy=0x009ae070` workload in `76.446 s` and Celox completed it in `184.652 s`;
+  a separate clean Celox run completed in `198.235 s`.
+- The fixed final gate built Celox commit `e917489e` once with the locked
+  release/LTO profile. Veryl-CC took `68.409 s` and Celox took `178.223 s`.
+  Both semantic checks and exact architectural markers passed, but Celox was
+  `2.605x` slower, so only the gate's performance condition failed.
+- That `2.605x` value is an end-to-end process ratio, not a generated-code
+  ratio. A subsequent non-LTO synchronous AOT-C split measured Celox at
+  `40.450 s` compile plus `137.675 s` execute, and Veryl with an empty AOT
+  cache at `58.354 s` compile plus `54.282 s` execute. The runtime optimization
+  target is therefore the measured `2.536x` execution gap; compiler latency is
+  tracked separately (Celox was `0.693x` the Veryl cold interval in this run).
+- Earlier Celox runs powered down at `cy=0x009ab960`. Those were not equivalent
+  work: a wide-to-narrow ISel error allowed upper garbage bits to affect a
+  one-bit Mux condition. Commit `138f46eb` physically canonicalizes scalar
+  results from wide lowering and restores exact cycle agreement.
+- Celox Cranelift remains a comparison backend rather than a replacement for
+  the custom native backend on this workload; its JIT/backend phase is
+  substantially slower than native.
+- The retained pipeline now includes phase-aware StateSSA, allocator-owned
+  reload recipes and live-range splitting, residual priority-region recovery,
+  cross-block occurrence placement, and whole-unit ScheduleLate placement.
+
+The partial-window instruction counts and rejected experiments below predate
+that retained pipeline. They remain useful design history, but are not the
+current performance baseline.
 
 Several instruction-count wins did not survive the Heliodor correctness/perf
 gate:
@@ -105,7 +112,7 @@ gate:
   the first 300k-tick timing marker within a 70 s timeout. The long branchless
   mux dependency chain itself remains the problem.
 
-The one accepted Heliodor-facing SIR change so far is conservative:
+One early accepted Heliodor-facing SIR change was conservative:
 
 - `vectorize_concat` now leaves all `Concat` operations intact in 4-state mode,
   because bitwise/arithmetic rewrites normalize Z to X while `Concat` must
@@ -178,30 +185,25 @@ memory-alias legality rules remain mandatory. The full relationship and cost
 equation are documented in
 [Branch-aware mux lowering](./branch-aware-mux-lowering.md).
 
-The binary stage is not the completed Heliodor solution. Current lowering sees
-22,344 muxes: 2,579 become verified CFG diamonds, 16,509 remain branchless
-because their local expected cost is unfavorable, and 3,227 pass the cost test
-but are conservatively retained because they contain deeper shared DAG nodes.
-Only one shared node is currently hoisted. Those 3,227 cases require
-dominance-aware expression placement: each node must be placed once in the
-nearest common control region of its uses, rather than cloning the global
-cache per arm or eagerly hoisting all shared work.
+Binary reverse if-conversion is now only one leaf mechanism in the retained
+solution. The production SIR pipeline builds shared CFG, dominance, StateSSA,
+and occurrence placement facts for the whole unit; it then recovers complete
+residual priority regions, moves legal cross-block state/value occurrences,
+and schedules connected pure DAGs into their latest existing control region.
+Each moved definition retains one SSA occurrence and each state load retains
+the same MemorySSA version.
 
-There is also a distinct multiway problem. Veryl's AOT path still invokes all
-31 combinational chunks every tick, so its advantage is not event-driven
-evaluation. GCC recognizes the generated equality/priority chains as decision
-regions and emits 159 indirect jump-table dispatches, along with balanced and
-partially if-converted tails. Celox must likewise recover a verified
-same-selector decision region and choose among a value table, dense jump table,
-sparse comparison tree, ordered wildcard chain, and small branchless tail by
-target cost. This is a region transform above binary mux lowering, not another
-`BranchifyMux` threshold.
+An additional grouped multi-output branch-fusion trial was implemented and
+passed its correctness tests, but made both complete Linux runs slower, so it
+was reverted. This is the current optimization boundary: reducing branch or
+Mux count is not sufficient when the rewrite lengthens live-ins or worsens
+native layout. The detailed slice-by-slice evidence is recorded in
+[Native throughput execution plan](./native-throughput-execution-plan.md).
 
-A same-build A/B of the cleanup pass confirms the distinction. Explicitly
-enabling `BranchifyMux` applied 464 additional diamonds, increased the spill
-frame from about 79.2 to 84.3 KiB and effective edge copies from 10,110 to
-14,206, while leaving `avg_comb_us` at roughly 36.1--36.4. It therefore remains
-disabled in the O1/O2 presets.
+The remaining release/LTO end-to-end gap and the separately measured `2.536x`
+non-LTO execution gap are both after the retained control-region and allocator
+work. Neither is evidence that the old leaf-only `BranchifyMux` pass should
+simply be enabled more aggressively.
 
 ## Goals
 

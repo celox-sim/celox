@@ -69,6 +69,14 @@ pub struct CompiledTestbench<B: SimBackend> {
     stmts: Vec<TestbenchStatement<B>>,
 }
 
+/// Result of executing a testbench with an optional tick limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LimitedTestbenchResult {
+    pub result: TestResult,
+    pub ticks: u64,
+    pub tick_limit_reached: bool,
+}
+
 pub(crate) enum AssertMessage {
     Formatted {
         template: String,
@@ -3167,9 +3175,19 @@ pub(crate) fn run_testbench<B: SimBackend>(
     sim: &mut Simulator<B>,
     stmts: &[TestbenchStatement<B>],
 ) -> TestResult {
+    run_testbench_limited(sim, stmts, None).result
+}
+
+fn run_testbench_limited<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    stmts: &[TestbenchStatement<B>],
+    tick_limit: Option<u64>,
+) -> LimitedTestbenchResult {
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
         current_time: 0,
+        tick_limit,
+        tick_limit_reached: false,
     };
     let result = exec_detailed(sim, stmts, &mut ctx);
     let failed_messages = ctx
@@ -3183,7 +3201,7 @@ pub(crate) fn run_testbench<B: SimBackend>(
                 .unwrap_or_else(|| "assertion failed".to_string())
         })
         .collect::<Vec<_>>();
-    match result {
+    let result = match result {
         ExecResult::Fail(message) => {
             if failed_messages.is_empty() {
                 TestResult::Fail(message)
@@ -3202,6 +3220,11 @@ pub(crate) fn run_testbench<B: SimBackend>(
                 TestResult::Fail(failed_messages.join("\n"))
             }
         }
+    };
+    LimitedTestbenchResult {
+        result,
+        ticks: ctx.current_time,
+        tick_limit_reached: ctx.tick_limit_reached,
     }
 }
 
@@ -3225,6 +3248,18 @@ pub fn run_compiled_testbench<B: SimBackend>(
     run_testbench(sim, &tb.stmts)
 }
 
+/// Execute at most `tick_limit` simulator ticks from a compiled testbench.
+///
+/// Reaching the limit is reported separately from the testbench result so a
+/// performance prefix cannot be mistaken for a completed test.
+pub fn run_compiled_testbench_with_tick_limit<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    tb: &CompiledTestbench<B>,
+    tick_limit: u64,
+) -> LimitedTestbenchResult {
+    run_testbench_limited(sim, &tb.stmts, Some(tick_limit))
+}
+
 /// Run the testbench and return assertion results observed before the test
 /// finishes or stops on a fatal failure.
 pub(crate) fn run_testbench_detailed<B: SimBackend>(
@@ -3234,6 +3269,8 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
         current_time: 0,
+        tick_limit: None,
+        tick_limit_reached: false,
     };
     let result = exec_detailed(sim, stmts, &mut ctx);
     let passed = !matches!(result, ExecResult::Fail(_)) && ctx.assertions.iter().all(|a| a.passed);
@@ -3246,6 +3283,8 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
 struct DetailedExecContext {
     assertions: Vec<AssertionResult>,
     current_time: u64,
+    tick_limit: Option<u64>,
+    tick_limit_reached: bool,
 }
 
 fn assert_event_args(message: &Option<AssertMessage>) -> &[CompiledAssertArg] {
@@ -3382,7 +3421,7 @@ fn drain_runtime_assertions<B: SimBackend>(
         tb_time: Some(ctx.current_time),
         scope: None,
     };
-    for event in sim.drain_runtime_events_with_context(format_ctx) {
+    for event in sim.drain_runtime_events_deferred_with_context(format_ctx) {
         match event {
             RuntimeEvent::AssertContinue { message } => {
                 last_message = Some(message.clone());
@@ -3447,21 +3486,50 @@ fn exec_one_detailed<B: SimBackend>(
     stmt: &TestbenchStatement<B>,
     ctx: &mut DetailedExecContext,
 ) -> ExecResult {
+    let tick_limit_reached = |ctx: &mut DetailedExecContext| {
+        let reached = ctx
+            .tick_limit
+            .is_some_and(|limit| ctx.current_time >= limit);
+        if reached {
+            ctx.tick_limit_reached = true;
+        }
+        reached
+    };
+    if tick_limit_reached(ctx) {
+        return ExecResult::Finished;
+    }
     match stmt {
         TestbenchStatement::ClockNext { clock_event, count } => {
             match eval_clock_count(sim, count) {
                 Ok(n) => {
                     let progress_every = testbench_progress_every();
-                    for _ in 0..n {
-                        if let Err(e) = sim.tick(*clock_event) {
-                            ctx.current_time = ctx.current_time.saturating_add(1);
+                    let mut remaining = n;
+                    while remaining != 0 {
+                        if tick_limit_reached(ctx) {
+                            return ExecResult::Finished;
+                        }
+                        let mut batch = remaining;
+                        if let Some(limit) = ctx.tick_limit {
+                            batch = batch.min(limit.saturating_sub(ctx.current_time));
+                        }
+                        if let Some(every) = progress_every.filter(|every| *every != 0) {
+                            batch = batch.min(every - ctx.current_time % every);
+                        }
+                        let (completed, result) = sim.tick_deferred_comb_many(*clock_event, batch);
+                        if completed == 0 || completed > batch {
+                            return ExecResult::Fail(
+                                "backend made invalid progress in a deferred tick batch".into(),
+                            );
+                        }
+                        ctx.current_time = ctx.current_time.saturating_add(completed);
+                        remaining -= completed;
+                        if let Err(e) = result {
                             let drained = drain_runtime_assertions(sim, ctx, None);
                             if let Some(message) = drained.fatal_message {
                                 return ExecResult::Fail(message);
                             }
                             return ExecResult::Fail(format!("{e}"));
                         }
-                        ctx.current_time = ctx.current_time.saturating_add(1);
                         if let Some(every) = progress_every
                             && every != 0
                             && ctx.current_time.is_multiple_of(every)
@@ -3483,16 +3551,30 @@ fn exec_one_detailed<B: SimBackend>(
             deassert_value,
         } => {
             sim_set_u64(sim, *reset_signal, (*assert_value).into());
-            for _ in 0..*duration {
-                if let Err(e) = sim.tick(*clock_event) {
-                    ctx.current_time = ctx.current_time.saturating_add(1);
+            let mut remaining = *duration;
+            while remaining != 0 {
+                if tick_limit_reached(ctx) {
+                    return ExecResult::Finished;
+                }
+                let mut batch = remaining;
+                if let Some(limit) = ctx.tick_limit {
+                    batch = batch.min(limit.saturating_sub(ctx.current_time));
+                }
+                let (completed, result) = sim.tick_deferred_comb_many(*clock_event, batch);
+                if completed == 0 || completed > batch {
+                    return ExecResult::Fail(
+                        "backend made invalid progress in a reset tick batch".into(),
+                    );
+                }
+                ctx.current_time = ctx.current_time.saturating_add(completed);
+                remaining -= completed;
+                if let Err(e) = result {
                     let drained = drain_runtime_assertions(sim, ctx, None);
                     if let Some(message) = drained.fatal_message {
                         return ExecResult::Fail(message);
                     }
                     return ExecResult::Fail(format!("reset: {e}"));
                 }
-                ctx.current_time = ctx.current_time.saturating_add(1);
                 drain_runtime_assertions(sim, ctx, None);
             }
             sim_set_u64(sim, *reset_signal, (*deassert_value).into());
@@ -3652,5 +3734,30 @@ mod tests {
             Some(TestbenchStatement::Display { newline: false, .. })
         ));
         assert!(matches!(tb.stmts.get(2), Some(TestbenchStatement::Finish)));
+    }
+
+    #[test]
+    fn limited_runner_stops_without_completing_the_testbench() {
+        let code = r#"
+            #[test(t)]
+            module t {
+                inst clk: $tb::clock_gen;
+                initial {
+                    clk.next(10);
+                    $finish();
+                }
+            }
+        "#;
+        let mut sim = Simulator::builder(code, "t").build_with_trace().unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+
+        assert_eq!(
+            run_compiled_testbench_with_tick_limit(&mut sim, &tb, 3),
+            LimitedTestbenchResult {
+                result: TestResult::Pass,
+                ticks: 3,
+                tick_limit_reached: true,
+            }
+        );
     }
 }

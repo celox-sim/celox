@@ -4,14 +4,17 @@
 //! value numbers). If two instructions have the same value number, the
 //! second is replaced with an alias to the first's result register.
 //!
-//! Pure expression availability is scoped by the dominator tree. Loads use a
-//! separate memory version and are reset at joins and cyclic SCCs.
+//! Pure expression availability is scoped by the dominator tree. Exact state
+//! loads use structural StateSSA versions; dynamic or otherwise unversioned
+//! loads retain the conservative path-local memory epoch.
 
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::def_reg;
-use crate::HashMap;
+use super::state_ssa::{MemoryVersionId, StateFragment, StateSsa};
+use crate::ir::cfg::SirCfg;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
+use crate::{HashMap, HashSet};
 
 pub(super) struct GvnPass;
 
@@ -20,15 +23,123 @@ impl ExecutionUnitPass for GvnPass {
         "gvn"
     }
 
-    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
+    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
+        let candidates = structural_load_candidates(eu);
+        let load_versions = if candidates.is_empty() {
+            HashMap::default()
+        } else {
+            SirCfg::analyze(eu)
+                .ok()
+                .map(|cfg| structural_load_versions(eu, &cfg, &candidates))
+                .unwrap_or_default()
+        };
         let cfg = GvnCfg::new(eu);
         let register_types = eu.register_map.clone();
         let mut state = GvnState::default();
 
         for &root in &cfg.roots {
-            gvn_dom_dfs(root, true, eu, &cfg, &register_types, &mut state);
+            gvn_dom_dfs(
+                root,
+                true,
+                eu,
+                &cfg,
+                &register_types,
+                &load_versions,
+                options.four_state,
+                &mut state,
+            );
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct StructuralLoadVersion {
+    fragment: StateFragment,
+    version: MemoryVersionId,
+}
+
+fn structural_load_versions(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &SirCfg,
+    candidates: &HashMap<u32, HashSet<RegisterId>>,
+) -> HashMap<RegisterId, StructuralLoadVersion> {
+    let mut versions = HashMap::default();
+    let mut regions = candidates.keys().copied().collect::<Vec<_>>();
+    regions.sort_unstable();
+    for region in regions {
+        let eligible = &candidates[&region];
+        let Ok(state) = StateSsa::analyze_selected_loads(eu, cfg, region, eligible) else {
+            continue;
+        };
+        for &block_id in &cfg.block_ids {
+            for (instruction_index, instruction) in
+                eu.blocks[&block_id].instructions.iter().enumerate()
+            {
+                let SIRInstruction::Load(destination, address, _, _) = instruction else {
+                    continue;
+                };
+                if address.region != region {
+                    continue;
+                }
+                if !eligible.contains(destination) {
+                    continue;
+                }
+                let Some((slot, version)) =
+                    state.read_version(block_id, instruction_index, *destination)
+                else {
+                    continue;
+                };
+                versions.insert(
+                    *destination,
+                    StructuralLoadVersion {
+                        fragment: state.slots[slot].fragment,
+                        version,
+                    },
+                );
+            }
+        }
+    }
+    versions
+}
+
+fn structural_load_candidates(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> HashMap<u32, HashSet<RegisterId>> {
+    let mut shapes = HashMap::<(StateFragment, ResultTypeKey), Vec<RegisterId>>::default();
+    for block in eu.blocks.values() {
+        for instruction in &block.instructions {
+            let SIRInstruction::Load(destination, address, SIROffset::Static(bit_offset), width) =
+                instruction
+            else {
+                continue;
+            };
+            let Some(result_type) = result_type_key(*destination, &eu.register_map) else {
+                continue;
+            };
+            let fragment = StateFragment::from_access(
+                *address,
+                *bit_offset,
+                *width,
+                &eu.register_map[destination],
+            );
+            shapes
+                .entry((fragment, result_type))
+                .or_default()
+                .push(*destination);
+        }
+    }
+
+    let mut candidates = HashMap::<u32, HashSet<RegisterId>>::default();
+    for ((fragment, _), destinations) in shapes {
+        if destinations.len() < 2 {
+            continue;
+        }
+        candidates
+            .entry(fragment.addr.region)
+            .or_default()
+            .extend(destinations);
+    }
+    candidates
 }
 
 struct GvnCfg {
@@ -229,6 +340,11 @@ fn terminator_successors(term: &SIRTerminator) -> Vec<BlockId> {
             false_block,
             ..
         } => vec![true_block.0, false_block.0],
+        SIRTerminator::Switch { cases, default, .. } => cases
+            .iter()
+            .map(|case| case.target)
+            .chain(std::iter::once(*default))
+            .collect(),
         SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
     }
 }
@@ -285,13 +401,23 @@ struct EpochLoadKey {
     load: LoadKey,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct StructuralLoadKey {
+    version: StructuralLoadVersion,
+    result_type: ResultTypeKey,
+    observable_epoch: u64,
+}
+
 #[derive(Clone, Copy)]
 struct GvnCheckpoint {
     value_inserts: usize,
     canonical_changes: usize,
     constant_changes: usize,
     load_inserts: usize,
+    structural_load_inserts: usize,
+    concat_inserts: usize,
     memory_epoch: u64,
+    observable_epoch: u64,
 }
 
 #[derive(Default)]
@@ -304,8 +430,14 @@ struct GvnState {
     constant_changes: Vec<(RegisterId, Option<u64>)>,
     loads: HashMap<EpochLoadKey, RegisterId>,
     load_inserts: Vec<EpochLoadKey>,
+    structural_loads: HashMap<StructuralLoadKey, RegisterId>,
+    structural_load_inserts: Vec<StructuralLoadKey>,
+    two_state_concats: HashMap<Vec<RegisterId>, RegisterId>,
+    concat_inserts: Vec<Vec<RegisterId>>,
     memory_epoch: u64,
     next_memory_epoch: u64,
+    observable_epoch: u64,
+    next_observable_epoch: u64,
 }
 
 impl GvnState {
@@ -315,7 +447,10 @@ impl GvnState {
             canonical_changes: self.canonical_changes.len(),
             constant_changes: self.constant_changes.len(),
             load_inserts: self.load_inserts.len(),
+            structural_load_inserts: self.structural_load_inserts.len(),
+            concat_inserts: self.concat_inserts.len(),
             memory_epoch: self.memory_epoch,
+            observable_epoch: self.observable_epoch,
         }
     }
 
@@ -344,7 +479,16 @@ impl GvnState {
             let key = self.load_inserts.pop().unwrap();
             self.loads.remove(&key);
         }
+        while self.structural_load_inserts.len() > checkpoint.structural_load_inserts {
+            let key = self.structural_load_inserts.pop().unwrap();
+            self.structural_loads.remove(&key);
+        }
+        while self.concat_inserts.len() > checkpoint.concat_inserts {
+            let key = self.concat_inserts.pop().unwrap();
+            self.two_state_concats.remove(&key);
+        }
         self.memory_epoch = checkpoint.memory_epoch;
+        self.observable_epoch = checkpoint.observable_epoch;
     }
 
     fn set_canonical(&mut self, register: RegisterId, canonical: RegisterId) {
@@ -390,6 +534,69 @@ impl GvnState {
         debug_assert!(!self.loads.contains_key(&key));
         self.loads.insert(key.clone(), register);
         self.load_inserts.push(key);
+    }
+
+    fn structural_load_key(
+        &self,
+        version: StructuralLoadVersion,
+        result_type: ResultTypeKey,
+    ) -> StructuralLoadKey {
+        StructuralLoadKey {
+            version,
+            result_type,
+            observable_epoch: self.observable_epoch,
+        }
+    }
+
+    fn available_structural_load(
+        &self,
+        version: StructuralLoadVersion,
+        result_type: ResultTypeKey,
+    ) -> Option<RegisterId> {
+        self.structural_loads
+            .get(&self.structural_load_key(version, result_type))
+            .copied()
+    }
+
+    fn insert_structural_load(
+        &mut self,
+        version: StructuralLoadVersion,
+        result_type: ResultTypeKey,
+        register: RegisterId,
+    ) {
+        let key = self.structural_load_key(version, result_type);
+        debug_assert!(!self.structural_loads.contains_key(&key));
+        self.structural_loads.insert(key.clone(), register);
+        self.structural_load_inserts.push(key);
+    }
+
+    fn bump_observable_epoch(&mut self) {
+        self.next_observable_epoch = self
+            .next_observable_epoch
+            .checked_add(1)
+            .expect("a compilation cannot contain u64::MAX observable barriers");
+        self.observable_epoch = self.next_observable_epoch;
+    }
+
+    fn insert_two_state_concat(&mut self, arguments: Vec<RegisterId>, register: RegisterId) {
+        if self.two_state_concats.contains_key(&arguments) {
+            return;
+        }
+        self.two_state_concats.insert(arguments.clone(), register);
+        self.concat_inserts.push(arguments);
+    }
+}
+
+fn is_observable_barrier(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    match instruction {
+        SIRInstruction::Store(_, _, _, _, triggers, capture_sites) => {
+            !triggers.is_empty() || !capture_sites.is_empty()
+        }
+        SIRInstruction::Commit(_, _, _, _, triggers) => !triggers.is_empty(),
+        SIRInstruction::RuntimeEvent { .. }
+        | SIRInstruction::CombCaptureEvent { .. }
+        | SIRInstruction::CombCaptureEnableIfChanged { .. } => true,
+        _ => false,
     }
 }
 
@@ -443,6 +650,8 @@ fn gvn_dom_dfs(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     cfg: &GvnCfg,
     register_types: &HashMap<RegisterId, RegisterType>,
+    load_versions: &HashMap<RegisterId, StructuralLoadVersion>,
+    four_state: bool,
     state: &mut GvnState,
 ) {
     enum Work {
@@ -462,7 +671,15 @@ fn gvn_dom_dfs(
                 if reset_loads {
                     state.bump_memory_epoch();
                 }
-                process_gvn_block(node, eu, cfg, register_types, state);
+                process_gvn_block(
+                    node,
+                    eu,
+                    cfg,
+                    register_types,
+                    load_versions,
+                    four_state,
+                    state,
+                );
 
                 work.push(Work::Exit(checkpoint));
                 for &child in cfg.dom_children[node].iter().rev() {
@@ -487,6 +704,8 @@ fn process_gvn_block(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     cfg: &GvnCfg,
     register_types: &HashMap<RegisterId, RegisterType>,
+    load_versions: &HashMap<RegisterId, StructuralLoadVersion>,
+    four_state: bool,
     state: &mut GvnState,
 ) {
     let block_id = cfg.block_ids[node];
@@ -508,6 +727,16 @@ fn process_gvn_block(
                     state.set_canonical(*dst, *dst);
                     continue;
                 };
+                if let Some(&version) = load_versions.get(dst) {
+                    if let Some(existing) = state.available_structural_load(version, result_type) {
+                        state.set_canonical(*dst, existing);
+                        redundant.insert(*dst);
+                    } else {
+                        state.insert_structural_load(version, result_type, *dst);
+                        state.set_canonical(*dst, *dst);
+                    }
+                    continue;
+                }
                 let key = LoadKey {
                     addr: *addr,
                     offset: offset.clone(),
@@ -533,6 +762,9 @@ fn process_gvn_block(
                     | SIRInstruction::CombCaptureEnableIfChanged { .. }
             ) {
                 state.bump_memory_epoch();
+                if is_observable_barrier(inst) {
+                    state.bump_observable_epoch();
+                }
                 continue;
             }
 
@@ -568,7 +800,25 @@ fn process_gvn_block(
             if let Some(&existing) = state.values.get(&key) {
                 state.set_canonical(dst, existing);
                 redundant.insert(dst);
+            } else if !four_state
+                && let PureExprKey::Concat(arguments) = &key.expression
+                && let Some(&existing) = state.two_state_concats.get(arguments)
+                && register_types
+                    .get(&existing)
+                    .is_some_and(|ty| ty.width() == register_types[&dst].width())
+            {
+                // A Bit and a Logic Concat with the same operands have the
+                // same raw value in two-state mode. Keep the destination
+                // definition and type, but avoid rebuilding the lanes.
+                *inst = SIRInstruction::Unary(dst, UnaryOp::Ident, existing);
+                state.insert_value(key, dst);
+                state.set_canonical(dst, dst);
             } else {
+                if let PureExprKey::Concat(arguments) = &key.expression
+                    && !four_state
+                {
+                    state.insert_two_state_concat(arguments.clone(), dst);
+                }
                 state.insert_value(key, dst);
                 state.set_canonical(dst, dst);
                 if let SIRInstruction::Imm(_, value) = inst
@@ -619,13 +869,16 @@ fn apply_aliases_to_terminator(
                 *arg = resolve_canonical(*arg, aliases);
             }
         }
+        SIRTerminator::Switch { selector, .. } => {
+            *selector = resolve_canonical(*selector, aliases);
+        }
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }
 
 fn apply_alias_to_offset(offset: &mut SIROffset, aliases: &HashMap<RegisterId, RegisterId>) {
     match offset {
-        SIROffset::Static(_) => {}
+        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
         SIROffset::Dynamic(register) => {
             *register = resolve_canonical(*register, aliases);
         }
@@ -819,6 +1072,81 @@ mod tests {
         );
         assert!(!unit.register_map.contains_key(&r1));
         unit.verify_result().unwrap();
+    }
+
+    #[test]
+    fn reuses_cross_type_concat_bits_only_in_two_state_mode() {
+        let r0 = RegisterId(0);
+        let r1 = RegisterId(1);
+        let packed_bit = RegisterId(2);
+        let packed_logic = RegisterId(3);
+        let block_id = BlockId(0);
+        let fixture = ExecutionUnit {
+            entry_block_id: block_id,
+            blocks: std::iter::once((
+                block_id,
+                BasicBlock {
+                    id: block_id,
+                    params: Vec::new(),
+                    instructions: vec![
+                        SIRInstruction::Imm(r0, SIRValue::new(0u8)),
+                        SIRInstruction::Imm(r1, SIRValue::new(1u8)),
+                        SIRInstruction::Concat(packed_bit, vec![r1, r0]),
+                        SIRInstruction::Store(
+                            address(0),
+                            SIROffset::Static(0),
+                            2,
+                            packed_bit,
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                        SIRInstruction::Concat(packed_logic, vec![r1, r0]),
+                        SIRInstruction::Store(
+                            address(1),
+                            SIROffset::Static(0),
+                            2,
+                            packed_logic,
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            ))
+            .collect(),
+            register_map: [
+                (r0, bit(1)),
+                (r1, bit(1)),
+                (packed_bit, bit(2)),
+                (packed_logic, RegisterType::Logic { width: 2 }),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let mut two_state = fixture.clone();
+        GvnPass.run(&mut two_state, &PassOptions::default());
+        assert!(matches!(
+            two_state.blocks[&block_id].instructions[4],
+            SIRInstruction::Unary(dst, UnaryOp::Ident, source)
+                if dst == packed_logic && source == packed_bit
+        ));
+        two_state.verify_result().unwrap();
+
+        let mut four_state = fixture;
+        GvnPass.run(
+            &mut four_state,
+            &PassOptions {
+                four_state: true,
+                ..PassOptions::default()
+            },
+        );
+        assert!(matches!(
+            four_state.blocks[&block_id].instructions[4],
+            SIRInstruction::Concat(dst, _)
+                if dst == packed_logic
+        ));
+        four_state.verify_result().unwrap();
     }
 
     #[test]
@@ -1404,12 +1732,13 @@ mod tests {
     }
 
     #[test]
-    fn load_availability_resets_at_a_join() {
+    fn same_state_version_load_crosses_a_diamond_with_a_disjoint_store() {
         let entry = BlockId(0);
         let left = BlockId(1);
         let right = BlockId(2);
         let join = BlockId(3);
         let addr = address(0);
+        let other_addr = address(1);
         let mut unit = ExecutionUnit {
             entry_block_id: entry,
             blocks: [
@@ -1419,6 +1748,7 @@ mod tests {
                     instructions: vec![
                         SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
                         SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(0), 8),
+                        SIRInstruction::Imm(RegisterId(3), SIRValue::new(7u8)),
                     ],
                     terminator: SIRTerminator::Branch {
                         cond: RegisterId(0),
@@ -1429,7 +1759,14 @@ mod tests {
                 BasicBlock {
                     id: left,
                     params: Vec::new(),
-                    instructions: Vec::new(),
+                    instructions: vec![SIRInstruction::Store(
+                        other_addr,
+                        SIROffset::Static(0),
+                        8,
+                        RegisterId(3),
+                        Vec::new(),
+                        Vec::new(),
+                    )],
                     terminator: SIRTerminator::Jump(join, Vec::new()),
                 },
                 BasicBlock {
@@ -1457,6 +1794,7 @@ mod tests {
                 (RegisterId(0), bit(1)),
                 (RegisterId(1), RegisterType::Logic { width: 8 }),
                 (RegisterId(2), RegisterType::Logic { width: 8 }),
+                (RegisterId(3), RegisterType::Logic { width: 8 }),
             ]
             .into_iter()
             .collect(),
@@ -1465,14 +1803,93 @@ mod tests {
 
         GvnPass.run(&mut unit, &PassOptions::default());
 
-        assert_eq!(unit.blocks[&entry].instructions.len(), 2);
-        assert_eq!(unit.blocks[&join].instructions.len(), 1);
+        assert_eq!(unit.blocks[&entry].instructions.len(), 3);
+        assert!(unit.blocks[&join].instructions.is_empty());
+        assert!(!unit.register_map.contains_key(&RegisterId(2)));
+        unit.verify_result().unwrap();
+    }
+
+    #[test]
+    fn same_slot_store_on_one_arm_creates_a_join_version() {
+        let entry = BlockId(0);
+        let left = BlockId(1);
+        let right = BlockId(2);
+        let join = BlockId(3);
+        let addr = address(0);
+        let mut unit = ExecutionUnit {
+            entry_block_id: entry,
+            blocks: [
+                BasicBlock {
+                    id: entry,
+                    params: Vec::new(),
+                    instructions: vec![
+                        SIRInstruction::Load(RegisterId(0), address(1), SIROffset::Static(0), 1),
+                        SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(0), 8),
+                        SIRInstruction::Imm(RegisterId(3), SIRValue::new(7u8)),
+                    ],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (left, Vec::new()),
+                        false_block: (right, Vec::new()),
+                    },
+                },
+                BasicBlock {
+                    id: left,
+                    params: Vec::new(),
+                    instructions: vec![SIRInstruction::Store(
+                        addr,
+                        SIROffset::Static(0),
+                        8,
+                        RegisterId(3),
+                        Vec::new(),
+                        Vec::new(),
+                    )],
+                    terminator: SIRTerminator::Jump(join, Vec::new()),
+                },
+                BasicBlock {
+                    id: right,
+                    params: Vec::new(),
+                    instructions: Vec::new(),
+                    terminator: SIRTerminator::Jump(join, Vec::new()),
+                },
+                BasicBlock {
+                    id: join,
+                    params: Vec::new(),
+                    instructions: vec![SIRInstruction::Load(
+                        RegisterId(2),
+                        addr,
+                        SIROffset::Static(0),
+                        8,
+                    )],
+                    terminator: SIRTerminator::Return,
+                },
+            ]
+            .into_iter()
+            .map(|block| (block.id, block))
+            .collect(),
+            register_map: [
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), RegisterType::Logic { width: 8 }),
+                (RegisterId(2), RegisterType::Logic { width: 8 }),
+                (RegisterId(3), RegisterType::Logic { width: 8 }),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        unit.verify_result().unwrap();
+
+        GvnPass.run(&mut unit, &PassOptions::default());
+
+        assert!(matches!(
+            unit.blocks[&join].instructions.as_slice(),
+            [SIRInstruction::Load(RegisterId(2), ..)]
+        ));
         assert!(unit.register_map.contains_key(&RegisterId(2)));
         unit.verify_result().unwrap();
     }
 
     #[test]
-    fn preheader_load_is_not_available_inside_a_cyclic_scc() {
+    fn read_only_loop_reuses_a_dominating_preheader_load() {
         let addr = address(0);
         let mut unit = loop_unit(
             vec![
@@ -1505,6 +1922,53 @@ mod tests {
                 .flat_map(|block| &block.instructions)
                 .filter(|inst| matches!(inst, SIRInstruction::Load(..)))
                 .count(),
+            1
+        );
+        assert!(!unit.register_map.contains_key(&RegisterId(3)));
+        unit.verify_result().unwrap();
+    }
+
+    #[test]
+    fn loop_carried_same_slot_store_creates_a_header_version() {
+        let addr = address(0);
+        let mut unit = loop_unit(
+            vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
+                SIRInstruction::Load(RegisterId(1), addr, SIROffset::Static(0), 8),
+                SIRInstruction::Imm(RegisterId(4), SIRValue::new(7u8)),
+            ],
+            vec![RegisterId(0)],
+            vec![RegisterId(2)],
+            vec![
+                SIRInstruction::Load(RegisterId(3), addr, SIROffset::Static(0), 8),
+                SIRInstruction::Store(
+                    addr,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(4),
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            ],
+            RegisterId(2),
+            vec![RegisterId(2)],
+            vec![
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), RegisterType::Logic { width: 8 }),
+                (RegisterId(2), bit(1)),
+                (RegisterId(3), RegisterType::Logic { width: 8 }),
+                (RegisterId(4), RegisterType::Logic { width: 8 }),
+            ],
+        );
+
+        GvnPass.run(&mut unit, &PassOptions::default());
+
+        assert_eq!(
+            unit.blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .filter(|inst| matches!(inst, SIRInstruction::Load(..)))
+                .count(),
             2
         );
         assert!(unit.register_map.contains_key(&RegisterId(3)));
@@ -1512,7 +1976,7 @@ mod tests {
     }
 
     #[test]
-    fn every_observable_memory_effect_advances_the_load_epoch() {
+    fn observable_callbacks_split_loads_but_a_disjoint_commit_does_not() {
         let block = BlockId(0);
         let addr = address(0);
         let other_addr = address(1);
@@ -1580,11 +2044,16 @@ mod tests {
                 .iter()
                 .filter(|inst| matches!(inst, SIRInstruction::Load(..)))
                 .count(),
-            5
+            4
         );
-        for register in 2..=6 {
+        assert!(!unit.register_map.contains_key(&RegisterId(3)));
+        for register in [2, 4, 5, 6] {
             assert!(unit.register_map.contains_key(&RegisterId(register)));
         }
+        assert!(matches!(
+            &unit.blocks[&block].instructions[4],
+            SIRInstruction::RuntimeEvent { args, .. } if args == &vec![RegisterId(2)]
+        ));
         unit.verify_result().unwrap();
     }
 

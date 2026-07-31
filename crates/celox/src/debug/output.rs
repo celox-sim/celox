@@ -19,6 +19,11 @@ impl CompilationTrace {
     pub fn format_post_optimized_sir(&self) -> Option<String> {
         self.post_optimized_sir.as_ref().map(format_program)
     }
+
+    /// Format the optimized, merged SIR actually consumed by native ISel.
+    pub fn format_native_optimized_sir(&self) -> Option<String> {
+        self.native_optimized_sir.clone()
+    }
     /// Format analyzer IR to string representation
     pub fn format_analyzer_ir(&self) -> Option<String> {
         self.analyzer_ir.clone()
@@ -43,6 +48,9 @@ impl CompilationTrace {
         }
         if let Some(sir) = self.format_post_optimized_sir() {
             println!("=== Post-optimized SIR ===\n{}", sir);
+        }
+        if let Some(sir) = self.format_native_optimized_sir() {
+            println!("=== Native optimized merged SIR ===\n{}", sir);
         }
         if let Some(ir) = self.format_analyzer_ir() {
             println!("=== Analyzer IR ===\n{}", ir);
@@ -236,6 +244,11 @@ fn sir_dominance_order<A>(eu: &ExecutionUnit<A>) -> Vec<crate::ir::BlockId> {
                 false_block,
                 ..
             } => vec![true_block.0, false_block.0],
+            SIRTerminator::Switch { cases, default, .. } => cases
+                .iter()
+                .map(|case| case.target)
+                .chain(std::iter::once(*default))
+                .collect(),
             SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
         },
     )

@@ -124,3 +124,38 @@ fn ff_branch_mir() {
     let output = mir_trace(code, "Top");
     assert_snapshot!(output);
 }
+
+#[test]
+fn trace_contains_the_exact_fused_native_pipeline() {
+    let code = r#"
+        module Top (
+            clk: input '_ clock,
+            d: input logic<8>,
+            q: output logic<8>,
+            y: output logic<8>,
+        ) {
+            always_ff(clk) {
+                q = d;
+            }
+            assign y = q + 1;
+        }
+    "#;
+    let result = SimulatorBuilder::new(code, "Top")
+        .optimize(true)
+        .trace_mir()
+        .build_with_trace();
+    result.res.expect("traced native build should succeed");
+    let native_sir = result
+        .trace
+        .native_optimized_sir
+        .expect("native optimized SIR should be captured");
+    let mir = result.trace.mir.expect("native MIR should be captured");
+
+    assert!(native_sir.contains("=== Native function eval_comb ==="));
+    assert!(native_sir.contains("=== Native function eval_comb_apply_ff[0] ==="));
+    assert!(mir.contains("=== Native function eval_comb_apply_ff[0] ==="));
+    assert!(
+        !mir.contains("Execution Unit eval_apply_ffs"),
+        "trace must not independently re-lower source execution units"
+    );
+}

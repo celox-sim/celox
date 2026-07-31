@@ -27,7 +27,9 @@ fn scalar_access_type(op_width: usize, max_bit_shift: usize) -> Type {
 
 fn max_bit_shift(offset: &SIROffset) -> usize {
     match offset {
-        SIROffset::Static(bit_offset) => bit_offset & 7,
+        SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
+            bit_offset & 7
+        }
         SIROffset::Dynamic(_) => 7,
         SIROffset::Element {
             element_width,
@@ -45,7 +47,10 @@ fn max_bit_shift(offset: &SIROffset) -> usize {
 
 fn logical_bit_offset(state: &mut TranslationState, offset: &SIROffset) -> Value {
     match offset {
-        SIROffset::Static(value) => state.builder.ins().iconst(types::I64, *value as i64),
+        SIROffset::Static(value)
+        | SIROffset::PackedElements {
+            bit_offset: value, ..
+        } => state.builder.ins().iconst(types::I64, *value as i64),
         SIROffset::Dynamic(reg) => {
             let value = state.regs[reg].first_value(state.builder);
             cast_type(state.builder, value, types::I64)
@@ -409,20 +414,7 @@ impl SIRTranslator {
 
         // 1. Calculate base memory address
         let abs = addr.absolute_addr();
-        let (mem_base, base_offset_bytes) = if addr.region == STABLE_REGION {
-            (state.mem_ptr, self.layout.offsets[&abs])
-        } else {
-            (
-                state.mem_ptr,
-                self.layout.working_base_offset
-                    + *self.layout.working_offsets.get(&abs).unwrap_or_else(|| {
-                        panic!(
-                            "Working region address is not laid out: region={}, addr={}",
-                            addr.region, abs
-                        )
-                    }),
-            )
-        };
+        let (mem_base, base_offset_bytes) = (state.mem_ptr, self.layout.region_base_offset(addr));
 
         if let SIROffset::Static(val) = offset {
             let byte_off = (val >> 3) as i64;
@@ -649,21 +641,7 @@ impl SIRTranslator {
 
         // 1. Calculate base memory address (static offset)
         let abs = addr.absolute_addr();
-        let base_offset_bytes = match addr.region {
-            STABLE_REGION => self.layout.offsets[&abs],
-            crate::ir::SPARSE_WORKING_REGION => {
-                self.layout.sparse_base_offset + self.layout.sparse_offsets[&abs]
-            }
-            _ => {
-                self.layout.working_base_offset
-                    + *self.layout.working_offsets.get(&abs).unwrap_or_else(|| {
-                        panic!(
-                            "Working region address is not laid out: region={}, addr={}",
-                            addr.region, abs
-                        )
-                    })
-            }
-        };
+        let base_offset_bytes = self.layout.region_base_offset(addr);
         let mem_base = state.mem_ptr;
 
         let (byte_offset_val, bit_shift_val) = packed_byte_and_shift(state, offset);
@@ -1037,44 +1015,12 @@ impl SIRTranslator {
         triggers: &[TriggerIdWithKind],
     ) {
         let src_abs = src_addr.absolute_addr();
-        let (src_mem_base, src_base_offset_bytes) = if src_addr.region == STABLE_REGION {
-            (state.mem_ptr, self.layout.offsets[&src_abs])
-        } else {
-            (
-                state.mem_ptr,
-                self.layout.working_base_offset
-                    + *self
-                        .layout
-                        .working_offsets
-                        .get(&src_abs)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "Working region address is not laid out: region={}, addr={}",
-                                src_addr.region, src_abs
-                            )
-                        }),
-            )
-        };
+        let (src_mem_base, src_base_offset_bytes) =
+            (state.mem_ptr, self.layout.region_base_offset(src_addr));
 
         let dst_abs = dst_addr.absolute_addr();
-        let (dst_mem_base, dst_base_offset_bytes) = if dst_addr.region == STABLE_REGION {
-            (state.mem_ptr, self.layout.offsets[&dst_abs])
-        } else {
-            (
-                state.mem_ptr,
-                self.layout.working_base_offset
-                    + *self
-                        .layout
-                        .working_offsets
-                        .get(&dst_abs)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "Working region address is not laid out: region={}, addr={}",
-                                dst_addr.region, dst_abs
-                            )
-                        }),
-            )
-        };
+        let (dst_mem_base, dst_base_offset_bytes) =
+            (state.mem_ptr, self.layout.region_base_offset(dst_addr));
 
         // Fast path: byte-aligned static commit can be lowered to direct memory copies.
         // This avoids generating complex RMW-style store sequences.
@@ -1639,7 +1585,7 @@ impl SIRTranslator {
         };
 
         let old_val = match offset {
-            SIROffset::Static(v) => {
+            SIROffset::Static(v) | SIROffset::PackedElements { bit_offset: v, .. } => {
                 if *v == 0 {
                     state.builder.ins().band_imm(pre_loaded, mask as i64)
                 } else {
@@ -1656,20 +1602,7 @@ impl SIRTranslator {
         };
 
         // 2. Load new value from live memory
-        let (_mem_base, base_offset_bytes) = if addr.region == STABLE_REGION {
-            (state.mem_ptr, self.layout.offsets[&abs])
-        } else {
-            (
-                state.mem_ptr,
-                self.layout.working_base_offset
-                    + *self.layout.working_offsets.get(&abs).unwrap_or_else(|| {
-                        panic!(
-                            "Working region address is not laid out: region={}, addr={}",
-                            addr.region, abs
-                        )
-                    }),
-            )
-        };
+        let (_mem_base, base_offset_bytes) = (state.mem_ptr, self.layout.region_base_offset(addr));
 
         let (byte_offset_val, bit_shift_val) = packed_byte_and_shift(state, offset);
 

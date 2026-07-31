@@ -3,16 +3,18 @@
 //! Supports 2-state and 4-state (IEEE 1800) with full mask propagation.
 //! Handles arbitrary widths: narrow (≤64-bit) and wide (>64-bit, chunk-based).
 
-use crate::ir::{
-    BinaryOp, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset, SIRTerminator,
-    UnaryOp,
-};
-use crate::ir::{RegionedAbsoluteAddr, STABLE_REGION};
-
 use super::mir::*;
+use super::sparse_write_state::{
+    SparseChunkState, SparseMetadataAction, SparseWriteState, SparseWriteStates,
+};
 use crate::backend::MemoryLayout;
 #[cfg(test)]
 use crate::backend::memory_layout::MemoryLayoutMode;
+use crate::ir::{
+    BasicBlock, BinaryOp, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
+    SIRTerminator, UnaryOp,
+};
+use crate::ir::{RegionedAbsoluteAddr, STABLE_REGION};
 use crate::{HashMap, HashSet};
 
 /// Maps SIR RegisterId → MIR VReg for the current execution unit.
@@ -69,7 +71,8 @@ fn find_sparse_worklist_run(
         return None;
     }
 
-    for (&block_id, block) in &eu.blocks {
+    for block_id in ordered_sir_blocks(eu) {
+        let block = &eu.blocks[&block_id];
         let mut start = 0usize;
         while start < block.instructions.len() {
             let is_sparse_commit = |instruction: &SIRInstruction<RegionedAbsoluteAddr>| {
@@ -124,6 +127,976 @@ fn sparse_descriptor_table(layout: &MemoryLayout) -> Vec<u64> {
     table
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackedLaneComparePlanRhs {
+    Scalar(RegisterId),
+    Memory(RegionedAbsoluteAddr),
+}
+
+#[derive(Debug, Clone)]
+struct PackedLaneComparePlan {
+    dst: RegisterId,
+    rhs: PackedLaneComparePlanRhs,
+    kind: CmpKind,
+    address: RegionedAbsoluteAddr,
+    lane_count: usize,
+    element_stride: usize,
+    bit_offset: usize,
+    field_width: usize,
+    covered_indices: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
+struct PackedLaneComparePlans {
+    roots: HashMap<usize, PackedLaneComparePlan>,
+    skip_indices: HashSet<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct PackedFieldComparePlan {
+    dst: RegisterId,
+    address: RegionedAbsoluteAddr,
+    first_bit: usize,
+    lane_count: usize,
+    field_width: usize,
+    value: u64,
+    covered_indices: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
+struct PackedFieldComparePlans {
+    roots: HashMap<usize, PackedFieldComparePlan>,
+    skip_indices: HashSet<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct PackedByteAffineComparePlan {
+    dst: RegisterId,
+    base: RegisterId,
+    rhs: RegisterId,
+    kind: CmpKind,
+    covered_indices: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
+struct PackedByteAffineComparePlans {
+    roots: HashMap<usize, PackedByteAffineComparePlan>,
+    skip_indices: HashSet<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct PackedBitStorePlan {
+    source: RegisterId,
+    address: RegionedAbsoluteAddr,
+    first_lane: usize,
+    lane_count: usize,
+}
+
+#[derive(Debug, Default)]
+struct PackedBitStorePlans {
+    roots: HashMap<usize, PackedBitStorePlan>,
+    skip_indices: HashSet<usize>,
+}
+
+fn find_packed_bit_store_plans(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    register_types: &HashMap<RegisterId, RegisterType>,
+    layout: &MemoryLayout,
+) -> PackedBitStorePlans {
+    let mut plans = PackedBitStorePlans::default();
+    let mut index = 0usize;
+    while index + 1 < block.instructions.len() {
+        let SIRInstruction::Slice(_, source, first_lane, 1) = block.instructions[index] else {
+            index += 1;
+            continue;
+        };
+        let SIRInstruction::Store(
+            address,
+            SIROffset::Static(first_store_lane),
+            1,
+            first_slice,
+            ref triggers,
+            ref captures,
+        ) = block.instructions[index + 1]
+        else {
+            index += 1;
+            continue;
+        };
+        let SIRInstruction::Slice(first_slice_definition, _, _, _) = block.instructions[index]
+        else {
+            unreachable!();
+        };
+        let Some(array) = layout.unpacked_arrays.get(&address.absolute_addr()) else {
+            index += 1;
+            continue;
+        };
+        if first_slice != first_slice_definition
+            || first_store_lane != first_lane
+            || !triggers.is_empty()
+            || !captures.is_empty()
+            || array.element_width != 1
+            || array.element_stride != 1
+        {
+            index += 1;
+            continue;
+        }
+
+        let mut lane_count = 0usize;
+        while index + lane_count * 2 + 1 < block.instructions.len() {
+            let slice_index = index + lane_count * 2;
+            let store_index = slice_index + 1;
+            let SIRInstruction::Slice(slice, lane_source, lane, 1) =
+                block.instructions[slice_index]
+            else {
+                break;
+            };
+            let SIRInstruction::Store(
+                lane_address,
+                SIROffset::Static(store_lane),
+                1,
+                stored,
+                ref lane_triggers,
+                ref lane_captures,
+            ) = block.instructions[store_index]
+            else {
+                break;
+            };
+            if lane_source != source
+                || lane != first_lane + lane_count
+                || lane_address != address
+                || store_lane != lane
+                || stored != slice
+                || !lane_triggers.is_empty()
+                || !lane_captures.is_empty()
+            {
+                break;
+            }
+            lane_count += 1;
+        }
+        let source_width = register_types.get(&source).map(RegisterType::width);
+        if lane_count >= 8
+            && lane_count.is_multiple_of(8)
+            && lane_count <= 64
+            && first_lane.is_multiple_of(8)
+            && source_width.is_some_and(|width| first_lane + lane_count <= width)
+            && first_lane + lane_count <= array.element_count
+        {
+            let plan = PackedBitStorePlan {
+                source,
+                address,
+                first_lane,
+                lane_count,
+            };
+            plans.skip_indices.extend(index..index + lane_count * 2);
+            plans.roots.insert(index, plan);
+            index += lane_count * 2;
+        } else {
+            index += 1;
+        }
+    }
+    plans
+}
+
+#[derive(Clone, Copy)]
+struct StaticLaneLoad {
+    load_index: usize,
+    slice_index: Option<usize>,
+    address: RegionedAbsoluteAddr,
+    offset: usize,
+    width: usize,
+}
+
+fn static_lane_load(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    defs: &HashMap<RegisterId, usize>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    register_types: &HashMap<RegisterId, RegisterType>,
+    layout: &MemoryLayout,
+    register: RegisterId,
+    lane: usize,
+) -> Option<StaticLaneLoad> {
+    fn constant_offset(
+        block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+        defs: &HashMap<RegisterId, usize>,
+        constants: &HashMap<RegisterId, ExactSirConstant>,
+        register_types: &HashMap<RegisterId, RegisterType>,
+        register: RegisterId,
+        active: &mut HashSet<RegisterId>,
+    ) -> Option<u64> {
+        if let Some(value) = constants.get(&register) {
+            return Some(value.value);
+        }
+        if !active.insert(register) {
+            return None;
+        }
+        let definition = *defs.get(&register)?;
+        let value = match block.instructions.get(definition)? {
+            SIRInstruction::Imm(_, value) => exact_sir_constant(value)?.value,
+            SIRInstruction::Binary(_, lhs, op, rhs) => {
+                let lhs = constant_offset(block, defs, constants, register_types, *lhs, active)?;
+                let rhs = constant_offset(block, defs, constants, register_types, *rhs, active)?;
+                match op {
+                    BinaryOp::Add => lhs.wrapping_add(rhs),
+                    BinaryOp::Mul => lhs.wrapping_mul(rhs),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        active.remove(&register);
+        let width = register_types.get(&register)?.width();
+        if width > 64 {
+            return None;
+        }
+        Some(if width == 64 {
+            value
+        } else {
+            value & ((1_u64 << width) - 1)
+        })
+    }
+
+    let load = |index: usize,
+                address: RegionedAbsoluteAddr,
+                offset: &SIROffset,
+                width: usize|
+     -> Option<StaticLaneLoad> {
+        let offset = match offset {
+            SIROffset::Static(offset)
+            | SIROffset::PackedElements {
+                bit_offset: offset, ..
+            } => *offset,
+            SIROffset::Dynamic(offset) => {
+                let value = constant_offset(
+                    block,
+                    defs,
+                    constants,
+                    register_types,
+                    *offset,
+                    &mut HashSet::default(),
+                );
+                usize::try_from(value?).ok()?
+            }
+            SIROffset::Element { .. } => return None,
+        };
+        Some(StaticLaneLoad {
+            load_index: index,
+            slice_index: None,
+            address,
+            offset,
+            width,
+        })
+    };
+    let definition = *defs.get(&register)?;
+    let lane_load = match block.instructions.get(definition)? {
+        SIRInstruction::Load(_, address, offset, width) => {
+            load(definition, *address, offset, *width)?
+        }
+        SIRInstruction::Slice(_, source, slice_offset, slice_width) => {
+            let load_index = *defs.get(source)?;
+            let SIRInstruction::Load(_, address, offset, load_width) =
+                block.instructions.get(load_index)?
+            else {
+                return None;
+            };
+            let mut load = load(load_index, *address, offset, *load_width)?;
+            load.slice_index = Some(definition);
+            load.offset = load.offset.checked_add(*slice_offset)?;
+            load.width = *slice_width;
+            load
+        }
+        _ => return None,
+    };
+    let belongs_to_lane = layout
+        .unpacked_arrays
+        .get(&lane_load.address.absolute_addr())
+        .map_or_else(
+            || {
+                lane_load.width.is_multiple_of(8)
+                    && lane_load.offset == lane.saturating_mul(lane_load.width)
+            },
+            |array| lane_load.offset / array.element_width == lane,
+        );
+    belongs_to_lane.then_some(lane_load)
+}
+
+fn packed_compare_kind(op: BinaryOp) -> Option<CmpKind> {
+    Some(match op {
+        BinaryOp::Eq => CmpKind::Eq,
+        BinaryOp::Ne => CmpKind::Ne,
+        BinaryOp::LtU => CmpKind::LtU,
+        BinaryOp::LtS => CmpKind::LtS,
+        BinaryOp::LeU => CmpKind::LeU,
+        BinaryOp::LeS => CmpKind::LeS,
+        BinaryOp::GtU => CmpKind::GtU,
+        BinaryOp::GtS => CmpKind::GtS,
+        BinaryOp::GeU => CmpKind::GeU,
+        BinaryOp::GeS => CmpKind::GeS,
+        _ => return None,
+    })
+}
+
+fn swap_compare_kind(kind: CmpKind) -> CmpKind {
+    match kind {
+        CmpKind::Eq => CmpKind::Eq,
+        CmpKind::Ne => CmpKind::Ne,
+        CmpKind::LtU => CmpKind::GtU,
+        CmpKind::LtS => CmpKind::GtS,
+        CmpKind::LeU => CmpKind::GeU,
+        CmpKind::LeS => CmpKind::GeS,
+        CmpKind::GtU => CmpKind::LtU,
+        CmpKind::GtS => CmpKind::LtS,
+        CmpKind::GeU => CmpKind::LeU,
+        CmpKind::GeS => CmpKind::LeS,
+    }
+}
+
+fn byte_affine_lane(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    defs: &HashMap<RegisterId, usize>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    register_types: &HashMap<RegisterId, RegisterType>,
+    register: RegisterId,
+    lane: usize,
+) -> Option<(RegisterId, usize)> {
+    fn constant_in_block(
+        block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+        defs: &HashMap<RegisterId, usize>,
+        constants: &HashMap<RegisterId, ExactSirConstant>,
+        register_types: &HashMap<RegisterId, RegisterType>,
+        register: RegisterId,
+        active: &mut HashSet<RegisterId>,
+    ) -> Option<u64> {
+        if let Some(value) = constants.get(&register) {
+            return Some(value.value);
+        }
+        if !active.insert(register) {
+            return None;
+        }
+        let definition = *defs.get(&register)?;
+        let value = match block.instructions.get(definition)? {
+            SIRInstruction::Imm(_, value) => exact_sir_constant(value)?.value,
+            SIRInstruction::Binary(_, lhs, operation, rhs) => {
+                let lhs = constant_in_block(block, defs, constants, register_types, *lhs, active)?;
+                let rhs = constant_in_block(block, defs, constants, register_types, *rhs, active)?;
+                match operation {
+                    BinaryOp::Add => lhs.wrapping_add(rhs),
+                    BinaryOp::Sub => lhs.wrapping_sub(rhs),
+                    BinaryOp::Mul => lhs.wrapping_mul(rhs),
+                    BinaryOp::And => lhs & rhs,
+                    BinaryOp::Or => lhs | rhs,
+                    BinaryOp::Xor => lhs ^ rhs,
+                    BinaryOp::Shr => u32::try_from(rhs)
+                        .ok()
+                        .and_then(|rhs| lhs.checked_shr(rhs))
+                        .unwrap_or(0),
+                    BinaryOp::Shl => u32::try_from(rhs)
+                        .ok()
+                        .and_then(|rhs| lhs.checked_shl(rhs))
+                        .unwrap_or(0),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        active.remove(&register);
+        let width = register_types.get(&register)?.width();
+        if width > 64 {
+            return None;
+        }
+        Some(if width == 64 {
+            value
+        } else {
+            value & ((1_u64 << width) - 1)
+        })
+    }
+
+    if register_types.get(&register)?.width() != 8 {
+        return None;
+    }
+    let definition = *defs.get(&register)?;
+    let SIRInstruction::Binary(dst, lhs, BinaryOp::Add, rhs) =
+        block.instructions.get(definition)?
+    else {
+        return None;
+    };
+    if *dst != register {
+        return None;
+    }
+    let lhs_constant = constant_in_block(
+        block,
+        defs,
+        constants,
+        register_types,
+        *lhs,
+        &mut HashSet::default(),
+    );
+    let rhs_constant = constant_in_block(
+        block,
+        defs,
+        constants,
+        register_types,
+        *rhs,
+        &mut HashSet::default(),
+    );
+    let (base, increment) = match (lhs_constant, rhs_constant) {
+        (None, Some(increment)) => (*lhs, increment),
+        (Some(increment), None) => (*rhs, increment),
+        _ => return None,
+    };
+    if register_types.get(&base)?.width() != 8 || increment != lane as u64 {
+        return None;
+    }
+    Some((base, definition))
+}
+
+/// Recognize a complete 16-bit predicate pack whose lanes compare
+/// `(base + lane) mod 256` with one scalar byte. This common HDL array-bound
+/// shape is one byte-vector operation; scalarizing every lane creates a long
+/// compare/shift/or chain and unnecessary register pressure.
+fn find_packed_byte_affine_compare_plans(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    register_types: &HashMap<RegisterId, RegisterType>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    uses: &HashMap<RegisterId, Vec<SirUseSite>>,
+) -> PackedByteAffineComparePlans {
+    let mut result = PackedByteAffineComparePlans::default();
+    let defs = collect_sir_defs(block);
+    for (root_idx, instruction) in block.instructions.iter().enumerate() {
+        let SIRInstruction::Concat(dst, predicates) = instruction else {
+            continue;
+        };
+        if predicates.len() != 16 || register_types[dst].width() != 16 {
+            continue;
+        }
+        let mut base = None;
+        let mut rhs_scalar = None;
+        let mut kind = None;
+        let mut covered = vec![root_idx];
+        let mut valid = true;
+        for (position, &predicate) in predicates.iter().enumerate() {
+            let lane = predicates.len() - position - 1;
+            let Some(&compare_idx) = defs.get(&predicate).filter(|&&idx| idx < root_idx) else {
+                valid = false;
+                break;
+            };
+            let SIRInstruction::Binary(compare_dst, lhs, operation, rhs) =
+                &block.instructions[compare_idx]
+            else {
+                valid = false;
+                break;
+            };
+            if *compare_dst != predicate
+                || uses.get(compare_dst).is_none_or(|sites| sites.len() != 1)
+            {
+                valid = false;
+                break;
+            }
+            let Some(compare_kind) = packed_compare_kind(*operation) else {
+                valid = false;
+                break;
+            };
+            let lhs_affine = byte_affine_lane(block, &defs, constants, register_types, *lhs, lane);
+            let rhs_affine = byte_affine_lane(block, &defs, constants, register_types, *rhs, lane);
+            let (lane_base, add_idx, scalar, compare_kind) = match (lhs_affine, rhs_affine) {
+                (Some((lane_base, add_idx)), None) => (lane_base, add_idx, *rhs, compare_kind),
+                (None, Some((lane_base, add_idx))) => {
+                    (lane_base, add_idx, *lhs, swap_compare_kind(compare_kind))
+                }
+                _ => {
+                    valid = false;
+                    break;
+                }
+            };
+            if register_types.get(&scalar).map(RegisterType::width) != Some(8)
+                || base.is_some_and(|previous| previous != lane_base)
+                || rhs_scalar.is_some_and(|previous| previous != scalar)
+                || kind.is_some_and(|previous| previous != compare_kind)
+            {
+                valid = false;
+                break;
+            }
+            base = Some(lane_base);
+            rhs_scalar = Some(scalar);
+            kind = Some(compare_kind);
+            covered.extend([add_idx, compare_idx]);
+        }
+        if valid {
+            result.roots.insert(
+                root_idx,
+                PackedByteAffineComparePlan {
+                    dst: *dst,
+                    base: base.expect("nonempty affine compare pack has a base"),
+                    rhs: rhs_scalar.expect("nonempty affine compare pack has a scalar RHS"),
+                    kind: kind.expect("nonempty affine compare pack has a comparison kind"),
+                    covered_indices: covered,
+                },
+            );
+        }
+    }
+    let covered = result
+        .roots
+        .values()
+        .flat_map(|plan| plan.covered_indices.iter().copied())
+        .collect::<HashSet<_>>();
+    for &index in &covered {
+        let is_root = result.roots.contains_key(&index);
+        let all_uses_covered = sir_def_reg(&block.instructions[index]).is_some_and(|definition| {
+            uses.get(&definition).is_none_or(|sites| {
+                sites.iter().all(|site| {
+                    site.block == block.id
+                        && site
+                            .inst_idx
+                            .is_some_and(|use_idx| covered.contains(&use_idx))
+                })
+            })
+        });
+        if is_root || all_uses_covered {
+            result.skip_indices.insert(index);
+        }
+    }
+    result
+}
+
+/// Recognize the canonical SIR representation of a lane-wise array compare:
+/// lane-aligned loads and comparisons followed by one Concat. Block scheduling
+/// may interleave independent work, so memory-version safety is proved by
+/// checking the interval from the earliest load to the root for an object write.
+fn find_packed_lane_compare_plans(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    register_types: &HashMap<RegisterId, RegisterType>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    layout: &MemoryLayout,
+    uses: &HashMap<RegisterId, Vec<SirUseSite>>,
+) -> PackedLaneComparePlans {
+    let mut result = PackedLaneComparePlans::default();
+    let defs = collect_sir_defs(block);
+    for (root_idx, instruction) in block.instructions.iter().enumerate() {
+        let SIRInstruction::Concat(dst, predicates) = instruction else {
+            continue;
+        };
+        let lane_count = predicates.len();
+        if lane_count == 0 || lane_count > 64 || register_types[dst].width() != lane_count {
+            continue;
+        }
+        let mut rhs_plan = None;
+        let mut kind = None;
+        let mut address = None;
+        let mut element_width = None;
+        let mut bit_offset = None;
+        let mut field_width = None;
+        let mut valid = true;
+        let mut covered = vec![root_idx];
+        let mut earliest_load = root_idx;
+
+        for (position, &predicate) in predicates.iter().enumerate() {
+            let Some(&compare_idx) = defs.get(&predicate).filter(|&&idx| idx < root_idx) else {
+                valid = false;
+                break;
+            };
+            let SIRInstruction::Binary(compare_dst, lhs, compare_op, rhs) =
+                &block.instructions[compare_idx]
+            else {
+                valid = false;
+                break;
+            };
+            if *compare_dst != predicate
+                || uses.get(compare_dst).is_none_or(|sites| sites.len() != 1)
+            {
+                valid = false;
+                break;
+            }
+            let Some(base_kind) = packed_compare_kind(*compare_op) else {
+                valid = false;
+                break;
+            };
+            let lane = lane_count - position - 1;
+            let lhs_load =
+                static_lane_load(block, &defs, constants, register_types, layout, *lhs, lane);
+            let mut rhs_load =
+                static_lane_load(block, &defs, constants, register_types, layout, *rhs, lane);
+            if matches!(rhs_plan, Some(PackedLaneComparePlanRhs::Scalar(value)) if value == *rhs) {
+                rhs_load = None;
+            }
+            let (lhs_load, current_rhs, current_kind) = match (lhs_load, rhs_load) {
+                (Some(lhs_load), Some(rhs_load)) => (
+                    lhs_load,
+                    PackedLaneComparePlanRhs::Memory(rhs_load.address),
+                    base_kind,
+                ),
+                (Some(lhs_load), None) => {
+                    (lhs_load, PackedLaneComparePlanRhs::Scalar(*rhs), base_kind)
+                }
+                (None, Some(rhs_load)) => (
+                    rhs_load,
+                    PackedLaneComparePlanRhs::Scalar(*lhs),
+                    swap_compare_kind(base_kind),
+                ),
+                (None, None) => {
+                    valid = false;
+                    break;
+                }
+            };
+            let array = layout
+                .unpacked_arrays
+                .get(&lhs_load.address.absolute_addr());
+            let current_element_width = array.map_or(lhs_load.width, |array| array.element_width);
+            let current_element_stride =
+                array.map_or(lhs_load.width / 8, |array| array.element_stride);
+            let within = lhs_load.offset % current_element_width;
+            if register_types[lhs].width() != register_types[rhs].width()
+                || register_types[lhs].width() != lhs_load.width
+                || rhs_plan.is_some_and(|previous| previous != current_rhs)
+                || kind.is_some_and(|previous| previous != current_kind)
+                || address.is_some_and(|previous| previous != lhs_load.address)
+                || field_width.is_some_and(|previous| previous != lhs_load.width)
+                || within
+                    .checked_add(lhs_load.width)
+                    .is_none_or(|end| end > current_element_width)
+                || element_width.is_some_and(|previous| previous != current_element_width)
+                || bit_offset.is_some_and(|previous| previous != within)
+            {
+                valid = false;
+                break;
+            }
+            if let Some(rhs_load) = rhs_load {
+                let rhs_array = layout
+                    .unpacked_arrays
+                    .get(&rhs_load.address.absolute_addr());
+                let rhs_element_width =
+                    rhs_array.map_or(rhs_load.width, |array| array.element_width);
+                let rhs_element_stride =
+                    rhs_array.map_or(rhs_load.width / 8, |array| array.element_stride);
+                if rhs_load.width != lhs_load.width
+                    || rhs_load.offset % rhs_element_width != within
+                    || rhs_element_width != current_element_width
+                    || rhs_element_stride != current_element_stride
+                {
+                    valid = false;
+                    break;
+                }
+                earliest_load = earliest_load.min(rhs_load.load_index);
+                covered.push(rhs_load.load_index);
+                if let Some(slice_index) = rhs_load.slice_index {
+                    covered.push(slice_index);
+                }
+            }
+            rhs_plan = Some(current_rhs);
+            kind = Some(current_kind);
+            address = Some(lhs_load.address);
+            element_width = Some(current_element_width);
+            bit_offset = Some(within);
+            field_width = Some(lhs_load.width);
+            earliest_load = earliest_load.min(lhs_load.load_index);
+            covered.extend([lhs_load.load_index, compare_idx]);
+            if let Some(slice_index) = lhs_load.slice_index {
+                covered.push(slice_index);
+            }
+        }
+        if !valid {
+            continue;
+        }
+        let address = address.expect("nonempty compare pack has an address");
+        let element_stride = layout
+            .unpacked_arrays
+            .get(&address.absolute_addr())
+            .map_or_else(|| field_width.unwrap() / 8, |array| array.element_stride);
+        let bit_offset = bit_offset.unwrap();
+        let field_width = field_width.unwrap();
+        let kind = kind.unwrap();
+        let physical_bytes = lane_count.saturating_mul(element_stride);
+        if !matches!(element_stride, 1 | 2 | 4)
+            || physical_bytes == 0
+            || !physical_bytes.is_multiple_of(16)
+            || bit_offset + field_width > element_stride * 8
+            || (element_stride == 1 && bit_offset != 0)
+            || (!matches!(kind, CmpKind::Eq | CmpKind::Ne) && field_width != element_stride * 8)
+        {
+            continue;
+        }
+        if block.instructions[earliest_load..root_idx]
+            .iter()
+            .any(|instruction| match instruction {
+                SIRInstruction::Store(destination, ..) => {
+                    *destination == address
+                        || matches!(rhs_plan, Some(PackedLaneComparePlanRhs::Memory(rhs)) if *destination == rhs)
+                }
+                SIRInstruction::Commit(_, destination, ..) => {
+                    *destination == address
+                        || matches!(rhs_plan, Some(PackedLaneComparePlanRhs::Memory(rhs)) if *destination == rhs)
+                }
+                _ => false,
+            })
+        {
+            continue;
+        }
+        result.roots.insert(
+            root_idx,
+            PackedLaneComparePlan {
+                dst: *dst,
+                rhs: rhs_plan.unwrap(),
+                kind,
+                address,
+                lane_count,
+                element_stride,
+                bit_offset,
+                field_width,
+                covered_indices: covered,
+            },
+        );
+    }
+    let covered = result
+        .roots
+        .values()
+        .flat_map(|plan| plan.covered_indices.iter().copied())
+        .collect::<HashSet<_>>();
+    for &index in &covered {
+        let is_root = result.roots.contains_key(&index);
+        let all_uses_covered = sir_def_reg(&block.instructions[index]).is_some_and(|definition| {
+            uses.get(&definition).is_none_or(|sites| {
+                sites.iter().all(|site| {
+                    site.block == block.id
+                        && site
+                            .inst_idx
+                            .is_some_and(|use_idx| covered.contains(&use_idx))
+                })
+            })
+        });
+        if is_root || all_uses_covered {
+            result.skip_indices.insert(index);
+        }
+    }
+    result
+}
+
+#[derive(Debug)]
+struct PackedFieldSource {
+    address: RegionedAbsoluteAddr,
+    bit_offset: usize,
+    covered_indices: Vec<usize>,
+}
+
+fn resolve_packed_field_source(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    defs: &HashMap<RegisterId, usize>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    register_types: &HashMap<RegisterId, RegisterType>,
+    register: RegisterId,
+    field_width: usize,
+) -> Option<PackedFieldSource> {
+    let mut current = register;
+    let mut relative_offset = 0usize;
+    let mut covered_indices = Vec::new();
+    let mut visited = HashSet::default();
+
+    while visited.insert(current) {
+        let definition = *defs.get(&current)?;
+        covered_indices.push(definition);
+        match block.instructions.get(definition)? {
+            SIRInstruction::Unary(_, UnaryOp::Ident, source) => current = *source,
+            SIRInstruction::Slice(_, source, offset, width) if *width == field_width => {
+                relative_offset = relative_offset.checked_add(*offset)?;
+                current = *source;
+            }
+            SIRInstruction::Binary(_, lhs, BinaryOp::And, rhs) => {
+                let expected_mask = mask_for_width(field_width);
+                current = match (constants.get(lhs), constants.get(rhs)) {
+                    (Some(value), None) if value.value == expected_mask => *rhs,
+                    (None, Some(value)) if value.value == expected_mask => *lhs,
+                    _ => return None,
+                };
+            }
+            SIRInstruction::Binary(_, source, BinaryOp::Shr, amount) => {
+                let shift = usize::try_from(constants.get(amount)?.value).ok()?;
+                relative_offset = relative_offset.checked_add(shift)?;
+                current = *source;
+            }
+            SIRInstruction::Load(_, address, offset, load_width) => {
+                let base = match offset {
+                    SIROffset::Static(offset)
+                    | SIROffset::PackedElements {
+                        bit_offset: offset, ..
+                    } => *offset,
+                    SIROffset::Dynamic(offset) => {
+                        usize::try_from(constants.get(offset)?.value).ok()?
+                    }
+                    SIROffset::Element { .. } => return None,
+                };
+                if relative_offset.checked_add(field_width)? > *load_width
+                    || register_types.get(&register)?.width() != field_width
+                {
+                    return None;
+                }
+                return Some(PackedFieldSource {
+                    address: *address,
+                    bit_offset: base.checked_add(relative_offset)?,
+                    covered_indices,
+                });
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Recognize a predicate pack over a physically packed fixed-width field
+/// sequence. `PackedLaneCompare` handles byte-addressable array slots; this
+/// companion recognizes bit-packed fields such as 32 consecutive 12-bit
+/// entries and lowers them with word-level SWAR plus BMI2 PEXT.
+fn find_packed_field_compare_plans(
+    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    register_types: &HashMap<RegisterId, RegisterType>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    uses: &HashMap<RegisterId, Vec<SirUseSite>>,
+) -> PackedFieldComparePlans {
+    let mut result = PackedFieldComparePlans::default();
+    let defs = collect_sir_defs(block);
+
+    for (root_idx, instruction) in block.instructions.iter().enumerate() {
+        let SIRInstruction::Concat(dst, predicates) = instruction else {
+            continue;
+        };
+        let lane_count = predicates.len();
+        if !(8..=64).contains(&lane_count)
+            || register_types.get(dst).map(RegisterType::width) != Some(lane_count)
+        {
+            continue;
+        }
+
+        let mut address = None;
+        let mut field_width = None;
+        let mut value = None;
+        let mut sources = Vec::with_capacity(lane_count);
+        let mut covered_indices = vec![root_idx];
+        let mut valid = true;
+
+        for &predicate in predicates {
+            let Some(&compare_idx) = defs.get(&predicate).filter(|&&index| index < root_idx) else {
+                valid = false;
+                break;
+            };
+            let SIRInstruction::Binary(compare_dst, lhs, BinaryOp::Eq, rhs) =
+                &block.instructions[compare_idx]
+            else {
+                valid = false;
+                break;
+            };
+            if *compare_dst != predicate
+                || uses.get(compare_dst).is_none_or(|sites| sites.len() != 1)
+            {
+                valid = false;
+                break;
+            }
+            let (source, constant_register, constant) =
+                match (constants.get(lhs), constants.get(rhs)) {
+                    (None, Some(constant)) => (*lhs, *rhs, constant.value),
+                    (Some(constant), None) => (*rhs, *lhs, constant.value),
+                    _ => {
+                        valid = false;
+                        break;
+                    }
+                };
+            let Some(width) = register_types.get(&source).map(RegisterType::width) else {
+                valid = false;
+                break;
+            };
+            if !(2..=16).contains(&width)
+                || constant > mask_for_width(width)
+                || field_width.is_some_and(|known| known != width)
+                || value.is_some_and(|known| known != constant)
+            {
+                valid = false;
+                break;
+            }
+            let Some(source) =
+                resolve_packed_field_source(block, &defs, constants, register_types, source, width)
+            else {
+                valid = false;
+                break;
+            };
+            if address.is_some_and(|known| known != source.address) {
+                valid = false;
+                break;
+            }
+            address.get_or_insert(source.address);
+            field_width.get_or_insert(width);
+            value.get_or_insert(constant);
+            covered_indices.push(compare_idx);
+            covered_indices.extend(source.covered_indices.iter().copied());
+            if let Some(&constant_idx) = defs.get(&constant_register) {
+                covered_indices.push(constant_idx);
+            }
+            sources.push(source);
+        }
+        if !valid {
+            continue;
+        }
+
+        let address = address.expect("nonempty packed field compare has an address");
+        let field_width = field_width.expect("nonempty packed field compare has a field width");
+        let value = value.expect("nonempty packed field compare has a constant");
+        let first_bit = sources
+            .last()
+            .expect("nonempty packed field compare has a low lane")
+            .bit_offset;
+        if sources.iter().enumerate().any(|(position, source)| {
+            let lane = lane_count - position - 1;
+            source.bit_offset != first_bit.saturating_add(lane.saturating_mul(field_width))
+        }) {
+            continue;
+        }
+
+        covered_indices.sort_unstable();
+        covered_indices.dedup();
+        let earliest_load = covered_indices.iter().copied().min().unwrap_or(root_idx);
+        if block.instructions[earliest_load..root_idx]
+            .iter()
+            .any(|instruction| match instruction {
+                SIRInstruction::Store(destination, ..) => *destination == address,
+                SIRInstruction::Commit(_, destination, ..) => *destination == address,
+                _ => false,
+            })
+        {
+            continue;
+        }
+
+        result.roots.insert(
+            root_idx,
+            PackedFieldComparePlan {
+                dst: *dst,
+                address,
+                first_bit,
+                lane_count,
+                field_width,
+                value,
+                covered_indices,
+            },
+        );
+    }
+
+    let covered = result
+        .roots
+        .values()
+        .flat_map(|plan| plan.covered_indices.iter().copied())
+        .collect::<HashSet<_>>();
+    for &index in &covered {
+        let is_root = result.roots.contains_key(&index);
+        let all_uses_covered = sir_def_reg(&block.instructions[index]).is_some_and(|definition| {
+            uses.get(&definition).is_none_or(|sites| {
+                sites.iter().all(|site| {
+                    site.block == block.id
+                        && site
+                            .inst_idx
+                            .is_some_and(|use_idx| covered.contains(&use_idx))
+                })
+            })
+        });
+        if is_root || all_uses_covered {
+            result.skip_indices.insert(index);
+        }
+    }
+    result
+}
+
 /// Lower a single SIR execution unit to a MIR function.
 ///
 /// Only handles 2-state values ≤64 bits for now.
@@ -142,9 +1115,11 @@ pub fn lower_execution_unit(
     let max_sir_regs = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0) + 1;
     let mut reg_map = RegMap::new(max_sir_regs);
     let trace_regs = parse_trace_sir_regs();
+    let mut sir_registers = eu.register_map.keys().copied().collect::<Vec<_>>();
+    sir_registers.sort_unstable_by_key(|register| register.0);
 
     // Pre-allocate a VReg for each SIR register
-    for sir_reg_id in eu.register_map.keys() {
+    for sir_reg_id in &sir_registers {
         let vreg = vregs.alloc();
         reg_map.set(*sir_reg_id, vreg);
         if trace_regs.contains(sir_reg_id) {
@@ -156,8 +1131,17 @@ pub fn lower_execution_unit(
     }
 
     let mut func = MFunction::new(vregs.clone(), spill_descs);
-    let block_ids = ordered_sir_blocks(eu);
+    let native_packed_bit_stores = !four_state && func.target_features.bmi2();
+    let native_packed_field_compares = !four_state && func.target_features.bmi2();
+    let mut block_ids = ordered_sir_blocks(eu);
     let sparse_worklist_run = find_sparse_worklist_run(eu);
+    let sparse_write_states = match sparse_worklist_run {
+        Some((commit_block, commit_start, _)) => {
+            SparseWriteStates::analyze(eu, layout, commit_block, commit_start)
+                .unwrap_or_else(|| SparseWriteStates::zero_fills_only(eu, layout))
+        }
+        None => SparseWriteStates::zero_fills_only(eu, layout),
+    };
     let sparse_descriptor_table = sparse_worklist_run
         .is_some()
         .then(|| func.intern_constant_table(sparse_descriptor_table(layout)));
@@ -167,16 +1151,33 @@ pub fn lower_execution_unit(
     } else {
         None
     };
+    let exact_constants = (!four_state).then(|| collect_exact_sir_constants(eu));
+    let selector_branch_table_plans = if !four_state {
+        find_selector_branch_table_plans(
+            eu,
+            exact_constants
+                .as_ref()
+                .expect("two-state branch tables require exact constants"),
+            sir_use_sites
+                .as_ref()
+                .expect("two-state branch tables require SIR uses"),
+        )
+    } else {
+        SelectorBranchTablePlans::default()
+    };
+    block_ids.retain(|block| !selector_branch_table_plans.removed_blocks.contains(block));
     let mut dense_lookup_plans_by_block: HashMap<crate::ir::BlockId, DenseLookupPlans> =
         HashMap::default();
     if !four_state {
-        let constants = collect_exact_sir_constants(eu);
         let uses = sir_use_sites
             .as_ref()
             .expect("two-state lookup planning must collect SIR uses");
+        let constants = exact_constants
+            .as_ref()
+            .expect("two-state lowering must collect exact constants");
         for &block_id in &block_ids {
             let block = &eu.blocks[&block_id];
-            let mut plans = find_dense_lookup_plans(block, &eu.register_map, &constants, uses);
+            let mut plans = find_dense_lookup_plans(block, &eu.register_map, constants, uses);
             let mut root_indices: Vec<_> = plans.roots.keys().copied().collect();
             root_indices.sort_unstable();
             for root_idx in root_indices {
@@ -199,7 +1200,7 @@ pub fn lower_execution_unit(
     let mut mask_map = RegMap::new(max_sir_regs);
     // Pre-allocate mask VRegs for 4-state
     if four_state {
-        for sir_reg_id in eu.register_map.keys() {
+        for sir_reg_id in &sir_registers {
             let mvreg = func.vregs.alloc();
             mask_map.set(*sir_reg_id, mvreg);
             func.spill_descs.push(SpillDesc::transient());
@@ -226,7 +1227,8 @@ pub fn lower_execution_unit(
     };
     // Pre-seed wide block params so instructions in those blocks can read the
     // full chunked value before phi nodes are materialized in a later pass.
-    for sir_block in eu.blocks.values() {
+    for &sir_block_id in &block_ids {
+        let sir_block = &eu.blocks[&sir_block_id];
         for &param_reg in &sir_block.params {
             let width = eu.register_map[&param_reg].width();
             let num_chunks = width.div_ceil(64).max(1);
@@ -284,14 +1286,67 @@ pub fn lower_execution_unit(
         } else {
             PriorityEncodePlans::default()
         };
+        let packed_bit_store_plans = if native_packed_bit_stores {
+            find_packed_bit_store_plans(sir_block, &eu.register_map, layout)
+        } else {
+            PackedBitStorePlans::default()
+        };
         let lookup_plans = dense_lookup_plans_by_block
             .remove(&sir_block_id)
             .unwrap_or_default();
+        let branch_table_plan = selector_branch_table_plans.roots.get(&sir_block_id);
+        let packed_lane_compare_plans = if !four_state {
+            find_packed_lane_compare_plans(
+                sir_block,
+                &eu.register_map,
+                exact_constants
+                    .as_ref()
+                    .expect("two-state packed compares must collect exact constants"),
+                layout,
+                sir_use_sites
+                    .as_ref()
+                    .expect("two-state packed compares must collect SIR uses"),
+            )
+        } else {
+            PackedLaneComparePlans::default()
+        };
+        let packed_field_compare_plans = if native_packed_field_compares {
+            find_packed_field_compare_plans(
+                sir_block,
+                &eu.register_map,
+                exact_constants
+                    .as_ref()
+                    .expect("two-state packed field compares require exact constants"),
+                sir_use_sites
+                    .as_ref()
+                    .expect("two-state packed field compares require SIR uses"),
+            )
+        } else {
+            PackedFieldComparePlans::default()
+        };
+        let packed_byte_affine_compare_plans = if !four_state {
+            find_packed_byte_affine_compare_plans(
+                sir_block,
+                &eu.register_map,
+                exact_constants
+                    .as_ref()
+                    .expect("two-state packed compares must collect exact constants"),
+                sir_use_sites
+                    .as_ref()
+                    .expect("two-state packed compares must collect SIR uses"),
+            )
+        } else {
+            PackedByteAffineComparePlans::default()
+        };
         let mut lookup_emit_cache = DenseLookupEmitCache::default();
+        let mut packed_field_load_cache = PackedFieldLoadCache::default();
         let sir_defs = collect_sir_defs(sir_block);
 
         // Lower instructions
         for (inst_idx, inst) in sir_block.instructions.iter().enumerate() {
+            if branch_table_plan.is_some_and(|plan| plan.skip_indices.contains(&inst_idx)) {
+                continue;
+            }
             if let Some((worklist_block, start, end)) = sparse_worklist_run
                 && sir_block_id == worklist_block
                 && (start..end).contains(&inst_idx)
@@ -300,11 +1355,24 @@ pub fn lower_execution_unit(
                     mblock.push(MInst::SparseCommitWorklist {
                         descriptor_table: sparse_descriptor_table
                             .expect("planned sparse worklist must have descriptor table"),
-                        active_count_offset: layout.sparse_active_count_offset as i32,
-                        active_flags_offset: layout.sparse_active_flags_offset as i32,
-                        active_list_offset: layout.sparse_active_list_offset as i32,
+                        active_bits_offset: layout.sparse_active_bits_offset as i32,
                         active_capacity: layout.sparse_active_capacity,
                     });
+                }
+                continue;
+            }
+            if sparse_write_states.is_dead_zero_definition(sir_block_id, inst_idx) {
+                continue;
+            }
+            if sparse_write_states.is_zero_fill_member(sir_block_id, inst_idx) {
+                if let Some(address) = sparse_write_states.zero_fill_root(sir_block_id, inst_idx) {
+                    emit_state_zero_fill(&mut ctx, &mut mblock, address);
+                }
+                continue;
+            }
+            if packed_bit_store_plans.skip_indices.contains(&inst_idx) {
+                if let Some(plan) = packed_bit_store_plans.roots.get(&inst_idx) {
+                    emit_packed_bit_stores(&mut ctx, &mut mblock, plan);
                 }
                 continue;
             }
@@ -315,6 +1383,64 @@ pub fn lower_execution_unit(
                     "[isel-trace] b{} inst {} lowering r{}: {}",
                     sir_block.id.0, inst_idx, dst.0, inst
                 );
+            }
+            if packed_field_compare_plans.skip_indices.contains(&inst_idx) {
+                if let Some(plan) = packed_field_compare_plans.roots.get(&inst_idx) {
+                    emit_packed_field_compare(
+                        &mut ctx,
+                        &mut mblock,
+                        plan,
+                        &mut packed_field_load_cache,
+                    );
+                }
+                continue;
+            }
+            if packed_lane_compare_plans.skip_indices.contains(&inst_idx) {
+                if let Some(plan) = packed_lane_compare_plans.roots.get(&inst_idx) {
+                    let offset = ctx.byte_offset(&plan.address, 0);
+                    let byte_len = plan.lane_count * plan.element_stride;
+                    let rhs = match plan.rhs {
+                        PackedLaneComparePlanRhs::Scalar(value) => {
+                            PackedLaneCompareRhs::Scalar(ctx.reg_map.get(value))
+                        }
+                        PackedLaneComparePlanRhs::Memory(address) => {
+                            let rhs_offset = ctx.byte_offset(&address, 0);
+                            PackedLaneCompareRhs::Memory {
+                                offset: rhs_offset,
+                                alias_range: MemoryAliasRange::new(rhs_offset, byte_len),
+                            }
+                        }
+                    };
+                    mblock.push(MInst::PackedLaneCompare {
+                        dst: ctx.reg_map.get(plan.dst),
+                        rhs,
+                        kind: plan.kind,
+                        offset,
+                        lane_count: plan.lane_count as u8,
+                        element_stride: plan.element_stride as u8,
+                        bit_offset: plan.bit_offset as u8,
+                        field_width: plan.field_width as u8,
+                        alias_range: MemoryAliasRange::new(offset, byte_len),
+                    });
+                    ctx.known_bits
+                        .insert(ctx.reg_map.get(plan.dst), plan.lane_count);
+                }
+                continue;
+            }
+            if packed_byte_affine_compare_plans
+                .skip_indices
+                .contains(&inst_idx)
+            {
+                if let Some(plan) = packed_byte_affine_compare_plans.roots.get(&inst_idx) {
+                    mblock.push(MInst::PackedByteAffineCompare {
+                        dst: ctx.reg_map.get(plan.dst),
+                        base: ctx.reg_map.get(plan.base),
+                        rhs: ctx.reg_map.get(plan.rhs),
+                        kind: plan.kind,
+                    });
+                    ctx.known_bits.insert(ctx.reg_map.get(plan.dst), 16);
+                }
+                continue;
             }
             if lookup_plans.skip_indices.contains(&inst_idx) {
                 if let Some(plan) = lookup_plans.roots.get(&inst_idx) {
@@ -414,7 +1540,17 @@ pub fn lower_execution_unit(
 
                 mblock = MBlock::new(cont_block_id);
             } else {
-                lower_instruction(&mut ctx, &mut mblock, inst, sir_block, &sir_defs);
+                lower_instruction(
+                    &mut ctx,
+                    &mut mblock,
+                    inst,
+                    sir_block,
+                    &sir_defs,
+                    sparse_write_states.state(sir_block_id, inst_idx),
+                    sparse_write_states.chunk_state(sir_block_id, inst_idx),
+                    sparse_write_states.dirty_word_state(sir_block_id, inst_idx),
+                    sparse_write_states.metadata_action(sir_block_id, inst_idx),
+                );
             }
             if cfg!(debug_assertions) {
                 ctx.verify_wide_values();
@@ -451,7 +1587,11 @@ pub fn lower_execution_unit(
         }
 
         // Lower terminator
-        lower_terminator(&mut ctx, &mut mblock, &sir_block.terminator);
+        if let Some(plan) = branch_table_plan {
+            lower_selector_branch_table(&mut ctx, &mut mblock, plan);
+        } else {
+            lower_terminator(&mut ctx, &mut mblock, &sir_block.terminator);
+        }
         let pred_mir_id = mblock.id;
         sir_exit_mir_blocks.insert(sir_block_id, pred_mir_id);
 
@@ -467,6 +1607,7 @@ pub fn lower_execution_unit(
                     (true_block.0, true_block.1.as_slice()),
                     (false_block.0, false_block.1.as_slice()),
                 ],
+                SIRTerminator::Switch { .. } => Vec::new(),
                 _ => vec![],
             };
             for (target_sir_id, args) in edges {
@@ -529,6 +1670,7 @@ pub fn lower_execution_unit(
                     (true_block.0, true_block.1.as_slice()),
                     (false_block.0, false_block.1.as_slice()),
                 ],
+                SIRTerminator::Switch { .. } => Vec::new(),
                 _ => vec![],
             };
             for (target_sir_id, args) in edges {
@@ -657,6 +1799,11 @@ fn ordered_sir_blocks(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Vec<crate::ir
                 false_block,
                 ..
             } => vec![true_block.0, false_block.0],
+            SIRTerminator::Switch { cases, default, .. } => cases
+                .iter()
+                .map(|case| case.target)
+                .chain(std::iter::once(*default))
+                .collect(),
             SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
         }
     }
@@ -858,20 +2005,9 @@ impl<'a> ISelContext<'a> {
         addr: &RegionedAbsoluteAddr,
         bit_offset: usize,
     ) -> (i32, usize) {
-        let abs_addr = addr.absolute_addr();
-        let base = match addr.region {
-            STABLE_REGION => *self.layout.offsets.get(&abs_addr).unwrap_or(&0),
-            crate::ir::SPARSE_WORKING_REGION => {
-                self.layout.sparse_base_offset
-                    + *self.layout.sparse_offsets.get(&abs_addr).unwrap_or(&0)
-            }
-            _ => {
-                self.layout.working_base_offset
-                    + *self.layout.working_offsets.get(&abs_addr).unwrap_or(&0)
-            }
-        };
-        let (byte_offset, intra) = self.layout.map_static_bit_offset(&abs_addr, bit_offset);
-        ((base + byte_offset) as i32, intra)
+        self.layout
+            .regioned_static_byte_and_intra(addr, bit_offset)
+            .expect("native static state offset must fit i32")
     }
 
     /// Choose OpSize for a given bit width, clamping to the smallest
@@ -902,6 +2038,15 @@ impl<'a> ISelContext<'a> {
         bit_offset: usize,
         width_bits: usize,
     ) -> Option<OpSize> {
+        if let Some(array) = self.layout.unpacked_arrays.get(&addr.absolute_addr()) {
+            if width_bits == array.element_width && bit_offset.is_multiple_of(array.element_width) {
+                return Self::exact_storage_access_size(width_bits);
+            }
+            // A complete unpacked array is not one contiguous scalar object
+            // in element-strided mode. It must be gathered/scattered element
+            // by element even when its logical width is 8/16/32/64 bits.
+            return None;
+        }
         if bit_offset != 0 {
             return None;
         }
@@ -927,6 +2072,36 @@ impl<'a> ISelContext<'a> {
         width_bits: usize,
     ) -> Option<OpSize> {
         self.full_static_access_size(addr, bit_offset, width_bits)
+    }
+
+    fn access_size_has_padding(size: OpSize, width_bits: usize) -> bool {
+        size.bytes() as usize * 8 != width_bits
+    }
+
+    /// A whole dynamically indexed array element occupies one independently
+    /// padded native scalar slot. Accessing that slot directly is legal when
+    /// the offset contains no additional bit displacement.
+    fn full_element_access_size(
+        &self,
+        addr: &RegionedAbsoluteAddr,
+        offset: &SIROffset,
+        width_bits: usize,
+    ) -> Option<OpSize> {
+        let array = self.layout.unpacked_arrays.get(&addr.absolute_addr())?;
+        if width_bits != array.element_width {
+            return None;
+        }
+        match offset {
+            SIROffset::Element {
+                element_width,
+                bit_offset: 0,
+                dynamic_bit_offset: None,
+                ..
+            } if *element_width == array.element_width => {
+                Self::exact_storage_access_size(width_bits)
+            }
+            _ => None,
+        }
     }
 
     fn mask_for_store_width(&mut self, block: &mut MBlock, src: VReg, width_bits: usize) -> VReg {
@@ -1146,6 +2321,45 @@ impl<'a> ISelContext<'a> {
         } else {
             self.wide_regs.replace(reg, chunks);
         }
+    }
+
+    /// Materialize the declared SIR width after an operation with wide inputs
+    /// produced a scalar result.
+    ///
+    /// `set_wide_chunks` keeps chunk zero in `reg_map` for narrow destinations,
+    /// but that machine word may still contain bits above the destination's SIR
+    /// width.  Consumers are allowed to trust `known_bits`, so merely recording
+    /// the narrow width would make those upper bits observable when a later mask
+    /// is eliminated.
+    fn canonicalize_narrow_wide_result(&mut self, block: &mut MBlock, reg: RegisterId) {
+        let width = self.sir_width(&reg);
+        if width >= 64 {
+            return;
+        }
+
+        let raw = self.reg_map.get(reg);
+        let canonical = self.alloc_vreg(SpillDesc::transient());
+        let mask = mask_for_width(width);
+        if mask <= u32::MAX as u64 {
+            block.push(MInst::AndImm32 {
+                dst: canonical,
+                src: raw,
+                imm: mask as u32,
+            });
+        } else {
+            let mask_reg = self.alloc_vreg(SpillDesc::remat(mask));
+            block.push(MInst::LoadImm {
+                dst: mask_reg,
+                value: mask,
+            });
+            block.push(MInst::And {
+                dst: canonical,
+                lhs: raw,
+                rhs: mask_reg,
+            });
+        }
+        self.reg_map.set(reg, canonical);
+        self.known_bits.insert(canonical, width);
     }
 
     /// Check the representation invariant for value chunks.
@@ -1724,6 +2938,283 @@ struct ExactSirConstant {
 }
 
 #[derive(Default)]
+struct SelectorBranchTablePlans {
+    roots: HashMap<crate::ir::BlockId, SelectorBranchTablePlan>,
+    removed_blocks: HashSet<crate::ir::BlockId>,
+}
+
+struct SelectorBranchTablePlan {
+    selector: RegisterId,
+    selector_width: usize,
+    targets: Box<[crate::ir::BlockId]>,
+    skip_indices: HashSet<usize>,
+}
+
+struct DenseBranchCondition {
+    selector: RegisterId,
+    selector_width: usize,
+    key: u64,
+    covered_indices: HashSet<usize>,
+}
+
+fn match_dense_branch_condition(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    register_types: &HashMap<RegisterId, RegisterType>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    uses: &HashMap<RegisterId, Vec<SirUseSite>>,
+    condition: RegisterId,
+) -> Option<DenseBranchCondition> {
+    let definitions = collect_sir_defs(block);
+    let mut cursor = condition;
+    let mut covered_indices = HashSet::default();
+    loop {
+        let &index = definitions.get(&cursor)?;
+        match &block.instructions[index] {
+            SIRInstruction::Unary(
+                _,
+                UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Or,
+                source,
+            ) => {
+                covered_indices.insert(index);
+                cursor = *source;
+            }
+            _ => break,
+        }
+    }
+
+    let &compare_index = definitions.get(&cursor)?;
+    let SIRInstruction::Binary(_, lhs, operation, rhs) = &block.instructions[compare_index] else {
+        return None;
+    };
+    let (selector, key_register, key) = match operation {
+        BinaryOp::EqWildcard => (*lhs, *rhs, constants.get(rhs)?.value),
+        BinaryOp::Eq => match (constants.get(lhs), constants.get(rhs)) {
+            (None, Some(key)) => (*lhs, *rhs, key.value),
+            (Some(key), None) => (*rhs, *lhs, key.value),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let selector_width = register_types.get(&selector)?.width();
+    if selector_width == 0 || selector_width > 8 || key & !mask_for_width(selector_width) != 0 {
+        return None;
+    }
+    covered_indices.insert(compare_index);
+    if let Some(&key_index) = definitions.get(&key_register) {
+        covered_indices.insert(key_index);
+    }
+
+    for &index in &covered_indices {
+        let definition = sir_def_reg(&block.instructions[index])?;
+        if uses.get(&definition).is_some_and(|sites| {
+            sites.iter().any(|site| {
+                site.block != block.id
+                    || site
+                        .inst_idx
+                        .is_some_and(|use_index| !covered_indices.contains(&use_index))
+                    || (site.inst_idx.is_none() && definition != condition)
+            })
+        }) {
+            return None;
+        }
+    }
+
+    Some(DenseBranchCondition {
+        selector,
+        selector_width,
+        key,
+        covered_indices,
+    })
+}
+
+fn find_selector_branch_table_plans(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    constants: &HashMap<RegisterId, ExactSirConstant>,
+    uses: &HashMap<RegisterId, Vec<SirUseSite>>,
+) -> SelectorBranchTablePlans {
+    let mut predecessors: HashMap<crate::ir::BlockId, Vec<crate::ir::BlockId>> =
+        eu.blocks.keys().map(|&block| (block, Vec::new())).collect();
+    for block in eu.blocks.values() {
+        let successors = match &block.terminator {
+            SIRTerminator::Jump(target, _) => vec![*target],
+            SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } => vec![true_block.0, false_block.0],
+            SIRTerminator::Switch { cases, default, .. } => cases
+                .iter()
+                .map(|case| case.target)
+                .chain(std::iter::once(*default))
+                .collect(),
+            SIRTerminator::Return | SIRTerminator::Error(_) => Vec::new(),
+        };
+        for successor in successors {
+            predecessors.entry(successor).or_default().push(block.id);
+        }
+    }
+
+    let mut result = SelectorBranchTablePlans::default();
+    for root in ordered_sir_blocks(eu) {
+        if result.removed_blocks.contains(&root) {
+            continue;
+        }
+        let mut current = root;
+        let mut selector = None;
+        let mut selector_width = None;
+        let mut targets = Vec::<Option<crate::ir::BlockId>>::new();
+        let mut decision_blocks = Vec::new();
+        let mut root_skip = HashSet::default();
+        let mut default = None;
+        let mut valid = true;
+
+        loop {
+            let block = &eu.blocks[&current];
+            let SIRTerminator::Branch {
+                cond,
+                true_block,
+                false_block,
+            } = &block.terminator
+            else {
+                if selector.is_some() {
+                    default = Some(current);
+                } else {
+                    valid = false;
+                }
+                break;
+            };
+            if !true_block.1.is_empty()
+                || !false_block.1.is_empty()
+                || !eu.blocks[&true_block.0].params.is_empty()
+            {
+                if selector.is_some() {
+                    default = Some(current);
+                } else {
+                    valid = false;
+                }
+                break;
+            }
+            let Some(condition) =
+                match_dense_branch_condition(block, &eu.register_map, constants, uses, *cond)
+            else {
+                if selector.is_some() {
+                    default = Some(current);
+                } else {
+                    valid = false;
+                }
+                break;
+            };
+            if let Some(expected) = selector {
+                if expected != condition.selector
+                    || selector_width != Some(condition.selector_width)
+                    || block
+                        .instructions
+                        .iter()
+                        .enumerate()
+                        .any(|(index, _)| !condition.covered_indices.contains(&index))
+                {
+                    default = Some(current);
+                    break;
+                }
+            } else {
+                selector = Some(condition.selector);
+                selector_width = Some(condition.selector_width);
+                targets.resize(1usize << condition.selector_width, None);
+                root_skip = condition.covered_indices.clone();
+            }
+            let key = condition.key as usize;
+            if targets[key].is_some() {
+                default = Some(current);
+                break;
+            }
+            targets[key] = Some(true_block.0);
+            decision_blocks.push(current);
+            if targets.iter().all(Option::is_some) {
+                default = targets[0];
+                break;
+            }
+
+            let next = false_block.0;
+            if next == root
+                || !eu.blocks[&next].params.is_empty()
+                || predecessors.get(&next).map(Vec::as_slice) != Some([current].as_slice())
+            {
+                default = Some(next);
+                break;
+            }
+            current = next;
+        }
+
+        let case_count = targets.iter().filter(|target| target.is_some()).count();
+        if !valid
+            || case_count < 4
+            || case_count.saturating_mul(8) < targets.len()
+            || default.is_none()
+        {
+            continue;
+        }
+        let default = default.expect("accepted selector dispatch has a default");
+        let targets = targets
+            .into_iter()
+            .map(|target| target.unwrap_or(default))
+            .collect::<Vec<_>>();
+        let target_blocks = targets.iter().copied().collect::<HashSet<_>>();
+        if decision_blocks
+            .iter()
+            .skip(1)
+            .any(|block| target_blocks.contains(block))
+        {
+            continue;
+        }
+        result
+            .removed_blocks
+            .extend(decision_blocks.iter().skip(1).copied());
+        result.roots.insert(
+            root,
+            SelectorBranchTablePlan {
+                selector: selector.expect("valid branch table has a selector"),
+                selector_width: selector_width.expect("valid branch table has a width"),
+                targets: targets.into(),
+                skip_indices: root_skip,
+            },
+        );
+    }
+
+    let mut reachable = HashSet::default();
+    let mut worklist = vec![eu.entry_block_id];
+    while let Some(block_id) = worklist.pop() {
+        if !reachable.insert(block_id) {
+            continue;
+        }
+        if let Some(plan) = result.roots.get(&block_id) {
+            worklist.extend(plan.targets.iter().copied());
+            continue;
+        }
+        let block = &eu.blocks[&block_id];
+        match &block.terminator {
+            SIRTerminator::Jump(target, _) => worklist.push(*target),
+            SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } => {
+                worklist.push(true_block.0);
+                worklist.push(false_block.0);
+            }
+            SIRTerminator::Switch { cases, default, .. } => {
+                worklist.extend(cases.iter().map(|case| case.target));
+                worklist.push(*default);
+            }
+            SIRTerminator::Return | SIRTerminator::Error(_) => {}
+        }
+    }
+    result
+        .removed_blocks
+        .extend(eu.blocks.keys().filter(|block| !reachable.contains(block)));
+    result
+}
+
+#[derive(Default)]
 struct DenseLookupPlans {
     roots: HashMap<usize, DenseLookupPlan>,
     skip_indices: HashSet<usize>,
@@ -1769,7 +3260,8 @@ fn collect_exact_sir_constants(
 ) -> HashMap<RegisterId, ExactSirConstant> {
     let mut constants = HashMap::default();
     let mut ambiguous = HashSet::default();
-    for block in eu.blocks.values() {
+    for block_id in ordered_sir_blocks(eu) {
+        let block = &eu.blocks[&block_id];
         for inst in &block.instructions {
             let SIRInstruction::Imm(dst, value) = inst else {
                 continue;
@@ -2098,18 +3590,19 @@ fn collect_sir_use_sites(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> HashMap<RegisterId, Vec<SirUseSite>> {
     let mut uses: HashMap<RegisterId, Vec<SirUseSite>> = HashMap::default();
-    for (block_id, block) in &eu.blocks {
+    for block_id in ordered_sir_blocks(eu) {
+        let block = &eu.blocks[&block_id];
         for (inst_idx, inst) in block.instructions.iter().enumerate() {
             collect_sir_inst_uses(inst, |reg| {
                 uses.entry(reg).or_default().push(SirUseSite {
-                    block: *block_id,
+                    block: block_id,
                     inst_idx: Some(inst_idx),
                 });
             });
         }
         collect_sir_term_uses(&block.terminator, |reg| {
             uses.entry(reg).or_default().push(SirUseSite {
-                block: *block_id,
+                block: block_id,
                 inst_idx: None,
             });
         });
@@ -2194,6 +3687,9 @@ fn collect_sir_term_uses(term: &SIRTerminator, mut add: impl FnMut(RegisterId)) 
             for &arg in &false_block.1 {
                 add(arg);
             }
+        }
+        SIRTerminator::Switch { selector, .. } => {
+            add(*selector);
         }
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
@@ -2672,6 +4168,45 @@ fn emit_priority_encode(ctx: &mut ISelContext<'_>, block: &mut MBlock, plan: &Pr
     ctx.known_bits.insert(dst, known_bits);
 }
 
+fn emit_packed_bit_stores(
+    ctx: &mut ISelContext<'_>,
+    block: &mut MBlock,
+    plan: &PackedBitStorePlan,
+) {
+    let source = ctx.reg_map.get(plan.source);
+    let deposit_mask = ctx.alloc_vreg(SpillDesc::remat(0x0101_0101_0101_0101));
+    block.push(MInst::LoadImm {
+        dst: deposit_mask,
+        value: 0x0101_0101_0101_0101,
+    });
+    for chunk in 0..plan.lane_count / 8 {
+        let shift = plan.first_lane + chunk * 8;
+        let chunk_source = if shift == 0 {
+            source
+        } else {
+            let shifted = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::ShrImm {
+                dst: shifted,
+                src: source,
+                imm: shift as u8,
+            });
+            shifted
+        };
+        let expanded = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Pdep {
+            dst: expanded,
+            src: chunk_source,
+            mask: deposit_mask,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: ctx.byte_offset(&plan.address, plan.first_lane + chunk * 8),
+            src: expanded,
+            size: OpSize::S64,
+        });
+    }
+}
+
 /// Lower the SystemVerilog truth state of a mux condition.
 ///
 /// A vector condition is definitely true when at least one *known* bit is one.
@@ -2880,24 +4415,105 @@ fn lower_four_state_mux_chunk(
 }
 
 fn emit_sparse_mark_active(
-    ctx: &ISelContext,
+    ctx: &mut ISelContext,
     block: &mut MBlock,
     sparse: &crate::backend::memory_layout::SparseWorkingLayout,
 ) {
     if ctx.sparse_descriptor_table.is_some() {
         block.push(MInst::SparseMarkActive {
             active_index: sparse.active_index as u32,
-            active_count_offset: ctx.layout.sparse_active_count_offset as i32,
-            active_flags_offset: ctx.layout.sparse_active_flags_offset as i32,
-            active_list_offset: ctx.layout.sparse_active_list_offset as i32,
+            active_bits_offset: ctx.layout.sparse_active_bits_offset as i32,
             active_capacity: ctx.layout.sparse_active_capacity,
         });
     }
 }
 
+fn emit_full_sparse_bitset(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    offset: usize,
+    bit_count: usize,
+) {
+    let full_words = bit_count / 64;
+    if full_words != 0 {
+        block.push(MInst::MemFill {
+            dst_offset: offset as i32,
+            byte_len: full_words * 8,
+            value: u8::MAX,
+        });
+    }
+    let tail_bits = bit_count % 64;
+    if tail_bits != 0 {
+        let tail = ctx.alloc_vreg(SpillDesc::remat(mask_for_width(tail_bits)));
+        block.push(MInst::LoadImm {
+            dst: tail,
+            value: mask_for_width(tail_bits),
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: (offset + full_words * 8) as i32,
+            src: tail,
+            size: OpSize::S64,
+        });
+    }
+}
+
+/// Lower a complete logical zero overwrite directly into physical storage.
+/// Every byte in each physical element slot may be canonicalized to zero
+/// because padding is not part of RTL state. A sparse write marks every data
+/// chunk dirty; a dependency-proved direct STABLE write needs only the fill.
+fn emit_state_zero_fill(ctx: &mut ISelContext, block: &mut MBlock, address: RegionedAbsoluteAddr) {
+    let object = address.absolute_addr();
+    let plane_size = ctx.layout.plane_size(&object);
+    if address.region == STABLE_REGION {
+        let stable_base = ctx.layout.offsets[&object];
+        block.push(MInst::MemFill {
+            dst_offset: stable_base as i32,
+            byte_len: plane_size,
+            value: 0,
+        });
+        if ctx.is_4state_var(&address) {
+            block.push(MInst::MemFill {
+                dst_offset: (stable_base + plane_size) as i32,
+                byte_len: plane_size,
+                value: 0,
+            });
+        }
+        return;
+    }
+
+    debug_assert_eq!(address.region, crate::ir::SPARSE_WORKING_REGION);
+    let sparse = ctx.layout.sparse_layouts[&object].clone();
+    let sparse_base = ctx.layout.sparse_base_offset + ctx.layout.sparse_offsets[&object];
+
+    emit_sparse_mark_active(ctx, block, &sparse);
+    block.push(MInst::MemFill {
+        dst_offset: sparse_base as i32,
+        byte_len: plane_size,
+        value: 0,
+    });
+    if ctx.is_4state_var(&address) {
+        block.push(MInst::MemFill {
+            dst_offset: (sparse_base + plane_size) as i32,
+            byte_len: plane_size,
+            value: 0,
+        });
+    }
+    emit_full_sparse_bitset(ctx, block, sparse.dirty_words_offset, sparse.chunk_count);
+    emit_full_sparse_bitset(
+        ctx,
+        block,
+        sparse.summary_words_offset,
+        sparse.dirty_word_count,
+    );
+}
+
 fn logical_offset_vreg(ctx: &mut ISelContext, block: &mut MBlock, offset: &SIROffset) -> VReg {
     match offset {
-        SIROffset::Static(value) => {
+        SIROffset::Static(value)
+        | SIROffset::PackedElements {
+            bit_offset: value, ..
+        } => {
             let result = ctx.alloc_vreg(SpillDesc::remat(*value as u64));
             block.push(MInst::LoadImm {
                 dst: result,
@@ -2970,7 +4586,10 @@ fn logical_offset_vreg(ctx: &mut ISelContext, block: &mut MBlock, offset: &SIROf
 
 fn logical_offset_low_zero_bits(ctx: &ISelContext, offset: &SIROffset) -> u32 {
     match offset {
-        SIROffset::Static(value) => value.trailing_zeros(),
+        SIROffset::Static(value)
+        | SIROffset::PackedElements {
+            bit_offset: value, ..
+        } => value.trailing_zeros(),
         SIROffset::Dynamic(reg) => ctx.low_zero_bits.get(reg).copied().unwrap_or(0),
         SIROffset::Element {
             index,
@@ -3064,7 +4683,7 @@ fn memory_offset_vreg(
                 with_static
             }
         }
-        SIROffset::Static(bit_offset) => {
+        SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
             let (byte_offset, intra) = ctx.layout.map_static_bit_offset(&abs, *bit_offset);
             let physical = byte_offset * 8 + intra;
             let result = ctx.alloc_vreg(SpillDesc::remat(physical as u64));
@@ -3077,6 +4696,222 @@ fn memory_offset_vreg(
         SIROffset::Dynamic(_) => {
             unreachable!("arbitrary dynamic offsets disqualify an element-strided array")
         }
+    }
+}
+
+/// Recover a byte index from the quotient/remainder form produced by a
+/// dynamic packed selection inside an unpacked element:
+///
+/// ```text
+/// (x >> log2(D / L)) * D + ((x * L) & (D - 1)) == x * L
+/// ```
+///
+/// Here `D` is the logical unpacked-element width and `L` is the selected
+/// packed-lane width.  This is also a physical-address identity only when the
+/// storage layout has no padding between those unpacked elements.
+fn recomposed_element_byte_offset(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    addr: &RegionedAbsoluteAddr,
+    offset: &SIROffset,
+    sir_block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    sir_defs: &HashMap<RegisterId, usize>,
+) -> Option<VReg> {
+    let SIROffset::Element {
+        index,
+        element_width,
+        bit_offset,
+        dynamic_bit_offset: Some(dynamic),
+    } = offset
+    else {
+        return None;
+    };
+    if !element_width.is_power_of_two() || !bit_offset.is_multiple_of(8) {
+        return None;
+    }
+    if let Some(array) = ctx.layout.unpacked_arrays.get(&addr.absolute_addr())
+        && array.element_stride.checked_mul(8) != Some(*element_width)
+    {
+        return None;
+    }
+
+    let instruction = |register: RegisterId| {
+        sir_defs
+            .get(&register)
+            .and_then(|&position| sir_block.instructions.get(position))
+    };
+    let SIRInstruction::Binary(_, source, BinaryOp::Shr, shift_register) = instruction(*index)?
+    else {
+        return None;
+    };
+    let shift = *ctx.consts.get(shift_register)?;
+
+    let SIRInstruction::Binary(_, and_lhs, BinaryOp::And, and_rhs) = instruction(*dynamic)? else {
+        return None;
+    };
+    let (product, remainder_mask) = match (ctx.consts.get(and_lhs), ctx.consts.get(and_rhs)) {
+        (Some(&mask), None) => (*and_rhs, mask),
+        (None, Some(&mask)) => (*and_lhs, mask),
+        _ => return None,
+    };
+    if remainder_mask != (*element_width as u64).wrapping_sub(1) {
+        return None;
+    }
+
+    let SIRInstruction::Binary(_, mul_lhs, BinaryOp::Mul, mul_rhs) = instruction(product)? else {
+        return None;
+    };
+    let (product_source, lane_width) = match (ctx.consts.get(mul_lhs), ctx.consts.get(mul_rhs)) {
+        (Some(&lane_width), None) => (*mul_rhs, lane_width),
+        (None, Some(&lane_width)) => (*mul_lhs, lane_width),
+        _ => return None,
+    };
+    if product_source != *source
+        || lane_width == 0
+        || !lane_width.is_power_of_two()
+        || !lane_width.is_multiple_of(8)
+        || lane_width > *element_width as u64
+    {
+        return None;
+    }
+    let lanes_per_element = (*element_width as u64) / lane_width;
+    if !lanes_per_element.is_power_of_two() || shift != lanes_per_element.trailing_zeros() as u64 {
+        return None;
+    }
+
+    // All arithmetic which formed the quotient and remainder must have the
+    // same modulo semantics.  The recovered physical byte index must also fit
+    // the native 64-bit address calculation without wrapping.
+    let source_width = ctx.sir_width(source);
+    if [*index, product, *dynamic]
+        .into_iter()
+        .any(|register| ctx.sir_width(&register) != source_width)
+    {
+        return None;
+    }
+    let lane_byte_shift = (lane_width / 8).trailing_zeros() as usize;
+    if source_width.saturating_add(lane_width.trailing_zeros() as usize) > 64 {
+        return None;
+    }
+
+    let source = ctx.reg_map.get(*source);
+    let scaled = if lane_byte_shift == 0 {
+        source
+    } else {
+        let scaled = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::ShlImm {
+            dst: scaled,
+            src: source,
+            imm: lane_byte_shift as u8,
+        });
+        ctx.known_bits
+            .insert(scaled, source_width + lane_byte_shift);
+        scaled
+    };
+    let static_bytes = bit_offset / 8;
+    if static_bytes == 0 {
+        Some(scaled)
+    } else if let Ok(imm) = i32::try_from(static_bytes) {
+        let result = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::AddImm {
+            dst: result,
+            src: scaled,
+            imm,
+        });
+        Some(result)
+    } else {
+        None
+    }
+}
+
+/// Lower a byte-aligned element address in byte units from the start.  The
+/// physical stride comes from MemoryLayout, so this handles both compact and
+/// padded element storage without constructing a bit offset only to divide it
+/// by eight again.
+fn direct_element_byte_offset(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    addr: &RegionedAbsoluteAddr,
+    offset: &SIROffset,
+) -> Option<VReg> {
+    let SIROffset::Element {
+        index,
+        element_width,
+        bit_offset,
+        dynamic_bit_offset,
+    } = offset
+    else {
+        return None;
+    };
+    if dynamic_bit_offset
+        .as_ref()
+        .is_some_and(|dynamic| ctx.consts.get(dynamic) != Some(&0))
+    {
+        return None;
+    }
+    if !bit_offset.is_multiple_of(8) {
+        return None;
+    }
+    let stride_bytes = if let Some(array) = ctx.layout.unpacked_arrays.get(&addr.absolute_addr()) {
+        array.element_stride
+    } else {
+        element_width
+            .checked_div(8)
+            .filter(|_| element_width.is_multiple_of(8))?
+    };
+    if stride_bytes == 0 {
+        return None;
+    }
+
+    // The old path formed `index * (stride_bytes * 8)` in a u64 and then
+    // shifted right.  Only bypass it when that bit product cannot wrap.
+    let source_width = ctx.sir_width(index);
+    let stride_bits =
+        usize::BITS as usize - stride_bytes.saturating_sub(1).leading_zeros() as usize;
+    if source_width.saturating_add(stride_bits) > 61 {
+        return None;
+    }
+
+    let index = ctx.reg_map.get(*index);
+    let scaled = if stride_bytes == 1 {
+        index
+    } else if stride_bytes.is_power_of_two() {
+        let scaled = ctx.alloc_vreg(SpillDesc::transient());
+        let shift = stride_bytes.trailing_zeros() as u8;
+        block.push(MInst::ShlImm {
+            dst: scaled,
+            src: index,
+            imm: shift,
+        });
+        ctx.known_bits.insert(scaled, source_width + shift as usize);
+        scaled
+    } else {
+        let stride = ctx.alloc_vreg(SpillDesc::remat(stride_bytes as u64));
+        block.push(MInst::LoadImm {
+            dst: stride,
+            value: stride_bytes as u64,
+        });
+        let scaled = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Mul {
+            dst: scaled,
+            lhs: index,
+            rhs: stride,
+        });
+        scaled
+    };
+    let static_bytes = bit_offset / 8;
+    if static_bytes == 0 {
+        Some(scaled)
+    } else if let Ok(imm) = i32::try_from(static_bytes) {
+        let result = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::AddImm {
+            dst: result,
+            src: scaled,
+            imm,
+        });
+        Some(result)
+    } else {
+        None
     }
 }
 
@@ -3113,13 +4948,192 @@ fn memory_offset_low_zero_bits(
                 static_zeros
             }
         }
-        SIROffset::Static(bit_offset) => {
+        SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
             let (byte_offset, intra) = ctx.layout.map_static_bit_offset(&abs, *bit_offset);
             (byte_offset * 8 + intra).trailing_zeros()
         }
         SIROffset::Dynamic(_) => {
             unreachable!("arbitrary dynamic offsets disqualify an element-strided array")
         }
+    }
+}
+
+/// Number of logical bits which can be accessed from `bit_offset` by one
+/// native scalar operation without crossing an element-strided storage gap.
+/// Packed values have no element boundary, while a strided element may need
+/// multiple native accesses when its byte extent is not 1, 2, 4, or 8 bytes.
+fn static_commit_chunk_capacity(
+    ctx: &ISelContext,
+    addr: &RegionedAbsoluteAddr,
+    bit_offset: usize,
+) -> usize {
+    let abs = addr.absolute_addr();
+    let Some(array) = ctx.layout.unpacked_arrays.get(&abs) else {
+        return 64 - bit_offset % 8;
+    };
+
+    let element_bit = bit_offset % array.element_width;
+    let byte_in_element = element_bit / 8;
+    let intra_byte = element_bit % 8;
+    let bytes_left = array.element_stride - byte_in_element;
+    let native_bits = if bytes_left >= 8 {
+        64
+    } else if bytes_left >= 4 {
+        32
+    } else if bytes_left >= 2 {
+        16
+    } else {
+        8
+    };
+    (array.element_width - element_bit).min(native_bits - intra_byte)
+}
+
+/// Copy one static logical bit range between potentially different physical
+/// array layouts.  Source and destination chunks are bounded independently:
+/// for example, `logic<2>[4]` may be byte-strided at an external interface but
+/// packed into one byte in an internal alias.
+fn emit_static_commit_plane(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    src_addr: &RegionedAbsoluteAddr,
+    dst_addr: &RegionedAbsoluteAddr,
+    bit_offset: usize,
+    width: usize,
+    mask_plane: bool,
+) {
+    if let (Some(src_size), Some(dst_size)) = (
+        ctx.full_static_load_size(src_addr, bit_offset, width),
+        ctx.full_static_store_size(dst_addr, bit_offset, width),
+    ) && src_size == dst_size
+    {
+        // A complete logical object owns every byte in its physical slot.
+        // Padding bits are not RTL state and no other object aliases them, so
+        // copying the native storage unit directly is both exact and avoids
+        // the load/mask/load/insert/store sequence used for partial ranges.
+        let src_offset = if mask_plane {
+            ctx.mask_byte_offset(src_addr, bit_offset)
+        } else {
+            ctx.byte_offset(src_addr, bit_offset)
+        };
+        let dst_offset = if mask_plane {
+            ctx.mask_byte_offset(dst_addr, bit_offset)
+        } else {
+            ctx.byte_offset(dst_addr, bit_offset)
+        };
+        let value = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Load {
+            dst: value,
+            base: BaseReg::SimState,
+            offset: src_offset,
+            size: src_size,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: dst_offset,
+            src: value,
+            size: dst_size,
+        });
+        return;
+    }
+
+    let mut copied = 0usize;
+    while copied < width {
+        let part_bit_offset = bit_offset + copied;
+        let (_, src_intra) = ctx.static_byte_and_intra(src_addr, part_bit_offset);
+        let (_, dst_intra) = ctx.static_byte_and_intra(dst_addr, part_bit_offset);
+        let mut part_width = (width - copied)
+            .min(static_commit_chunk_capacity(ctx, src_addr, part_bit_offset))
+            .min(static_commit_chunk_capacity(ctx, dst_addr, part_bit_offset));
+        if src_intra == 0 && dst_intra == 0 {
+            part_width = match part_width {
+                64.. => 64,
+                32.. => 32,
+                16.. => 16,
+                8.. => 8,
+                _ => part_width,
+            };
+        }
+        debug_assert!(part_width != 0);
+
+        let src_size = ISelContext::op_size_for_width(src_intra + part_width);
+        let dst_size = ISelContext::op_size_for_width(dst_intra + part_width);
+        let containing_src = if mask_plane {
+            ctx.mask_byte_offset(src_addr, part_bit_offset)
+        } else {
+            ctx.byte_offset(src_addr, part_bit_offset)
+        };
+        let containing_dst = if mask_plane {
+            ctx.mask_byte_offset(dst_addr, part_bit_offset)
+        } else {
+            ctx.byte_offset(dst_addr, part_bit_offset)
+        };
+
+        if src_intra == 0
+            && dst_intra == 0
+            && let Some(size) = OpSize::from_bits(part_width)
+        {
+            let value = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Load {
+                dst: value,
+                base: BaseReg::SimState,
+                offset: containing_src,
+                size,
+            });
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: containing_dst,
+                src: value,
+                size,
+            });
+            copied += part_width;
+            continue;
+        }
+
+        let raw = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Load {
+            dst: raw,
+            base: BaseReg::SimState,
+            offset: containing_src,
+            size: src_size,
+        });
+        let shifted = if src_intra == 0 {
+            raw
+        } else {
+            let shifted = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::ShrImm {
+                dst: shifted,
+                src: raw,
+                imm: src_intra as u8,
+            });
+            shifted
+        };
+        let value = ctx.alloc_vreg(SpillDesc::transient());
+        ctx.emit_and_imm(block, value, shifted, mask_for_width(part_width));
+
+        let old = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Load {
+            dst: old,
+            base: BaseReg::SimState,
+            offset: containing_dst,
+            size: dst_size,
+        });
+        let new = ctx.alloc_vreg(SpillDesc::transient());
+        ctx.emit_bfi(
+            block,
+            new,
+            old,
+            value,
+            dst_intra as u8,
+            mask_for_width(part_width),
+        );
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: containing_dst,
+            src: new,
+            size: dst_size,
+        });
+
+        copied += part_width;
     }
 }
 
@@ -3135,8 +5149,20 @@ fn emit_single_chunk_sparse_insert(
     let result = ctx.alloc_vreg(SpillDesc::transient());
     let value_mask = mask_for_width(width);
     match offset {
-        SIROffset::Static(bit_offset) => {
-            ctx.emit_bfi(block, result, base, value, *bit_offset as u8, value_mask);
+        SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
+            let (byte_offset, intra_byte) = ctx
+                .layout
+                .map_static_bit_offset(&addr.absolute_addr(), *bit_offset);
+            let physical_bit_offset = byte_offset * 8 + intra_byte;
+            debug_assert!(physical_bit_offset + width <= 64);
+            ctx.emit_bfi(
+                block,
+                result,
+                base,
+                value,
+                physical_bit_offset as u8,
+                value_mask,
+            );
         }
         SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
             let offset = memory_offset_vreg(ctx, block, addr, offset);
@@ -3194,6 +5220,7 @@ fn try_emit_single_chunk_sparse_store(
     src_reg: RegisterId,
     triggers: &[crate::ir::TriggerIdWithKind],
     comb_capture_sites: &[u32],
+    write_state: SparseWriteState,
 ) -> bool {
     if addr.region != crate::ir::SPARSE_WORKING_REGION
         || width == 0
@@ -3209,107 +5236,14 @@ fn try_emit_single_chunk_sparse_store(
         return false;
     }
 
-    emit_sparse_mark_active(ctx, block, &sparse);
-    let stable_base = ctx.layout.offsets[&abs] as i32;
-    let sparse_base = (ctx.layout.sparse_base_offset + ctx.layout.sparse_offsets[&abs]) as i32;
-    let byte_size = ctx.layout.plane_size(&abs) as i32;
-
-    let dirty_bits = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::Load {
-        dst: dirty_bits,
-        base: BaseReg::SimState,
-        offset: sparse.dirty_words_offset as i32,
-        size: OpSize::S64,
-    });
-    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
-    block.push(MInst::LoadImm {
-        dst: zero,
-        value: 0,
-    });
-    let was_dirty = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::Cmp {
-        dst: was_dirty,
-        lhs: dirty_bits,
-        rhs: zero,
-        kind: CmpKind::Ne,
-    });
-
-    let value = ctx.reg_map.get(src_reg);
-    let mask = ctx
-        .is_4state_var(addr)
-        .then(|| ctx.get_mask(src_reg, block));
-    for (plane_delta, value) in [(0, value)]
-        .into_iter()
-        .chain(mask.into_iter().map(|mask| (byte_size, mask)))
-    {
-        let stable = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Load {
-            dst: stable,
-            base: BaseReg::SimState,
-            offset: stable_base + plane_delta,
-            size: OpSize::S64,
-        });
-        let working = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Load {
-            dst: working,
-            base: BaseReg::SimState,
-            offset: sparse_base + plane_delta,
-            size: OpSize::S64,
-        });
-        let initialized = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::Select {
-            dst: initialized,
-            cond: was_dirty,
-            true_val: working,
-            false_val: stable,
-        });
-        let new_value =
-            emit_single_chunk_sparse_insert(ctx, block, addr, initialized, value, offset, width);
-        block.push(MInst::Store {
-            base: BaseReg::SimState,
-            offset: sparse_base + plane_delta,
-            src: new_value,
-            size: OpSize::S64,
-        });
+    if write_state != SparseWriteState::Active {
+        emit_sparse_mark_active(ctx, block, &sparse);
     }
-
-    let one = ctx.alloc_vreg(SpillDesc::remat(1));
-    block.push(MInst::LoadImm { dst: one, value: 1 });
-    block.push(MInst::Store {
-        base: BaseReg::SimState,
-        offset: sparse.dirty_words_offset as i32,
-        src: one,
-        size: OpSize::S64,
-    });
-    block.push(MInst::Store {
-        base: BaseReg::SimState,
-        offset: sparse.summary_words_offset as i32,
-        src: one,
-        size: OpSize::S64,
-    });
-    true
-}
-
-fn prepare_sparse_store(
-    ctx: &mut ISelContext,
-    block: &mut MBlock,
-    addr: &RegionedAbsoluteAddr,
-    offset: &SIROffset,
-    width: usize,
-) {
-    let abs = addr.absolute_addr();
-    let sparse = &ctx.layout.sparse_layouts[&abs];
-    emit_sparse_mark_active(ctx, block, sparse);
     let stable_base = ctx.layout.offsets[&abs] as i32;
     let sparse_base = (ctx.layout.sparse_base_offset + ctx.layout.sparse_offsets[&abs]) as i32;
     let byte_size = ctx.layout.plane_size(&abs) as i32;
 
-    // A value that fits in one 64-bit chunk has no dynamic sparse-metadata
-    // indexing at all: every valid store touches chunk zero, dirty word zero,
-    // and summary bit zero.  This is common for arrays of one-bit FF fields.
-    // Keeping the generic chunk calculation here used to turn every one-bit
-    // store into roughly a dozen unnecessary MIR operations.
-    if sparse.chunk_count == 1 {
+    let was_dirty = (write_state == SparseWriteState::Unknown).then(|| {
         let dirty_bits = ctx.alloc_vreg(SpillDesc::transient());
         block.push(MInst::Load {
             dst: dirty_bits,
@@ -3329,6 +5263,411 @@ fn prepare_sparse_store(
             rhs: zero,
             kind: CmpKind::Ne,
         });
+        was_dirty
+    });
+
+    let value = ctx.reg_map.get(src_reg);
+    let mask = ctx
+        .is_4state_var(addr)
+        .then(|| ctx.get_mask(src_reg, block));
+    for (plane_delta, value) in [(0, value)]
+        .into_iter()
+        .chain(mask.into_iter().map(|mask| (byte_size, mask)))
+    {
+        let load_value = |ctx: &mut ISelContext, block: &mut MBlock, offset: i32| {
+            let value = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Load {
+                dst: value,
+                base: BaseReg::SimState,
+                offset,
+                size: OpSize::S64,
+            });
+            value
+        };
+        let initialized = match write_state {
+            SparseWriteState::First => load_value(ctx, block, stable_base + plane_delta),
+            SparseWriteState::Active => load_value(ctx, block, sparse_base + plane_delta),
+            SparseWriteState::Unknown => {
+                let stable = load_value(ctx, block, stable_base + plane_delta);
+                let working = load_value(ctx, block, sparse_base + plane_delta);
+                let initialized = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Select {
+                    dst: initialized,
+                    cond: was_dirty.expect("unknown sparse state tests the dirty bit"),
+                    true_val: working,
+                    false_val: stable,
+                });
+                initialized
+            }
+        };
+        let new_value =
+            emit_single_chunk_sparse_insert(ctx, block, addr, initialized, value, offset, width);
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: sparse_base + plane_delta,
+            src: new_value,
+            size: OpSize::S64,
+        });
+    }
+
+    if write_state != SparseWriteState::Active {
+        let one = ctx.alloc_vreg(SpillDesc::remat(1));
+        block.push(MInst::LoadImm { dst: one, value: 1 });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: sparse.dirty_words_offset as i32,
+            src: one,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: sparse.summary_words_offset as i32,
+            src: one,
+            size: OpSize::S64,
+        });
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_sparse_clean_single_chunk(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    addr: &RegionedAbsoluteAddr,
+    offset: &SIROffset,
+    stable_base: i32,
+    sparse_base: i32,
+    byte_size: i32,
+    sparse_plane_access_len: Option<usize>,
+    dirty_words_offset: i32,
+    summary_words_offset: i32,
+    dirty_alias_range: Option<MemoryAliasRange>,
+    summary_alias_range: Option<MemoryAliasRange>,
+    write_state: SparseWriteState,
+    dirty_word_state: SparseChunkState,
+    metadata_action: SparseMetadataAction,
+) {
+    let bit_offset = memory_offset_vreg(ctx, block, addr, offset);
+    let chunk = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::ShrImm {
+        dst: chunk,
+        src: bit_offset,
+        imm: 6,
+    });
+
+    let data_index = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::ShlImm {
+        dst: data_index,
+        src: chunk,
+        imm: 3,
+    });
+    for plane_delta in [0, byte_size]
+        .into_iter()
+        .take(if ctx.is_4state_var(addr) { 2 } else { 1 })
+    {
+        let stable = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::LoadIndexed {
+            dst: stable,
+            base: BaseReg::SimState,
+            offset: stable_base + plane_delta,
+            index: data_index,
+            scale: 1,
+            size: OpSize::S64,
+            alias_range: sparse_plane_access_len
+                .and_then(|byte_len| MemoryAliasRange::new(stable_base + plane_delta, byte_len)),
+        });
+        block.push(MInst::StoreIndexed {
+            base: BaseReg::SimState,
+            offset: sparse_base + plane_delta,
+            index: data_index,
+            src: stable,
+            size: OpSize::S64,
+            alias_range: sparse_plane_access_len
+                .and_then(|byte_len| MemoryAliasRange::new(sparse_base + plane_delta, byte_len)),
+        });
+    }
+
+    match metadata_action {
+        SparseMetadataAction::Immediate => emit_sparse_metadata_update(
+            ctx,
+            block,
+            chunk,
+            dirty_words_offset,
+            summary_words_offset,
+            dirty_alias_range,
+            summary_alias_range,
+            write_state,
+            dirty_word_state,
+        ),
+        SparseMetadataAction::Deferred => {}
+        SparseMetadataAction::Batch {
+            dirty_word,
+            dirty_mask,
+            initial_write_state,
+            initial_dirty_word_state,
+        } => emit_sparse_metadata_batch(
+            ctx,
+            block,
+            dirty_words_offset,
+            summary_words_offset,
+            dirty_word,
+            dirty_mask,
+            initial_write_state,
+            initial_dirty_word_state,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_sparse_metadata_update(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    chunk: VReg,
+    dirty_words_offset: i32,
+    summary_words_offset: i32,
+    dirty_alias_range: Option<MemoryAliasRange>,
+    summary_alias_range: Option<MemoryAliasRange>,
+    write_state: SparseWriteState,
+    dirty_word_state: SparseChunkState,
+) {
+    let dirty_word = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::ShrImm {
+        dst: dirty_word,
+        src: chunk,
+        imm: 6,
+    });
+    let dirty_index = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::ShlImm {
+        dst: dirty_index,
+        src: dirty_word,
+        imm: 3,
+    });
+    let bit_in_word = ctx.alloc_vreg(SpillDesc::transient());
+    ctx.emit_and_imm(block, bit_in_word, chunk, 63);
+    let one = ctx.alloc_vreg(SpillDesc::remat(1));
+    block.push(MInst::LoadImm { dst: one, value: 1 });
+    let dirty_mask = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Shl {
+        dst: dirty_mask,
+        lhs: one,
+        rhs: bit_in_word,
+    });
+
+    let preserve_dirty_word =
+        write_state == SparseWriteState::Active && dirty_word_state != SparseChunkState::Clean;
+    if preserve_dirty_word {
+        block.push(MInst::OrStoreIndexed {
+            base: BaseReg::SimState,
+            offset: dirty_words_offset,
+            index: dirty_index,
+            src: dirty_mask,
+            size: OpSize::S64,
+            alias_range: dirty_alias_range,
+        });
+    } else {
+        block.push(MInst::StoreIndexed {
+            base: BaseReg::SimState,
+            offset: dirty_words_offset,
+            index: dirty_index,
+            src: dirty_mask,
+            size: OpSize::S64,
+            alias_range: dirty_alias_range,
+        });
+    }
+
+    if write_state != SparseWriteState::Active || dirty_word_state != SparseChunkState::Dirty {
+        let summary_word = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::ShrImm {
+            dst: summary_word,
+            src: dirty_word,
+            imm: 6,
+        });
+        let summary_index = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::ShlImm {
+            dst: summary_index,
+            src: summary_word,
+            imm: 3,
+        });
+        let summary_bit = ctx.alloc_vreg(SpillDesc::transient());
+        ctx.emit_and_imm(block, summary_bit, dirty_word, 63);
+        let summary_mask = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Shl {
+            dst: summary_mask,
+            lhs: one,
+            rhs: summary_bit,
+        });
+        if write_state == SparseWriteState::Active {
+            block.push(MInst::OrStoreIndexed {
+                base: BaseReg::SimState,
+                offset: summary_words_offset,
+                index: summary_index,
+                src: summary_mask,
+                size: OpSize::S64,
+                alias_range: summary_alias_range,
+            });
+        } else {
+            block.push(MInst::StoreIndexed {
+                base: BaseReg::SimState,
+                offset: summary_words_offset,
+                index: summary_index,
+                src: summary_mask,
+                size: OpSize::S64,
+                alias_range: summary_alias_range,
+            });
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_sparse_metadata_batch(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    dirty_words_offset: i32,
+    summary_words_offset: i32,
+    dirty_word: usize,
+    dirty_mask: u64,
+    initial_write_state: SparseWriteState,
+    initial_dirty_word_state: SparseChunkState,
+) {
+    let dirty_word_offset = dirty_words_offset
+        .checked_add(
+            i32::try_from(
+                dirty_word
+                    .checked_mul(8)
+                    .expect("dirty word offset overflow"),
+            )
+            .expect("dirty word offset exceeds MIR displacement"),
+        )
+        .expect("dirty word offset exceeds MIR displacement");
+    let mask = ctx.alloc_vreg(SpillDesc::remat(dirty_mask));
+    block.push(MInst::LoadImm {
+        dst: mask,
+        value: dirty_mask,
+    });
+    if initial_write_state == SparseWriteState::Active
+        && initial_dirty_word_state != SparseChunkState::Clean
+    {
+        emit_sparse_or_store(ctx, block, dirty_word_offset, mask);
+    } else {
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: dirty_word_offset,
+            src: mask,
+            size: OpSize::S64,
+        });
+    }
+
+    if initial_write_state == SparseWriteState::Active
+        && initial_dirty_word_state == SparseChunkState::Dirty
+    {
+        return;
+    }
+    let summary_word = dirty_word / 64;
+    let summary_word_offset = summary_words_offset
+        .checked_add(
+            i32::try_from(
+                summary_word
+                    .checked_mul(8)
+                    .expect("summary word offset overflow"),
+            )
+            .expect("summary word offset exceeds MIR displacement"),
+        )
+        .expect("summary word offset exceeds MIR displacement");
+    let summary_mask_value = 1u64 << (dirty_word % 64);
+    let summary_mask = ctx.alloc_vreg(SpillDesc::remat(summary_mask_value));
+    block.push(MInst::LoadImm {
+        dst: summary_mask,
+        value: summary_mask_value,
+    });
+    if initial_write_state == SparseWriteState::Active {
+        emit_sparse_or_store(ctx, block, summary_word_offset, summary_mask);
+    } else {
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: summary_word_offset,
+            src: summary_mask,
+            size: OpSize::S64,
+        });
+    }
+}
+
+fn emit_sparse_or_store(ctx: &mut ISelContext, block: &mut MBlock, offset: i32, src: VReg) {
+    let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+    block.push(MInst::LoadImm {
+        dst: zero,
+        value: 0,
+    });
+    block.push(MInst::OrStoreIndexed {
+        base: BaseReg::SimState,
+        offset,
+        index: zero,
+        src,
+        size: OpSize::S64,
+        alias_range: MemoryAliasRange::new(offset, 8),
+    });
+}
+
+fn prepare_sparse_store(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    addr: &RegionedAbsoluteAddr,
+    offset: &SIROffset,
+    width: usize,
+    write_state: SparseWriteState,
+    chunk_state: SparseChunkState,
+    dirty_word_state: SparseChunkState,
+    metadata_action: SparseMetadataAction,
+) {
+    let abs = addr.absolute_addr();
+    let sparse = ctx.layout.sparse_layouts[&abs].clone();
+    if write_state != SparseWriteState::Active {
+        emit_sparse_mark_active(ctx, block, &sparse);
+    }
+    let stable_base = ctx.layout.offsets[&abs] as i32;
+    let sparse_base = (ctx.layout.sparse_base_offset + ctx.layout.sparse_offsets[&abs]) as i32;
+    let plane_size = ctx.layout.plane_size(&abs);
+    let byte_size = plane_size as i32;
+    let sparse_plane_access_len = plane_size.checked_add(7).map(|size| size & !7);
+    let dirty_alias_range = sparse
+        .dirty_word_count
+        .checked_mul(8)
+        .and_then(|byte_len| MemoryAliasRange::new(sparse.dirty_words_offset as i32, byte_len));
+    let summary_alias_range = sparse
+        .summary_word_count
+        .checked_mul(8)
+        .and_then(|byte_len| MemoryAliasRange::new(sparse.summary_words_offset as i32, byte_len));
+
+    // A value that fits in one 64-bit chunk has no dynamic sparse-metadata
+    // indexing at all: every valid store touches chunk zero, dirty word zero,
+    // and summary bit zero.  This is common for arrays of one-bit FF fields.
+    // Keeping the generic chunk calculation here used to turn every one-bit
+    // store into roughly a dozen unnecessary MIR operations.
+    if sparse.chunk_count == 1 {
+        if write_state == SparseWriteState::Active {
+            return;
+        }
+        let was_dirty = (write_state == SparseWriteState::Unknown).then(|| {
+            let dirty_bits = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Load {
+                dst: dirty_bits,
+                base: BaseReg::SimState,
+                offset: sparse.dirty_words_offset as i32,
+                size: OpSize::S64,
+            });
+            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm {
+                dst: zero,
+                value: 0,
+            });
+            let was_dirty = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Cmp {
+                dst: was_dirty,
+                lhs: dirty_bits,
+                rhs: zero,
+                kind: CmpKind::Ne,
+            });
+            was_dirty
+        });
 
         for plane_delta in
             [0, byte_size]
@@ -3342,20 +5681,25 @@ fn prepare_sparse_store(
                 offset: stable_base + plane_delta,
                 size: OpSize::S64,
             });
-            let working = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::Load {
-                dst: working,
-                base: BaseReg::SimState,
-                offset: sparse_base + plane_delta,
-                size: OpSize::S64,
-            });
-            let initialized = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::Select {
-                dst: initialized,
-                cond: was_dirty,
-                true_val: working,
-                false_val: stable,
-            });
+            let initialized = if let Some(was_dirty) = was_dirty {
+                let working = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Load {
+                    dst: working,
+                    base: BaseReg::SimState,
+                    offset: sparse_base + plane_delta,
+                    size: OpSize::S64,
+                });
+                let initialized = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Select {
+                    dst: initialized,
+                    cond: was_dirty,
+                    true_val: working,
+                    false_val: stable,
+                });
+                initialized
+            } else {
+                stable
+            };
             block.push(MInst::Store {
                 base: BaseReg::SimState,
                 offset: sparse_base + plane_delta,
@@ -3380,6 +5724,45 @@ fn prepare_sparse_store(
         });
         return;
     }
+
+    let max_chunks = match offset {
+        SIROffset::Static(value)
+        | SIROffset::PackedElements {
+            bit_offset: value, ..
+        } => ((value % 64) + width).div_ceil(64),
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+            let zero_bits = memory_offset_low_zero_bits(ctx, addr, offset).min(6);
+            let alignment = 1usize << zero_bits;
+            (width + (64 - alignment)).div_ceil(64)
+        }
+    };
+    if write_state == SparseWriteState::Active && chunk_state == SparseChunkState::Dirty {
+        return;
+    }
+    let clean_single_chunk = metadata_action != SparseMetadataAction::Immediate
+        || write_state == SparseWriteState::First && max_chunks == 1
+        || write_state == SparseWriteState::Active && chunk_state == SparseChunkState::Clean;
+    if clean_single_chunk {
+        prepare_sparse_clean_single_chunk(
+            ctx,
+            block,
+            addr,
+            offset,
+            stable_base,
+            sparse_base,
+            byte_size,
+            sparse_plane_access_len,
+            sparse.dirty_words_offset as i32,
+            sparse.summary_words_offset as i32,
+            dirty_alias_range,
+            summary_alias_range,
+            write_state,
+            dirty_word_state,
+            metadata_action,
+        );
+        return;
+    }
+    debug_assert_eq!(metadata_action, SparseMetadataAction::Immediate);
 
     let bit_offset = memory_offset_vreg(ctx, block, addr, offset);
     let start_chunk = ctx.alloc_vreg(SpillDesc::transient());
@@ -3406,14 +5789,6 @@ fn prepare_sparse_store(
         imm: 6,
     });
 
-    let max_chunks = match offset {
-        SIROffset::Static(value) => ((value % 64) + width).div_ceil(64),
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
-            let zero_bits = memory_offset_low_zero_bits(ctx, addr, offset).min(6);
-            let alignment = 1usize << zero_bits;
-            (width + (64 - alignment)).div_ceil(64)
-        }
-    };
     for chunk_delta in 0..max_chunks {
         let delta = ctx.alloc_vreg(SpillDesc::remat(chunk_delta as u64));
         block.push(MInst::LoadImm {
@@ -3464,7 +5839,9 @@ fn prepare_sparse_store(
             base: BaseReg::SimState,
             offset: sparse.dirty_words_offset as i32,
             index: dirty_index,
+            scale: 1,
             size: OpSize::S64,
+            alias_range: dirty_alias_range,
         });
         let bit_in_word = ctx.alloc_vreg(SpillDesc::transient());
         ctx.emit_and_imm(block, bit_in_word, chunk, 63);
@@ -3513,14 +5890,22 @@ fn prepare_sparse_store(
                 base: BaseReg::SimState,
                 offset: stable_base + plane_delta,
                 index: data_index,
+                scale: 1,
                 size: OpSize::S64,
+                alias_range: sparse_plane_access_len.and_then(|byte_len| {
+                    MemoryAliasRange::new(stable_base + plane_delta, byte_len)
+                }),
             });
             block.push(MInst::LoadIndexed {
                 dst: working,
                 base: BaseReg::SimState,
                 offset: sparse_base + plane_delta,
                 index: data_index,
+                scale: 1,
                 size: OpSize::S64,
+                alias_range: sparse_plane_access_len.and_then(|byte_len| {
+                    MemoryAliasRange::new(sparse_base + plane_delta, byte_len)
+                }),
             });
             let initialized = ctx.alloc_vreg(SpillDesc::transient());
             block.push(MInst::Select {
@@ -3535,6 +5920,9 @@ fn prepare_sparse_store(
                 index: data_index,
                 src: initialized,
                 size: OpSize::S64,
+                alias_range: sparse_plane_access_len.and_then(|byte_len| {
+                    MemoryAliasRange::new(sparse_base + plane_delta, byte_len)
+                }),
             });
         }
 
@@ -3550,6 +5938,7 @@ fn prepare_sparse_store(
             index: dirty_index,
             src: new_dirty,
             size: OpSize::S64,
+            alias_range: dirty_alias_range,
         });
 
         let summary_word = ctx.alloc_vreg(SpillDesc::transient());
@@ -3570,7 +5959,9 @@ fn prepare_sparse_store(
             base: BaseReg::SimState,
             offset: sparse.summary_words_offset as i32,
             index: summary_index,
+            scale: 1,
             size: OpSize::S64,
+            alias_range: summary_alias_range,
         });
         let summary_bit = ctx.alloc_vreg(SpillDesc::transient());
         ctx.emit_and_imm(block, summary_bit, dirty_word, 63);
@@ -3592,6 +5983,7 @@ fn prepare_sparse_store(
             index: summary_index,
             src: new_summary,
             size: OpSize::S64,
+            alias_range: summary_alias_range,
         });
     }
 }
@@ -3602,6 +5994,7 @@ fn emit_aligned_dynamic_wide_store(
     base_offset: i32,
     byte_offset: VReg,
     width: usize,
+    alias_range: Option<MemoryAliasRange>,
     chunks: &[(VReg, usize)],
 ) {
     let mut bit_pos = 0usize;
@@ -3642,6 +6035,7 @@ fn emit_aligned_dynamic_wide_store(
                         1 => OpSize::S8,
                         _ => unreachable!(),
                     },
+                    alias_range,
                 });
                 copied += bytes;
             }
@@ -3668,7 +6062,9 @@ fn emit_aligned_dynamic_wide_store(
                 base: BaseReg::SimState,
                 offset,
                 index: byte_offset,
+                scale: 1,
                 size: OpSize::S8,
+                alias_range,
             });
             let new = ctx.alloc_vreg(SpillDesc::transient());
             ctx.emit_bfi(block, new, old, src, 0, mask_for_width(tail_bits));
@@ -3678,6 +6074,7 @@ fn emit_aligned_dynamic_wide_store(
                 index: byte_offset,
                 src: new,
                 size: OpSize::S8,
+                alias_range,
             });
         }
 
@@ -3696,6 +6093,7 @@ fn emit_dynamic_scalar_bitfield_store(
     bit_shift: VReg,
     src: VReg,
     width: usize,
+    alias_range: Option<MemoryAliasRange>,
     track_change: bool,
 ) -> Option<VReg> {
     let width_mask = mask_for_width(width);
@@ -3712,7 +6110,9 @@ fn emit_dynamic_scalar_bitfield_store(
         base: BaseReg::SimState,
         offset: base_offset,
         index: byte_offset,
+        scale: 1,
         size: ISelContext::op_size_for_width(width + 7),
+        alias_range,
     });
     let shifted_src = ctx.alloc_vreg(SpillDesc::transient());
     block.push(MInst::Shl {
@@ -3754,6 +6154,7 @@ fn emit_dynamic_scalar_bitfield_store(
         index: byte_offset,
         src: new_low,
         size: ISelContext::op_size_for_width(width + 7),
+        alias_range,
     });
 
     let mut changed = track_change.then(|| {
@@ -3827,7 +6228,9 @@ fn emit_dynamic_scalar_bitfield_store(
         base: BaseReg::SimState,
         offset: base_offset + 8,
         index: byte_offset,
+        scale: 1,
         size: OpSize::S8,
+        alias_range,
     });
     let inverted_high_mask = ctx.alloc_vreg(SpillDesc::transient());
     block.push(MInst::BitNot {
@@ -3852,6 +6255,7 @@ fn emit_dynamic_scalar_bitfield_store(
         index: byte_offset,
         src: new_high,
         size: OpSize::S8,
+        alias_range,
     });
     if track_change {
         let high_changed = ctx.alloc_vreg(SpillDesc::transient());
@@ -3879,6 +6283,7 @@ fn emit_dynamic_wide_bitfield_store(
     byte_offset: VReg,
     bit_shift: VReg,
     width: usize,
+    alias_range: Option<MemoryAliasRange>,
     chunks: &[(VReg, usize)],
     track_change: bool,
 ) -> Option<VReg> {
@@ -3898,6 +6303,7 @@ fn emit_dynamic_wide_bitfield_store(
             bit_shift,
             chunk,
             logical_width,
+            alias_range,
             track_change,
         );
         changed = match (changed, chunk_changed) {
@@ -3925,6 +6331,10 @@ fn lower_instruction(
     inst: &SIRInstruction<RegionedAbsoluteAddr>,
     sir_block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
     sir_defs: &HashMap<RegisterId, usize>,
+    sparse_write_state: SparseWriteState,
+    sparse_chunk_state: SparseChunkState,
+    sparse_dirty_word_state: SparseChunkState,
+    sparse_metadata_action: SparseMetadataAction,
 ) {
     if let SIRInstruction::Commit(src, dst, _, _, _) = inst
         && src.region == crate::ir::SPARSE_WORKING_REGION
@@ -4184,7 +6594,7 @@ fn lower_instruction(
 
         SIRInstruction::Load(dst, addr, offset, width_bits) => {
             match offset {
-                SIROffset::Static(bit_offset) => {
+                SIROffset::Static(bit_offset) | SIROffset::PackedElements { bit_offset, .. } => {
                     ctx.reg_addrs.insert(*dst, (*addr, *bit_offset));
                 }
                 SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
@@ -4194,7 +6604,11 @@ fn lower_instruction(
             let vreg = ctx.reg_map.get(*dst);
 
             match offset {
-                SIROffset::Static(bit_off) => {
+                SIROffset::Static(bit_off)
+                | SIROffset::PackedElements {
+                    bit_offset: bit_off,
+                    ..
+                } => {
                     let intra_byte = ctx.static_byte_and_intra(addr, *bit_off).1;
                     let crosses_native_word = intra_byte + *width_bits > 64;
                     if intra_byte != 0 && (*width_bits > 64 || crosses_native_word) {
@@ -4326,14 +6740,38 @@ fn lower_instruction(
                             .copied()
                             .unwrap_or(*width_bits);
                         if var_width < *width_bits && var_width < 64 {
-                            let raw = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Load {
-                                dst: raw,
-                                base: BaseReg::SimState,
-                                offset: byte_off,
-                                size: op_size,
-                            });
-                            ctx.emit_and_imm(block, vreg, raw, mask_for_width(var_width));
+                            if !ctx.four_state
+                                && OpSize::from_bits(var_width).is_some()
+                                && let Some(load_size) =
+                                    ctx.full_static_load_size(addr, *bit_off, var_width)
+                            {
+                                // SIR may widen a whole-variable load even
+                                // though the physical variable still has a
+                                // native 8/16/32-bit representation. Loading
+                                // that representation already performs the
+                                // required zero extension; a wider load plus a
+                                // second truncating VReg only lengthens
+                                // allocation ranges and may read adjacent
+                                // packed state.
+                                ctx.spill_descs[vreg.0 as usize] =
+                                    SpillDesc::sim_state(*addr, *bit_off, var_width, false);
+                                block.push(MInst::Load {
+                                    dst: vreg,
+                                    base: BaseReg::SimState,
+                                    offset: byte_off,
+                                    size: load_size,
+                                });
+                                ctx.known_bits.insert(vreg, var_width);
+                            } else {
+                                let raw = ctx.alloc_vreg(SpillDesc::transient());
+                                block.push(MInst::Load {
+                                    dst: raw,
+                                    base: BaseReg::SimState,
+                                    offset: byte_off,
+                                    size: op_size,
+                                });
+                                ctx.emit_and_imm(block, vreg, raw, mask_for_width(var_width));
+                            }
                         } else {
                             block.push(MInst::Load {
                                 dst: vreg,
@@ -4372,19 +6810,45 @@ fn lower_instruction(
                     }
                 }
                 SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
-                    let offset_vreg = memory_offset_vreg(ctx, block, addr, offset);
-                    let offset_low_zero_bits = memory_offset_low_zero_bits(ctx, addr, offset);
+                    let full_element_size = ctx.full_element_access_size(addr, offset, *width_bits);
+                    let direct_byte_off = (*width_bits <= 64)
+                        .then(|| {
+                            recomposed_element_byte_offset(
+                                ctx, block, addr, offset, sir_block, sir_defs,
+                            )
+                            .or_else(|| direct_element_byte_offset(ctx, block, addr, offset))
+                        })
+                        .flatten();
+                    let offset_vreg = direct_byte_off
+                        .is_none()
+                        .then(|| memory_offset_vreg(ctx, block, addr, offset));
+                    let offset_low_zero_bits = if direct_byte_off.is_some() {
+                        3
+                    } else {
+                        memory_offset_low_zero_bits(ctx, addr, offset)
+                    };
                     let base_off = ctx.byte_offset(addr, 0);
+                    let value_alias_range = MemoryAliasRange::new(
+                        base_off,
+                        ctx.layout.plane_size(&addr.absolute_addr()),
+                    );
 
                     // Compute byte offset and intra-byte bit shift
-                    let byte_off = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::ShrImm {
-                        dst: byte_off,
-                        src: offset_vreg,
-                        imm: 3,
-                    });
+                    let byte_off = if let Some(byte_off) = direct_byte_off {
+                        byte_off
+                    } else {
+                        let byte_off = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::ShrImm {
+                            dst: byte_off,
+                            src: offset_vreg.expect("non-recomposed offset has a bit offset"),
+                            imm: 3,
+                        });
+                        byte_off
+                    };
                     let may_cross_native_word = *width_bits + 7 > 64 && offset_low_zero_bits < 3;
                     if *width_bits > 64 || may_cross_native_word {
+                        let offset_vreg =
+                            offset_vreg.expect("wide dynamic load requires a bit offset");
                         let chunks = lower_dynamic_wide_load_chunks(
                             ctx,
                             block,
@@ -4393,6 +6857,7 @@ fn lower_instruction(
                             offset_vreg,
                             offset_low_zero_bits,
                             *width_bits,
+                            value_alias_range,
                         );
                         if *width_bits > 64 {
                             ctx.set_wide_chunks(*dst, chunks);
@@ -4402,6 +6867,10 @@ fn lower_instruction(
 
                         if ctx.is_4state_var(addr) {
                             let mask_base_off = ctx.mask_byte_offset(addr, 0);
+                            let mask_alias_range = MemoryAliasRange::new(
+                                mask_base_off,
+                                ctx.layout.plane_size(&addr.absolute_addr()),
+                            );
                             let mask_chunks = lower_dynamic_wide_load_chunks(
                                 ctx,
                                 block,
@@ -4410,6 +6879,7 @@ fn lower_instruction(
                                 offset_vreg,
                                 offset_low_zero_bits,
                                 *width_bits,
+                                mask_alias_range,
                             );
                             if let Some(&(mask0, _)) = mask_chunks.first() {
                                 ctx.set_mask(*dst, mask0);
@@ -4428,23 +6898,42 @@ fn lower_instruction(
                         return;
                     }
                     if offset_low_zero_bits >= 3 {
-                        let load_size = ISelContext::op_size_for_width(*width_bits);
-                        let raw = ctx.alloc_vreg(SpillDesc::transient());
+                        let load_size = full_element_size
+                            .unwrap_or_else(|| ISelContext::op_size_for_width(*width_bits));
+                        let padded_full_element = full_element_size.is_some_and(|size| {
+                            ISelContext::access_size_has_padding(size, *width_bits)
+                        });
+                        let raw = if full_element_size.is_some() && !padded_full_element {
+                            vreg
+                        } else {
+                            ctx.alloc_vreg(SpillDesc::transient())
+                        };
                         block.push(MInst::LoadIndexed {
                             dst: raw,
                             base: BaseReg::SimState,
                             offset: base_off,
                             index: byte_off,
+                            scale: 1,
                             size: load_size,
+                            alias_range: value_alias_range,
                         });
-                        if *width_bits < 64 {
+                        if padded_full_element {
+                            ctx.emit_and_imm(block, vreg, raw, mask_for_width(*width_bits));
+                        } else if full_element_size.is_some() {
+                            ctx.known_bits.insert(vreg, *width_bits);
+                        } else if *width_bits < 64 {
                             ctx.emit_and_imm(block, vreg, raw, mask_for_width(*width_bits));
                         } else {
                             ctx.emit_mov(block, vreg, raw);
                         }
                     } else {
                         let bit_shift = ctx.alloc_vreg(SpillDesc::transient());
-                        ctx.emit_and_imm(block, bit_shift, offset_vreg, 7);
+                        ctx.emit_and_imm(
+                            block,
+                            bit_shift,
+                            offset_vreg.expect("unaligned dynamic load requires a bit offset"),
+                            7,
+                        );
 
                         // Load containing word at [sim + base_off + byte_off]
                         // Use a slightly larger load to account for bit_shift
@@ -4455,7 +6944,9 @@ fn lower_instruction(
                             base: BaseReg::SimState,
                             offset: base_off,
                             index: byte_off,
+                            scale: 1,
                             size: load_size,
+                            alias_range: value_alias_range,
                         });
 
                         // Shift right by bit_shift (dynamic)
@@ -4480,7 +6971,11 @@ fn lower_instruction(
             // 4-state: load mask from memory (narrow path; wide handled above in early-return)
             if ctx.is_4state_var(addr) {
                 match offset {
-                    SIROffset::Static(bit_off) => {
+                    SIROffset::Static(bit_off)
+                    | SIROffset::PackedElements {
+                        bit_offset: bit_off,
+                        ..
+                    } => {
                         if *width_bits <= 64 {
                             let mask_off = ctx.mask_byte_offset(addr, *bit_off);
                             let intra_byte = ctx.static_byte_and_intra(addr, *bit_off).1;
@@ -4550,8 +7045,14 @@ fn lower_instruction(
                     }
                     SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
                         // Dynamic: load mask similarly with indexed addressing
+                        let full_element_size =
+                            ctx.full_element_access_size(addr, offset, *width_bits);
                         let offset_vreg = memory_offset_vreg(ctx, block, addr, offset);
                         let mask_base_off = ctx.mask_byte_offset(addr, 0);
+                        let mask_alias_range = MemoryAliasRange::new(
+                            mask_base_off,
+                            ctx.layout.plane_size(&addr.absolute_addr()),
+                        );
                         let byte_off = ctx.alloc_vreg(SpillDesc::transient());
                         block.push(MInst::ShrImm {
                             dst: byte_off,
@@ -4559,17 +7060,31 @@ fn lower_instruction(
                             imm: 3,
                         });
                         if memory_offset_low_zero_bits(ctx, addr, offset) >= 3 {
-                            let load_size = ISelContext::op_size_for_width(*width_bits);
-                            let raw = ctx.alloc_vreg(SpillDesc::transient());
+                            let load_size = full_element_size
+                                .unwrap_or_else(|| ISelContext::op_size_for_width(*width_bits));
+                            let mvreg = ctx.alloc_vreg(SpillDesc::transient());
+                            let padded_full_element = full_element_size.is_some_and(|size| {
+                                ISelContext::access_size_has_padding(size, *width_bits)
+                            });
+                            let raw = if full_element_size.is_some() && !padded_full_element {
+                                mvreg
+                            } else {
+                                ctx.alloc_vreg(SpillDesc::transient())
+                            };
                             block.push(MInst::LoadIndexed {
                                 dst: raw,
                                 base: BaseReg::SimState,
                                 offset: mask_base_off,
                                 index: byte_off,
+                                scale: 1,
                                 size: load_size,
+                                alias_range: mask_alias_range,
                             });
-                            let mvreg = ctx.alloc_vreg(SpillDesc::transient());
-                            if *width_bits < 64 {
+                            if padded_full_element {
+                                ctx.emit_and_imm(block, mvreg, raw, mask_for_width(*width_bits));
+                            } else if full_element_size.is_some() {
+                                ctx.known_bits.insert(mvreg, *width_bits);
+                            } else if *width_bits < 64 {
                                 ctx.emit_and_imm(block, mvreg, raw, mask_for_width(*width_bits));
                             } else {
                                 ctx.emit_mov(block, mvreg, raw);
@@ -4586,7 +7101,9 @@ fn lower_instruction(
                             base: BaseReg::SimState,
                             offset: mask_base_off,
                             index: byte_off,
+                            scale: 1,
                             size: load_size,
+                            alias_range: mask_alias_range,
                         });
                         let shifted = ctx.alloc_vreg(SpillDesc::transient());
                         block.push(MInst::Shr {
@@ -4624,11 +7141,22 @@ fn lower_instruction(
                 *src_reg,
                 triggers,
                 comb_capture_sites,
+                sparse_write_state,
             ) {
                 return;
             }
             if addr.region == crate::ir::SPARSE_WORKING_REGION && *width_bits != 0 {
-                prepare_sparse_store(ctx, block, addr, offset, *width_bits);
+                prepare_sparse_store(
+                    ctx,
+                    block,
+                    addr,
+                    offset,
+                    *width_bits,
+                    sparse_write_state,
+                    sparse_chunk_state,
+                    sparse_dirty_word_state,
+                    sparse_metadata_action,
+                );
             }
             // width=0: identity Store optimized away; only emit triggers.
             if *width_bits == 0 {
@@ -4716,7 +7244,11 @@ fn lower_instruction(
                     None
                 } else {
                     match offset {
-                        SIROffset::Static(bit_off) => {
+                        SIROffset::Static(bit_off)
+                        | SIROffset::PackedElements {
+                            bit_offset: bit_off,
+                            ..
+                        } => {
                             let intra = ctx.static_byte_and_intra(addr, *bit_off).1;
                             let containing_byte_off = ctx.byte_offset(addr, *bit_off);
                             let size = ISelContext::op_size_for_width(*width_bits + intra);
@@ -4753,7 +7285,11 @@ fn lower_instruction(
                     None
                 } else {
                     match offset {
-                        SIROffset::Static(bit_off) => {
+                        SIROffset::Static(bit_off)
+                        | SIROffset::PackedElements {
+                            bit_offset: bit_off,
+                            ..
+                        } => {
                             let intra = ctx.static_byte_and_intra(addr, *bit_off).1;
                             let containing_byte_off = ctx.mask_byte_offset(addr, *bit_off);
                             let size = ISelContext::op_size_for_width(*width_bits + intra);
@@ -4787,7 +7323,11 @@ fn lower_instruction(
                     Vec::new()
                 };
                 match offset {
-                    SIROffset::Static(bit_off) => {
+                    SIROffset::Static(bit_off)
+                    | SIROffset::PackedElements {
+                        bit_offset: bit_off,
+                        ..
+                    } => {
                         // Check for wide value from Concat
                         if *width_bits > 64 {
                             if let Some(chunks) = ctx.wide_regs.get(src_reg).cloned() {
@@ -4938,7 +7478,15 @@ fn lower_instruction(
                                         size: load_size,
                                     });
 
-                                    let new_word = ctx.alloc_vreg(SpillDesc::transient());
+                                    let descriptor = if consumed == 0 && part_width == *width_bits {
+                                        SpillDesc::transient()
+                                            .with_state_insert(src_vreg, intra, part_width)
+                                    } else {
+                                        SpillDesc::transient().with_state_insert_fragment(
+                                            src_vreg, consumed, intra, part_width,
+                                        )
+                                    };
+                                    let new_word = ctx.alloc_vreg(descriptor);
                                     ctx.emit_bfi(
                                         block,
                                         new_word,
@@ -4962,10 +7510,16 @@ fn lower_instruction(
                     }
                     SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
                         // Dynamic offset store: RMW with register-indexed addressing.
+                        let full_element_size =
+                            ctx.full_element_access_size(addr, offset, *width_bits);
                         let src_vreg = ctx.reg_map.get(*src_reg);
                         let offset_vreg = memory_offset_vreg(ctx, block, addr, offset);
                         let offset_low_zero_bits = memory_offset_low_zero_bits(ctx, addr, offset);
                         let base_off = ctx.byte_offset(addr, 0);
+                        let value_alias_range = MemoryAliasRange::new(
+                            base_off,
+                            ctx.layout.plane_size(&addr.absolute_addr()),
+                        );
 
                         let byte_off = ctx.alloc_vreg(SpillDesc::transient());
                         block.push(MInst::ShrImm {
@@ -4981,6 +7535,7 @@ fn lower_instruction(
                                 base_off,
                                 byte_off,
                                 *width_bits,
+                                value_alias_range,
                                 &chunks,
                             );
                         } else if *width_bits > 64 {
@@ -4994,6 +7549,7 @@ fn lower_instruction(
                                 byte_off,
                                 bit_shift,
                                 *width_bits,
+                                value_alias_range,
                                 &chunks,
                                 !comb_capture_sites.is_empty(),
                             ) {
@@ -5005,7 +7561,8 @@ fn lower_instruction(
                                 );
                             }
                         } else if offset_low_zero_bits >= 3
-                            && let Some(store_size) = OpSize::from_bits(*width_bits)
+                            && let Some(store_size) =
+                                full_element_size.or_else(|| OpSize::from_bits(*width_bits))
                         {
                             let store_src = if *width_bits < 64 {
                                 let masked = ctx.alloc_vreg(SpillDesc::transient());
@@ -5028,7 +7585,9 @@ fn lower_instruction(
                                     base: BaseReg::SimState,
                                     offset: base_off,
                                     index: byte_off,
+                                    scale: 1,
                                     size: store_size,
+                                    alias_range: value_alias_range,
                                 });
                                 Some(old)
                             };
@@ -5038,6 +7597,7 @@ fn lower_instruction(
                                 index: byte_off,
                                 src: store_src,
                                 size: store_size,
+                                alias_range: value_alias_range,
                             });
                             if let Some(old_word) = old_word {
                                 let changed = ctx.alloc_vreg(SpillDesc::transient());
@@ -5065,6 +7625,7 @@ fn lower_instruction(
                                 bit_shift,
                                 src_vreg,
                                 *width_bits,
+                                value_alias_range,
                                 !comb_capture_sites.is_empty(),
                             ) {
                                 emit_enable_comb_capture_sites(
@@ -5082,7 +7643,11 @@ fn lower_instruction(
                 if ctx.is_4state_var(addr) {
                     let mask_vreg = ctx.get_mask(*src_reg, block);
                     match offset {
-                        SIROffset::Static(bit_off) => {
+                        SIROffset::Static(bit_off)
+                        | SIROffset::PackedElements {
+                            bit_offset: bit_off,
+                            ..
+                        } => {
                             if *width_bits > 64 {
                                 // Wide mask store: chunk-by-chunk
                                 if let Some(mchunks) = ctx.wide_masks.get(src_reg).cloned() {
@@ -5209,7 +7774,16 @@ fn lower_instruction(
                                             offset: containing_off,
                                             size: load_size,
                                         });
-                                        let new_word = ctx.alloc_vreg(SpillDesc::transient());
+                                        let descriptor =
+                                            if consumed == 0 && part_width == *width_bits {
+                                                SpillDesc::transient()
+                                                    .with_state_insert(mask_vreg, intra, part_width)
+                                            } else {
+                                                SpillDesc::transient().with_state_insert_fragment(
+                                                    mask_vreg, consumed, intra, part_width,
+                                                )
+                                            };
+                                        let new_word = ctx.alloc_vreg(descriptor);
                                         ctx.emit_bfi(
                                             block,
                                             new_word,
@@ -5232,10 +7806,16 @@ fn lower_instruction(
                         SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
                             // Dynamic mask store: same RMW pattern as value store,
                             // but targeting the mask memory region.
+                            let full_element_size =
+                                ctx.full_element_access_size(addr, offset, *width_bits);
                             let offset_vreg = memory_offset_vreg(ctx, block, addr, offset);
                             let offset_low_zero_bits =
                                 memory_offset_low_zero_bits(ctx, addr, offset);
                             let mask_base_off = ctx.mask_byte_offset(addr, 0);
+                            let mask_alias_range = MemoryAliasRange::new(
+                                mask_base_off,
+                                ctx.layout.plane_size(&addr.absolute_addr()),
+                            );
 
                             let m_byte_off = ctx.alloc_vreg(SpillDesc::transient());
                             block.push(MInst::ShrImm {
@@ -5260,6 +7840,7 @@ fn lower_instruction(
                                     mask_base_off,
                                     m_byte_off,
                                     *width_bits,
+                                    mask_alias_range,
                                     &mask_chunks,
                                 );
                             } else if *width_bits > 64 {
@@ -5281,6 +7862,7 @@ fn lower_instruction(
                                     m_byte_off,
                                     m_bit_shift,
                                     *width_bits,
+                                    mask_alias_range,
                                     &mask_chunks,
                                     !comb_capture_sites.is_empty(),
                                 ) {
@@ -5292,7 +7874,8 @@ fn lower_instruction(
                                     );
                                 }
                             } else if offset_low_zero_bits >= 3
-                                && let Some(store_size) = OpSize::from_bits(*width_bits)
+                                && let Some(store_size) =
+                                    full_element_size.or_else(|| OpSize::from_bits(*width_bits))
                             {
                                 let store_src = if *width_bits < 64 {
                                     let masked = ctx.alloc_vreg(SpillDesc::transient());
@@ -5312,6 +7895,7 @@ fn lower_instruction(
                                     index: m_byte_off,
                                     src: store_src,
                                     size: store_size,
+                                    alias_range: mask_alias_range,
                                 });
                             } else {
                                 let m_bit_shift = ctx.alloc_vreg(SpillDesc::transient());
@@ -5324,6 +7908,7 @@ fn lower_instruction(
                                     m_bit_shift,
                                     mask_vreg,
                                     *width_bits,
+                                    mask_alias_range,
                                     !comb_capture_sites.is_empty(),
                                 ) {
                                     emit_enable_comb_capture_sites(
@@ -5492,11 +8077,27 @@ fn lower_instruction(
                 });
             } else {
                 match offset {
-                    SIROffset::Static(bit_off) => {
+                    SIROffset::Static(bit_off)
+                    | SIROffset::PackedElements {
+                        bit_offset: bit_off,
+                        ..
+                    } => {
                         let (src_byte_off, intra) = ctx.static_byte_and_intra(src_addr, *bit_off);
                         let (dst_byte_off, dst_intra) =
                             ctx.static_byte_and_intra(dst_addr, *bit_off);
-                        if intra == 0 && dst_intra == 0 && width_bits % 8 == 0 && *width_bits >= 512
+                        let packed_layouts = !ctx
+                            .layout
+                            .unpacked_arrays
+                            .contains_key(&src_addr.absolute_addr())
+                            && !ctx
+                                .layout
+                                .unpacked_arrays
+                                .contains_key(&dst_addr.absolute_addr());
+                        if packed_layouts
+                            && intra == 0
+                            && dst_intra == 0
+                            && width_bits % 8 == 0
+                            && *width_bits >= 512
                         {
                             block.push(MInst::MemCopy {
                                 src_offset: src_byte_off,
@@ -5504,62 +8105,15 @@ fn lower_instruction(
                                 byte_len: width_bits / 8,
                             });
                         } else {
-                            let mut copied = 0usize;
-                            while copied < *width_bits {
-                                let part_bit_off = *bit_off + copied;
-                                let intra = ctx.static_byte_and_intra(src_addr, part_bit_off).1;
-                                let part_width = (*width_bits - copied).min(64 - intra);
-                                let load_size = ISelContext::op_size_for_width(part_width + intra);
-                                let containing_src = ctx.byte_offset(src_addr, part_bit_off);
-                                let containing_dst = ctx.byte_offset(dst_addr, part_bit_off);
-
-                                let raw = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::Load {
-                                    dst: raw,
-                                    base: BaseReg::SimState,
-                                    offset: containing_src,
-                                    size: load_size,
-                                });
-
-                                let shifted = if intra > 0 {
-                                    let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                                    block.push(MInst::ShrImm {
-                                        dst: shifted,
-                                        src: raw,
-                                        imm: intra as u8,
-                                    });
-                                    shifted
-                                } else {
-                                    raw
-                                };
-                                let value = ctx.alloc_vreg(SpillDesc::transient());
-                                ctx.emit_and_imm(block, value, shifted, mask_for_width(part_width));
-
-                                let old = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::Load {
-                                    dst: old,
-                                    base: BaseReg::SimState,
-                                    offset: containing_dst,
-                                    size: load_size,
-                                });
-                                let new = ctx.alloc_vreg(SpillDesc::transient());
-                                ctx.emit_bfi(
-                                    block,
-                                    new,
-                                    old,
-                                    value,
-                                    intra as u8,
-                                    mask_for_width(part_width),
-                                );
-                                block.push(MInst::Store {
-                                    base: BaseReg::SimState,
-                                    offset: containing_dst,
-                                    src: new,
-                                    size: load_size,
-                                });
-
-                                copied += part_width;
-                            }
+                            emit_static_commit_plane(
+                                ctx,
+                                block,
+                                src_addr,
+                                dst_addr,
+                                *bit_off,
+                                *width_bits,
+                                false,
+                            );
                         }
                     }
                     SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
@@ -5597,7 +8151,12 @@ fn lower_instruction(
                                 base: BaseReg::SimState,
                                 offset: src_base_off + copied as i32,
                                 index: byte_off,
+                                scale: 1,
                                 size: chunk_size,
+                                alias_range: MemoryAliasRange::new(
+                                    src_base_off,
+                                    ctx.layout.plane_size(&src_addr.absolute_addr()),
+                                ),
                             });
                             block.push(MInst::StoreIndexed {
                                 base: BaseReg::SimState,
@@ -5605,6 +8164,10 @@ fn lower_instruction(
                                 index: byte_off,
                                 src: tmp,
                                 size: chunk_size,
+                                alias_range: MemoryAliasRange::new(
+                                    dst_base_off,
+                                    ctx.layout.plane_size(&dst_addr.absolute_addr()),
+                                ),
                             });
                             copied += chunk_size.bytes() as usize;
                         }
@@ -5622,12 +8185,25 @@ fn lower_instruction(
                     });
                 } else {
                     match offset {
-                        SIROffset::Static(bit_off) => {
+                        SIROffset::Static(bit_off)
+                        | SIROffset::PackedElements {
+                            bit_offset: bit_off,
+                            ..
+                        } => {
                             let (src_value_off, intra) =
                                 ctx.static_byte_and_intra(src_addr, *bit_off);
                             let (dst_value_off, dst_intra) =
                                 ctx.static_byte_and_intra(dst_addr, *bit_off);
-                            if intra == 0
+                            let packed_layouts = !ctx
+                                .layout
+                                .unpacked_arrays
+                                .contains_key(&src_addr.absolute_addr())
+                                && !ctx
+                                    .layout
+                                    .unpacked_arrays
+                                    .contains_key(&dst_addr.absolute_addr());
+                            if packed_layouts
+                                && intra == 0
                                 && dst_intra == 0
                                 && width_bits % 8 == 0
                                 && *width_bits >= 512
@@ -5642,69 +8218,15 @@ fn lower_instruction(
                                     byte_len: width_bits / 8,
                                 });
                             } else {
-                                let mut copied = 0usize;
-                                while copied < *width_bits {
-                                    let part_bit_off = *bit_off + copied;
-                                    let intra = ctx.static_byte_and_intra(src_addr, part_bit_off).1;
-                                    let part_width = (*width_bits - copied).min(64 - intra);
-                                    let load_size =
-                                        ISelContext::op_size_for_width(part_width + intra);
-                                    let containing_src =
-                                        ctx.mask_byte_offset(src_addr, part_bit_off);
-                                    let containing_dst =
-                                        ctx.mask_byte_offset(dst_addr, part_bit_off);
-
-                                    let raw = ctx.alloc_vreg(SpillDesc::transient());
-                                    block.push(MInst::Load {
-                                        dst: raw,
-                                        base: BaseReg::SimState,
-                                        offset: containing_src,
-                                        size: load_size,
-                                    });
-                                    let shifted = if intra > 0 {
-                                        let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                                        block.push(MInst::ShrImm {
-                                            dst: shifted,
-                                            src: raw,
-                                            imm: intra as u8,
-                                        });
-                                        shifted
-                                    } else {
-                                        raw
-                                    };
-                                    let value = ctx.alloc_vreg(SpillDesc::transient());
-                                    ctx.emit_and_imm(
-                                        block,
-                                        value,
-                                        shifted,
-                                        mask_for_width(part_width),
-                                    );
-
-                                    let old = ctx.alloc_vreg(SpillDesc::transient());
-                                    block.push(MInst::Load {
-                                        dst: old,
-                                        base: BaseReg::SimState,
-                                        offset: containing_dst,
-                                        size: load_size,
-                                    });
-                                    let new = ctx.alloc_vreg(SpillDesc::transient());
-                                    ctx.emit_bfi(
-                                        block,
-                                        new,
-                                        old,
-                                        value,
-                                        intra as u8,
-                                        mask_for_width(part_width),
-                                    );
-                                    block.push(MInst::Store {
-                                        base: BaseReg::SimState,
-                                        offset: containing_dst,
-                                        src: new,
-                                        size: load_size,
-                                    });
-
-                                    copied += part_width;
-                                }
+                                emit_static_commit_plane(
+                                    ctx,
+                                    block,
+                                    src_addr,
+                                    dst_addr,
+                                    *bit_off,
+                                    *width_bits,
+                                    true,
+                                );
                             }
                         }
                         SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
@@ -5736,7 +8258,12 @@ fn lower_instruction(
                                     base: BaseReg::SimState,
                                     offset: src_mask_base + copied as i32,
                                     index: byte_off,
+                                    scale: 1,
                                     size: cs,
+                                    alias_range: MemoryAliasRange::new(
+                                        src_mask_base,
+                                        ctx.layout.plane_size(&src_addr.absolute_addr()),
+                                    ),
                                 });
                                 block.push(MInst::StoreIndexed {
                                     base: BaseReg::SimState,
@@ -5744,6 +8271,10 @@ fn lower_instruction(
                                     index: byte_off,
                                     src: tmp,
                                     size: cs,
+                                    alias_range: MemoryAliasRange::new(
+                                        dst_mask_base,
+                                        ctx.layout.plane_size(&dst_addr.absolute_addr()),
+                                    ),
                                 });
                                 copied += cs.bytes() as usize;
                             }
@@ -5760,6 +8291,22 @@ fn lower_instruction(
             debug_assert!(lhs_width > 64 || !ctx.wide_regs.contains_key(lhs));
             debug_assert!(rhs_width > 64 || !ctx.wide_regs.contains_key(rhs));
 
+            // A constant logical shift whose wide source is consumed as one
+            // narrow result is an extraction, not a full-width shift. Select
+            // it before the generic wide dispatcher; otherwise that path
+            // constructs every shifted source chunk and only afterwards drops
+            // all but the low destination bits.
+            if !ctx.four_state
+                && d_width <= 64
+                && lhs_width > 64
+                && rhs_width <= 64
+                && matches!(op, BinaryOp::Shr)
+                && ctx.consts.contains_key(rhs)
+            {
+                lower_wide_extract(ctx, block, *dst, *lhs, *rhs);
+                return;
+            }
+
             // Wide (>64-bit) binary operations: dispatch to multi-word handler.
             // For comparisons/logic, the result may be narrow (1 bit) but the
             // operands can be wide — dispatch based on operand width too.
@@ -5769,6 +8316,7 @@ fn lower_instruction(
                     lower_wide_binary_mask(ctx, block, *dst, *lhs, op, *rhs, d_width);
                     normalize_wide_value(ctx, block, *dst);
                 }
+                ctx.canonicalize_narrow_wide_result(block, *dst);
                 return;
             }
             // Constant folding: if both operands are known constants, compute result
@@ -5933,13 +8481,6 @@ fn lower_instruction(
                     set_low_zero_bits(ctx, *dst, lz);
                 }
                 BinaryOp::Shr => {
-                    // Check for wide-to-narrow extraction: lhs is >64 bits, dst is ≤64 bits
-                    let lhs_width = ctx.sir_width(lhs);
-                    if lhs_width > 64 {
-                        lower_wide_extract(ctx, block, *dst, *lhs, *rhs);
-                        return;
-                    }
-
                     let shifted = ctx.alloc_vreg(SpillDesc::transient());
                     if let Some(&shift_amt) = ctx.consts.get(rhs) {
                         if shift_amt < 64 {
@@ -6454,6 +8995,7 @@ fn lower_instruction(
                         normalize_wide_value(ctx, block, *dst);
                     }
                 }
+                ctx.canonicalize_narrow_wide_result(block, *dst);
                 return;
             }
             let dst_vreg = ctx.reg_map.get(*dst);
@@ -6605,6 +9147,9 @@ fn lower_instruction(
             if try_lower_concat_of_muxes(ctx, block, *dst, args, sir_block, sir_defs) {
                 return;
             }
+            if try_lower_repeated_msb_concat(ctx, block, *dst, args) {
+                return;
+            }
 
             // Concat: build a wide value from chunks.
             // For ≤64-bit result, shift and OR the pieces together.
@@ -6691,7 +9236,6 @@ fn lower_instruction(
                 // then repack into uniform 64-bit chunks so Slice can use
                 // bit_offset / 64 for indexing.
                 let total_width = args.iter().map(|a| ctx.sir_width(a)).sum::<usize>();
-                let n_dst_chunks = ISelContext::num_chunks(total_width);
 
                 // Collect a flat bit stream: list of (vreg, width) in LSB-first order
                 let mut flat_bits: Vec<(VReg, usize)> = Vec::new();
@@ -6708,84 +9252,7 @@ fn lower_instruction(
                     }
                 }
 
-                // Repack into 64-bit uniform chunks via shift+or
-                let mut dst_chunks: Vec<(VReg, usize)> = Vec::new();
-                let mut _bit_pos = 0usize; // current position in the flat stream
-                let mut flat_idx = 0usize;
-                let mut flat_consumed = 0usize; // bits consumed from flat_bits[flat_idx]
-
-                for chunk_i in 0..n_dst_chunks {
-                    let chunk_width = if chunk_i == n_dst_chunks - 1 {
-                        let rem = total_width % 64;
-                        if rem == 0 { 64 } else { rem }
-                    } else {
-                        64
-                    };
-
-                    let mut acc = ctx.alloc_vreg(SpillDesc::remat(0));
-                    block.push(MInst::LoadImm { dst: acc, value: 0 });
-                    let mut acc_pos = 0usize;
-
-                    while acc_pos < chunk_width && flat_idx < flat_bits.len() {
-                        let (fv, fw) = flat_bits[flat_idx];
-                        let remaining_in_flat = fw - flat_consumed;
-                        let need = chunk_width - acc_pos;
-                        let take = remaining_in_flat.min(need);
-
-                        // Extract `take` bits from fv starting at flat_consumed
-                        let mut piece = fv;
-                        if flat_consumed > 0 {
-                            let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::ShrImm {
-                                dst: shifted,
-                                src: piece,
-                                imm: flat_consumed as u8,
-                            });
-                            piece = shifted;
-                        }
-                        if take < 64 {
-                            let masked = ctx.alloc_vreg(SpillDesc::transient());
-                            ctx.emit_and_imm(block, masked, piece, mask_for_width(take));
-                            piece = masked;
-                        }
-
-                        // Place into acc at acc_pos
-                        if acc_pos > 0 {
-                            let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::ShlImm {
-                                dst: shifted,
-                                src: piece,
-                                imm: acc_pos as u8,
-                            });
-                            let merged = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Or {
-                                dst: merged,
-                                lhs: acc,
-                                rhs: shifted,
-                            });
-                            acc = merged;
-                        } else {
-                            let merged = ctx.alloc_vreg(SpillDesc::transient());
-                            block.push(MInst::Or {
-                                dst: merged,
-                                lhs: acc,
-                                rhs: piece,
-                            });
-                            acc = merged;
-                        }
-
-                        acc_pos += take;
-                        flat_consumed += take;
-                        if flat_consumed >= fw {
-                            flat_idx += 1;
-                            flat_consumed = 0;
-                        }
-                    }
-
-                    dst_chunks.push((acc, chunk_width));
-                    _bit_pos += chunk_width;
-                }
-
+                let dst_chunks = lower_flat_concat_to_chunks(ctx, block, flat_bits, total_width);
                 ctx.set_wide_chunks(*dst, dst_chunks);
 
                 // 4-state: repack mask chunks the same way
@@ -6815,71 +9282,8 @@ fn lower_instruction(
                         }
                     }
 
-                    // Repack masks into uniform 64-bit chunks (same algorithm as values)
-                    let mut dst_m_chunks: Vec<(VReg, usize)> = Vec::new();
-                    let mut mf_idx = 0usize;
-                    let mut mf_consumed = 0usize;
-                    for chunk_i in 0..n_dst_chunks {
-                        let chunk_width = if chunk_i == n_dst_chunks - 1 {
-                            let rem = total_width % 64;
-                            if rem == 0 { 64 } else { rem }
-                        } else {
-                            64
-                        };
-                        let mut acc = ctx.alloc_vreg(SpillDesc::remat(0));
-                        block.push(MInst::LoadImm { dst: acc, value: 0 });
-                        let mut ap = 0usize;
-                        while ap < chunk_width && mf_idx < mask_flat.len() {
-                            let (fv, fw) = mask_flat[mf_idx];
-                            let rem = fw - mf_consumed;
-                            let take = rem.min(chunk_width - ap);
-                            let mut piece = fv;
-                            if mf_consumed > 0 {
-                                let s = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::ShrImm {
-                                    dst: s,
-                                    src: piece,
-                                    imm: mf_consumed as u8,
-                                });
-                                piece = s;
-                            }
-                            if take < 64 {
-                                let m = ctx.alloc_vreg(SpillDesc::transient());
-                                ctx.emit_and_imm(block, m, piece, mask_for_width(take));
-                                piece = m;
-                            }
-                            if ap > 0 {
-                                let s = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::ShlImm {
-                                    dst: s,
-                                    src: piece,
-                                    imm: ap as u8,
-                                });
-                                let mg = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::Or {
-                                    dst: mg,
-                                    lhs: acc,
-                                    rhs: s,
-                                });
-                                acc = mg;
-                            } else {
-                                let mg = ctx.alloc_vreg(SpillDesc::transient());
-                                block.push(MInst::Or {
-                                    dst: mg,
-                                    lhs: acc,
-                                    rhs: piece,
-                                });
-                                acc = mg;
-                            }
-                            ap += take;
-                            mf_consumed += take;
-                            if mf_consumed >= fw {
-                                mf_idx += 1;
-                                mf_consumed = 0;
-                            }
-                        }
-                        dst_m_chunks.push((acc, chunk_width));
-                    }
+                    let dst_m_chunks =
+                        lower_flat_concat_to_chunks(ctx, block, mask_flat, total_width);
                     ctx.set_mask(*dst, dst_m_chunks[0].0);
                     ctx.wide_masks.insert(*dst, dst_m_chunks);
                 }
@@ -7124,6 +9528,105 @@ fn lower_sir_bool_value(
     Some(lower_bool_value(ctx, block, raw))
 }
 
+/// Lower a machine-word concat whose high part is a repeated one-bit value.
+///
+/// HDL sign extension commonly reaches SIR as
+///
+/// ```text
+/// Concat([sign, sign, ..., sign, low_bits])
+/// ```
+///
+/// Expanding that literally emits one shift and one OR per repeated bit. A
+/// one-bit value is exactly zero or one in each value/mask plane, so negating
+/// it creates the required all-zero/all-one fill word. Shifting that fill to
+/// the high part and ORing the low value implements the complete concat with
+/// constant work. Keep this rule at the native 64-bit boundary; narrower
+/// results require an additional canonical-width mask and wider values use the
+/// normal chunk lowering.
+fn try_lower_repeated_msb_concat(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    dst: RegisterId,
+    args: &[RegisterId],
+) -> bool {
+    const MIN_REPEATED_BITS: usize = 4;
+
+    if ctx.sir_width(&dst) != 64 || args.len() <= MIN_REPEATED_BITS {
+        return false;
+    }
+
+    let repeated = args[0];
+    let suffix = *args.last().expect("non-empty concat");
+    let repeated_bits = args.len() - 1;
+    let suffix_width = ctx.sir_width(&suffix);
+    if ctx.sir_width(&repeated) != 1
+        || repeated_bits < MIN_REPEATED_BITS
+        || repeated_bits + suffix_width != 64
+        || !args[..repeated_bits]
+            .iter()
+            .all(|candidate| *candidate == repeated)
+    {
+        return false;
+    }
+
+    fn lower_plane(
+        ctx: &mut ISelContext,
+        block: &mut MBlock,
+        repeated: VReg,
+        suffix: VReg,
+        suffix_width: usize,
+        destination: Option<VReg>,
+    ) -> VReg {
+        if repeated == suffix && suffix_width == 1 {
+            let result = destination.unwrap_or_else(|| ctx.alloc_vreg(SpillDesc::transient()));
+            block.push(MInst::Neg {
+                dst: result,
+                src: repeated,
+            });
+            return result;
+        }
+
+        let fill = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Neg {
+            dst: fill,
+            src: repeated,
+        });
+        let high = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::ShlImm {
+            dst: high,
+            src: fill,
+            imm: suffix_width as u8,
+        });
+        let result = destination.unwrap_or_else(|| ctx.alloc_vreg(SpillDesc::transient()));
+        block.push(MInst::Or {
+            dst: result,
+            lhs: suffix,
+            rhs: high,
+        });
+        result
+    }
+
+    let destination = ctx.reg_map.get(dst);
+    let value = lower_plane(
+        ctx,
+        block,
+        ctx.reg_map.get(repeated),
+        ctx.reg_map.get(suffix),
+        suffix_width,
+        Some(destination),
+    );
+    debug_assert_eq!(value, destination);
+
+    if ctx.four_state {
+        let repeated_mask = ctx.get_mask(repeated, block);
+        let suffix_mask = ctx.get_mask(suffix, block);
+        let result_mask = lower_plane(ctx, block, repeated_mask, suffix_mask, suffix_width, None);
+        ctx.set_mask(dst, result_mask);
+    }
+
+    true
+}
+
 fn try_lower_concat_of_muxes(
     ctx: &mut ISelContext,
     block: &mut MBlock,
@@ -7204,7 +9707,6 @@ fn lower_concat_parts_to_chunks(
     parts: &[(RegisterId, usize)],
     total_width: usize,
 ) -> Vec<(VReg, usize)> {
-    let n_dst_chunks = ISelContext::num_chunks(total_width);
     let mut flat_bits: Vec<(VReg, usize)> = Vec::with_capacity(parts.len());
     for &(reg, width) in parts.iter().rev() {
         if width > 64 || ctx.wide_regs.contains_key(&reg) {
@@ -7224,6 +9726,79 @@ fn lower_concat_parts_to_chunks(
         }
     }
 
+    lower_flat_concat_to_chunks(ctx, block, flat_bits, total_width)
+}
+
+/// Replace an adjacent run of the same canonical one-bit value by one fill
+/// word.  The rewrite is in-place: its output never has more parts than its
+/// input, including runs longer than one machine word.
+fn collapse_repeated_single_bit_concat_parts(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    mut parts: Vec<(VReg, usize)>,
+) -> Vec<(VReg, usize)> {
+    const MIN_REPEATED_BITS: usize = 4;
+
+    let mut read = 0usize;
+    let mut write = 0usize;
+    while read < parts.len() {
+        let (source, width) = parts[read];
+        if width != 1 {
+            parts[write] = parts[read];
+            read += 1;
+            write += 1;
+            continue;
+        }
+
+        let mut run_end = read + 1;
+        while run_end < parts.len() && parts[run_end] == (source, 1) {
+            run_end += 1;
+        }
+        let run_width = run_end - read;
+        if run_width < MIN_REPEATED_BITS {
+            while read < run_end {
+                parts[write] = parts[read];
+                read += 1;
+                write += 1;
+            }
+            continue;
+        }
+
+        let fill = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Neg {
+            dst: fill,
+            src: source,
+        });
+        let mut remaining = run_width;
+        while remaining != 0 {
+            let take = remaining.min(64);
+            parts[write] = (fill, take);
+            write += 1;
+            remaining -= take;
+        }
+        read = run_end;
+    }
+    parts.truncate(write);
+    parts
+}
+
+/// Repack an LSB-first stream of at-most-machine-word pieces into canonical
+/// 64-bit chunks.  Each source part is consumed once, so lowering is linear in
+/// the number of concat parts plus produced chunks.
+fn lower_flat_concat_to_chunks(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    flat_bits: Vec<(VReg, usize)>,
+    total_width: usize,
+) -> Vec<(VReg, usize)> {
+    let flat_bits = collapse_repeated_single_bit_concat_parts(ctx, block, flat_bits);
+    debug_assert_eq!(
+        flat_bits.iter().map(|(_, width)| *width).sum::<usize>(),
+        total_width
+    );
+    debug_assert!(flat_bits.iter().all(|(_, width)| (1..=64).contains(width)));
+
+    let n_dst_chunks = ISelContext::num_chunks(total_width);
     let mut dst_chunks = Vec::with_capacity(n_dst_chunks);
     let mut flat_idx = 0usize;
     let mut flat_consumed = 0usize;
@@ -7236,8 +9811,7 @@ fn lower_concat_parts_to_chunks(
             64
         };
 
-        let mut acc = ctx.alloc_vreg(SpillDesc::remat(0));
-        block.push(MInst::LoadImm { dst: acc, value: 0 });
+        let mut acc = None;
         let mut acc_pos = 0usize;
 
         while acc_pos < chunk_width && flat_idx < flat_bits.len() {
@@ -7272,13 +9846,18 @@ fn lower_concat_parts_to_chunks(
                 piece = shifted;
             }
 
-            let merged = ctx.alloc_vreg(SpillDesc::transient());
-            block.push(MInst::Or {
-                dst: merged,
-                lhs: acc,
-                rhs: piece,
+            acc = Some(match acc {
+                None => piece,
+                Some(previous) => {
+                    let merged = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Or {
+                        dst: merged,
+                        lhs: previous,
+                        rhs: piece,
+                    });
+                    merged
+                }
             });
-            acc = merged;
 
             acc_pos += take;
             flat_consumed += take;
@@ -7288,6 +9867,14 @@ fn lower_concat_parts_to_chunks(
             }
         }
 
+        let acc = acc.unwrap_or_else(|| {
+            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm {
+                dst: zero,
+                value: 0,
+            });
+            zero
+        });
         dst_chunks.push((acc, chunk_width));
     }
 
@@ -9052,31 +11639,17 @@ fn clz_word_candidate(
     (bit_count_nonzero(ctx, block, src), candidate)
 }
 
-/// Return `(src != 0, offset + ctz(src))`.  `x ^ (x - 1)` is non-zero for
-/// every x and its highest set bit is ctz(x) whenever x itself is non-zero.
+/// Return `(src != 0, offset + ctz(src))`.  BSF's result is unspecified for
+/// zero, but the paired predicate ensures that candidate is selected only for
+/// a non-zero source.
 fn ctz_word_candidate(
     ctx: &mut ISelContext,
     block: &mut MBlock,
     src: VReg,
     offset: u64,
 ) -> (VReg, VReg) {
-    let decremented = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::SubImm {
-        dst: decremented,
-        src,
-        imm: 1,
-    });
-    let low_span = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::Xor {
-        dst: low_span,
-        lhs: src,
-        rhs: decremented,
-    });
     let local = ctx.alloc_vreg(SpillDesc::transient());
-    block.push(MInst::Bsr {
-        dst: local,
-        src: low_span,
-    });
+    block.push(MInst::Bsf { dst: local, src });
     let candidate = if offset == 0 {
         local
     } else {
@@ -9540,8 +12113,12 @@ fn lower_wide_extract(
                 imm: is,
             });
 
-            // Carry from next chunk
-            if (ci + 1) < n_src {
+            // Include the next source word only if the declared result crosses
+            // this word boundary. For a one-bit slice, unconditionally forming
+            // `hi << (64 - bit)` creates two transients and an OR whose value
+            // is discarded by the result mask.
+            let crosses_chunk = d_width > 64 - usize::from(is);
+            if crosses_chunk && (ci + 1) < n_src {
                 let next_vreg = src_chunks[ci + 1].0;
                 let carry = ctx.alloc_vreg(SpillDesc::transient());
                 block.push(MInst::ShlImm {
@@ -9646,6 +12223,45 @@ fn sign_extend_pair(
     (sl, sr)
 }
 
+fn lower_selector_branch_table(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    plan: &SelectorBranchTablePlan,
+) {
+    if plan
+        .targets
+        .first()
+        .is_some_and(|target| plan.targets.iter().all(|candidate| candidate == target))
+    {
+        block.push(MInst::Jump {
+            target: BlockId(plan.targets[0].0 as u32),
+        });
+        return;
+    }
+    let selector = ctx.reg_map.get(plan.selector);
+    let normalized = ctx.alloc_vreg(SpillDesc::transient());
+    ctx.emit_and_imm(
+        block,
+        normalized,
+        selector,
+        mask_for_width(plan.selector_width),
+    );
+    let table_base = ctx.alloc_vreg(SpillDesc::transient());
+    let target = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Scratch { dst: table_base });
+    block.push(MInst::Scratch { dst: target });
+    block.push(MInst::JumpTable {
+        index: normalized,
+        table_base,
+        target,
+        targets: plan
+            .targets
+            .iter()
+            .map(|target| BlockId(target.0 as u32))
+            .collect(),
+    });
+}
+
 fn lower_terminator(ctx: &mut ISelContext, block: &mut MBlock, term: &SIRTerminator) {
     match term {
         SIRTerminator::Jump(target, _args) => {
@@ -9670,6 +12286,44 @@ fn lower_terminator(ctx: &mut ISelContext, block: &mut MBlock, term: &SIRTermina
                 cond: cond_vreg,
                 true_bb: BlockId(true_block.0.0 as u32),
                 false_bb: BlockId(false_block.0.0 as u32),
+            });
+        }
+        SIRTerminator::Switch {
+            selector,
+            cases,
+            default,
+        } => {
+            let selector_width = ctx.sir_width(selector);
+            debug_assert!((1..=8).contains(&selector_width));
+            let mut targets = vec![BlockId(default.0 as u32); 1usize << selector_width];
+            for case in cases {
+                let digits = case.value.to_u64_digits();
+                let index = match digits.as_slice() {
+                    [] => 0,
+                    [value] => *value as usize,
+                    _ => unreachable!("verified switch key fits eight bits"),
+                };
+                targets[index] = BlockId(case.target.0 as u32);
+            }
+            if targets
+                .first()
+                .is_some_and(|target| targets.iter().all(|candidate| candidate == target))
+            {
+                block.push(MInst::Jump { target: targets[0] });
+                return;
+            }
+            let selector = ctx.reg_map.get(*selector);
+            let normalized = ctx.alloc_vreg(SpillDesc::transient());
+            ctx.emit_and_imm(block, normalized, selector, mask_for_width(selector_width));
+            let table_base = ctx.alloc_vreg(SpillDesc::transient());
+            let target = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::Scratch { dst: table_base });
+            block.push(MInst::Scratch { dst: target });
+            block.push(MInst::JumpTable {
+                index: normalized,
+                table_base,
+                target,
+                targets: targets.into(),
             });
         }
         SIRTerminator::Return => {
@@ -9736,6 +12390,7 @@ fn lower_dynamic_wide_load_chunks(
     offset_vreg: VReg,
     offset_low_zero_bits: u32,
     width_bits: usize,
+    alias_range: Option<MemoryAliasRange>,
 ) -> Vec<(VReg, usize)> {
     let n_chunks = ISelContext::num_chunks(width_bits);
     let mut chunks = Vec::with_capacity(n_chunks);
@@ -9751,7 +12406,9 @@ fn lower_dynamic_wide_load_chunks(
                 base: BaseReg::SimState,
                 offset: base_off + (bit_pos / 8) as i32,
                 index: byte_off,
+                scale: 1,
                 size: ISelContext::op_size_for_width(chunk_bits),
+                alias_range,
             });
             chunks.push((chunk, chunk_bits));
             bit_pos += chunk_bits;
@@ -9801,7 +12458,9 @@ fn lower_dynamic_wide_load_chunks(
             base: BaseReg::SimState,
             offset: base_off + byte_delta,
             index: byte_off,
+            scale: 1,
             size: OpSize::S64,
+            alias_range,
         });
         let lo_shifted = ctx.alloc_vreg(SpillDesc::transient());
         block.push(MInst::Shr {
@@ -9816,7 +12475,9 @@ fn lower_dynamic_wide_load_chunks(
             base: BaseReg::SimState,
             offset: base_off + byte_delta + 8,
             index: byte_off,
+            scale: 1,
             size: OpSize::S8,
+            alias_range,
         });
         let hi_shifted_raw = ctx.alloc_vreg(SpillDesc::transient());
         block.push(MInst::Shl {
@@ -9857,6 +12518,154 @@ fn lower_dynamic_wide_load_chunks(
 // ────────────────────────────────────────────────────────────────
 // 4-state mask computation
 // ────────────────────────────────────────────────────────────────
+
+fn repeat_packed_field(value: u64, field_width: usize, lane_count: usize) -> Option<u64> {
+    let mut packed = 0u64;
+    for lane in 0..lane_count {
+        packed |= value.checked_shl(u32::try_from(lane.checked_mul(field_width)?).ok()?)?;
+    }
+    Some(packed)
+}
+
+type PackedFieldLoadCache = HashMap<(RegionedAbsoluteAddr, usize, usize, usize), Vec<VReg>>;
+
+fn emit_packed_field_compare(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    plan: &PackedFieldComparePlan,
+    load_cache: &mut PackedFieldLoadCache,
+) {
+    let lanes_per_word = 64 / plan.field_width;
+    debug_assert!(lanes_per_word != 0);
+    let cache_key = (
+        plan.address,
+        plan.first_bit,
+        plan.lane_count,
+        plan.field_width,
+    );
+    let sources = load_cache.entry(cache_key).or_insert_with(|| {
+        let mut sources = Vec::with_capacity(plan.lane_count.div_ceil(lanes_per_word));
+        for first_lane in (0..plan.lane_count).step_by(lanes_per_word) {
+            let lanes = lanes_per_word.min(plan.lane_count - first_lane);
+            let width = lanes * plan.field_width;
+            let bit_offset = plan.first_bit + first_lane * plan.field_width;
+            let (base, intra) = ctx.static_byte_and_intra(&plan.address, bit_offset);
+            let chunks = lower_static_wide_load_chunks(ctx, block, base, intra, width);
+            sources.push(chunks[0].0);
+        }
+        sources
+    });
+
+    let mut accumulated = None;
+    for (group, &source) in sources.iter().enumerate() {
+        let first_lane = group * lanes_per_word;
+        let lanes = lanes_per_word.min(plan.lane_count - first_lane);
+        let low_lane_mask = mask_for_width(plan.field_width - 1);
+        let high_lane_mask = 1u64 << (plan.field_width - 1);
+        let needle = repeat_packed_field(plan.value, plan.field_width, lanes)
+            .expect("validated packed field constant must fit one word");
+        let low_mask = repeat_packed_field(low_lane_mask, plan.field_width, lanes)
+            .expect("validated packed field low mask must fit one word");
+        let high_mask = repeat_packed_field(high_lane_mask, plan.field_width, lanes)
+            .expect("validated packed field high mask must fit one word");
+
+        let needle_reg = ctx.alloc_vreg(SpillDesc::remat(needle));
+        block.push(MInst::LoadImm {
+            dst: needle_reg,
+            value: needle,
+        });
+        let different = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Xor {
+            dst: different,
+            lhs: source,
+            rhs: needle_reg,
+        });
+
+        let low_mask_reg = ctx.alloc_vreg(SpillDesc::remat(low_mask));
+        block.push(MInst::LoadImm {
+            dst: low_mask_reg,
+            value: low_mask,
+        });
+        let low = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::And {
+            dst: low,
+            lhs: different,
+            rhs: low_mask_reg,
+        });
+        let carried = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Add {
+            dst: carried,
+            lhs: low,
+            rhs: low_mask_reg,
+        });
+        let with_value = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Or {
+            dst: with_value,
+            lhs: carried,
+            rhs: different,
+        });
+        let with_low_bits = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Or {
+            dst: with_low_bits,
+            lhs: with_value,
+            rhs: low_mask_reg,
+        });
+        let inverted = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::BitNot {
+            dst: inverted,
+            src: with_low_bits,
+        });
+
+        let high_mask_reg = ctx.alloc_vreg(SpillDesc::remat(high_mask));
+        block.push(MInst::LoadImm {
+            dst: high_mask_reg,
+            value: high_mask,
+        });
+        let zero_markers = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::And {
+            dst: zero_markers,
+            lhs: inverted,
+            rhs: high_mask_reg,
+        });
+        let packed = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Pext {
+            dst: packed,
+            src: zero_markers,
+            mask: high_mask_reg,
+        });
+        ctx.known_bits.insert(packed, lanes);
+
+        let placed = if first_lane == 0 {
+            packed
+        } else {
+            let shifted = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::ShlImm {
+                dst: shifted,
+                src: packed,
+                imm: first_lane as u8,
+            });
+            shifted
+        };
+        accumulated = Some(match accumulated {
+            None => placed,
+            Some(previous) => {
+                let merged = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Or {
+                    dst: merged,
+                    lhs: previous,
+                    rhs: placed,
+                });
+                merged
+            }
+        });
+    }
+
+    if let Some(result) = accumulated {
+        let dst = ctx.reg_map.get(plan.dst);
+        ctx.emit_mov(block, dst, result);
+        ctx.known_bits.insert(dst, plan.lane_count);
+    }
+}
 
 fn lower_static_wide_load_chunks(
     ctx: &mut ISelContext,
@@ -11540,6 +14349,2501 @@ mod tests {
     use num_bigint::BigUint;
     use veryl_analyzer::ir::VarId;
 
+    fn empty_layout() -> MemoryLayout {
+        MemoryLayout {
+            four_state: false,
+            mode: MemoryLayoutMode::Packed,
+            unpacked_arrays: HashMap::default(),
+            offsets: HashMap::default(),
+            widths: HashMap::default(),
+            is_4states: HashMap::default(),
+            total_size: 0,
+            working_offsets: HashMap::default(),
+            working_base_offset: 0,
+            sparse_offsets: HashMap::default(),
+            sparse_base_offset: 0,
+            sparse_layouts: HashMap::default(),
+            sparse_active_bits_offset: 0,
+            sparse_active_capacity: 0,
+            merged_total_size: 0,
+            triggered_bits_offset: 0,
+            triggered_bits_total_size: 0,
+            scratch_base_offset: 0,
+            scratch_size: 0,
+            runtime_event_capacity: 0,
+            runtime_event_slot_size: 0,
+            runtime_event_buffer_size: 0,
+            runtime_event_site_layouts: vec![],
+        }
+    }
+
+    #[test]
+    fn lowers_bit_packed_field_compare_to_word_swar() {
+        if !crate::backend::native::features::X86Features::detect().bmi2() {
+            return;
+        }
+
+        const LANES: usize = 32;
+        const FIELD_WIDTH: usize = 12;
+        const MATCH: u64 = 0x300;
+        let input_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let mut output_var = VarId::default();
+        output_var.inc();
+        let output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: output_var,
+        };
+        let input = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, input_abs);
+        let output = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+        let mut next_register = 0usize;
+        let mut register_map = HashMap::default();
+        let mut allocate = |width: usize| {
+            let register = RegisterId(next_register);
+            next_register += 1;
+            register_map.insert(
+                register,
+                RegisterType::Bit {
+                    width,
+                    signed: false,
+                },
+            );
+            register
+        };
+        let constant = allocate(FIELD_WIDTH);
+        let mut instructions = vec![SIRInstruction::Imm(constant, SIRValue::new(MATCH))];
+        let mut predicates = Vec::with_capacity(LANES);
+        for lane in 0..LANES {
+            let field = allocate(FIELD_WIDTH);
+            let predicate = allocate(1);
+            instructions.push(SIRInstruction::Load(
+                field,
+                input,
+                SIROffset::PackedElements {
+                    bit_offset: lane * FIELD_WIDTH,
+                    element_width: FIELD_WIDTH,
+                },
+                FIELD_WIDTH,
+            ));
+            instructions.push(SIRInstruction::Binary(
+                predicate,
+                field,
+                BinaryOp::Eq,
+                constant,
+            ));
+            predicates.push(predicate);
+        }
+        predicates.reverse();
+        let packed = allocate(LANES);
+        instructions.push(SIRInstruction::Concat(packed, predicates));
+        instructions.push(SIRInstruction::Store(
+            output,
+            SIROffset::Static(0),
+            LANES,
+            packed,
+            vec![],
+            vec![],
+        ));
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map,
+        };
+        unit.verify();
+
+        let input_bytes = (LANES * FIELD_WIDTH).div_ceil(8);
+        let output_offset = input_bytes;
+        let total_size = output_offset + LANES.div_ceil(8);
+        let mut layout = empty_layout();
+        layout.offsets = [(input_abs, 0), (output_abs, output_offset)]
+            .into_iter()
+            .collect();
+        layout.widths = [(input_abs, LANES * FIELD_WIDTH), (output_abs, LANES)]
+            .into_iter()
+            .collect();
+        layout.is_4states = [(input_abs, false), (output_abs, false)]
+            .into_iter()
+            .collect();
+        layout.total_size = total_size;
+        layout.working_base_offset = total_size;
+        layout.sparse_base_offset = total_size;
+        layout.merged_total_size = total_size;
+        layout.triggered_bits_offset = total_size;
+        layout.scratch_base_offset = total_size;
+
+        let mut function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        let instructions = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, MInst::Pext { .. }))
+                .count(),
+            LANES.div_ceil(64 / FIELD_WIDTH)
+        );
+        assert!(
+            !instructions
+                .iter()
+                .any(|instruction| matches!(instruction, MInst::Cmp { .. }))
+        );
+
+        mir_legalize::legalize(&mut function);
+        mir_opt::optimize(&mut function);
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+
+        let mut packed_input = BigUint::ZERO;
+        let mut expected = 0u32;
+        for lane in 0..LANES {
+            let value = if lane.is_multiple_of(3) {
+                expected |= 1u32 << lane;
+                MATCH
+            } else {
+                (lane as u64 * 37 + 1) & mask_for_width(FIELD_WIDTH)
+            };
+            packed_input |= BigUint::from(value) << (lane * FIELD_WIDTH);
+        }
+        let mut state = vec![0u8; total_size];
+        let bytes = packed_input.to_bytes_le();
+        state[..bytes.len()].copy_from_slice(&bytes);
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(
+            u32::from_le_bytes(state[output_offset..output_offset + 4].try_into().unwrap()),
+            expected
+        );
+    }
+
+    #[test]
+    fn selects_complete_byte_affine_predicate_pack() {
+        let base = RegisterId(0);
+        let rhs = RegisterId(1);
+        let packed = RegisterId(2);
+        let byte_type = RegisterType::Bit {
+            width: 8,
+            signed: false,
+        };
+        let predicate_type = RegisterType::Bit {
+            width: 1,
+            signed: false,
+        };
+        let mut register_map = HashMap::default();
+        register_map.insert(base, byte_type.clone());
+        register_map.insert(rhs, byte_type.clone());
+        register_map.insert(
+            packed,
+            RegisterType::Bit {
+                width: 16,
+                signed: false,
+            },
+        );
+        let mut instructions = Vec::new();
+        let mut predicates = Vec::new();
+        let mut next_register = 3usize;
+        for lane in 0..16 {
+            let increment = RegisterId(next_register);
+            let affine = RegisterId(next_register + 1);
+            let predicate = RegisterId(next_register + 2);
+            next_register += 3;
+            register_map.insert(increment, byte_type.clone());
+            register_map.insert(affine, byte_type.clone());
+            register_map.insert(predicate, predicate_type.clone());
+            instructions.push(SIRInstruction::Imm(increment, SIRValue::new(lane as u8)));
+            instructions.push(SIRInstruction::Binary(
+                affine,
+                base,
+                BinaryOp::Add,
+                increment,
+            ));
+            instructions.push(SIRInstruction::Binary(
+                predicate,
+                affine,
+                BinaryOp::LtU,
+                rhs,
+            ));
+            predicates.push(predicate);
+        }
+        predicates.reverse();
+        instructions.push(SIRInstruction::Concat(packed, predicates));
+        let block = BasicBlock {
+            id: SirBlockId(0),
+            params: vec![base, rhs],
+            instructions,
+            terminator: SIRTerminator::Return,
+        };
+        let mut blocks = HashMap::default();
+        blocks.insert(SirBlockId(0), block);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks,
+            register_map,
+        };
+        unit.verify();
+
+        let function = lower_execution_unit(&unit, &empty_layout(), false);
+        let affine_compares = function
+            .blocks
+            .iter()
+            .flat_map(|block| block.insts.iter())
+            .filter(|instruction| matches!(instruction, MInst::PackedByteAffineCompare { .. }))
+            .count();
+        assert_eq!(affine_compares, 1);
+    }
+
+    #[test]
+    fn combines_packed_bits_stored_to_one_byte_lanes() {
+        let absolute = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let address = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
+        let source = RegisterId(0);
+        let mut instructions = vec![SIRInstruction::Imm(source, SIRValue::new(0b1010_0101u8))];
+        let mut register_map = HashMap::default();
+        register_map.insert(
+            source,
+            RegisterType::Bit {
+                width: 8,
+                signed: false,
+            },
+        );
+        for lane in 0..8 {
+            let slice = RegisterId(lane + 1);
+            register_map.insert(
+                slice,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            );
+            instructions.push(SIRInstruction::Slice(slice, source, lane, 1));
+            instructions.push(SIRInstruction::Store(
+                address,
+                SIROffset::Static(lane),
+                1,
+                slice,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+        let block = BasicBlock {
+            id: SirBlockId(0),
+            params: Vec::new(),
+            instructions,
+            terminator: SIRTerminator::Return,
+        };
+        let mut blocks = HashMap::default();
+        blocks.insert(SirBlockId(0), block);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks,
+            register_map,
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.mode = MemoryLayoutMode::ElementStrided;
+        layout.offsets.insert(absolute, 0);
+        layout.widths.insert(absolute, 8);
+        layout.is_4states.insert(absolute, false);
+        layout.unpacked_arrays.insert(
+            absolute,
+            crate::backend::memory_layout::UnpackedArrayLayout {
+                element_width: 1,
+                element_count: 8,
+                element_stride: 1,
+                plane_size: 8,
+            },
+        );
+        layout.total_size = 8;
+        layout.working_base_offset = 8;
+        layout.sparse_base_offset = 8;
+        layout.merged_total_size = 8;
+        layout.triggered_bits_offset = 8;
+        layout.scratch_base_offset = 8;
+
+        let plans =
+            find_packed_bit_store_plans(&unit.blocks[&SirBlockId(0)], &unit.register_map, &layout);
+        assert_eq!(plans.roots.len(), 1);
+        assert_eq!(plans.skip_indices.len(), 16);
+        let plan = plans.roots.values().next().unwrap();
+        assert_eq!(plan.source, source);
+        assert_eq!(plan.lane_count, 8);
+
+        if crate::backend::native::features::X86Features::detect().bmi2() {
+            let function = lower_execution_unit(&unit, &layout, false);
+            function.verify();
+            assert_eq!(
+                function
+                    .blocks
+                    .iter()
+                    .flat_map(|block| &block.insts)
+                    .filter(|instruction| matches!(instruction, MInst::Pdep { .. }))
+                    .count(),
+                1
+            );
+            assert!(function.blocks.iter().flat_map(|block| &block.insts).any(
+                |instruction| matches!(
+                    instruction,
+                    MInst::Store {
+                        offset: 0,
+                        size: OpSize::S64,
+                        ..
+                    }
+                )
+            ));
+            assert!(!function.blocks.iter().flat_map(|block| &block.insts).any(
+                |instruction| matches!(
+                    instruction,
+                    MInst::Store {
+                        size: OpSize::S8,
+                        ..
+                    }
+                )
+            ));
+        }
+    }
+
+    #[test]
+    fn recognizes_dynamic_constant_lane_offsets_in_packed_layout() {
+        let lhs_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let mut rhs_var = VarId::default();
+        rhs_var.inc();
+        let rhs_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: rhs_var,
+        };
+        let lhs_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, lhs_abs);
+        let rhs_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, rhs_abs);
+        let mut next_register = 0usize;
+        let mut register_map = HashMap::default();
+        let mut allocate = |ty: RegisterType| {
+            let register = RegisterId(next_register);
+            next_register += 1;
+            register_map.insert(register, ty);
+            register
+        };
+        let eight = allocate(RegisterType::Logic { width: 8 });
+        let mut instructions = vec![SIRInstruction::Imm(eight, SIRValue::new(8u8))];
+        let mut predicates = Vec::with_capacity(16);
+        for lane in 0u8..16 {
+            let lane_register = allocate(RegisterType::Logic { width: 8 });
+            let offset = allocate(RegisterType::Logic { width: 8 });
+            let lhs = allocate(RegisterType::Logic { width: 8 });
+            let rhs = allocate(RegisterType::Logic { width: 8 });
+            let predicate = allocate(RegisterType::Bit {
+                width: 1,
+                signed: false,
+            });
+            instructions.extend([
+                SIRInstruction::Imm(lane_register, SIRValue::new(lane)),
+                SIRInstruction::Binary(offset, lane_register, BinaryOp::Mul, eight),
+                SIRInstruction::Load(lhs, lhs_addr, SIROffset::Dynamic(offset), 8),
+                SIRInstruction::Load(rhs, rhs_addr, SIROffset::Dynamic(offset), 8),
+                SIRInstruction::Binary(predicate, lhs, BinaryOp::LtU, rhs),
+            ]);
+            predicates.push(predicate);
+        }
+        predicates.reverse();
+        let packed = allocate(RegisterType::Logic { width: 16 });
+        instructions.push(SIRInstruction::Concat(packed, predicates));
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map,
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.offsets = [(lhs_abs, 0), (rhs_abs, 16)].into_iter().collect();
+        layout.widths = [(lhs_abs, 128), (rhs_abs, 128)].into_iter().collect();
+        layout.is_4states = [(lhs_abs, false), (rhs_abs, false)].into_iter().collect();
+        layout.total_size = 32;
+        layout.working_base_offset = 32;
+        layout.sparse_base_offset = 32;
+        layout.merged_total_size = 32;
+        layout.triggered_bits_offset = 32;
+        layout.scratch_base_offset = 32;
+
+        let function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::PackedLaneCompare {
+                        kind: CmpKind::LtU,
+                        rhs: PackedLaneCompareRhs::Memory { .. },
+                        lane_count: 16,
+                        element_stride: 1,
+                        field_width: 8,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+
+    fn lower_widened_whole_variable_load(variable_width: usize) -> MFunction {
+        let absolute = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let address = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
+        let loaded = RegisterId(0);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Load(
+                        loaded,
+                        address,
+                        SIROffset::Static(0),
+                        64,
+                    )],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [(loaded, RegisterType::Logic { width: 64 })]
+                .into_iter()
+                .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        let byte_width = variable_width.div_ceil(8);
+        layout.offsets.insert(absolute, 0);
+        layout.widths.insert(absolute, variable_width);
+        layout.is_4states.insert(absolute, false);
+        layout.total_size = byte_width;
+        layout.working_base_offset = byte_width;
+        layout.sparse_base_offset = byte_width;
+        layout.sparse_active_bits_offset = byte_width;
+        layout.merged_total_size = byte_width;
+        layout.triggered_bits_offset = byte_width;
+        layout.scratch_base_offset = byte_width;
+
+        lower_execution_unit(&unit, &layout, false)
+    }
+
+    #[test]
+    fn widened_whole_native_variable_loads_at_physical_width() {
+        let function = lower_widened_whole_variable_load(32);
+        let instructions = &function.blocks[0].insts;
+
+        assert_eq!(instructions.len(), 2);
+        assert!(matches!(
+            instructions[0],
+            MInst::Load {
+                dst: VReg(0),
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S32,
+            }
+        ));
+        assert!(matches!(instructions[1], MInst::Return));
+        assert!(matches!(
+            function.spill_descs[0].kind,
+            SpillKind::SimState {
+                bit_offset: 0,
+                width_bits: 32,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn widened_whole_non_native_variable_keeps_explicit_mask() {
+        let function = lower_widened_whole_variable_load(27);
+        let instructions = &function.blocks[0].insts;
+
+        assert_eq!(instructions.len(), 3);
+        assert!(matches!(
+            instructions[0],
+            MInst::Load {
+                dst: VReg(1),
+                base: BaseReg::SimState,
+                offset: 0,
+                size: OpSize::S64,
+            }
+        ));
+        assert!(matches!(instructions[2], MInst::Return));
+        assert!(matches!(
+            instructions[1],
+            MInst::AndImm32 {
+                dst: VReg(0),
+                src: VReg(1),
+                imm: 0x07ff_ffff,
+            }
+        ));
+    }
+
+    #[test]
+    fn repeated_msb_concat_uses_constant_work_in_both_planes() {
+        let output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let output = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+        let sign = RegisterId(0);
+        let low = RegisterId(1);
+        let result = RegisterId(2);
+        let low_value = 0x89ab_cdefu64;
+        let low_mask = 0x00ff_00ffu64;
+
+        for four_state in [false, true] {
+            let unit = ExecutionUnit {
+                entry_block_id: SirBlockId(0),
+                blocks: [(
+                    SirBlockId(0),
+                    BasicBlock {
+                        id: SirBlockId(0),
+                        params: vec![],
+                        instructions: vec![
+                            SIRInstruction::Imm(
+                                sign,
+                                SIRValue::new_four_state(1u8, u8::from(four_state)),
+                            ),
+                            SIRInstruction::Imm(
+                                low,
+                                SIRValue::new_four_state(
+                                    low_value,
+                                    if four_state { low_mask } else { 0 },
+                                ),
+                            ),
+                            SIRInstruction::Concat(
+                                result,
+                                std::iter::repeat_n(sign, 32)
+                                    .chain(std::iter::once(low))
+                                    .collect(),
+                            ),
+                            SIRInstruction::Store(
+                                output,
+                                SIROffset::Static(0),
+                                64,
+                                result,
+                                vec![],
+                                vec![],
+                            ),
+                        ],
+                        terminator: SIRTerminator::Return,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                register_map: [
+                    (sign, RegisterType::Logic { width: 1 }),
+                    (low, RegisterType::Logic { width: 32 }),
+                    (result, RegisterType::Logic { width: 64 }),
+                ]
+                .into_iter()
+                .collect(),
+            };
+            unit.verify();
+
+            let mut layout = empty_layout();
+            layout.four_state = four_state;
+            layout.offsets.insert(output_abs, 0);
+            layout.widths.insert(output_abs, 64);
+            layout.is_4states.insert(output_abs, four_state);
+            layout.total_size = if four_state { 16 } else { 8 };
+            layout.working_base_offset = layout.total_size;
+            layout.sparse_base_offset = layout.total_size;
+            layout.merged_total_size = layout.total_size;
+            layout.triggered_bits_offset = layout.total_size;
+            layout.scratch_base_offset = layout.total_size;
+
+            let mut function = lower_execution_unit(&unit, &layout, four_state);
+            function.verify();
+            let instructions = function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .collect::<Vec<_>>();
+            let expected_planes = if four_state { 2 } else { 1 };
+            assert_eq!(
+                instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, MInst::Neg { .. }))
+                    .count(),
+                expected_planes
+            );
+            assert_eq!(
+                instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, MInst::ShlImm { imm: 32, .. }))
+                    .count(),
+                expected_planes
+            );
+            assert_eq!(
+                instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, MInst::Or { .. }))
+                    .count(),
+                expected_planes
+            );
+
+            mir_legalize::legalize(&mut function);
+            mir_opt::optimize(&mut function);
+            let allocation = regalloc::run_regalloc(&mut function).unwrap();
+            mir_opt::post_regalloc_peephole(&mut function);
+            function.verify();
+            let emitted = emit::emit(
+                &function,
+                &allocation.assignment,
+                allocation.spill_frame_size,
+            )
+            .unwrap();
+            let jit = JitCode::new(&emitted.code).unwrap();
+            let mut state = vec![0u8; layout.total_size];
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(
+                u64::from_le_bytes(state[..8].try_into().unwrap()),
+                0xffff_ffff_0000_0000 | low_value
+            );
+            if four_state {
+                assert_eq!(
+                    u64::from_le_bytes(state[8..16].try_into().unwrap()),
+                    0xffff_ffff_0000_0000 | low_mask
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wide_repeated_msb_chunk_uses_constant_work_in_both_planes() {
+        let output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let output = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+        let sign = RegisterId(0);
+        let low = RegisterId(1);
+        let result = RegisterId(2);
+        let low_value = 0x89ab_cdef_0123_4567u64;
+        let low_mask = 0x00ff_00ff_000f_000fu64;
+
+        for four_state in [false, true] {
+            let unit = ExecutionUnit {
+                entry_block_id: SirBlockId(0),
+                blocks: [(
+                    SirBlockId(0),
+                    BasicBlock {
+                        id: SirBlockId(0),
+                        params: vec![],
+                        instructions: vec![
+                            SIRInstruction::Imm(
+                                sign,
+                                SIRValue::new_four_state(1u8, u8::from(four_state)),
+                            ),
+                            SIRInstruction::Imm(
+                                low,
+                                SIRValue::new_four_state(
+                                    low_value,
+                                    if four_state { low_mask } else { 0 },
+                                ),
+                            ),
+                            SIRInstruction::Concat(
+                                result,
+                                std::iter::repeat_n(sign, 64)
+                                    .chain(std::iter::once(low))
+                                    .collect(),
+                            ),
+                            SIRInstruction::Store(
+                                output,
+                                SIROffset::Static(0),
+                                128,
+                                result,
+                                vec![],
+                                vec![],
+                            ),
+                        ],
+                        terminator: SIRTerminator::Return,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                register_map: [
+                    (sign, RegisterType::Logic { width: 1 }),
+                    (low, RegisterType::Logic { width: 64 }),
+                    (result, RegisterType::Logic { width: 128 }),
+                ]
+                .into_iter()
+                .collect(),
+            };
+            unit.verify();
+
+            let mut layout = empty_layout();
+            layout.four_state = four_state;
+            layout.offsets.insert(output_abs, 0);
+            layout.widths.insert(output_abs, 128);
+            layout.is_4states.insert(output_abs, four_state);
+            layout.total_size = if four_state { 32 } else { 16 };
+            layout.working_base_offset = layout.total_size;
+            layout.sparse_base_offset = layout.total_size;
+            layout.merged_total_size = layout.total_size;
+            layout.triggered_bits_offset = layout.total_size;
+            layout.scratch_base_offset = layout.total_size;
+
+            let mut function = lower_execution_unit(&unit, &layout, four_state);
+            function.verify();
+            let instructions = function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .collect::<Vec<_>>();
+            let expected_planes = if four_state { 2 } else { 1 };
+            assert_eq!(
+                instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, MInst::Neg { .. }))
+                    .count(),
+                expected_planes,
+                "{instructions:#?}"
+            );
+            assert_eq!(
+                instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, MInst::ShlImm { .. }))
+                    .count(),
+                0,
+                "{instructions:#?}"
+            );
+
+            mir_legalize::legalize(&mut function);
+            mir_opt::optimize(&mut function);
+            let allocation = regalloc::run_regalloc(&mut function).unwrap();
+            mir_opt::post_regalloc_peephole(&mut function);
+            function.verify();
+            let emitted = emit::emit(
+                &function,
+                &allocation.assignment,
+                allocation.spill_frame_size,
+            )
+            .unwrap();
+            let jit = JitCode::new(&emitted.code).unwrap();
+            let mut state = vec![0u8; layout.total_size];
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(
+                u64::from_le_bytes(state[..8].try_into().unwrap()),
+                low_value
+            );
+            assert_eq!(
+                u64::from_le_bytes(state[8..16].try_into().unwrap()),
+                u64::MAX
+            );
+            if four_state {
+                assert_eq!(
+                    u64::from_le_bytes(state[16..24].try_into().unwrap()),
+                    low_mask
+                );
+                assert_eq!(
+                    u64::from_le_bytes(state[24..32].try_into().unwrap()),
+                    u64::MAX
+                );
+            }
+        }
+    }
+
+    fn quotient_remainder_array_load(element_stride: usize) -> (VReg, VReg) {
+        let input_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let mut array_var = VarId::default();
+        array_var.inc();
+        let array_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: array_var,
+        };
+        let input = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, input_abs);
+        let array = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, array_abs);
+
+        let source = RegisterId(0);
+        let shift = RegisterId(1);
+        let quotient = RegisterId(2);
+        let lane_width = RegisterId(3);
+        let product = RegisterId(4);
+        let remainder_mask = RegisterId(5);
+        let remainder = RegisterId(6);
+        let loaded = RegisterId(7);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Load(source, input, SIROffset::Static(0), 32),
+                        SIRInstruction::Imm(shift, SIRValue::new(3u8)),
+                        SIRInstruction::Binary(quotient, source, BinaryOp::Shr, shift),
+                        SIRInstruction::Imm(lane_width, SIRValue::new(8u8)),
+                        SIRInstruction::Binary(product, source, BinaryOp::Mul, lane_width),
+                        SIRInstruction::Imm(remainder_mask, SIRValue::new(63u8)),
+                        SIRInstruction::Binary(remainder, product, BinaryOp::And, remainder_mask),
+                        SIRInstruction::Load(
+                            loaded,
+                            array,
+                            SIROffset::Element {
+                                index: quotient,
+                                element_width: 64,
+                                bit_offset: 0,
+                                dynamic_bit_offset: Some(remainder),
+                            },
+                            8,
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: (0..=6)
+                .map(|register| {
+                    (
+                        RegisterId(register),
+                        RegisterType::Bit {
+                            width: 32,
+                            signed: false,
+                        },
+                    )
+                })
+                .chain([(loaded, RegisterType::Logic { width: 8 })])
+                .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.mode = MemoryLayoutMode::ElementStrided;
+        layout.offsets = [(input_abs, 0), (array_abs, 8)].into_iter().collect();
+        layout.widths = [(input_abs, 32), (array_abs, 128)].into_iter().collect();
+        layout.is_4states = [(input_abs, false), (array_abs, false)]
+            .into_iter()
+            .collect();
+        layout.unpacked_arrays.insert(
+            array_abs,
+            crate::backend::memory_layout::UnpackedArrayLayout {
+                element_width: 64,
+                element_count: 2,
+                element_stride,
+                plane_size: element_stride * 2,
+            },
+        );
+        layout.total_size = 32;
+        layout.working_base_offset = 32;
+        layout.sparse_base_offset = 32;
+        layout.merged_total_size = 32;
+        layout.triggered_bits_offset = 32;
+        layout.scratch_base_offset = 32;
+
+        let function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        let instructions = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .collect::<Vec<_>>();
+        let source_vreg = instructions
+            .iter()
+            .find_map(|instruction| match instruction {
+                MInst::Load {
+                    dst,
+                    offset: 0,
+                    size: OpSize::S32,
+                    ..
+                } => Some(*dst),
+                _ => None,
+            })
+            .expect("source load");
+        let array_index = instructions
+            .iter()
+            .find_map(|instruction| match instruction {
+                MInst::LoadIndexed {
+                    index,
+                    offset: 8,
+                    size: OpSize::S8,
+                    ..
+                } => Some(*index),
+                _ => None,
+            })
+            .expect("array load");
+        (source_vreg, array_index)
+    }
+
+    #[test]
+    fn recomposes_contiguous_element_quotient_and_remainder_into_byte_index() {
+        let (source, array_index) = quotient_remainder_array_load(8);
+        assert_eq!(array_index, source);
+    }
+
+    #[test]
+    fn preserves_element_quotient_and_remainder_when_storage_has_padding() {
+        let (source, array_index) = quotient_remainder_array_load(16);
+        assert_ne!(array_index, source);
+    }
+
+    #[test]
+    fn constant_zero_dynamic_element_bit_offset_uses_direct_byte_index() {
+        let input_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let mut array_var = VarId::default();
+        array_var.inc();
+        let array_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: array_var,
+        };
+        let mut output_var = array_var;
+        output_var.inc();
+        let output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: output_var,
+        };
+        let input = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, input_abs);
+        let array = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, array_abs);
+        let output = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+        let index = RegisterId(0);
+        let zero = RegisterId(1);
+        let loaded = RegisterId(2);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Load(index, input, SIROffset::Static(0), 32),
+                        SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                        SIRInstruction::Load(
+                            loaded,
+                            array,
+                            SIROffset::Element {
+                                index,
+                                element_width: 64,
+                                bit_offset: 0,
+                                dynamic_bit_offset: Some(zero),
+                            },
+                            54,
+                        ),
+                        SIRInstruction::Store(
+                            output,
+                            SIROffset::Static(0),
+                            54,
+                            loaded,
+                            vec![],
+                            vec![],
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (
+                    index,
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: true,
+                    },
+                ),
+                (
+                    zero,
+                    RegisterType::Bit {
+                        width: 64,
+                        signed: false,
+                    },
+                ),
+                (loaded, RegisterType::Logic { width: 54 }),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.mode = MemoryLayoutMode::ElementStrided;
+        layout.offsets = [(input_abs, 0), (array_abs, 8), (output_abs, 136)]
+            .into_iter()
+            .collect();
+        layout.widths = [(input_abs, 32), (array_abs, 1024), (output_abs, 54)]
+            .into_iter()
+            .collect();
+        layout.is_4states = [(input_abs, false), (array_abs, false), (output_abs, false)]
+            .into_iter()
+            .collect();
+        layout.unpacked_arrays.insert(
+            array_abs,
+            crate::backend::memory_layout::UnpackedArrayLayout {
+                element_width: 64,
+                element_count: 16,
+                element_stride: 8,
+                plane_size: 128,
+            },
+        );
+        layout.total_size = 144;
+        layout.working_base_offset = 144;
+        layout.sparse_base_offset = 144;
+        layout.merged_total_size = 144;
+        layout.triggered_bits_offset = 144;
+        layout.scratch_base_offset = 144;
+
+        let mut function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        let instructions = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .collect::<Vec<_>>();
+        let byte_index = instructions
+            .iter()
+            .find_map(|instruction| match instruction {
+                MInst::LoadIndexed {
+                    index,
+                    offset: 8,
+                    size: OpSize::S64,
+                    ..
+                } => Some(*index),
+                _ => None,
+            })
+            .expect("direct indexed array load");
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            MInst::ShlImm {
+                dst,
+                imm: 3,
+                ..
+            } if *dst == byte_index
+        )));
+
+        let source_index = instructions
+            .iter()
+            .find_map(|instruction| match instruction {
+                MInst::Load {
+                    dst,
+                    offset: 0,
+                    size: OpSize::S32,
+                    ..
+                } => Some(*dst),
+                _ => None,
+            })
+            .expect("source index load");
+        mir_opt::optimize(&mut function);
+        function.verify();
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|instruction| matches!(
+                    instruction,
+                    MInst::LoadIndexed {
+                        index,
+                        scale: 8,
+                        offset: 8,
+                        size: OpSize::S64,
+                        ..
+                    } if *index == source_index
+                ))
+        );
+    }
+
+    #[test]
+    fn wide_dynamic_element_load_retains_its_bit_offset() {
+        let array_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let array = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, array_abs);
+        let index = RegisterId(0);
+        let loaded = RegisterId(1);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(index, SIRValue::new(1u8)),
+                        SIRInstruction::Load(
+                            loaded,
+                            array,
+                            SIROffset::Element {
+                                index,
+                                element_width: 128,
+                                bit_offset: 0,
+                                dynamic_bit_offset: None,
+                            },
+                            128,
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (
+                    index,
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                ),
+                (loaded, RegisterType::Logic { width: 128 }),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.mode = MemoryLayoutMode::ElementStrided;
+        layout.offsets.insert(array_abs, 0);
+        layout.widths.insert(array_abs, 256);
+        layout.is_4states.insert(array_abs, false);
+        layout.unpacked_arrays.insert(
+            array_abs,
+            crate::backend::memory_layout::UnpackedArrayLayout {
+                element_width: 128,
+                element_count: 2,
+                element_stride: 16,
+                plane_size: 32,
+            },
+        );
+        layout.total_size = 32;
+        layout.working_base_offset = 32;
+        layout.sparse_base_offset = 32;
+        layout.merged_total_size = 32;
+        layout.triggered_bits_offset = 32;
+        layout.scratch_base_offset = 32;
+
+        let function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::LoadIndexed {
+                        size: OpSize::S64,
+                        ..
+                    }
+                ))
+                .count()
+                >= 2
+        );
+    }
+
+    #[test]
+    fn full_dynamic_padded_element_uses_native_indexed_load_and_store() {
+        let array_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let mut output_var = VarId::default();
+        output_var.inc();
+        let output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: output_var,
+        };
+        let array = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, array_abs);
+        let output = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+        let index = RegisterId(0);
+        let value = RegisterId(1);
+        let loaded = RegisterId(2);
+        let expected = RegisterId(3);
+        let matches = RegisterId(4);
+        let element_offset = SIROffset::Element {
+            index,
+            element_width: 12,
+            bit_offset: 0,
+            dynamic_bit_offset: None,
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(index, SIRValue::new(1u8)),
+                        SIRInstruction::Load(loaded, array, element_offset.clone(), 12),
+                        SIRInstruction::Imm(expected, SIRValue::new(0x123u16)),
+                        SIRInstruction::Binary(matches, loaded, BinaryOp::Eq, expected),
+                        SIRInstruction::Store(
+                            output,
+                            SIROffset::Static(0),
+                            1,
+                            matches,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Imm(value, SIRValue::new(0xabcu16)),
+                        SIRInstruction::Store(array, element_offset, 12, value, vec![], vec![]),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (
+                    index,
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                ),
+                (value, RegisterType::Logic { width: 12 }),
+                (loaded, RegisterType::Logic { width: 12 }),
+                (expected, RegisterType::Logic { width: 12 }),
+                (
+                    matches,
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.mode = MemoryLayoutMode::ElementStrided;
+        layout.offsets = [(array_abs, 0), (output_abs, 8)].into_iter().collect();
+        layout.widths = [(array_abs, 24), (output_abs, 1)].into_iter().collect();
+        layout.is_4states = [(array_abs, false), (output_abs, false)]
+            .into_iter()
+            .collect();
+        layout.unpacked_arrays.insert(
+            array_abs,
+            crate::backend::memory_layout::UnpackedArrayLayout {
+                element_width: 12,
+                element_count: 2,
+                element_stride: 2,
+                plane_size: 4,
+            },
+        );
+        layout.total_size = 16;
+        layout.working_base_offset = 16;
+        layout.sparse_base_offset = 16;
+        layout.merged_total_size = 16;
+        layout.triggered_bits_offset = 16;
+        layout.scratch_base_offset = 16;
+
+        let mut function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|inst| matches!(
+                    inst,
+                    MInst::LoadIndexed {
+                        size: OpSize::S16,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|inst| matches!(
+                    inst,
+                    MInst::StoreIndexed {
+                        size: OpSize::S16,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .all(|inst| !matches!(
+                    inst,
+                    MInst::LoadIndexed {
+                        size: OpSize::S32,
+                        ..
+                    }
+                ))
+        );
+
+        mir_legalize::legalize(&mut function);
+        mir_opt::optimize(&mut function);
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+
+        let mut state = vec![0u8; 16];
+        state[2..4].copy_from_slice(&0xf123u16.to_le_bytes());
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(u16::from_le_bytes(state[2..4].try_into().unwrap()), 0x0abc);
+        assert_eq!(state[8] & 1, 1);
+    }
+
+    #[test]
+    fn first_sparse_element_write_uses_entry_memoryssa_and_commits_exactly() {
+        const STABLE: usize = 0;
+        const SPARSE: usize = 32;
+        const DIRTY: usize = 64;
+        const SUMMARY: usize = 72;
+        const ACTIVE_BITS: usize = 88;
+        const STATE_SIZE: usize = 96;
+
+        let absolute = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let sparse =
+            RegionedAbsoluteAddr::from_absolute_addr(crate::ir::SPARSE_WORKING_REGION, absolute);
+        let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
+        let value = RegisterId(0);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(value, SIRValue::new(1u8)),
+                        SIRInstruction::Store(
+                            sparse,
+                            SIROffset::Static(1),
+                            1,
+                            value,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Commit(sparse, stable, SIROffset::Static(0), 4, vec![]),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [(
+                value,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.mode = MemoryLayoutMode::ElementStrided;
+        layout.offsets.insert(absolute, STABLE);
+        layout.widths.insert(absolute, 4);
+        layout.is_4states.insert(absolute, false);
+        layout.unpacked_arrays.insert(
+            absolute,
+            crate::backend::memory_layout::UnpackedArrayLayout {
+                element_width: 1,
+                element_count: 4,
+                element_stride: 1,
+                plane_size: 4,
+            },
+        );
+        layout.total_size = SPARSE;
+        layout.working_base_offset = SPARSE;
+        layout.sparse_base_offset = SPARSE;
+        layout.sparse_offsets.insert(absolute, 0);
+        layout.sparse_layouts.insert(
+            absolute,
+            crate::backend::memory_layout::SparseWorkingLayout {
+                active_index: 0,
+                chunk_count: 1,
+                dirty_words_offset: DIRTY,
+                dirty_word_count: 1,
+                summary_words_offset: SUMMARY,
+                summary_word_count: 1,
+            },
+        );
+        layout.sparse_active_bits_offset = ACTIVE_BITS;
+        layout.sparse_active_capacity = 1;
+        layout.merged_total_size = STATE_SIZE;
+        layout.triggered_bits_offset = STATE_SIZE;
+        layout.scratch_base_offset = STATE_SIZE;
+
+        let mut function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        let dirty_loads = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .filter(|instruction| {
+                matches!(
+                    instruction,
+                    MInst::LoadIndexed {
+                        base: BaseReg::SimState,
+                        offset,
+                        ..
+                    } if *offset == DIRTY as i32
+                )
+            })
+            .count();
+        assert_eq!(dirty_loads, 0, "first write must not inspect dirty state");
+
+        mir_legalize::legalize(&mut function);
+        mir_opt::optimize(&mut function);
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+
+        let mut state = vec![0u8; STATE_SIZE];
+        state[STABLE] = 1;
+        state[STABLE + 3] = 1;
+        state[SPARSE..SPARSE + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        // Only bit 0 of each padded slot belongs to the RTL value. Padding is
+        // backend-owned and may be canonicalized by a whole-element store.
+        assert_eq!(state[STABLE + 2] & 1, 0);
+        assert_eq!(state[STABLE] & 1, 1);
+        assert_eq!(state[STABLE + 1] & 1, 1);
+        assert_eq!(state[STABLE + 3] & 1, 1);
+        assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
+        assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
+        assert_eq!(&state[ACTIVE_BITS..ACTIVE_BITS + 8], &[0; 8]);
+    }
+
+    #[test]
+    fn whole_sparse_zero_overwrite_uses_one_physical_fill() {
+        const STABLE: usize = 0;
+        const SPARSE: usize = 40;
+        const DIRTY: usize = 72;
+        const SUMMARY: usize = 80;
+        const ACTIVE_BITS: usize = 96;
+        const STATE_SIZE: usize = 112;
+
+        let absolute = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let sparse =
+            RegionedAbsoluteAddr::from_absolute_addr(crate::ir::SPARSE_WORKING_REGION, absolute);
+        let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
+        let zero = RegisterId(0);
+        let wide_zero = RegisterId(1);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(zero, SIRValue::new(0u8)),
+                        SIRInstruction::Concat(wide_zero, vec![zero; 4]),
+                        SIRInstruction::Store(
+                            sparse,
+                            SIROffset::PackedElements {
+                                bit_offset: 0,
+                                element_width: 51,
+                            },
+                            204,
+                            wide_zero,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Commit(sparse, stable, SIROffset::Static(0), 204, vec![]),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (zero, RegisterType::Logic { width: 51 }),
+                (wide_zero, RegisterType::Logic { width: 204 }),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.mode = MemoryLayoutMode::ElementStrided;
+        layout.offsets.insert(absolute, STABLE);
+        layout.widths.insert(absolute, 204);
+        layout.is_4states.insert(absolute, false);
+        layout.unpacked_arrays.insert(
+            absolute,
+            crate::backend::memory_layout::UnpackedArrayLayout {
+                element_width: 51,
+                element_count: 4,
+                element_stride: 8,
+                plane_size: 32,
+            },
+        );
+        layout.total_size = SPARSE;
+        layout.working_base_offset = SPARSE;
+        layout.sparse_base_offset = SPARSE;
+        layout.sparse_offsets.insert(absolute, 0);
+        layout.sparse_layouts.insert(
+            absolute,
+            crate::backend::memory_layout::SparseWorkingLayout {
+                active_index: 0,
+                chunk_count: 4,
+                dirty_words_offset: DIRTY,
+                dirty_word_count: 1,
+                summary_words_offset: SUMMARY,
+                summary_word_count: 1,
+            },
+        );
+        layout.sparse_active_bits_offset = ACTIVE_BITS;
+        layout.sparse_active_capacity = 1;
+        layout.merged_total_size = STATE_SIZE;
+        layout.triggered_bits_offset = STATE_SIZE;
+        layout.scratch_base_offset = STATE_SIZE;
+
+        let mut direct_unit = unit.clone();
+        crate::optimizer::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
+            &mut direct_unit,
+            &[],
+        );
+        direct_unit.verify();
+        assert!(matches!(
+            direct_unit.blocks[&SirBlockId(0)].instructions.as_slice(),
+            [SIRInstruction::Imm(..), SIRInstruction::Concat(..), SIRInstruction::Store(address, ..)]
+                if address.region == STABLE_REGION
+        ));
+        let mut direct_function = lower_execution_unit(&direct_unit, &layout, false);
+        direct_function.verify();
+        assert_eq!(
+            direct_function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::MemFill {
+                        dst_offset,
+                        byte_len: 32,
+                        value: 0,
+                    } if *dst_offset == STABLE as i32
+                ))
+                .count(),
+            1,
+            "direct publication must retain the bulk-zero lowering"
+        );
+        assert!(
+            !direct_function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|instruction| matches!(
+                    instruction,
+                    MInst::SparseMarkActive { .. }
+                        | MInst::SparseCommit { .. }
+                        | MInst::SparseCommitWorklist { .. }
+                ))
+        );
+
+        mir_legalize::legalize(&mut direct_function);
+        mir_opt::optimize(&mut direct_function);
+        let direct_allocation = regalloc::run_regalloc(&mut direct_function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut direct_function);
+        direct_function.verify();
+        let direct_emitted = emit::emit(
+            &direct_function,
+            &direct_allocation.assignment,
+            direct_allocation.spill_frame_size,
+        )
+        .unwrap();
+        let direct_jit = JitCode::new(&direct_emitted.code).unwrap();
+        let mut direct_state = vec![0xa5u8; STATE_SIZE];
+        let direct_sentinel = direct_state[STABLE + 32];
+        assert_eq!(unsafe { direct_jit.call(&mut direct_state) }, 0);
+        assert_eq!(&direct_state[STABLE..STABLE + 32], &[0; 32]);
+        assert_eq!(direct_state[STABLE + 32], direct_sentinel);
+        assert_eq!(
+            &direct_state[SPARSE..STATE_SIZE],
+            &[0xa5; STATE_SIZE - SPARSE]
+        );
+
+        let mut eval_only_unit = unit.clone();
+        let removed = eval_only_unit
+            .blocks
+            .get_mut(&SirBlockId(0))
+            .unwrap()
+            .instructions
+            .pop();
+        assert!(matches!(removed, Some(SIRInstruction::Commit(..))));
+        eval_only_unit.verify();
+        let eval_only_function = lower_execution_unit(&eval_only_unit, &layout, false);
+        eval_only_function.verify();
+        assert_eq!(
+            eval_only_function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::MemFill {
+                        dst_offset,
+                        byte_len: 32,
+                        value: 0,
+                    } if *dst_offset == SPARSE as i32
+                ))
+                .count(),
+            1,
+            "an eval-only function must not require a local sparse commit"
+        );
+
+        let mut function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::MemFill {
+                        dst_offset,
+                        byte_len: 32,
+                        value: 0,
+                    } if *dst_offset == SPARSE as i32
+                ))
+                .count(),
+            1
+        );
+
+        mir_legalize::legalize(&mut function);
+        mir_opt::optimize(&mut function);
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+
+        let mut state = vec![0xa5u8; STATE_SIZE];
+        state[DIRTY..DIRTY + 8].fill(0);
+        state[SUMMARY..SUMMARY + 8].fill(0);
+        state[ACTIVE_BITS..ACTIVE_BITS + 8].fill(0);
+        let sentinel = state[STABLE + 32];
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(&state[STABLE..STABLE + 32], &[0; 32]);
+        assert_eq!(state[STABLE + 32], sentinel);
+        assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
+        assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
+        assert_eq!(&state[ACTIVE_BITS..ACTIVE_BITS + 8], &[0; 8]);
+    }
+
+    #[test]
+    fn dominating_sparse_store_reuses_active_single_chunk_state() {
+        const STABLE: usize = 0;
+        const SPARSE: usize = 8;
+        const DIRTY: usize = 16;
+        const SUMMARY: usize = 24;
+        const ACTIVE_BITS: usize = 40;
+        const STATE_SIZE: usize = 48;
+
+        let absolute = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let sparse =
+            RegionedAbsoluteAddr::from_absolute_addr(crate::ir::SPARSE_WORKING_REGION, absolute);
+        let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
+        let value = RegisterId(0);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(value, SIRValue::new(1u8)),
+                        SIRInstruction::Store(
+                            sparse,
+                            SIROffset::Static(1),
+                            1,
+                            value,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Store(
+                            sparse,
+                            SIROffset::Static(2),
+                            1,
+                            value,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Commit(sparse, stable, SIROffset::Static(0), 8, vec![]),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [(
+                value,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.offsets.insert(absolute, STABLE);
+        layout.widths.insert(absolute, 8);
+        layout.is_4states.insert(absolute, false);
+        layout.total_size = SPARSE;
+        layout.working_base_offset = SPARSE;
+        layout.sparse_base_offset = SPARSE;
+        layout.sparse_offsets.insert(absolute, 0);
+        layout.sparse_layouts.insert(
+            absolute,
+            crate::backend::memory_layout::SparseWorkingLayout {
+                active_index: 0,
+                chunk_count: 1,
+                dirty_words_offset: DIRTY,
+                dirty_word_count: 1,
+                summary_words_offset: SUMMARY,
+                summary_word_count: 1,
+            },
+        );
+        layout.sparse_active_bits_offset = ACTIVE_BITS;
+        layout.sparse_active_capacity = 1;
+        layout.merged_total_size = STATE_SIZE;
+        layout.triggered_bits_offset = STATE_SIZE;
+        layout.scratch_base_offset = STATE_SIZE;
+
+        let mut function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(instruction, MInst::SparseMarkActive { .. }))
+                .count(),
+            1,
+            "the dominating Store proves that the object is already active"
+        );
+
+        mir_legalize::legalize(&mut function);
+        mir_opt::optimize(&mut function);
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+
+        let mut state = vec![0u8; STATE_SIZE];
+        state[STABLE] = 0xa0;
+        state[SPARSE..SPARSE + 8].fill(0xff);
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(state[STABLE], 0xa6);
+        assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
+        assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
+        assert_eq!(&state[ACTIVE_BITS..ACTIVE_BITS + 8], &[0; 8]);
+    }
+
+    #[test]
+    fn chunk_memoryssa_preserves_disjoint_and_repeated_sparse_writes() {
+        const STABLE: usize = 0;
+        const SPARSE: usize = 32;
+        const DIRTY: usize = 64;
+        const SUMMARY: usize = 72;
+        const ACTIVE_BITS: usize = 88;
+        const STATE_SIZE: usize = 96;
+
+        let absolute = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let sparse =
+            RegionedAbsoluteAddr::from_absolute_addr(crate::ir::SPARSE_WORKING_REGION, absolute);
+        let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
+        let one = RegisterId(0);
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(one, SIRValue::new(1u8)),
+                        SIRInstruction::Store(sparse, SIROffset::Static(0), 1, one, vec![], vec![]),
+                        SIRInstruction::Store(
+                            sparse,
+                            SIROffset::Static(64),
+                            1,
+                            one,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Store(
+                            sparse,
+                            SIROffset::Static(65),
+                            1,
+                            one,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Store(
+                            sparse,
+                            SIROffset::Static(128),
+                            1,
+                            one,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Store(
+                            sparse,
+                            SIROffset::Static(192),
+                            1,
+                            one,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Commit(sparse, stable, SIROffset::Static(0), 256, vec![]),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [(
+                one,
+                RegisterType::Bit {
+                    width: 1,
+                    signed: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.offsets.insert(absolute, STABLE);
+        layout.widths.insert(absolute, 256);
+        layout.is_4states.insert(absolute, false);
+        layout.total_size = SPARSE;
+        layout.working_base_offset = SPARSE;
+        layout.sparse_base_offset = SPARSE;
+        layout.sparse_offsets.insert(absolute, 0);
+        layout.sparse_layouts.insert(
+            absolute,
+            crate::backend::memory_layout::SparseWorkingLayout {
+                active_index: 0,
+                chunk_count: 4,
+                dirty_words_offset: DIRTY,
+                dirty_word_count: 1,
+                summary_words_offset: SUMMARY,
+                summary_word_count: 1,
+            },
+        );
+        layout.sparse_active_bits_offset = ACTIVE_BITS;
+        layout.sparse_active_capacity = 1;
+        layout.merged_total_size = STATE_SIZE;
+        layout.triggered_bits_offset = STATE_SIZE;
+        layout.scratch_base_offset = STATE_SIZE;
+
+        let mut function = lower_execution_unit(&unit, &layout, false);
+        function.verify();
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(instruction, MInst::SparseMarkActive { .. }))
+                .count(),
+            1,
+            "only the object's first Store may mark it active"
+        );
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| {
+                    matches!(
+                        instruction,
+                        MInst::Store {
+                            base: BaseReg::SimState,
+                            offset,
+                            ..
+                        }
+                        | MInst::StoreIndexed {
+                            base: BaseReg::SimState,
+                            offset,
+                            ..
+                        }
+                        | MInst::OrStoreIndexed {
+                            base: BaseReg::SimState,
+                            offset,
+                            ..
+                        } if *offset == SUMMARY as i32
+                    )
+                })
+                .count(),
+            1,
+            "one dirty-word run needs one summary update"
+        );
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| {
+                    matches!(
+                        instruction,
+                        MInst::LoadIndexed {
+                            base: BaseReg::SimState,
+                            offset,
+                            ..
+                        } if *offset == DIRTY as i32
+                    )
+                })
+                .count(),
+            0,
+            "preserving a dirty word must not materialize it in a VReg"
+        );
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| {
+                    matches!(
+                        instruction,
+                        MInst::Store {
+                            base: BaseReg::SimState,
+                            offset,
+                            ..
+                        }
+                        | MInst::StoreIndexed {
+                            base: BaseReg::SimState,
+                            offset,
+                            ..
+                        }
+                        | MInst::OrStoreIndexed {
+                            base: BaseReg::SimState,
+                            offset,
+                            ..
+                        } if *offset == DIRTY as i32
+                    )
+                })
+                .count(),
+            2,
+            "each straight-line clean-chunk run needs one bitmap update"
+        );
+        let dirty_mask = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .find_map(|instruction| match instruction {
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset,
+                    src,
+                    size: OpSize::S64,
+                } if *offset == DIRTY as i32 => Some(*src),
+                _ => None,
+            })
+            .expect("clean entry should use a direct batched dirty-word store");
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|instruction| matches!(
+                    instruction,
+                    MInst::LoadImm { dst, value: 0b11 } if *dst == dirty_mask
+                ))
+        );
+        let dirty_or_mask = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.insts)
+            .find_map(|instruction| match instruction {
+                MInst::OrStoreIndexed {
+                    base: BaseReg::SimState,
+                    offset,
+                    src,
+                    size: OpSize::S64,
+                    ..
+                } if *offset == DIRTY as i32 => Some(*src),
+                _ => None,
+            })
+            .expect("an active dirty word should preserve the first batch");
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|instruction| matches!(
+                    instruction,
+                    MInst::LoadImm { dst, value: 0b1100 } if *dst == dirty_or_mask
+                ))
+        );
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .all(|instruction| !matches!(instruction, MInst::Select { .. })),
+            "proved clean/dirty chunks must not select stable versus working storage"
+        );
+
+        mir_legalize::legalize(&mut function);
+        mir_opt::optimize(&mut function);
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+
+        let mut state = vec![0u8; STATE_SIZE];
+        state[STABLE..STABLE + 8].copy_from_slice(&0x10u64.to_le_bytes());
+        state[STABLE + 8..STABLE + 16].copy_from_slice(&0x20u64.to_le_bytes());
+        state[STABLE + 16..STABLE + 24].copy_from_slice(&0x30u64.to_le_bytes());
+        state[STABLE + 24..STABLE + 32].copy_from_slice(&0x40u64.to_le_bytes());
+        state[SPARSE..SPARSE + 32].fill(0xff);
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(
+            u64::from_le_bytes(state[STABLE..STABLE + 8].try_into().unwrap()),
+            0x11
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[STABLE + 8..STABLE + 16].try_into().unwrap()),
+            0x23
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[STABLE + 16..STABLE + 24].try_into().unwrap()),
+            0x31
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[STABLE + 24..STABLE + 32].try_into().unwrap()),
+            0x41
+        );
+        assert_eq!(&state[DIRTY..DIRTY + 8], &[0; 8]);
+        assert_eq!(&state[SUMMARY..SUMMARY + 8], &[0; 8]);
+        assert_eq!(&state[ACTIVE_BITS..ACTIVE_BITS + 8], &[0; 8]);
+    }
+
+    #[test]
+    fn static_commit_converts_between_strided_and_packed_array_storage() {
+        let source_var = VarId::default();
+        let mut packed_var = source_var;
+        packed_var.inc();
+        let mut destination_var = packed_var;
+        destination_var.inc();
+        let address = |var_id| AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id,
+        };
+        let source_abs = address(source_var);
+        let packed_abs = address(packed_var);
+        let destination_abs = address(destination_var);
+        let regioned = |absolute| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
+        let eu = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Commit(
+                            regioned(source_abs),
+                            regioned(packed_abs),
+                            SIROffset::Static(0),
+                            8,
+                            vec![],
+                        ),
+                        SIRInstruction::Commit(
+                            regioned(packed_abs),
+                            regioned(destination_abs),
+                            SIROffset::Static(0),
+                            8,
+                            vec![],
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: HashMap::default(),
+        };
+        eu.verify();
+
+        for four_state in [false, true] {
+            let mut layout = empty_layout();
+            layout.four_state = four_state;
+            layout.mode = MemoryLayoutMode::ElementStrided;
+            layout.offsets = [(source_abs, 0), (packed_abs, 16), (destination_abs, 24)]
+                .into_iter()
+                .collect();
+            layout.widths = [source_abs, packed_abs, destination_abs]
+                .into_iter()
+                .map(|absolute| (absolute, 8))
+                .collect();
+            layout.is_4states = [source_abs, packed_abs, destination_abs]
+                .into_iter()
+                .map(|absolute| (absolute, four_state))
+                .collect();
+            let array_layout = crate::backend::memory_layout::UnpackedArrayLayout {
+                element_width: 2,
+                element_count: 4,
+                element_stride: 1,
+                plane_size: 4,
+            };
+            layout.unpacked_arrays.insert(source_abs, array_layout);
+            layout.unpacked_arrays.insert(destination_abs, array_layout);
+            layout.total_size = 40;
+            layout.working_base_offset = 40;
+            layout.sparse_base_offset = 40;
+            layout.sparse_active_bits_offset = 40;
+            layout.merged_total_size = 40;
+            layout.triggered_bits_offset = 40;
+            layout.scratch_base_offset = 40;
+
+            let mut function = lower_execution_unit(&eu, &layout, four_state);
+            mir_legalize::legalize(&mut function);
+            mir_opt::optimize(&mut function);
+            let allocation = regalloc::run_regalloc(&mut function).unwrap();
+            mir_opt::post_regalloc_peephole(&mut function);
+            function.verify();
+            let emitted = emit::emit(
+                &function,
+                &allocation.assignment,
+                allocation.spill_frame_size,
+            )
+            .unwrap();
+            let jit = JitCode::new(&emitted.code).unwrap();
+
+            let mut state = vec![0xa8u8; 40];
+            state[0..4].copy_from_slice(&[0xfc, 0xff, 0xfd, 0xfe]);
+            state[24..28].fill(0xa8);
+            if four_state {
+                state[4..8].copy_from_slice(&[0xfd, 0xfe, 0xff, 0xfc]);
+                state[28..32].fill(0x54);
+            }
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+
+            assert_eq!(state[16], 0x9c, "packed value, four_state={four_state}");
+            assert_eq!(
+                &state[24..28],
+                &[0xa8, 0xab, 0xa9, 0xaa],
+                "strided value, four_state={four_state}"
+            );
+            if four_state {
+                assert_eq!(state[17], 0x39, "packed mask");
+                assert_eq!(&state[28..32], &[0x55, 0x56, 0x57, 0x54]);
+            }
+        }
+    }
+
+    #[test]
+    fn full_narrow_commit_copies_private_padding_without_rmw() {
+        let absolute = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
+        let working = RegionedAbsoluteAddr::from_absolute_addr(crate::ir::WORKING_REGION, absolute);
+        let eu = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Commit(
+                        stable,
+                        working,
+                        SIROffset::Static(0),
+                        1,
+                        vec![],
+                    )],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: HashMap::default(),
+        };
+        let mut layout = empty_layout();
+        layout.offsets.insert(absolute, 0);
+        layout.widths.insert(absolute, 1);
+        layout.is_4states.insert(absolute, false);
+        layout.working_offsets.insert(absolute, 0);
+        layout.working_base_offset = 8;
+        layout.total_size = 8;
+        layout.merged_total_size = 16;
+
+        let function = lower_execution_unit(&eu, &layout, false);
+        let instructions = function
+            .blocks
+            .iter()
+            .flat_map(|block| block.insts.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::Load {
+                        offset: 0,
+                        size: OpSize::S8,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::Store {
+                        offset: 8,
+                        size: OpSize::S8,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(
+            instructions
+                .iter()
+                .all(|instruction| !matches!(instruction, MInst::And { .. } | MInst::Or { .. }))
+        );
+    }
+
+    #[test]
+    fn preallocates_vregs_in_sir_register_order() {
+        let low = RegisterId(2);
+        let middle = RegisterId(7);
+        let high = RegisterId(9);
+        let register_type = RegisterType::Bit {
+            width: 64,
+            signed: false,
+        };
+        let eu = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(middle, SIRValue::new(7u8)),
+                        SIRInstruction::Imm(low, SIRValue::new(2u8)),
+                        SIRInstruction::Binary(high, low, BinaryOp::Add, middle),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            // Deliberately insert in neither source nor RegisterId order.
+            register_map: [
+                (high, register_type.clone()),
+                (low, register_type.clone()),
+                (middle, register_type),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        eu.verify();
+
+        let function = lower_execution_unit(&eu, &empty_layout(), false);
+        let instructions = &function.blocks[0].insts;
+        assert!(matches!(
+            instructions[0],
+            MInst::LoadImm {
+                dst: VReg(1),
+                value: 7
+            }
+        ));
+        assert!(matches!(
+            instructions[1],
+            MInst::LoadImm {
+                dst: VReg(0),
+                value: 2
+            }
+        ));
+        assert!(
+            instructions
+                .iter()
+                .any(|instruction| instruction.def() == Some(VReg(2))),
+            "r9 must use the third preallocated VReg: {instructions:?}"
+        );
+    }
+
+    #[test]
+    fn wide_block_parameter_preallocation_ignores_block_map_order() {
+        let source = RegisterId(0);
+        let first_param = RegisterId(1);
+        let second_param = RegisterId(2);
+        let entry = BasicBlock {
+            id: SirBlockId(0),
+            params: vec![],
+            instructions: vec![SIRInstruction::Imm(
+                source,
+                SIRValue::new(BigUint::from(0x1234u64)),
+            )],
+            terminator: SIRTerminator::Jump(SirBlockId(2), vec![source]),
+        };
+        let first = BasicBlock {
+            id: SirBlockId(1),
+            params: vec![first_param],
+            instructions: vec![],
+            terminator: SIRTerminator::Return,
+        };
+        let second = BasicBlock {
+            id: SirBlockId(2),
+            params: vec![second_param],
+            instructions: vec![],
+            terminator: SIRTerminator::Jump(SirBlockId(1), vec![second_param]),
+        };
+        let register_map = [source, first_param, second_param]
+            .into_iter()
+            .map(|register| {
+                (
+                    register,
+                    RegisterType::Bit {
+                        width: 128,
+                        signed: false,
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let make_eu = |blocks: Vec<(SirBlockId, BasicBlock<RegionedAbsoluteAddr>)>| ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: blocks.into_iter().collect(),
+            register_map: register_map.clone(),
+        };
+        let forward = make_eu(vec![
+            (SirBlockId(0), entry.clone()),
+            (SirBlockId(1), first.clone()),
+            (SirBlockId(2), second.clone()),
+        ]);
+        let reverse = make_eu(vec![
+            (SirBlockId(2), second),
+            (SirBlockId(1), first),
+            (SirBlockId(0), entry),
+        ]);
+
+        let forward = lower_execution_unit(&forward, &empty_layout(), false);
+        let reverse = lower_execution_unit(&reverse, &empty_layout(), false);
+
+        assert_eq!(forward.to_string(), reverse.to_string());
+    }
+
     fn execute_unaligned_64_bit_load(dynamic: bool) -> u64 {
         let input_var = VarId::default();
         let mut output_var = input_var;
@@ -11621,9 +16925,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 24,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: 24,
-            sparse_active_flags_offset: 24,
-            sparse_active_list_offset: 24,
+            sparse_active_bits_offset: 24,
             sparse_active_capacity: 0,
             merged_total_size: 24,
             triggered_bits_offset: 24,
@@ -11685,6 +16987,31 @@ mod tests {
                 bytes[destination / 8] &= !mask;
             }
         }
+    }
+
+    fn assert_indexed_state_accesses_have_alias_ranges(function: &MFunction) {
+        let (loads, stores) = function.blocks.iter().flat_map(|block| &block.insts).fold(
+            (Vec::new(), Vec::new()),
+            |mut accesses, inst| {
+                match inst {
+                    MInst::LoadIndexed { alias_range, .. } => accesses.0.push(alias_range),
+                    MInst::StoreIndexed { alias_range, .. }
+                    | MInst::OrStoreIndexed { alias_range, .. } => accesses.1.push(alias_range),
+                    _ => {}
+                }
+                accesses
+            },
+        );
+        assert!(!loads.is_empty(), "fixture did not lower an indexed load");
+        assert!(!stores.is_empty(), "fixture did not lower an indexed store");
+        assert!(
+            loads.iter().all(|range| range.is_some()),
+            "ISel emitted an indexed load without a bounded memory effect"
+        );
+        assert!(
+            stores.iter().all(|range| range.is_some()),
+            "ISel emitted an indexed store without a bounded memory effect"
+        );
     }
 
     fn verify_scalar_alignment_matrix(dynamic: bool, four_state: bool) {
@@ -11816,9 +17143,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: total_size,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: total_size,
-            sparse_active_flags_offset: total_size,
-            sparse_active_list_offset: total_size,
+            sparse_active_bits_offset: total_size,
             sparse_active_capacity: 0,
             merged_total_size: total_size,
             triggered_bits_offset: total_size,
@@ -11831,6 +17156,9 @@ mod tests {
             runtime_event_site_layouts: vec![],
         };
         let mut function = lower_execution_unit(&eu, &layout, four_state);
+        if dynamic {
+            assert_indexed_state_accesses_have_alias_ranges(&function);
+        }
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
@@ -12050,9 +17378,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: total_size,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: total_size,
-            sparse_active_flags_offset: total_size,
-            sparse_active_list_offset: total_size,
+            sparse_active_bits_offset: total_size,
             sparse_active_capacity: 0,
             merged_total_size: total_size,
             triggered_bits_offset: total_size,
@@ -12065,6 +17391,9 @@ mod tests {
             runtime_event_site_layouts: vec![],
         };
         let mut function = lower_execution_unit(&eu, &layout, false);
+        if dynamic {
+            assert_indexed_state_accesses_have_alias_ranges(&function);
+        }
         mir_legalize::legalize(&mut function);
         mir_opt::optimize(&mut function);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
@@ -12199,9 +17528,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 112,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: 112,
-            sparse_active_flags_offset: 112,
-            sparse_active_list_offset: 112,
+            sparse_active_bits_offset: 112,
             sparse_active_capacity: 0,
             merged_total_size: 112,
             triggered_bits_offset: 112,
@@ -12423,6 +17750,201 @@ mod tests {
             &constants,
             &uses,
         )
+    }
+
+    fn dense_branch_table_fixture() -> ExecutionUnit<RegionedAbsoluteAddr> {
+        let selector = RegisterId(0);
+        let bit_type = |width| RegisterType::Bit {
+            width,
+            signed: false,
+        };
+        let mut register_map = [(selector, bit_type(2))]
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let mut blocks = HashMap::default();
+        let mut next_register = 1usize;
+
+        for key in 0..4usize {
+            let key_register = RegisterId(next_register);
+            let comparison = RegisterId(next_register + 1);
+            let reduced = RegisterId(next_register + 2);
+            let condition = RegisterId(next_register + 3);
+            next_register += 4;
+            register_map.insert(key_register, bit_type(2));
+            register_map.insert(comparison, bit_type(1));
+            register_map.insert(reduced, bit_type(1));
+            register_map.insert(condition, bit_type(1));
+            let false_target = if key + 1 < 4 {
+                SirBlockId(key + 1)
+            } else {
+                SirBlockId(7)
+            };
+            blocks.insert(
+                SirBlockId(key),
+                BasicBlock {
+                    id: SirBlockId(key),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(key_register, SIRValue::new(BigUint::from(key as u64))),
+                        SIRInstruction::Binary(
+                            comparison,
+                            selector,
+                            BinaryOp::EqWildcard,
+                            key_register,
+                        ),
+                        SIRInstruction::Unary(reduced, UnaryOp::Or, comparison),
+                        SIRInstruction::Unary(condition, UnaryOp::ToTwoState, reduced),
+                    ],
+                    terminator: SIRTerminator::Branch {
+                        cond: condition,
+                        true_block: (SirBlockId(4 + key), vec![]),
+                        false_block: (false_target, vec![]),
+                    },
+                },
+            );
+        }
+        for block in 4..8 {
+            blocks.insert(
+                SirBlockId(block),
+                BasicBlock {
+                    id: SirBlockId(block),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Return,
+                },
+            );
+        }
+        ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks,
+            register_map,
+        }
+    }
+
+    #[test]
+    fn recognizes_full_domain_selector_branch_spine() {
+        let fixture = dense_branch_table_fixture();
+        let constants = collect_exact_sir_constants(&fixture);
+        let uses = collect_sir_use_sites(&fixture);
+        let plans = find_selector_branch_table_plans(&fixture, &constants, &uses);
+
+        let plan = &plans.roots[&SirBlockId(0)];
+        assert_eq!(plan.selector, RegisterId(0));
+        assert_eq!(plan.selector_width, 2);
+        assert_eq!(
+            plan.targets.as_ref(),
+            &[SirBlockId(4), SirBlockId(5), SirBlockId(6), SirBlockId(7)]
+        );
+        assert_eq!(
+            plans.removed_blocks,
+            [SirBlockId(1), SirBlockId(2), SirBlockId(3)]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(plan.skip_indices, [0, 1, 2, 3].into_iter().collect());
+    }
+
+    #[test]
+    fn recognizes_partial_selector_branch_spine_with_original_default() {
+        let mut fixture = dense_branch_table_fixture();
+        let bit3 = RegisterType::Bit {
+            width: 3,
+            signed: false,
+        };
+        fixture.register_map.insert(RegisterId(0), bit3.clone());
+        for key_register in [1, 5, 9, 13].map(RegisterId) {
+            fixture.register_map.insert(key_register, bit3.clone());
+        }
+        let constants = collect_exact_sir_constants(&fixture);
+        let uses = collect_sir_use_sites(&fixture);
+        let plans = find_selector_branch_table_plans(&fixture, &constants, &uses);
+
+        let plan = &plans.roots[&SirBlockId(0)];
+        assert_eq!(plan.selector_width, 3);
+        assert_eq!(
+            plan.targets.as_ref(),
+            &[
+                SirBlockId(4),
+                SirBlockId(5),
+                SirBlockId(6),
+                SirBlockId(7),
+                SirBlockId(7),
+                SirBlockId(7),
+                SirBlockId(7),
+                SirBlockId(7),
+            ]
+        );
+        assert_eq!(
+            plans.removed_blocks,
+            [SirBlockId(1), SirBlockId(2), SirBlockId(3)]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn lowers_a_single_target_switch_to_an_unconditional_jump() {
+        let selector = RegisterId(0);
+        let blocks = [
+            (
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![SIRInstruction::Imm(selector, SIRValue::new(0_u8))],
+                    terminator: SIRTerminator::Switch {
+                        selector,
+                        cases: vec![
+                            crate::ir::SIRSwitchCase {
+                                value: BigUint::from(1_u8),
+                                target: SirBlockId(1),
+                            },
+                            crate::ir::SIRSwitchCase {
+                                value: BigUint::from(7_u8),
+                                target: SirBlockId(1),
+                            },
+                        ],
+                        default: SirBlockId(1),
+                    },
+                },
+            ),
+            (
+                SirBlockId(1),
+                BasicBlock {
+                    id: SirBlockId(1),
+                    params: vec![],
+                    instructions: vec![],
+                    terminator: SIRTerminator::Return,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let eu = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks,
+            register_map: [(
+                selector,
+                RegisterType::Bit {
+                    width: 7,
+                    signed: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let function = lower_execution_unit(&eu, &empty_layout(), false);
+        assert!(matches!(
+            function.blocks[0].insts.last(),
+            Some(MInst::Jump { target: BlockId(1) })
+        ));
+        assert!(
+            !function.blocks[0]
+                .insts
+                .iter()
+                .any(|instruction| matches!(instruction, MInst::JumpTable { .. }))
+        );
     }
 
     #[test]
@@ -12757,9 +18279,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 24,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: 24,
-            sparse_active_flags_offset: 24,
-            sparse_active_list_offset: 24,
+            sparse_active_bits_offset: 24,
             sparse_active_capacity: 0,
             merged_total_size: 24,
             triggered_bits_offset: 24,
@@ -12870,6 +18390,7 @@ mod tests {
     }
 
     fn compile_bit_count(op: UnaryOp, source_width: usize, four_state: bool) -> CompiledBitCount {
+        let expect_native_bsf = !four_state && matches!(op, UnaryOp::CountTrailingZeros);
         let result_width = op.result_width(source_width);
         let input_bytes = source_width.div_ceil(8);
         let output_bytes = result_width.div_ceil(8);
@@ -12961,9 +18482,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: state_size,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: state_size,
-            sparse_active_flags_offset: state_size,
-            sparse_active_list_offset: state_size,
+            sparse_active_bits_offset: state_size,
             sparse_active_capacity: 0,
             merged_total_size: state_size,
             triggered_bits_offset: state_size,
@@ -12982,6 +18501,15 @@ mod tests {
         function.verify();
         mir_opt::optimize(&mut function);
         function.verify();
+        if expect_native_bsf {
+            let mut instructions = function.blocks.iter().flat_map(|block| &block.insts);
+            assert!(
+                instructions
+                    .clone()
+                    .any(|inst| matches!(inst, MInst::Bsf { .. }))
+            );
+            assert!(!instructions.any(|inst| matches!(inst, MInst::Bsr { .. })));
+        }
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
         mir_opt::post_regalloc_peephole(&mut function);
         function.verify();
@@ -13031,9 +18559,10 @@ mod tests {
     }
 
     #[test]
-    fn narrow_result_of_wide_shift_uses_declared_width_afterwards() {
+    fn narrow_wide_shift_uses_only_chunks_covered_by_the_result() {
         let input_var = VarId::default();
         let output_var = VarId::from_raw(1);
+        let crossing_output_var = VarId::from_raw(2);
         let input_abs = AbsoluteAddr {
             instance_id: InstanceId(0),
             var_id: input_var,
@@ -13042,8 +18571,14 @@ mod tests {
             instance_id: InstanceId(0),
             var_id: output_var,
         };
+        let crossing_output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: crossing_output_var,
+        };
         let input_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, input_abs);
         let output_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+        let crossing_output_addr =
+            RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, crossing_output_abs);
 
         let wide = RegisterId(0);
         let bit_index = RegisterId(1);
@@ -13051,6 +18586,8 @@ mod tests {
         let sign_index = RegisterId(3);
         let shifted = RegisterId(4);
         let extended = RegisterId(5);
+        let crossing_index = RegisterId(6);
+        let crossing = RegisterId(7);
         let eu = ExecutionUnit {
             entry_block_id: SirBlockId(0),
             blocks: [(
@@ -13060,16 +18597,26 @@ mod tests {
                     params: vec![],
                     instructions: vec![
                         SIRInstruction::Load(wide, input_addr, SIROffset::Static(0), 128),
-                        SIRInstruction::Imm(bit_index, SIRValue::new(127u8)),
+                        SIRInstruction::Imm(bit_index, SIRValue::new(15u8)),
                         SIRInstruction::Binary(gate, wide, BinaryOp::Shr, bit_index),
                         SIRInstruction::Imm(sign_index, SIRValue::new(31u8)),
                         SIRInstruction::Binary(shifted, gate, BinaryOp::Shl, sign_index),
                         SIRInstruction::Binary(extended, shifted, BinaryOp::Sar, sign_index),
+                        SIRInstruction::Imm(crossing_index, SIRValue::new(60u8)),
+                        SIRInstruction::Binary(crossing, wide, BinaryOp::Shr, crossing_index),
                         SIRInstruction::Store(
                             output_addr,
                             SIROffset::Static(0),
                             32,
                             extended,
+                            vec![],
+                            vec![],
+                        ),
+                        SIRInstruction::Store(
+                            crossing_output_addr,
+                            SIROffset::Static(0),
+                            8,
+                            crossing,
                             vec![],
                             vec![],
                         ),
@@ -13122,6 +18669,195 @@ mod tests {
                         signed: true,
                     },
                 ),
+                (
+                    crossing_index,
+                    RegisterType::Bit {
+                        width: 8,
+                        signed: false,
+                    },
+                ),
+                (
+                    crossing,
+                    RegisterType::Bit {
+                        width: 8,
+                        signed: false,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        eu.verify();
+
+        let layout = MemoryLayout {
+            four_state: false,
+            mode: MemoryLayoutMode::Packed,
+            unpacked_arrays: HashMap::default(),
+            offsets: [(input_abs, 0), (output_abs, 16), (crossing_output_abs, 20)]
+                .into_iter()
+                .collect(),
+            widths: [(input_abs, 128), (output_abs, 32), (crossing_output_abs, 8)]
+                .into_iter()
+                .collect(),
+            is_4states: [
+                (input_abs, false),
+                (output_abs, false),
+                (crossing_output_abs, false),
+            ]
+            .into_iter()
+            .collect(),
+            total_size: 24,
+            working_offsets: HashMap::default(),
+            working_base_offset: 24,
+            sparse_offsets: HashMap::default(),
+            sparse_base_offset: 24,
+            sparse_layouts: HashMap::default(),
+            sparse_active_bits_offset: 24,
+            sparse_active_capacity: 0,
+            merged_total_size: 24,
+            triggered_bits_offset: 24,
+            triggered_bits_total_size: 0,
+            scratch_base_offset: 24,
+            scratch_size: 0,
+            runtime_event_capacity: 0,
+            runtime_event_slot_size: 0,
+            runtime_event_buffer_size: 0,
+            runtime_event_site_layouts: vec![],
+        };
+
+        let mut function = lower_execution_unit(&eu, &layout, false);
+        function.verify();
+        assert!(
+            !function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|instruction| matches!(instruction, MInst::ShlImm { imm: 49, .. })),
+            "a one-bit extraction wholly inside the low word must not combine the next word"
+        );
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|instruction| matches!(instruction, MInst::ShlImm { imm: 4, .. })),
+            "an eight-bit extraction starting at bit 60 must combine the next word"
+        );
+        mir_legalize::legalize(&mut function);
+        function.verify();
+        mir_opt::optimize(&mut function);
+        function.verify();
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0u8; 24];
+        state[1] = 0x80;
+        state[7] = 0x80;
+        state[8] = 0x01;
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(&state[16..20], &u32::MAX.to_le_bytes());
+        assert_eq!(state[20], 0x18);
+    }
+
+    #[test]
+    fn wide_shift_result_is_canonical_before_mux_condition() {
+        let input_var = VarId::default();
+        let output_var = VarId::from_raw(1);
+        let input_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: input_var,
+        };
+        let output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: output_var,
+        };
+        let input_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, input_abs);
+        let output_addr = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+
+        let wide = RegisterId(0);
+        let bit_index = RegisterId(1);
+        let gate = RegisterId(2);
+        let then_value = RegisterId(3);
+        let else_value = RegisterId(4);
+        let selected = RegisterId(5);
+        let eu = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Load(wide, input_addr, SIROffset::Static(0), 128),
+                        SIRInstruction::Imm(bit_index, SIRValue::new(65u8)),
+                        SIRInstruction::Binary(gate, wide, BinaryOp::Shr, bit_index),
+                        SIRInstruction::Imm(then_value, SIRValue::new(u32::MAX)),
+                        SIRInstruction::Imm(else_value, SIRValue::new(0u8)),
+                        SIRInstruction::Mux(selected, gate, then_value, else_value),
+                        SIRInstruction::Store(
+                            output_addr,
+                            SIROffset::Static(0),
+                            32,
+                            selected,
+                            vec![],
+                            vec![],
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (
+                    wide,
+                    RegisterType::Bit {
+                        width: 128,
+                        signed: false,
+                    },
+                ),
+                (
+                    bit_index,
+                    RegisterType::Bit {
+                        width: 8,
+                        signed: false,
+                    },
+                ),
+                (
+                    gate,
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                ),
+                (
+                    then_value,
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: false,
+                    },
+                ),
+                (
+                    else_value,
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: false,
+                    },
+                ),
+                (
+                    selected,
+                    RegisterType::Bit {
+                        width: 32,
+                        signed: false,
+                    },
+                ),
             ]
             .into_iter()
             .collect(),
@@ -13143,9 +18879,7 @@ mod tests {
             sparse_offsets: HashMap::default(),
             sparse_base_offset: 24,
             sparse_layouts: HashMap::default(),
-            sparse_active_count_offset: 24,
-            sparse_active_flags_offset: 24,
-            sparse_active_list_offset: 24,
+            sparse_active_bits_offset: 24,
             sparse_active_capacity: 0,
             merged_total_size: 24,
             triggered_bits_offset: 24,
@@ -13175,9 +18909,9 @@ mod tests {
         .unwrap();
         let jit = JitCode::new(&emitted.code).unwrap();
         let mut state = vec![0u8; 24];
-        state[15] = 0x80;
+        state[8] = 0x04; // bit 66 = 1, bit 65 = 0
         assert_eq!(unsafe { jit.call(&mut state) }, 0);
-        assert_eq!(&state[16..20], &u32::MAX.to_le_bytes());
+        assert_eq!(&state[16..20], &0u32.to_le_bytes());
     }
 
     #[test]
