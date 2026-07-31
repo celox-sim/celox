@@ -45,7 +45,7 @@ pub struct Program {
 -   **`apply_ffs`**: Phase that commits values from the Working region to the Stable region.
 -   **`eval_comb_plan`**: Compilation plan for `eval_comb` when the estimated CLIF instruction count exceeds the safety threshold used to stay below Cranelift's instruction/value limits. See [Tail-Call Splitting](./optimizations.md#214-tail-call-splitting) for details.
 -   **`reset_clock_map`**: Maps each reset `AbsoluteAddr` to its associated clock `AbsoluteAddr` (derived from `FfDeclaration`).
--   **`layout_requirements`**: Semantic physical-layout constraints, including validated candidates mapping non-canonical → canonical state homes. `IdentityStoreBypass` populates these aliases; layout verifies representation compatibility before sharing memory. The requirements are retained while `Program` remains publicly re-layoutable.
+-   **`layout_requirements`**: Semantic physical-layout constraints, including validated candidates mapping non-canonical → canonical state homes. `IdentityStoreBypass` populates these aliases; layout verifies representation compatibility before sharing memory and consumes the requirements when producing `LaidOutProgram`.
 -   **`layout`**: Pre-computed `MemoryLayout`. Built after optimization, before backend codegen. Centralizes offset calculation so all backends share the same layout.
 -   **`initial_statements`**: Initial block statements from the top-level module (for native testbenches).
 -   **`tb_functions`**: Functions defined in the top-level module (for testbench function calls via the bytecode VM).

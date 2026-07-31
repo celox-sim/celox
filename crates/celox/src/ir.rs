@@ -175,6 +175,8 @@ impl Program {
                 );
             }
         }
+        self.layout_requirements.clear();
+
         LaidOutProgram {
             program: self,
             layout,

@@ -1447,6 +1447,14 @@ impl Simulator<JitBackend> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl Simulator<crate::backend::wasm_runtime::WasmBackend> {
+    /// Consume the simulator and return the inner Wasmtime backend.
+    pub fn into_backend(self) -> crate::backend::wasm_runtime::WasmBackend {
+        self.backend
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 impl Simulator<NativeBackend> {
     /// Returns the shared compiled native code, allowing it to be reused
