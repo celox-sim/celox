@@ -6,6 +6,11 @@ This document defines the target crate architecture and the migration contract f
 current `celox` compiler/runtime monolith. It is a design document, not a claim that the described
 crates already exist.
 
+Migration note: `celox-state-layout` now owns the generic layout algorithm and the compiler driver
+uses a consuming `Program -> LaidOutProgram` transition. The current facade artifact still wraps
+the mixed `Program`; dissolving that payload into the phase-specific target types below remains
+part of Milestone 3.
+
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making
 phase ownership explicit.

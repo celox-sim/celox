@@ -2,8 +2,8 @@ use celox::{BigUint, SimulatorOptions, WasmBackend};
 
 fn build_wasm(code: &str, top: &str) -> (WasmBackend, celox::Simulator) {
     let sim = celox::Simulator::builder(code, top).build().unwrap();
-    let program = sim.program().clone();
     let opts = SimulatorOptions::default();
+    let program = sim.program().clone().into_laid_out(opts.four_state);
     let backend = WasmBackend::new(&program, &opts).expect("WasmBackend::new failed");
     (backend, sim)
 }

@@ -1414,7 +1414,6 @@ pub(crate) fn flatten(
                 num_events: 0,
                 reset_clock_map: HashMap::default(),
                 address_aliases: HashMap::default(),
-                layout: None,
                 initial_memory_values: Vec::new(),
                 initial_statements: None,
                 tb_functions: fxhash::FxHashMap::default(),
@@ -1603,7 +1602,6 @@ pub(crate) fn flatten(
         num_events,
         reset_clock_map,
         address_aliases: HashMap::default(),
-        layout: None,
         initial_memory_values,
         initial_statements,
         tb_functions: module_ir

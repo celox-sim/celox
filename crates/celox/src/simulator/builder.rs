@@ -560,14 +560,15 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         }
     }
 
-    /// Compile SIR and return it along with the remaining builder state.
+    /// Compile SIR, finalize its state layout, and return the typed artifact
+    /// along with the remaining builder state.
     /// Consumes self.
-    fn into_sir(
+    fn into_laid_out_program(
         self,
         layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
     ) -> Result<
         (
-            crate::ir::Program,
+            crate::ir::LaidOutProgram,
             Vec<veryl_analyzer::AnalyzerError>,
             SimulatorOptions,
             Option<std::path::PathBuf>,
@@ -609,14 +610,14 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
         // Build memory layout (consumes address_aliases for offset sharing)
         let layout_start = phase_timing.then(crate::timing::now);
-        program.build_layout_with_mode(self.options.four_state, layout_mode);
+        let mut laid_out = program.into_laid_out_with_mode(self.options.four_state, layout_mode);
         if let Some(start) = layout_start {
             eprintln!("[phase-timing] build_layout: {:?}", start.elapsed());
         }
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {
             let dse_start = phase_timing.then(crate::timing::now);
-            run_dead_store_elimination(&mut program, &self.live_signals, &self.options);
+            run_dead_store_elimination(laid_out.program_mut(), &self.live_signals, &self.options);
             if let Some(start) = dse_start {
                 eprintln!(
                     "[phase-timing] dead_store_elimination: {:?}",
@@ -625,7 +626,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             }
         }
 
-        Ok((program, warnings, self.options, self.vcd_path))
+        Ok((laid_out, warnings, self.options, self.vcd_path))
     }
 
     /// Compiles the Veryl source and constructs the simulator.
@@ -646,20 +647,24 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         let phase_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
         let phase_start = phase_timing.then(crate::timing::now);
 
-        let (program, warnings, options, vcd_path) =
-            self.into_sir(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+        let (laid_out, warnings, options, vcd_path) =
+            self.into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
 
         if let Some(s) = phase_start {
-            eprintln!("[phase-timing] compile_to_sir (total): {:?}", s.elapsed());
+            eprintln!(
+                "[phase-timing] compile_and_layout (total): {:?}",
+                s.elapsed()
+            );
         }
 
         let jit_start = phase_timing.then(crate::timing::now);
-        let backend = JitBackend::new(&program, &options, None)?;
+        let backend = JitBackend::new(&laid_out, &options, None)?;
         if let Some(s) = jit_start {
             eprintln!("[phase-timing] jit_backend: {:?}", s.elapsed());
         }
 
-        let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
+        let mut sim =
+            Simulator::with_backend_and_program(backend, laid_out.into_program(), warnings);
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
@@ -678,17 +683,22 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
         let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
         let sir_start = phase_timing.then(crate::timing::now);
-        let (program, warnings, options, vcd_path) =
-            self.into_sir(crate::backend::memory_layout::MemoryLayoutMode::ElementStrided)?;
+        let (laid_out, warnings, options, vcd_path) = self.into_laid_out_program(
+            crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+        )?;
         if let Some(start) = sir_start {
-            eprintln!("[phase-timing] into_sir total: {:?}", start.elapsed());
+            eprintln!(
+                "[phase-timing] into_laid_out_program total: {:?}",
+                start.elapsed()
+            );
         }
         let backend_start = phase_timing.then(crate::timing::now);
-        let backend = crate::backend::native::NativeBackend::new(&program, &options)?;
+        let backend = crate::backend::native::NativeBackend::new(&laid_out, &options)?;
         if let Some(start) = backend_start {
             eprintln!("[phase-timing] native_backend: {:?}", start.elapsed());
         }
-        let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
+        let mut sim =
+            Simulator::with_backend_and_program(backend, laid_out.into_program(), warnings);
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
@@ -712,10 +722,11 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     pub fn build_wasm(
         self,
     ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
-        let (program, warnings, options, vcd_path) =
-            self.into_sir(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
-        let backend = crate::backend::wasm_runtime::WasmBackend::new(&program, &options)?;
-        let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
+        let (laid_out, warnings, options, vcd_path) =
+            self.into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+        let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)?;
+        let mut sim =
+            Simulator::with_backend_and_program(backend, laid_out.into_program(), warnings);
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
@@ -788,10 +799,15 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             // Register testbench runtime-event sites before layout fixes the ring geometry.
             crate::testbench::register_runtime_event_sites(&mut program);
 
-            program.build_layout_with_mode(self.options.four_state, layout_mode);
+            let mut laid_out =
+                program.into_laid_out_with_mode(self.options.four_state, layout_mode);
 
             if self.options.dead_store_policy != DeadStorePolicy::Off {
-                run_dead_store_elimination(&mut program, &self.live_signals, &self.options);
+                run_dead_store_elimination(
+                    laid_out.program_mut(),
+                    &self.live_signals,
+                    &self.options,
+                );
             }
 
             #[cfg(target_arch = "x86_64")]
@@ -799,7 +815,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 if self.options.trace.mir || !self.options.trace.native_profile_blocks.is_empty() {
                     let (backend, native_trace) =
                         crate::backend::native::NativeBackend::new_with_codegen_trace(
-                            &program,
+                            &laid_out,
                             &self.options,
                         )?;
                     trace.native_optimized_sir = Some(native_trace.optimized_sir);
@@ -808,12 +824,13 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                     trace.native_state_layout = Some(native_trace.state_layout);
                     backend
                 } else {
-                    crate::backend::native::NativeBackend::new(&program, &self.options)?
+                    crate::backend::native::NativeBackend::new(&laid_out, &self.options)?
                 };
             #[cfg(not(target_arch = "x86_64"))]
-            let backend = JitBackend::new(&program, &self.options, None)?;
+            let backend = JitBackend::new(&laid_out, &self.options, None)?;
 
-            let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
+            let mut sim =
+                Simulator::with_backend_and_program(backend, laid_out.into_program(), warnings);
             sim.apply_initial_values();
             sim.modify(|_| {}).map_err(SimulatorError::from)?;
             Ok(sim)
@@ -893,7 +910,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
         let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
         #[cfg(not(target_arch = "x86_64"))]
         let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
-        let (mut program, warnings) = compile_to_sir_with_layout_mode(
+        let (program, warnings) = compile_to_sir_with_layout_mode(
             &self.sources,
             self.top,
             &self.ignored_loops,
@@ -908,17 +925,18 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             &self.options.optimize_options,
             layout_mode,
         )?;
-        program.build_layout_with_mode(self.options.four_state, layout_mode);
+        let mut laid_out = program.into_laid_out_with_mode(self.options.four_state, layout_mode);
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {
-            run_dead_store_elimination(&mut program, &self.live_signals, &self.options);
+            run_dead_store_elimination(laid_out.program_mut(), &self.live_signals, &self.options);
         }
         #[cfg(target_arch = "x86_64")]
-        let backend = crate::backend::native::NativeBackend::new(&program, &self.options)?;
+        let backend = crate::backend::native::NativeBackend::new(&laid_out, &self.options)?;
         #[cfg(not(target_arch = "x86_64"))]
-        let backend = crate::backend::JitBackend::new(&program, &self.options, None)?;
+        let backend = crate::backend::JitBackend::new(&laid_out, &self.options, None)?;
 
-        let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
+        let mut sim =
+            Simulator::with_backend_and_program(backend, laid_out.into_program(), warnings);
         if let Some(path) = self.vcd_path {
             let descs = sim.build_vcd_descs(self.options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
