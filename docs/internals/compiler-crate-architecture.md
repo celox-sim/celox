@@ -17,7 +17,9 @@ oversized-function planning is constructed from final SIR
 at the backend boundary; backend scratch extends only the backend's private layout copy.
 Veryl source identities retained for diagnostics and public path lookup are grouped in
 `celox-frontend-veryl::VerylFrontendLookup`; optimizer and backend code no longer inspect that
-artifact. Moving the remaining parser implementation, symbolic, optimizer, and testbench payload
+artifact. The unused semantic-process provenance formerly copied from `LogicPath` through the
+scheduler into `Program` has been removed instead of being assigned to a target crate. Moving the
+remaining parser implementation, symbolic, optimizer, and testbench payload
 into the phase-specific target types below remains part of Milestone 3.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The

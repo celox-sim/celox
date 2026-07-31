@@ -55,10 +55,6 @@ impl<A: fmt::Display + Hash + Eq + Clone> fmt::Display for LogicPathTarget<A> {
 pub struct LogicPath<A: Hash + Eq + Clone> {
     /// Semantic combinational process which produced this range definition.
     ///
-    /// This is placement provenance, not an execution-order constraint.
-    /// Flattening makes populated IDs globally unique before scheduling.
-    #[serde(default)]
-    pub semantic_region: Option<u64>,
     pub target: LogicPathTarget<A>,
     pub sources: HashSet<VarAtomBase<A>>,
     pub previous_sources: HashSet<VarAtomBase<A>>,
@@ -157,7 +153,6 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
             .map_addr(self.expr, arena, target_arena, cache, f)?;
 
         Ok(LogicPath {
-            semantic_region: self.semantic_region,
             target,
             sources: self
                 .sources

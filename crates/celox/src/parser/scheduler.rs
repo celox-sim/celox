@@ -2184,9 +2184,6 @@ impl<A: Display + Debug + Eq + Hash + Clone> SchedulerError<A> {
 pub struct ScheduleResult<Addr> {
     pub execution_units: Vec<ExecutionUnit<Addr>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<Addr>>,
-    /// Exact comb range definitions grouped by their source semantic process.
-    /// This survives physical EU coalescing and is not an ordering constraint.
-    pub semantic_regions: HashMap<VarAtomBase<Addr>, u64>,
     /// Persistent-state ranges published directly by FF actions in the shared
     /// comb/FF schedule. These Stores are semantic state updates rather than
     /// disposable comb publications.
@@ -2708,10 +2705,6 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     let n = input.len();
     let (mut materialization_tokens, token_weights) =
         logic_path_materialization_tokens(&input, arena);
-    let semantic_regions = input
-        .iter()
-        .filter_map(|path| Some((*path.target.var()?, path.semantic_region?)))
-        .collect();
     let LogicPathMemorySsa {
         successors: mut adj,
         mut value_users,
@@ -3278,7 +3271,6 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     Ok(ScheduleResult {
         execution_units: result_eus,
         runtime_errors,
-        semantic_regions,
         direct_ff_writes,
     })
 }
@@ -3440,7 +3432,6 @@ mod tests {
                 .unwrap()
         };
         LogicPath {
-            semantic_region: None,
             target: LogicPathTarget::Var(VarAtomBase::new(target, 0, 7)),
             sources: source
                 .map(|source| [VarAtomBase::new(source, 0, 7)].into_iter().collect())
@@ -3535,30 +3526,6 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(stores, vec![10, 11, 12, 20, 21, 22]);
-    }
-
-    #[test]
-    fn physical_comb_unit_preserves_independent_semantic_regions() {
-        let mut arena = SLTNodeArena::new();
-        let mut first = simple_path(&mut arena, 10, None);
-        first.semantic_region = Some(7);
-        let mut second = simple_path(&mut arena, 20, None);
-        second.semantic_region = Some(9);
-
-        let result = sort(
-            vec![first, second],
-            &arena,
-            &crate::HashSet::default(),
-            &crate::HashMap::default(),
-            false,
-            &crate::HashMap::default(),
-            1,
-        )
-        .unwrap();
-
-        assert_eq!(result.execution_units.len(), 1);
-        assert_eq!(result.semantic_regions[&VarAtomBase::new(10, 0, 7)], 7);
-        assert_eq!(result.semantic_regions[&VarAtomBase::new(20, 0, 7)], 9);
     }
 
     #[test]
@@ -3709,7 +3676,6 @@ mod tests {
             })
             .unwrap();
         LogicPath {
-            semantic_region: None,
             target: LogicPathTarget::Var(target),
             sources: [VarAtomBase::new(external, 0, 63)].into_iter().collect(),
             previous_sources: crate::HashSet::default(),
@@ -4189,7 +4155,6 @@ mod tests {
             })
             .unwrap();
         let path = |target, expr| LogicPath {
-            semantic_region: None,
             target: LogicPathTarget::Var(VarAtomBase::new(target, 0, 7)),
             // Keep the scheduling graph acyclic in this focused cache test;
             // dependency memoization still sees both initial reads.
