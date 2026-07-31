@@ -435,8 +435,8 @@ fn rewrite_expr<A: Clone + Eq + Hash + Debug + Display>(
 
 #[cfg(test)]
 mod tests {
-    use celox_design::UnaryOp;
     use crate::{SLTNode, SLTNodeArena};
+    use celox_design::UnaryOp;
     use num_bigint::BigUint;
 
     use super::eval_const_expr;

@@ -9,12 +9,16 @@ use celox_design::VarAtomBase;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 pub mod const_inline;
+mod lower;
 mod node;
 mod node_facts;
 mod node_rules;
 mod path;
 pub mod range_store;
 
+#[doc(hidden)]
+pub use lower::matches_slt_or_scan_group;
+pub use lower::{SLTToSIRLowerer, matches_slt_count_idiom};
 pub use node::{
     NodeId, SLTForEffect, SLTForFoldGroupState, SLTForUpdate, SLTIndex, SLTIndexKind, SLTLoopBound,
     SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTStepOp,
