@@ -11,6 +11,7 @@ mod config;
 pub mod context_width;
 mod error;
 pub mod ff;
+pub mod flattening;
 pub mod hierarchy;
 pub mod logic_tree;
 pub mod loop_provenance;

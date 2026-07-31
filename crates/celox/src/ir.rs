@@ -436,8 +436,6 @@ pub(crate) mod verify {
 }
 pub use celox_slt::{GlueAddrBase, GlueBlockBase};
 
-/// Concrete glue block using the Veryl analyzer's `VarId`.
-pub type GlueBlock = GlueBlockBase<VarId>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SignalArrayLayout {
     pub element_width: usize,
