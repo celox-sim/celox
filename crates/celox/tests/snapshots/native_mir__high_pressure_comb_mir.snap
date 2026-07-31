@@ -4,183 +4,218 @@ expression: output
 ---
 === MIR used by native emission ===
 === Native function eval_comb ===
---- MIR after optimization, before register allocation ---
+--- MIR after main optimization, before regalloc-owned late folds ---
 bb0:
   v0 = load.i32 [sim + 32]
   v1 = load.i32 [sim + 36]
-  v3 = load.i32 [sim + 40]
-  v5 = load.i32 [sim + 44]
-  v7 = load.i32 [sim + 48]
-  v9 = load.i32 [sim + 52]
-  v11 = load.i32 [sim + 56]
-  v13 = load.i32 [sim + 60]
-  v31 = add.w32 v0, v1
-  v15 = load.i32 [sim + 64]
-  v17 = load.i32 [sim + 68]
-  v32 = add.w32 v31, v3
-  v19 = load.i32 [sim + 72]
-  v33 = add.w32 v32, v5
-  v21 = load.i32 [sim + 76]
-  v34 = add.w32 v33, v7
-  v23 = load.i32 [sim + 80]
-  v35 = add.w32 v34, v9
-  v25 = load.i32 [sim + 84]
-  v36 = add.w32 v35, v11
-  v27 = load.i32 [sim + 88]
-  v37 = add.w32 v36, v13
-  v29 = load.i32 [sim + 92]
-  v38 = add.w32 v37, v15
-  v39 = add.w32 v38, v17
-  v40 = add.w32 v39, v19
-  v41 = add.w32 v40, v21
-  v42 = add.w32 v41, v23
-  v43 = add.w32 v42, v25
-  v44 = add.w32 v43, v27
-  v45 = add.w32 v44, v29
-  store.i32 [sim + 96], v45
+  v2 = load.i32 [sim + 40]
+  v3 = load.i32 [sim + 44]
+  v4 = load.i32 [sim + 48]
+  v5 = load.i32 [sim + 52]
+  v6 = load.i32 [sim + 56]
+  v7 = load.i32 [sim + 60]
+  v16 = add.w32 v0, v1
+  v8 = load.i32 [sim + 64]
+  v9 = load.i32 [sim + 68]
+  v17 = add.w32 v16, v2
+  v10 = load.i32 [sim + 72]
+  v18 = add.w32 v17, v3
+  v11 = load.i32 [sim + 76]
+  v19 = add.w32 v18, v4
+  v12 = load.i32 [sim + 80]
+  v20 = add.w32 v19, v5
+  v13 = load.i32 [sim + 84]
+  v21 = add.w32 v20, v6
+  v14 = load.i32 [sim + 88]
+  v22 = add.w32 v21, v7
+  v15 = load.i32 [sim + 92]
+  v23 = add.w32 v22, v8
+  v24 = add.w32 v23, v9
+  v25 = add.w32 v24, v10
+  v26 = add.w32 v25, v11
+  v27 = add.w32 v26, v12
+  v28 = add.w32 v27, v13
+  v29 = add.w32 v28, v14
+  v30 = add.w32 v29, v15
+  store.i32 [sim + 96], v30
   ret
---- MIR after pressure scheduling, before CSSA and spilling ---
+--- MIR after late memory folds, before allocation-owned scheduling ---
 bb0:
   v0 = load.i32 [sim + 32]
   v1 = load.i32 [sim + 36]
-  v3 = load.i32 [sim + 40]
-  v5 = load.i32 [sim + 44]
-  v7 = load.i32 [sim + 48]
-  v9 = load.i32 [sim + 52]
-  v11 = load.i32 [sim + 56]
-  v13 = load.i32 [sim + 60]
-  v31 = add.w32 v0, v1
-  v15 = load.i32 [sim + 64]
-  v17 = load.i32 [sim + 68]
-  v32 = add.w32 v31, v3
-  v19 = load.i32 [sim + 72]
-  v33 = add.w32 v32, v5
-  v21 = load.i32 [sim + 76]
-  v34 = add.w32 v33, v7
-  v23 = load.i32 [sim + 80]
-  v35 = add.w32 v34, v9
-  v25 = load.i32 [sim + 84]
-  v36 = add.w32 v35, v11
-  v27 = load.i32 [sim + 88]
-  v37 = add.w32 v36, v13
-  v29 = load.i32 [sim + 92]
-  v38 = add.w32 v37, v15
-  v39 = add.w32 v38, v17
-  v40 = add.w32 v39, v19
-  v41 = add.w32 v40, v21
-  v42 = add.w32 v41, v23
-  v43 = add.w32 v42, v25
-  v44 = add.w32 v43, v27
-  v45 = add.w32 v44, v29
-  store.i32 [sim + 96], v45
+  v2 = load.i32 [sim + 40]
+  v3 = load.i32 [sim + 44]
+  v4 = load.i32 [sim + 48]
+  v5 = load.i32 [sim + 52]
+  v6 = load.i32 [sim + 56]
+  v7 = load.i32 [sim + 60]
+  v16 = add.w32 v0, v1
+  v8 = load.i32 [sim + 64]
+  v9 = load.i32 [sim + 68]
+  v17 = add.w32 v16, v2
+  v10 = load.i32 [sim + 72]
+  v18 = add.w32 v17, v3
+  v11 = load.i32 [sim + 76]
+  v19 = add.w32 v18, v4
+  v12 = load.i32 [sim + 80]
+  v20 = add.w32 v19, v5
+  v13 = load.i32 [sim + 84]
+  v21 = add.w32 v20, v6
+  v14 = load.i32 [sim + 88]
+  v22 = add.w32 v21, v7
+  v15 = load.i32 [sim + 92]
+  v23 = add.w32 v22, v8
+  v24 = add.w32 v23, v9
+  v25 = add.w32 v24, v10
+  v26 = add.w32 v25, v11
+  v27 = add.w32 v26, v12
+  v28 = add.w32 v27, v13
+  v29 = add.w32 v28, v14
+  v30 = add.w32 v29, v15
+  store.i32 [sim + 96], v30
+  ret
+--- MIR after allocation-owned scheduling, before spill reconstruction ---
+bb0:
+  v0 = load.i32 [sim + 32]
+  v1 = load.i32 [sim + 36]
+  v16 = add.w32 v0, v1
+  v2 = load.i32 [sim + 40]
+  v17 = add.w32 v16, v2
+  v3 = load.i32 [sim + 44]
+  v18 = add.w32 v17, v3
+  v4 = load.i32 [sim + 48]
+  v19 = add.w32 v18, v4
+  v5 = load.i32 [sim + 52]
+  v20 = add.w32 v19, v5
+  v6 = load.i32 [sim + 56]
+  v21 = add.w32 v20, v6
+  v7 = load.i32 [sim + 60]
+  v22 = add.w32 v21, v7
+  v8 = load.i32 [sim + 64]
+  v23 = add.w32 v22, v8
+  v9 = load.i32 [sim + 68]
+  v24 = add.w32 v23, v9
+  v10 = load.i32 [sim + 72]
+  v25 = add.w32 v24, v10
+  v11 = load.i32 [sim + 76]
+  v26 = add.w32 v25, v11
+  v12 = load.i32 [sim + 80]
+  v27 = add.w32 v26, v12
+  v13 = load.i32 [sim + 84]
+  v28 = add.w32 v27, v13
+  v14 = load.i32 [sim + 88]
+  v29 = add.w32 v28, v14
+  v15 = load.i32 [sim + 92]
+  v30 = add.w32 v29, v15
+  store.i32 [sim + 96], v30
   ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
   v0 = load.i32 [sim + 32]
   v1 = load.i32 [sim + 36]
-  v3 = load.i32 [sim + 40]
-  v5 = load.i32 [sim + 44]
-  v7 = load.i32 [sim + 48]
-  v9 = load.i32 [sim + 52]
-  v11 = load.i32 [sim + 56]
-  v13 = load.i32 [sim + 60]
-  v31 = add.w32 v0, v1
-  v15 = load.i32 [sim + 64]
-  v17 = load.i32 [sim + 68]
-  v32 = add.w32 v31, v3
-  v19 = load.i32 [sim + 72]
-  v33 = add.w32 v32, v5
-  v21 = load.i32 [sim + 76]
-  v34 = add.w32 v33, v7
-  v23 = load.i32 [sim + 80]
-  v35 = add.w32 v34, v9
-  v25 = load.i32 [sim + 84]
-  v36 = add.w32 v35, v11
-  v27 = load.i32 [sim + 88]
-  v37 = add.w32 v36, v13
-  v29 = load.i32 [sim + 92]
-  v38 = add.w32 v37, v15
-  v39 = add.w32 v38, v17
-  v40 = add.w32 v39, v19
-  v41 = add.w32 v40, v21
-  v42 = add.w32 v41, v23
-  v43 = add.w32 v42, v25
-  v44 = add.w32 v43, v27
-  v45 = add.w32 v44, v29
-  store.i32 [sim + 96], v45
+  v16 = add.w32 v0, v1
+  v2 = load.i32 [sim + 40]
+  v17 = add.w32 v16, v2
+  v3 = load.i32 [sim + 44]
+  v18 = add.w32 v17, v3
+  v4 = load.i32 [sim + 48]
+  v19 = add.w32 v18, v4
+  v5 = load.i32 [sim + 52]
+  v20 = add.w32 v19, v5
+  v6 = load.i32 [sim + 56]
+  v21 = add.w32 v20, v6
+  v7 = load.i32 [sim + 60]
+  v22 = add.w32 v21, v7
+  v8 = load.i32 [sim + 64]
+  v23 = add.w32 v22, v8
+  v9 = load.i32 [sim + 68]
+  v24 = add.w32 v23, v9
+  v10 = load.i32 [sim + 72]
+  v25 = add.w32 v24, v10
+  v11 = load.i32 [sim + 76]
+  v26 = add.w32 v25, v11
+  v12 = load.i32 [sim + 80]
+  v27 = add.w32 v26, v12
+  v13 = load.i32 [sim + 84]
+  v28 = add.w32 v27, v13
+  v14 = load.i32 [sim + 88]
+  v29 = add.w32 v28, v14
+  v15 = load.i32 [sim + 92]
+  v30 = add.w32 v29, v15
+  store.i32 [sim + 96], v30
   ret
 Spill frame: 0 bytes
 Register assignment:
   v0 -> rax
   v1 -> rdx
-  v3 -> rsi
-  v5 -> rdi
-  v7 -> r8
-  v9 -> r9
-  v11 -> r10
-  v13 -> r11
+  v2 -> rdx
+  v3 -> rdx
+  v4 -> rdx
+  v5 -> rdx
+  v6 -> rdx
+  v7 -> rdx
+  v8 -> rdx
+  v9 -> rdx
+  v10 -> rdx
+  v11 -> rdx
+  v12 -> rdx
+  v13 -> rdx
+  v14 -> rdx
   v15 -> rdx
-  v17 -> rcx
-  v19 -> rsi
-  v21 -> rdi
-  v23 -> r8
-  v25 -> r9
-  v27 -> r10
-  v29 -> r11
-  v31 -> rax
-  v32 -> rax
-  v33 -> rax
-  v34 -> rax
-  v35 -> rax
-  v36 -> rax
-  v37 -> rax
-  v38 -> rax
-  v39 -> rax
-  v40 -> rax
-  v41 -> rax
-  v42 -> rax
-  v43 -> rax
-  v44 -> rax
-  v45 -> rax
+  v16 -> rax
+  v17 -> rax
+  v18 -> rax
+  v19 -> rax
+  v20 -> rax
+  v21 -> rax
+  v22 -> rax
+  v23 -> rax
+  v24 -> rax
+  v25 -> rax
+  v26 -> rax
+  v27 -> rax
+  v28 -> rax
+  v29 -> rax
+  v30 -> rax
 x86-64 disassembly of emitted function:
-  0x00000000  push r15
-  0x00000002  sub rsp,8
-  0x00000006  mov r15,rdi
+  0x00000000  rdgsbase rax
+  0x00000005  movq xmm15,rax
+  0x0000000a  wrgsbase rdi
 bb0:
-  0x00000009  mov eax,[r15+20h]
-  0x0000000d  mov edx,[r15+24h]
-  0x00000011  mov esi,[r15+28h]
-  0x00000015  mov edi,[r15+2Ch]
-  0x00000019  mov r8d,[r15+30h]
-  0x0000001d  mov r9d,[r15+34h]
-  0x00000021  mov r10d,[r15+38h]
-  0x00000025  mov r11d,[r15+3Ch]
-  0x00000029  add eax,edx
-  0x0000002b  mov edx,[r15+40h]
-  0x0000002f  mov ecx,[r15+44h]
-  0x00000033  add eax,esi
-  0x00000035  mov esi,[r15+48h]
-  0x00000039  add eax,edi
-  0x0000003b  mov edi,[r15+4Ch]
-  0x0000003f  add eax,r8d
-  0x00000042  mov r8d,[r15+50h]
-  0x00000046  add eax,r9d
-  0x00000049  mov r9d,[r15+54h]
-  0x0000004d  add eax,r10d
-  0x00000050  mov r10d,[r15+58h]
-  0x00000054  add eax,r11d
-  0x00000057  mov r11d,[r15+5Ch]
-  0x0000005b  add eax,edx
-  0x0000005d  add eax,ecx
-  0x0000005f  add eax,esi
-  0x00000061  add eax,edi
-  0x00000063  add eax,r8d
-  0x00000066  add eax,r9d
-  0x00000069  add eax,r10d
-  0x0000006c  add eax,r11d
-  0x0000006f  mov [r15+60h],eax
-  0x00000073  xor eax,eax
-  0x00000075  jmp short 0000000000000077h
-  0x00000077  add rsp,8
-  0x0000007b  pop r15
-  0x0000007d  ret
+  0x0000000f  mov eax,[qword gs:20h]
+  0x00000019  mov edx,[gs:24h]
+  0x00000021  add eax,edx
+  0x00000023  mov edx,[gs:28h]
+  0x0000002b  add eax,edx
+  0x0000002d  mov edx,[gs:2Ch]
+  0x00000035  add eax,edx
+  0x00000037  mov edx,[gs:30h]
+  0x0000003f  add eax,edx
+  0x00000041  mov edx,[gs:34h]
+  0x00000049  add eax,edx
+  0x0000004b  mov edx,[gs:38h]
+  0x00000053  add eax,edx
+  0x00000055  mov edx,[gs:3Ch]
+  0x0000005d  add eax,edx
+  0x0000005f  mov edx,[gs:40h]
+  0x00000067  add eax,edx
+  0x00000069  mov edx,[gs:44h]
+  0x00000071  add eax,edx
+  0x00000073  mov edx,[gs:48h]
+  0x0000007b  add eax,edx
+  0x0000007d  mov edx,[gs:4Ch]
+  0x00000085  add eax,edx
+  0x00000087  mov edx,[gs:50h]
+  0x0000008f  add eax,edx
+  0x00000091  mov edx,[gs:54h]
+  0x00000099  add eax,edx
+  0x0000009b  mov edx,[gs:58h]
+  0x000000a3  add eax,edx
+  0x000000a5  mov edx,[gs:5Ch]
+  0x000000ad  add eax,edx
+  0x000000af  mov [qword gs:60h],eax
+  0x000000b9  xor eax,eax
+  0x000000bb  jmp short 00000000000000BDh
+  0x000000bd  movq r11,xmm15
+  0x000000c2  wrgsbase r11
+  0x000000c7  ret

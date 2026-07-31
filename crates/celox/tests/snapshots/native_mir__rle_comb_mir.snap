@@ -4,43 +4,50 @@ expression: output
 ---
 === MIR used by native emission ===
 === Native function eval_comb ===
---- MIR after optimization, before register allocation ---
+--- MIR after main optimization, before regalloc-owned late folds ---
 bb0:
   v0 = load.i32 [sim + 32]
   v1 = load.i32 [sim + 36]
-  v3 = add.w32 v0, v1
-  store.i32 [sim + 40], v3
+  v2 = add.w32 v0, v1
+  store.i32 [sim + 40], v2
   ret
---- MIR after pressure scheduling, before CSSA and spilling ---
+--- MIR after late memory folds, before allocation-owned scheduling ---
 bb0:
   v0 = load.i32 [sim + 32]
   v1 = load.i32 [sim + 36]
-  v3 = add.w32 v0, v1
-  store.i32 [sim + 40], v3
+  v2 = add.w32 v0, v1
+  store.i32 [sim + 40], v2
+  ret
+--- MIR after allocation-owned scheduling, before spill reconstruction ---
+bb0:
+  v0 = load.i32 [sim + 32]
+  v1 = load.i32 [sim + 36]
+  v2 = add.w32 v0, v1
+  store.i32 [sim + 40], v2
   ret
 --- MIR after register allocation and post-RA peepholes ---
 bb0:
   v0 = load.i32 [sim + 32]
   v1 = load.i32 [sim + 36]
-  v3 = add.w32 v0, v1
-  store.i32 [sim + 40], v3
+  v2 = add.w32 v0, v1
+  store.i32 [sim + 40], v2
   ret
 Spill frame: 0 bytes
 Register assignment:
   v0 -> rax
   v1 -> rdx
-  v3 -> rax
+  v2 -> rax
 x86-64 disassembly of emitted function:
-  0x00000000  push r15
-  0x00000002  sub rsp,8
-  0x00000006  mov r15,rdi
+  0x00000000  rdgsbase rax
+  0x00000005  movq xmm15,rax
+  0x0000000a  wrgsbase rdi
 bb0:
-  0x00000009  mov eax,[r15+20h]
-  0x0000000d  mov edx,[r15+24h]
-  0x00000011  add eax,edx
-  0x00000013  mov [r15+28h],eax
-  0x00000017  xor eax,eax
-  0x00000019  jmp short 000000000000001Bh
-  0x0000001b  add rsp,8
-  0x0000001f  pop r15
-  0x00000021  ret
+  0x0000000f  mov eax,[qword gs:20h]
+  0x00000019  mov edx,[gs:24h]
+  0x00000021  add eax,edx
+  0x00000023  mov [qword gs:28h],eax
+  0x0000002d  xor eax,eax
+  0x0000002f  jmp short 0000000000000031h
+  0x00000031  movq r11,xmm15
+  0x00000036  wrgsbase r11
+  0x0000003b  ret
