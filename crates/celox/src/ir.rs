@@ -1,5 +1,5 @@
 use crate::{
-    HashMap, HashSet,
+    HashMap,
     logic_tree::{LogicPath, SLTNodeArena, SymbolicStore},
 };
 pub use celox_design::PortTypeKind;
@@ -550,18 +550,7 @@ impl fmt::Debug for SimModule {
     }
 }
 
-/// Sparse scheduler-facing memory effects for one same-trigger FF group.
-///
-/// These ranges describe the event-entry/current-state values consumed while
-/// lowering the group and the next-state ranges it may update. They deliberately
-/// retain no lowered SIR so the comb scheduler can reason about FF placement
-/// before choosing one shared lowering order.
-#[derive(Debug, Clone, Default)]
-pub struct FfAccessSummary<A> {
-    pub reads: Vec<VarAtomBase<A>>,
-    pub writes: Vec<VarAtomBase<A>>,
-    pub dynamic_writes: HashSet<A>,
-}
+pub use celox_slt::FfAccessSummary;
 
 impl SimModule {
     pub fn find_var_id(&self, path: &VarPath) -> VarId {

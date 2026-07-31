@@ -2947,6 +2947,8 @@ impl<'a> SharedClockLowering<'a> {
 }
 
 impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_> {
+    type Error = ParserError;
+
     fn summaries(&self) -> &[crate::ir::FfAccessSummary<RegionedAbsoluteAddr>] {
         &self.summaries
     }

@@ -37,8 +37,10 @@ physical layout before the VM executes the bound bytecode. Native, Cranelift, an
 therefore share the same testbench binding path. Moving the remaining parser implementation,
 symbolic, optimizer, and runtime payload into the phase-specific target crates below remains.
 `celox-slt` now owns the frontend-independent bit-range store, symbolic-state contract, SLT node
-arena, and iterative facts/verifier. Veryl AST traversal remains in the facade as an arena builder;
-the source-independent path graph, scheduler, and lowerer are the remaining SLT moves.
+arena, iterative facts/verifier, path graph, fused comb/FF scheduler, and SLT-to-SIR lowerer. The FF
+lowering callback has an associated frontend-owned error type, so the scheduler no longer imports
+parser errors. Veryl AST traversal remains in the facade as an arena builder and is the remaining
+SLT construction move.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making

@@ -1,5 +1,4 @@
 mod comb;
-pub use celox_slt::SLTToSIRLowerer;
 pub use celox_slt::const_inline;
 pub(crate) use celox_slt::matches_slt_count_idiom;
 #[cfg(test)]
