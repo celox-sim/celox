@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    branches: [master, integration/veryl-head]
   pull_request:
   merge_group:
 
@@ -50,6 +50,9 @@ jobs:
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
+
+      - name: Verify vendored Veryl metadata
+        run: node scripts/veryl-vendor.mjs check
 
       - name: cargo clippy
         run: cargo clippy --locked -p celox -p celox-macros -p celox-napi -p celox-ts-gen --all-targets --no-deps

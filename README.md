@@ -111,6 +111,7 @@ The native backend compiles SIR execution units into optimized machine code thro
 - [Guide](https://celox-sim.github.io/celox/guide/introduction) — Introduction and tutorials
 - [API Reference](https://celox-sim.github.io/celox/api/) — TypeScript API docs
 - [Internals](https://celox-sim.github.io/celox/internals/architecture) — Architecture and design
+- [Release policy](docs/releasing.md) — Versioning, release cadence, and Veryl dependency lanes
 
 ## License
 

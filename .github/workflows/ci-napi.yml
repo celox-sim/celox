@@ -2,9 +2,9 @@ name: NAPI Build & Publish
 
 on:
   push:
-    tags:
-      - "v*"
-  workflow_dispatch:
+    branches: [master]
+    paths:
+      - ".release-please-manifest.json"
 
 env:
   CARGO_INCREMENTAL: "0"
@@ -13,7 +13,17 @@ permissions:
   contents: read
 
 jobs:
+  validate-release:
+    name: Validate release version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check synchronized versions and stable dependencies
+        run: node scripts/check-release-version.mjs
+
   build:
+    needs: validate-release
     strategy:
       fail-fast: false
       matrix:
@@ -156,13 +166,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Set version from tag
-        working-directory: crates/celox-napi
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "Publishing version: $VERSION"
-          npm version "$VERSION" --no-git-tag-version
-
       - name: Exclude WASI from npm publish targets
         working-directory: crates/celox-napi
         run: |
@@ -209,23 +212,31 @@ jobs:
 
       - name: Publish platform packages
         working-directory: crates/celox-napi
+        shell: bash
         run: |
           for dir in npm/*/; do
             if [ -d "$dir" ]; then
-              echo "Publishing $dir..."
-              npm publish "$dir" --provenance --access public || true
+              package_name="$(node -p "require('./$dir/package.json').name")"
+              package_version="$(node -p "require('./$dir/package.json').version")"
+              if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
+                echo "$package_name@$package_version is already published; skipping."
+              else
+                npm publish "$dir" --provenance --access public
+              fi
             fi
           done
 
       - name: Publish main package
         working-directory: crates/celox-napi
-        run: npm publish --provenance --access public
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: crates/celox-napi/artifacts/**/*.node
-          generate_release_notes: true
+        shell: bash
+        run: |
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
+            echo "$package_name@$package_version is already published; skipping."
+          else
+            npm publish --provenance --access public
+          fi
 
   publish-js:
     needs: publish
@@ -249,21 +260,29 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Set version from tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "Publishing version: $VERSION"
-          (cd crates/celox-napi && npm version "$VERSION" --no-git-tag-version)
-          (cd packages/celox && npm version "$VERSION" --no-git-tag-version)
-          (cd packages/vite-plugin && npm version "$VERSION" --no-git-tag-version)
-
       - name: Build packages
         run: pnpm --filter="!@celox-sim/celox-napi" --filter="!@celox-sim/playground" -r build
 
       - name: Publish @celox-sim/celox
         working-directory: packages/celox
-        run: pnpm publish --provenance --access public --no-git-checks
+        shell: bash
+        run: |
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
+            echo "$package_name@$package_version is already published; skipping."
+          else
+            pnpm publish --provenance --access public --no-git-checks
+          fi
 
       - name: Publish @celox-sim/vite-plugin
         working-directory: packages/vite-plugin
-        run: pnpm publish --provenance --access public --no-git-checks
+        shell: bash
+        run: |
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
+            echo "$package_name@$package_version is already published; skipping."
+          else
+            pnpm publish --provenance --access public --no-git-checks
+          fi

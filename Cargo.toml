@@ -14,7 +14,9 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version     = "0.18.0"
+# Rust workspace crates are internal implementation units. The Celox distribution
+# version is tracked in VERSION and the published npm package manifests.
+version     = "0.0.0"
 authors     = ["tignear"]
 repository  = "https://github.com/celox-sim/celox"
 keywords    = ["hdl", "simulator", "veryl"]
