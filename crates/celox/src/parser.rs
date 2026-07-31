@@ -1850,14 +1850,16 @@ fn module_variables(
             variables.insert(
                 *id,
                 VariableInfo {
-                    width: resolve_total_width(module, varibale)?,
                     id: *id,
                     path: varibale.path.clone(),
-                    is_4state: is_4state_type(&varibale.r#type.kind),
-                    kind: type_kind_to_domain_kind(&varibale.r#type.kind, config),
                     var_kind: varibale.kind,
-                    type_kind: type_kind_to_port_type_kind(&varibale.r#type.kind, config),
-                    array_dims: varibale.r#type.array.iter().filter_map(|d| *d).collect(),
+                    metadata: celox_design::VariableMetadata {
+                        width: resolve_total_width(module, varibale)?,
+                        is_4state: is_4state_type(&varibale.r#type.kind),
+                        kind: type_kind_to_domain_kind(&varibale.r#type.kind, config),
+                        type_kind: type_kind_to_port_type_kind(&varibale.r#type.kind, config),
+                        array_dims: varibale.r#type.array.iter().filter_map(|d| *d).collect(),
+                    },
                 },
             );
         }
