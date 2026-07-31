@@ -63,7 +63,7 @@ impl LayoutSource<AbsoluteAddr> for Program {
             ff_referenced_addresses: collect_ff_referenced_addresses(self),
             num_events: self.num_events(),
             scratch_bytes,
-            runtime_event_sites: self.runtime_event_sites.clone(),
+            runtime_event_sites: self.runtime_schema.runtime_event_sites.clone(),
         }
     }
 }

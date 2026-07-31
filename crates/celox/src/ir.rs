@@ -6,8 +6,8 @@ pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
     AbsoluteAddrBase, BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue,
     InitialStateWriteRun, InstanceId, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
-    RuntimeEventKind, RuntimeEventSite, SPARSE_WORKING_REGION, STABLE_REGION, TriggerIdWithKind,
-    TriggerSet, UnaryOp, VarAtomBase, VariableMetadata, WORKING_REGION,
+    RuntimeEventKind, RuntimeEventSite, RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION,
+    TriggerIdWithKind, TriggerSet, UnaryOp, VarAtomBase, VariableMetadata, WORKING_REGION,
 };
 pub(crate) use celox_sir::{
     BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRBuilder, SIRInstruction,
@@ -112,8 +112,7 @@ pub struct Program {
     /// Semantic comb process for each exact published range. Physical
     /// ExecutionUnit boundaries deliberately do not define these regions.
     pub comb_semantic_regions: HashMap<VarAtomBase<AbsoluteAddr>, u64>,
-    pub runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
-    pub runtime_event_sites: Vec<RuntimeEventSite>,
+    pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
     pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
     /// Tail-call chain compilation plan, populated by the optimizer when the
     /// estimated CLIF instruction count exceeds Cranelift's limit.

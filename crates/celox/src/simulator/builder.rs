@@ -603,7 +603,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             eprintln!(
                 "[phase-timing] register_runtime_event_sites: {:?} runtime_event_sites={} comb_observers={}",
                 start.elapsed(),
-                program.runtime_event_sites.len(),
+                program.runtime_schema.runtime_event_sites.len(),
                 program.comb_observers.len()
             );
         }
