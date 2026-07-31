@@ -4,10 +4,10 @@ use crate::{
 };
 pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
-    AbsoluteAddrBase, BinaryOp, BitAccess, DomainKind, InstanceId, ModuleId,
-    RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeEventKind, RuntimeEventSite,
-    SPARSE_WORKING_REGION, STABLE_REGION, TriggerIdWithKind, TriggerSet, UnaryOp, VarAtomBase,
-    WORKING_REGION,
+    AbsoluteAddrBase, BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue,
+    InitialStateWriteRun, InstanceId, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
+    RuntimeEventKind, RuntimeEventSite, SPARSE_WORKING_REGION, STABLE_REGION, TriggerIdWithKind,
+    TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
 };
 pub(crate) use celox_sir::{
     BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRBuilder, SIRInstruction,
@@ -17,7 +17,6 @@ pub(crate) use celox_sir::{
 pub(crate) use celox_sir::{
     SirMergeProvenance, inline_single_predecessor_jumps, merge_sir_eu_refs_with_provenance,
 };
-use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -55,35 +54,11 @@ pub struct VariableInfo {
     pub array_dims: Vec<usize>,
 }
 
-#[derive(Clone, Debug)]
-pub struct InitialMemoryWriteRun {
-    pub bit_offset: usize,
-    pub bit_width: usize,
-    pub value_bytes: Vec<u8>,
-    pub mask_bytes: Vec<u8>,
-}
-
-#[derive(Clone, Debug)]
-pub enum InitialMemoryData {
-    Packed {
-        value: BigUint,
-        mask: BigUint,
-        written_mask: BigUint,
-    },
-    Writes(Vec<InitialMemoryWriteRun>),
-}
-
-#[derive(Clone, Debug)]
-pub struct InitialMemoryValue {
-    pub addr: AbsoluteAddr,
-    pub data: InitialMemoryData,
-}
-
-#[derive(Clone, Debug)]
-pub struct ModuleInitialMemoryValue {
-    pub var_id: VarId,
-    pub data: InitialMemoryData,
-}
+pub type InitialMemoryWriteRun = InitialStateWriteRun;
+pub type InitialMemoryData = InitialStateData;
+pub type InitialMemoryValue = InitialStateValue<AbsoluteAddr>;
+pub type ModuleInitialMemoryValue = InitialStateValue<VarId>;
+pub type RuntimeErrorInfo<Addr = AbsoluteAddr> = celox_design::RuntimeErrorInfo<Addr>;
 
 impl fmt::Debug for VariableInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -105,12 +80,6 @@ pub enum EvalCombPlan {
     TailCallChunks(Vec<crate::optimizer::coalescing::TailCallChunk>),
     /// Memory-spilled multi-block splitting with scratch memory.
     MemorySpilled(crate::optimizer::coalescing::pass_tail_call_split::MemorySpilledPlan),
-}
-
-#[derive(Clone)]
-pub struct RuntimeErrorInfo<Addr = AbsoluteAddr> {
-    pub message: String,
-    pub signals: Vec<Addr>,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

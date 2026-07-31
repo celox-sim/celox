@@ -1572,9 +1572,9 @@ pub(crate) fn flatten(
                 .initial_memory_values
                 .iter()
                 .map(move |init| crate::ir::InitialMemoryValue {
-                    addr: AbsoluteAddr {
+                    address: AbsoluteAddr {
                         instance_id,
-                        var_id: init.var_id,
+                        var_id: init.address,
                     },
                     data: init.data.clone(),
                 })
