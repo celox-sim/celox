@@ -1175,6 +1175,9 @@ fn optimize_with_options(
             comb_ff_passes.add_pass(GuardedRegionSinkingPass);
         }
     }
+    if on(SirPass::IndexedStoreRecovery) {
+        comb_ff_passes.add_pass(IndexedStoreRecoveryPass::for_program(program));
+    }
     if on(SirPass::BitExtractPeephole) {
         comb_ff_passes.add_pass(BitExtractPeepholePass);
     }
