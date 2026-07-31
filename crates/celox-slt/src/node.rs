@@ -5,17 +5,15 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use super::node_facts::{SLTNodeFactsError, verify_append, verify_raw_nodes};
 
-use crate::{
-    HashMap,
-    ir::{BinaryOp, BitAccess, UnaryOp, VarAtomBase},
-};
+use crate::HashMap;
+use celox_design::{BinaryOp, BitAccess, UnaryOp, VarAtomBase};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub usize);
 
 /// Failure from a narrowly scoped mutation of a construction arena.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SLTNodeArenaEditError {
+pub enum SLTNodeArenaEditError {
     RangeOutOfBounds {
         start: usize,
         end: usize,
@@ -137,7 +135,7 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
     }
 
     /// Return a construction-time width computed once when `id` was interned.
-    pub(super) fn width(&self, id: NodeId) -> Option<usize> {
+    pub(crate) fn width(&self, id: NodeId) -> Option<usize> {
         self.widths.get(id.0).copied()
     }
 
@@ -174,7 +172,7 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
     /// The semantic interning cache is rebuilt internally whenever the rewrite
     /// changes a node, so callers cannot leave node storage and cache identity
     /// out of sync. `None` leaves an effect unchanged.
-    pub(crate) fn remap_for_fold_effect_sites(
+    pub fn remap_for_fold_effect_sites(
         &mut self,
         range: std::ops::Range<usize>,
         mut remap: impl FnMut(
@@ -349,27 +347,27 @@ impl<A: Hash + Eq + Clone> SLTNode<A> {
                 write!(f, "n{}:", lhs.0)?;
                 arena.get(*lhs).fmt_expression(f, arena)?;
                 let op_str = match op {
-                    crate::ir::BinaryOp::Add => "+",
-                    crate::ir::BinaryOp::Sub => "-",
-                    crate::ir::BinaryOp::Mul => "*",
-                    crate::ir::BinaryOp::DivU | crate::ir::BinaryOp::DivS => "/",
-                    crate::ir::BinaryOp::RemU | crate::ir::BinaryOp::RemS => "%",
-                    crate::ir::BinaryOp::And => "&",
-                    crate::ir::BinaryOp::Or => "|",
-                    crate::ir::BinaryOp::Xor => "^",
-                    crate::ir::BinaryOp::Shl => "<<",
-                    crate::ir::BinaryOp::Shr => ">>",
-                    crate::ir::BinaryOp::Sar => ">>>",
-                    crate::ir::BinaryOp::Eq => "==",
-                    crate::ir::BinaryOp::Ne => "!=",
-                    crate::ir::BinaryOp::LtU | crate::ir::BinaryOp::LtS => "<",
-                    crate::ir::BinaryOp::LeU | crate::ir::BinaryOp::LeS => "<=",
-                    crate::ir::BinaryOp::GtU | crate::ir::BinaryOp::GtS => ">",
-                    crate::ir::BinaryOp::GeU | crate::ir::BinaryOp::GeS => ">=",
-                    crate::ir::BinaryOp::LogicAnd => "&&",
-                    crate::ir::BinaryOp::LogicOr => "||",
-                    crate::ir::BinaryOp::EqWildcard => "==?",
-                    crate::ir::BinaryOp::NeWildcard => "!=?",
+                    celox_design::BinaryOp::Add => "+",
+                    celox_design::BinaryOp::Sub => "-",
+                    celox_design::BinaryOp::Mul => "*",
+                    celox_design::BinaryOp::DivU | celox_design::BinaryOp::DivS => "/",
+                    celox_design::BinaryOp::RemU | celox_design::BinaryOp::RemS => "%",
+                    celox_design::BinaryOp::And => "&",
+                    celox_design::BinaryOp::Or => "|",
+                    celox_design::BinaryOp::Xor => "^",
+                    celox_design::BinaryOp::Shl => "<<",
+                    celox_design::BinaryOp::Shr => ">>",
+                    celox_design::BinaryOp::Sar => ">>>",
+                    celox_design::BinaryOp::Eq => "==",
+                    celox_design::BinaryOp::Ne => "!=",
+                    celox_design::BinaryOp::LtU | celox_design::BinaryOp::LtS => "<",
+                    celox_design::BinaryOp::LeU | celox_design::BinaryOp::LeS => "<=",
+                    celox_design::BinaryOp::GtU | celox_design::BinaryOp::GtS => ">",
+                    celox_design::BinaryOp::GeU | celox_design::BinaryOp::GeS => ">=",
+                    celox_design::BinaryOp::LogicAnd => "&&",
+                    celox_design::BinaryOp::LogicOr => "||",
+                    celox_design::BinaryOp::EqWildcard => "==?",
+                    celox_design::BinaryOp::NeWildcard => "!=?",
                 };
                 write!(f, " {} ", op_str)?;
                 write!(f, "n{}:", rhs.0)?;
@@ -378,17 +376,17 @@ impl<A: Hash + Eq + Clone> SLTNode<A> {
             }
             SLTNode::Unary(op, inner) => {
                 let op_str = match op {
-                    crate::ir::UnaryOp::Ident => "",
-                    crate::ir::UnaryOp::ToTwoState => "2state",
-                    crate::ir::UnaryOp::Minus => "-",
-                    crate::ir::UnaryOp::BitNot => "~",
-                    crate::ir::UnaryOp::LogicNot => "!",
-                    crate::ir::UnaryOp::And => "&", // reduction
-                    crate::ir::UnaryOp::Or => "|",
-                    crate::ir::UnaryOp::Xor => "^",
-                    crate::ir::UnaryOp::PopCount => "popcount",
-                    crate::ir::UnaryOp::CountLeadingZeros => "clz",
-                    crate::ir::UnaryOp::CountTrailingZeros => "ctz",
+                    celox_design::UnaryOp::Ident => "",
+                    celox_design::UnaryOp::ToTwoState => "2state",
+                    celox_design::UnaryOp::Minus => "-",
+                    celox_design::UnaryOp::BitNot => "~",
+                    celox_design::UnaryOp::LogicNot => "!",
+                    celox_design::UnaryOp::And => "&", // reduction
+                    celox_design::UnaryOp::Or => "|",
+                    celox_design::UnaryOp::Xor => "^",
+                    celox_design::UnaryOp::PopCount => "popcount",
+                    celox_design::UnaryOp::CountLeadingZeros => "clz",
+                    celox_design::UnaryOp::CountTrailingZeros => "ctz",
                 };
                 write!(f, "{}(", op_str)?;
                 write!(f, "n{}:", inner.0)?;
@@ -1405,10 +1403,8 @@ mod tests {
         NodeId, SLTForEffect, SLTForFoldGroupState, SLTIndex, SLTLoopBound, SLTNode, SLTNodeArena,
         SLTNodeArenaEditError, SLTNodeArenaWire, SLTStepOp,
     };
-    use crate::{
-        ir::{BinaryOp, BitAccess, UnaryOp, VarAtomBase},
-        logic_tree::comb::{expr::get_width, node_facts::SLTNodeFacts},
-    };
+    use crate::{SLTNodeFacts, get_width};
+    use celox_design::{BinaryOp, BitAccess, UnaryOp, VarAtomBase};
     use num_bigint::{BigInt, BigUint};
 
     fn constant(value: u8) -> SLTNode<u32> {
@@ -1685,33 +1681,6 @@ mod tests {
         assert_eq!(
             SLTNodeFacts::verify(&arena).unwrap_err().invariant,
             "FACTS.CACHED_WIDTH_MATCHES"
-        );
-    }
-
-    #[test]
-    fn zero_width_coercion_is_a_structured_error() {
-        let mut arena = SLTNodeArena::<u32>::new();
-        let zero = arena
-            .alloc(SLTNode::Constant(
-                BigUint::from(0u8),
-                BigUint::from(0u8),
-                0,
-                false,
-            ))
-            .unwrap();
-        let nonzero = arena.alloc(constant(1)).unwrap();
-
-        assert_eq!(
-            crate::logic_tree::coerce_node_width(&mut arena, zero, Some(8), true)
-                .unwrap_err()
-                .invariant,
-            "WIDTH.COERCE_SOURCE_NON_ZERO"
-        );
-        assert_eq!(
-            crate::logic_tree::coerce_node_width(&mut arena, nonzero, Some(0), false)
-                .unwrap_err()
-                .invariant,
-            "WIDTH.COERCE_TARGET_NON_ZERO"
         );
     }
 

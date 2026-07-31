@@ -1,11 +1,19 @@
 mod effect;
 mod expr;
-mod node;
-mod node_facts;
-mod node_rules;
 mod path;
 mod recover_unrolled;
 mod state;
+
+pub(crate) mod node {
+    pub use celox_slt::{
+        NodeId, SLTForEffect, SLTForFoldGroupState, SLTForUpdate, SLTIndex, SLTIndexKind,
+        SLTLoopBound, SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTStepOp,
+    };
+}
+
+pub(crate) mod node_facts {
+    pub use celox_slt::{SLTNodeFacts, SLTNodeFactsError};
+}
 
 pub use path::{LogicPath, LogicPathTarget};
 pub use state::{BoundaryMap, SymbolicStore};

@@ -2670,9 +2670,7 @@ fn eval_factor(
     }
 }
 pub fn get_width<A: Hash + Eq + Clone>(expr: NodeId, arena: &SLTNodeArena<A>) -> usize {
-    arena
-        .width(expr)
-        .unwrap_or_else(|| panic!("SLT node id n{} is outside the arena", expr.0))
+    celox_slt::get_width(expr, arena)
 }
 
 pub(super) fn merge_boundaries(
@@ -3038,5 +3036,46 @@ pub fn convert_unary_op(op: &Op) -> UnaryOp {
         Op::Condition => unreachable!("condition node must not be lowered by convert_unary_op"),
         Op::Repeat => unreachable!("repeat node must be lowered by repeat-specific path"),
         Op::As => unreachable!("As is binary and must not be lowered by convert_unary_op"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::coerce_node_width;
+    use celox_slt::{SLTNode, SLTNodeArena};
+    use num_bigint::BigUint;
+
+    #[test]
+    fn zero_width_coercion_is_a_structured_error() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let zero = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(0u8),
+                BigUint::from(0u8),
+                0,
+                false,
+            ))
+            .unwrap();
+        let nonzero = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                8,
+                false,
+            ))
+            .unwrap();
+
+        assert_eq!(
+            coerce_node_width(&mut arena, zero, Some(8), true)
+                .unwrap_err()
+                .invariant,
+            "WIDTH.COERCE_SOURCE_NON_ZERO"
+        );
+        assert_eq!(
+            coerce_node_width(&mut arena, nonzero, Some(0), false)
+                .unwrap_err()
+                .invariant,
+            "WIDTH.COERCE_TARGET_NON_ZERO"
+        );
     }
 }

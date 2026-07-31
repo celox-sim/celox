@@ -10,7 +10,11 @@ edition.workspace     = true
 [dependencies]
 celox-design = { path = "../celox-design" }
 fxhash       = { workspace = true }
+num-bigint   = { workspace = true }
 serde        = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

@@ -536,7 +536,9 @@ version = "0.18.0"
 dependencies = [
  "celox-design",
  "fxhash",
+ "num-bigint",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
