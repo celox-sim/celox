@@ -61,8 +61,8 @@ pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
 pub(crate) use fxhash::FxHashMap as HashMap;
 pub(crate) use fxhash::FxHashSet as HashSet;
 pub use ir::{
-    AbsoluteAddr, AddrLookupError, InstancePath, LaidOutProgram, PortTypeKind, Program,
-    RuntimeErrorInfo, SignalRef, SirProgram, VariableInfo, VerylFrontendLookup,
+    AbsoluteAddr, AddrLookupError, InstancePath, LaidOutProgram, OptimizedSir, PortTypeKind,
+    Program, RuntimeErrorInfo, SignalRef, SirProgram, VariableInfo, VerylFrontendLookup,
 };
 #[cfg(target_arch = "x86_64")]
 pub mod native_backend {

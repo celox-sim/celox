@@ -25,7 +25,7 @@ The transformation from Veryl source code to execution consists of the following
     -   **SIR Optimization**: Applies per-pass optimization (store-load forwarding, commit sinking, dead store elimination, instruction scheduling, etc.) controlled by `OptimizeOptions`.
 
 3.  **Backend (Code Generation)**:
-    -   **Memory Layout**: Determines memory offsets for all variables and places them on a single memory buffer with Stable, Working, Triggered-bits, and Scratch regions. Layout finalization consumes a pre-layout `Program` and produces `LaidOutProgram`; every backend accepts only that typed artifact and therefore shares the same immutable layout.
+    -   **Memory Layout**: Determines memory offsets for all variables and places them on a single memory buffer with Stable, Working, Triggered-bits, and Scratch regions. The optimizer wraps verified SIR in `OptimizedSir`; layout finalization consumes that artifact and produces `LaidOutProgram`. Every backend accepts only the laid-out artifact and therefore shares the same immutable layout.
     -   **Code Generation**: Compiles SIR into executable machine code via one of the available backends.
     -   **Runtime**: Manages compiled function pointers as event handles and executes the simulation.
     -   **Testbench VM** (optional): A stack-based bytecode VM that executes Veryl `initial` blocks and testbench functions. Opcodes include `ConstU64`, `ConstWide`, `LoadU64`, `LoadWide`, `BinOp`, `UnaryOp`, `Ternary`, `LoadIndexed`, `LoadBitSelect`, `StoreU64`, supporting both narrow (≤64-bit) and wide signals.

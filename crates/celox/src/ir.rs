@@ -18,6 +18,7 @@ pub(crate) use celox_sir::{
 pub(crate) use celox_sir::{
     SirMergeProvenance, inline_single_predecessor_jumps, merge_sir_eu_refs_with_provenance,
 };
+use celox_testbench::TestbenchProgram;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use veryl_analyzer::ir::{VarId, VarPath, Variable};
@@ -75,10 +76,40 @@ pub struct Program {
     pub frontend: VerylFrontendLookup,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
     pub layout_requirements: celox_state_layout::LayoutRequirements<AbsoluteAddr>,
-    /// Initial block statements from the top-level module (for native testbenches).
-    pub initial_statements: Option<Vec<veryl_analyzer::ir::Statement>>,
-    /// Functions defined in the top-level module (for testbench function calls).
-    pub tb_functions: fxhash::FxHashMap<veryl_analyzer::ir::VarId, veryl_analyzer::ir::Function>,
+    pub testbench: Option<TestbenchProgram<AbsoluteAddr>>,
+}
+
+/// A pre-layout compiler artifact whose SIR optimization pipeline has
+/// completed successfully.
+///
+/// Construction is restricted to the compiler driver. Physical layout can
+/// only be finalized from this phase, preventing unoptimized SIR from
+/// accidentally entering a backend.
+#[derive(Clone, Debug)]
+pub struct OptimizedSir {
+    program: Program,
+}
+
+impl OptimizedSir {
+    pub(crate) fn new(program: Program) -> Self {
+        Self { program }
+    }
+
+    pub fn program(&self) -> &Program {
+        &self.program
+    }
+
+    pub fn into_program(self) -> Program {
+        self.program
+    }
+}
+
+impl std::ops::Deref for OptimizedSir {
+    type Target = Program;
+
+    fn deref(&self) -> &Self::Target {
+        &self.program
+    }
 }
 
 /// A [`Program`] whose physical state layout has been finalized.
@@ -121,8 +152,8 @@ impl fmt::Debug for Program {
     }
 }
 
-impl Program {
-    /// Finalize the physical state layout and consume the pre-layout program.
+impl OptimizedSir {
+    /// Finalize the physical state layout and consume the optimized program.
     pub fn into_laid_out(self, four_state: bool) -> LaidOutProgram {
         self.into_laid_out_with_mode(
             four_state,
@@ -131,32 +162,40 @@ impl Program {
     }
 
     pub fn into_laid_out_with_mode(
-        mut self,
+        self,
         four_state: bool,
         mode: crate::backend::memory_layout::MemoryLayoutMode,
     ) -> LaidOutProgram {
-        if !self.runtime_schema.comb_observers.is_empty() && !self.layout_requirements.is_empty() {
-            let observed_written: crate::HashSet<AbsoluteAddr> = self
+        let mut program = self.program;
+        if !program.runtime_schema.comb_observers.is_empty()
+            && !program.layout_requirements.is_empty()
+        {
+            let observed_written: crate::HashSet<AbsoluteAddr> = program
                 .runtime_schema
                 .comb_observers
                 .iter()
                 .flat_map(|observer| observer.written_inputs.iter().copied())
                 .collect();
-            self.layout_requirements
+            program
+                .layout_requirements
                 .state_aliases_mut()
                 .retain(|alias_addr, _| !observed_written.contains(alias_addr));
-            self.layout_requirements
+            program
+                .layout_requirements
                 .state_aliases_mut()
                 .retain(|alias_addr, _| {
-                    !comb_capture_enable_needs_unaliased_old_value(&self.sir.eval_comb, *alias_addr)
+                    !comb_capture_enable_needs_unaliased_old_value(
+                        &program.sir.eval_comb,
+                        *alias_addr,
+                    )
                 });
         }
-        crate::optimizer::coalescing::retain_final_identity_aliases(&mut self, four_state);
-        let layout = crate::backend::MemoryLayout::build(&self, four_state, mode);
+        crate::optimizer::coalescing::retain_final_identity_aliases(&mut program, four_state);
+        let layout = crate::backend::MemoryLayout::build(&program, four_state, mode);
 
         // Remove identity Stores for aliases validated by the layout
-        if !self.layout_requirements.is_empty() {
-            let aliased: crate::HashMap<AbsoluteAddr, AbsoluteAddr> = self
+        if !program.layout_requirements.is_empty() {
+            let aliased: crate::HashMap<AbsoluteAddr, AbsoluteAddr> = program
                 .layout_requirements
                 .state_aliases()
                 .iter()
@@ -171,18 +210,19 @@ impl Program {
                 .collect();
             if !aliased.is_empty() {
                 crate::optimizer::coalescing::remove_final_identity_alias_stores(
-                    &mut self, &aliased, four_state,
+                    &mut program,
+                    &aliased,
+                    four_state,
                 );
             }
         }
-        self.layout_requirements.clear();
+        program.layout_requirements.clear();
 
-        LaidOutProgram {
-            program: self,
-            layout,
-        }
+        LaidOutProgram { program, layout }
     }
+}
 
+impl Program {
     pub fn get_addr(
         &self,
         instance_path: &[(&str, usize)],

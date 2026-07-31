@@ -8,7 +8,11 @@ use veryl_parser::Parser;
 use veryl_parser::resource_table;
 
 use crate::parser::BuildConfig;
-use crate::{ParserError, SimulatorError, SimulatorErrorKind, ir::Program, parser};
+use crate::{
+    ParserError, SimulatorError, SimulatorErrorKind,
+    ir::{OptimizedSir, Program},
+    parser,
+};
 
 fn analyze(
     sources: &[(&str, &Path)],
@@ -31,7 +35,7 @@ fn analyze(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     preserve_element_storage_layout: bool,
-) -> (Result<Program, ParserError>, Vec<AnalyzerError>) {
+) -> (Result<OptimizedSir, ParserError>, Vec<AnalyzerError>) {
     symbol_table::clear();
     attribute_table::clear();
 
@@ -109,7 +113,7 @@ fn analyze(
 /// Compile Veryl source code to the SIR (Simulation IR) representation.
 ///
 /// This is the shared compilation pipeline used by all backends.
-/// Returns the compiled Program and any analyzer warnings on success.
+/// Returns verified optimized SIR and any analyzer warnings on success.
 pub fn compile_to_sir(
     sources: &[(&str, &Path)],
     top: &str,
@@ -130,7 +134,7 @@ pub fn compile_to_sir(
     reset_type: Option<ResetType>,
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
-) -> Result<(Program, Vec<AnalyzerError>), SimulatorError> {
+) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
     compile_to_sir_with_layout_mode(
         sources,
         top,
@@ -169,7 +173,7 @@ fn compile_to_sir_with_layout_mode(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
-) -> Result<(Program, Vec<AnalyzerError>), SimulatorError> {
+) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
     let (sir, errors) = analyze(
         sources,
         top,
@@ -577,7 +581,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     > {
         let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
         let compile_start = phase_timing.then(crate::timing::now);
-        let (mut program, warnings) = compile_to_sir_with_layout_mode(
+        let (program, warnings) = compile_to_sir_with_layout_mode(
             &self.sources,
             self.top,
             &self.ignored_loops,
@@ -594,18 +598,6 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         )?;
         if let Some(start) = compile_start {
             eprintln!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
-        }
-
-        // Register testbench runtime-event sites before layout fixes the ring geometry.
-        let runtime_sites_start = phase_timing.then(crate::timing::now);
-        crate::testbench::register_runtime_event_sites(&mut program);
-        if let Some(start) = runtime_sites_start {
-            eprintln!(
-                "[phase-timing] register_runtime_event_sites: {:?} runtime_event_sites={} comb_observers={}",
-                start.elapsed(),
-                program.runtime_schema.runtime_event_sites.len(),
-                program.runtime_schema.comb_observers.len()
-            );
         }
 
         // Build memory layout (consumes semantic layout requirements).
@@ -758,16 +750,14 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     /// observed before the test finishes or stops on a fatal failure.
     pub fn run_test_detailed(self) -> Result<crate::testbench::TestResultDetailed, SimulatorError> {
         let mut sim = self.build()?;
-        let initial_stmts = sim.program().initial_statements.clone().ok_or_else(|| {
+        let testbench = crate::testbench::compile_initial_testbench(&sim).ok_or_else(|| {
             SimulatorError::new(SimulatorErrorKind::Codegen(
                 "no initial block found — this module is not a native testbench".into(),
             ))
         })?;
-        let mut tb_builder = crate::testbench::TestbenchBuilder::new(&sim);
-        tb_builder.build_event_map(&initial_stmts);
-        let tb_stmts = tb_builder.convert(&initial_stmts);
         Ok(crate::testbench::run_testbench_detailed(
-            &mut sim, &tb_stmts,
+            &mut sim,
+            &testbench.stmts,
         ))
     }
 
@@ -795,10 +785,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             layout_mode,
         );
 
-        let sim_res = program_res.and_then(|(mut program, warnings)| {
-            // Register testbench runtime-event sites before layout fixes the ring geometry.
-            crate::testbench::register_runtime_event_sites(&mut program);
-
+        let sim_res = program_res.and_then(|(program, warnings)| {
             let mut laid_out =
                 program.into_laid_out_with_mode(self.options.four_state, layout_mode);
 
@@ -852,15 +839,12 @@ fn run_test_with_sim<B: crate::backend::SimBackend>(
 ) -> Result<crate::testbench::TestResult, SimulatorError> {
     let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let testbench_start = phase_timing.then(crate::timing::now);
-    let initial_stmts = sim.program().initial_statements.clone().ok_or_else(|| {
+    let testbench = crate::testbench::compile_initial_testbench(&sim).ok_or_else(|| {
         SimulatorError::new(SimulatorErrorKind::Codegen(
             "no initial block found — this module is not a native testbench".into(),
         ))
     })?;
-    let mut tb_builder = crate::testbench::TestbenchBuilder::new(&sim);
-    tb_builder.build_event_map(&initial_stmts);
-    let tb_stmts = tb_builder.convert(&initial_stmts);
-    let result = crate::testbench::run_testbench(&mut sim, &tb_stmts);
+    let result = crate::testbench::run_testbench(&mut sim, &testbench.stmts);
     if let Some(start) = testbench_start {
         eprintln!("[phase-timing] testbench: {:?}", start.elapsed());
     }
@@ -963,7 +947,7 @@ fn run_dead_store_elimination(
     // Native testbench expressions bypass SIR and read simulator memory
     // directly. Their inputs are therefore external DSE roots just like
     // signals named with `live_signal()`.
-    externally_live.extend(crate::testbench::initial_read_addresses(program));
+    externally_live.extend(program.runtime_schema.testbench_read_roots.iter().copied());
 
     // User-specified live signals
     for (inst_path, var_path) in live_signals {

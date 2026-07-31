@@ -7,8 +7,10 @@ current `celox` compiler/runtime monolith. It is a design document, not a claim 
 crates already exist.
 
 Migration note: `celox-state-layout` now owns the generic layout algorithm and the compiler driver
-uses a consuming `Program -> LaidOutProgram` transition. The current facade artifact still wraps
-the mixed `Program`, whose execution-unit groups are now held by `celox-sir::SirProgram` and whose
+uses a consuming `Program -> OptimizedSir -> LaidOutProgram` transition. Only the optimizer driver
+can construct `OptimizedSir`, and physical layout is no longer available on an unoptimized
+`Program`. The transitional facade artifact wraps the mixed `Program`, whose execution-unit groups
+are now held by `celox-sir::SirProgram` and whose
 flattened state metadata, event topology, and initial state are held by
 `celox-design::ElaboratedDesign`. Runtime diagnostics are held by
 `celox-design::RuntimeSchema`; its combinational observation recipes retain only persistent-state
@@ -21,10 +23,19 @@ artifact. The unused semantic-process provenance formerly copied from `LogicPath
 scheduler into `Program` has been removed instead of being assigned to a target crate. Moving the
 optimizer-to-layout state-alias contract is now represented by
 `celox-state-layout::LayoutRequirements` and is cleared after physical layout is finalized. Tests
-and consumers construct each backend from an unlaid-out `Program` rather than attempting to
-re-layout the finalized program after identity Stores have been removed. Moving the remaining
-parser implementation, symbolic, optimizer, and testbench payload
-into the phase-specific target types below remains part of Milestone 3.
+and consumers construct each backend from `OptimizedSir` rather than attempting to
+re-layout the finalized program after identity Stores have been removed. Veryl
+testbench runtime-event sites and direct state-read roots are projected into the source-independent
+`RuntimeSchema` before SIR optimization, so optimization and layout no longer traverse testbench
+AST. Veryl statements/functions are an explicit
+`celox-frontend-veryl::VerylTestbenchSource` input consumed during frontend flattening. The source-independent
+expression opcode and operator vocabulary is owned by `celox-testbench`; the current Veryl
+testbench compiler translates source operators at that boundary and emits bytecode with semantic
+state addresses plus relative byte offsets. The resulting source-independent `TestbenchProgram` is
+stored before optimization; a separate binding step resolves those locations from the finalized
+physical layout before the VM executes the bound bytecode. Native, Cranelift, and WASM execution
+therefore share the same testbench binding path. Moving the remaining parser implementation,
+symbolic, optimizer, and runtime payload into the phase-specific target crates below remains.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making

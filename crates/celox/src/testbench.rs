@@ -18,6 +18,14 @@ use crate::context_width::{
 use crate::display_format::{DisplayFormatArg, format_display_arg};
 use crate::ir::{AbsoluteAddr, Program, RuntimeEventKind, RuntimeEventSite, SignalRef};
 use crate::simulator::{RuntimeEvent, RuntimeFormatContext, Simulator};
+use celox_frontend_veryl::VerylTestbenchSource;
+pub use celox_testbench::SourceLocation;
+use celox_testbench::{
+    AssertMessage as GenericAssertMessage, ClockCount as GenericClockCount, ExprBytecode,
+    ExprOpcode as TbOpcode, LoopBound as GenericLoopBound, SemanticArgument, SemanticSignal,
+    SemanticStatement, StateLocation, TestbenchOperator as Op, TestbenchProgram,
+    TestbenchStatement as GenericTestbenchStatement,
+};
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use std::sync::{
@@ -26,11 +34,13 @@ use std::sync::{
 };
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssertKind, CasePattern, Expression, Factor, ForBound, ForRange, Function,
-    FunctionCall, Op, Statement, SystemFunctionInput, SystemFunctionKind, TbMethod, TbMethodCall,
-    VarId,
+    FunctionCall, Op as VerylOp, Statement, SystemFunctionInput, SystemFunctionKind, TbMethod,
+    TbMethodCall, VarId,
 };
 use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::{self, StrId};
+
+type UnboundTbOpcode = TbOpcode<StateLocation<AbsoluteAddr>>;
 
 // ── Public types ───────────────────────────────────────────────────────
 
@@ -38,14 +48,6 @@ use veryl_parser::resource_table::{self, StrId};
 pub enum TestResult {
     Pass,
     Fail(String),
-}
-
-/// Source location of a testbench statement in the original Veryl source.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceLocation {
-    pub file: String,
-    pub line: u32,
-    pub column: u32,
 }
 
 /// Result of a single `$assert` evaluation.
@@ -66,7 +68,7 @@ pub struct TestResultDetailed {
 
 /// Opaque, precompiled native testbench program for a built simulator.
 pub struct CompiledTestbench<B: SimBackend> {
-    stmts: Vec<TestbenchStatement<B>>,
+    pub(crate) stmts: Vec<TestbenchStatement<B>>,
 }
 
 /// Result of executing a testbench with an optional tick limit.
@@ -77,76 +79,15 @@ pub struct LimitedTestbenchResult {
     pub tick_limit_reached: bool,
 }
 
-pub(crate) enum AssertMessage {
-    Formatted {
-        template: String,
-        args: Vec<CompiledAssertArg>,
-    },
-    DynamicArgs(Vec<CompiledAssertArg>),
-}
+pub(crate) type AssertMessage = GenericAssertMessage<CompiledAssertArg>;
 
 /// Clock cycle count: either a compile-time constant or a runtime expression.
-pub enum ClockCount {
-    Static(u64),
-    Dynamic(CompiledExpr),
-}
+pub type ClockCount = GenericClockCount<CompiledExpr>;
 
-pub enum LoopBound {
-    Static(usize),
-    Dynamic {
-        expr: CompiledExpr,
-        width: usize,
-        signed: bool,
-    },
-}
+pub type LoopBound = GenericLoopBound<CompiledExpr>;
 
-pub(crate) enum TestbenchStatement<B: SimBackend> {
-    ClockNext {
-        clock_event: B::Event,
-        count: ClockCount,
-    },
-    ResetAssert {
-        reset_signal: SignalRef,
-        clock_event: B::Event,
-        duration: u64,
-        /// Value to drive when reset is asserted (0 for active-low, 1 for active-high).
-        assert_value: u8,
-        /// Value to drive when reset is deasserted.
-        deassert_value: u8,
-    },
-    Assert {
-        expr: CompiledExpr,
-        site_id: u32,
-        continue_on_fail: bool,
-        message: Option<AssertMessage>,
-        location: Option<SourceLocation>,
-    },
-    Display {
-        message: Option<AssertMessage>,
-        newline: bool,
-    },
-    If {
-        expr: CompiledExpr,
-        then_block: Vec<TestbenchStatement<B>>,
-        else_block: Vec<TestbenchStatement<B>>,
-    },
-    For {
-        loop_var: Option<(SignalRef, usize, bool)>,
-        start: LoopBound,
-        end: LoopBound,
-        inclusive: bool,
-        step: usize,
-        step_op: Option<Op>,
-        reverse: bool,
-        body: Vec<TestbenchStatement<B>>,
-    },
-    Assign {
-        dst: SignalRef,
-        expr: CompiledExpr,
-    },
-    Break,
-    Finish,
-}
+pub(crate) type TestbenchStatement<B> =
+    GenericTestbenchStatement<<B as SimBackend>::Event, SignalRef, CompiledExpr, CompiledAssertArg>;
 
 pub(crate) struct CompiledAssertArg {
     expr: CompiledExpr,
@@ -160,83 +101,7 @@ pub(crate) struct CompiledAssertArg {
 /// A compiled expression: flat bytecode evaluated on a stack VM.
 #[derive(Debug)]
 pub struct CompiledExpr {
-    ops: Vec<TbOpcode>,
-}
-
-/// Bytecode instructions for the testbench expression evaluator.
-#[derive(Debug)]
-enum TbOpcode {
-    /// Push a constant u64.
-    ConstU64(u64),
-    /// Push a wide constant (>64 bits).
-    ConstWide(BigUint),
-    /// Read ≤8 bytes from memory at `offset`, zero-extend to u64.
-    LoadU64 {
-        offset: usize,
-        byte_size: usize,
-        mask: u64,
-    },
-    /// Read >8 bytes from memory, push as BigUint.
-    LoadWide {
-        offset: usize,
-        byte_size: usize,
-        width: usize,
-    },
-    /// Binary operation: pop two values, push result.
-    ///
-    /// This is reserved for the compiler's unsigned address/concatenation
-    /// plumbing. Source-language expressions use `TypedBinOp` below.
-    BinOp(Op),
-    /// Source-language binary operation with its resolved common width and
-    /// operand signedness.
-    TypedBinOp {
-        op: Op,
-        lhs_width: usize,
-        rhs_width: usize,
-        result_width: usize,
-        lhs_signed: bool,
-        rhs_signed: bool,
-    },
-    /// Source-language unary operation. Reductions have a one-bit result even
-    /// though their operand retains `operand_width`.
-    TypedUnary {
-        op: Op,
-        operand_width: usize,
-        result_width: usize,
-    },
-    /// Resize a value in its resolved expression context. The context's
-    /// effective signedness controls widening; resizing never changes bits
-    /// merely to reinterpret the result type.
-    Resize {
-        source_width: usize,
-        target_width: usize,
-        signed: bool,
-    },
-    /// Append a self-determined concatenation item to the accumulator.
-    ConcatPart {
-        part_width: usize,
-        result_width: usize,
-    },
-    /// Conditional: pop condition; if non-zero execute `then_len` ops,
-    /// otherwise skip them and execute `else_len` ops.
-    Ternary { then_len: usize, else_len: usize },
-    /// Dynamic array element load: pop index (u64), compute
-    /// `base_offset + index * stride_bytes`, read `element_width` bits.
-    LoadIndexed {
-        base_offset: usize,
-        stride_bytes: usize,
-        element_byte_size: usize,
-        element_width: usize,
-    },
-    /// Dynamic bit select: pop bit-index (u64), read full value from
-    /// `base_offset`, then shift right by bit-index and mask to `select_width`.
-    LoadBitSelect {
-        base_offset: usize,
-        base_byte_size: usize,
-        select_width: usize,
-    },
-    /// Pop value from stack and write to memory (for function arg binding).
-    StoreU64 { offset: usize, byte_size: usize },
+    bytecode: ExprBytecode,
 }
 
 /// Stack value: either a native u64 or a heap-allocated BigUint.
@@ -297,7 +162,7 @@ impl CompiledExpr {
     fn eval(&self, memory: *mut u8) -> TbValue {
         let mut stack: Vec<TbValue> = Vec::with_capacity(16);
         let mut pc: usize = 0;
-        let ops = &self.ops;
+        let ops = self.bytecode.ops();
 
         while pc < ops.len() {
             self.exec_at(ops, &mut pc, &mut stack, memory);
@@ -322,21 +187,21 @@ impl CompiledExpr {
                 *pc += 1;
             }
             TbOpcode::LoadU64 {
-                offset,
+                location,
                 byte_size,
                 mask,
             } => {
                 // SAFETY: caller guarantees `memory` is valid simulator memory
-                let val = unsafe { read_le_u64(memory.add(*offset), *byte_size) } & mask;
+                let val = unsafe { read_le_u64(memory.add(*location), *byte_size) } & mask;
                 stack.push(TbValue::U64(val));
                 *pc += 1;
             }
             TbOpcode::LoadWide {
-                offset,
+                location,
                 byte_size,
                 width,
             } => {
-                let val = unsafe { read_le_wide(memory.add(*offset), *byte_size, *width) };
+                let val = unsafe { read_le_wide(memory.add(*location), *byte_size, *width) };
                 stack.push(TbValue::Wide(val));
                 *pc += 1;
             }
@@ -456,7 +321,7 @@ impl CompiledExpr {
                 }
             }
             TbOpcode::LoadIndexed {
-                base_offset,
+                location,
                 stride_bytes,
                 element_byte_size,
                 element_width,
@@ -466,7 +331,7 @@ impl CompiledExpr {
                     TbValue::U64(0)
                 });
                 let i = idx.to_u64() as usize;
-                let offset = base_offset + i * stride_bytes;
+                let offset = location + i * stride_bytes;
                 let mask = if *element_width >= 64 {
                     u64::MAX
                 } else {
@@ -477,7 +342,7 @@ impl CompiledExpr {
                 *pc += 1;
             }
             TbOpcode::LoadBitSelect {
-                base_offset,
+                location,
                 base_byte_size,
                 select_width,
             } => {
@@ -486,7 +351,7 @@ impl CompiledExpr {
                     TbValue::U64(0)
                 });
                 let shift = bit_idx.to_u64() as usize;
-                let full_val = unsafe { read_le_u64(memory.add(*base_offset), *base_byte_size) };
+                let full_val = unsafe { read_le_u64(memory.add(*location), *base_byte_size) };
                 let mask = if *select_width >= 64 {
                     u64::MAX
                 } else {
@@ -496,7 +361,10 @@ impl CompiledExpr {
                 stack.push(TbValue::U64(val));
                 *pc += 1;
             }
-            TbOpcode::StoreU64 { offset, byte_size } => {
+            TbOpcode::StoreU64 {
+                location,
+                byte_size,
+            } => {
                 let val = stack.pop().unwrap_or_else(|| {
                     debug_assert!(false, "testbench bytecode: StoreU64 underflow");
                     TbValue::U64(0)
@@ -505,7 +373,7 @@ impl CompiledExpr {
                 let bytes = v.to_le_bytes();
                 let n = (*byte_size).min(8);
                 unsafe {
-                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), memory.add(*offset), n);
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), memory.add(*location), n);
                 }
                 *pc += 1;
             }
@@ -521,10 +389,10 @@ fn static_string_expr(expr: &Expression) -> Option<String> {
     byte_value_to_string(value)
 }
 
-fn compile_assert_arg<B: SimBackend>(
+fn compile_assert_arg(
     input: &SystemFunctionInput,
-    ec: &ExprCompiler<'_, B>,
-) -> CompiledAssertArg {
+    ec: &ExprCompiler<'_>,
+) -> SemanticArgument<AbsoluteAddr> {
     let expr = &input.0;
     let width = {
         let ctx_width = expr.comptime().expr_context.width;
@@ -538,7 +406,7 @@ fn compile_assert_arg<B: SimBackend>(
             0
         }
     };
-    CompiledAssertArg {
+    SemanticArgument {
         expr: ec.compile(expr),
         width,
         signed: expression_signed(expr),
@@ -661,20 +529,24 @@ fn count_assert_statements(
     count
 }
 
-pub(crate) fn register_runtime_event_sites(program: &mut Program) {
-    let Some(stmts) = program.initial_statements.as_ref() else {
+pub(crate) fn project_observability(program: &mut Program, source: &VerylTestbenchSource) {
+    let Some(stmts) = source.initial_statements.as_ref() else {
         return;
     };
     let mut sites = Vec::new();
-    collect_runtime_event_sites(stmts, &program.tb_functions, &mut sites);
+    collect_runtime_event_sites(stmts, &source.functions, &mut sites);
     program.runtime_schema.runtime_event_sites.extend(sites);
+    program.runtime_schema.testbench_read_roots = initial_read_addresses(program, source);
 }
 
 /// Return top-module signals read by the native testbench. Testbench bytecode
 /// reads these directly from simulator memory, so they are external roots for
 /// dead-store elimination even though no SIR execution unit loads them.
-pub(crate) fn initial_read_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
-    let Some(stmts) = program.initial_statements.as_ref() else {
+fn initial_read_addresses(
+    program: &Program,
+    source: &VerylTestbenchSource,
+) -> crate::HashSet<AbsoluteAddr> {
+    let Some(stmts) = source.initial_statements.as_ref() else {
         return crate::HashSet::default();
     };
     let Some(&root_instance_id) = program
@@ -693,12 +565,7 @@ pub(crate) fn initial_read_addresses(program: &Program) -> crate::HashSet<Absolu
 
     let mut reads = crate::HashSet::default();
     let mut active_functions = crate::HashSet::default();
-    collect_statement_reads(
-        stmts,
-        &program.tb_functions,
-        &mut active_functions,
-        &mut reads,
-    );
+    collect_statement_reads(stmts, &source.functions, &mut active_functions, &mut reads);
     reads
         .into_iter()
         .filter(|id| root_variables.contains_key(id))
@@ -947,10 +814,10 @@ fn collect_function_call_reads(
     }
 }
 
-fn compile_assert_message<B: SimBackend>(
+fn compile_assert_message(
     args: &[SystemFunctionInput],
-    ec: &ExprCompiler<'_, B>,
-) -> Option<AssertMessage> {
+    ec: &ExprCompiler<'_>,
+) -> Option<GenericAssertMessage<SemanticArgument<AbsoluteAddr>>> {
     if args.is_empty() {
         return None;
     }
@@ -959,12 +826,12 @@ fn compile_assert_message<B: SimBackend>(
             .iter()
             .map(|arg| compile_assert_arg(arg, ec))
             .collect::<Vec<_>>();
-        Some(AssertMessage::Formatted {
+        Some(GenericAssertMessage::Formatted {
             template,
             args: compiled_args,
         })
     } else {
-        Some(AssertMessage::DynamicArgs(
+        Some(GenericAssertMessage::DynamicArgs(
             args.iter().map(|arg| compile_assert_arg(arg, ec)).collect(),
         ))
     }
@@ -1620,21 +1487,60 @@ fn eval_binop_wide_cmp(l: &BigUint, op: Op, r: &BigUint) -> u64 {
 
 // ── Expression compiler ────────────────────────────────────────────────
 
-struct ExprCompiler<'a, B: SimBackend> {
-    sim: &'a Simulator<B>,
+fn lower_testbench_operator(op: VerylOp) -> Op {
+    match op {
+        VerylOp::Add => Op::Add,
+        VerylOp::Sub => Op::Sub,
+        VerylOp::Mul => Op::Mul,
+        VerylOp::Div => Op::Div,
+        VerylOp::Rem => Op::Rem,
+        VerylOp::Pow => Op::Pow,
+        VerylOp::BitAnd => Op::BitAnd,
+        VerylOp::BitOr => Op::BitOr,
+        VerylOp::BitXor => Op::BitXor,
+        VerylOp::BitXnor => Op::BitXnor,
+        VerylOp::BitNand => Op::BitNand,
+        VerylOp::BitNor => Op::BitNor,
+        VerylOp::LogicShiftL => Op::LogicShiftL,
+        VerylOp::LogicShiftR => Op::LogicShiftR,
+        VerylOp::ArithShiftL => Op::ArithShiftL,
+        VerylOp::ArithShiftR => Op::ArithShiftR,
+        VerylOp::Eq => Op::Eq,
+        VerylOp::EqWildcard => Op::EqWildcard,
+        VerylOp::Ne => Op::Ne,
+        VerylOp::NeWildcard => Op::NeWildcard,
+        VerylOp::Less => Op::Less,
+        VerylOp::LessEq => Op::LessEq,
+        VerylOp::Greater => Op::Greater,
+        VerylOp::GreaterEq => Op::GreaterEq,
+        VerylOp::LogicAnd => Op::LogicAnd,
+        VerylOp::LogicOr => Op::LogicOr,
+        VerylOp::LogicNot => Op::LogicNot,
+        VerylOp::BitNot => Op::BitNot,
+        _ => unreachable!("operator cannot be represented in testbench bytecode: {op:?}"),
+    }
+}
+
+struct ExprCompiler<'a> {
+    program: &'a Program,
+    testbench_source: &'a VerylTestbenchSource,
     /// Root module instance ID, cached for repeated lookups.
     root_instance_id: crate::ir::InstanceId,
     root_module_id: crate::ir::ModuleId,
 }
 
-impl<'a, B: SimBackend> ExprCompiler<'a, B> {
-    fn compile(&self, expr: &Expression) -> CompiledExpr {
+impl ExprCompiler<'_> {
+    fn compile(&self, expr: &Expression) -> ExprBytecode<StateLocation<AbsoluteAddr>> {
         let mut ops = Vec::new();
         self.emit(expr, &mut ops);
-        CompiledExpr { ops }
+        ExprBytecode::new(ops)
     }
 
-    fn compile_with_width(&self, expr: &Expression, width: usize) -> CompiledExpr {
+    fn compile_with_width(
+        &self,
+        expr: &Expression,
+        width: usize,
+    ) -> ExprBytecode<StateLocation<AbsoluteAddr>> {
         let mut ops = Vec::new();
         self.emit_in_context(
             expr,
@@ -1644,7 +1550,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                 signed: expression_signed(expr),
             }),
         );
-        CompiledExpr { ops }
+        ExprBytecode::new(ops)
     }
 
     fn natural_width(&self, expr: &Expression) -> usize {
@@ -1662,13 +1568,13 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         }
     }
 
-    fn emit(&self, expr: &Expression, ops: &mut Vec<TbOpcode>) {
+    fn emit(&self, expr: &Expression, ops: &mut Vec<UnboundTbOpcode>) {
         self.emit_in_context(expr, ops, Some(self.root_context(expr)));
     }
 
     fn resize_result(
         &self,
-        ops: &mut Vec<TbOpcode>,
+        ops: &mut Vec<UnboundTbOpcode>,
         source: ValueContext,
         target: Option<ValueContext>,
     ) -> ValueContext {
@@ -1688,7 +1594,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
     fn emit_in_context(
         &self,
         expr: &Expression,
-        ops: &mut Vec<TbOpcode>,
+        ops: &mut Vec<UnboundTbOpcode>,
         context: Option<ValueContext>,
     ) -> ValueContext {
         match expr {
@@ -1703,13 +1609,13 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
             Expression::Unary(op, inner, _) => {
                 let reduction = matches!(
                     op,
-                    Op::BitAnd
-                        | Op::BitNand
-                        | Op::BitOr
-                        | Op::BitNor
-                        | Op::BitXor
-                        | Op::BitXnor
-                        | Op::LogicNot
+                    VerylOp::BitAnd
+                        | VerylOp::BitNand
+                        | VerylOp::BitOr
+                        | VerylOp::BitNor
+                        | VerylOp::BitXor
+                        | VerylOp::BitXnor
+                        | VerylOp::LogicNot
                 );
                 let natural_width = self.natural_width(inner);
                 let operand_context = if reduction {
@@ -1725,17 +1631,17 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                 let operand = self.emit_in_context(inner, ops, operand_context);
                 let result_width = if reduction { 1 } else { operand.width };
                 match op {
-                    Op::Add
-                    | Op::Sub
-                    | Op::BitNot
-                    | Op::BitAnd
-                    | Op::BitNand
-                    | Op::BitOr
-                    | Op::BitNor
-                    | Op::BitXor
-                    | Op::BitXnor
-                    | Op::LogicNot => ops.push(TbOpcode::TypedUnary {
-                        op: *op,
+                    VerylOp::Add
+                    | VerylOp::Sub
+                    | VerylOp::BitNot
+                    | VerylOp::BitAnd
+                    | VerylOp::BitNand
+                    | VerylOp::BitOr
+                    | VerylOp::BitNor
+                    | VerylOp::BitXor
+                    | VerylOp::BitXnor
+                    | VerylOp::LogicNot => ops.push(TbOpcode::TypedUnary {
+                        op: lower_testbench_operator(*op),
                         operand_width: operand.width,
                         result_width,
                     }),
@@ -1748,7 +1654,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                 self.resize_result(ops, result, context)
             }
             Expression::Binary(lhs, op, rhs, _) => {
-                if matches!(op, Op::As) {
+                if matches!(op, VerylOp::As) {
                     let cast = cast_semantics(lhs, rhs)
                         .expect("analyzed testbench cast must have a concrete target");
                     let source = self.emit_in_context(
@@ -1779,31 +1685,31 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                 let lhs = self.emit_in_context(lhs, ops, semantics.lhs_context);
                 let rhs = self.emit_in_context(rhs, ops, semantics.rhs_context);
                 match op {
-                    Op::Pow
-                    | Op::Div
-                    | Op::Rem
-                    | Op::Mul
-                    | Op::Add
-                    | Op::Sub
-                    | Op::ArithShiftL
-                    | Op::ArithShiftR
-                    | Op::LogicShiftL
-                    | Op::LogicShiftR
-                    | Op::LessEq
-                    | Op::GreaterEq
-                    | Op::Less
-                    | Op::Greater
-                    | Op::Eq
-                    | Op::EqWildcard
-                    | Op::Ne
-                    | Op::NeWildcard
-                    | Op::BitAnd
-                    | Op::BitOr
-                    | Op::BitXor
-                    | Op::BitXnor
-                    | Op::LogicAnd
-                    | Op::LogicOr => ops.push(TbOpcode::TypedBinOp {
-                        op: *op,
+                    VerylOp::Pow
+                    | VerylOp::Div
+                    | VerylOp::Rem
+                    | VerylOp::Mul
+                    | VerylOp::Add
+                    | VerylOp::Sub
+                    | VerylOp::ArithShiftL
+                    | VerylOp::ArithShiftR
+                    | VerylOp::LogicShiftL
+                    | VerylOp::LogicShiftR
+                    | VerylOp::LessEq
+                    | VerylOp::GreaterEq
+                    | VerylOp::Less
+                    | VerylOp::Greater
+                    | VerylOp::Eq
+                    | VerylOp::EqWildcard
+                    | VerylOp::Ne
+                    | VerylOp::NeWildcard
+                    | VerylOp::BitAnd
+                    | VerylOp::BitOr
+                    | VerylOp::BitXor
+                    | VerylOp::BitXnor
+                    | VerylOp::LogicAnd
+                    | VerylOp::LogicOr => ops.push(TbOpcode::TypedBinOp {
+                        op: lower_testbench_operator(*op),
                         lhs_width: lhs.width,
                         rhs_width: rhs.width,
                         result_width: semantics.result_width,
@@ -1848,7 +1754,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                     let part_width = self.natural_width(val_expr);
                     let repeat = repeat_expr
                         .as_ref()
-                        .and_then(|e| Self::try_const_usize(e))
+                        .and_then(Self::try_const_usize)
                         .unwrap_or(1);
                     for _ in 0..repeat {
                         self.emit_in_context(val_expr, ops, None);
@@ -1874,7 +1780,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         }
     }
 
-    fn emit_factor(&self, factor: &Factor, ops: &mut Vec<TbOpcode>) {
+    fn emit_factor(&self, factor: &Factor, ops: &mut Vec<UnboundTbOpcode>) {
         match factor {
             Factor::Variable(var_id, index, select, comptime) => {
                 if comptime.is_const
@@ -1920,7 +1826,11 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         }
     }
 
-    fn emit_constant_value(&self, value: &veryl_analyzer::value::Value, ops: &mut Vec<TbOpcode>) {
+    fn emit_constant_value(
+        &self,
+        value: &veryl_analyzer::value::Value,
+        ops: &mut Vec<UnboundTbOpcode>,
+    ) {
         if value.width() <= 64 {
             ops.push(TbOpcode::ConstU64(value.payload_u64()));
         } else {
@@ -1930,9 +1840,12 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
 
     /// Emit bytecode for a function call used as an expression value.
     /// Inline-expands: store args → emit body assigns → load return value.
-    fn emit_function_call(&self, fc: &veryl_analyzer::ir::FunctionCall, ops: &mut Vec<TbOpcode>) {
-        let p = self.sim.program();
-        let func = match p.tb_functions.get(&fc.id) {
+    fn emit_function_call(
+        &self,
+        fc: &veryl_analyzer::ir::FunctionCall,
+        ops: &mut Vec<UnboundTbOpcode>,
+    ) {
+        let func = match self.testbench_source.functions.get(&fc.id) {
             Some(f) => f,
             None => {
                 ops.push(TbOpcode::ConstU64(0));
@@ -1964,7 +1877,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                         }),
                     );
                     ops.push(TbOpcode::StoreU64 {
-                        offset: sig.offset,
+                        location: self.state_location(arg_var_id, 0),
                         byte_size: get_byte_size(sig.width),
                     });
                 }
@@ -1985,7 +1898,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                             }),
                         );
                         ops.push(TbOpcode::StoreU64 {
-                            offset: dst_sig.offset,
+                            location: self.state_location(first_dst.id, 0),
                             byte_size: get_byte_size(dst_sig.width),
                         });
                     }
@@ -1998,7 +1911,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         // 3. Load return value
         if let Some(ret_var_id) = &func_body.ret {
             if let Some(sig) = self.resolve_var(ret_var_id) {
-                self.emit_load(sig.offset, sig.width, ops);
+                self.emit_load(*ret_var_id, 0, sig.width, ops);
             } else {
                 ops.push(TbOpcode::ConstU64(0));
             }
@@ -2012,12 +1925,12 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
     fn emit_var_access(
         &self,
         var_id: &VarId,
-        sig: SignalRef,
+        sig: SemanticSignal<AbsoluteAddr>,
         index: &veryl_analyzer::ir::VarIndex,
         select: &veryl_analyzer::ir::VarSelect,
-        ops: &mut Vec<TbOpcode>,
+        ops: &mut Vec<UnboundTbOpcode>,
     ) {
-        let p = self.sim.program();
+        let p = self.program;
         let info = match p
             .frontend
             .module_variables
@@ -2026,14 +1939,14 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         {
             Some(i) => i,
             None => {
-                self.emit_load(sig.offset, sig.width, ops);
+                self.emit_load(*var_id, 0, sig.width, ops);
                 return;
             }
         };
 
         // No index or select → whole variable
         if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
-            self.emit_load(sig.offset, sig.width, ops);
+            self.emit_load(*var_id, 0, sig.width, ops);
             return;
         }
 
@@ -2065,12 +1978,12 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                 static_bit_offset += idx_val * stride;
             } else {
                 // Dynamic index: emit the index expression, then LoadIndexed
-                let base_byte_offset = sig.offset + static_bit_offset / 8;
+                let base_byte_offset = static_bit_offset / 8;
                 let stride_bytes = get_byte_size(stride);
                 let elem_byte_size = get_byte_size(element_width);
                 self.emit(idx_expr, ops);
                 ops.push(TbOpcode::LoadIndexed {
-                    base_offset: base_byte_offset,
+                    location: self.state_location(*var_id, base_byte_offset),
                     stride_bytes,
                     element_byte_size: elem_byte_size,
                     element_width,
@@ -2101,13 +2014,13 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
 
         if select.0.is_empty() && select.1.is_none() {
             // No bit select, just load the element
-            let byte_offset = sig.offset + static_bit_offset / 8;
+            let byte_offset = static_bit_offset / 8;
             let sub = static_bit_offset % 8;
             if sub == 0 {
-                self.emit_load(byte_offset, accessed_width, ops);
+                self.emit_load(*var_id, byte_offset, accessed_width, ops);
             } else {
                 let load_width = accessed_width + sub;
-                self.emit_load(byte_offset, load_width, ops);
+                self.emit_load(*var_id, byte_offset, load_width, ops);
                 ops.push(TbOpcode::ConstU64(sub as u64));
                 ops.push(TbOpcode::BinOp(Op::LogicShiftR));
                 if accessed_width < 64 {
@@ -2123,10 +2036,10 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
 
         if is_dynamic_select {
             // Dynamic bit select: load full value, shift by dynamic amount, mask
-            let byte_offset = sig.offset + static_bit_offset / 8;
+            let byte_offset = static_bit_offset / 8;
             let total_byte_size = get_byte_size(accessed_width);
             ops.push(TbOpcode::LoadBitSelect {
-                base_offset: byte_offset,
+                location: self.state_location(*var_id, byte_offset),
                 base_byte_size: total_byte_size,
                 select_width: sel_width,
             });
@@ -2134,13 +2047,13 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         }
 
         let bit_offset = static_bit_offset + sel_lsb;
-        let byte_offset = sig.offset + bit_offset / 8;
+        let byte_offset = bit_offset / 8;
         let sub = bit_offset % 8;
         if sub == 0 {
-            self.emit_load(byte_offset, sel_width, ops);
+            self.emit_load(*var_id, byte_offset, sel_width, ops);
         } else {
             let load_width = sel_width + sub;
-            self.emit_load(byte_offset, load_width, ops);
+            self.emit_load(*var_id, byte_offset, load_width, ops);
             ops.push(TbOpcode::ConstU64(sub as u64));
             ops.push(TbOpcode::BinOp(Op::LogicShiftR));
             if sel_width < 64 {
@@ -2156,11 +2069,11 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
     fn resolve_select(
         &self,
         select: &veryl_analyzer::ir::VarSelect,
-        ops: &mut Vec<TbOpcode>,
+        ops: &mut Vec<UnboundTbOpcode>,
     ) -> (usize, usize, bool) {
         if let Some((op, range_expr)) = &select.1 {
             let anchor_expr = select.0.last();
-            let anchor = anchor_expr.and_then(|e| Self::try_const_usize(e));
+            let anchor = anchor_expr.and_then(Self::try_const_usize);
             let range_val = Self::try_const_usize(range_expr);
 
             if let (Some(a), Some(v)) = (anchor, range_val) {
@@ -2202,7 +2115,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         &self,
         select: &veryl_analyzer::ir::VarSelect,
         _base_width: usize,
-        ops: &mut Vec<TbOpcode>,
+        ops: &mut Vec<UnboundTbOpcode>,
     ) {
         let (lsb, width, is_dynamic) = self.resolve_select(select, ops);
         if is_dynamic {
@@ -2225,7 +2138,13 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
     }
 
     /// Emit a LoadU64 or LoadWide opcode for the given byte offset and bit width.
-    fn emit_load(&self, offset: usize, width: usize, ops: &mut Vec<TbOpcode>) {
+    fn emit_load(
+        &self,
+        var_id: VarId,
+        byte_offset: usize,
+        width: usize,
+        ops: &mut Vec<UnboundTbOpcode>,
+    ) {
         let byte_size = get_byte_size(width);
         if byte_size <= 8 {
             let mask = if width >= 64 {
@@ -2234,16 +2153,26 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                 (1u64 << width) - 1
             };
             ops.push(TbOpcode::LoadU64 {
-                offset,
+                location: self.state_location(var_id, byte_offset),
                 byte_size,
                 mask,
             });
         } else {
             ops.push(TbOpcode::LoadWide {
-                offset,
+                location: self.state_location(var_id, byte_offset),
                 byte_size,
                 width,
             });
+        }
+    }
+
+    fn state_location(&self, var_id: VarId, byte_offset: usize) -> StateLocation<AbsoluteAddr> {
+        StateLocation {
+            address: AbsoluteAddr {
+                instance_id: self.root_instance_id,
+                var_id,
+            },
+            byte_offset,
         }
     }
 
@@ -2269,7 +2198,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         if let Expression::Term(f) = expr {
             match f.as_ref() {
                 Factor::Variable(var_id, _, _, _) => {
-                    let p = self.sim.program();
+                    let p = self.program;
                     if let Some(vars) = p.frontend.module_variables.get(&self.root_module_id) {
                         if let Some(info) = vars.get(var_id) {
                             return info.width;
@@ -2297,49 +2226,59 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         }
     }
 
-    fn resolve_var(&self, var_id: &VarId) -> Option<SignalRef> {
-        let p = self.sim.program();
+    fn resolve_var(&self, var_id: &VarId) -> Option<SemanticSignal<AbsoluteAddr>> {
+        let p = self.program;
         let vars = p.frontend.module_variables.get(&self.root_module_id)?;
-        let _ = vars.get(var_id)?;
-        Some(self.sim.backend_ref().resolve_signal(&AbsoluteAddr {
-            instance_id: self.root_instance_id,
-            var_id: *var_id,
-        }))
+        let info = vars.get(var_id)?;
+        Some(SemanticSignal {
+            address: AbsoluteAddr {
+                instance_id: self.root_instance_id,
+                var_id: *var_id,
+            },
+            width: info.width,
+        })
     }
 }
 
 // ── Builder ────────────────────────────────────────────────────────────
 
-pub struct TestbenchBuilder<'a, B: SimBackend> {
-    sim: &'a Simulator<B>,
-    event_map: std::collections::HashMap<StrId, B::Event>,
-    signal_map: std::collections::HashMap<StrId, SignalRef>,
+struct SemanticTestbenchBuilder<'a> {
+    program: &'a Program,
+    testbench_source: &'a VerylTestbenchSource,
+    event_map: std::collections::HashMap<StrId, AbsoluteAddr>,
+    signal_map: std::collections::HashMap<StrId, SemanticSignal<AbsoluteAddr>>,
     default_reset_duration: u64,
 }
 
-impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
-    pub fn new(sim: &'a Simulator<B>) -> Self {
+impl<'a> SemanticTestbenchBuilder<'a> {
+    fn new(program: &'a Program, testbench_source: &'a VerylTestbenchSource) -> Self {
         Self {
-            sim,
+            program,
+            testbench_source,
             event_map: Default::default(),
             signal_map: Default::default(),
             default_reset_duration: 3,
         }
     }
 
-    pub fn build_event_map(&mut self, stmts: &[Statement]) {
+    fn build_event_map(&mut self, stmts: &[Statement]) {
         let mut clock_insts: Vec<StrId> = Vec::new();
         let mut reset_insts: Vec<StrId> = Vec::new();
         Self::scan_tb_methods(stmts, &mut clock_insts, &mut reset_insts);
-        let program = self.sim.program();
+        let program = self.program;
         for inst in clock_insts.iter().chain(reset_insts.iter()) {
             let name = veryl_parser::resource_table::get_str_value(*inst).unwrap_or_default();
             if let Ok(addr) = program.get_addr(&[], &[&name]) {
-                if let Some(event) = self.sim.backend_ref().resolve_event_opt(&addr) {
-                    self.event_map.insert(*inst, event);
+                self.event_map.insert(*inst, addr);
+                if let Some(info) = program.get_variable_info(&addr) {
+                    self.signal_map.insert(
+                        *inst,
+                        SemanticSignal {
+                            address: addr,
+                            width: info.width,
+                        },
+                    );
                 }
-                self.signal_map
-                    .insert(*inst, self.sim.backend_ref().resolve_signal(&addr));
             }
         }
     }
@@ -2376,8 +2315,8 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         }
     }
 
-    pub(crate) fn convert(&mut self, stmts: &[Statement]) -> Vec<TestbenchStatement<B>> {
-        let p = self.sim.program();
+    fn convert(&mut self, stmts: &[Statement]) -> Vec<SemanticStatement<AbsoluteAddr>> {
+        let p = self.program;
         let root_instance_id = *p
             .frontend
             .instance_ids
@@ -2385,11 +2324,12 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
             .expect("root instance not found");
         let root_module_id = p.frontend.instance_module[&root_instance_id];
         let ec = ExprCompiler {
-            sim: self.sim,
+            program: self.program,
+            testbench_source: self.testbench_source,
             root_instance_id,
             root_module_id,
         };
-        let site_count = count_assert_statements(stmts, &p.tb_functions) as u32;
+        let site_count = count_assert_statements(stmts, &self.testbench_source.functions) as u32;
         let mut next_assert_site_id = p
             .runtime_schema
             .runtime_event_sites
@@ -2404,16 +2344,16 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
     fn convert_stmt(
         &self,
         stmt: &Statement,
-        ec: &ExprCompiler<'_, B>,
+        ec: &ExprCompiler<'_>,
         next_assert_site_id: &mut u32,
-    ) -> Option<TestbenchStatement<B>> {
-        fn convert_for_bound<B: SimBackend>(
+    ) -> Option<SemanticStatement<AbsoluteAddr>> {
+        fn convert_for_bound(
             bound: &ForBound,
-            ec: &ExprCompiler<'_, B>,
-        ) -> LoopBound {
+            ec: &ExprCompiler<'_>,
+        ) -> GenericLoopBound<ExprBytecode<StateLocation<AbsoluteAddr>>> {
             match bound {
-                ForBound::Const(x) => LoopBound::Static(*x),
-                ForBound::Expression(expr) => LoopBound::Dynamic {
+                ForBound::Const(x) => GenericLoopBound::Static(*x),
+                ForBound::Expression(expr) => GenericLoopBound::Dynamic {
                     expr: ec.compile(expr.as_ref()),
                     width: ec.root_context(expr).width,
                     signed: expression_signed(expr),
@@ -2427,7 +2367,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                 SystemFunctionKind::Assert { kind, cond, args } => {
                     let site_id = *next_assert_site_id;
                     *next_assert_site_id = next_assert_site_id.saturating_add(1);
-                    Some(TestbenchStatement::Assert {
+                    Some(GenericTestbenchStatement::Assert {
                         expr: ec.compile(&cond.0),
                         site_id,
                         continue_on_fail: matches!(kind, AssertKind::Continue),
@@ -2435,18 +2375,18 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                         location: extract_source_location(&sf.comptime.token),
                     })
                 }
-                SystemFunctionKind::Finish => Some(TestbenchStatement::Finish),
-                SystemFunctionKind::Display(args) => Some(TestbenchStatement::Display {
+                SystemFunctionKind::Finish => Some(GenericTestbenchStatement::Finish),
+                SystemFunctionKind::Display(args) => Some(GenericTestbenchStatement::Display {
                     message: compile_assert_message(args, ec),
                     newline: true,
                 }),
-                SystemFunctionKind::Write(args) => Some(TestbenchStatement::Display {
+                SystemFunctionKind::Write(args) => Some(GenericTestbenchStatement::Display {
                     message: compile_assert_message(args, ec),
                     newline: false,
                 }),
                 _ => None,
             },
-            Statement::If(s) => Some(TestbenchStatement::If {
+            Statement::If(s) => Some(GenericTestbenchStatement::If {
                 expr: ec.compile(&s.cond),
                 then_block: s
                     .true_side
@@ -2474,7 +2414,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                         end,
                         inclusive,
                         step,
-                    } => Some(TestbenchStatement::For {
+                    } => Some(GenericTestbenchStatement::For {
                         loop_var: lv,
                         start: convert_for_bound(start, ec),
                         end: convert_for_bound(end, ec),
@@ -2489,7 +2429,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                         end,
                         inclusive,
                         step,
-                    } => Some(TestbenchStatement::For {
+                    } => Some(GenericTestbenchStatement::For {
                         loop_var: lv,
                         start: convert_for_bound(start, ec),
                         end: convert_for_bound(end, ec),
@@ -2505,13 +2445,13 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                         inclusive,
                         step,
                         op,
-                    } => Some(TestbenchStatement::For {
+                    } => Some(GenericTestbenchStatement::For {
                         loop_var: lv,
                         start: convert_for_bound(start, ec),
                         end: convert_for_bound(end, ec),
                         inclusive: *inclusive,
                         step: *step,
-                        step_op: Some(*op),
+                        step_op: Some(lower_testbench_operator(*op)),
                         reverse: false,
                         body,
                     }),
@@ -2521,11 +2461,11 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                 .dst
                 .first()
                 .and_then(|d| ec.resolve_var(&d.id))
-                .map(|dst| TestbenchStatement::Assign {
+                .map(|dst| GenericTestbenchStatement::Assign {
                     dst,
                     expr: ec.compile_with_width(&a.expr, dst.width),
                 }),
-            Statement::Break => Some(TestbenchStatement::Break),
+            Statement::Break => Some(GenericTestbenchStatement::Break),
             Statement::FunctionCall(fc) => self.convert_function_call(fc, ec, next_assert_site_id),
             _ => None,
         }
@@ -2536,11 +2476,10 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
     fn convert_function_call(
         &self,
         fc: &veryl_analyzer::ir::FunctionCall,
-        ec: &ExprCompiler<'_, B>,
+        ec: &ExprCompiler<'_>,
         next_assert_site_id: &mut u32,
-    ) -> Option<TestbenchStatement<B>> {
-        let program = self.sim.program();
-        let func = program.tb_functions.get(&fc.id)?;
+    ) -> Option<SemanticStatement<AbsoluteAddr>> {
+        let func = self.testbench_source.functions.get(&fc.id)?;
         let func_body = if let Some(idx) = &fc.index {
             func.get_function(idx)?
         } else {
@@ -2548,13 +2487,13 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         };
 
         // Build a list of statements: argument assignments + body
-        let mut stmts: Vec<TestbenchStatement<B>> = Vec::new();
+        let mut stmts: Vec<SemanticStatement<AbsoluteAddr>> = Vec::new();
 
         // Bind input arguments
         for (arg_path, arg_expr) in &fc.inputs {
             if let Some(&arg_var_id) = func_body.arg_map.get(arg_path) {
                 if let Some(sig) = ec.resolve_var(&arg_var_id) {
-                    stmts.push(TestbenchStatement::Assign {
+                    stmts.push(GenericTestbenchStatement::Assign {
                         dst: sig,
                         expr: ec.compile_with_width(arg_expr, sig.width),
                     });
@@ -2577,10 +2516,8 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
             // Actually, we can return None and use a different approach:
             // flatten into the parent's statement list.
             // For now, wrap in an always-true If:
-            Some(TestbenchStatement::If {
-                expr: CompiledExpr {
-                    ops: vec![TbOpcode::ConstU64(1)],
-                },
+            Some(GenericTestbenchStatement::If {
+                expr: ExprBytecode::new(vec![TbOpcode::ConstU64(1)]),
                 then_block: stmts,
                 else_block: Vec::new(),
             })
@@ -2590,22 +2527,22 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
     fn convert_tb_method(
         &self,
         tb: &TbMethodCall,
-        ec: &ExprCompiler<'_, B>,
-    ) -> Option<TestbenchStatement<B>> {
+        ec: &ExprCompiler<'_>,
+    ) -> Option<SemanticStatement<AbsoluteAddr>> {
         match &tb.method {
             TbMethod::ClockNext { count, .. } => {
                 let ev = self.event_map.get(&tb.inst).copied()?;
                 let clock_count = match count {
                     Some(expr) => {
                         if let Some(n) = try_eval_const(expr) {
-                            ClockCount::Static(n)
+                            GenericClockCount::Static(n)
                         } else {
-                            ClockCount::Dynamic(ec.compile(expr))
+                            GenericClockCount::Dynamic(ec.compile(expr))
                         }
                     }
-                    None => ClockCount::Static(1),
+                    None => GenericClockCount::Static(1),
                 };
-                Some(TestbenchStatement::ClockNext {
+                Some(GenericTestbenchStatement::ClockNext {
                     clock_event: ev,
                     count: clock_count,
                 })
@@ -2619,7 +2556,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                     .unwrap_or(self.default_reset_duration);
                 // Determine reset polarity from the variable's DomainKind
                 let (assert_value, deassert_value) = self.resolve_reset_polarity(&tb.inst);
-                Some(TestbenchStatement::ResetAssert {
+                Some(GenericTestbenchStatement::ResetAssert {
                     reset_signal,
                     clock_event,
                     duration: dur,
@@ -2639,7 +2576,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
     /// unlike DomainKind which maps sync resets to Other.
     fn resolve_reset_polarity(&self, inst: &StrId) -> (u8, u8) {
         let name = veryl_parser::resource_table::get_str_value(*inst).unwrap_or_default();
-        let program = self.sim.program();
+        let program = self.program;
         if let Ok(addr) = program.get_addr(&[], &[&name]) {
             if let Some(info) = program.get_variable_info(&addr) {
                 return match info.type_kind {
@@ -2654,8 +2591,8 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         (0, 1)
     }
 
-    fn resolve_loop_var(&self, var_id: &VarId) -> Option<(SignalRef, usize)> {
-        let p = self.sim.program();
+    fn resolve_loop_var(&self, var_id: &VarId) -> Option<(SemanticSignal<AbsoluteAddr>, usize)> {
+        let p = self.program;
         let rid = p
             .frontend
             .instance_ids
@@ -2667,7 +2604,13 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
             instance_id: *rid,
             var_id: *var_id,
         };
-        Some((self.sim.backend_ref().resolve_signal(&addr), info.width))
+        Some((
+            SemanticSignal {
+                address: addr,
+                width: info.width,
+            },
+            info.width,
+        ))
     }
 }
 
@@ -3238,15 +3181,210 @@ fn run_testbench_limited<B: SimBackend>(
     }
 }
 
+pub(crate) fn compile_semantic_testbench(
+    program: &Program,
+    source: &VerylTestbenchSource,
+) -> Option<TestbenchProgram<AbsoluteAddr>> {
+    let initial_stmts = source.initial_statements.as_ref()?;
+    let mut builder = SemanticTestbenchBuilder::new(program, source);
+    builder.build_event_map(initial_stmts);
+    Some(TestbenchProgram::new(builder.convert(initial_stmts)))
+}
+
+fn bind_expr<B: SimBackend>(
+    sim: &Simulator<B>,
+    expr: ExprBytecode<StateLocation<AbsoluteAddr>>,
+) -> Option<CompiledExpr> {
+    let layout = sim.backend_ref().layout();
+    let bytecode = expr
+        .bind_with(|address| layout.offsets.get(address).copied())
+        .ok()?;
+    Some(CompiledExpr { bytecode })
+}
+
+fn bind_assert_arg<B: SimBackend>(
+    sim: &Simulator<B>,
+    arg: SemanticArgument<AbsoluteAddr>,
+) -> Option<CompiledAssertArg> {
+    Some(CompiledAssertArg {
+        expr: bind_expr(sim, arg.expr)?,
+        width: arg.width,
+        signed: arg.signed,
+        is_string: arg.is_string,
+    })
+}
+
+fn bind_assert_message<B: SimBackend>(
+    sim: &Simulator<B>,
+    message: GenericAssertMessage<SemanticArgument<AbsoluteAddr>>,
+) -> Option<AssertMessage> {
+    match message {
+        GenericAssertMessage::Formatted { template, args } => {
+            let args = args
+                .into_iter()
+                .map(|arg| bind_assert_arg(sim, arg))
+                .collect::<Option<Vec<_>>>()?;
+            Some(GenericAssertMessage::Formatted { template, args })
+        }
+        GenericAssertMessage::DynamicArgs(args) => {
+            let args = args
+                .into_iter()
+                .map(|arg| bind_assert_arg(sim, arg))
+                .collect::<Option<Vec<_>>>()?;
+            Some(GenericAssertMessage::DynamicArgs(args))
+        }
+    }
+}
+
+fn bind_clock_count<B: SimBackend>(
+    sim: &Simulator<B>,
+    count: GenericClockCount<ExprBytecode<StateLocation<AbsoluteAddr>>>,
+) -> Option<ClockCount> {
+    match count {
+        GenericClockCount::Static(count) => Some(GenericClockCount::Static(count)),
+        GenericClockCount::Dynamic(expr) => Some(GenericClockCount::Dynamic(bind_expr(sim, expr)?)),
+    }
+}
+
+fn bind_loop_bound<B: SimBackend>(
+    sim: &Simulator<B>,
+    bound: GenericLoopBound<ExprBytecode<StateLocation<AbsoluteAddr>>>,
+) -> Option<LoopBound> {
+    match bound {
+        GenericLoopBound::Static(bound) => Some(GenericLoopBound::Static(bound)),
+        GenericLoopBound::Dynamic {
+            expr,
+            width,
+            signed,
+        } => Some(GenericLoopBound::Dynamic {
+            expr: bind_expr(sim, expr)?,
+            width,
+            signed,
+        }),
+    }
+}
+
+fn bind_statement<B: SimBackend>(
+    sim: &Simulator<B>,
+    statement: SemanticStatement<AbsoluteAddr>,
+) -> Option<TestbenchStatement<B>> {
+    match statement {
+        GenericTestbenchStatement::ClockNext { clock_event, count } => {
+            Some(GenericTestbenchStatement::ClockNext {
+                clock_event: sim.backend_ref().resolve_event_opt(&clock_event)?,
+                count: bind_clock_count(sim, count)?,
+            })
+        }
+        GenericTestbenchStatement::ResetAssert {
+            reset_signal,
+            clock_event,
+            duration,
+            assert_value,
+            deassert_value,
+        } => Some(GenericTestbenchStatement::ResetAssert {
+            reset_signal: sim.backend_ref().resolve_signal(&reset_signal.address),
+            clock_event: sim.backend_ref().resolve_event_opt(&clock_event)?,
+            duration,
+            assert_value,
+            deassert_value,
+        }),
+        GenericTestbenchStatement::Assert {
+            expr,
+            site_id,
+            continue_on_fail,
+            message,
+            location,
+        } => Some(GenericTestbenchStatement::Assert {
+            expr: bind_expr(sim, expr)?,
+            site_id,
+            continue_on_fail,
+            message: match message {
+                Some(message) => Some(bind_assert_message(sim, message)?),
+                None => None,
+            },
+            location,
+        }),
+        GenericTestbenchStatement::Display { message, newline } => {
+            Some(GenericTestbenchStatement::Display {
+                message: match message {
+                    Some(message) => Some(bind_assert_message(sim, message)?),
+                    None => None,
+                },
+                newline,
+            })
+        }
+        GenericTestbenchStatement::If {
+            expr,
+            then_block,
+            else_block,
+        } => Some(GenericTestbenchStatement::If {
+            expr: bind_expr(sim, expr)?,
+            then_block: then_block
+                .into_iter()
+                .map(|statement| bind_statement(sim, statement))
+                .collect::<Option<Vec<_>>>()?,
+            else_block: else_block
+                .into_iter()
+                .map(|statement| bind_statement(sim, statement))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        GenericTestbenchStatement::For {
+            loop_var,
+            start,
+            end,
+            inclusive,
+            step,
+            step_op,
+            reverse,
+            body,
+        } => Some(GenericTestbenchStatement::For {
+            loop_var: loop_var.map(|(signal, width, signed)| {
+                (
+                    sim.backend_ref().resolve_signal(&signal.address),
+                    width,
+                    signed,
+                )
+            }),
+            start: bind_loop_bound(sim, start)?,
+            end: bind_loop_bound(sim, end)?,
+            inclusive,
+            step,
+            step_op,
+            reverse,
+            body: body
+                .into_iter()
+                .map(|statement| bind_statement(sim, statement))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        GenericTestbenchStatement::Assign { dst, expr } => {
+            Some(GenericTestbenchStatement::Assign {
+                dst: sim.backend_ref().resolve_signal(&dst.address),
+                expr: bind_expr(sim, expr)?,
+            })
+        }
+        GenericTestbenchStatement::Break => Some(GenericTestbenchStatement::Break),
+        GenericTestbenchStatement::Finish => Some(GenericTestbenchStatement::Finish),
+    }
+}
+
+fn bind_testbench_program<B: SimBackend>(
+    sim: &Simulator<B>,
+    program: TestbenchProgram<AbsoluteAddr>,
+) -> Option<Vec<TestbenchStatement<B>>> {
+    program
+        .into_statements()
+        .into_iter()
+        .map(|statement| bind_statement(sim, statement))
+        .collect()
+}
+
 /// Compile the root module's initial block into an executable native testbench.
 pub fn compile_initial_testbench<B: SimBackend>(
     sim: &Simulator<B>,
 ) -> Option<CompiledTestbench<B>> {
-    let initial_stmts = sim.program().initial_statements.as_ref()?;
-    let mut tb_builder = TestbenchBuilder::new(sim);
-    tb_builder.build_event_map(initial_stmts);
+    let semantic = sim.program().testbench.clone()?;
     Some(CompiledTestbench {
-        stmts: tb_builder.convert(initial_stmts),
+        stmts: bind_testbench_program(sim, semantic)?,
     })
 }
 
@@ -3509,7 +3647,7 @@ fn exec_one_detailed<B: SimBackend>(
         return ExecResult::Finished;
     }
     match stmt {
-        TestbenchStatement::ClockNext { clock_event, count } => {
+        GenericTestbenchStatement::ClockNext { clock_event, count } => {
             match eval_clock_count(sim, count) {
                 Ok(n) => {
                     let progress_every = testbench_progress_every();
@@ -3553,7 +3691,7 @@ fn exec_one_detailed<B: SimBackend>(
                 Err(e) => ExecResult::Fail(e),
             }
         }
-        TestbenchStatement::ResetAssert {
+        GenericTestbenchStatement::ResetAssert {
             reset_signal,
             clock_event,
             duration,
@@ -3590,7 +3728,7 @@ fn exec_one_detailed<B: SimBackend>(
             sim_set_u64(sim, *reset_signal, (*deassert_value).into());
             ExecResult::Continue
         }
-        TestbenchStatement::Assert {
+        GenericTestbenchStatement::Assert {
             expr,
             site_id,
             continue_on_fail,
@@ -3624,7 +3762,7 @@ fn exec_one_detailed<B: SimBackend>(
                 }
             }
         }
-        TestbenchStatement::Display { message, newline } => {
+        GenericTestbenchStatement::Display { message, newline } => {
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
@@ -3634,7 +3772,7 @@ fn exec_one_detailed<B: SimBackend>(
             forward_display(&rendered, *newline);
             ExecResult::Continue
         }
-        TestbenchStatement::If {
+        GenericTestbenchStatement::If {
             expr,
             then_block,
             else_block,
@@ -3649,7 +3787,7 @@ fn exec_one_detailed<B: SimBackend>(
                 exec_detailed(sim, else_block, ctx)
             }
         }
-        TestbenchStatement::For {
+        GenericTestbenchStatement::For {
             loop_var,
             start,
             end,
@@ -3669,7 +3807,7 @@ fn exec_one_detailed<B: SimBackend>(
             *reverse,
             |sim| exec_detailed(sim, body, ctx),
         ),
-        TestbenchStatement::Assign { dst, expr } => {
+        GenericTestbenchStatement::Assign { dst, expr } => {
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
@@ -3681,8 +3819,8 @@ fn exec_one_detailed<B: SimBackend>(
             }
             ExecResult::Continue
         }
-        TestbenchStatement::Break => ExecResult::Break,
-        TestbenchStatement::Finish => ExecResult::Finished,
+        GenericTestbenchStatement::Break => ExecResult::Break,
+        GenericTestbenchStatement::Finish => ExecResult::Finished,
     }
 }
 
@@ -3737,13 +3875,16 @@ mod tests {
 
         assert!(matches!(
             tb.stmts.first(),
-            Some(TestbenchStatement::Display { newline: true, .. })
+            Some(GenericTestbenchStatement::Display { newline: true, .. })
         ));
         assert!(matches!(
             tb.stmts.get(1),
-            Some(TestbenchStatement::Display { newline: false, .. })
+            Some(GenericTestbenchStatement::Display { newline: false, .. })
         ));
-        assert!(matches!(tb.stmts.get(2), Some(TestbenchStatement::Finish)));
+        assert!(matches!(
+            tb.stmts.get(2),
+            Some(GenericTestbenchStatement::Finish)
+        ));
     }
 
     #[test]

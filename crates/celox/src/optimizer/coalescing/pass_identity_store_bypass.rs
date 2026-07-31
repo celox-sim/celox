@@ -48,7 +48,7 @@ struct GlobalIdentityFacts {
 
 /// Analyze all combinational units before selecting any Program-global address
 /// alias or memory-copy replacement. Alias selection has priority; the
-/// returned stores are still present until `Program::into_laid_out` validates
+/// returned stores are still present until `OptimizedSir::into_laid_out` validates
 /// the selected aliases.
 pub(super) fn optimize_program_identity_stores(
     program: &mut Program,

@@ -1408,8 +1408,7 @@ pub(crate) fn flatten(
                 },
                 runtime_schema: celox_design::RuntimeSchema::default(),
                 layout_requirements: Default::default(),
-                initial_statements: None,
-                tb_functions: fxhash::FxHashMap::default(),
+                testbench: None,
             };
             let source_locations = scheduler_source_locations(&error, module_ir, &instance_modules);
             let mut target_arena = SLTNodeArena::new();
@@ -1593,6 +1592,13 @@ pub(crate) fn flatten(
             written_inputs: observer.written_inputs.clone(),
         })
         .collect();
+    let testbench_source = celox_frontend_veryl::VerylTestbenchSource {
+        initial_statements,
+        functions: module_ir
+            .get(root_id)
+            .map(|m| m.functions.clone())
+            .unwrap_or_default(),
+    };
     let program = Program {
         sir: crate::ir::SirProgram {
             eval_apply_ffs,
@@ -1622,13 +1628,10 @@ pub(crate) fn flatten(
             runtime_errors,
             runtime_event_sites,
             comb_observers: runtime_comb_observers,
+            testbench_read_roots: Default::default(),
         },
         layout_requirements: Default::default(),
-        initial_statements,
-        tb_functions: module_ir
-            .get(root_id)
-            .map(|m| m.functions.clone())
-            .unwrap_or_default(),
+        testbench: None,
     };
 
     // --- Trigger Injection ---
@@ -1756,6 +1759,9 @@ pub(crate) fn flatten(
             }
         }
     }
+
+    crate::testbench::project_observability(&mut program, &testbench_source);
+    program.testbench = crate::testbench::compile_semantic_testbench(&program, &testbench_source);
 
     dump_addr_map_if_requested(&program);
 
@@ -2512,7 +2518,7 @@ pub fn parse(
     mut trace: Option<&mut crate::debug::CompilationTrace>,
     optimize_options: &crate::optimizer::OptimizeOptions,
     preserve_element_storage_layout: bool,
-) -> Result<Program, ParserError> {
+) -> Result<crate::ir::OptimizedSir, ParserError> {
     debug_assert!(
         loop_provenance.is_consistent_with(ir),
         "loop provenance must describe the analyzer IR passed to the parser"
@@ -2556,7 +2562,6 @@ pub fn parse(
             trace.as_deref_mut(),
         )
     )?;
-
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.pre_optimized_sir
     {
@@ -2593,7 +2598,7 @@ pub fn parse(
         t.post_optimized_sir = Some(program.clone());
     }
 
-    Ok(program)
+    Ok(crate::ir::OptimizedSir::new(program))
 }
 
 fn relocate_executation_unit_with_errors<A, B>(

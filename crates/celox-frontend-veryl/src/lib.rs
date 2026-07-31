@@ -7,7 +7,7 @@
 use celox_design::{InstanceId, ModuleId, VariableMetadata};
 use fxhash::FxHashMap as HashMap;
 use std::fmt;
-use veryl_analyzer::ir::{VarId, VarPath};
+use veryl_analyzer::ir::{Function, Statement, VarId, VarPath};
 use veryl_parser::resource_table::StrId;
 
 #[derive(Clone)]
@@ -64,6 +64,29 @@ impl fmt::Debug for VerylFrontendLookup {
     }
 }
 
+/// Veryl-owned source input for frontend testbench lowering.
+///
+/// This artifact is intentionally separate from semantic design/runtime
+/// schemas.  It is consumed by the testbench compiler and must not be
+/// inspected by SIR optimization, layout, or backend code generation.
+#[derive(Clone, Default)]
+pub struct VerylTestbenchSource {
+    pub initial_statements: Option<Vec<Statement>>,
+    pub functions: HashMap<VarId, Function>,
+}
+
+impl fmt::Debug for VerylTestbenchSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VerylTestbenchSource")
+            .field(
+                "initial_statements",
+                &self.initial_statements.as_ref().map(Vec::len),
+            )
+            .field("functions", &self.functions.len())
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +99,12 @@ mod tests {
         assert!(lookup.module_variables.is_empty());
         assert!(lookup.module_var_path_index.is_empty());
         assert!(lookup.module_names.is_empty());
+    }
+
+    #[test]
+    fn default_testbench_source_is_empty() {
+        let source = VerylTestbenchSource::default();
+        assert!(source.initial_statements.is_none());
+        assert!(source.functions.is_empty());
     }
 }

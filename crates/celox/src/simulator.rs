@@ -1464,9 +1464,9 @@ impl Simulator<NativeBackend> {
     }
 
     /// Create a simulator from pre-compiled shared native code.
-    pub fn from_shared(shared: Arc<SharedNativeCode>, program: crate::ir::Program) -> Self {
+    pub fn from_shared(shared: Arc<SharedNativeCode>, program: crate::ir::OptimizedSir) -> Self {
         let backend = NativeBackend::from_shared(shared);
-        let mut sim = Self::with_backend_and_program(backend, program, vec![]);
+        let mut sim = Self::with_backend_and_program(backend, program.into_program(), vec![]);
         sim.apply_initial_values();
         sim
     }
