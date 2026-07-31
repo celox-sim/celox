@@ -7,7 +7,7 @@ pub(crate) use celox_design::{
     AbsoluteAddrBase, BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue,
     InitialStateWriteRun, InstanceId, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
     RuntimeEventKind, RuntimeEventSite, SPARSE_WORKING_REGION, STABLE_REGION, TriggerIdWithKind,
-    TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
+    TriggerSet, UnaryOp, VarAtomBase, VariableMetadata, WORKING_REGION,
 };
 pub(crate) use celox_sir::{
     BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRBuilder, SIRInstruction,
@@ -42,16 +42,10 @@ pub enum AddrLookupError {
 
 #[derive(Clone)]
 pub struct VariableInfo {
-    pub width: usize,
     pub id: VarId,
     pub path: VarPath,
-    pub is_4state: bool,
-    pub kind: DomainKind,
     pub var_kind: veryl_analyzer::ir::VarKind,
-    pub type_kind: PortTypeKind,
-    /// Per-dimension sizes for array ports (e.g. `[4]` for `logic<32>[4]`).
-    /// Empty means scalar.
-    pub array_dims: Vec<usize>,
+    pub metadata: VariableMetadata,
 }
 
 pub type InitialMemoryWriteRun = InitialStateWriteRun;
@@ -59,6 +53,14 @@ pub type InitialMemoryData = InitialStateData;
 pub type InitialMemoryValue = InitialStateValue<AbsoluteAddr>;
 pub type ModuleInitialMemoryValue = InitialStateValue<VarId>;
 pub type RuntimeErrorInfo<Addr = AbsoluteAddr> = celox_design::RuntimeErrorInfo<Addr>;
+
+impl std::ops::Deref for VariableInfo {
+    type Target = VariableMetadata;
+
+    fn deref(&self) -> &Self::Target {
+        &self.metadata
+    }
+}
 
 impl fmt::Debug for VariableInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -31,6 +31,21 @@ pub enum PortTypeKind {
     Other,
 }
 
+/// Source-independent metadata for one elaborated design variable.
+///
+/// Source IDs, source paths, and declaration syntax belong to the frontend and
+/// deliberately are not part of this type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariableMetadata {
+    pub width: usize,
+    pub is_4state: bool,
+    pub kind: DomainKind,
+    pub type_kind: PortTypeKind,
+    /// Per-dimension sizes for array ports (for example, `[4]` for `logic<32>[4]`).
+    /// Empty means scalar.
+    pub array_dims: Vec<usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TriggerSet<A> {
     pub clock: A,
@@ -442,5 +457,19 @@ mod tests {
 
         assert_eq!(error.signals, vec![initial.address]);
         assert!(matches!(initial.data, InitialStateData::Writes(_)));
+    }
+
+    #[test]
+    fn variable_metadata_preserves_elaborated_shape_and_domain() {
+        let metadata = VariableMetadata {
+            width: 32,
+            is_4state: true,
+            kind: DomainKind::Other,
+            type_kind: PortTypeKind::Logic,
+            array_dims: vec![4],
+        };
+
+        assert_eq!(metadata.width, 32);
+        assert_eq!(metadata.array_dims, vec![4]);
     }
 }
