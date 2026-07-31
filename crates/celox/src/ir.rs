@@ -48,8 +48,7 @@ pub type InitialMemoryValue = InitialStateValue<AbsoluteAddr>;
 pub type ModuleInitialMemoryValue = InitialStateValue<VarId>;
 pub type RuntimeErrorInfo<Addr = AbsoluteAddr> = celox_design::RuntimeErrorInfo<Addr>;
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct LogicPathId(pub usize);
+pub(crate) use celox_slt::LogicPathId;
 
 #[derive(Clone, Debug)]
 pub struct CombObserver<A = AbsoluteAddr> {

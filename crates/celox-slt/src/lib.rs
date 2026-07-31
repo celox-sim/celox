@@ -11,6 +11,7 @@ use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 mod node;
 mod node_facts;
 mod node_rules;
+mod path;
 pub mod range_store;
 
 pub use node::{
@@ -18,6 +19,7 @@ pub use node::{
     SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTStepOp,
 };
 pub use node_facts::{SLTNodeFacts, SLTNodeFactsError};
+pub use path::{LogicPath, LogicPathId, LogicPathTarget};
 pub use range_store::{RangeStore, RangeStoreError};
 
 /// Return the construction-time width cached when a node was interned.

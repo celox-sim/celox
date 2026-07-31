@@ -1,6 +1,5 @@
 mod effect;
 mod expr;
-mod path;
 mod recover_unrolled;
 mod state;
 
@@ -15,7 +14,7 @@ pub(crate) mod node_facts {
     pub use celox_slt::{SLTNodeFacts, SLTNodeFactsError};
 }
 
-pub use path::{LogicPath, LogicPathTarget};
+pub use celox_slt::{LogicPath, LogicPathTarget};
 pub use state::{BoundaryMap, SymbolicStore};
 
 use std::{collections::BTreeSet, hash::Hash};

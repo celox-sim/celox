@@ -2,12 +2,12 @@ use std::{fmt, hash::Hash};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    HashMap, HashSet,
-    ir::{LogicPathId, VarAtomBase},
-};
+use celox_design::VarAtomBase;
 
-use super::{NodeId, SLTNodeArena, SLTNodeFactsError};
+use crate::{HashMap, HashSet, NodeId, SLTNodeArena, SLTNodeFactsError};
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LogicPathId(pub usize);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound(
