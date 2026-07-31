@@ -5,8 +5,8 @@ use veryl_analyzer::ir::VarId;
 
 use crate::HashMap;
 use crate::ir::{
-    AbsoluteAddr, BitAccess, CombObserver, GlueAddr, GlueBlock, InstanceId, InstancePath,
-    RelocationModule, SimModule, VarAtomBase,
+    AbsoluteAddr, BinaryOp, BitAccess, CombObserver, GlueAddr, GlueBlock, InstanceId, InstancePath,
+    RelocationModule, SimModule, UnaryOp, VarAtomBase,
 };
 use crate::logic_tree::{
     LogicPath, LogicPathTarget, NodeId, SLTNode, SLTNodeArena, SLTNodeFactsError, get_width,
@@ -282,12 +282,13 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
     window: Option<BitAccess>,
     arena: &SLTNodeArena<A>,
     set: &mut crate::HashSet<VarAtomBase<A>>,
-    visited: &mut crate::HashSet<NodeId>,
+    visited: &mut crate::HashSet<(NodeId, Option<BitAccess>)>,
 ) {
-    // For nodes that drop the window (Binary, Unary, Mux), the result depends
-    // only on the NodeId.  When window is None, we can skip nodes already
-    // visited — their inputs are already in `set`.
-    if window.is_none() && !visited.insert(expr) {
+    // A shared DAG node may be reached through many paths.  The dependency
+    // result is determined by both the node and the requested result window;
+    // memoizing only unwindowed visits makes range-preserving pointwise DAGs
+    // expand exponentially.
+    if !visited.insert((expr, window)) {
         return;
     }
 
@@ -377,19 +378,34 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
                 }
             }
         }
-        SLTNode::Binary(lhs, _, rhs) => {
-            collect_inputs_with_window(*lhs, None, arena, set, visited);
-            collect_inputs_with_window(*rhs, None, arena, set, visited);
+        SLTNode::Binary(lhs, op, rhs) => {
+            let pointwise = matches!(op, BinaryOp::And | BinaryOp::Or | BinaryOp::Xor);
+            let lhs_window = pointwise
+                .then(|| dependency_window(window, *lhs, arena))
+                .flatten();
+            let rhs_window = pointwise
+                .then(|| dependency_window(window, *rhs, arena))
+                .flatten();
+            collect_inputs_with_window(*lhs, lhs_window, arena, set, visited);
+            collect_inputs_with_window(*rhs, rhs_window, arena, set, visited);
         }
-        SLTNode::Unary(_, inner) => collect_inputs_with_window(*inner, None, arena, set, visited),
+        SLTNode::Unary(op, inner) => {
+            let pointwise = matches!(op, UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::BitNot);
+            let inner_window = pointwise
+                .then(|| dependency_window(window, *inner, arena))
+                .flatten();
+            collect_inputs_with_window(*inner, inner_window, arena, set, visited);
+        }
         SLTNode::Mux {
             cond,
             then_expr,
             else_expr,
         } => {
             collect_inputs_with_window(*cond, None, arena, set, visited);
-            collect_inputs_with_window(*then_expr, None, arena, set, visited);
-            collect_inputs_with_window(*else_expr, None, arena, set, visited);
+            let then_window = dependency_window(window, *then_expr, arena);
+            let else_window = dependency_window(window, *else_expr, arena);
+            collect_inputs_with_window(*then_expr, then_window, arena, set, visited);
+            collect_inputs_with_window(*else_expr, else_window, arena, set, visited);
         }
         SLTNode::ForFold {
             loop_var,
@@ -466,6 +482,17 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
         }
         SLTNode::Constant(_, _, _, _) => {}
     }
+}
+
+/// Preserve a result bit window only when it is also a valid operand window.
+/// Width-changing operands may use extension bits, so falling back to the full
+/// operand is the conservative answer in that case.
+fn dependency_window<A: Hash + Eq + Clone + Debug>(
+    window: Option<BitAccess>,
+    operand: NodeId,
+    arena: &SLTNodeArena<A>,
+) -> Option<BitAccess> {
+    window.filter(|window| window.msb < get_width(operand, arena))
 }
 
 /// Return whether the union of loop-carried ranges covers every bit of an
@@ -624,7 +651,7 @@ fn convert_glue_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{BinaryOp, ModuleId};
+    use crate::ir::ModuleId;
     use crate::logic_tree::SLTForFoldGroupState;
     use crate::parser::module::ModuleParser;
     use num_bigint::{BigInt, BigUint};
@@ -763,6 +790,49 @@ mod tests {
                 } if *variable == source && *access == expected
             ));
         }
+    }
+
+    #[test]
+    fn collect_inputs_preserves_slice_window_through_bitwise_mux() {
+        let mut arena = SLTNodeArena::<u32>::new();
+        let input = |arena: &mut SLTNodeArena<u32>, variable, msb| {
+            arena
+                .alloc(SLTNode::Input {
+                    variable,
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, msb),
+                })
+                .unwrap()
+        };
+        let old = input(&mut arena, 1, 15);
+        let replacement = input(&mut arena, 2, 15);
+        let condition = input(&mut arena, 3, 0);
+        let merged = arena
+            .alloc(SLTNode::Binary(old, BinaryOp::Or, replacement))
+            .unwrap();
+        let selected = arena
+            .alloc(SLTNode::Mux {
+                cond: condition,
+                then_expr: merged,
+                else_expr: old,
+            })
+            .unwrap();
+        let upper = arena
+            .alloc(SLTNode::Slice {
+                expr: selected,
+                access: BitAccess::new(8, 15),
+            })
+            .unwrap();
+
+        let mut inputs = crate::HashSet::default();
+        collect_inputs(upper, &arena, &mut inputs);
+
+        assert!(inputs.contains(&VarAtomBase::new(1, 8, 15)));
+        assert!(inputs.contains(&VarAtomBase::new(2, 8, 15)));
+        assert!(inputs.contains(&VarAtomBase::new(3, 0, 0)));
+        assert!(!inputs.contains(&VarAtomBase::new(1, 0, 15)));
+        assert!(!inputs.contains(&VarAtomBase::new(2, 0, 15)));
     }
 
     #[test]
