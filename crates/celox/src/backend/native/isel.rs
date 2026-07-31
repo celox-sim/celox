@@ -4702,7 +4702,9 @@ fn memory_offset_vreg(
 /// Recover a byte index from the quotient/remainder form produced by a
 /// dynamic packed selection inside an unpacked element:
 ///
-///     (x >> log2(D / L)) * D + ((x * L) & (D - 1)) == x * L
+/// ```text
+/// (x >> log2(D / L)) * D + ((x * L) & (D - 1)) == x * L
+/// ```
 ///
 /// Here `D` is the logical unpacked-element width and `L` is the selected
 /// packed-lane width.  This is also a physical-address identity only when the

@@ -3899,7 +3899,9 @@ impl ContiguousLoadPack {
 ///
 /// Frontend Concat lowering commonly produces:
 ///
-///     load.i8 [p+0] | (load.i8 [p+1] << 8) | ...
+/// ```text
+/// load.i8 [p+0] | (load.i8 [p+1] << 8) | ...
+/// ```
 ///
 /// Keeping those as separate SSA values creates seven unnecessary ALU
 /// definitions and eight memory operations for one 64-bit value.  Summaries
