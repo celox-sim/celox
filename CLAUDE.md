@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+The repository-wide agent workflow requirements in `AGENTS.md` also apply.
+
 ## Project Overview
 
 Celox is a JIT simulator for Veryl HDL. It compiles Veryl designs with Cranelift for high-speed simulation. Future plans include SystemVerilog/Verilog support.
