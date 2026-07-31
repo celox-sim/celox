@@ -2518,7 +2518,7 @@ pub fn parse(
     mut trace: Option<&mut crate::debug::CompilationTrace>,
     optimize_options: &crate::optimizer::OptimizeOptions,
     preserve_element_storage_layout: bool,
-) -> Result<Program, ParserError> {
+) -> Result<crate::ir::OptimizedSir, ParserError> {
     debug_assert!(
         loop_provenance.is_consistent_with(ir),
         "loop provenance must describe the analyzer IR passed to the parser"
@@ -2598,7 +2598,7 @@ pub fn parse(
         t.post_optimized_sir = Some(program.clone());
     }
 
-    Ok(program)
+    Ok(crate::ir::OptimizedSir::new(program))
 }
 
 fn relocate_executation_unit_with_errors<A, B>(

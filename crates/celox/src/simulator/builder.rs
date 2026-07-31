@@ -8,7 +8,11 @@ use veryl_parser::Parser;
 use veryl_parser::resource_table;
 
 use crate::parser::BuildConfig;
-use crate::{ParserError, SimulatorError, SimulatorErrorKind, ir::Program, parser};
+use crate::{
+    ParserError, SimulatorError, SimulatorErrorKind,
+    ir::{OptimizedSir, Program},
+    parser,
+};
 
 fn analyze(
     sources: &[(&str, &Path)],
@@ -31,7 +35,7 @@ fn analyze(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     preserve_element_storage_layout: bool,
-) -> (Result<Program, ParserError>, Vec<AnalyzerError>) {
+) -> (Result<OptimizedSir, ParserError>, Vec<AnalyzerError>) {
     symbol_table::clear();
     attribute_table::clear();
 
@@ -109,7 +113,7 @@ fn analyze(
 /// Compile Veryl source code to the SIR (Simulation IR) representation.
 ///
 /// This is the shared compilation pipeline used by all backends.
-/// Returns the compiled Program and any analyzer warnings on success.
+/// Returns verified optimized SIR and any analyzer warnings on success.
 pub fn compile_to_sir(
     sources: &[(&str, &Path)],
     top: &str,
@@ -130,7 +134,7 @@ pub fn compile_to_sir(
     reset_type: Option<ResetType>,
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
-) -> Result<(Program, Vec<AnalyzerError>), SimulatorError> {
+) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
     compile_to_sir_with_layout_mode(
         sources,
         top,
@@ -169,7 +173,7 @@ fn compile_to_sir_with_layout_mode(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
-) -> Result<(Program, Vec<AnalyzerError>), SimulatorError> {
+) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
     let (sir, errors) = analyze(
         sources,
         top,
