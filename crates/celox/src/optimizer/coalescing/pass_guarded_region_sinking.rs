@@ -310,6 +310,11 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
             }
         }
 
+        // Values consumed on both mutually exclusive sides otherwise remain
+        // live in the branch head. Split their pure cones at the control edge
+        // before ordinary dominator placement.
+        split_branch_live_ranges(eu);
+
         // Place pure values at the nearest common dominator of their uses.
         // Priority recovery often leaves the normal arithmetic in the branch
         // head even though every use is in the final normal leaf.  This is
@@ -319,6 +324,187 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
 
         debug_assert_eq!(eu.verify_result(), Ok(()));
     }
+}
+
+#[derive(Clone)]
+struct BranchLiveRangeSplitPlan {
+    source: BlockId,
+    arms: [BlockId; 2],
+    placements: Vec<u8>,
+}
+
+/// Split a pure cone which is live from a branch head into both exclusive
+/// successor regions.
+///
+/// Both successors must have the head as their sole predecessor. Therefore an
+/// edge-local copy executes exactly once whenever that edge is taken, even if
+/// the branch is inside a loop. Loads and effects stay in the head and form
+/// the materialization frontier.
+fn split_branch_live_ranges(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+    let Ok(cfg) = SirCfg::analyze_forward_structure(eu) else {
+        return;
+    };
+    let uses = collect_uses(eu);
+    let mut plans = Vec::new();
+
+    for &source_id in &cfg.block_ids {
+        let source = &eu.blocks[&source_id];
+        let SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } = &source.terminator
+        else {
+            continue;
+        };
+        let arms = [true_block.0, false_block.0];
+        let (Some(source_index), Some(true_index), Some(false_index)) = (
+            cfg.block_index(source_id),
+            cfg.block_index(arms[0]),
+            cfg.block_index(arms[1]),
+        ) else {
+            continue;
+        };
+        if arms[0] == arms[1]
+            || cfg.predecessors[true_index].as_slice() != [source_index]
+            || cfg.predecessors[false_index].as_slice() != [source_index]
+        {
+            continue;
+        }
+
+        // Bit 0 is the true edge and bit 1 is the false edge. Reverse order
+        // lets a producer inherit the exact edge set of a local pure user.
+        let mut placements = vec![0u8; source.instructions.len()];
+        for (index, instruction) in source.instructions.iter().enumerate().rev() {
+            if !instruction_is_movable(instruction) {
+                continue;
+            }
+            let Some(definition) = def_reg(instruction) else {
+                continue;
+            };
+            let Some(value_uses) = uses.get(&definition).filter(|uses| !uses.is_empty()) else {
+                continue;
+            };
+            let mut edges = 0u8;
+            let mut legal = true;
+            for site in value_uses {
+                let use_edges = match *site {
+                    UseSite::Instruction { block, index: user } if block == source_id => {
+                        placements.get(user).copied().unwrap_or(0)
+                    }
+                    _ if site.block() == source_id => 0,
+                    _ => {
+                        let block = site.block();
+                        match (cfg.dominates(arms[0], block), cfg.dominates(arms[1], block)) {
+                            (true, false) => 1,
+                            (false, true) => 2,
+                            _ => 0,
+                        }
+                    }
+                };
+                if use_edges == 0 {
+                    legal = false;
+                    break;
+                }
+                edges |= use_edges;
+            }
+            if legal {
+                placements[index] = edges;
+            }
+        }
+
+        // One-edge values are already handled by ordinary sinking. This pass
+        // only applies when it removes a genuinely shared branch live range.
+        if placements.contains(&3) {
+            plans.push(BranchLiveRangeSplitPlan {
+                source: source_id,
+                arms,
+                placements,
+            });
+        }
+    }
+
+    if plans.is_empty() {
+        return;
+    }
+    // Inner branches first. An outer split may rewrite their operands, but it
+    // cannot invalidate their source instruction indices.
+    plans.sort_unstable_by_key(|plan| {
+        std::cmp::Reverse(dominator_depth(&cfg, cfg.block_index(plan.source).unwrap()))
+    });
+
+    let mut reg_counter = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
+    let Some(additional_registers) = plans.iter().try_fold(0usize, |total, plan| {
+        plan.placements.iter().try_fold(total, |total, placement| {
+            total.checked_add(placement.count_ones() as usize)
+        })
+    }) else {
+        return;
+    };
+    if reg_counter.checked_add(additional_registers).is_none() {
+        return;
+    }
+
+    for plan in plans {
+        let original = eu.blocks[&plan.source].instructions.clone();
+        let mut replacements = [HashMap::default(), HashMap::default()];
+        let mut cloned = [Vec::new(), Vec::new()];
+
+        for (index, instruction) in original.iter().enumerate() {
+            let placement = plan.placements[index];
+            if placement == 0 {
+                continue;
+            }
+            let old = def_reg(instruction).expect("split plan contains only value definitions");
+            for arm in 0..2 {
+                if placement & (1 << arm) == 0 {
+                    continue;
+                }
+                reg_counter += 1;
+                let new = RegisterId(reg_counter);
+                eu.register_map.insert(new, eu.register_map[&old].clone());
+                cloned[arm].push(
+                    clone_pure_instruction(instruction, new, &replacements[arm])
+                        .expect("split plan contains only pure instructions"),
+                );
+                replacements[arm].insert(old, new);
+            }
+        }
+
+        for arm in 0..2 {
+            for &block_id in &cfg.block_ids {
+                if !cfg.dominates(plan.arms[arm], block_id) {
+                    continue;
+                }
+                let block = eu.blocks.get_mut(&block_id).unwrap();
+                for (&old, &new) in &replacements[arm] {
+                    for instruction in &mut block.instructions {
+                        replace_register_uses_in_instruction(instruction, old, new);
+                    }
+                    replace_register_uses_in_terminator(&mut block.terminator, old, new);
+                }
+            }
+            cloned[arm].append(&mut eu.blocks.get_mut(&plan.arms[arm]).unwrap().instructions);
+            eu.blocks.get_mut(&plan.arms[arm]).unwrap().instructions =
+                std::mem::take(&mut cloned[arm]);
+        }
+
+        let source = eu.blocks.get_mut(&plan.source).unwrap();
+        source.instructions = std::mem::take(&mut source.instructions)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, instruction)| (plan.placements[index] == 0).then_some(instruction))
+            .collect();
+        for (index, instruction) in original.iter().enumerate() {
+            if plan.placements[index] != 0
+                && let Some(old) = def_reg(instruction)
+            {
+                eu.register_map.remove(&old);
+            }
+        }
+    }
+
+    debug_assert_eq!(eu.verify_result(), Ok(()));
 }
 
 /// Sink pure SSA definitions to the nearest common dominator of all uses.

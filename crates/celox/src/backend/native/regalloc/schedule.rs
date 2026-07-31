@@ -1,6 +1,5 @@
 //! Exact dependency DAGs for allocation-owned machine scheduling.
 
-#[cfg(test)]
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
 #[cfg(test)]
@@ -284,6 +283,45 @@ impl InstructionDag {
                 }
             }
         }
+        let vector_definitions = region
+            .iter()
+            .enumerate()
+            .filter_map(|(index, inst)| inst.x86_vec_def().map(|value| (value, index)))
+            .collect::<HashMap<_, _>>();
+        for (user, inst) in region.iter().enumerate() {
+            for used in inst.x86_vec_uses().into_iter().flatten() {
+                if let Some(&definition) = vector_definitions.get(&used) {
+                    add_dependency(&mut dependencies, &mut dependents, user, definition);
+                }
+            }
+        }
+        // Existing emitter pseudos own XMM scratch registers. Preserve their
+        // position relative to explicit vector operations so no scheduled
+        // vector live range can silently cross an unmodelled scratch clobber.
+        let mut vector_since_barrier = Vec::new();
+        let mut last_vector_barrier = None;
+        for (instruction, inst) in region.iter().enumerate() {
+            let is_vector = matches!(inst, MInst::X86Simd(_));
+            let is_vector_barrier = matches!(
+                inst,
+                MInst::PackedLaneCompare { .. }
+                    | MInst::PackedByteAffineCompare { .. }
+                    | MInst::MemCopy { .. }
+            );
+            if is_vector {
+                if let Some(barrier) = last_vector_barrier {
+                    add_dependency(&mut dependencies, &mut dependents, instruction, barrier);
+                }
+                vector_since_barrier.push(instruction);
+            }
+            if is_vector_barrier {
+                for &vector in &vector_since_barrier {
+                    add_dependency(&mut dependencies, &mut dependents, instruction, vector);
+                }
+                vector_since_barrier.clear();
+                last_vector_barrier = Some(instruction);
+            }
+        }
         // Preserve RAW, WAR, and WAW without inventing read-after-read edges.
         // The sparse interval partition scales with effect endpoints rather
         // than the physical byte length of wide state ranges.
@@ -462,7 +500,6 @@ impl ForwardReadyRegion {
 /// Every instruction and dependency edge is visited a constant number of
 /// times. Ready-set operations are logarithmic and all auxiliary tables are
 /// linear in the block DAG.
-#[cfg(test)]
 pub(super) fn pressure_preferred_block_order(
     instructions: &[MInst],
     constraints: &[super::constraints::InstructionConstraints],
@@ -523,7 +560,6 @@ pub(super) fn pressure_preferred_block_order(
     })
 }
 
-#[cfg(test)]
 fn transfer_liveness_at(instructions: &[MInst], source: usize, live: &mut BTreeSet<VReg>) {
     let inst = &instructions[source];
     if let Some(definition) = inst.def() {
@@ -532,7 +568,6 @@ fn transfer_liveness_at(instructions: &[MInst], source: usize, live: &mut BTreeS
     live.extend(inst.uses());
 }
 
-#[cfg(test)]
 fn pressure_preferred_region_order(
     region: &[MInst],
     live: &mut BTreeSet<VReg>,
@@ -545,8 +580,14 @@ fn pressure_preferred_region_order(
         return Some((0..region.len()).collect());
     }
     let dag = InstructionDag::build(region)?;
+    let dependency_priorities = dependency_priorities(&dag.dependencies)?;
+    let definitions = region
+        .iter()
+        .enumerate()
+        .filter_map(|(instruction, inst)| inst.def().map(|value| (value, instruction)))
+        .collect::<HashMap<_, _>>();
     let mut remaining_dependents = dag.dependents.iter().map(Vec::len).collect::<Vec<_>>();
-    let mut ready = BackwardPressureQueue::new(dag.dependency_priorities.clone());
+    let mut ready = BackwardPressureQueue::new(dependency_priorities);
     for (instruction, &count) in remaining_dependents.iter().enumerate() {
         if count == 0 {
             ready.insert(
@@ -567,11 +608,11 @@ fn pressure_preferred_region_order(
         if let Some(definition) = inst.def()
             && live.remove(&definition)
         {
-            update_backward_pressure_candidates(definition, false, &dag, &mut ready);
+            update_backward_pressure_candidates(definition, false, &dag, &definitions, &mut ready);
         }
         for &value in &dag.unique_uses[candidate] {
             if live.insert(value) {
-                update_backward_pressure_candidates(value, true, &dag, &mut ready);
+                update_backward_pressure_candidates(value, true, &dag, &definitions, &mut ready);
             }
         }
         for &dependency in &dag.dependencies[candidate] {
@@ -593,7 +634,6 @@ fn pressure_preferred_region_order(
     Some(reverse)
 }
 
-#[cfg(test)]
 fn backward_pressure_delta(
     definition: Option<VReg>,
     uses: &[VReg],
@@ -604,11 +644,11 @@ fn backward_pressure_delta(
     missing_uses - live_definition
 }
 
-#[cfg(test)]
 fn update_backward_pressure_candidates(
     value: VReg,
     became_live: bool,
     dag: &InstructionDag,
+    definitions: &HashMap<VReg, usize>,
     ready: &mut BackwardPressureQueue,
 ) {
     let delta = if became_live { -1 } else { 1 };
@@ -617,12 +657,11 @@ fn update_backward_pressure_candidates(
             ready.adjust(candidate, delta);
         }
     }
-    if let Some(&candidate) = dag.definitions.get(&value) {
+    if let Some(&candidate) = definitions.get(&value) {
         ready.adjust(candidate, delta);
     }
 }
 
-#[cfg(test)]
 struct BackwardPressureQueue {
     by_pressure: BTreeSet<(isize, Reverse<usize>, Reverse<usize>, Reverse<usize>)>,
     by_depth: BTreeSet<(Reverse<usize>, Reverse<usize>, isize, Reverse<usize>)>,
@@ -630,7 +669,6 @@ struct BackwardPressureQueue {
     dependency_priorities: Vec<(usize, usize)>,
 }
 
-#[cfg(test)]
 impl BackwardPressureQueue {
     fn new(dependency_priorities: Vec<(usize, usize)>) -> Self {
         let instructions = dependency_priorities.len();
@@ -694,7 +732,6 @@ impl BackwardPressureQueue {
     }
 }
 
-#[cfg(test)]
 fn projected_pressure_signed(current: usize, delta: isize) -> usize {
     if delta < 0 {
         current.saturating_sub(delta.unsigned_abs())
@@ -703,8 +740,7 @@ fn projected_pressure_signed(current: usize, delta: isize) -> usize {
     }
 }
 
-#[cfg(test)]
-fn pressure_cost_for_order(
+pub(super) fn pressure_cost_for_order(
     instructions: &[MInst],
     order: &[usize],
     live_out: &BTreeSet<VReg>,
@@ -719,6 +755,17 @@ fn pressure_cost_for_order(
         excess_area += live.len().saturating_sub(register_capacity) as u128;
     }
     (excess_area, maximum)
+}
+
+pub(super) fn preserves_original_pressure(
+    instructions: &[MInst],
+    candidate: &[usize],
+    live_out: &BTreeSet<VReg>,
+    register_capacity: usize,
+) -> bool {
+    let identity = (0..instructions.len()).collect::<Vec<_>>();
+    pressure_cost_for_order(instructions, candidate, live_out, register_capacity)
+        <= pressure_cost_for_order(instructions, &identity, live_out, register_capacity)
 }
 
 #[cfg(test)]
@@ -1112,6 +1159,7 @@ fn unconstrained_schedulable_at(
 fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
     match inst {
         MInst::Mov { .. }
+        | MInst::X86Simd(_)
         | MInst::Mov32 { .. }
         | MInst::LoadImm { .. }
         | MInst::Scratch { .. }
@@ -1323,6 +1371,36 @@ mod tests {
         assert!(ready.is_complete());
         assert_eq!(ready.discharged_edges(), LANES);
         assert_eq!(ready.discharged_edges(), ready.edge_count());
+    }
+
+    #[test]
+    fn pressure_gate_rejects_turning_lane_local_chains_into_a_wavefront() {
+        const LANES: usize = 8;
+        let mut instructions = Vec::with_capacity(LANES * 2);
+        for lane in 0..LANES {
+            let input = VReg((lane * 2) as u32);
+            let result = VReg((lane * 2 + 1) as u32);
+            instructions.push(MInst::LoadImm {
+                dst: input,
+                value: lane as u64,
+            });
+            instructions.push(MInst::AndImm {
+                dst: result,
+                src: input,
+                imm: 1,
+            });
+        }
+        let wavefront = (0..LANES)
+            .map(|lane| lane * 2)
+            .chain((0..LANES).map(|lane| lane * 2 + 1))
+            .collect::<Vec<_>>();
+
+        assert!(!preserves_original_pressure(
+            &instructions,
+            &wavefront,
+            &BTreeSet::new(),
+            4,
+        ));
     }
 
     #[test]

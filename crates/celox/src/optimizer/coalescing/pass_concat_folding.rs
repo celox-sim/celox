@@ -22,20 +22,31 @@ struct BitSource {
     width: usize,
 }
 
-#[derive(Default)]
 pub(super) struct ConcatFoldingPass {
     unpacked_element_widths: Arc<crate::HashMap<AbsoluteAddr, usize>>,
+    max_load_width: usize,
 }
 
-impl ConcatFoldingPass {
-    pub(super) fn new(unpacked_element_widths: Arc<crate::HashMap<AbsoluteAddr, usize>>) -> Self {
+impl Default for ConcatFoldingPass {
+    fn default() -> Self {
         Self {
-            unpacked_element_widths,
+            unpacked_element_widths: Arc::default(),
+            max_load_width: 64,
         }
     }
 }
 
-const MAX_FOLDED_LOAD_WIDTH: usize = 64;
+impl ConcatFoldingPass {
+    pub(super) fn new(
+        unpacked_element_widths: Arc<crate::HashMap<AbsoluteAddr, usize>>,
+        max_load_width: usize,
+    ) -> Self {
+        Self {
+            unpacked_element_widths,
+            max_load_width,
+        }
+    }
+}
 
 impl ExecutionUnitPass for ConcatFoldingPass {
     fn name(&self) -> &'static str {
@@ -150,7 +161,7 @@ impl ExecutionUnitPass for ConcatFoldingPass {
                             }
                         }
 
-                        if run_count >= 2 && run_width <= MAX_FOLDED_LOAD_WIDTH {
+                        if run_count >= 2 && run_width <= self.max_load_width {
                             max_reg += 1;
                             let new_reg = RegisterId(max_reg);
                             eu.register_map.insert(
@@ -531,7 +542,7 @@ mod tests {
 
         let mut eu = make_eu(instructions, register_map);
         let element_widths = Arc::new(HashMap::from_iter([(addr.absolute_addr(), 1)]));
-        ConcatFoldingPass::new(element_widths).run(&mut eu, &PassOptions::default());
+        ConcatFoldingPass::new(element_widths, 64).run(&mut eu, &PassOptions::default());
 
         assert!(eu.blocks[&BlockId(0)].instructions.iter().any(|inst| {
             matches!(

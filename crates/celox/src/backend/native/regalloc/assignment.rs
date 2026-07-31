@@ -33,6 +33,16 @@ pub enum PhysReg {
     R15 = 15,
 }
 
+/// Physical register in the x86 128-bit vector class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct X86PhysVec(pub u8);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum X86VectorLocation {
+    Register(X86PhysVec),
+    Stack(i32),
+}
+
 impl fmt::Display for PhysReg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
@@ -203,6 +213,10 @@ pub fn block_clobber_points_for(
 #[derive(Debug, Clone, Default)]
 pub struct AssignmentMap {
     pub map: HashMap<VReg, PhysReg>,
+    /// XMM assignment produced by the same allocation pipeline. Keeping both
+    /// classes in one artifact prevents emission from running an independent
+    /// late allocator with a different view of scheduling and clobbers.
+    x86_vectors: HashMap<X86VecReg, X86VectorLocation>,
     pub edge_spill_slots: HashMap<VReg, i32>,
     pub edge_locations: HashMap<(BlockId, VReg), EdgeLocation>,
     pub edge_location_points: HashMap<(BlockId, VReg), usize>,
@@ -224,6 +238,28 @@ impl AssignmentMap {
 
     pub fn set(&mut self, vreg: VReg, preg: PhysReg) {
         self.map.insert(vreg, preg);
+    }
+
+    pub fn x86_vector(&self, value: X86VecReg) -> Option<X86VectorLocation> {
+        self.x86_vectors.get(&value).copied()
+    }
+
+    pub(crate) fn set_x86_vector(&mut self, value: X86VecReg, location: X86VectorLocation) {
+        self.x86_vectors.insert(value, location);
+    }
+
+    pub(crate) fn x86_vector_count(&self) -> usize {
+        self.x86_vectors.len()
+    }
+
+    pub(crate) fn sorted_x86_vectors(&self) -> Vec<(X86VecReg, X86VectorLocation)> {
+        let mut entries = self
+            .x86_vectors
+            .iter()
+            .map(|(&value, &location)| (value, location))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|(value, _)| *value);
+        entries
     }
 
     pub fn edge_spill_slot(&self, vreg: VReg) -> Option<i32> {

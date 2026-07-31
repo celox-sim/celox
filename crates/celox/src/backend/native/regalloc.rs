@@ -146,7 +146,42 @@ pub(crate) fn verify_assignment(
             Vec::new(),
             error.message,
         )
-    })
+    })?;
+    if assignment.x86_vector_count() != func.x86_vec_count() as usize {
+        return Err(RegallocError::new(
+            "completed-assignment verification",
+            "ASSIGNMENT.X86_VECTOR_COMPLETE",
+            None,
+            None,
+            Vec::new(),
+            format!(
+                "{} x86 vector values exist but {} have assignments",
+                func.x86_vec_count(),
+                assignment.x86_vector_count()
+            ),
+        ));
+    }
+    for block in &func.blocks {
+        for (instruction, inst) in block.insts.iter().enumerate() {
+            for value in inst
+                .x86_vec_def()
+                .into_iter()
+                .chain(inst.x86_vec_uses().into_iter().flatten())
+            {
+                if assignment.x86_vector(value).is_none() {
+                    return Err(RegallocError::new(
+                        "completed-assignment verification",
+                        "ASSIGNMENT.X86_VECTOR_MISSING",
+                        Some(block.id),
+                        Some(instruction),
+                        Vec::new(),
+                        format!("{value} has no XMM assignment"),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn constraint_error(phase: &'static str, error: constraints::ConstraintError) -> RegallocError {
@@ -336,8 +371,35 @@ fn run_regalloc_in_place(
         &allocation_constraints,
         trace,
     )?;
-    let assignment = allocation.assignment;
-    let spill_frame_size = allocation.spill_frame_size;
+    let mut assignment = allocation.assignment;
+    let mut spill_frame_size = allocation.spill_frame_size;
+    let tick_loop = label == "eval_comb_apply_ff" && super::native_tick_loop_enabled();
+    let vector_allocation = super::x86_slp::allocate(func, spill_frame_size, tick_loop);
+    for (value, location) in vector_allocation.assignments {
+        assignment.set_x86_vector(value, location);
+    }
+    if vector_allocation.spill_bytes != 0 {
+        spill_frame_size = spill_frame_size
+            .checked_add(15)
+            .map(|size| size & !15)
+            .and_then(|base| base.checked_add(vector_allocation.spill_bytes))
+            .ok_or_else(|| {
+                RegallocError::new(
+                    "x86 vector coloring",
+                    "ASSIGNMENT.X86_VECTOR_SPILL_FRAME",
+                    None,
+                    None,
+                    Vec::new(),
+                    "x86 vector spill frame size overflow",
+                )
+            })?;
+    }
+    if timing && vector_allocation.spilled_values != 0 {
+        eprintln!(
+            "[regalloc-timing] label={label} x86_vector_spills={} spill_bytes={}",
+            vector_allocation.spilled_values, vector_allocation.spill_bytes
+        );
+    }
     if let Some(start) = alloc_start {
         eprintln!(
             "[regalloc-timing] label={label} implementation=ssa-split-color blocks={} insts={} vregs={} spill_frame={} elapsed={:?}",

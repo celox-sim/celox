@@ -22,7 +22,9 @@ use crate::backend::memory_layout::{
 };
 use crate::backend::native::features::{StateBaseStrategy, VariableShiftEncoding};
 use crate::backend::native::mir::*;
-use crate::backend::native::regalloc::assignment::{AssignmentMap, PhysReg, PhysRegSet, clobbers};
+use crate::backend::native::regalloc::assignment::{
+    AssignmentMap, PhysReg, PhysRegSet, X86PhysVec, X86VectorLocation, clobbers,
+};
 use crate::backend::native::ssa_destroy::{
     EdgeCopyPlan, ParallelCopyDestination, ParallelCopyOperation, ParallelCopySource,
     SsaDestructionPlan,
@@ -51,6 +53,28 @@ fn preg_to_reg64(preg: PhysReg) -> AsmRegister64 {
         PhysReg::R13 => r13,
         PhysReg::R14 => r14,
         PhysReg::R15 => r15,
+    }
+}
+
+fn x86_vec_to_xmm(register: X86PhysVec) -> AsmRegisterXmm {
+    match register.0 {
+        0 => xmm0,
+        1 => xmm1,
+        2 => xmm2,
+        3 => xmm3,
+        4 => xmm4,
+        5 => xmm5,
+        6 => xmm6,
+        7 => xmm7,
+        8 => xmm8,
+        9 => xmm9,
+        10 => xmm10,
+        11 => xmm11,
+        12 => xmm12,
+        13 => xmm13,
+        14 => xmm14,
+        15 => xmm15,
+        other => panic!("invalid XMM register index {other}"),
     }
 }
 
@@ -319,25 +343,25 @@ fn saved_gpr_xmm(index: usize) -> AsmRegisterXmm {
     }
 }
 
-/// A small post-allocation cache for the hottest ordinary qword spill slots.
+/// A post-allocation cache for the hottest ordinary qword spill slots.
 ///
-/// The GPR allocator deliberately does not model vector registers. XMM6-8 are
-/// otherwise unused by scalar emission.
+/// Explicit vector values and this scalar-home cache share one physical XMM
+/// inventory. Vector assignment owns registers first; the cache may use only
+/// registers which remain unassigned and are not clobbered by any pseudo in
+/// the body. A native tick loop can use XMM0..XMM14. Standalone functions keep
+/// XMM9..XMM14 for ABI-boundary GPR saves.
 #[derive(Debug, Clone, Copy, Default)]
 struct SpillRegisterCache {
-    offsets: [Option<i32>; 3],
+    entries: [Option<(i32, X86PhysVec)>; 15],
 }
 
 impl SpillRegisterCache {
     fn register(self, offset: i32) -> Option<AsmRegisterXmm> {
-        self.offsets
+        self.entries
             .iter()
-            .position(|candidate| *candidate == Some(offset))
-            .map(|index| match index {
-                0 => xmm6,
-                1 => xmm7,
-                2 => xmm8,
-                _ => unreachable!("invalid spill register cache index"),
+            .flatten()
+            .find_map(|&(candidate, register)| {
+                (candidate == offset).then(|| x86_vec_to_xmm(register))
             })
     }
 }
@@ -350,7 +374,12 @@ fn ranges_overlap(left_offset: i32, left_size: u32, right_offset: i32, right_siz
     left_start < right_end && right_start < left_end
 }
 
-fn select_spill_register_cache(func: &MFunction, plan: &SsaDestructionPlan) -> SpillRegisterCache {
+fn select_spill_register_cache(
+    func: &MFunction,
+    plan: &SsaDestructionPlan,
+    assignment: &AssignmentMap,
+    tick_loop: bool,
+) -> SpillRegisterCache {
     let mut access_counts = HashMap::<i32, usize>::new();
     let mut incompatible_ranges = Vec::<(i32, u32)>::new();
     let mut indexed_stack_access = false;
@@ -455,9 +484,39 @@ fn select_spill_register_cache(func: &MFunction, plan: &SsaDestructionPlan) -> S
         .collect::<Vec<_>>();
     candidates.sort_unstable_by_key(|(offset, count)| (std::cmp::Reverse(*count), *offset));
 
+    let assigned_vectors = assignment
+        .sorted_x86_vectors()
+        .into_iter()
+        .filter_map(|(_, location)| match location {
+            X86VectorLocation::Register(register) => Some(register),
+            X86VectorLocation::Stack(_) => None,
+        })
+        .collect::<HashSet<_>>();
+    let vector_scratch_used = assignment
+        .sorted_x86_vectors()
+        .into_iter()
+        .any(|(_, location)| matches!(location, X86VectorLocation::Stack(_)));
+    let register_limit = if tick_loop { 15u8 } else { 9u8 };
+    let available_registers = (0..register_limit)
+        .map(X86PhysVec)
+        .filter(|register| !assigned_vectors.contains(register))
+        .filter(|register| !(vector_scratch_used && register.0 == 5))
+        .filter(|register| {
+            !func
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|inst| super::x86_slp::clobbers_xmm(inst, *register))
+        })
+        .collect::<Vec<_>>();
+
     let mut cache = SpillRegisterCache::default();
-    for (destination, (offset, _)) in cache.offsets.iter_mut().zip(candidates) {
-        *destination = Some(offset);
+    for (entry, ((offset, _), register)) in cache
+        .entries
+        .iter_mut()
+        .zip(candidates.into_iter().zip(available_registers))
+    {
+        *entry = Some((offset, register));
     }
     cache
 }
@@ -1529,6 +1588,7 @@ impl BlockLabels {
 
 fn instruction_emits_no_code(inst: &MInst, assignment: &AssignmentMap) -> bool {
     match inst {
+        MInst::X86Simd(_) => false,
         MInst::Mov { dst, src } => {
             matches!((assignment.get(*dst), assignment.get(*src)), (Some(dst), Some(src)) if dst == src)
         }
@@ -1827,7 +1887,7 @@ pub fn emit(
     assignment: &AssignmentMap,
     spill_frame_size: u32,
 ) -> Result<EmitResult, EmitError> {
-    verify_emission_inputs(func, assignment, spill_frame_size)?;
+    verify_emission_inputs(func, assignment, spill_frame_size, false)?;
     let plan = SsaDestructionPlan::build(func, assignment)?;
     plan.verify(func, assignment, spill_frame_size)?;
     emit_planned(
@@ -1873,7 +1933,7 @@ pub(crate) fn emit_with_plan(
     state_size: usize,
     plan: &SsaDestructionPlan,
 ) -> Result<EmitResult, EmitError> {
-    verify_emission_inputs(func, assignment, spill_frame_size)?;
+    verify_emission_inputs(func, assignment, spill_frame_size, false)?;
     plan.verify(func, assignment, spill_frame_size)?;
     emit_planned(
         func,
@@ -1894,7 +1954,7 @@ fn emit_with_plan_tick_loop(
     plan: &SsaDestructionPlan,
     check_runtime_events: bool,
 ) -> Result<EmitResult, EmitError> {
-    verify_emission_inputs(func, assignment, spill_frame_size)?;
+    verify_emission_inputs(func, assignment, spill_frame_size, true)?;
     plan.verify(func, assignment, spill_frame_size)?;
     emit_planned(
         func,
@@ -1911,8 +1971,40 @@ fn verify_emission_inputs(
     func: &MFunction,
     assignment: &AssignmentMap,
     spill_frame_size: u32,
+    tick_loop: bool,
 ) -> Result<(), EmitError> {
     func.verify_result().map_err(EmitError::Mir)?;
+
+    let vector_entries = assignment.sorted_x86_vectors();
+    let has_vector_spill = vector_entries
+        .iter()
+        .any(|(_, location)| matches!(location, X86VectorLocation::Stack(_)));
+    let register_limit = if tick_loop { 15 } else { 9 };
+    for (value, location) in vector_entries {
+        match location {
+            X86VectorLocation::Register(register)
+                if register.0 < register_limit && !(has_vector_spill && register.0 == 5) => {}
+            X86VectorLocation::Stack(offset)
+                if offset >= 0
+                    && offset % 16 == 0
+                    && u32::try_from(offset)
+                        .ok()
+                        .and_then(|offset| offset.checked_add(16))
+                        .is_some_and(|end| end <= spill_frame_size) => {}
+            _ => {
+                return Err(EmitInputError::new(
+                    "EMIT.X86_VECTOR_LOCATION",
+                    None,
+                    None,
+                    None,
+                    format!(
+                        "{value} has invalid location {location:?} in {spill_frame_size}-byte spill frame"
+                    ),
+                )
+                .into());
+            }
+        }
+    }
 
     for block in &func.blocks {
         for (instruction, inst) in block.insts.iter().enumerate() {
@@ -2076,7 +2168,7 @@ fn emit_planned(
     let mut epilogue_label = asm.create_label();
     let mut tick_loop_success_label = tick_loop.then(|| asm.create_label());
     let use_counts = count_vreg_uses(func, plan);
-    let spill_register_cache = select_spill_register_cache(func, plan);
+    let spill_register_cache = select_spill_register_cache(func, plan, assignment, tick_loop);
     let tick_loop_entry = tick_loop
         .then(|| branch_label(&block_labels, func.blocks[0].id))
         .transpose()?;
@@ -2887,6 +2979,225 @@ fn emit_inst(
 ) -> Result<bool, IcedError> {
     let mut bound_continuation = false;
     match inst {
+        MInst::X86Simd(X86SimdInst::Zero128 { dst }) => {
+            match assignment
+                .x86_vector(*dst)
+                .expect("verified x86 vector assignment")
+            {
+                X86VectorLocation::Register(register) => {
+                    let destination = x86_vec_to_xmm(register);
+                    if func.target_features.avx() {
+                        asm.vpxor(destination, destination, destination)?;
+                    } else {
+                        asm.pxor(destination, destination)?;
+                    }
+                }
+                X86VectorLocation::Stack(stack_offset) => {
+                    let destination = xmmword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+                    if func.target_features.avx() {
+                        asm.vpxor(xmm5, xmm5, xmm5)?;
+                        asm.vmovdqu(destination, xmm5)?;
+                    } else {
+                        asm.pxor(xmm5, xmm5)?;
+                        asm.movdqu(destination, xmm5)?;
+                    }
+                }
+            }
+        }
+        MInst::X86Simd(X86SimdInst::Pack128 { dst, low, high }) => {
+            let low = preg_to_reg64(resolve(assignment, *low));
+            let high = preg_to_reg64(resolve(assignment, *high));
+            match assignment
+                .x86_vector(*dst)
+                .expect("verified x86 vector assignment")
+            {
+                X86VectorLocation::Register(register) => {
+                    let destination = x86_vec_to_xmm(register);
+                    asm.movq(destination, low)?;
+                    if low == high {
+                        asm.punpcklqdq(destination, destination)?;
+                    } else {
+                        asm.movq(xmm5, high)?;
+                        asm.punpcklqdq(destination, xmm5)?;
+                    }
+                }
+                X86VectorLocation::Stack(stack_offset) => {
+                    asm.mov(
+                        qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)),
+                        low,
+                    )?;
+                    asm.mov(
+                        qword_ptr(mem_operand(
+                            BaseReg::StackFrame,
+                            stack_offset
+                                .checked_add(8)
+                                .expect("verified vector spill offset fits i32"),
+                        )),
+                        high,
+                    )?;
+                }
+            }
+        }
+        MInst::X86Simd(X86SimdInst::Load128 { dst, base, offset }) => {
+            let source = xmmword_ptr(mem_operand(*base, *offset));
+            match assignment
+                .x86_vector(*dst)
+                .expect("verified x86 vector assignment")
+            {
+                X86VectorLocation::Register(register) => {
+                    let destination = x86_vec_to_xmm(register);
+                    if func.target_features.avx() {
+                        asm.vmovdqu(destination, source)?;
+                    } else {
+                        asm.movdqu(destination, source)?;
+                    }
+                }
+                X86VectorLocation::Stack(stack_offset) => {
+                    if func.target_features.avx() {
+                        asm.vmovdqu(xmm5, source)?;
+                        asm.vmovdqu(
+                            xmmword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)),
+                            xmm5,
+                        )?;
+                    } else {
+                        asm.movdqu(xmm5, source)?;
+                        asm.movdqu(
+                            xmmword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)),
+                            xmm5,
+                        )?;
+                    }
+                }
+            }
+        }
+        MInst::X86Simd(X86SimdInst::Binary128 { op, dst, lhs, rhs }) => {
+            let destination = assignment
+                .x86_vector(*dst)
+                .expect("verified x86 vector destination assignment");
+            let lhs = assignment
+                .x86_vector(*lhs)
+                .expect("verified x86 vector lhs assignment");
+            let rhs = assignment
+                .x86_vector(*rhs)
+                .expect("verified x86 vector rhs assignment");
+            let output = match destination {
+                X86VectorLocation::Register(register) => x86_vec_to_xmm(register),
+                X86VectorLocation::Stack(_) => xmm5,
+            };
+            match (lhs, rhs) {
+                (X86VectorLocation::Register(lhs), X86VectorLocation::Register(rhs)) => {
+                    let lhs = x86_vec_to_xmm(lhs);
+                    let rhs = x86_vec_to_xmm(rhs);
+                    if func.target_features.avx() {
+                        match op {
+                            X86SimdBinaryOp::And => asm.vpand(output, lhs, rhs)?,
+                            X86SimdBinaryOp::Or => asm.vpor(output, lhs, rhs)?,
+                            X86SimdBinaryOp::Xor => asm.vpxor(output, lhs, rhs)?,
+                        }
+                    } else {
+                        if output != lhs {
+                            asm.movdqa(output, lhs)?;
+                        }
+                        match op {
+                            X86SimdBinaryOp::And => asm.pand(output, rhs)?,
+                            X86SimdBinaryOp::Or => asm.por(output, rhs)?,
+                            X86SimdBinaryOp::Xor => asm.pxor(output, rhs)?,
+                        }
+                    }
+                }
+                (X86VectorLocation::Register(lhs), X86VectorLocation::Stack(rhs)) => {
+                    let lhs = x86_vec_to_xmm(lhs);
+                    let rhs = xmmword_ptr(mem_operand(BaseReg::StackFrame, rhs));
+                    if func.target_features.avx() {
+                        match op {
+                            X86SimdBinaryOp::And => asm.vpand(output, lhs, rhs)?,
+                            X86SimdBinaryOp::Or => asm.vpor(output, lhs, rhs)?,
+                            X86SimdBinaryOp::Xor => asm.vpxor(output, lhs, rhs)?,
+                        }
+                    } else {
+                        if output != lhs {
+                            asm.movdqa(output, lhs)?;
+                        }
+                        match op {
+                            X86SimdBinaryOp::And => asm.pand(output, rhs)?,
+                            X86SimdBinaryOp::Or => asm.por(output, rhs)?,
+                            X86SimdBinaryOp::Xor => asm.pxor(output, rhs)?,
+                        }
+                    }
+                }
+                (X86VectorLocation::Stack(lhs), X86VectorLocation::Register(rhs)) => {
+                    let lhs = xmmword_ptr(mem_operand(BaseReg::StackFrame, lhs));
+                    let rhs = x86_vec_to_xmm(rhs);
+                    if func.target_features.avx() {
+                        asm.vmovdqu(output, lhs)?;
+                        match op {
+                            X86SimdBinaryOp::And => asm.vpand(output, output, rhs)?,
+                            X86SimdBinaryOp::Or => asm.vpor(output, output, rhs)?,
+                            X86SimdBinaryOp::Xor => asm.vpxor(output, output, rhs)?,
+                        }
+                    } else {
+                        asm.movdqu(output, lhs)?;
+                        match op {
+                            X86SimdBinaryOp::And => asm.pand(output, rhs)?,
+                            X86SimdBinaryOp::Or => asm.por(output, rhs)?,
+                            X86SimdBinaryOp::Xor => asm.pxor(output, rhs)?,
+                        }
+                    }
+                }
+                (X86VectorLocation::Stack(lhs), X86VectorLocation::Stack(rhs)) => {
+                    let lhs = xmmword_ptr(mem_operand(BaseReg::StackFrame, lhs));
+                    let rhs = xmmword_ptr(mem_operand(BaseReg::StackFrame, rhs));
+                    if func.target_features.avx() {
+                        asm.vmovdqu(output, lhs)?;
+                        match op {
+                            X86SimdBinaryOp::And => asm.vpand(output, output, rhs)?,
+                            X86SimdBinaryOp::Or => asm.vpor(output, output, rhs)?,
+                            X86SimdBinaryOp::Xor => asm.vpxor(output, output, rhs)?,
+                        }
+                    } else {
+                        asm.movdqu(output, lhs)?;
+                        match op {
+                            X86SimdBinaryOp::And => asm.pand(output, rhs)?,
+                            X86SimdBinaryOp::Or => asm.por(output, rhs)?,
+                            X86SimdBinaryOp::Xor => asm.pxor(output, rhs)?,
+                        }
+                    }
+                }
+            }
+            if let X86VectorLocation::Stack(stack_offset) = destination {
+                let destination = xmmword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+                if func.target_features.avx() {
+                    asm.vmovdqu(destination, output)?;
+                } else {
+                    asm.movdqu(destination, output)?;
+                }
+            }
+        }
+        MInst::X86Simd(X86SimdInst::Store128 { base, offset, src }) => {
+            let destination = xmmword_ptr(mem_operand(*base, *offset));
+            match assignment
+                .x86_vector(*src)
+                .expect("verified x86 vector assignment")
+            {
+                X86VectorLocation::Register(register) => {
+                    let source = x86_vec_to_xmm(register);
+                    if func.target_features.avx() {
+                        asm.vmovdqu(destination, source)?;
+                    } else {
+                        asm.movdqu(destination, source)?;
+                    }
+                }
+                X86VectorLocation::Stack(stack_offset) => {
+                    let source = xmmword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+                    if func.target_features.avx() {
+                        asm.vmovdqu(xmm5, source)?;
+                        asm.vmovdqu(destination, xmm5)?;
+                    } else {
+                        asm.movdqu(xmm5, source)?;
+                        asm.movdqu(destination, xmm5)?;
+                    }
+                }
+            }
+        }
         MInst::Mov { dst, src } => {
             let d_preg = resolve(assignment, *dst);
             let s_preg = resolve(assignment, *src);
@@ -4883,7 +5194,7 @@ fn emit_chained_eu_list(
     trace: Option<&mut NativeFunctionTrace>,
 ) -> Result<EmitResult, ChainedEmitError> {
     let unit_refs = units.iter().collect::<Vec<_>>();
-    emit_chained_eu_refs(&unit_refs, layout, four_state, label, None, trace)
+    emit_chained_eu_refs(&unit_refs, layout, four_state, label, None, true, trace)
 }
 
 pub(crate) fn emit_chained_eu_refs(
@@ -4892,6 +5203,7 @@ pub(crate) fn emit_chained_eu_refs(
     four_state: bool,
     label: &str,
     first_ff_unit: Option<usize>,
+    enable_x86_slp: bool,
     mut trace: Option<&mut NativeFunctionTrace>,
 ) -> Result<EmitResult, ChainedEmitError> {
     use super::{isel, regalloc};
@@ -5073,6 +5385,34 @@ pub(crate) fn emit_chained_eu_refs(
             mir_inst_count(&mfunc),
             mfunc.vregs.count(),
             start.elapsed()
+        );
+    }
+    mfunc
+        .verify_result()
+        .map_err(|error| ChainedEmitError::Mir {
+            phase: "after MIR optimization before x86 SLP",
+            error,
+        })?;
+    let slp_stats = if enable_x86_slp {
+        super::x86_slp::select(&mut mfunc)
+    } else {
+        super::x86_slp::SlpStats::default()
+    };
+    mfunc
+        .verify_result()
+        .map_err(|error| ChainedEmitError::Mir {
+            phase: "after x86 SLP before VReg compaction",
+            error,
+        })?;
+    if timing {
+        eprintln!(
+            "[native-timing] emit_chained x86_slp vector_zeroes={} vector_packs={} vector_loads={} vector_binary_ops={} vector_stores={} scalar_instructions_removed={}",
+            slp_stats.vector_zeroes,
+            slp_stats.vector_packs,
+            slp_stats.vector_loads,
+            slp_stats.vector_binary_ops,
+            slp_stats.vector_stores,
+            slp_stats.scalar_instructions_removed,
         );
     }
     let compact_start = timing.then(crate::timing::now);
@@ -5273,6 +5613,17 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
         phi += block.phis.len();
         for inst in &block.insts {
             match inst {
+                MInst::X86Simd(X86SimdInst::Zero128 { .. })
+                | MInst::X86Simd(X86SimdInst::Pack128 { .. })
+                | MInst::X86Simd(X86SimdInst::Binary128 { .. }) => alu += 1,
+                MInst::X86Simd(X86SimdInst::Load128 { base, .. }) => match base {
+                    BaseReg::SimState => load_sim += 1,
+                    BaseReg::StackFrame => load_stack += 1,
+                },
+                MInst::X86Simd(X86SimdInst::Store128 { base, .. }) => match base {
+                    BaseReg::SimState => store_sim += 1,
+                    BaseReg::StackFrame => store_stack += 1,
+                },
                 MInst::Mov { .. } | MInst::Mov32 { .. } => mov += 1,
                 MInst::LoadImm { .. } | MInst::LoadConstantTableAddr { .. } => imm += 1,
                 MInst::Scratch { .. } => {}
@@ -5786,6 +6137,74 @@ mod shift_encoding_tests {
     use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, Register};
 
     #[test]
+    fn vector_binary_ops_execute_both_lanes_without_gpr_roundtrips() {
+        for op in [
+            X86SimdBinaryOp::And,
+            X86SimdBinaryOp::Or,
+            X86SimdBinaryOp::Xor,
+        ] {
+            let mut function = MFunction::new(VRegAllocator::new(), Vec::new());
+            let lhs = function.alloc_x86_vec();
+            let rhs = function.alloc_x86_vec();
+            let result = function.alloc_x86_vec();
+            let mut block = MBlock::new(BlockId(0));
+            block.push(MInst::X86Simd(X86SimdInst::Load128 {
+                dst: lhs,
+                base: BaseReg::SimState,
+                offset: 0,
+            }));
+            block.push(MInst::X86Simd(X86SimdInst::Load128 {
+                dst: rhs,
+                base: BaseReg::SimState,
+                offset: 16,
+            }));
+            block.push(MInst::X86Simd(X86SimdInst::Binary128 {
+                op,
+                dst: result,
+                lhs,
+                rhs,
+            }));
+            block.push(MInst::X86Simd(X86SimdInst::Store128 {
+                base: BaseReg::SimState,
+                offset: 32,
+                src: result,
+            }));
+            block.push(MInst::Return);
+            function.push_block(block);
+            function.verify();
+
+            let mut assignment = AssignmentMap::default();
+            assignment.set_x86_vector(lhs, X86VectorLocation::Register(X86PhysVec(0)));
+            assignment.set_x86_vector(rhs, X86VectorLocation::Register(X86PhysVec(1)));
+            assignment.set_x86_vector(result, X86VectorLocation::Register(X86PhysVec(2)));
+            let emitted = emit(&function, &assignment, 0).unwrap();
+            let jit = JitCode::new(&emitted.code).unwrap();
+            let lhs_lanes: [u64; 2] = [0xf0f0_aaaa_5555_0f0f, 0x0123_4567_89ab_cdef];
+            let rhs_lanes: [u64; 2] = [0x3333_ffff_0000_cccc, 0xfedc_ba98_7654_3210];
+            let mut state = [0u8; 48];
+            for (lane, value) in lhs_lanes.into_iter().enumerate() {
+                state[lane * 8..lane * 8 + 8].copy_from_slice(&value.to_le_bytes());
+            }
+            for (lane, value) in rhs_lanes.into_iter().enumerate() {
+                let offset = 16 + lane * 8;
+                state[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+            }
+
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            for lane in 0..2 {
+                let offset = 32 + lane * 8;
+                let actual = u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap());
+                let expected = match op {
+                    X86SimdBinaryOp::And => lhs_lanes[lane] & rhs_lanes[lane],
+                    X86SimdBinaryOp::Or => lhs_lanes[lane] | rhs_lanes[lane],
+                    X86SimdBinaryOp::Xor => lhs_lanes[lane] ^ rhs_lanes[lane],
+                };
+                assert_eq!(actual, expected, "{op:?}");
+            }
+        }
+    }
+
+    #[test]
     fn native_tick_loop_reenters_the_allocated_body_without_reentering_the_abi_boundary() {
         let mut vregs = VRegAllocator::new();
         let current = vregs.alloc();
@@ -5955,18 +6374,59 @@ mod shift_encoding_tests {
 
         let emitted = emit(&func, &assignment, 8).unwrap();
         let mut decoder = Decoder::new(64, &emitted.code, DecoderOptions::NONE);
-        let mut uses_xmm6 = false;
+        let mut uses_xmm_cache = false;
         while decoder.can_decode() {
             let instruction = decoder.decode();
-            uses_xmm6 |= instruction.op0_register() == Register::XMM6
-                || instruction.op1_register() == Register::XMM6;
+            uses_xmm_cache |= [instruction.op0_register(), instruction.op1_register()]
+                .into_iter()
+                .any(|register| {
+                    (Register::XMM0 as u32..=Register::XMM14 as u32).contains(&(register as u32))
+                });
         }
-        assert!(uses_xmm6);
+        assert!(uses_xmm_cache);
 
         let jit = JitCode::new(&emitted.code).unwrap();
         let mut arena = [0u8; 128];
         assert_eq!(unsafe { jit.call(&mut arena) }, 0);
         assert_eq!(u64::from_le_bytes(arena[..8].try_into().unwrap()), 9);
+    }
+
+    #[test]
+    fn native_tick_loop_uses_all_nonconflicting_xmm_spill_cache_registers() {
+        let mut vregs = VRegAllocator::new();
+        let value = vregs.alloc();
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient()]);
+        let mut block = MBlock::new(BlockId(0));
+        for offset in (0..9).map(|slot| slot * 8) {
+            for _ in 0..2 {
+                block.push(MInst::Load {
+                    dst: value,
+                    base: BaseReg::StackFrame,
+                    offset,
+                    size: OpSize::S64,
+                });
+                block.push(MInst::Store {
+                    base: BaseReg::StackFrame,
+                    offset,
+                    src: value,
+                    size: OpSize::S64,
+                });
+            }
+        }
+        block.push(MInst::Return);
+        function.push_block(block);
+        let plan = SsaDestructionPlan::default();
+        let assignment = AssignmentMap::default();
+
+        let standalone = select_spill_register_cache(&function, &plan, &assignment, false);
+        let tick_loop = select_spill_register_cache(&function, &plan, &assignment, true);
+
+        for offset in (0..9).map(|slot| slot * 8) {
+            assert!(standalone.register(offset).is_some());
+        }
+        for offset in (0..9).map(|slot| slot * 8) {
+            assert!(tick_loop.register(offset).is_some());
+        }
     }
 
     #[test]

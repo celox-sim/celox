@@ -1035,8 +1035,9 @@ fn plan_scheduled_block_transition(
             "allocation constraints do not cover every block instruction",
         ));
     }
+    let original_spilled = spilled.clone();
     let mut remaining =
-        RemainingBlockUses::build(func, next_use, logical, block, exit_reload_costs)?;
+        RemainingBlockUses::build(func, next_use, logical, block, exit_reload_costs, None)?;
     let mut planner = BlockTransitionPlanner::new(
         func,
         next_use,
@@ -1173,7 +1174,91 @@ fn plan_scheduled_block_transition(
             }
         }
     }
-    Ok((planner.finish()?, order))
+    let transition = planner.finish()?;
+    let identity = (0..instructions.len()).collect::<Vec<_>>();
+    let live_out = next_use.exit[block]
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if super::schedule::preserves_original_pressure(instructions, &order, &live_out, registers) {
+        return Ok((transition, order));
+    }
+
+    // The allocator's ready walk is intentionally local, so it can avoid one
+    // immediate eviction by creating a much wider live wavefront later in the
+    // block. Give a bottom-up pressure scheduler one chance to recover such a
+    // block before preserving source order. The pressure scheduler itself
+    // falls back to identity whenever its complete order is worse.
+    let fallback = super::schedule::pressure_preferred_block_order(
+        instructions,
+        constraints,
+        live_out.iter().copied(),
+        registers,
+    )
+    .unwrap_or(identity);
+    let transition = plan_explicit_block_order(
+        func,
+        next_use,
+        planning_recipes,
+        logical,
+        homes,
+        block,
+        registers,
+        w_entry,
+        original_spilled,
+        exit_reload_costs,
+        &fallback,
+    )?;
+    Ok((transition, fallback))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_explicit_block_order(
+    func: &MFunction,
+    next_use: &NextUseAnalysis,
+    planning_recipes: &PlanningRecipes,
+    logical: &LogicalValues,
+    homes: &SpillHomes,
+    block: usize,
+    registers: usize,
+    w_entry: &BTreeSet<LogicalValue>,
+    spilled: BTreeSet<LogicalValue>,
+    exit_reload_costs: &HashMap<LogicalValue, u32>,
+    order: &[usize],
+) -> Result<BlockTransition, SpillPlanError> {
+    let instructions = &func.blocks[block].insts;
+    let mut remaining = RemainingBlockUses::build(
+        func,
+        next_use,
+        logical,
+        block,
+        exit_reload_costs,
+        Some(order),
+    )?;
+    let mut planner = BlockTransitionPlanner::new(
+        func,
+        next_use,
+        planning_recipes,
+        logical,
+        homes,
+        block,
+        registers,
+        w_entry,
+        spilled,
+    )?;
+    for (output, &source) in order.iter().enumerate() {
+        let inst = instructions.get(source).ok_or_else(|| {
+            SpillPlanError::new(
+                "SPILL_PLAN.SCHEDULE_ORDER",
+                Some(func.blocks[block].id),
+                Some(source),
+                Vec::new(),
+                "explicit schedule references an instruction outside the block",
+            )
+        })?;
+        planner.step_scheduled(TransitionPoint { output, source }, inst, &mut remaining)?;
+    }
+    planner.finish()
 }
 
 struct BlockTransitionPlanner<'a> {
@@ -1818,9 +1903,44 @@ impl RemainingBlockUses {
         logical: &LogicalValues,
         block: usize,
         exit_reload_costs: &HashMap<LogicalValue, u32>,
+        preferred_order: Option<&[usize]>,
     ) -> Result<Self, SpillPlanError> {
         let instructions = func.blocks[block].insts.len();
-        let preferred_rank = (0..instructions).collect::<Vec<_>>();
+        let preferred_rank = if let Some(order) = preferred_order {
+            if order.len() != instructions {
+                return Err(SpillPlanError::new(
+                    "SPILL_PLAN.SCHEDULE_ORDER",
+                    Some(func.blocks[block].id),
+                    None,
+                    Vec::new(),
+                    "explicit order does not cover every block instruction",
+                ));
+            }
+            let mut ranks = vec![usize::MAX; instructions];
+            for (rank, &source) in order.iter().enumerate() {
+                let Some(slot) = ranks.get_mut(source) else {
+                    return Err(SpillPlanError::new(
+                        "SPILL_PLAN.SCHEDULE_ORDER",
+                        Some(func.blocks[block].id),
+                        Some(source),
+                        Vec::new(),
+                        "explicit order references an instruction outside the block",
+                    ));
+                };
+                if std::mem::replace(slot, rank) != usize::MAX {
+                    return Err(SpillPlanError::new(
+                        "SPILL_PLAN.SCHEDULE_ORDER",
+                        Some(func.blocks[block].id),
+                        Some(source),
+                        Vec::new(),
+                        "explicit order references one instruction more than once",
+                    ));
+                }
+            }
+            ranks
+        } else {
+            (0..instructions).collect::<Vec<_>>()
+        };
         let mut remaining = HashMap::<LogicalValue, BTreeSet<(usize, usize)>>::new();
         for (source, inst) in func.blocks[block].insts.iter().enumerate() {
             let mut uses = inst.uses().to_vec();

@@ -369,6 +369,11 @@ fn next_use_bucket(next_use: u32) -> &'static str {
 
 fn inst_opcode(inst: &MInst) -> &'static str {
     match inst {
+        MInst::X86Simd(X86SimdInst::Zero128 { .. }) => "x86_zero_v128",
+        MInst::X86Simd(X86SimdInst::Pack128 { .. }) => "x86_pack_v2i64",
+        MInst::X86Simd(X86SimdInst::Load128 { .. }) => "x86_load_v128",
+        MInst::X86Simd(X86SimdInst::Binary128 { .. }) => "x86_binary_v128",
+        MInst::X86Simd(X86SimdInst::Store128 { .. }) => "x86_store_v128",
         MInst::Mov { .. } => "mov.w64",
         MInst::Mov32 { .. } => "mov.w32",
         MInst::LoadImm { .. } => "imm",

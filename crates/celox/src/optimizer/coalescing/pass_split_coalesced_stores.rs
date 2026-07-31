@@ -1,4 +1,4 @@
-//! Split wide Concat+Store back into individual element stores,
+//! Split wide Concat+Store into at most one native-vector-width per store,
 //! placing each store immediately after its source value computation.
 //! This dramatically reduces register pressure for large arrays.
 //!
@@ -10,7 +10,9 @@ use crate::ir::*;
 use crate::optimizer::PassOptions;
 use std::collections::HashMap;
 
-pub(super) struct SplitCoalescedStoresPass;
+pub(super) struct SplitCoalescedStoresPass {
+    pub max_store_width: usize,
+}
 
 impl ExecutionUnitPass for SplitCoalescedStoresPass {
     fn name(&self) -> &'static str {
@@ -18,11 +20,11 @@ impl ExecutionUnitPass for SplitCoalescedStoresPass {
     }
 
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
-        split_coalesced_stores(eu);
+        split_coalesced_stores(eu, self.max_store_width);
     }
 }
 
-fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, max_store_width: usize) {
     let block_ids: Vec<BlockId> = eu.blocks.keys().copied().collect();
     let mut reg_counter = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0);
     let uses = collect_uses(eu);
@@ -95,14 +97,15 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
                 continue;
             }
 
-            // Build <=64-bit chunks. Concat args are MSB-first while Store
+            // Build <=128-bit chunks. Concat args are MSB-first while Store
             // offsets grow from the LSB, and ordinary RTL packing can mix
             // unrelated operand widths.
             let args_lsb = args.into_iter().zip(arg_widths).rev().collect::<Vec<_>>();
             let mut chunks = Vec::<Vec<(RegisterId, usize)>>::new();
             for (source, source_width) in args_lsb {
                 if chunks.last().is_none_or(|chunk| {
-                    chunk.iter().map(|(_, width)| *width).sum::<usize>() + source_width > 64
+                    chunk.iter().map(|(_, width)| *width).sum::<usize>() + source_width
+                        > max_store_width
                 }) {
                     chunks.push(Vec::new());
                 }
@@ -306,7 +309,7 @@ mod tests {
             register_map,
         };
 
-        split_coalesced_stores(&mut eu);
+        split_coalesced_stores(&mut eu, 64);
 
         eu.verify_result().unwrap();
         assert!(eu.blocks[&BlockId(0)].instructions.iter().any(
@@ -361,7 +364,7 @@ mod tests {
             register_map,
         };
 
-        split_coalesced_stores(&mut eu);
+        split_coalesced_stores(&mut eu, 64);
 
         eu.verify_result().unwrap();
         let mut stores = eu.blocks[&BlockId(0)]

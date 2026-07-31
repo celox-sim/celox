@@ -6,7 +6,7 @@
 
 use celox_analysis::memory::{MemoryEffect, MemoryLocation};
 
-use super::mir::{BaseReg, BranchPredicate, MInst};
+use super::mir::{BaseReg, BranchPredicate, MInst, X86SimdInst};
 
 // Keep small exact effect sets inline so MemorySSA consumers do not allocate
 // in their instruction scans.
@@ -227,6 +227,14 @@ fn sparse_mark_ranges(inst: &MInst) -> Option<[MemoryRange; 1]> {
 
 pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
     match inst {
+        MInst::X86Simd(X86SimdInst::Zero128 { .. })
+        | MInst::X86Simd(X86SimdInst::Pack128 { .. })
+        | MInst::X86Simd(X86SimdInst::Binary128 { .. }) => MemoryEffects::NONE,
+        MInst::X86Simd(X86SimdInst::Load128 { base, offset, .. }) => {
+            checked_range(*base, *offset, 16)
+                .map(|range| MemoryEffects::static_ranges(&[range]))
+                .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(*base)))
+        }
         MInst::Load {
             base, offset, size, ..
         }
@@ -306,6 +314,15 @@ pub(crate) fn reads(inst: &MInst) -> MemoryEffects {
 
 pub(crate) fn writes(inst: &MInst) -> MemoryEffects {
     match inst {
+        MInst::X86Simd(X86SimdInst::Zero128 { .. })
+        | MInst::X86Simd(X86SimdInst::Pack128 { .. })
+        | MInst::X86Simd(X86SimdInst::Binary128 { .. })
+        | MInst::X86Simd(X86SimdInst::Load128 { .. }) => MemoryEffects::NONE,
+        MInst::X86Simd(X86SimdInst::Store128 { base, offset, .. }) => {
+            checked_range(*base, *offset, 16)
+                .map(|range| MemoryEffects::static_ranges(&[range]))
+                .unwrap_or_else(|| MemoryEffects::unknown(UnknownMemory::Direct(*base)))
+        }
         MInst::Store {
             base, offset, size, ..
         }

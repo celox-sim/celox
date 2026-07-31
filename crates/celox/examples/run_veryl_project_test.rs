@@ -9,7 +9,7 @@ use std::{
 use celox::testbench::{
     compile_initial_testbench, run_compiled_testbench, run_compiled_testbench_with_tick_limit,
 };
-use celox::{OptLevel, Simulator, SirPass, TestResult};
+use celox::{OptLevel, OptimizeOptions, Simulator, SirPass, TestResult};
 use veryl_metadata::Metadata;
 
 struct Options {
@@ -22,8 +22,11 @@ struct Options {
     compile_only: bool,
     tick_limit: Option<u64>,
     dump_ir_dir: Option<PathBuf>,
+    dump_ir_and_run: bool,
     native_profile_blocks: Vec<celox::NativeProfileBlock>,
     pass_overrides: Vec<(bool, SirPass)>,
+    native_memory_width: usize,
+    x86_slp: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +56,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     if !opts.native_profile_blocks.is_empty() && opts.dump_ir_dir.is_none() {
         return Err("--native-profile-block requires --dump-ir-dir".into());
     }
+    if opts.dump_ir_and_run && opts.dump_ir_dir.is_none() {
+        return Err("--dump-ir-and-run requires --dump-ir-dir".into());
+    }
     let (sources, metadata) = load_sources(&opts.project, &opts.source_files)?;
     let source_refs: Vec<(&str, &Path)> = sources
         .iter()
@@ -68,9 +74,13 @@ fn run() -> Result<(), Box<dyn Error>> {
     );
 
     let total_start = Instant::now();
+    let optimize_options = OptimizeOptions::new(opts.opt_level)
+        .with_max_native_memory_width(opts.native_memory_width)
+        .with_x86_slp(opts.x86_slp);
     let mut builder = Simulator::from_sources(source_refs, &opts.test)
         .with_metadata(metadata)
         .opt_level(opts.opt_level)
+        .optimize_options(optimize_options)
         .four_state(opts.four_state);
     for block in &opts.native_profile_blocks {
         builder = builder.trace_native_profile_block(&block.function, block.block, block.samples);
@@ -92,7 +102,8 @@ fn run() -> Result<(), Box<dyn Error>> {
             .trace_post_optimized_sir()
             .trace_mir()
             .build_with_trace();
-        let celox::CompilationTraceResult { res, trace } = trace_result;
+        let celox::CompilationTraceResult { res, mut trace } = trace_result;
+        let compile_elapsed = total_start.elapsed();
         let pre_sir_path = output_dir.join("pre_optimized.sir");
         let sir_path = output_dir.join("post_optimized.sir");
         let pre_optimized_sir = trace.format_pre_optimized_sir();
@@ -113,21 +124,22 @@ fn run() -> Result<(), Box<dyn Error>> {
                 sir_path.display()
             );
         }
-        if let Err(error) = res {
-            return Err(format!("Celox build failed: {error:?}").into());
-        }
+        let mut sim = res.map_err(|error| format!("Celox build failed: {error:?}"))?;
         let _pre_optimized_sir =
             pre_optimized_sir.ok_or("pre-optimized SIR trace was not captured")?;
         let _sir = sir.ok_or("post-optimized SIR trace was not captured")?;
         let native_sir = trace
-            .format_native_optimized_sir()
+            .native_optimized_sir
+            .take()
             .ok_or("native optimized SIR trace was not captured")?;
-        let mir = trace.mir.ok_or("MIR trace was not captured")?;
+        let mir = trace.mir.take().ok_or("MIR trace was not captured")?;
         let reactive_graph = trace
             .reactive_event_graph
+            .take()
             .ok_or("reactive event graph was not captured")?;
         let state_layout = trace
             .native_state_layout
+            .take()
             .ok_or("native state-layout analysis was not captured")?;
         let native_sir_path = output_dir.join("native_optimized.sir");
         let mir_path = output_dir.join("mir.txt");
@@ -157,6 +169,83 @@ fn run() -> Result<(), Box<dyn Error>> {
             state_layout.len(),
             state_layout_path.display()
         );
+        // The trace owns complete SIR programs and the formatted dumps are
+        // hundreds of MiB on Heliodor. They are not part of the generated JIT
+        // state; release them before timing that exact Simulator instance.
+        drop((
+            _pre_optimized_sir,
+            _sir,
+            native_sir,
+            mir,
+            reactive_graph,
+            state_layout,
+            trace,
+        ));
+        if opts.dump_ir_and_run {
+            let testbench = compile_initial_testbench(&sim)
+                .ok_or("no initial block found — this module is not a native testbench")?;
+            let execute_cpu_start = process_cpu_time();
+            let execute_start = Instant::now();
+            let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
+                let limited = run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
+                (limited.result, limited.ticks, limited.tick_limit_reached)
+            } else {
+                (run_compiled_testbench(&mut sim, &testbench), 0, false)
+            };
+            let execute_elapsed = execute_start.elapsed();
+            let execute_cpu_elapsed = process_cpu_time()
+                .zip(execute_cpu_start)
+                .map(|(end, start)| end.saturating_sub(start));
+            if let Some(execute_cpu_elapsed) = execute_cpu_elapsed {
+                println!(
+                    "CELOX_TEST_TIMING test={} compile_ns={} execute_ns={} execute_cpu_ns={}",
+                    opts.test,
+                    compile_elapsed.as_nanos(),
+                    execute_elapsed.as_nanos(),
+                    execute_cpu_elapsed.as_nanos()
+                );
+            } else {
+                println!(
+                    "CELOX_TEST_TIMING test={} compile_ns={} execute_ns={}",
+                    opts.test,
+                    compile_elapsed.as_nanos(),
+                    execute_elapsed.as_nanos()
+                );
+            }
+            if opts.tick_limit.is_some() {
+                println!(
+                    "CELOX_TEST_TICK_LIMIT test={} ticks={} reached={}",
+                    opts.test, ticks, tick_limit_reached
+                );
+            }
+            let elapsed = total_start.elapsed();
+            return match result {
+                TestResult::Pass if tick_limit_reached => {
+                    println!(
+                        "CELOX_TEST_RESULT test={} status=tick-limit elapsed_ns={}",
+                        opts.test,
+                        elapsed.as_nanos()
+                    );
+                    Ok(())
+                }
+                TestResult::Pass => {
+                    println!(
+                        "CELOX_TEST_RESULT test={} status=pass elapsed_ns={}",
+                        opts.test,
+                        elapsed.as_nanos()
+                    );
+                    Ok(())
+                }
+                TestResult::Fail(message) => {
+                    println!(
+                        "CELOX_TEST_RESULT test={} status=fail elapsed_ns={}",
+                        opts.test,
+                        elapsed.as_nanos()
+                    );
+                    Err(message.into())
+                }
+            };
+        }
         println!(
             "CELOX_TEST_RESULT test={} status=trace-only elapsed_ns={}",
             opts.test,
@@ -325,8 +414,15 @@ fn parse_args() -> Result<Options, String> {
     let mut compile_only = false;
     let mut tick_limit = None;
     let mut dump_ir_dir = None;
+    let mut dump_ir_and_run = false;
     let mut native_profile_blocks = Vec::new();
     let mut pass_overrides = Vec::new();
+    let mut native_memory_width = if cfg!(target_arch = "x86_64") {
+        128
+    } else {
+        64
+    };
+    let mut x86_slp = cfg!(target_arch = "x86_64");
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -388,11 +484,32 @@ fn parse_args() -> Result<Options, String> {
                         "--dump-ir-dir requires a directory".to_string()
                     })?));
             }
+            "--dump-ir-and-run" => dump_ir_and_run = true,
             "--native-profile-block" => {
                 let value = args.next().ok_or_else(|| {
                     "--native-profile-block requires FUNCTION:BLOCK:SAMPLES".to_string()
                 })?;
                 native_profile_blocks.push(parse_native_profile_block(&value)?);
+            }
+            "--native-memory-width" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--native-memory-width requires 64 or 128".to_string())?;
+                native_memory_width = match value.as_str() {
+                    "64" => 64,
+                    "128" => 128,
+                    _ => return Err(format!("invalid native memory width: {value}")),
+                };
+            }
+            "--x86-slp" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--x86-slp requires on or off".to_string())?;
+                x86_slp = match value.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(format!("invalid x86 SLP setting: {value}")),
+                };
             }
             other if project.is_none() => project = Some(PathBuf::from(other)),
             other if test.is_none() => test = Some(other.to_string()),
@@ -410,8 +527,11 @@ fn parse_args() -> Result<Options, String> {
         compile_only,
         tick_limit,
         dump_ir_dir,
+        dump_ir_and_run,
         native_profile_blocks,
         pass_overrides,
+        native_memory_width,
+        x86_slp,
     })
 }
 
@@ -469,7 +589,7 @@ fn parse_pass_override(value: &str) -> Result<(bool, SirPass), String> {
 }
 
 fn usage() -> &'static str {
-    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O2] [--sir-pass +/-name ...] [--four-state] [--compile-only] [--tick-limit N] [--dump-ir-dir <dir>] [--native-profile-block FUNCTION:BLOCK:SAMPLES ...]"
+    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O2] [--sir-pass +/-name ...] [--native-memory-width 64|128] [--x86-slp on|off] [--four-state] [--compile-only] [--tick-limit N] [--dump-ir-dir <dir>] [--dump-ir-and-run] [--native-profile-block FUNCTION:BLOCK:SAMPLES ...]"
 }
 
 fn load_sources(

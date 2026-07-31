@@ -295,6 +295,8 @@ pub struct OptimizeOptions {
     opt_level: OptLevel,
     enabled: crate::HashSet<SirPass>,
     disabled: crate::HashSet<SirPass>,
+    max_native_memory_width: usize,
+    x86_slp: bool,
 }
 
 impl Default for OptimizeOptions {
@@ -310,6 +312,12 @@ impl OptimizeOptions {
             opt_level: level,
             enabled: crate::HashSet::default(),
             disabled: crate::HashSet::default(),
+            max_native_memory_width: if cfg!(target_arch = "x86_64") {
+                128
+            } else {
+                64
+            },
+            x86_slp: cfg!(target_arch = "x86_64"),
         }
     }
 
@@ -335,6 +343,35 @@ impl OptimizeOptions {
         self.enabled.remove(&pass);
         self.disabled.insert(pass);
         self
+    }
+
+    /// Set the largest contiguous Store represented as one SIR value.
+    ///
+    /// 64 preserves scalar word-sized placement. 128 exposes one x86 vector
+    /// to target SLP while wider stores are still split before lowering.
+    pub fn with_max_native_memory_width(mut self, width: usize) -> Self {
+        assert!(
+            matches!(width, 64 | 128),
+            "coalesced Store width must be 64 or 128 bits"
+        );
+        self.max_native_memory_width = width;
+        self
+    }
+
+    pub fn max_native_memory_width(&self) -> usize {
+        self.max_native_memory_width
+    }
+
+    /// Enable or disable target-owned x86 SLP selection after scalar MIR
+    /// optimization. This is independent of SIR memory coalescing width so
+    /// profitability can be measured without conflating the two transforms.
+    pub fn with_x86_slp(mut self, enable: bool) -> Self {
+        self.x86_slp = enable;
+        self
+    }
+
+    pub fn x86_slp_enabled(&self) -> bool {
+        self.x86_slp
     }
 
     /// Query whether a specific pass is active.

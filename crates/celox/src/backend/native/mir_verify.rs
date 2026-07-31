@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
-use super::mir::{BlockId, MFunction, MInst, OpSize, SparseCommitDescriptor, VReg};
+use super::mir::{BlockId, MFunction, MInst, OpSize, SparseCommitDescriptor, VReg, X86VecReg};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirVerifyError {
@@ -248,6 +248,70 @@ pub fn verify_function(func: &MFunction) -> Result<(), MirVerifyError> {
                 verify_use(&defs, &dominators, block.id, index, reg, None)?;
             }
         }
+    }
+    verify_x86_vector_ssa(func)?;
+    Ok(())
+}
+
+fn verify_x86_vector_ssa(func: &MFunction) -> Result<(), MirVerifyError> {
+    let mut globally_defined = BTreeSet::<X86VecReg>::new();
+    for block in &func.blocks {
+        let mut locally_defined = BTreeSet::<X86VecReg>::new();
+        for (instruction, inst) in block.insts.iter().enumerate() {
+            for used in inst.x86_vec_uses().into_iter().flatten() {
+                if used.0 >= func.x86_vec_count() {
+                    return Err(MirVerifyError::instruction(
+                        "X86_VECTOR.ALLOCATED",
+                        block.id,
+                        instruction,
+                        format!(
+                            "{used} is outside allocated vector range 0..{}",
+                            func.x86_vec_count()
+                        ),
+                    ));
+                }
+                if !locally_defined.contains(&used) {
+                    return Err(MirVerifyError::instruction(
+                        "X86_VECTOR.BLOCK_LOCAL_DOMINANCE",
+                        block.id,
+                        instruction,
+                        format!("{used} has no earlier definition in this block"),
+                    ));
+                }
+            }
+            if let Some(defined) = inst.x86_vec_def() {
+                if defined.0 >= func.x86_vec_count() {
+                    return Err(MirVerifyError::instruction(
+                        "X86_VECTOR.ALLOCATED",
+                        block.id,
+                        instruction,
+                        format!(
+                            "{defined} is outside allocated vector range 0..{}",
+                            func.x86_vec_count()
+                        ),
+                    ));
+                }
+                if !globally_defined.insert(defined) {
+                    return Err(MirVerifyError::instruction(
+                        "X86_VECTOR.SINGLE_DEFINITION",
+                        block.id,
+                        instruction,
+                        format!("{defined} has more than one definition"),
+                    ));
+                }
+                locally_defined.insert(defined);
+            }
+        }
+    }
+    if globally_defined.len() != func.x86_vec_count() as usize {
+        return Err(MirVerifyError::function(
+            "X86_VECTOR.ALL_ALLOCATED_VALUES_DEFINED",
+            format!(
+                "{} vector values were allocated but {} were defined",
+                func.x86_vec_count(),
+                globally_defined.len()
+            ),
+        ));
     }
     Ok(())
 }

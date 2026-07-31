@@ -266,6 +266,17 @@ pub(crate) fn optimize_native_merged_chain(
         eu.verify_result()
             .map_err(|error| ("after native packed phi forwarding", error))?;
     }
+    if !four_state {
+        // Fusion and the native-only packed/control rewrites above can create
+        // new branch-local pure suffixes after the ordinary per-EU placement
+        // pass has already run.  Recompute placement on this final CFG so a
+        // value used only by one selected arm is not evaluated in the branch
+        // head and kept live across the edge.
+        pass_guarded_region_sinking::sink_pure_values_with_predicate_repair(eu);
+        changed = true;
+        eu.verify_result()
+            .map_err(|error| ("after native final pure-value placement", error))?;
+    }
     if changed {
         pass_vectorize_concat::remove_dead_definitions(eu);
         eu.verify_result()
@@ -885,6 +896,7 @@ fn optimize_with_options(
         optimize_options: opt.clone(),
         preserve_element_storage_layout,
     };
+    let max_native_memory_width = opt.max_native_memory_width();
     let unpacked_element_widths = Arc::new(
         program
             .instance_module
@@ -977,7 +989,10 @@ fn optimize_with_options(
         ff_passes.add_pass(IndexedStoreRecoveryPass::for_program(program));
     }
     if on(SirPass::ConcatFolding) {
-        ff_passes.add_pass(ConcatFoldingPass::new(Arc::clone(&unpacked_element_widths)));
+        ff_passes.add_pass(ConcatFoldingPass::new(
+            Arc::clone(&unpacked_element_widths),
+            max_native_memory_width,
+        ));
     }
     if on(SirPass::XorChainFolding) {
         ff_passes.add_pass(XorChainFoldingPass);
@@ -997,6 +1012,7 @@ fn optimize_with_options(
     if on(SirPass::CoalesceStores) {
         ff_passes.add_pass(CoalesceStoresPass {
             element_widths: Arc::clone(&element_widths),
+            max_store_width: max_native_memory_width,
         });
     }
     if on(SirPass::SplitWideCommits) {
@@ -1028,7 +1044,10 @@ fn optimize_with_options(
         comb_ff_passes.add_pass(IndexedStoreRecoveryPass::for_program(program));
     }
     if on(SirPass::ConcatFolding) {
-        comb_ff_passes.add_pass(ConcatFoldingPass::new(Arc::clone(&unpacked_element_widths)));
+        comb_ff_passes.add_pass(ConcatFoldingPass::new(
+            Arc::clone(&unpacked_element_widths),
+            max_native_memory_width,
+        ));
     }
     if on(SirPass::XorChainFolding) {
         comb_ff_passes.add_pass(XorChainFoldingPass);
@@ -1063,6 +1082,7 @@ fn optimize_with_options(
     if on(SirPass::CoalesceStores) {
         comb_ff_passes.add_pass(CoalesceStoresPass {
             element_widths: Arc::clone(&element_widths),
+            max_store_width: max_native_memory_width,
         });
     }
     if on(SirPass::VectorizeConcat) {
@@ -1128,7 +1148,9 @@ fn optimize_with_options(
     // Coalescing reduces memory ops, but keeping a wide Concat live until its
     // Store can create unnecessary pressure.  Split it after scheduling.
     if on(SirPass::SplitCoalescedStores) {
-        ff_post_passes.add_pass(SplitCoalescedStoresPass);
+        ff_post_passes.add_pass(SplitCoalescedStoresPass {
+            max_store_width: max_native_memory_width,
+        });
     }
     let mut comb_ff_post_passes = ExecutionUnitPassManager::new()
         .with_unpacked_element_widths(Arc::clone(&unpacked_element_widths));
@@ -1139,7 +1161,9 @@ fn optimize_with_options(
         comb_ff_post_passes.add_pass(ReschedulePass);
     }
     if on(SirPass::SplitCoalescedStores) {
-        comb_ff_post_passes.add_pass(SplitCoalescedStoresPass);
+        comb_ff_post_passes.add_pass(SplitCoalescedStoresPass {
+            max_store_width: max_native_memory_width,
+        });
     }
     optimize_unit_groups_cached(&mut program.eval_apply_ffs, &ff_post_passes, &options);
     optimize_unit_groups_cached(
@@ -1172,7 +1196,10 @@ fn optimize_with_options(
         eval_only_passes.add_pass(IndexedStoreRecoveryPass::for_program(program));
     }
     if on(SirPass::ConcatFolding) {
-        eval_only_passes.add_pass(ConcatFoldingPass::new(Arc::clone(&unpacked_element_widths)));
+        eval_only_passes.add_pass(ConcatFoldingPass::new(
+            Arc::clone(&unpacked_element_widths),
+            max_native_memory_width,
+        ));
     }
     if on(SirPass::XorChainFolding) {
         eval_only_passes.add_pass(XorChainFoldingPass);
@@ -1192,6 +1219,7 @@ fn optimize_with_options(
     if on(SirPass::CoalesceStores) {
         eval_only_passes.add_pass(CoalesceStoresPass {
             element_widths: Arc::clone(&element_widths),
+            max_store_width: max_native_memory_width,
         });
     }
     if on(SirPass::Reschedule) {
@@ -1229,6 +1257,7 @@ fn optimize_with_options(
     if on(SirPass::CoalesceStores) {
         apply_passes.add_pass(CoalesceStoresPass {
             element_widths: Arc::clone(&element_widths),
+            max_store_width: max_native_memory_width,
         });
     }
     if on(SirPass::SplitWideCommits) {
@@ -1271,7 +1300,10 @@ fn optimize_with_options(
         }
     }
     if on(SirPass::ConcatFolding) {
-        comb_passes.add_pass(ConcatFoldingPass::new(Arc::clone(&unpacked_element_widths)));
+        comb_passes.add_pass(ConcatFoldingPass::new(
+            Arc::clone(&unpacked_element_widths),
+            max_native_memory_width,
+        ));
     }
     if on(SirPass::XorChainFolding) {
         comb_passes.add_pass(XorChainFoldingPass);
@@ -1307,6 +1339,7 @@ fn optimize_with_options(
     if on(SirPass::CoalesceStores) {
         comb_passes.add_pass(CoalesceStoresPass {
             element_widths: Arc::clone(&element_widths),
+            max_store_width: max_native_memory_width,
         });
     }
     if on(SirPass::VectorizeConcat) {

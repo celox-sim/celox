@@ -135,6 +135,26 @@ impl fmt::Display for VReg {
     }
 }
 
+/// Virtual 128-bit x86 vector register.
+///
+/// Vector values deliberately have a namespace and register class separate
+/// from scalar [`VReg`]s.  Treating an XMM-resident value as a scalar VReg
+/// would make the GPR allocator create pointless copies and spills.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct X86VecReg(pub u32);
+
+impl fmt::Debug for X86VecReg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "xv{}", self.0)
+    }
+}
+
+impl fmt::Display for X86VecReg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "xv{}", self.0)
+    }
+}
+
 /// Index of an immutable u64 constant table owned by an [`MFunction`].
 ///
 /// The emitter materializes table addresses relative to the generated code,
@@ -585,6 +605,13 @@ pub struct SparseCommitDescriptor {
     pub four_state: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum X86SimdBinaryOp {
+    And,
+    Or,
+    Xor,
+}
+
 impl SparseCommitDescriptor {
     pub const WORDS: usize = 8;
 
@@ -602,6 +629,62 @@ impl SparseCommitDescriptor {
     }
 }
 
+/// Target-owned SIMD operations selected from scalar MIR.
+///
+/// These are executable x86 recipes, not architecture-neutral vector
+/// semantics. Scalar MIR remains the semantic fallback when a pack is not
+/// legal or profitable for this target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum X86SimdInst {
+    /// `dst = <0, 0>`, emitted with a dependency-breaking x86 zero idiom.
+    Zero128 { dst: X86VecReg },
+    /// `dst = <low, high>`, with each scalar becoming one 64-bit lane.
+    Pack128 {
+        dst: X86VecReg,
+        low: VReg,
+        high: VReg,
+    },
+    /// `dst = load 16 bytes [base + offset]`.
+    Load128 {
+        dst: X86VecReg,
+        base: BaseReg,
+        offset: i32,
+    },
+    /// `dst = op(lhs, rhs)` over two independent 64-bit lanes.
+    Binary128 {
+        op: X86SimdBinaryOp,
+        dst: X86VecReg,
+        lhs: X86VecReg,
+        rhs: X86VecReg,
+    },
+    /// `store 16 bytes [base + offset] = src`.
+    Store128 {
+        base: BaseReg,
+        offset: i32,
+        src: X86VecReg,
+    },
+}
+
+impl X86SimdInst {
+    pub fn def(self) -> Option<X86VecReg> {
+        match self {
+            Self::Zero128 { dst }
+            | Self::Pack128 { dst, .. }
+            | Self::Load128 { dst, .. }
+            | Self::Binary128 { dst, .. } => Some(dst),
+            Self::Store128 { .. } => None,
+        }
+    }
+
+    pub fn uses(self) -> [Option<X86VecReg>; 2] {
+        match self {
+            Self::Zero128 { .. } | Self::Pack128 { .. } | Self::Load128 { .. } => [None, None],
+            Self::Binary128 { lhs, rhs, .. } => [Some(lhs), Some(rhs)],
+            Self::Store128 { src, .. } => [Some(src), None],
+        }
+    }
+}
+
 // ────────────────────────────────────────────────────────────────
 // MIR instructions
 // ────────────────────────────────────────────────────────────────
@@ -612,6 +695,9 @@ impl SparseCommitDescriptor {
 /// handles x86-64's 2-operand constraint by inserting mov when needed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MInst {
+    /// Explicit target-specific SIMD instruction with its own register class.
+    X86Simd(X86SimdInst),
+
     // ── Data movement ──────────────────────────────────────────
     /// dst = src (full 64-bit word copy)
     Mov { dst: VReg, src: VReg },
@@ -1006,6 +1092,21 @@ pub enum MInst {
 impl fmt::Display for MInst {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            MInst::X86Simd(X86SimdInst::Zero128 { dst }) => {
+                write!(f, "{dst} = x86.zero.v128")
+            }
+            MInst::X86Simd(X86SimdInst::Pack128 { dst, low, high }) => {
+                write!(f, "{dst} = x86.pack.v2i64 {low}, {high}")
+            }
+            MInst::X86Simd(X86SimdInst::Load128 { dst, base, offset }) => {
+                write!(f, "{dst} = x86.load.v128 [{base} + {offset}]")
+            }
+            MInst::X86Simd(X86SimdInst::Binary128 { op, dst, lhs, rhs }) => {
+                write!(f, "{dst} = x86.{op:?}.v2i64 {lhs}, {rhs}")
+            }
+            MInst::X86Simd(X86SimdInst::Store128 { base, offset, src }) => {
+                write!(f, "x86.store.v128 [{base} + {offset}], {src}")
+            }
             MInst::Mov { dst, src } => write!(f, "{dst} = mov.w64 {src}"),
             MInst::Mov32 { dst, src } => write!(f, "{dst} = mov.w32 {src}"),
             MInst::LoadImm { dst, value } => write!(f, "{dst} = imm {value:#x}"),
@@ -1354,6 +1455,20 @@ impl fmt::Display for MFunction {
 }
 
 impl MInst {
+    pub fn x86_vec_def(&self) -> Option<X86VecReg> {
+        match self {
+            Self::X86Simd(inst) => inst.def(),
+            _ => None,
+        }
+    }
+
+    pub fn x86_vec_uses(&self) -> [Option<X86VecReg>; 2] {
+        match self {
+            Self::X86Simd(inst) => inst.uses(),
+            _ => [None, None],
+        }
+    }
+
     /// Returns the destination VReg, if any.
     pub fn def(&self) -> Option<VReg> {
         match self {
@@ -1412,6 +1527,7 @@ impl MInst {
             | MInst::GuardedCmpSelect { dst, .. } => Some(*dst),
 
             MInst::Store { .. }
+            | MInst::X86Simd(_)
             | MInst::AndStoreImm { .. }
             | MInst::OrStoreImm { .. }
             | MInst::StorePtr { .. }
@@ -1496,6 +1612,7 @@ impl MInst {
             | MInst::GuardedCmpSelect { dst, .. } => Some(dst),
 
             MInst::Store { .. }
+            | MInst::X86Simd(_)
             | MInst::AndStoreImm { .. }
             | MInst::OrStoreImm { .. }
             | MInst::StorePtr { .. }
@@ -1523,7 +1640,12 @@ impl MInst {
     pub fn uses(&self) -> Uses {
         match self {
             MInst::Mov { src, .. } | MInst::Mov32 { src, .. } => Uses::one(*src),
+            MInst::X86Simd(X86SimdInst::Pack128 { low, high, .. }) => Uses::two(*low, *high),
             MInst::LoadImm { .. }
+            | MInst::X86Simd(X86SimdInst::Zero128 { .. })
+            | MInst::X86Simd(X86SimdInst::Load128 { .. })
+            | MInst::X86Simd(X86SimdInst::Binary128 { .. })
+            | MInst::X86Simd(X86SimdInst::Store128 { .. })
             | MInst::Scratch { .. }
             | MInst::LoadConstantTableAddr { .. }
             | MInst::Load { .. }
@@ -1651,6 +1773,14 @@ impl MInst {
             MInst::Mov { src, .. } | MInst::Mov32 { src, .. } => {
                 if *src == old {
                     *src = new;
+                }
+            }
+            MInst::X86Simd(X86SimdInst::Pack128 { low, high, .. }) => {
+                if *low == old {
+                    *low = new;
+                }
+                if *high == old {
+                    *high = new;
                 }
             }
             MInst::Store { src, .. } => {
@@ -1919,6 +2049,10 @@ impl MInst {
                 }
             }
             MInst::LoadImm { .. }
+            | MInst::X86Simd(X86SimdInst::Zero128 { .. })
+            | MInst::X86Simd(X86SimdInst::Load128 { .. })
+            | MInst::X86Simd(X86SimdInst::Binary128 { .. })
+            | MInst::X86Simd(X86SimdInst::Store128 { .. })
             | MInst::Scratch { .. }
             | MInst::LoadConstantTableAddr { .. }
             | MInst::Load { .. }
@@ -2052,6 +2186,8 @@ pub struct MFunction {
     pub spill_descs: Vec<SpillDesc>,
     /// VReg allocator (for the spilling phase to allocate reload regs).
     pub vregs: VRegAllocator,
+    /// Number of target-specific virtual XMM values allocated by x86 SLP.
+    x86_vec_count: u32,
     /// Immutable u64 lookup tables embedded in the emitted function body.
     constant_tables: Vec<Vec<u64>>,
     /// Target facts shared by optimization, register allocation, and emission.
@@ -2064,9 +2200,23 @@ impl MFunction {
             blocks: Vec::new(),
             spill_descs,
             vregs,
+            x86_vec_count: 0,
             constant_tables: Vec::new(),
             target_features: super::features::X86Features::detect(),
         }
+    }
+
+    pub fn alloc_x86_vec(&mut self) -> X86VecReg {
+        let value = X86VecReg(self.x86_vec_count);
+        self.x86_vec_count = self
+            .x86_vec_count
+            .checked_add(1)
+            .expect("x86 vector VReg overflow");
+        value
+    }
+
+    pub fn x86_vec_count(&self) -> u32 {
+        self.x86_vec_count
     }
 
     /// Return the stable identity of `values`, reusing an identical table.

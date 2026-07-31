@@ -117,10 +117,19 @@ fn compile_units(
     layout: &MemoryLayout,
     four_state: bool,
     label: &str,
+    enable_x86_slp: bool,
     capture_trace: bool,
 ) -> Result<CompiledNativeFunction, SimulatorError> {
     let units = units.iter().collect::<Vec<_>>();
-    compile_unit_refs(&units, layout, four_state, label, None, capture_trace)
+    compile_unit_refs(
+        &units,
+        layout,
+        four_state,
+        label,
+        None,
+        enable_x86_slp,
+        capture_trace,
+    )
 }
 
 fn compile_unit_refs(
@@ -129,6 +138,7 @@ fn compile_unit_refs(
     four_state: bool,
     label: &str,
     first_ff_unit: Option<usize>,
+    enable_x86_slp: bool,
     capture_trace: bool,
 ) -> Result<CompiledNativeFunction, SimulatorError> {
     let timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
@@ -176,6 +186,7 @@ fn compile_unit_refs(
         four_state,
         label,
         first_ff_unit,
+        enable_x86_slp,
         trace.as_mut(),
     )
     .map_err(|e| codegen_err(format!("emit error: {e}")))?;
@@ -505,12 +516,14 @@ fn compile_program(
     let next_task = AtomicUsize::new(0);
     let (comb_jit, mut compiled_ff_codes) = std::thread::scope(|scope| {
         let four_state = options.four_state;
+        let enable_x86_slp = options.optimize_options.x86_slp_enabled();
         let comb_handle = scope.spawn(move || {
             compile_units(
                 &sir.eval_comb,
                 layout,
                 four_state,
                 "eval_comb",
+                enable_x86_slp,
                 capture_trace,
             )
         });
@@ -534,6 +547,7 @@ fn compile_program(
                             four_state,
                             task.label,
                             task.first_ff_unit,
+                            enable_x86_slp,
                             capture_trace,
                         )?;
                         compiled.push((task_id, code));

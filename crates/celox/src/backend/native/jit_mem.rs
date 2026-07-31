@@ -1,8 +1,10 @@
 //! JIT memory: load emitted machine code into executable memory and call it.
 
-use std::io::Write;
+use std::{io::Write, sync::Mutex};
 
 use memmap2::{Mmap, MmapMut};
+
+static PERF_MAP_INITIALIZED: Mutex<bool> = Mutex::new(false);
 
 /// Optional subrange symbol for Linux perf JIT maps.
 pub struct JitSymbol {
@@ -93,10 +95,22 @@ fn write_perf_map_entries(
     }
 
     let path = format!("/tmp/perf-{}.map", std::process::id());
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    // Containerized runs can reuse a PID while the previous process's map is
+    // still present in /tmp.  Retaining those entries makes perf resolve an
+    // address to an unrelated block from an older compilation.  Truncate once
+    // per process, then append the remaining native functions to the same map.
+    let mut initialized = PERF_MAP_INITIALIZED
+        .lock()
+        .map_err(|_| std::io::Error::other("perf map initialization lock was poisoned"))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true);
+    if *initialized {
+        options.append(true);
+    } else {
+        options.truncate(true);
+    }
+    let mut file = options.open(path)?;
+    *initialized = true;
     if symbols.is_empty() {
         writeln!(file, "{addr:x} {size:x} {}", sanitize_perf_symbol(name))?;
     } else {

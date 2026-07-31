@@ -15,6 +15,7 @@ pub mod mir_verify;
 pub mod regalloc;
 mod sparse_write_state;
 pub(crate) mod ssa_destroy;
+pub(crate) mod x86_slp;
 
 pub use backend::{NativeBackend, SharedNativeCode};
 

@@ -7,12 +7,19 @@ use std::sync::Arc;
 use super::block_opt::aggregate_static_offset;
 use super::pass_manager::ExecutionUnitPass;
 
-#[derive(Default)]
 pub(super) struct CoalesceStoresPass {
     pub element_widths: Arc<HashMap<RegionedAbsoluteAddr, usize>>,
+    pub max_store_width: usize,
 }
 
-const MAX_COALESCED_STORE_WIDTH: usize = 64;
+impl Default for CoalesceStoresPass {
+    fn default() -> Self {
+        Self {
+            element_widths: Arc::default(),
+            max_store_width: 64,
+        }
+    }
+}
 
 impl ExecutionUnitPass for CoalesceStoresPass {
     fn name(&self) -> &'static str {
@@ -28,6 +35,7 @@ impl ExecutionUnitPass for CoalesceStoresPass {
                 &mut eu.register_map,
                 &mut reg_counter,
                 &self.element_widths,
+                self.max_store_width,
             );
         }
     }
@@ -48,6 +56,7 @@ fn coalesce_block(
     register_map: &mut HashMap<RegisterId, RegisterType>,
     reg_counter: &mut usize,
     element_widths: &HashMap<RegionedAbsoluteAddr, usize>,
+    max_store_width: usize,
 ) {
     // Step 1: Collect Store groups, sealing on reads.
     //
@@ -130,6 +139,9 @@ fn coalesce_block(
                 scan_end += 1;
                 expected += next.width;
                 let aggregate_width = expected - group[run_start].offset;
+                if aggregate_width > max_store_width {
+                    break;
+                }
                 if aggregate_static_offset(
                     group[run_start].offset,
                     aggregate_width,
@@ -153,10 +165,7 @@ fn coalesce_block(
                 let sub_run = &group[run_start..=run_end];
                 let merged_lsb = sub_run[0].offset;
                 let total_width: usize = sub_run.iter().map(|c| c.width).sum();
-                if total_width > MAX_COALESCED_STORE_WIDTH {
-                    run_start = run_end + 1;
-                    continue;
-                }
+                debug_assert!(total_width <= max_store_width);
                 let anchor_index = sub_run.iter().map(|c| c.inst_index).max().unwrap();
                 let removed_indices: Vec<usize> = sub_run.iter().map(|c| c.inst_index).collect();
 
@@ -384,6 +393,51 @@ mod tests {
             }
             other => panic!("Expected wide Store, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn partitions_a_long_run_at_the_configured_memory_width() {
+        let addr = make_addr(0);
+        let register_map = (0..4)
+            .map(|index| {
+                (
+                    RegisterId(index),
+                    RegisterType::Bit {
+                        width: 64,
+                        signed: false,
+                    },
+                )
+            })
+            .collect();
+        let instructions = (0..4)
+            .map(|index| {
+                SIRInstruction::Store(
+                    addr,
+                    SIROffset::Static(index * 64),
+                    64,
+                    RegisterId(index),
+                    vec![],
+                    vec![],
+                )
+            })
+            .collect();
+        let mut eu = make_eu(instructions, register_map);
+
+        CoalesceStoresPass {
+            element_widths: Arc::default(),
+            max_store_width: 128,
+        }
+        .run(&mut eu, &PassOptions::default());
+
+        let widths = eu.blocks[&BlockId(0)]
+            .instructions
+            .iter()
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(_, _, width, ..) => Some(*width),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(widths, vec![128, 128]);
     }
 
     #[test]
@@ -667,6 +721,7 @@ mod tests {
         let mut eu = make_eu(instructions, register_map);
         let pass = CoalesceStoresPass {
             element_widths: Arc::new([(addr, 12usize)].into_iter().collect()),
+            max_store_width: 64,
         };
 
         pass.run(&mut eu, &PassOptions::default());
