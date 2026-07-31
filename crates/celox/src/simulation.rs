@@ -80,7 +80,9 @@ impl<B: SimBackend> Simulation<B> {
         let num_events = simulator.backend.num_events();
         let topo_signals: Vec<(SignalRef, usize, usize)> = simulator
             .program
-            .topological_clocks
+            .design
+            .events
+            .ordered_events
             .iter()
             .map(|addr| {
                 let signal = simulator.backend.resolve_signal(addr);
@@ -89,12 +91,7 @@ impl<B: SimBackend> Simulation<B> {
                     .resolve_event_opt(addr)
                     .map(|ev| ev.id())
                     .unwrap_or(usize::MAX);
-                let canonical = simulator
-                    .program
-                    .clock_domains
-                    .get(addr)
-                    .copied()
-                    .unwrap_or(*addr);
+                let canonical = simulator.program.design.events.canonical(*addr);
                 let canonical_id = simulator
                     .backend
                     .resolve_event_opt(&canonical)
@@ -136,14 +133,14 @@ impl<B: SimBackend> Simulation<B> {
         ];
         for (id, info) in event_info.iter_mut().enumerate() {
             let addr = simulator.backend.id_to_addr_slice()[id];
-            let canonical = simulator
-                .program
-                .clock_domains
-                .get(&addr)
-                .copied()
-                .unwrap_or(addr);
+            let canonical = simulator.program.design.events.canonical(addr);
 
-            let is_cascaded = simulator.program.cascaded_clocks.contains(&canonical);
+            let is_cascaded = simulator
+                .program
+                .design
+                .events
+                .cascaded_events
+                .contains(&canonical);
 
             let eval_ff_event = simulator.backend.resolve_event_opt(&canonical);
             let eval_only_event = simulator.backend.resolve_eval_only_event(&canonical);

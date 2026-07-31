@@ -9,10 +9,12 @@ crates already exist.
 Migration note: `celox-state-layout` now owns the generic layout algorithm and the compiler driver
 uses a consuming `Program -> LaidOutProgram` transition. The current facade artifact still wraps
 the mixed `Program`, whose execution-unit groups are now held by `celox-sir::SirProgram` and whose
-runtime diagnostics are held by `celox-design::RuntimeSchema`. Cranelift oversized-function
-planning is now constructed from final SIR at the backend boundary; backend scratch extends only
-the backend's private layout copy. Dissolving the remaining design, symbolic, optimizer, and
-testbench payload into the phase-specific target types below remains part of Milestone 3.
+flattened state metadata, event topology, and initial state are held by
+`celox-design::ElaboratedDesign`. Runtime diagnostics are held by
+`celox-design::RuntimeSchema`. Cranelift oversized-function planning is constructed from final SIR
+at the backend boundary; backend scratch extends only the backend's private layout copy.
+Dissolving the remaining frontend lookup, symbolic, optimizer, and testbench payload into the
+phase-specific target types below remains part of Milestone 3.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making
@@ -356,8 +358,10 @@ Cargo features may remove optional dependencies; they must not reverse these edg
 
 ### `ElaboratedDesign`
 
-Contains hierarchy, semantic state objects, clocks/resets, initial values, runtime event schema, and
-source maps required for diagnostics. It contains no SLT/SIR/layout/backend plan.
+Contains semantic hierarchy identities, flattened semantic state objects, clocks/resets, initial
+values, and runtime event schema. Source-language paths and IDs used for diagnostics or public
+lookup stay in a separate frontend/facade lookup artifact. It contains no SLT/SIR/layout/backend
+plan.
 
 ### `SymbolicRtl`
 
@@ -410,7 +414,8 @@ optional testbench bytecode. It has no compiler IR.
 | `eval_comb`, `eval_*_ffs`, `eval_comb_apply_ffs` | `SirProgram` |
 | `comb_semantic_regions` | `ScheduledRtl`, then explicit SIR provenance if still needed |
 | `arena`, `comb_observers` containing `NodeId` | `SymbolicRtl`; consumed before `SirProgram` |
-| hierarchy/module/variable/clock/reset maps | `ElaboratedDesign` |
+| semantic hierarchy/state/clock/reset maps | `ElaboratedDesign` |
+| Veryl module, variable, and path lookup maps | temporary frontend/facade lookup artifact, then compiled diagnostics |
 | runtime errors and event sites | design/runtime schema |
 | `address_aliases` | `LayoutRequirements` with proof identity |
 | `layout: Option<MemoryLayout>` | separate `LaidOutProgram` |

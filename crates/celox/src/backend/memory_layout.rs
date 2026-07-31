@@ -27,19 +27,13 @@ impl LayoutSource<AbsoluteAddr> for Program {
             HashMap::default()
         };
         let state_objects = self
-            .instance_module
+            .design
+            .state_objects
             .iter()
-            .flat_map(|(instance_id, module_id)| {
-                self.module_variables[module_id]
-                    .values()
-                    .map(move |info| StateObjectLayout {
-                        address: AbsoluteAddr {
-                            instance_id: *instance_id,
-                            var_id: info.id,
-                        },
-                        width: info.width,
-                        is_4state: info.is_4state,
-                    })
+            .map(|(&address, metadata)| StateObjectLayout {
+                address,
+                width: metadata.width,
+                is_4state: metadata.is_4state,
             })
             .collect();
 
@@ -65,28 +59,23 @@ impl LayoutSource<AbsoluteAddr> for Program {
 
 fn declared_strided_array_layouts(program: &Program) -> HashMap<AbsoluteAddr, UnpackedArrayLayout> {
     let mut layouts = HashMap::default();
-    for (instance_id, module_id) in &program.instance_module {
-        for info in program.module_variables[module_id].values() {
-            let element_count = info.array_dims.iter().copied().product::<usize>();
-            if element_count <= 1 || info.width % element_count != 0 {
-                continue;
-            }
-            let element_width = info.width / element_count;
-            let element_bytes = get_byte_size(element_width);
-            let element_stride = element_bytes;
-            layouts.insert(
-                AbsoluteAddr {
-                    instance_id: *instance_id,
-                    var_id: info.id,
-                },
-                UnpackedArrayLayout {
-                    element_width,
-                    element_count,
-                    element_stride,
-                    plane_size: element_stride * element_count,
-                },
-            );
+    for (&address, metadata) in &program.design.state_objects {
+        let element_count = metadata.array_dims.iter().copied().product::<usize>();
+        if element_count <= 1 || metadata.width % element_count != 0 {
+            continue;
         }
+        let element_width = metadata.width / element_count;
+        let element_bytes = get_byte_size(element_width);
+        let element_stride = element_bytes;
+        layouts.insert(
+            address,
+            UnpackedArrayLayout {
+                element_width,
+                element_count,
+                element_stride,
+                plane_size: element_stride * element_count,
+            },
+        );
     }
     for (&alias, &canonical) in &program.address_aliases {
         layouts.remove(&alias);

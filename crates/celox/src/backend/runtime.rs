@@ -542,7 +542,7 @@ impl JitBackend {
         let _ = compile_ffs;
 
         // Insert clock_domains aliases so every event signal resolves
-        for (alias, canonical) in &sir.clock_domains {
+        for (alias, canonical) in &sir.design.events.aliases {
             if let Some(&ev) = event_map.get(canonical) {
                 event_map.insert(*alias, ev);
             }
@@ -575,9 +575,11 @@ impl JitBackend {
         if options.four_state {
             for (addr, &offset) in &engine.translator.layout.offsets {
                 let width = engine.translator.layout.widths[addr];
-                let is_4state = sir.module_variables[&sir.instance_module[&addr.instance_id]]
-                    .get(&addr.var_id)
-                    .map(|v| v.is_4state)
+                let is_4state = sir
+                    .design
+                    .state_objects
+                    .get(addr)
+                    .map(|metadata| metadata.is_4state)
                     .unwrap_or(false);
 
                 if is_4state {
@@ -588,9 +590,11 @@ impl JitBackend {
             for (addr, &rel_offset) in &engine.translator.layout.working_offsets {
                 let offset = engine.translator.layout.working_base_offset + rel_offset;
                 let width = engine.translator.layout.widths[addr];
-                let is_4state = sir.module_variables[&sir.instance_module[&addr.instance_id]]
-                    .get(&addr.var_id)
-                    .map(|v| v.is_4state)
+                let is_4state = sir
+                    .design
+                    .state_objects
+                    .get(addr)
+                    .map(|metadata| metadata.is_4state)
                     .unwrap_or(false);
 
                 if is_4state {
