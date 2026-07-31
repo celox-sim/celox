@@ -885,27 +885,18 @@ fn optimize_with_options(
     let max_native_memory_width = opt.max_native_memory_width();
     let unpacked_element_widths = Arc::new(
         program
-            .instance_module
+            .design
+            .state_objects
             .iter()
-            .flat_map(|(&instance_id, &module_id)| {
-                program.module_variables[&module_id]
-                    .values()
-                    .filter_map(move |info| {
-                        let element_count = info
-                            .array_dims
-                            .iter()
-                            .try_fold(1usize, |count, &dimension| count.checked_mul(dimension))?;
-                        (!info.array_dims.is_empty()
-                            && element_count != 0
-                            && info.width % element_count == 0)
-                            .then_some((
-                                AbsoluteAddr {
-                                    instance_id,
-                                    var_id: info.id,
-                                },
-                                info.width / element_count,
-                            ))
-                    })
+            .filter_map(|(&address, metadata)| {
+                let element_count = metadata
+                    .array_dims
+                    .iter()
+                    .try_fold(1usize, |count, &dimension| count.checked_mul(dimension))?;
+                (!metadata.array_dims.is_empty()
+                    && element_count != 0
+                    && metadata.width % element_count == 0)
+                    .then_some((address, metadata.width / element_count))
             })
             .collect::<crate::HashMap<_, _>>(),
     );

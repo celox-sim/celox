@@ -169,61 +169,47 @@ impl CircularPriorityPass {
     pub(super) fn for_program(program: &Program) -> Self {
         let mut bit_array_elements = HashMap::default();
         let mut array_shapes = HashMap::default();
-        for (&instance_id, &module_id) in &program.instance_module {
-            for info in program.module_variables[&module_id].values() {
-                let element_count = if info.array_dims.is_empty() {
-                    info.width
-                } else {
-                    let Some(element_count) = info
-                        .array_dims
-                        .iter()
-                        .try_fold(1usize, |count, &dimension| count.checked_mul(dimension))
-                    else {
+        for (&address, info) in &program.design.state_objects {
+            let element_count = if info.array_dims.is_empty() {
+                info.width
+            } else {
+                let Some(element_count) = info
+                    .array_dims
+                    .iter()
+                    .try_fold(1usize, |count, &dimension| count.checked_mul(dimension))
+                else {
+                    continue;
+                };
+                if info.width != element_count {
+                    let Some(element_width) = info.width.checked_div(element_count) else {
                         continue;
                     };
-                    if info.width != element_count {
-                        let Some(element_width) = info.width.checked_div(element_count) else {
-                            continue;
-                        };
-                        if element_width == 0 || element_width * element_count != info.width {
-                            continue;
-                        }
-                        array_shapes.insert(
-                            AbsoluteAddr {
-                                instance_id,
-                                var_id: info.id,
-                            },
-                            ArrayShape {
-                                element_width,
-                                element_count,
-                            },
-                        );
+                    if element_width == 0 || element_width * element_count != info.width {
                         continue;
                     }
-                    element_count
-                };
-                if element_count == 0 {
-                    continue;
-                }
-                bit_array_elements.insert(
-                    AbsoluteAddr {
-                        instance_id,
-                        var_id: info.id,
-                    },
-                    element_count,
-                );
-                if !info.array_dims.is_empty() {
                     array_shapes.insert(
-                        AbsoluteAddr {
-                            instance_id,
-                            var_id: info.id,
-                        },
+                        address,
                         ArrayShape {
-                            element_width: 1,
+                            element_width,
                             element_count,
                         },
                     );
+                    continue;
                 }
+                element_count
+            };
+            if element_count == 0 {
+                continue;
+            }
+            bit_array_elements.insert(address, element_count);
+            if !info.array_dims.is_empty() {
+                array_shapes.insert(
+                    address,
+                    ArrayShape {
+                        element_width: 1,
+                        element_count,
+                    },
+                );
             }
         }
         Self {

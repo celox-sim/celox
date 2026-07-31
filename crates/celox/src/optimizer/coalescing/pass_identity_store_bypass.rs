@@ -78,24 +78,20 @@ pub(super) fn optimize_program_identity_stores(
 }
 
 fn address_metadata(program: &Program) -> HashMap<AbsoluteAddr, AddressMetadata> {
-    let mut metadata = HashMap::default();
-    for (&instance_id, module_id) in &program.instance_module {
-        if let Some(variables) = program.module_variables.get(module_id) {
-            for variable in variables.values() {
-                metadata.insert(
-                    AbsoluteAddr {
-                        instance_id,
-                        var_id: variable.id,
-                    },
-                    AddressMetadata {
-                        width: variable.width,
-                        is_4state: variable.is_4state,
-                    },
-                );
-            }
-        }
-    }
-    metadata
+    program
+        .design
+        .state_objects
+        .iter()
+        .map(|(&address, metadata)| {
+            (
+                address,
+                AddressMetadata {
+                    width: metadata.width,
+                    is_4state: metadata.is_4state,
+                },
+            )
+        })
+        .collect()
 }
 
 fn optimize_eval_comb_identity_stores(

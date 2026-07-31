@@ -1400,14 +1400,16 @@ pub(crate) fn flatten(
                     eval_comb: Vec::new(),
                 },
                 design: celox_design::ElaboratedDesign::default(),
+                frontend: crate::ir::VerylFrontendLookup {
+                    instance_ids: expanded.clone(),
+                    instance_module: instance_modules.clone(),
+                    module_variables: err_vars,
+                    module_var_path_index: err_path_idx,
+                    module_names: module_names.clone(),
+                },
                 comb_semantic_regions: HashMap::default(),
                 runtime_schema: celox_design::RuntimeSchema::default(),
                 comb_observers: Vec::new(),
-                instance_ids: expanded.clone(),
-                instance_module: instance_modules.clone(),
-                module_variables: err_vars,
-                module_var_path_index: err_path_idx,
-                module_names: module_names.clone(),
                 arena: SLTNodeArena::new(),
                 address_aliases: HashMap::default(),
                 initial_statements: None,
@@ -1605,17 +1607,19 @@ pub(crate) fn flatten(
             },
             initial_state: initial_memory_values,
         },
+        frontend: crate::ir::VerylFrontendLookup {
+            instance_ids: expanded,
+            instance_module: instance_modules,
+            module_variables: mod_vars,
+            module_var_path_index: mod_path_idx,
+            module_names,
+        },
         comb_semantic_regions,
         runtime_schema: celox_design::RuntimeSchema {
             runtime_errors,
             runtime_event_sites,
         },
         comb_observers,
-        instance_ids: expanded,
-        instance_module: instance_modules,
-        module_variables: mod_vars,
-        module_var_path_index: mod_path_idx,
-        module_names,
         arena: global_arena,
         address_aliases: HashMap::default(),
         initial_statements,
@@ -1763,8 +1767,8 @@ fn dump_addr_map_if_requested(program: &Program) {
 
     let filter = parse_addr_map_filter();
     let mut entries = Vec::new();
-    for (&instance_id, &module_id) in &program.instance_module {
-        let Some(vars) = program.module_variables.get(&module_id) else {
+    for (&instance_id, &module_id) in &program.frontend.instance_module {
+        let Some(vars) = program.frontend.module_variables.get(&module_id) else {
             continue;
         };
         for (&var_id, info) in vars {
@@ -1785,6 +1789,7 @@ fn dump_addr_map_if_requested(program: &Program) {
 
     for (instance_id, module_id, var_id, info) in entries {
         let module_name = program
+            .frontend
             .module_names
             .get(&module_id)
             .and_then(|name| resource_table::get_str_value(*name))

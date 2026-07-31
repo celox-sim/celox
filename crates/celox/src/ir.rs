@@ -7,8 +7,9 @@ pub(crate) use celox_design::{
     AbsoluteAddrBase, BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue,
     InitialStateWriteRun, InstanceId, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
     RuntimeEventKind, RuntimeEventSite, RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION,
-    TriggerIdWithKind, TriggerSet, UnaryOp, VarAtomBase, VariableMetadata, WORKING_REGION,
+    TriggerIdWithKind, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
 };
+pub use celox_frontend_veryl::{InstancePath, VariableInfo, VerylFrontendLookup};
 pub(crate) use celox_sir::{
     BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRBuilder, SIRInstruction,
     SIROffset, SIRSwitchCase, SIRTerminator, SIRValue, collect_exact_zero_registers, merge_sir_eus,
@@ -40,39 +41,11 @@ pub enum AddrLookupError {
     AmbiguousPath { path: String },
 }
 
-#[derive(Clone)]
-pub struct VariableInfo {
-    pub id: VarId,
-    pub path: VarPath,
-    pub var_kind: veryl_analyzer::ir::VarKind,
-    pub metadata: VariableMetadata,
-}
-
 pub type InitialMemoryWriteRun = InitialStateWriteRun;
 pub type InitialMemoryData = InitialStateData;
 pub type InitialMemoryValue = InitialStateValue<AbsoluteAddr>;
 pub type ModuleInitialMemoryValue = InitialStateValue<VarId>;
 pub type RuntimeErrorInfo<Addr = AbsoluteAddr> = celox_design::RuntimeErrorInfo<Addr>;
-
-impl std::ops::Deref for VariableInfo {
-    type Target = VariableMetadata;
-
-    fn deref(&self) -> &Self::Target {
-        &self.metadata
-    }
-}
-
-impl fmt::Debug for VariableInfo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("VariableInfo")
-            .field("width", &self.width)
-            .field("id", &self.id)
-            .field("is_4state", &self.is_4state)
-            .field("kind", &self.kind)
-            .field("type_kind", &self.type_kind)
-            .finish()
-    }
-}
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LogicPathId(pub usize);
@@ -99,18 +72,12 @@ pub struct CombObserver<A = AbsoluteAddr> {
 pub struct Program {
     pub sir: SirProgram,
     pub design: celox_design::ElaboratedDesign<AbsoluteAddr>,
+    pub frontend: VerylFrontendLookup,
     /// Semantic comb process for each exact published range. Physical
     /// ExecutionUnit boundaries deliberately do not define these regions.
     pub comb_semantic_regions: HashMap<VarAtomBase<AbsoluteAddr>, u64>,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
     pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
-    pub instance_ids: HashMap<InstancePath, InstanceId>,
-    pub instance_module: HashMap<InstanceId, ModuleId>,
-    pub module_variables: HashMap<ModuleId, HashMap<VarId, VariableInfo>>,
-    /// Reverse index: VarPath → VarId for path-based lookups.
-    /// `None` marks ambiguous paths (multiple VarIds share the same VarPath).
-    pub module_var_path_index: HashMap<ModuleId, HashMap<VarPath, Option<VarId>>>,
-    pub module_names: HashMap<ModuleId, StrId>,
     pub arena: SLTNodeArena<AbsoluteAddr>,
     /// Memory layout aliases: non-canonical → canonical address.
     /// Variables with identity Store→Load roundtrips share physical memory.
@@ -228,6 +195,7 @@ impl Program {
             instance_path_str_id.push((id, path.1));
         }
         let instance_id = *self
+            .frontend
             .instance_ids
             .get(&InstancePath(instance_path_str_id))
             .ok_or_else(|| AddrLookupError::InstanceNotFound {
@@ -237,7 +205,7 @@ impl Program {
                     .collect::<Vec<_>>()
                     .join("."),
             })?;
-        let module_id = self.instance_module[&instance_id];
+        let module_id = self.frontend.instance_module[&instance_id];
         let mut var_path_str_id = Vec::new();
         for path in var_path {
             let id = veryl_parser::resource_table::insert_str(path);
@@ -246,7 +214,7 @@ impl Program {
 
         let target_path = VarPath(var_path_str_id);
         let path_str = var_path.join(".");
-        let entry = self.module_var_path_index[&module_id]
+        let entry = self.frontend.module_var_path_index[&module_id]
             .get(&target_path)
             .ok_or_else(|| AddrLookupError::VariableNotFound {
                 path: path_str.clone(),
@@ -263,12 +231,13 @@ impl Program {
         let var_id = addr.var_id;
 
         let instance_path = self
+            .frontend
             .instance_ids
             .iter()
             .find(|(_, id)| **id == instance_id)
             .map(|(path, _)| path);
-        let module_id = self.instance_module.get(&instance_id).unwrap();
-        let module_vars = self.module_variables.get(module_id).unwrap();
+        let module_id = self.frontend.instance_module.get(&instance_id).unwrap();
+        let module_vars = self.frontend.module_variables.get(module_id).unwrap();
         let var_path = module_vars
             .values()
             .find(|info| info.id == var_id)
@@ -297,8 +266,8 @@ impl Program {
     }
 
     pub fn get_variable_info(&self, addr: &AbsoluteAddr) -> Option<&VariableInfo> {
-        let module_id = self.instance_module.get(&addr.instance_id)?;
-        let module_vars = self.module_variables.get(module_id)?;
+        let module_id = self.frontend.instance_module.get(&addr.instance_id)?;
+        let module_vars = self.frontend.module_variables.get(module_id)?;
         module_vars.get(&addr.var_id)
     }
 
@@ -311,9 +280,10 @@ impl Program {
     /// the frontend tables are consumed rather than retained beside `design`.
     pub(crate) fn verify_design_projection(&self) -> Result<(), String> {
         let expected_count = self
+            .frontend
             .instance_module
             .values()
-            .map(|module_id| self.module_variables[module_id].len())
+            .map(|module_id| self.frontend.module_variables[module_id].len())
             .sum::<usize>();
         if self.design.state_objects.len() != expected_count {
             return Err(format!(
@@ -322,8 +292,8 @@ impl Program {
             ));
         }
 
-        for (&instance_id, module_id) in &self.instance_module {
-            for info in self.module_variables[module_id].values() {
+        for (&instance_id, module_id) in &self.frontend.instance_module {
+            for info in self.frontend.module_variables[module_id].values() {
                 let address = AbsoluteAddr {
                     instance_id,
                     var_id: info.id,
@@ -478,9 +448,6 @@ pub struct SignalRef {
     pub is_4state: bool,
     pub array_layout: Option<SignalArrayLayout>,
 }
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct InstancePath(pub Vec<(StrId, usize)>);
-
 #[derive(Clone)]
 pub struct RelocationModule {
     #[cfg(test)]
