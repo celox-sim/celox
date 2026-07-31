@@ -162,7 +162,6 @@ pub(crate) fn parse_comb_with_loop_recovery(
                 };
 
                 paths.push(LogicPath::<VarId> {
-                    semantic_region: None,
                     target: LogicPathTarget::Var(VarAtomBase::new(*id, lsb, msb)),
                     sources: sources.clone(),
                     previous_sources: sources

@@ -372,7 +372,6 @@ mod slt_root_verify_tests {
 
     fn path(expr: crate::logic_tree::NodeId) -> LogicPath<u32> {
         LogicPath {
-            semantic_region: None,
             target: LogicPathTarget::Var(VarAtomBase::new(2, 0, 7)),
             sources: crate::HashSet::default(),
             previous_sources: crate::HashSet::default(),
@@ -1407,7 +1406,6 @@ pub(crate) fn flatten(
                     module_var_path_index: err_path_idx,
                     module_names: module_names.clone(),
                 },
-                comb_semantic_regions: HashMap::default(),
                 runtime_schema: celox_design::RuntimeSchema::default(),
                 address_aliases: HashMap::default(),
                 initial_statements: None,
@@ -1432,7 +1430,6 @@ pub(crate) fn flatten(
         eprintln!("[flatten] scheduler::sort: {:?}", s.elapsed());
     }
     runtime_errors.extend(schedule.runtime_errors);
-    let comb_semantic_regions = schedule.semantic_regions;
     let schduled: Vec<crate::ir::ExecutionUnit<RegionedAbsoluteAddr>> = schedule
         .execution_units
         .into_iter()
@@ -1621,7 +1618,6 @@ pub(crate) fn flatten(
             module_var_path_index: mod_path_idx,
             module_names,
         },
-        comb_semantic_regions,
         runtime_schema: celox_design::RuntimeSchema {
             runtime_errors,
             runtime_event_sites,
@@ -3315,29 +3311,6 @@ fn relocate_units(
             observer.site_id = runtime_event_site_map[&observer.site_id];
             observer.activation_group = runtime_event_site_map[&observer.activation_group];
         }
-        let instance_region =
-            u64::try_from(id.0).expect("instance identifier exceeds semantic-region domain");
-        for (path_index, logic_path) in relocated_module.comb_blocks.iter_mut().enumerate() {
-            let local_region = match logic_path.semantic_region {
-                Some(process) => {
-                    assert!(
-                        process < (1u64 << 31),
-                        "comb process identifier exceeds semantic-region domain"
-                    );
-                    process
-                }
-                None => {
-                    let path = u64::try_from(path_index)
-                        .expect("logic-path index exceeds semantic-region domain");
-                    assert!(
-                        path < (1u64 << 31),
-                        "logic-path index exceeds semantic-region domain"
-                    );
-                    (1u64 << 31) | path
-                }
-            };
-            logic_path.semantic_region = Some((instance_region << 32) | local_region);
-        }
         comb_blocks.extend(relocated_module.comb_blocks);
         comb_observers.extend(relocated_module.comb_observers);
 
@@ -3548,7 +3521,6 @@ fn build_comb_observer_capture_paths(
                 comb_blocks[idx.0].order_before.insert(path_id);
             }
             comb_blocks.push(LogicPath {
-                semantic_region: None,
                 target: LogicPathTarget::CombCaptureEvent {
                     site_id: observer.site_id,
                     guard: None,
@@ -3580,7 +3552,6 @@ fn build_comb_observer_capture_paths(
                 }
                 comb_blocks[trigger_idx.0].order_before.insert(path_id);
                 comb_blocks.push(LogicPath {
-                    semantic_region: None,
                     target: LogicPathTarget::CombCaptureEvent {
                         site_id: observer.site_id,
                         guard: None,
@@ -3661,7 +3632,6 @@ fn build_comb_observer_capture_paths(
             comb_blocks[idx.0].order_before.insert(path_id);
         }
         comb_blocks.push(LogicPath {
-            semantic_region: None,
             target: LogicPathTarget::CombCaptureEvent {
                 site_id: observer.site_id,
                 guard: observer.guard,
@@ -3719,7 +3689,6 @@ fn build_comb_observer_capture_paths(
                 }
                 comb_blocks[trigger_idx.0].order_before.insert(path_id);
                 comb_blocks.push(LogicPath {
-                    semantic_region: None,
                     target: LogicPathTarget::CombCaptureEvent {
                         site_id: member.site_id,
                         guard: member.guard,

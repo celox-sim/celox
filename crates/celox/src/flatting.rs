@@ -216,7 +216,6 @@ fn atomize_logic_paths(
 
                 let target = VarAtomBase::new(target_var.id, merged_lsb, merged_msb);
                 atomized_paths.push(LogicPath {
-                    semantic_region: path.semantic_region,
                     target: LogicPathTarget::Var(target),
                     sources: filtered_sources,
                     previous_sources: filtered_previous_sources,
@@ -786,7 +785,6 @@ mod tests {
         let mut sources = crate::HashSet::default();
         sources.insert(VarAtomBase::new(source, 0, 23));
         let path = LogicPath {
-            semantic_region: None,
             target: LogicPathTarget::Var(VarAtomBase::new(address, 0, 23)),
             sources,
             previous_sources: crate::HashSet::default(),
