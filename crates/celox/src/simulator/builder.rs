@@ -577,7 +577,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     > {
         let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
         let compile_start = phase_timing.then(crate::timing::now);
-        let (mut program, warnings) = compile_to_sir_with_layout_mode(
+        let (program, warnings) = compile_to_sir_with_layout_mode(
             &self.sources,
             self.top,
             &self.ignored_loops,
@@ -594,18 +594,6 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         )?;
         if let Some(start) = compile_start {
             eprintln!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
-        }
-
-        // Register testbench runtime-event sites before layout fixes the ring geometry.
-        let runtime_sites_start = phase_timing.then(crate::timing::now);
-        crate::testbench::register_runtime_event_sites(&mut program);
-        if let Some(start) = runtime_sites_start {
-            eprintln!(
-                "[phase-timing] register_runtime_event_sites: {:?} runtime_event_sites={} comb_observers={}",
-                start.elapsed(),
-                program.runtime_schema.runtime_event_sites.len(),
-                program.runtime_schema.comb_observers.len()
-            );
         }
 
         // Build memory layout (consumes semantic layout requirements).
@@ -795,10 +783,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             layout_mode,
         );
 
-        let sim_res = program_res.and_then(|(mut program, warnings)| {
-            // Register testbench runtime-event sites before layout fixes the ring geometry.
-            crate::testbench::register_runtime_event_sites(&mut program);
-
+        let sim_res = program_res.and_then(|(program, warnings)| {
             let mut laid_out =
                 program.into_laid_out_with_mode(self.options.four_state, layout_mode);
 
@@ -963,7 +948,7 @@ fn run_dead_store_elimination(
     // Native testbench expressions bypass SIR and read simulator memory
     // directly. Their inputs are therefore external DSE roots just like
     // signals named with `live_signal()`.
-    externally_live.extend(crate::testbench::initial_read_addresses(program));
+    externally_live.extend(program.runtime_schema.testbench_read_roots.iter().copied());
 
     // User-specified live signals
     for (inst_path, var_path) in live_signals {

@@ -1,4 +1,4 @@
-use celox::{ResetType, Simulator, TestResult};
+use celox::{DeadStorePolicy, ResetType, Simulator, TestResult};
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -87,6 +87,33 @@ fn test_counter_fail() {
         Simulator::builder(&code, "t").run_test().unwrap(),
         TestResult::Fail(_),
     ));
+}
+
+#[test]
+fn test_testbench_direct_reads_are_dead_store_roots() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var hidden: logic<8>;
+
+            always_comb {
+                hidden = 8'd7;
+            }
+
+            initial {
+                $assert(hidden == 8'd7);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass,
+    );
 }
 
 // ── Wide signal (>64 bit) ──────────────────────────────────────────────

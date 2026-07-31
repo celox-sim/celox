@@ -22,8 +22,10 @@ scheduler into `Program` has been removed instead of being assigned to a target 
 optimizer-to-layout state-alias contract is now represented by
 `celox-state-layout::LayoutRequirements` and is cleared after physical layout is finalized. Tests
 and consumers construct each backend from an unlaid-out `Program` rather than attempting to
-re-layout the finalized program after identity Stores have been removed. Moving the remaining
-parser implementation, symbolic, optimizer, and testbench payload
+re-layout the finalized program after identity Stores have been removed. Veryl
+testbench runtime-event sites and direct state-read roots are projected into the source-independent
+`RuntimeSchema` before SIR optimization, so optimization and layout no longer traverse testbench
+AST. Moving the remaining parser implementation, symbolic, optimizer, and testbench payload
 into the phase-specific target types below remains part of Milestone 3.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The

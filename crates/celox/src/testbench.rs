@@ -661,19 +661,20 @@ fn count_assert_statements(
     count
 }
 
-pub(crate) fn register_runtime_event_sites(program: &mut Program) {
+pub(crate) fn project_observability(program: &mut Program) {
     let Some(stmts) = program.initial_statements.as_ref() else {
         return;
     };
     let mut sites = Vec::new();
     collect_runtime_event_sites(stmts, &program.tb_functions, &mut sites);
     program.runtime_schema.runtime_event_sites.extend(sites);
+    program.runtime_schema.testbench_read_roots = initial_read_addresses(program);
 }
 
 /// Return top-module signals read by the native testbench. Testbench bytecode
 /// reads these directly from simulator memory, so they are external roots for
 /// dead-store elimination even though no SIR execution unit loads them.
-pub(crate) fn initial_read_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
+fn initial_read_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
     let Some(stmts) = program.initial_statements.as_ref() else {
         return crate::HashSet::default();
     };
