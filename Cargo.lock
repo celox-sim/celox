@@ -409,6 +409,7 @@ dependencies = [
  "bit-set 0.11.1",
  "celox-analysis",
  "celox-macros",
+ "celox-sir",
  "chrono",
  "clap",
  "cranelift",
@@ -491,6 +492,17 @@ dependencies = [
  "veryl-metadata",
  "veryl-parser",
  "veryl-path",
+]
+
+[[package]]
+name = "celox-sir"
+version = "0.18.0"
+dependencies = [
+ "celox-analysis",
+ "fxhash",
+ "num-bigint",
+ "num-traits",
+ "serde",
 ]
 
 [[package]]

@@ -3,7 +3,7 @@
 use std::fmt;
 
 use celox_analysis::cfg::{ControlFlowGraph, ForwardControlFlowGraph};
-pub(crate) use celox_analysis::cfg::{
+pub use celox_analysis::cfg::{
     DominatorTree, NaturalLoop, PostDominatorTree, StronglyConnectedRegion,
 };
 
@@ -12,7 +12,7 @@ use crate::HashMap;
 use super::{BlockId, ExecutionUnit, SIRTerminator};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SirCfgError {
+pub enum SirCfgError {
     Empty,
     MissingEntry(BlockId),
     BlockIdentity { key: BlockId, embedded: BlockId },
@@ -52,7 +52,7 @@ impl std::error::Error for SirCfgError {}
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Some analyses are intentionally ahead of their first consumer.
-pub(crate) struct SirCfg {
+pub struct SirCfg {
     /// Reachable blocks in deterministic reverse postorder. The entry is 0.
     pub block_ids: Vec<BlockId>,
     pub index: HashMap<BlockId, usize>,
@@ -74,7 +74,7 @@ pub(crate) struct SirCfg {
 
 #[allow(dead_code)]
 impl SirCfg {
-    pub(crate) fn analyze<A>(eu: &ExecutionUnit<A>) -> Result<Self, SirCfgError> {
+    pub fn analyze<A>(eu: &ExecutionUnit<A>) -> Result<Self, SirCfgError> {
         let IndexedSirGraph {
             block_ids,
             index,
@@ -104,7 +104,7 @@ impl SirCfg {
     ///
     /// This mode intentionally omits postdominance and control-dependence
     /// tables, which can be dense on a large branchy SIR function.
-    pub(crate) fn analyze_forward<A>(eu: &ExecutionUnit<A>) -> Result<Self, SirCfgError> {
+    pub fn analyze_forward<A>(eu: &ExecutionUnit<A>) -> Result<Self, SirCfgError> {
         let IndexedSirGraph {
             block_ids,
             index,
@@ -135,7 +135,7 @@ impl SirCfg {
     /// Analyze only forward structural properties without constructing a
     /// dominance frontier.  Use this for repeated legality queries which need
     /// dominance but do not build SSA.
-    pub(crate) fn analyze_forward_structure<A>(eu: &ExecutionUnit<A>) -> Result<Self, SirCfgError> {
+    pub fn analyze_forward_structure<A>(eu: &ExecutionUnit<A>) -> Result<Self, SirCfgError> {
         let IndexedSirGraph {
             block_ids,
             index,
@@ -165,7 +165,7 @@ impl SirCfg {
 
     /// Analyze forward and reverse structural properties without materializing
     /// dominance frontiers or control-dependence tables.
-    pub(crate) fn analyze_structure<A>(eu: &ExecutionUnit<A>) -> Result<Self, SirCfgError> {
+    pub fn analyze_structure<A>(eu: &ExecutionUnit<A>) -> Result<Self, SirCfgError> {
         let IndexedSirGraph {
             block_ids,
             index,
@@ -192,11 +192,11 @@ impl SirCfg {
         })
     }
 
-    pub(crate) fn block_index(&self, block: BlockId) -> Option<usize> {
+    pub fn block_index(&self, block: BlockId) -> Option<usize> {
         self.index.get(&block).copied()
     }
 
-    pub(crate) fn dominates(&self, dominator: BlockId, block: BlockId) -> bool {
+    pub fn dominates(&self, dominator: BlockId, block: BlockId) -> bool {
         let (Some(dominator), Some(block)) = (self.block_index(dominator), self.block_index(block))
         else {
             return false;
@@ -204,7 +204,7 @@ impl SirCfg {
         self.dominators.dominates(dominator, block)
     }
 
-    pub(crate) fn common_dominator(&self, left: BlockId, right: BlockId) -> Option<BlockId> {
+    pub fn common_dominator(&self, left: BlockId, right: BlockId) -> Option<BlockId> {
         let left = self.block_index(left)?;
         let right = self.block_index(right)?;
         self.dominators
@@ -212,7 +212,7 @@ impl SirCfg {
             .map(|block| self.block_ids[block])
     }
 
-    pub(crate) fn postdominates(&self, postdominator: BlockId, block: BlockId) -> bool {
+    pub fn postdominates(&self, postdominator: BlockId, block: BlockId) -> bool {
         let (Some(postdominator), Some(block)) =
             (self.block_index(postdominator), self.block_index(block))
         else {
@@ -223,7 +223,7 @@ impl SirCfg {
             .is_some_and(|tree| tree.postdominates(postdominator, block))
     }
 
-    pub(crate) fn common_postdominator(&self, left: BlockId, right: BlockId) -> Option<BlockId> {
+    pub fn common_postdominator(&self, left: BlockId, right: BlockId) -> Option<BlockId> {
         let left = self.block_index(left)?;
         let right = self.block_index(right)?;
         self.postdominators
@@ -232,7 +232,7 @@ impl SirCfg {
             .map(|block| self.block_ids[block])
     }
 
-    pub(crate) fn immediate_postdominator(&self, block: usize) -> Option<usize> {
+    pub fn immediate_postdominator(&self, block: usize) -> Option<usize> {
         self.postdominators.as_ref()?.immediate_postdominator(block)
     }
 }
@@ -367,7 +367,7 @@ fn map_analysis_error(error: celox_analysis::cfg::CfgError) -> SirCfgError {
     }
 }
 
-pub(crate) fn terminator_successors(terminator: &SIRTerminator) -> Vec<BlockId> {
+pub fn terminator_successors(terminator: &SIRTerminator) -> Vec<BlockId> {
     match terminator {
         SIRTerminator::Jump(target, _) => vec![*target],
         SIRTerminator::Branch {
@@ -390,7 +390,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use crate::HashMap;
-    use crate::ir::{BasicBlock, RegisterType};
+    use crate::{BasicBlock, RegisterType};
 
     fn block(id: usize, terminator: SIRTerminator) -> BasicBlock<()> {
         BasicBlock {
@@ -437,7 +437,7 @@ mod tests {
 
     #[test]
     fn computes_diamond_frontiers_and_control_dependence() {
-        let condition = crate::ir::RegisterId(0);
+        let condition = crate::RegisterId(0);
         let mut unit = eu(
             0,
             vec![
@@ -482,7 +482,7 @@ mod tests {
 
     #[test]
     fn forward_analysis_keeps_ssa_frontiers_and_omits_dense_control_tables() {
-        let condition = crate::ir::RegisterId(0);
+        let condition = crate::RegisterId(0);
         let mut unit = eu(
             0,
             vec![
@@ -519,7 +519,7 @@ mod tests {
 
     #[test]
     fn computes_nested_diamond_control_dependence() {
-        let condition = crate::ir::RegisterId(0);
+        let condition = crate::RegisterId(0);
         let mut unit = eu(
             0,
             vec![
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn handles_multiple_exits_with_a_virtual_postdominator_root() {
-        let condition = crate::ir::RegisterId(0);
+        let condition = crate::RegisterId(0);
         let mut unit = eu(
             0,
             vec![
@@ -607,7 +607,7 @@ mod tests {
 
     #[test]
     fn finds_natural_loop_and_irreducible_scc() {
-        let condition = crate::ir::RegisterId(0);
+        let condition = crate::RegisterId(0);
         let mut natural = eu(
             0,
             vec![
@@ -727,7 +727,7 @@ mod tests {
         const TREE_BLOCKS: usize = LEAVES * 2 - 1;
         const JOIN: usize = TREE_BLOCKS;
 
-        let condition = crate::ir::RegisterId(0);
+        let condition = crate::RegisterId(0);
         let mut blocks = Vec::with_capacity(TREE_BLOCKS + 1);
         for id in 0..LEAVES - 1 {
             blocks.push(block(
@@ -826,7 +826,7 @@ mod tests {
 
     #[test]
     fn lengauer_tarjan_and_frontiers_match_set_equations() {
-        let condition = crate::ir::RegisterId(0);
+        let condition = crate::RegisterId(0);
         let mut random = 0x4d59_5df4_d0f3_3173u64;
         for blocks in 2..40usize {
             for _case in 0..20 {

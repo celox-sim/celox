@@ -15,6 +15,7 @@ veryl-parser          = { workspace = true }
 veryl-path            = { workspace = true }
 celox-macros          = { path = "../celox-macros" }
 celox-analysis        = { path = "../celox-analysis" }
+celox-sir             = { path = "../celox-sir" }
 fxhash                = { workspace = true }
 thiserror             = { workspace = true }
 clap                  = { workspace = true }

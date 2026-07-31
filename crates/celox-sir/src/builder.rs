@@ -1,15 +1,21 @@
 use crate::HashMap;
-use crate::ir::{
+use crate::{
     BasicBlock, BlockId, RegisterId, RegisterType, SIRInstruction, SIRTerminator, UnaryOp,
 };
 
 #[derive(Clone)]
-pub(crate) struct SIRBuilder<Addr> {
+pub struct SIRBuilder<Addr> {
     next_reg_id: usize,
     registers: HashMap<RegisterId, RegisterType>,
     current_block_id: Option<BlockId>,
     blocks: HashMap<BlockId, BasicBlock<Addr>>,
     next_block_id: usize,
+}
+
+impl<Addr> Default for SIRBuilder<Addr> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<Addr> SIRBuilder<Addr> {
@@ -158,7 +164,7 @@ impl<Addr> SIRBuilder<Addr> {
     /// a new one.  The current block must be unsealed (it will be sealed
     /// with `Return` automatically).  Returns `None` if the builder has
     /// only one empty block.
-    pub fn flush_eu(&mut self) -> Option<crate::ir::ExecutionUnit<Addr>> {
+    pub fn flush_eu(&mut self) -> Option<crate::ExecutionUnit<Addr>> {
         // If only the initial block and it's empty, nothing to flush
         if self.blocks.len() == 1 {
             let block = self.blocks.values().next().unwrap();
@@ -193,7 +199,7 @@ impl<Addr> SIRBuilder<Addr> {
         self.next_block_id = 1;
         self.current_block_id = Some(BlockId(0));
 
-        Some(crate::ir::ExecutionUnit {
+        Some(crate::ExecutionUnit {
             entry_block_id: BlockId(0),
             blocks,
             register_map: regs,
@@ -203,11 +209,11 @@ impl<Addr> SIRBuilder<Addr> {
 
 #[cfg(test)]
 mod tests {
-    use crate::ir::{SIRValue, UnaryOp};
+    use crate::{SIRValue, UnaryOp};
 
     use super::*;
 
-    fn branch_unit(condition_type: RegisterType) -> crate::ir::ExecutionUnit<usize> {
+    fn branch_unit(condition_type: RegisterType) -> crate::ExecutionUnit<usize> {
         let mut builder = SIRBuilder::new();
         let cond = builder.alloc_reg(condition_type);
         builder.emit(SIRInstruction::Imm(cond, SIRValue::new(0u8)));
@@ -223,7 +229,7 @@ mod tests {
         builder.switch_to_block(else_block);
         builder.seal_block(SIRTerminator::Return);
         let (blocks, register_map, _) = builder.drain();
-        crate::ir::ExecutionUnit {
+        crate::ExecutionUnit {
             entry_block_id: BlockId(0),
             blocks,
             register_map,
