@@ -1,8 +1,5 @@
 mod comb;
 pub use celox_slt::const_inline;
-pub(crate) use celox_slt::matches_slt_count_idiom;
-#[cfg(test)]
-pub(crate) use celox_slt::matches_slt_or_scan_group;
 pub use celox_slt::range_store;
 pub use comb::SLTLoopBound;
 pub use comb::SLTNode;

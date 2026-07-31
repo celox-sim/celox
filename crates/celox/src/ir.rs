@@ -50,23 +50,7 @@ pub type RuntimeErrorInfo<Addr = AbsoluteAddr> = celox_design::RuntimeErrorInfo<
 
 pub(crate) use celox_slt::LogicPathId;
 
-#[derive(Clone, Debug)]
-pub struct CombObserver<A = AbsoluteAddr> {
-    pub site_id: u32,
-    pub activation_group: u32,
-    pub guard: Option<crate::logic_tree::NodeId>,
-    pub args: Vec<crate::logic_tree::NodeId>,
-    pub loop_runner: Option<crate::logic_tree::NodeId>,
-    pub sensitivity: Vec<VarAtomBase<A>>,
-    pub local_inputs: Vec<(A, crate::logic_tree::NodeId)>,
-    pub observed_inputs: Vec<VarAtomBase<A>>,
-    pub position_inputs: Vec<VarAtomBase<A>>,
-    pub preceding_writes: Vec<VarAtomBase<A>>,
-    pub written_before: Vec<VarAtomBase<A>>,
-    pub written_input_atoms: Vec<VarAtomBase<A>>,
-    pub written_inputs: Vec<A>,
-    pub captured_in_loop: bool,
-}
+pub type CombObserver<A = AbsoluteAddr> = celox_slt::CombObserver<A>;
 
 #[derive(Clone)]
 pub struct Program {

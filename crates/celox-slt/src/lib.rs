@@ -45,6 +45,25 @@ pub type SymbolicStore<A, N> = HashMap<A, RangeStore<Option<(N, HashSet<VarAtomB
 /// Bit boundaries discovered while constructing symbolic state.
 pub type BoundaryMap<A> = HashMap<A, BTreeSet<usize>>;
 
+/// Source-independent combinational observation recipe retained until SIR construction.
+#[derive(Clone, Debug)]
+pub struct CombObserver<A> {
+    pub site_id: u32,
+    pub activation_group: u32,
+    pub guard: Option<NodeId>,
+    pub args: Vec<NodeId>,
+    pub loop_runner: Option<NodeId>,
+    pub sensitivity: Vec<VarAtomBase<A>>,
+    pub local_inputs: Vec<(A, NodeId)>,
+    pub observed_inputs: Vec<VarAtomBase<A>>,
+    pub position_inputs: Vec<VarAtomBase<A>>,
+    pub preceding_writes: Vec<VarAtomBase<A>>,
+    pub written_before: Vec<VarAtomBase<A>>,
+    pub written_input_atoms: Vec<VarAtomBase<A>>,
+    pub written_inputs: Vec<A>,
+    pub captured_in_loop: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

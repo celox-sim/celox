@@ -8,7 +8,9 @@ pub mod bitaccess;
 pub mod bitslicer;
 pub mod case;
 mod config;
+pub mod context_width;
 mod error;
+pub mod logic_tree;
 pub mod loop_provenance;
 mod types;
 
@@ -17,7 +19,7 @@ pub use error::{LoweringPhase, ParserError, SourceLocation};
 pub use types::{resolve_dims, resolve_total_width};
 
 use celox_design::{InstanceId, ModuleId, VariableMetadata};
-use fxhash::FxHashMap as HashMap;
+use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::fmt;
 use veryl_analyzer::ir::{Function, Statement, VarId, VarPath};
 use veryl_parser::resource_table::StrId;

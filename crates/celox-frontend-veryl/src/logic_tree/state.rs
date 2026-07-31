@@ -1,6 +1,7 @@
 use veryl_analyzer::ir::VarId;
 
-use crate::{HashSet, ir::VarAtomBase};
+use crate::HashSet;
+use celox_design::VarAtomBase;
 
 use super::NodeId;
 

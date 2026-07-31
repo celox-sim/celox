@@ -1,5 +1,5 @@
 use super::*;
-use crate::parser::case::case_arm_condition_expr;
+use crate::case::case_arm_condition_expr;
 
 pub(super) fn subtract_written_sensitivity<A: Copy + Eq + std::hash::Hash>(
     atoms: impl IntoIterator<Item = VarAtomBase<A>>,

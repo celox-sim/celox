@@ -1,13 +1,11 @@
 use super::*;
 
 use crate::{
+    bitaccess::{celox_value_from_comptime, celox_value_from_comptime_in_context},
+    case::case_arm_condition_expr,
     context_width::{
         ValueContext, binary_semantics, cast_semantics, expression_signed, get_expr_width,
         resolve_binary_op,
-    },
-    parser::{
-        bitaccess::{celox_value_from_comptime, celox_value_from_comptime_in_context},
-        case::case_arm_condition_expr,
     },
 };
 use num_traits::ToPrimitive as _;
@@ -2471,8 +2469,7 @@ fn eval_factor(
             // Also handles constant[const_index] (e.g. IDX[p] in generate loops).
             if comptime.is_const {
                 let is_bare = index.0.is_empty() && select.0.is_empty() && select.1.is_none();
-                let is_static_sel =
-                    !is_bare && crate::parser::bitaccess::is_static_access(index, select);
+                let is_static_sel = !is_bare && crate::bitaccess::is_static_access(index, select);
 
                 let constant = if is_bare {
                     celox_value_from_comptime_in_context(comptime, context_width)
@@ -2503,7 +2500,7 @@ fn eval_factor(
                 }
             }
 
-            let is_static_access = crate::parser::bitaccess::is_static_access(index, select);
+            let is_static_access = crate::bitaccess::is_static_access(index, select);
             if is_static_access {
                 let access = eval_var_select(module, *var_id, index, select)?;
 
@@ -2587,7 +2584,7 @@ fn eval_factor(
                 let is_unmodified = parts.iter().all(|(val, _)| val.is_none());
 
                 let element_width =
-                    crate::parser::bitaccess::get_access_width(module, *var_id, index, select)?;
+                    crate::bitaccess::get_access_width(module, *var_id, index, select)?;
                 if element_width == 0 || element_width > width {
                     return Err(ParserError::illegal_context(
                         "dynamic variable read",
@@ -2683,7 +2680,7 @@ pub(super) fn merge_boundaries(
     base
 }
 
-pub(crate) fn coerce_node_width<A: Hash + Eq + Clone>(
+pub fn coerce_node_width<A: Hash + Eq + Clone>(
     arena: &mut SLTNodeArena<A>,
     expr: NodeId,
     target_width: Option<usize>,
