@@ -786,6 +786,7 @@ pub(super) fn optimize_block<
     unit_replacement_map: &mut HashMap<RegisterId, RegisterId>,
     reg_counter: &mut usize,
     skip_final_schedule: bool,
+    four_state: bool,
     element_widths: &HashMap<A, usize>,
 ) {
     const MAX_INFLIGHT_LOADS: usize = 8;
@@ -793,6 +794,7 @@ pub(super) fn optimize_block<
         &mut block.instructions,
         register_map,
         reg_counter,
+        four_state,
         element_widths,
     );
 
@@ -840,6 +842,7 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
     instructions: &mut Vec<SIRInstruction<A>>,
     register_map: &mut HashMap<RegisterId, RegisterType>,
     reg_counter: &mut usize,
+    four_state: bool,
     element_widths: &HashMap<A, usize>,
 ) {
     #[derive(Clone)]
@@ -994,7 +997,7 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
 
             for ld in loads {
                 let rel_off = ld.offset - word_base;
-                if element_width.is_some() {
+                if four_state || element_width.is_some() {
                     replacements.insert(
                         ld.index,
                         vec![SIRInstruction::Slice(ld.dst, wide_reg, rel_off, ld.width)],
@@ -1381,6 +1384,7 @@ mod tests {
             &mut instructions,
             &mut register_map,
             &mut reg_counter,
+            false,
             &HashMap::default(),
         );
 
@@ -1417,6 +1421,7 @@ mod tests {
             &mut instructions,
             &mut register_map,
             &mut reg_counter,
+            false,
             &[(7u32, 12usize)].into_iter().collect(),
         );
 
@@ -1435,6 +1440,40 @@ mod tests {
                 SIRInstruction::Slice(RegisterId(0), RegisterId(2), 0, 12),
                 SIRInstruction::Slice(RegisterId(1), RegisterId(2), 12, 12),
             ]
+        );
+        verify(instructions, register_map);
+    }
+
+    #[test]
+    fn four_state_load_coalescing_extracts_with_slices() {
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 7u32, SIROffset::Static(0), 5),
+            SIRInstruction::Load(RegisterId(1), 7, SIROffset::Static(4), 1),
+        ];
+        let mut register_map = [(RegisterId(0), logic(5)), (RegisterId(1), logic(1))]
+            .into_iter()
+            .collect();
+        let mut reg_counter = 1;
+
+        coalesce_static_loads_with_types(
+            &mut instructions,
+            &mut register_map,
+            &mut reg_counter,
+            true,
+            &HashMap::default(),
+        );
+
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, SIRInstruction::Slice(..)))
+                .count(),
+            2
+        );
+        assert!(
+            instructions
+                .iter()
+                .all(|instruction| !matches!(instruction, SIRInstruction::Binary(..)))
         );
         verify(instructions, register_map);
     }
@@ -1767,6 +1806,7 @@ mod tests {
             &mut replacements,
             &mut reg_counter,
             true,
+            false,
             &HashMap::default(),
         );
 
@@ -1810,6 +1850,7 @@ mod tests {
             &mut replacements,
             &mut reg_counter,
             true,
+            false,
             &HashMap::default(),
         );
 
@@ -1848,6 +1889,7 @@ mod tests {
                 &mut replacements,
                 &mut reg_counter,
                 true,
+                false,
                 &HashMap::default(),
             );
             verify(block.instructions.clone(), register_map);

@@ -22,7 +22,7 @@ impl ExecutionUnitPass for OptimizeBlocksPass {
         "optimize_blocks"
     }
 
-    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
+    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
         let skip_final_schedule = self.skip_final_schedule;
 
         let mut replacement_map = HashMap::default();
@@ -39,6 +39,7 @@ impl ExecutionUnitPass for OptimizeBlocksPass {
                 &mut replacement_map,
                 &mut reg_counter,
                 true,
+                options.four_state,
                 &self.element_widths,
             );
         }
