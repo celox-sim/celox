@@ -9,8 +9,13 @@ edition.workspace     = true
 
 [dependencies]
 celox-design   = { path = "../celox-design" }
+celox-sir      = { path = "../celox-sir" }
+celox-slt      = { path = "../celox-slt" }
 fxhash         = { workspace = true }
+miette         = { workspace = true }
+thiserror      = { workspace = true }
 veryl-analyzer = { workspace = true }
+veryl-metadata = { workspace = true }
 veryl-parser   = { workspace = true }
 
 [lints]

@@ -478,8 +478,13 @@ name = "celox-frontend-veryl"
 version = "0.18.0"
 dependencies = [
  "celox-design",
+ "celox-sir",
+ "celox-slt",
  "fxhash",
+ "miette",
+ "thiserror 2.0.19",
  "veryl-analyzer",
+ "veryl-metadata",
  "veryl-parser",
 ]
 

@@ -4,6 +4,12 @@
 //! public path lookup. Semantic design and backend phases must not depend on
 //! them.
 
+mod config;
+mod error;
+
+pub use config::BuildConfig;
+pub use error::{LoweringPhase, ParserError, SourceLocation};
+
 use celox_design::{InstanceId, ModuleId, VariableMetadata};
 use fxhash::FxHashMap as HashMap;
 use std::fmt;
