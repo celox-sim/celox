@@ -22,7 +22,7 @@ mod types;
 pub use config::BuildConfig;
 pub use error::{LoweringPhase, ParserError, SourceLocation};
 pub use hierarchy::{ParseIrResult, parse_ir, parse_ir_with_loop_provenance};
-pub use module_artifact::SimModule;
+pub use module_artifact::{RelocationModule, SimModule};
 pub use types::{resolve_dims, resolve_total_width};
 
 use celox_design::{InstanceId, ModuleId, VariableMetadata};
@@ -32,6 +32,8 @@ use veryl_analyzer::ir::{Function, Statement, VarId, VarPath};
 use veryl_parser::resource_table::StrId;
 
 pub type RegionedVarAddr = celox_design::RegionedVarAddrBase<VarId>;
+pub type AbsoluteAddr = celox_design::AbsoluteAddrBase<VarId>;
+pub type RegionedAbsoluteAddr = celox_design::RegionedAbsoluteAddrBase<VarId>;
 pub type GlueAddr = celox_slt::GlueAddrBase<VarId>;
 pub type GlueBlock = celox_slt::GlueBlockBase<VarId>;
 pub type ModuleInitialMemoryValue = celox_design::InitialStateValue<VarId>;

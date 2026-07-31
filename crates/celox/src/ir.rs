@@ -1,4 +1,4 @@
-use crate::{HashMap, logic_tree::LogicPath};
+use crate::HashMap;
 pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
     AbsoluteAddrBase, BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue,
@@ -17,8 +17,6 @@ pub(crate) use celox_sir::{
 };
 use celox_testbench::TestbenchProgram;
 use std::fmt;
-#[cfg(test)]
-use veryl_analyzer::ir::Variable;
 use veryl_analyzer::ir::{VarId, VarPath};
 
 /// Concrete address type using the Veryl analyzer's `VarId` during frontend migration.
@@ -455,31 +453,7 @@ pub struct SignalRef {
     pub is_4state: bool,
     pub array_layout: Option<SignalArrayLayout>,
 }
-#[derive(Clone)]
-pub struct RelocationModule {
-    #[cfg(test)]
-    pub variables: HashMap<VarId, Variable>,
-    pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
-    pub eval_only_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
-    pub apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
-    pub comb_blocks: Vec<LogicPath<AbsoluteAddr>>,
-    pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
-}
-
-impl fmt::Debug for RelocationModule {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut ds = f.debug_struct("RelocationModule");
-        #[cfg(test)]
-        ds.field("variables", &"<omitted>");
-        ds.field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
-            .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
-            .field("apply_ff_blocks", &self.apply_ff_blocks)
-            .field("comb_blocks", &self.comb_blocks)
-            .field("comb_observers", &self.comb_observers)
-            .finish()
-    }
-}
-pub use celox_frontend_veryl::SimModule;
+pub use celox_frontend_veryl::{RelocationModule, SimModule};
 pub use celox_slt::FfAccessSummary;
 
 /// Concrete glue address type using the Veryl analyzer's `VarId`.

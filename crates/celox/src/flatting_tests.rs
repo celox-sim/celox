@@ -189,10 +189,14 @@ fn test_split_by_boundaries() {
     }
     "#;
 
-    let (relocation_module, _, _arena) = setup_to_flatting(code, "Top");
+    let (relocation_module, modules, _arena) = setup_to_flatting(code, "Top");
 
     // Find x logic paths
-    let top_vars = &relocation_module.variables;
+    let top_vars = &modules
+        .values()
+        .find(|module| module.name == resource_table::insert_str("Top"))
+        .expect("Top module not found")
+        .variables;
     // We can filter by seeing if var path implies "x"
     // But since we have only one internal variable x, it should be easy.
     // Wait, parsing output variables might not be easy to destinguish from inputs/outputs by name unless we check Variable struct.
@@ -250,9 +254,12 @@ fn test_dynamic_index_no_split() {
     }
     "#;
 
-    let (relocation_module, _, _arena) = setup_to_flatting(code, "Top");
+    let (relocation_module, modules, _arena) = setup_to_flatting(code, "Top");
 
-    let x_id = relocation_module
+    let x_id = modules
+        .values()
+        .find(|module| module.name == resource_table::insert_str("Top"))
+        .expect("Top module not found")
         .variables
         .iter()
         .find(|(_, v)| v.path.0.len() == 1 && v.path.0[0] == resource_table::insert_str("x"))
@@ -297,9 +304,12 @@ fn test_mixed_boundaries() {
     }
     "#;
 
-    let (relocation_module, _, _arena) = setup_to_flatting(code, "Top");
+    let (relocation_module, modules, _arena) = setup_to_flatting(code, "Top");
 
-    let x_id = relocation_module
+    let x_id = modules
+        .values()
+        .find(|module| module.name == resource_table::insert_str("Top"))
+        .expect("Top module not found")
         .variables
         .iter()
         .find(|(_, v)| v.path.0.len() == 1 && v.path.0[0] == resource_table::insert_str("x"))

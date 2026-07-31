@@ -1,7 +1,8 @@
 use std::{collections::BTreeSet, fmt};
 
 use celox_design::{
-    InitialStateValue, RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, TriggerSet,
+    AbsoluteAddrBase, InitialStateValue, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
+    RuntimeErrorInfo, RuntimeEventSite, TriggerSet,
 };
 use celox_sir::ExecutionUnit;
 use celox_slt::{
@@ -14,6 +15,8 @@ use crate::HashMap;
 
 type RegionedVarAddr = RegionedVarAddrBase<VarId>;
 type GlueBlock = GlueBlockBase<VarId>;
+type AbsoluteAddr = AbsoluteAddrBase<VarId>;
+type RegionedAbsoluteAddr = RegionedAbsoluteAddrBase<VarId>;
 
 #[derive(Clone)]
 pub struct SimModule {
@@ -62,5 +65,29 @@ impl SimModule {
             .find(|(_, variable)| &variable.path == path)
             .map(|(id, _)| *id)
             .unwrap_or_else(|| panic!("Variable '{path}' not found in module"))
+    }
+}
+
+/// One module after source identities have been relocated into the flattened
+/// instance namespace, but before the complete design is assembled.
+#[derive(Clone)]
+pub struct RelocationModule {
+    pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
+    pub eval_only_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
+    pub apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedAbsoluteAddr>>,
+    pub comb_blocks: Vec<LogicPath<AbsoluteAddr>>,
+    pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
+}
+
+impl fmt::Debug for RelocationModule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("RelocationModule");
+        debug
+            .field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
+            .field("eval_only_ff_blocks", &self.eval_only_ff_blocks)
+            .field("apply_ff_blocks", &self.apply_ff_blocks)
+            .field("comb_blocks", &self.comb_blocks)
+            .field("comb_observers", &self.comb_observers)
+            .finish()
     }
 }
