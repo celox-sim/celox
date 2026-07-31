@@ -572,7 +572,7 @@ impl<B: SimBackend> Simulator<B> {
         let initial_memory_values = std::mem::take(&mut self.program.initial_memory_values);
         for init in &initial_memory_values {
             applied = true;
-            let signal = self.backend.resolve_signal(&init.addr);
+            let signal = self.backend.resolve_signal(&init.address);
             match &init.data {
                 InitialMemoryData::Packed {
                     value,

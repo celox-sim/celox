@@ -1,5 +1,6 @@
 //! Source-language-independent design identities and semantic vocabulary.
 
+use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fmt};
 
@@ -50,6 +51,36 @@ pub struct RuntimeEventSite {
     pub arg_widths: Vec<usize>,
     pub arg_signed: Vec<bool>,
     pub arg_is_string: Vec<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InitialStateWriteRun {
+    pub bit_offset: usize,
+    pub bit_width: usize,
+    pub value_bytes: Vec<u8>,
+    pub mask_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InitialStateData {
+    Packed {
+        value: BigUint,
+        mask: BigUint,
+        written_mask: BigUint,
+    },
+    Writes(Vec<InitialStateWriteRun>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InitialStateValue<A> {
+    pub address: A,
+    pub data: InitialStateData,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeErrorInfo<A> {
+    pub message: String,
+    pub signals: Vec<A>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -388,5 +419,28 @@ mod tests {
         assert!(!BinaryOp::Sub.is_commutative());
         assert_eq!(UnaryOp::LogicNot.result_width(128), 1);
         assert_eq!(UnaryOp::PopCount.result_width(128), 8);
+    }
+
+    #[test]
+    fn initial_state_and_runtime_error_schemas_accept_design_owned_ids() {
+        let initial = InitialStateValue {
+            address: AbsoluteAddrBase {
+                instance_id: InstanceId(1),
+                var_id: 7u32,
+            },
+            data: InitialStateData::Writes(vec![InitialStateWriteRun {
+                bit_offset: 3,
+                bit_width: 5,
+                value_bytes: vec![0x15],
+                mask_bytes: vec![0],
+            }]),
+        };
+        let error = RuntimeErrorInfo {
+            message: "failed".to_string(),
+            signals: vec![initial.address],
+        };
+
+        assert_eq!(error.signals, vec![initial.address]);
+        assert!(matches!(initial.data, InitialStateData::Writes(_)));
     }
 }

@@ -985,7 +985,7 @@ impl<'a> ModuleParser<'a> {
         }
 
         Ok(ModuleInitialMemoryValue {
-            var_id: dst.id,
+            address: dst.id,
             data: InitialMemoryData::Writes(writes.runs),
         })
     }

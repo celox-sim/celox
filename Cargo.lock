@@ -464,6 +464,7 @@ dependencies = [
 name = "celox-design"
 version = "0.18.0"
 dependencies = [
+ "num-bigint",
  "serde",
 ]
 
