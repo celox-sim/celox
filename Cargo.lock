@@ -535,8 +535,10 @@ name = "celox-slt"
 version = "0.18.0"
 dependencies = [
  "celox-design",
+ "celox-sir",
  "fxhash",
  "num-bigint",
+ "num-traits",
  "serde",
  "serde_json",
 ]
