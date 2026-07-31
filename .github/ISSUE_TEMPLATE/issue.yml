@@ -1,0 +1,41 @@
+name: Issue
+description: Report a bug, request a feature, or propose an improvement
+title: ""
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Celox.
+
+        If this issue is implemented in a pull request, its title must use
+        Conventional Commits, for example `fix(parser): preserve enum widths`.
+        Use `!` for a breaking change, for example
+        `feat(api)!: remove legacy simulator options`.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - Bug
+        - Feature
+        - Performance
+        - Documentation
+        - Maintenance
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the problem or desired outcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Add reproduction steps, examples, logs, or relevant design constraints.

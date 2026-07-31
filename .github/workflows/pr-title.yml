@@ -1,0 +1,32 @@
+name: PR Title
+
+on:
+  # This workflow intentionally runs from the base branch. Checking out the PR
+  # merge commit would let a pull request replace its own title validator.
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  conventional-title:
+    name: Conventional Commit title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the trusted title validator
+        if: github.event_name == 'pull_request_target'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+
+      - name: Validate pull request title
+        if: github.event_name == 'pull_request_target'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: node scripts/check-pr-title.mjs "$PR_TITLE"
+
+      - name: Preserve the required check in the merge queue
+        if: github.event_name == 'merge_group'
+        run: echo "Pull request titles are validated before entering the merge queue."

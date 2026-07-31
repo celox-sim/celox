@@ -2,6 +2,9 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "internalChecksFilter": "strict",
   "cloneSubmodules": true,
+  "semanticCommits": "enabled",
+  "semanticCommitType": "chore",
+  "semanticCommitScope": "deps",
   "extends": [
     "config:recommended"
   ],
@@ -143,6 +146,20 @@
         "dependencies",
         "rust"
       ]
+    },
+    {
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchPackageNames": [
+        "/^veryl-/"
+      ],
+      "semanticCommitType": "fix",
+      "semanticCommitScope": "veryl",
+      "minimumReleaseAge": "3 days",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true
     }
   ]
 }
