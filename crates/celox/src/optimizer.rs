@@ -101,7 +101,8 @@ impl CraneliftOptions {
 /// via [`OptimizeOptions::enable`] / [`OptimizeOptions::disable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum OptLevel {
-    /// No SIR optimizations except [`SirPass::TailCallSplit`].
+    /// No semantic SIR optimizations. The compatibility
+    /// [`SirPass::TailCallSplit`] selector is consumed only by Cranelift.
     /// Cranelift: `fast_compile()`. DSE: Off.
     O0,
     /// Production-default SIR optimizations enabled, including conservative
@@ -179,6 +180,8 @@ pub enum SirPass {
     SplitCoalescedStores,
     PartialForward,
     IdentityStoreBypass,
+    /// Compatibility selector for Cranelift oversized-function planning.
+    /// This is not a SIR transform and is consumed at the backend boundary.
     TailCallSplit,
 }
 
