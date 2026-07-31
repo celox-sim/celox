@@ -1409,8 +1409,6 @@ pub(crate) fn flatten(
                 },
                 comb_semantic_regions: HashMap::default(),
                 runtime_schema: celox_design::RuntimeSchema::default(),
-                comb_observers: Vec::new(),
-                arena: SLTNodeArena::new(),
                 address_aliases: HashMap::default(),
                 initial_statements: None,
                 tb_functions: fxhash::FxHashMap::default(),
@@ -1589,6 +1587,15 @@ pub(crate) fn flatten(
             })
         })
         .collect();
+    let runtime_comb_observers = comb_observers
+        .iter()
+        .map(|observer| celox_design::RuntimeCombObserver {
+            site_id: observer.site_id,
+            activation_group: observer.activation_group,
+            sensitivity: observer.sensitivity.clone(),
+            written_inputs: observer.written_inputs.clone(),
+        })
+        .collect();
     let program = Program {
         sir: crate::ir::SirProgram {
             eval_apply_ffs,
@@ -1618,9 +1625,8 @@ pub(crate) fn flatten(
         runtime_schema: celox_design::RuntimeSchema {
             runtime_errors,
             runtime_event_sites,
+            comb_observers: runtime_comb_observers,
         },
-        comb_observers,
-        arena: global_arena,
         address_aliases: HashMap::default(),
         initial_statements,
         tb_functions: module_ir

@@ -69,6 +69,19 @@ pub struct RuntimeEventSite {
     pub arg_is_string: Vec<bool>,
 }
 
+/// Runtime activation recipe for one combinational event site.
+///
+/// Expression trees used to emit the event have already been lowered into
+/// SIR.  The runtime only retains the persistent-state ranges needed to detect
+/// whether the corresponding combinational process must be observed again.
+#[derive(Clone, Debug)]
+pub struct RuntimeCombObserver<A> {
+    pub site_id: u32,
+    pub activation_group: u32,
+    pub sensitivity: Vec<VarAtomBase<A>>,
+    pub written_inputs: Vec<A>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InitialStateWriteRun {
     pub bit_offset: usize,
@@ -104,6 +117,7 @@ pub struct RuntimeErrorInfo<A> {
 pub struct RuntimeSchema<A> {
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<A>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
+    pub comb_observers: Vec<RuntimeCombObserver<A>>,
 }
 
 impl<A> Default for RuntimeSchema<A> {
@@ -111,6 +125,7 @@ impl<A> Default for RuntimeSchema<A> {
         Self {
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
+            comb_observers: Vec::new(),
         }
     }
 }
@@ -543,11 +558,21 @@ mod tests {
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),
         });
+        runtime.comb_observers.push(RuntimeCombObserver {
+            site_id: 0,
+            activation_group: 0,
+            sensitivity: vec![VarAtomBase {
+                id: initial.address,
+                access: BitAccess { lsb: 3, msb: 7 },
+            }],
+            written_inputs: vec![initial.address],
+        });
 
         assert_eq!(error.signals, vec![initial.address]);
         assert!(matches!(initial.data, InitialStateData::Writes(_)));
         assert_eq!(runtime.runtime_errors[&1], error);
         assert_eq!(runtime.runtime_event_sites.len(), 1);
+        assert_eq!(runtime.comb_observers[0].sensitivity[0].id, initial.address);
     }
 
     #[test]

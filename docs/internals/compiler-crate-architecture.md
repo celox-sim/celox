@@ -11,7 +11,9 @@ uses a consuming `Program -> LaidOutProgram` transition. The current facade arti
 the mixed `Program`, whose execution-unit groups are now held by `celox-sir::SirProgram` and whose
 flattened state metadata, event topology, and initial state are held by
 `celox-design::ElaboratedDesign`. Runtime diagnostics are held by
-`celox-design::RuntimeSchema`. Cranelift oversized-function planning is constructed from final SIR
+`celox-design::RuntimeSchema`; its combinational observation recipes retain only persistent-state
+ranges, so the final `Program` no longer owns an SLT arena or observer `NodeId`s. Cranelift
+oversized-function planning is constructed from final SIR
 at the backend boundary; backend scratch extends only the backend's private layout copy.
 Veryl source identities retained for diagnostics and public path lookup are grouped in
 `celox-frontend-veryl::VerylFrontendLookup`; optimizer and backend code no longer inspect that
