@@ -4514,8 +4514,58 @@ fn compile_store_at_offset(
             }
         }
     } else {
-        // Multi-chunk bit-offset store: complex.
-        // TODO: implement multi-chunk bit-offset RMW store
+        // Unaligned wide store.  Build each affected destination word from
+        // the adjacent source chunks, then preserve every memory bit outside
+        // the exact logical store range.  Starting the words at byte_offset
+        // is intentional: WebAssembly permits unaligned i64 accesses, and it
+        // keeps bit_shift bounded to the sub-byte part of the SIR offset.
+        let affected_bits = bit_shift + op_width;
+        let affected_bytes = affected_bits.div_ceil(8);
+        let destination_chunks = affected_bits.div_ceil(64);
+        for chunk in 0..destination_chunks {
+            let chunk_bit = chunk * 64;
+            let field_start = bit_shift.saturating_sub(chunk_bit);
+            let field_end = affected_bits.saturating_sub(chunk_bit).min(64);
+            if field_start >= field_end {
+                continue;
+            }
+            let field_width = field_end - field_start;
+            let field_mask = if field_width == 64 {
+                u64::MAX
+            } else {
+                ((1u64 << field_width) - 1) << field_start
+            };
+
+            let assembled = locals.alloc(1);
+            if chunk < src.num_chunks {
+                instrs.push(Instruction::LocalGet(src.value_idx + chunk as u32));
+                instrs.push(Instruction::I64Const(bit_shift as i64));
+                instrs.push(Instruction::I64Shl);
+            } else {
+                instrs.push(Instruction::I64Const(0));
+            }
+            if chunk > 0 && chunk - 1 < src.num_chunks {
+                instrs.push(Instruction::LocalGet(src.value_idx + (chunk - 1) as u32));
+                instrs.push(Instruction::I64Const((64 - bit_shift) as i64));
+                instrs.push(Instruction::I64ShrU);
+                instrs.push(Instruction::I64Or);
+            }
+            instrs.push(Instruction::LocalSet(assembled));
+
+            let byte_len = affected_bytes.saturating_sub(chunk * 8).min(8);
+            let merged = locals.alloc(1);
+            emit_load_small_word(byte_offset + chunk * 8, byte_len, instrs);
+            instrs.push(Instruction::I64Const(
+                (mask_for_bytes(byte_len) & !field_mask) as i64,
+            ));
+            instrs.push(Instruction::I64And);
+            instrs.push(Instruction::LocalGet(assembled));
+            instrs.push(Instruction::I64Const(field_mask as i64));
+            instrs.push(Instruction::I64And);
+            instrs.push(Instruction::I64Or);
+            instrs.push(Instruction::LocalSet(merged));
+            emit_store_small_word(byte_offset + chunk * 8, byte_len, merged, instrs);
+        }
     }
 }
 
