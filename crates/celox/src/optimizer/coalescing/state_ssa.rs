@@ -204,14 +204,26 @@ struct InstructionAccesses {
     defs: Vec<MemoryAccessId>,
 }
 
+const VERSION_CHECKPOINT_INTERVAL: usize = 64;
+
+#[derive(Debug, Clone)]
+enum VersionSnapshot {
+    Dense(Vec<MemoryVersionId>),
+    Delta {
+        parent: usize,
+        updates: Vec<(usize, MemoryVersionId)>,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct StateSsa {
     pub slots: Vec<StateSsaSlot>,
     pub accesses: Vec<MemoryAccess>,
     effects: HashMap<(BlockId, usize), InstructionEffects>,
     read_versions: HashMap<(BlockId, usize, RegisterId), (usize, MemoryVersionId)>,
-    entry_versions: HashMap<BlockId, Vec<MemoryVersionId>>,
-    exit_versions: HashMap<BlockId, Vec<MemoryVersionId>>,
+    version_snapshots: Vec<VersionSnapshot>,
+    entry_versions: HashMap<BlockId, usize>,
+    exit_versions: HashMap<BlockId, usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,6 +345,22 @@ fn phi_blocks_for_slot(cfg: &SirCfg, facts: &RawSlot, live_in: &[bool]) -> Vec<u
     let mut blocks = phi_blocks.into_iter().collect::<Vec<_>>();
     blocks.sort_unstable();
     blocks
+}
+
+fn current_versions(
+    versions: &[Vec<MemoryVersionId>],
+    block: BlockId,
+) -> Result<Vec<MemoryVersionId>, StateSsaError> {
+    versions
+        .iter()
+        .enumerate()
+        .map(|(slot, versions)| {
+            versions
+                .last()
+                .copied()
+                .ok_or(StateSsaError::MissingReachingVersion { block, slot })
+        })
+        .collect()
 }
 
 impl StateSsa {
@@ -783,6 +811,7 @@ impl StateSsa {
             accesses: Vec::new(),
             effects,
             read_versions: HashMap::default(),
+            version_snapshots: Vec::new(),
             entry_versions: HashMap::default(),
             exit_versions: HashMap::default(),
         };
@@ -807,6 +836,26 @@ impl StateSsa {
             kind,
         });
         id
+    }
+
+    fn push_version_snapshot(&mut self, snapshot: VersionSnapshot) -> usize {
+        let id = self.version_snapshots.len();
+        self.version_snapshots.push(snapshot);
+        id
+    }
+
+    fn version_at_snapshot(&self, mut snapshot: usize, slot: usize) -> Option<MemoryVersionId> {
+        loop {
+            match self.version_snapshots.get(snapshot)? {
+                VersionSnapshot::Dense(versions) => return versions.get(slot).copied(),
+                VersionSnapshot::Delta { parent, updates } => {
+                    if let Ok(index) = updates.binary_search_by_key(&slot, |(slot, _)| *slot) {
+                        return Some(updates[index].1);
+                    }
+                    snapshot = *parent;
+                }
+            }
+        }
     }
 
     fn build_access_graph(
@@ -871,7 +920,11 @@ impl StateSsa {
         }
 
         enum Visit {
-            Enter(usize),
+            Enter {
+                block: usize,
+                parent_exit: Option<usize>,
+                depth: usize,
+            },
             Exit(Vec<usize>),
         }
         let mut versions = live_versions
@@ -879,7 +932,11 @@ impl StateSsa {
             .copied()
             .map(|version| vec![version])
             .collect::<Vec<_>>();
-        let mut visits = vec![Visit::Enter(0)];
+        let mut visits = vec![Visit::Enter {
+            block: 0,
+            parent_exit: None,
+            depth: 0,
+        }];
         while let Some(visit) = visits.pop() {
             match visit {
                 Visit::Exit(pushed) => {
@@ -887,28 +944,31 @@ impl StateSsa {
                         versions[slot].pop();
                     }
                 }
-                Visit::Enter(block) => {
+                Visit::Enter {
+                    block,
+                    parent_exit,
+                    depth,
+                } => {
                     let block_id = cfg.block_ids[block];
                     let mut pushed = Vec::new();
                     for &(slot, access) in &phi_accesses[block] {
                         versions[slot].push(access);
                         pushed.push(slot);
                     }
-                    self.entry_versions.insert(
-                        block_id,
-                        versions
-                            .iter()
-                            .enumerate()
-                            .map(|(slot, versions)| {
-                                versions.last().copied().ok_or(
-                                    StateSsaError::MissingReachingVersion {
-                                        block: block_id,
-                                        slot,
-                                    },
-                                )
-                            })
-                            .collect::<Result<Vec<_>, _>>()?,
-                    );
+                    let entry = if depth.is_multiple_of(VERSION_CHECKPOINT_INTERVAL) {
+                        let dense = current_versions(&versions, block_id)?;
+                        self.push_version_snapshot(VersionSnapshot::Dense(dense))
+                    } else {
+                        let parent = parent_exit.ok_or(StateSsaError::InvalidAccess(
+                            "non-root block has no parent version snapshot",
+                        ))?;
+                        self.push_version_snapshot(VersionSnapshot::Delta {
+                            parent,
+                            updates: phi_accesses[block].clone(),
+                        })
+                    };
+                    self.entry_versions.insert(block_id, entry);
+                    let mut changed_slots = Vec::new();
                     for instruction in 0..eu.blocks[&block_id].instructions.len() {
                         let Some(accesses) =
                             instruction_accesses.get(&(block_id, instruction)).cloned()
@@ -948,23 +1008,33 @@ impl StateSsa {
                             }
                             versions[slot].push(access);
                             pushed.push(slot);
+                            changed_slots.push(slot);
                         }
                     }
-                    self.exit_versions.insert(
-                        block_id,
-                        versions
-                            .iter()
-                            .enumerate()
-                            .map(|(slot, versions)| {
-                                versions.last().copied().ok_or(
-                                    StateSsaError::MissingReachingVersion {
+                    changed_slots.sort_unstable();
+                    changed_slots.dedup();
+                    let exit = if changed_slots.is_empty() {
+                        entry
+                    } else {
+                        let updates = changed_slots
+                            .into_iter()
+                            .map(|slot| {
+                                versions[slot]
+                                    .last()
+                                    .copied()
+                                    .map(|version| (slot, version))
+                                    .ok_or(StateSsaError::MissingReachingVersion {
                                         block: block_id,
                                         slot,
-                                    },
-                                )
+                                    })
                             })
-                            .collect::<Result<Vec<_>, _>>()?,
-                    );
+                            .collect::<Result<Vec<_>, _>>()?;
+                        self.push_version_snapshot(VersionSnapshot::Delta {
+                            parent: entry,
+                            updates,
+                        })
+                    };
+                    self.exit_versions.insert(block_id, exit);
                     for &successor in &cfg.successors[block] {
                         for &(slot, phi) in &phi_accesses[successor] {
                             let version = versions[slot].last().copied().ok_or(
@@ -984,7 +1054,11 @@ impl StateSsa {
                     }
                     visits.push(Visit::Exit(pushed));
                     for &child in cfg.dom_children[block].iter().rev() {
-                        visits.push(Visit::Enter(child));
+                        visits.push(Visit::Enter {
+                            block: child,
+                            parent_exit: Some(exit),
+                            depth: depth + 1,
+                        });
                     }
                 }
             }
@@ -1162,11 +1236,11 @@ impl StateSsa {
     }
 
     pub fn entry_version(&self, block: BlockId, slot: usize) -> Option<MemoryVersionId> {
-        self.entry_versions.get(&block)?.get(slot).copied()
+        self.version_at_snapshot(*self.entry_versions.get(&block)?, slot)
     }
 
     pub fn exit_version(&self, block: BlockId, slot: usize) -> Option<MemoryVersionId> {
-        self.exit_versions.get(&block)?.get(slot).copied()
+        self.version_at_snapshot(*self.exit_versions.get(&block)?, slot)
     }
 }
 
@@ -1233,6 +1307,57 @@ mod tests {
                 )
             })
             .expect("destination has a StateSSA use")
+    }
+
+    #[test]
+    fn version_snapshots_preserve_versions_across_multiple_checkpoints() {
+        let stable = address(STABLE_REGION, 0);
+        let last = VERSION_CHECKPOINT_INTERVAL * 2 + 3;
+        let mut blocks = Vec::new();
+        for id in 0..=last {
+            let instructions = if id == 0 {
+                vec![SIRInstruction::Store(
+                    stable,
+                    SIROffset::Static(0),
+                    8,
+                    RegisterId(0),
+                    Vec::new(),
+                    Vec::new(),
+                )]
+            } else if id == last {
+                vec![SIRInstruction::Load(
+                    RegisterId(1),
+                    stable,
+                    SIROffset::Static(0),
+                    8,
+                )]
+            } else {
+                Vec::new()
+            };
+            let terminator = if id == last {
+                SIRTerminator::Return
+            } else {
+                SIRTerminator::Jump(BlockId(id + 1), Vec::new())
+            };
+            blocks.push(block(id, instructions, terminator));
+        }
+        let eu = unit(blocks, [(RegisterId(0), bit(8)), (RegisterId(1), bit(8))]);
+        let cfg = SirCfg::analyze(&eu).unwrap();
+
+        let state = StateSsa::analyze_all_loads(&eu, &cfg, STABLE_REGION).unwrap();
+        let (_, reaching) = state
+            .read_version(BlockId(last), 0, RegisterId(1))
+            .expect("final load has a reaching state version");
+
+        assert_eq!(state.entry_version(BlockId(last), 0), Some(reaching));
+        assert_eq!(state.exit_version(BlockId(last), 0), Some(reaching));
+        assert!(matches!(
+            state.accesses[reaching.0].kind,
+            MemoryAccessKind::Def {
+                source: RegisterId(0),
+                ..
+            }
+        ));
     }
 
     #[test]
