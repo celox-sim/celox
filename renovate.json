@@ -46,7 +46,8 @@
         "syn",
         "prettyplease"
       ],
-      "groupName": "syn ecosystem"
+      "groupName": "syn ecosystem",
+      "separateMajorMinor": false
     },
     {
       "matchManagers": [
