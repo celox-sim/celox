@@ -9,7 +9,9 @@ pub(crate) use celox_design::{
     RuntimeEventKind, RuntimeEventSite, RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION,
     TriggerIdWithKind, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
 };
-pub use celox_frontend_veryl::{InstancePath, VariableInfo, VerylFrontendLookup};
+pub use celox_frontend_veryl::{
+    InstancePath, VariableInfo, VerylFrontendLookup, VerylTestbenchSource,
+};
 pub(crate) use celox_sir::{
     BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRBuilder, SIRInstruction,
     SIROffset, SIRSwitchCase, SIRTerminator, SIRValue, collect_exact_zero_registers, merge_sir_eus,
@@ -75,10 +77,7 @@ pub struct Program {
     pub frontend: VerylFrontendLookup,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
     pub layout_requirements: celox_state_layout::LayoutRequirements<AbsoluteAddr>,
-    /// Initial block statements from the top-level module (for native testbenches).
-    pub initial_statements: Option<Vec<veryl_analyzer::ir::Statement>>,
-    /// Functions defined in the top-level module (for testbench function calls).
-    pub tb_functions: fxhash::FxHashMap<veryl_analyzer::ir::VarId, veryl_analyzer::ir::Function>,
+    pub testbench_source: VerylTestbenchSource,
 }
 
 /// A [`Program`] whose physical state layout has been finalized.
