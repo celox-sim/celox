@@ -537,6 +537,7 @@ dependencies = [
  "celox-design",
  "fxhash",
  "num-bigint",
+ "num-traits",
  "serde",
  "serde_json",
 ]

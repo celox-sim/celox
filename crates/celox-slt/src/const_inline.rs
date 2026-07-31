@@ -12,9 +12,12 @@ use std::hash::Hash;
 use num_bigint::BigUint;
 use num_traits::Zero;
 
-use crate::ir::BitAccess;
-use crate::logic_tree::comb::{LogicPath, NodeId, SLTNode, SLTNodeArena, SLTNodeFactsError};
-use crate::{HashMap, HashSet};
+use celox_design::{BinaryOp, BitAccess, UnaryOp};
+
+use crate::{
+    HashMap, HashSet, LogicPath, NodeId, SLTForFoldGroupState, SLTNode, SLTNodeArena,
+    SLTNodeFactsError, get_width,
+};
 
 /// Check if an SLT expression tree is purely constant (no Input references).
 /// Conservative: only handles Constant, Slice(Constant-tree), Binary, Unary,
@@ -38,9 +41,6 @@ fn eval_const_expr<A: Clone + Eq + Hash + Debug>(
     node: NodeId,
     arena: &SLTNodeArena<A>,
 ) -> (BigUint, BigUint, usize) {
-    use crate::ir::BinaryOp;
-    use crate::logic_tree::comb::get_width;
-
     let width = get_width(node, arena);
     let width_mask = if width > 0 {
         (BigUint::from(1u32) << width) - 1u32
@@ -96,7 +96,6 @@ fn eval_const_expr<A: Clone + Eq + Hash + Debug>(
             (result & &width_mask, BigUint::from(0u32), width)
         }
         SLTNode::Unary(op, inner) => {
-            use crate::ir::UnaryOp;
             let (v, m, inner_width) = eval_const_expr(*inner, arena);
             if matches!(op, UnaryOp::ToTwoState) {
                 return (
@@ -399,7 +398,7 @@ fn rewrite_expr<A: Clone + Eq + Hash + Debug + Display>(
                 let new_states = states
                     .iter()
                     .map(|state| {
-                        Ok(crate::logic_tree::comb::SLTForFoldGroupState {
+                        Ok(SLTForFoldGroupState {
                             target: state.target.clone(),
                             initial: rewrite_expr(state.initial, arena, const_vars, cache)?,
                             update: rewrite_expr(state.update, arena, const_vars, cache)?,
@@ -436,8 +435,8 @@ fn rewrite_expr<A: Clone + Eq + Hash + Debug + Display>(
 
 #[cfg(test)]
 mod tests {
-    use crate::ir::UnaryOp;
-    use crate::logic_tree::comb::{SLTNode, SLTNodeArena};
+    use celox_design::UnaryOp;
+    use crate::{SLTNode, SLTNodeArena};
     use num_bigint::BigUint;
 
     use super::eval_const_expr;
