@@ -51,6 +51,7 @@ pub struct SourceLocation {
     pub column: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AssertMessage<Argument> {
     Formatted {
         template: String,
@@ -59,11 +60,13 @@ pub enum AssertMessage<Argument> {
     DynamicArgs(Vec<Argument>),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClockCount<Expression> {
     Static(u64),
     Dynamic(Expression),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LoopBound<Expression> {
     Static(usize),
     Dynamic {
@@ -78,6 +81,7 @@ pub enum LoopBound<Expression> {
 /// Frontends instantiate this with semantic state/event identities and
 /// unbound expressions. Runtime binding instantiates the same contract with
 /// backend event/signal handles and executable expressions.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TestbenchStatement<Event, Signal, Expression, Argument> {
     ClockNext {
         clock_event: Event,
@@ -122,6 +126,54 @@ pub enum TestbenchStatement<Event, Signal, Expression, Argument> {
     },
     Break,
     Finish,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SemanticSignal<A> {
+    pub address: A,
+    pub width: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticArgument<A> {
+    pub expr: ExprBytecode<StateLocation<A>>,
+    pub width: usize,
+    pub signed: bool,
+    pub is_string: bool,
+}
+
+pub type SemanticStatement<A> =
+    TestbenchStatement<A, SemanticSignal<A>, ExprBytecode<StateLocation<A>>, SemanticArgument<A>>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestbenchProgram<A> {
+    statements: Vec<SemanticStatement<A>>,
+}
+
+impl<A> Default for TestbenchProgram<A> {
+    fn default() -> Self {
+        Self {
+            statements: Vec::new(),
+        }
+    }
+}
+
+impl<A> TestbenchProgram<A> {
+    pub fn new(statements: Vec<SemanticStatement<A>>) -> Self {
+        Self { statements }
+    }
+
+    pub fn statements(&self) -> &[SemanticStatement<A>] {
+        &self.statements
+    }
+
+    pub fn into_statements(self) -> Vec<SemanticStatement<A>> {
+        self.statements
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.statements.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

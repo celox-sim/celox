@@ -9,9 +9,7 @@ pub(crate) use celox_design::{
     RuntimeEventKind, RuntimeEventSite, RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION,
     TriggerIdWithKind, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
 };
-pub use celox_frontend_veryl::{
-    InstancePath, VariableInfo, VerylFrontendLookup, VerylTestbenchSource,
-};
+pub use celox_frontend_veryl::{InstancePath, VariableInfo, VerylFrontendLookup};
 pub(crate) use celox_sir::{
     BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRBuilder, SIRInstruction,
     SIROffset, SIRSwitchCase, SIRTerminator, SIRValue, collect_exact_zero_registers, merge_sir_eus,
@@ -20,6 +18,7 @@ pub(crate) use celox_sir::{
 pub(crate) use celox_sir::{
     SirMergeProvenance, inline_single_predecessor_jumps, merge_sir_eu_refs_with_provenance,
 };
+use celox_testbench::TestbenchProgram;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use veryl_analyzer::ir::{VarId, VarPath, Variable};
@@ -77,7 +76,7 @@ pub struct Program {
     pub frontend: VerylFrontendLookup,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
     pub layout_requirements: celox_state_layout::LayoutRequirements<AbsoluteAddr>,
-    pub testbench_source: VerylTestbenchSource,
+    pub testbench: Option<TestbenchProgram<AbsoluteAddr>>,
 }
 
 /// A [`Program`] whose physical state layout has been finalized.

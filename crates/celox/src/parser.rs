@@ -1408,7 +1408,7 @@ pub(crate) fn flatten(
                 },
                 runtime_schema: celox_design::RuntimeSchema::default(),
                 layout_requirements: Default::default(),
-                testbench_source: Default::default(),
+                testbench: None,
             };
             let source_locations = scheduler_source_locations(&error, module_ir, &instance_modules);
             let mut target_arena = SLTNodeArena::new();
@@ -1592,6 +1592,13 @@ pub(crate) fn flatten(
             written_inputs: observer.written_inputs.clone(),
         })
         .collect();
+    let testbench_source = celox_frontend_veryl::VerylTestbenchSource {
+        initial_statements,
+        functions: module_ir
+            .get(root_id)
+            .map(|m| m.functions.clone())
+            .unwrap_or_default(),
+    };
     let program = Program {
         sir: crate::ir::SirProgram {
             eval_apply_ffs,
@@ -1624,13 +1631,7 @@ pub(crate) fn flatten(
             testbench_read_roots: Default::default(),
         },
         layout_requirements: Default::default(),
-        testbench_source: crate::ir::VerylTestbenchSource {
-            initial_statements,
-            functions: module_ir
-                .get(root_id)
-                .map(|m| m.functions.clone())
-                .unwrap_or_default(),
-        },
+        testbench: None,
     };
 
     // --- Trigger Injection ---
@@ -1758,6 +1759,9 @@ pub(crate) fn flatten(
             }
         }
     }
+
+    crate::testbench::project_observability(&mut program, &testbench_source);
+    program.testbench = crate::testbench::compile_semantic_testbench(&program, &testbench_source);
 
     dump_addr_map_if_requested(&program);
 
@@ -2558,11 +2562,6 @@ pub fn parse(
             trace.as_deref_mut(),
         )
     )?;
-    timed_phase!(
-        "project_testbench_observability",
-        crate::testbench::project_observability(&mut program)
-    );
-
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.pre_optimized_sir
     {

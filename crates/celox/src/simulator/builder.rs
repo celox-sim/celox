@@ -746,21 +746,14 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     /// observed before the test finishes or stops on a fatal failure.
     pub fn run_test_detailed(self) -> Result<crate::testbench::TestResultDetailed, SimulatorError> {
         let mut sim = self.build()?;
-        let initial_stmts = sim
-            .program()
-            .testbench_source
-            .initial_statements
-            .clone()
-            .ok_or_else(|| {
-                SimulatorError::new(SimulatorErrorKind::Codegen(
-                    "no initial block found — this module is not a native testbench".into(),
-                ))
-            })?;
-        let mut tb_builder = crate::testbench::TestbenchBuilder::new(&sim);
-        tb_builder.build_event_map(&initial_stmts);
-        let tb_stmts = tb_builder.convert(&initial_stmts);
+        let testbench = crate::testbench::compile_initial_testbench(&sim).ok_or_else(|| {
+            SimulatorError::new(SimulatorErrorKind::Codegen(
+                "no initial block found — this module is not a native testbench".into(),
+            ))
+        })?;
         Ok(crate::testbench::run_testbench_detailed(
-            &mut sim, &tb_stmts,
+            &mut sim,
+            &testbench.stmts,
         ))
     }
 
@@ -842,20 +835,12 @@ fn run_test_with_sim<B: crate::backend::SimBackend>(
 ) -> Result<crate::testbench::TestResult, SimulatorError> {
     let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let testbench_start = phase_timing.then(crate::timing::now);
-    let initial_stmts = sim
-        .program()
-        .testbench_source
-        .initial_statements
-        .clone()
-        .ok_or_else(|| {
-            SimulatorError::new(SimulatorErrorKind::Codegen(
-                "no initial block found — this module is not a native testbench".into(),
-            ))
-        })?;
-    let mut tb_builder = crate::testbench::TestbenchBuilder::new(&sim);
-    tb_builder.build_event_map(&initial_stmts);
-    let tb_stmts = tb_builder.convert(&initial_stmts);
-    let result = crate::testbench::run_testbench(&mut sim, &tb_stmts);
+    let testbench = crate::testbench::compile_initial_testbench(&sim).ok_or_else(|| {
+        SimulatorError::new(SimulatorErrorKind::Codegen(
+            "no initial block found — this module is not a native testbench".into(),
+        ))
+    })?;
+    let result = crate::testbench::run_testbench(&mut sim, &testbench.stmts);
     if let Some(start) = testbench_start {
         eprintln!("[phase-timing] testbench: {:?}", start.elapsed());
     }
