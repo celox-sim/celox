@@ -1,0 +1,17 @@
+[package]
+name                  = "celox-frontend-veryl"
+version.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+license.workspace     = true
+description           = "Veryl frontend artifacts and source lookup for Celox"
+edition.workspace     = true
+
+[dependencies]
+celox-design   = { path = "../celox-design" }
+fxhash         = { workspace = true }
+veryl-analyzer = { workspace = true }
+veryl-parser   = { workspace = true }
+
+[lints]
+workspace = true

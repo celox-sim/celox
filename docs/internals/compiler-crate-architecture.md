@@ -13,8 +13,10 @@ flattened state metadata, event topology, and initial state are held by
 `celox-design::ElaboratedDesign`. Runtime diagnostics are held by
 `celox-design::RuntimeSchema`. Cranelift oversized-function planning is constructed from final SIR
 at the backend boundary; backend scratch extends only the backend's private layout copy.
-Dissolving the remaining frontend lookup, symbolic, optimizer, and testbench payload into the
-phase-specific target types below remains part of Milestone 3.
+Veryl source identities retained for diagnostics and public path lookup are grouped in
+`celox-frontend-veryl::VerylFrontendLookup`; optimizer and backend code no longer inspect that
+artifact. Moving the remaining parser implementation, symbolic, optimizer, and testbench payload
+into the phase-specific target types below remains part of Milestone 3.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making

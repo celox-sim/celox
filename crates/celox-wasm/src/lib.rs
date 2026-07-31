@@ -113,9 +113,9 @@ impl SimHandle {
 
         let mut layout_map: BTreeMap<String, serde_json::Value> = BTreeMap::new();
 
-        for (instance_id, module_id) in &self.program().instance_module {
-            let variables = &self.program().module_variables[module_id];
-            let path_index = &self.program().module_var_path_index[module_id];
+        for (instance_id, module_id) in &self.program().frontend.instance_module {
+            let variables = &self.program().frontend.module_variables[module_id];
+            let path_index = &self.program().frontend.module_var_path_index[module_id];
 
             for info in variables.values() {
                 if path_index.get(&info.path) == Some(&None) {

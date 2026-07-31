@@ -1,0 +1,80 @@
+//! Veryl-owned frontend artifacts.
+//!
+//! Types in this crate may retain Veryl source identities for diagnostics and
+//! public path lookup. Semantic design and backend phases must not depend on
+//! them.
+
+use celox_design::{InstanceId, ModuleId, VariableMetadata};
+use fxhash::FxHashMap as HashMap;
+use std::fmt;
+use veryl_analyzer::ir::{VarId, VarPath};
+use veryl_parser::resource_table::StrId;
+
+#[derive(Clone)]
+pub struct VariableInfo {
+    pub id: VarId,
+    pub path: VarPath,
+    pub var_kind: veryl_analyzer::ir::VarKind,
+    pub metadata: VariableMetadata,
+}
+
+impl std::ops::Deref for VariableInfo {
+    type Target = VariableMetadata;
+
+    fn deref(&self) -> &Self::Target {
+        &self.metadata
+    }
+}
+
+impl fmt::Debug for VariableInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VariableInfo")
+            .field("width", &self.width)
+            .field("id", &self.id)
+            .field("is_4state", &self.is_4state)
+            .field("kind", &self.kind)
+            .field("type_kind", &self.type_kind)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct InstancePath(pub Vec<(StrId, usize)>);
+
+/// Veryl source identities retained by the facade for diagnostics and public
+/// path lookup. Compiler phases after elaboration should consume flattened
+/// `celox-design` identities instead.
+#[derive(Clone, Default)]
+pub struct VerylFrontendLookup {
+    pub instance_ids: HashMap<InstancePath, InstanceId>,
+    pub instance_module: HashMap<InstanceId, ModuleId>,
+    pub module_variables: HashMap<ModuleId, HashMap<VarId, VariableInfo>>,
+    /// Reverse index from source path to source variable ID. `None` marks a
+    /// path that is ambiguous within the module.
+    pub module_var_path_index: HashMap<ModuleId, HashMap<VarPath, Option<VarId>>>,
+    pub module_names: HashMap<ModuleId, StrId>,
+}
+
+impl fmt::Debug for VerylFrontendLookup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VerylFrontendLookup")
+            .field("instances", &self.instance_module.len())
+            .field("modules", &self.module_variables.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_lookup_has_no_source_identities() {
+        let lookup = VerylFrontendLookup::default();
+        assert!(lookup.instance_ids.is_empty());
+        assert!(lookup.instance_module.is_empty());
+        assert!(lookup.module_variables.is_empty());
+        assert!(lookup.module_var_path_index.is_empty());
+        assert!(lookup.module_names.is_empty());
+    }
+}

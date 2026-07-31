@@ -22,29 +22,21 @@ pub(super) struct PackedScatterStorePass {
 impl PackedScatterStorePass {
     pub(super) fn for_program(program: &Program) -> Self {
         let mut unpacked_element_widths = HashMap::default();
-        for (&instance_id, &module_id) in &program.instance_module {
-            for info in program.module_variables[&module_id].values() {
-                if info.array_dims.is_empty() {
-                    continue;
-                }
-                let Some(element_count) = info
-                    .array_dims
-                    .iter()
-                    .try_fold(1usize, |count, &dimension| count.checked_mul(dimension))
-                else {
-                    continue;
-                };
-                if element_count == 0 || info.width % element_count != 0 {
-                    continue;
-                }
-                unpacked_element_widths.insert(
-                    AbsoluteAddr {
-                        instance_id,
-                        var_id: info.id,
-                    },
-                    info.width / element_count,
-                );
+        for (&address, info) in &program.design.state_objects {
+            if info.array_dims.is_empty() {
+                continue;
             }
+            let Some(element_count) = info
+                .array_dims
+                .iter()
+                .try_fold(1usize, |count, &dimension| count.checked_mul(dimension))
+            else {
+                continue;
+            };
+            if element_count == 0 || info.width % element_count != 0 {
+                continue;
+            }
+            unpacked_element_widths.insert(address, info.width / element_count);
         }
         Self {
             unpacked_element_widths,

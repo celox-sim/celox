@@ -677,13 +677,17 @@ pub(crate) fn initial_read_addresses(program: &Program) -> crate::HashSet<Absolu
     let Some(stmts) = program.initial_statements.as_ref() else {
         return crate::HashSet::default();
     };
-    let Some(&root_instance_id) = program.instance_ids.get(&crate::ir::InstancePath(vec![])) else {
+    let Some(&root_instance_id) = program
+        .frontend
+        .instance_ids
+        .get(&crate::ir::InstancePath(vec![]))
+    else {
         return crate::HashSet::default();
     };
-    let Some(&root_module_id) = program.instance_module.get(&root_instance_id) else {
+    let Some(&root_module_id) = program.frontend.instance_module.get(&root_instance_id) else {
         return crate::HashSet::default();
     };
-    let Some(root_variables) = program.module_variables.get(&root_module_id) else {
+    let Some(root_variables) = program.frontend.module_variables.get(&root_module_id) else {
         return crate::HashSet::default();
     };
 
@@ -2015,6 +2019,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
     ) {
         let p = self.sim.program();
         let info = match p
+            .frontend
             .module_variables
             .get(&self.root_module_id)
             .and_then(|v| v.get(var_id))
@@ -2265,7 +2270,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
             match f.as_ref() {
                 Factor::Variable(var_id, _, _, _) => {
                     let p = self.sim.program();
-                    if let Some(vars) = p.module_variables.get(&self.root_module_id) {
+                    if let Some(vars) = p.frontend.module_variables.get(&self.root_module_id) {
                         if let Some(info) = vars.get(var_id) {
                             return info.width;
                         }
@@ -2294,7 +2299,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
 
     fn resolve_var(&self, var_id: &VarId) -> Option<SignalRef> {
         let p = self.sim.program();
-        let vars = p.module_variables.get(&self.root_module_id)?;
+        let vars = p.frontend.module_variables.get(&self.root_module_id)?;
         let _ = vars.get(var_id)?;
         Some(self.sim.backend_ref().resolve_signal(&AbsoluteAddr {
             instance_id: self.root_instance_id,
@@ -2374,10 +2379,11 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
     pub(crate) fn convert(&mut self, stmts: &[Statement]) -> Vec<TestbenchStatement<B>> {
         let p = self.sim.program();
         let root_instance_id = *p
+            .frontend
             .instance_ids
             .get(&crate::ir::InstancePath(Vec::new()))
             .expect("root instance not found");
-        let root_module_id = p.instance_module[&root_instance_id];
+        let root_module_id = p.frontend.instance_module[&root_instance_id];
         let ec = ExprCompiler {
             sim: self.sim,
             root_instance_id,
@@ -2650,9 +2656,12 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
 
     fn resolve_loop_var(&self, var_id: &VarId) -> Option<(SignalRef, usize)> {
         let p = self.sim.program();
-        let rid = p.instance_ids.get(&crate::ir::InstancePath(Vec::new()))?;
-        let mid = p.instance_module.get(rid)?;
-        let vars = p.module_variables.get(mid)?;
+        let rid = p
+            .frontend
+            .instance_ids
+            .get(&crate::ir::InstancePath(Vec::new()))?;
+        let mid = p.frontend.instance_module.get(rid)?;
+        let vars = p.frontend.module_variables.get(mid)?;
         let info = vars.get(var_id)?;
         let addr = AbsoluteAddr {
             instance_id: *rid,

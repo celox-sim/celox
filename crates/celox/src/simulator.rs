@@ -1171,12 +1171,12 @@ impl<B: SimBackend> Simulator<B> {
     /// paths without the original [`Program`].
     pub fn build_vcd_descs(&self, four_state_mode: bool) -> Vec<crate::vcd::VcdSignalDesc> {
         let mut descs = Vec::new();
-        let mut sorted_instances: Vec<_> = self.program.instance_module.iter().collect();
+        let mut sorted_instances: Vec<_> = self.program.frontend.instance_module.iter().collect();
         sorted_instances.sort_by_key(|(id, _)| *id);
 
         for (instance_id, module_id) in sorted_instances {
-            let variables = &self.program.module_variables[module_id];
-            let path_index = &self.program.module_var_path_index[module_id];
+            let variables = &self.program.frontend.module_variables[module_id];
+            let path_index = &self.program.frontend.module_var_path_index[module_id];
             let scope = format!("{}", instance_id);
 
             let mut sorted_vars: Vec<_> = variables
@@ -1224,6 +1224,7 @@ impl<B: SimBackend> Simulator<B> {
     pub fn named_signals(&self) -> Vec<NamedSignal> {
         let top_instance_id = self
             .program
+            .frontend
             .instance_ids
             .get(&InstancePath(vec![]))
             .expect("top-level instance not found");
@@ -1239,7 +1240,12 @@ impl<B: SimBackend> Simulator<B> {
             .iter()
             .map(|(name, idx)| (veryl_parser::resource_table::insert_str(name), *idx))
             .collect();
-        match self.program.instance_ids.get(&InstancePath(path_str_ids)) {
+        match self
+            .program
+            .frontend
+            .instance_ids
+            .get(&InstancePath(path_str_ids))
+        {
             Some(&instance_id) => self.build_signals_for_instance(instance_id),
             None => Vec::new(),
         }
@@ -1251,9 +1257,9 @@ impl<B: SimBackend> Simulator<B> {
     /// same name) are excluded — they cannot be addressed by path and would
     /// cause silent overwrites in name-keyed maps such as the layout JSON.
     fn build_signals_for_instance(&self, instance_id: crate::ir::InstanceId) -> Vec<NamedSignal> {
-        let module_id = &self.program.instance_module[&instance_id];
-        let module_vars = &self.program.module_variables[module_id];
-        let path_index = &self.program.module_var_path_index[module_id];
+        let module_id = &self.program.frontend.instance_module[&instance_id];
+        let module_vars = &self.program.frontend.module_variables[module_id];
+        let path_index = &self.program.frontend.module_var_path_index[module_id];
 
         let mut result = Vec::new();
         for info in module_vars.values() {
@@ -1356,12 +1362,14 @@ impl<B: SimBackend> Simulator<B> {
     ) -> InstanceHierarchy {
         let instance_id = self
             .program
+            .frontend
             .instance_ids
             .get(&InstancePath(current_path.to_vec()))
             .expect("instance not found");
-        let module_id = &self.program.instance_module[instance_id];
+        let module_id = &self.program.frontend.instance_module[instance_id];
         let module_name = self
             .program
+            .frontend
             .module_names
             .get(module_id)
             .and_then(|name| veryl_parser::resource_table::get_str_value(*name))
@@ -1375,7 +1383,7 @@ impl<B: SimBackend> Simulator<B> {
         let mut children_map: crate::HashMap<String, Vec<(usize, InstanceHierarchy)>> =
             crate::HashMap::default();
 
-        for path in self.program.instance_ids.keys() {
+        for path in self.program.frontend.instance_ids.keys() {
             if path.0.len() == current_len + 1 && path.0.starts_with(current_path) {
                 let (child_name_id, child_index) = path.0[current_len];
                 let child_name = veryl_parser::resource_table::get_str_value(child_name_id)
