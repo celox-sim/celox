@@ -3213,7 +3213,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     );
     pending_fold_roots.clear();
 
-    if let Some(ff_lowering) = ff.as_deref_mut() {
+    if let Some(ff_lowering) = ff {
         ff_lowering
             .finish(&mut builder, &direct_ff)
             .map_err(ClockSortError::Lowering)?;

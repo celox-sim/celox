@@ -239,12 +239,7 @@ fn packed_chain_single_predecessor(cfg: &SirCfg, block: BlockId, expected: Block
     let Some(index) = cfg.block_index(block) else {
         return false;
     };
-    cfg.predecessors[index].as_slice()
-        == cfg
-            .block_index(expected)
-            .as_ref()
-            .map(std::slice::from_ref)
-            .unwrap_or_default()
+    cfg.predecessors[index].as_slice() == cfg.block_index(expected).as_slice()
 }
 
 fn packed_chain_merge_predecessors(
@@ -510,9 +505,10 @@ fn collapse_packed_conditional_store_chains_with(
         loop {
             next_register += 1;
             let register = RegisterId(next_register);
-            if !eu.register_map.contains_key(&register) {
-                eu.register_map
-                    .insert(register, RegisterType::Logic { width });
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                eu.register_map.entry(register)
+            {
+                entry.insert(RegisterType::Logic { width });
                 return register;
             }
         }

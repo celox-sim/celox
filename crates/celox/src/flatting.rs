@@ -160,7 +160,8 @@ fn atomize_logic_paths(
                 let group_source_ids = &atom_infos[i].1;
                 while i + 1 < atom_infos.len()
                     && atom_infos[i + 1].1 == *group_source_ids
-                    && element_width.is_none_or(|width| atom_infos[i + 1].0.lsb % width != 0)
+                    && element_width
+                        .is_none_or(|width| !atom_infos[i + 1].0.lsb.is_multiple_of(width))
                 {
                     i += 1;
                 }

@@ -2333,8 +2333,8 @@ fn verify_memory_offset_for_addr(
                 ));
             };
             let valid_range = *element_width == declared_element_width
-                && *bit_offset % declared_element_width == 0
-                && width % declared_element_width == 0
+                && bit_offset.is_multiple_of(declared_element_width)
+                && width.is_multiple_of(declared_element_width)
                 && bit_offset
                     .checked_add(width)
                     .is_some_and(|end| end <= info.width);

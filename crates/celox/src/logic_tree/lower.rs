@@ -1913,7 +1913,7 @@ impl SLTToSIRLowerer {
     ) -> RegisterId {
         if index.is_empty()
             && let Some(&element_width) = self.unpacked_input_element_widths.get(&node)
-            && width % element_width == 0
+            && width.is_multiple_of(element_width)
         {
             let destination = builder.alloc_logic(width);
             builder.emit(SIRInstruction::Load(
