@@ -6,6 +6,8 @@ use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use std::{fmt, fmt::Display};
 
+pub use celox_design::{BinaryOp, DomainKind, TriggerIdWithKind, UnaryOp};
+
 pub mod builder;
 pub mod cfg;
 mod serde_helpers;
@@ -17,21 +19,6 @@ pub use transform::{
     SirMergeProvenance, inline_single_predecessor_jumps, merge_sir_eu_refs,
     merge_sir_eu_refs_with_provenance, merge_sir_eus,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum DomainKind {
-    ClockPosedge,
-    ClockNegedge,
-    ResetAsyncHigh,
-    ResetAsyncLow,
-    Other,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct TriggerIdWithKind {
-    pub kind: DomainKind,
-    pub id: usize,
-}
 
 /// Block identifier
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -244,145 +231,6 @@ impl fmt::Display for RegisterId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum BinaryOp {
-    Add,
-    Sub,
-    Mul,
-    DivU,
-    DivS,
-    RemU,
-    RemS,
-    And,
-    Or,
-    Xor,
-    Shl, // Logical Shift Left (<<)
-    Shr, // Logical Shift Right (>>)
-    Sar, // Arithmetic Shift Right (>>>)
-    Eq,
-    Ne,
-    LtU,
-    LtS, // Less Than (Unsigned / Signed)
-    LeU,
-    LeS, // Less Equal
-    GtU,
-    GtS, // Greater Than
-    GeU,
-    GeS, // Greater Equal
-    LogicAnd,
-    LogicOr,
-    EqWildcard,
-    NeWildcard,
-}
-
-impl BinaryOp {
-    /// Whether the operation is commutative (a op b == b op a).
-    pub fn is_commutative(&self) -> bool {
-        matches!(
-            self,
-            BinaryOp::Add
-                | BinaryOp::Mul
-                | BinaryOp::And
-                | BinaryOp::Or
-                | BinaryOp::Xor
-                | BinaryOp::Eq
-                | BinaryOp::Ne
-                | BinaryOp::LogicAnd
-                | BinaryOp::LogicOr
-        )
-    }
-}
-
-impl fmt::Display for BinaryOp {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let op_str = match self {
-            BinaryOp::Add => "Add",
-            BinaryOp::Sub => "Sub",
-            BinaryOp::Mul => "Mul",
-            BinaryOp::DivU => "DivU",
-            BinaryOp::DivS => "DivS",
-            BinaryOp::RemU => "RemU",
-            BinaryOp::RemS => "RemS",
-            BinaryOp::And => "And",
-            BinaryOp::Or => "Or",
-            BinaryOp::Xor => "Xor",
-            BinaryOp::Shl => "Shl",
-            BinaryOp::Shr => "Shr",
-            BinaryOp::Sar => "Sar",
-            BinaryOp::Eq => "Eq",
-            BinaryOp::Ne => "Ne",
-            BinaryOp::LtU => "LtU",
-            BinaryOp::LtS => "LtS",
-            BinaryOp::LeU => "LeU",
-            BinaryOp::LeS => "LeS",
-            BinaryOp::GtU => "GtU",
-            BinaryOp::GtS => "GtS",
-            BinaryOp::GeU => "GeU",
-            BinaryOp::GeS => "GeS",
-            BinaryOp::LogicAnd => "LogicAnd",
-            BinaryOp::LogicOr => "LogicOr",
-            BinaryOp::EqWildcard => "EqWildcard",
-            BinaryOp::NeWildcard => "NeWildcard",
-        };
-        write!(f, "{}", op_str)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum UnaryOp {
-    Ident,
-    /// Convert a four-state value to two-state form. Unknown bits become zero:
-    /// `(value, mask) -> (value & !mask, 0)`.
-    ToTwoState,
-    Minus,
-    BitNot,
-    LogicNot,
-    And,
-    Or,
-    Xor,
-    PopCount,
-    CountLeadingZeros,
-    CountTrailingZeros,
-}
-
-impl UnaryOp {
-    /// Return the canonical result width for an operand of `operand_width` bits.
-    ///
-    /// Bit-count operations return a value in `0..=operand_width`, which needs
-    /// `ceil(log2(operand_width + 1))` bits.  Computing that as the bit length
-    /// of `operand_width` avoids overflowing when the operand width is
-    /// `usize::MAX`.
-    pub fn result_width(self, operand_width: usize) -> usize {
-        match self {
-            UnaryOp::LogicNot | UnaryOp::And | UnaryOp::Or | UnaryOp::Xor => 1,
-            UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot => {
-                operand_width
-            }
-            UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
-                usize::BITS as usize - operand_width.leading_zeros() as usize
-            }
-        }
-    }
-}
-
-impl fmt::Display for UnaryOp {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let op_str = match self {
-            UnaryOp::Ident => "Ident",
-            UnaryOp::ToTwoState => "ToTwoState",
-            UnaryOp::Minus => "Minus",
-            UnaryOp::BitNot => "BitNot",
-            UnaryOp::LogicNot => "LogicNot",
-            UnaryOp::And => "And",
-            UnaryOp::Or => "Or",
-            UnaryOp::Xor => "Xor",
-            UnaryOp::PopCount => "PopCount",
-            UnaryOp::CountLeadingZeros => "CountLeadingZeros",
-            UnaryOp::CountTrailingZeros => "CountTrailingZeros",
-        };
-        write!(f, "{}", op_str)
-    }
-}
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 
 pub struct SIRValue {

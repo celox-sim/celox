@@ -2,6 +2,7 @@
 members = [
     "crates/celox",
     "crates/celox-analysis",
+    "crates/celox-design",
     "crates/celox-sir",
     "crates/celox-bench-sv",
     "crates/celox-macros",

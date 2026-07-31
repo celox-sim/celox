@@ -408,6 +408,7 @@ version = "0.18.0"
 dependencies = [
  "bit-set 0.11.1",
  "celox-analysis",
+ "celox-design",
  "celox-macros",
  "celox-sir",
  "chrono",
@@ -460,6 +461,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "celox-design"
+version = "0.18.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "celox-macros"
 version = "0.18.0"
 dependencies = [
@@ -499,6 +507,7 @@ name = "celox-sir"
 version = "0.18.0"
 dependencies = [
  "celox-analysis",
+ "celox-design",
  "fxhash",
  "num-bigint",
  "num-traits",
