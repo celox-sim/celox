@@ -1927,8 +1927,9 @@ impl SLTToSIRLowerer {
             ));
             destination
         } else {
-            self.lower_input(
+            self.lower_input_for_node(
                 builder,
+                node,
                 variable,
                 index,
                 &BitAccess::new(0, width - 1),
@@ -1936,6 +1937,41 @@ impl SLTToSIRLowerer {
                 cache,
                 None,
             )
+        }
+    }
+
+    fn lower_input_for_node<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
+        &self,
+        builder: &mut SIRBuilder<A>,
+        node: NodeId,
+        id: &A,
+        index: &[crate::logic_tree::comb::SLTIndex],
+        access: &BitAccess,
+        arena: &SLTNodeArena<A>,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+        env: Option<&LowerEnv<'_, A>>,
+    ) -> RegisterId {
+        let width = access.msb - access.lsb + 1;
+        if index.is_empty()
+            && let Some(&element_width) = self.unpacked_input_element_widths.get(&node)
+            && element_width != 0
+            && width > element_width
+            && access.lsb.is_multiple_of(element_width)
+            && width.is_multiple_of(element_width)
+        {
+            let destination = builder.alloc_logic(width);
+            builder.emit(SIRInstruction::Load(
+                destination,
+                id.clone(),
+                SIROffset::PackedElements {
+                    bit_offset: access.lsb,
+                    element_width,
+                },
+                width,
+            ));
+            destination
+        } else {
+            self.lower_input(builder, id, index, access, arena, cache, env)
         }
     }
 
@@ -2514,29 +2550,11 @@ impl SLTToSIRLowerer {
             } => {
                 if let Some(env) = env
                     && let Some(reg) =
-                        self.lookup_override(builder, arena, cache, env, id, index, access)
+                        self.lookup_override(builder, node, arena, cache, env, id, index, access)
                 {
                     reg
-                } else if index.is_empty()
-                    && let Some(&element_width) = self.unpacked_input_element_widths.get(&node)
-                    && access.lsb % element_width == 0
-                    && (access.msb - access.lsb + 1) % element_width == 0
-                    && access.msb - access.lsb + 1 > element_width
-                {
-                    let width = access.msb - access.lsb + 1;
-                    let destination = builder.alloc_logic(width);
-                    builder.emit(SIRInstruction::Load(
-                        destination,
-                        id.clone(),
-                        SIROffset::PackedElements {
-                            bit_offset: access.lsb,
-                            element_width,
-                        },
-                        width,
-                    ));
-                    destination
                 } else {
-                    self.lower_input(builder, id, index, access, arena, cache, env)
+                    self.lower_input_for_node(builder, node, id, index, access, arena, cache, env)
                 }
             }
             SLTNode::Constant(val, mask, width, _signed) => {
@@ -2889,6 +2907,7 @@ impl SLTToSIRLowerer {
     fn rebuild_override_range<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
+        node: NodeId,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
         env: &LowerEnv<'_, A>,
@@ -2970,7 +2989,16 @@ impl SLTToSIRLowerer {
                 layer = current.parent;
             }
             let reg = part_reg.unwrap_or_else(|| {
-                self.lower_input(builder, id, index, &part_access, arena, cache, None)
+                self.lower_input_for_node(
+                    builder,
+                    node,
+                    id,
+                    index,
+                    &part_access,
+                    arena,
+                    cache,
+                    None,
+                )
             });
             part_regs.push(reg);
         }
@@ -2987,6 +3015,7 @@ impl SLTToSIRLowerer {
     fn lookup_override<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
+        node: NodeId,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
         env: &LowerEnv<'_, A>,
@@ -3089,7 +3118,7 @@ impl SLTToSIRLowerer {
             }
             return Some(result);
         }
-        self.rebuild_override_range(builder, arena, cache, env, id, index, access)
+        self.rebuild_override_range(builder, node, arena, cache, env, id, index, access)
     }
 
     /// Get width (references information from veryl-analyzer)
@@ -3197,12 +3226,14 @@ impl SLTToSIRLowerer {
             let composed =
                 BitAccess::new(input_access.lsb + access.lsb, input_access.lsb + access.msb);
             if let Some(env) = env
-                && let Some(reg) =
-                    self.lookup_override(builder, arena, cache, env, variable, index, &composed)
+                && let Some(reg) = self
+                    .lookup_override(builder, expr, arena, cache, env, variable, index, &composed)
             {
                 return reg;
             }
-            return self.lower_input(builder, variable, index, &composed, arena, cache, env);
+            return self.lower_input_for_node(
+                builder, expr, variable, index, &composed, arena, cache, env,
+            );
         }
 
         let inner_reg = self.lower_inner(builder, expr, arena, cache, env, allow_cache);
@@ -3233,7 +3264,9 @@ impl SLTToSIRLowerer {
             } if access.msb <= input_access.msb - input_access.lsb => {
                 let composed =
                     BitAccess::new(input_access.lsb + access.lsb, input_access.lsb + access.msb);
-                self.lower_input(builder, variable, index, &composed, arena, cache, None)
+                self.lower_input_for_node(
+                    builder, expr, variable, index, &composed, arena, cache, None,
+                )
             }
             SLTNode::Slice {
                 expr: inner,

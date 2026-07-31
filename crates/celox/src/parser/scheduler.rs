@@ -814,12 +814,35 @@ fn pre_lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Disp
     }
 }
 
+fn static_access_offset<Addr: Eq + Hash>(
+    addr: &Addr,
+    access: BitAccess,
+    unpacked_element_widths: &HashMap<Addr, usize>,
+) -> SIROffset {
+    let width = access.msb - access.lsb + 1;
+    match unpacked_element_widths.get(addr).copied() {
+        Some(element_width)
+            if element_width != 0
+                && width > element_width
+                && access.lsb.is_multiple_of(element_width)
+                && width.is_multiple_of(element_width) =>
+        {
+            SIROffset::PackedElements {
+                bit_offset: access.lsb,
+                element_width,
+            }
+        }
+        _ => SIROffset::Static(access.lsb),
+    }
+}
+
 fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     lowerer: &crate::logic_tree::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     path: &LogicPath<Addr>,
     arena: &SLTNodeArena<Addr>,
     lower_cache: &mut HashMap<NodeId, RegisterId>,
+    unpacked_element_widths: &HashMap<Addr, usize>,
     prepared_result: Option<RegisterId>,
 ) {
     match &path.target {
@@ -832,6 +855,7 @@ fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Cop
                 None => lower_logic_path_expr(lowerer, builder, path, arena, lower_cache),
             };
             let width = 1 + target.access.msb - target.access.lsb;
+            let offset = static_access_offset(&target.id, target.access, unpacked_element_widths);
             let old_reg = if path.comb_capture_enable_sites.is_empty() {
                 None
             } else {
@@ -839,14 +863,14 @@ fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Cop
                 builder.emit(SIRInstruction::Load(
                     old_reg,
                     target.id,
-                    SIROffset::Static(target.access.lsb),
+                    offset.clone(),
                     width,
                 ));
                 Some(old_reg)
             };
             builder.emit(SIRInstruction::Store(
                 target.id,
-                SIROffset::Static(target.access.lsb),
+                offset,
                 width,
                 result_reg,
                 Vec::new(),
@@ -927,8 +951,17 @@ fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
     path: &LogicPath<Addr>,
     arena: &SLTNodeArena<Addr>,
     lower_cache: &mut HashMap<NodeId, RegisterId>,
+    unpacked_element_widths: &HashMap<Addr, usize>,
 ) {
-    emit_logic_path_store_with_result(lowerer, builder, path, arena, lower_cache, None);
+    emit_logic_path_store_with_result(
+        lowerer,
+        builder,
+        path,
+        arena,
+        lower_cache,
+        unpacked_element_widths,
+        None,
+    );
 }
 
 fn invalidate_logic_path_target<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
@@ -2203,6 +2236,7 @@ fn flush_pending_fold_paths<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Displ
     lower_cache: &mut HashMap<NodeId, RegisterId>,
     dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
     inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
+    unpacked_element_widths: &HashMap<Addr, usize>,
     four_state: bool,
 ) {
     if pending.is_empty() {
@@ -2233,6 +2267,7 @@ fn flush_pending_fold_paths<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Displ
             path,
             arena,
             lower_cache,
+            unpacked_element_widths,
             prepared_result,
         );
         invalidate_logic_path_target(path, inverse_dep_memo, lower_cache);
@@ -2825,7 +2860,14 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         let path = &input[idx];
 
         collect_logic_path_input_deps(path, arena, dep_memo, inverse_dep_memo);
-        emit_logic_path_store(&lowerer, builder, path, arena, lower_cache);
+        emit_logic_path_store(
+            &lowerer,
+            builder,
+            path,
+            arena,
+            lower_cache,
+            unpacked_element_widths,
+        );
         invalidate_logic_path_target(path, inverse_dep_memo, lower_cache);
     };
     // Maximum blocks in a single EU before flushing to a new one.
@@ -2859,6 +2901,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     &mut lower_cache,
                     &mut dep_memo,
                     &mut inverse_dep_memo,
+                    unpacked_element_widths,
                     four_state,
                 );
                 pending_fold_roots.clear();
@@ -2906,6 +2949,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 &mut lower_cache,
                 &mut dep_memo,
                 &mut inverse_dep_memo,
+                unpacked_element_widths,
                 four_state,
             );
             pending_fold_roots.clear();
@@ -3029,11 +3073,14 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                             path,
                             arena,
                             &mut lower_cache,
+                            unpacked_element_widths,
                         );
                         continue;
                     };
                     let width = 1 + target.access.msb - target.access.lsb;
                     let addr = target.id;
+                    let offset =
+                        static_access_offset(&target.id, target.access, unpacked_element_widths);
 
                     // --- Dynamic Convergence Check Logic ---
                     // For each node in the SCC, we verify if its value changed after this iteration.
@@ -3043,7 +3090,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     builder.emit(SIRInstruction::Load(
                         old_val_reg,
                         addr,
-                        SIROffset::Static(target.access.lsb),
+                        offset.clone(),
                         width,
                     ));
                     collect_logic_path_input_deps(
@@ -3083,7 +3130,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     // e. Store the new value
                     builder.emit(SIRInstruction::Store(
                         addr,
-                        SIROffset::Static(target.access.lsb),
+                        offset,
                         width,
                         new_val_reg,
                         Vec::new(),
@@ -3145,6 +3192,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     &mut lower_cache,
                     &mut dep_memo,
                     &mut inverse_dep_memo,
+                    unpacked_element_widths,
                     four_state,
                 );
                 pending_fold_roots.clear();
@@ -3179,6 +3227,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     &mut lower_cache,
                     &mut dep_memo,
                     &mut inverse_dep_memo,
+                    unpacked_element_widths,
                     four_state,
                 );
                 pending_fold_roots.clear();
@@ -3209,6 +3258,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         &mut lower_cache,
         &mut dep_memo,
         &mut inverse_dep_memo,
+        unpacked_element_widths,
         four_state,
     );
     pending_fold_roots.clear();
