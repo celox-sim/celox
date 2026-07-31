@@ -10,13 +10,8 @@ Trigger Group: clk (AbsoluteAddr(inst0, var0))
       r0: logic<1>
       r1: logic<1>
       r2: bit<1>
-      r3: bit<32>
-      r4: bit<8>
       r5: signed bit<8>
-      r9: bit<32>
-      r10: bit<8>
       r11: signed bit<8>
-      r12: bit<32>
       r14: signed bit<8>
     b0:
       r0 = Load(addr=rst (region=0), offset=0, bits=1)
@@ -24,19 +19,14 @@ Trigger Group: clk (AbsoluteAddr(inst0, var0))
       r2 = ToTwoState r1
       Branch(r2 ? b1 : b2)
     b1:
-      r3 = SIRValue(0x0)
-      r4 = SIRValue(0xff)
-      r5 = r3 And r4
+      r5 = SIRValue(0x0)
       Store(addr=a (region=0), offset=0, bits=8, src_reg = 5)
       Store(addr=b (region=0), offset=0, bits=8, src_reg = 5)
       Jump(b3)
     b2:
-      r9 = SIRValue(0x1)
-      r10 = SIRValue(0xff)
-      r11 = r9 And r10
+      r11 = SIRValue(0x1)
       Store(addr=a (region=0), offset=0, bits=8, src_reg = 11)
-      r12 = SIRValue(0x2)
-      r14 = r12 And r10
+      r14 = SIRValue(0x2)
       Store(addr=b (region=0), offset=0, bits=8, src_reg = 14)
       Jump(b3)
     b3:
@@ -48,13 +38,8 @@ Trigger Group: rst (AbsoluteAddr(inst0, var1))
       r0: logic<1>
       r1: logic<1>
       r2: bit<1>
-      r3: bit<32>
-      r4: bit<8>
       r5: signed bit<8>
-      r9: bit<32>
-      r10: bit<8>
       r11: signed bit<8>
-      r12: bit<32>
       r14: signed bit<8>
     b0:
       r0 = Load(addr=rst (region=0), offset=0, bits=1)
@@ -62,19 +47,14 @@ Trigger Group: rst (AbsoluteAddr(inst0, var1))
       r2 = ToTwoState r1
       Branch(r2 ? b1 : b2)
     b1:
-      r3 = SIRValue(0x0)
-      r4 = SIRValue(0xff)
-      r5 = r3 And r4
+      r5 = SIRValue(0x0)
       Store(addr=a (region=0), offset=0, bits=8, src_reg = 5)
       Store(addr=b (region=0), offset=0, bits=8, src_reg = 5)
       Jump(b3)
     b2:
-      r9 = SIRValue(0x1)
-      r10 = SIRValue(0xff)
-      r11 = r9 And r10
+      r11 = SIRValue(0x1)
       Store(addr=a (region=0), offset=0, bits=8, src_reg = 11)
-      r12 = SIRValue(0x2)
-      r14 = r12 And r10
+      r14 = SIRValue(0x2)
       Store(addr=b (region=0), offset=0, bits=8, src_reg = 14)
       Jump(b3)
     b3:
@@ -88,13 +68,8 @@ Trigger Group: clk (AbsoluteAddr(inst0, var0))
       r0: logic<1>
       r1: logic<1>
       r2: bit<1>
-      r3: bit<32>
-      r4: bit<8>
       r5: signed bit<8>
-      r9: bit<32>
-      r10: bit<8>
       r11: signed bit<8>
-      r12: bit<32>
       r14: signed bit<8>
     b0:
       Commit(src=a (region=0), dst=a (region=1), offset=0, bits=8)
@@ -104,19 +79,14 @@ Trigger Group: clk (AbsoluteAddr(inst0, var0))
       r2 = ToTwoState r1
       Branch(r2 ? b1 : b2)
     b1:
-      r3 = SIRValue(0x0)
-      r4 = SIRValue(0xff)
-      r5 = r3 And r4
+      r5 = SIRValue(0x0)
       Store(addr=a (region=1), offset=0, bits=8, src_reg = 5)
       Store(addr=b (region=1), offset=0, bits=8, src_reg = 5)
       Jump(b3)
     b2:
-      r9 = SIRValue(0x1)
-      r10 = SIRValue(0xff)
-      r11 = r9 And r10
+      r11 = SIRValue(0x1)
       Store(addr=a (region=1), offset=0, bits=8, src_reg = 11)
-      r12 = SIRValue(0x2)
-      r14 = r12 And r10
+      r14 = SIRValue(0x2)
       Store(addr=b (region=1), offset=0, bits=8, src_reg = 14)
       Jump(b3)
     b3:
@@ -128,13 +98,8 @@ Trigger Group: rst (AbsoluteAddr(inst0, var1))
       r0: logic<1>
       r1: logic<1>
       r2: bit<1>
-      r3: bit<32>
-      r4: bit<8>
       r5: signed bit<8>
-      r9: bit<32>
-      r10: bit<8>
       r11: signed bit<8>
-      r12: bit<32>
       r14: signed bit<8>
     b0:
       Commit(src=a (region=0), dst=a (region=1), offset=0, bits=8)
@@ -144,19 +109,14 @@ Trigger Group: rst (AbsoluteAddr(inst0, var1))
       r2 = ToTwoState r1
       Branch(r2 ? b1 : b2)
     b1:
-      r3 = SIRValue(0x0)
-      r4 = SIRValue(0xff)
-      r5 = r3 And r4
+      r5 = SIRValue(0x0)
       Store(addr=a (region=1), offset=0, bits=8, src_reg = 5)
       Store(addr=b (region=1), offset=0, bits=8, src_reg = 5)
       Jump(b3)
     b2:
-      r9 = SIRValue(0x1)
-      r10 = SIRValue(0xff)
-      r11 = r9 And r10
+      r11 = SIRValue(0x1)
       Store(addr=a (region=1), offset=0, bits=8, src_reg = 11)
-      r12 = SIRValue(0x2)
-      r14 = r12 And r10
+      r14 = SIRValue(0x2)
       Store(addr=b (region=1), offset=0, bits=8, src_reg = 14)
       Jump(b3)
     b3:
