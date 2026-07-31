@@ -15,6 +15,7 @@ mod node_facts;
 mod node_rules;
 mod path;
 pub mod range_store;
+pub mod scheduler;
 
 #[doc(hidden)]
 pub use lower::matches_slt_or_scan_group;
@@ -26,6 +27,7 @@ pub use node::{
 pub use node_facts::{SLTNodeFacts, SLTNodeFactsError};
 pub use path::{LogicPath, LogicPathId, LogicPathTarget};
 pub use range_store::{RangeStore, RangeStoreError};
+pub use scheduler::FfAccessSummary;
 
 /// Return the construction-time width cached when a node was interned.
 pub fn get_width<A: std::hash::Hash + Eq + Clone>(node: NodeId, arena: &SLTNodeArena<A>) -> usize {

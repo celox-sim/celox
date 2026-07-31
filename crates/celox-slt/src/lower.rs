@@ -3110,7 +3110,7 @@ impl SLTToSIRLowerer {
         self.rebuild_override_range(builder, node, arena, cache, env, id, index, access)
     }
 
-    /// Get width (references information from veryl-analyzer)
+    /// Get the width recorded by frontend construction.
     fn get_width<A: Hash + Eq + Clone + std::fmt::Debug>(
         &self,
         node: NodeId,
