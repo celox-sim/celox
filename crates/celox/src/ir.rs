@@ -4,9 +4,12 @@ use crate::{
 };
 pub(crate) use celox_sir::{
     BasicBlock, BinaryOp, BlockId, DomainKind, ExecutionUnit, RegisterId, RegisterType, SIRBuilder,
-    SIRInstruction, SIROffset, SIRSwitchCase, SIRTerminator, SIRValue, SirMergeProvenance,
-    TriggerIdWithKind, UnaryOp, collect_exact_zero_registers, inline_single_predecessor_jumps,
-    merge_sir_eu_refs_with_provenance, merge_sir_eus,
+    SIRInstruction, SIROffset, SIRSwitchCase, SIRTerminator, SIRValue, TriggerIdWithKind, UnaryOp,
+    collect_exact_zero_registers, merge_sir_eus,
+};
+#[cfg(any(target_arch = "x86_64", test))]
+pub(crate) use celox_sir::{
+    SirMergeProvenance, inline_single_predecessor_jumps, merge_sir_eu_refs_with_provenance,
 };
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
