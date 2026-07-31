@@ -18,6 +18,7 @@ use crate::context_width::{
 use crate::display_format::{DisplayFormatArg, format_display_arg};
 use crate::ir::{AbsoluteAddr, Program, RuntimeEventKind, RuntimeEventSite, SignalRef};
 use crate::simulator::{RuntimeEvent, RuntimeFormatContext, Simulator};
+use celox_testbench::{ExprBytecode, ExprOpcode as TbOpcode, TestbenchOperator as Op};
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use std::sync::{
@@ -26,8 +27,8 @@ use std::sync::{
 };
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssertKind, CasePattern, Expression, Factor, ForBound, ForRange, Function,
-    FunctionCall, Op, Statement, SystemFunctionInput, SystemFunctionKind, TbMethod, TbMethodCall,
-    VarId,
+    FunctionCall, Op as VerylOp, Statement, SystemFunctionInput, SystemFunctionKind, TbMethod,
+    TbMethodCall, VarId,
 };
 use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::{self, StrId};
@@ -160,83 +161,7 @@ pub(crate) struct CompiledAssertArg {
 /// A compiled expression: flat bytecode evaluated on a stack VM.
 #[derive(Debug)]
 pub struct CompiledExpr {
-    ops: Vec<TbOpcode>,
-}
-
-/// Bytecode instructions for the testbench expression evaluator.
-#[derive(Debug)]
-enum TbOpcode {
-    /// Push a constant u64.
-    ConstU64(u64),
-    /// Push a wide constant (>64 bits).
-    ConstWide(BigUint),
-    /// Read ≤8 bytes from memory at `offset`, zero-extend to u64.
-    LoadU64 {
-        offset: usize,
-        byte_size: usize,
-        mask: u64,
-    },
-    /// Read >8 bytes from memory, push as BigUint.
-    LoadWide {
-        offset: usize,
-        byte_size: usize,
-        width: usize,
-    },
-    /// Binary operation: pop two values, push result.
-    ///
-    /// This is reserved for the compiler's unsigned address/concatenation
-    /// plumbing. Source-language expressions use `TypedBinOp` below.
-    BinOp(Op),
-    /// Source-language binary operation with its resolved common width and
-    /// operand signedness.
-    TypedBinOp {
-        op: Op,
-        lhs_width: usize,
-        rhs_width: usize,
-        result_width: usize,
-        lhs_signed: bool,
-        rhs_signed: bool,
-    },
-    /// Source-language unary operation. Reductions have a one-bit result even
-    /// though their operand retains `operand_width`.
-    TypedUnary {
-        op: Op,
-        operand_width: usize,
-        result_width: usize,
-    },
-    /// Resize a value in its resolved expression context. The context's
-    /// effective signedness controls widening; resizing never changes bits
-    /// merely to reinterpret the result type.
-    Resize {
-        source_width: usize,
-        target_width: usize,
-        signed: bool,
-    },
-    /// Append a self-determined concatenation item to the accumulator.
-    ConcatPart {
-        part_width: usize,
-        result_width: usize,
-    },
-    /// Conditional: pop condition; if non-zero execute `then_len` ops,
-    /// otherwise skip them and execute `else_len` ops.
-    Ternary { then_len: usize, else_len: usize },
-    /// Dynamic array element load: pop index (u64), compute
-    /// `base_offset + index * stride_bytes`, read `element_width` bits.
-    LoadIndexed {
-        base_offset: usize,
-        stride_bytes: usize,
-        element_byte_size: usize,
-        element_width: usize,
-    },
-    /// Dynamic bit select: pop bit-index (u64), read full value from
-    /// `base_offset`, then shift right by bit-index and mask to `select_width`.
-    LoadBitSelect {
-        base_offset: usize,
-        base_byte_size: usize,
-        select_width: usize,
-    },
-    /// Pop value from stack and write to memory (for function arg binding).
-    StoreU64 { offset: usize, byte_size: usize },
+    bytecode: ExprBytecode,
 }
 
 /// Stack value: either a native u64 or a heap-allocated BigUint.
@@ -297,7 +222,7 @@ impl CompiledExpr {
     fn eval(&self, memory: *mut u8) -> TbValue {
         let mut stack: Vec<TbValue> = Vec::with_capacity(16);
         let mut pc: usize = 0;
-        let ops = &self.ops;
+        let ops = self.bytecode.ops();
 
         while pc < ops.len() {
             self.exec_at(ops, &mut pc, &mut stack, memory);
@@ -1621,6 +1546,40 @@ fn eval_binop_wide_cmp(l: &BigUint, op: Op, r: &BigUint) -> u64 {
 
 // ── Expression compiler ────────────────────────────────────────────────
 
+fn lower_testbench_operator(op: VerylOp) -> Op {
+    match op {
+        VerylOp::Add => Op::Add,
+        VerylOp::Sub => Op::Sub,
+        VerylOp::Mul => Op::Mul,
+        VerylOp::Div => Op::Div,
+        VerylOp::Rem => Op::Rem,
+        VerylOp::Pow => Op::Pow,
+        VerylOp::BitAnd => Op::BitAnd,
+        VerylOp::BitOr => Op::BitOr,
+        VerylOp::BitXor => Op::BitXor,
+        VerylOp::BitXnor => Op::BitXnor,
+        VerylOp::BitNand => Op::BitNand,
+        VerylOp::BitNor => Op::BitNor,
+        VerylOp::LogicShiftL => Op::LogicShiftL,
+        VerylOp::LogicShiftR => Op::LogicShiftR,
+        VerylOp::ArithShiftL => Op::ArithShiftL,
+        VerylOp::ArithShiftR => Op::ArithShiftR,
+        VerylOp::Eq => Op::Eq,
+        VerylOp::EqWildcard => Op::EqWildcard,
+        VerylOp::Ne => Op::Ne,
+        VerylOp::NeWildcard => Op::NeWildcard,
+        VerylOp::Less => Op::Less,
+        VerylOp::LessEq => Op::LessEq,
+        VerylOp::Greater => Op::Greater,
+        VerylOp::GreaterEq => Op::GreaterEq,
+        VerylOp::LogicAnd => Op::LogicAnd,
+        VerylOp::LogicOr => Op::LogicOr,
+        VerylOp::LogicNot => Op::LogicNot,
+        VerylOp::BitNot => Op::BitNot,
+        _ => unreachable!("operator cannot be represented in testbench bytecode: {op:?}"),
+    }
+}
+
 struct ExprCompiler<'a, B: SimBackend> {
     sim: &'a Simulator<B>,
     /// Root module instance ID, cached for repeated lookups.
@@ -1632,7 +1591,9 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
     fn compile(&self, expr: &Expression) -> CompiledExpr {
         let mut ops = Vec::new();
         self.emit(expr, &mut ops);
-        CompiledExpr { ops }
+        CompiledExpr {
+            bytecode: ExprBytecode::new(ops),
+        }
     }
 
     fn compile_with_width(&self, expr: &Expression, width: usize) -> CompiledExpr {
@@ -1645,7 +1606,9 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                 signed: expression_signed(expr),
             }),
         );
-        CompiledExpr { ops }
+        CompiledExpr {
+            bytecode: ExprBytecode::new(ops),
+        }
     }
 
     fn natural_width(&self, expr: &Expression) -> usize {
@@ -1704,13 +1667,13 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
             Expression::Unary(op, inner, _) => {
                 let reduction = matches!(
                     op,
-                    Op::BitAnd
-                        | Op::BitNand
-                        | Op::BitOr
-                        | Op::BitNor
-                        | Op::BitXor
-                        | Op::BitXnor
-                        | Op::LogicNot
+                    VerylOp::BitAnd
+                        | VerylOp::BitNand
+                        | VerylOp::BitOr
+                        | VerylOp::BitNor
+                        | VerylOp::BitXor
+                        | VerylOp::BitXnor
+                        | VerylOp::LogicNot
                 );
                 let natural_width = self.natural_width(inner);
                 let operand_context = if reduction {
@@ -1726,17 +1689,17 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                 let operand = self.emit_in_context(inner, ops, operand_context);
                 let result_width = if reduction { 1 } else { operand.width };
                 match op {
-                    Op::Add
-                    | Op::Sub
-                    | Op::BitNot
-                    | Op::BitAnd
-                    | Op::BitNand
-                    | Op::BitOr
-                    | Op::BitNor
-                    | Op::BitXor
-                    | Op::BitXnor
-                    | Op::LogicNot => ops.push(TbOpcode::TypedUnary {
-                        op: *op,
+                    VerylOp::Add
+                    | VerylOp::Sub
+                    | VerylOp::BitNot
+                    | VerylOp::BitAnd
+                    | VerylOp::BitNand
+                    | VerylOp::BitOr
+                    | VerylOp::BitNor
+                    | VerylOp::BitXor
+                    | VerylOp::BitXnor
+                    | VerylOp::LogicNot => ops.push(TbOpcode::TypedUnary {
+                        op: lower_testbench_operator(*op),
                         operand_width: operand.width,
                         result_width,
                     }),
@@ -1749,7 +1712,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                 self.resize_result(ops, result, context)
             }
             Expression::Binary(lhs, op, rhs, _) => {
-                if matches!(op, Op::As) {
+                if matches!(op, VerylOp::As) {
                     let cast = cast_semantics(lhs, rhs)
                         .expect("analyzed testbench cast must have a concrete target");
                     let source = self.emit_in_context(
@@ -1780,31 +1743,31 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                 let lhs = self.emit_in_context(lhs, ops, semantics.lhs_context);
                 let rhs = self.emit_in_context(rhs, ops, semantics.rhs_context);
                 match op {
-                    Op::Pow
-                    | Op::Div
-                    | Op::Rem
-                    | Op::Mul
-                    | Op::Add
-                    | Op::Sub
-                    | Op::ArithShiftL
-                    | Op::ArithShiftR
-                    | Op::LogicShiftL
-                    | Op::LogicShiftR
-                    | Op::LessEq
-                    | Op::GreaterEq
-                    | Op::Less
-                    | Op::Greater
-                    | Op::Eq
-                    | Op::EqWildcard
-                    | Op::Ne
-                    | Op::NeWildcard
-                    | Op::BitAnd
-                    | Op::BitOr
-                    | Op::BitXor
-                    | Op::BitXnor
-                    | Op::LogicAnd
-                    | Op::LogicOr => ops.push(TbOpcode::TypedBinOp {
-                        op: *op,
+                    VerylOp::Pow
+                    | VerylOp::Div
+                    | VerylOp::Rem
+                    | VerylOp::Mul
+                    | VerylOp::Add
+                    | VerylOp::Sub
+                    | VerylOp::ArithShiftL
+                    | VerylOp::ArithShiftR
+                    | VerylOp::LogicShiftL
+                    | VerylOp::LogicShiftR
+                    | VerylOp::LessEq
+                    | VerylOp::GreaterEq
+                    | VerylOp::Less
+                    | VerylOp::Greater
+                    | VerylOp::Eq
+                    | VerylOp::EqWildcard
+                    | VerylOp::Ne
+                    | VerylOp::NeWildcard
+                    | VerylOp::BitAnd
+                    | VerylOp::BitOr
+                    | VerylOp::BitXor
+                    | VerylOp::BitXnor
+                    | VerylOp::LogicAnd
+                    | VerylOp::LogicOr => ops.push(TbOpcode::TypedBinOp {
+                        op: lower_testbench_operator(*op),
                         lhs_width: lhs.width,
                         rhs_width: rhs.width,
                         result_width: semantics.result_width,
@@ -2512,7 +2475,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                         end: convert_for_bound(end, ec),
                         inclusive: *inclusive,
                         step: *step,
-                        step_op: Some(*op),
+                        step_op: Some(lower_testbench_operator(*op)),
                         reverse: false,
                         body,
                     }),
@@ -2580,7 +2543,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
             // For now, wrap in an always-true If:
             Some(TestbenchStatement::If {
                 expr: CompiledExpr {
-                    ops: vec![TbOpcode::ConstU64(1)],
+                    bytecode: ExprBytecode::new(vec![TbOpcode::ConstU64(1)]),
                 },
                 then_block: stmts,
                 else_block: Vec::new(),

@@ -26,10 +26,14 @@ re-layout the finalized program after identity Stores have been removed. Veryl
 testbench runtime-event sites and direct state-read roots are projected into the source-independent
 `RuntimeSchema` before SIR optimization, so optimization and layout no longer traverse testbench
 AST. The remaining Veryl statements/functions are now one explicit
-`celox-frontend-veryl::VerylTestbenchSource` input owned by the frontend; the next testbench
-milestone consumes that artifact into source-independent bytecode instead of retaining two loose
-AST fields. Moving the remaining parser implementation, symbolic, optimizer, and testbench payload
-into the phase-specific target types below remains part of Milestone 3.
+`celox-frontend-veryl::VerylTestbenchSource` input owned by the frontend. The source-independent
+expression opcode and operator vocabulary is owned by `celox-testbench`; the current Veryl
+testbench compiler translates source operators at that boundary and the VM executes only the
+shared bytecode types. The bytecode still names physical layout offsets and source statements are
+still retained until simulator construction, so compiling an address-independent testbench
+artifact before layout remains the next step. Moving the remaining parser implementation,
+symbolic, optimizer, and testbench payload into the phase-specific target types below remains part
+of Milestone 3.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making

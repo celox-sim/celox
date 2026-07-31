@@ -413,6 +413,7 @@ dependencies = [
  "celox-macros",
  "celox-sir",
  "celox-state-layout",
+ "celox-testbench",
  "chrono",
  "clap",
  "cranelift",
@@ -534,6 +535,13 @@ version = "0.18.0"
 dependencies = [
  "celox-design",
  "fxhash",
+]
+
+[[package]]
+name = "celox-testbench"
+version = "0.18.0"
+dependencies = [
+ "num-bigint",
 ]
 
 [[package]]
