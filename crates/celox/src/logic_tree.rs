@@ -1,7 +1,7 @@
 mod comb;
 pub mod const_inline;
 mod lower;
-pub mod range_store;
+pub use celox_slt::range_store;
 pub use comb::SLTLoopBound;
 pub use comb::SLTNode;
 pub(crate) use comb::SLTNodeArenaEditError;

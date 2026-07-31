@@ -412,6 +412,7 @@ dependencies = [
  "celox-frontend-veryl",
  "celox-macros",
  "celox-sir",
+ "celox-slt",
  "celox-state-layout",
  "celox-testbench",
  "chrono",
@@ -526,6 +527,15 @@ dependencies = [
  "fxhash",
  "num-bigint",
  "num-traits",
+ "serde",
+]
+
+[[package]]
+name = "celox-slt"
+version = "0.18.0"
+dependencies = [
+ "celox-design",
+ "fxhash",
  "serde",
 ]
 
