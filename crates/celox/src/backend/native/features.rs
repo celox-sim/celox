@@ -21,6 +21,13 @@ pub(crate) enum StateBaseStrategy {
     )]
     Fs,
     /// Borrow the GS base while generated code is running.
+    #[cfg_attr(
+        not(any(all(target_os = "linux", target_arch = "x86_64"), test)),
+        expect(
+            dead_code,
+            reason = "constructed by Linux x86-64 target detection and emitter tests"
+        )
+    )]
     Gs,
 }
 
