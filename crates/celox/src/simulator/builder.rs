@@ -608,7 +608,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             );
         }
 
-        // Build memory layout (consumes address_aliases for offset sharing)
+        // Build memory layout (consumes semantic layout requirements).
         let layout_start = phase_timing.then(crate::timing::now);
         let mut laid_out = program.into_laid_out_with_mode(self.options.four_state, layout_mode);
         if let Some(start) = layout_start {

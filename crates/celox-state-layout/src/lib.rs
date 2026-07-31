@@ -78,6 +78,43 @@ pub struct StateObjectLayout<A> {
     pub is_4state: bool,
 }
 
+/// Semantic constraints produced by optimization and consumed when physical
+/// state layout is finalized.
+///
+/// This deliberately contains no physical offsets.  Alias pairs state that
+/// two semantic objects may share one stable-state home; layout construction
+/// still validates representation compatibility before applying the pair.
+#[derive(Debug, Clone)]
+pub struct LayoutRequirements<A> {
+    state_aliases: HashMap<A, A>,
+}
+
+impl<A> Default for LayoutRequirements<A> {
+    fn default() -> Self {
+        Self {
+            state_aliases: HashMap::default(),
+        }
+    }
+}
+
+impl<A> LayoutRequirements<A> {
+    pub fn state_aliases(&self) -> &HashMap<A, A> {
+        &self.state_aliases
+    }
+
+    pub fn state_aliases_mut(&mut self) -> &mut HashMap<A, A> {
+        &mut self.state_aliases
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.state_aliases.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.state_aliases.clear();
+    }
+}
+
 /// Complete, backend-independent input to physical layout construction.
 ///
 /// The compiler facade adapts its phase artifacts into this value. Layout
@@ -89,7 +126,7 @@ pub struct LayoutInput<A> {
     pub working_addresses: Vec<A>,
     pub sparse_addresses: Vec<A>,
     pub unpacked_arrays: HashMap<A, UnpackedArrayLayout>,
-    pub address_aliases: Vec<(A, A)>,
+    pub requirements: LayoutRequirements<A>,
     pub ff_referenced_addresses: HashSet<A>,
     pub num_events: usize,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
@@ -161,7 +198,7 @@ where
             working_addresses,
             sparse_addresses,
             unpacked_arrays,
-            mut address_aliases,
+            requirements,
             ff_referenced_addresses,
             num_events,
             runtime_event_sites,
@@ -310,6 +347,7 @@ where
             RUNTIME_EVENT_HEADER_SIZE + RUNTIME_EVENT_CAPACITY * runtime_event_slot_size;
         let merged_total_size = scratch_base_offset;
 
+        let mut address_aliases = requirements.state_aliases.into_iter().collect::<Vec<_>>();
         address_aliases.sort_unstable();
         for (alias, canonical) in address_aliases {
             let fourstate_ok = !four_state
@@ -507,6 +545,54 @@ mod tests {
     }
 
     #[test]
+    fn layout_requirements_own_semantic_aliases_until_layout() {
+        let mut requirements = LayoutRequirements::default();
+        requirements.state_aliases_mut().insert(2u32, 1u32);
+
+        assert_eq!(requirements.state_aliases().get(&2), Some(&1));
+        assert!(!requirements.is_empty());
+
+        requirements.clear();
+        assert!(requirements.is_empty());
+    }
+
+    #[test]
+    fn layout_applies_aliases_from_requirements() {
+        struct AliasLayoutSource;
+
+        impl LayoutSource<u32> for AliasLayoutSource {
+            fn layout_input(&self, _mode: MemoryLayoutMode) -> LayoutInput<u32> {
+                let mut requirements = LayoutRequirements::default();
+                requirements.state_aliases_mut().insert(2, 1);
+                LayoutInput {
+                    state_objects: vec![
+                        StateObjectLayout {
+                            address: 1,
+                            width: 8,
+                            is_4state: false,
+                        },
+                        StateObjectLayout {
+                            address: 2,
+                            width: 8,
+                            is_4state: false,
+                        },
+                    ],
+                    working_addresses: Vec::new(),
+                    sparse_addresses: Vec::new(),
+                    unpacked_arrays: HashMap::default(),
+                    requirements,
+                    ff_referenced_addresses: HashSet::default(),
+                    num_events: 0,
+                    runtime_event_sites: Vec::new(),
+                }
+            }
+        }
+
+        let layout = MemoryLayout::build(&AliasLayoutSource, false, MemoryLayoutMode::Packed);
+        assert_eq!(layout.offsets[&1], layout.offsets[&2]);
+    }
+
+    #[test]
     fn backend_scratch_only_extends_the_final_layout_region() {
         struct EmptyLayoutSource;
 
@@ -517,7 +603,7 @@ mod tests {
                     working_addresses: Vec::new(),
                     sparse_addresses: Vec::new(),
                     unpacked_arrays: HashMap::default(),
-                    address_aliases: Vec::new(),
+                    requirements: LayoutRequirements::default(),
                     ff_referenced_addresses: HashSet::default(),
                     num_events: 3,
                     runtime_event_sites: Vec::new(),

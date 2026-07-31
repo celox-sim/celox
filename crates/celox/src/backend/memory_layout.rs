@@ -6,7 +6,7 @@ use crate::ir::{
 #[cfg(any(target_arch = "x86_64", test))]
 pub use celox_state_layout::SparseWorkingLayout;
 pub use celox_state_layout::{
-    LayoutInput, LayoutSource, MemoryLayoutMode, RUNTIME_EVENT_HEADER_SIZE,
+    LayoutInput, LayoutRequirements, LayoutSource, MemoryLayoutMode, RUNTIME_EVENT_HEADER_SIZE,
     RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET, RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET,
     RUNTIME_EVENT_SLOT_SEQ_OFFSET, RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
     STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
@@ -45,11 +45,7 @@ impl LayoutSource<AbsoluteAddr> for Program {
                 .into_iter()
                 .collect(),
             unpacked_arrays,
-            address_aliases: self
-                .address_aliases
-                .iter()
-                .map(|(&alias, &canonical)| (alias, canonical))
-                .collect(),
+            requirements: self.layout_requirements.clone(),
             ff_referenced_addresses: collect_ff_referenced_addresses(self),
             num_events: self.num_events(),
             runtime_event_sites: self.runtime_schema.runtime_event_sites.clone(),
@@ -77,7 +73,7 @@ fn declared_strided_array_layouts(program: &Program) -> HashMap<AbsoluteAddr, Un
             },
         );
     }
-    for (&alias, &canonical) in &program.address_aliases {
+    for (&alias, &canonical) in program.layout_requirements.state_aliases() {
         layouts.remove(&alias);
         layouts.remove(&canonical);
     }

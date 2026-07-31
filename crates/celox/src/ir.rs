@@ -74,9 +74,7 @@ pub struct Program {
     pub design: celox_design::ElaboratedDesign<AbsoluteAddr>,
     pub frontend: VerylFrontendLookup,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
-    /// Memory layout aliases: non-canonical → canonical address.
-    /// Variables with identity Store→Load roundtrips share physical memory.
-    pub address_aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
+    pub layout_requirements: celox_state_layout::LayoutRequirements<AbsoluteAddr>,
     /// Initial block statements from the top-level module (for native testbenches).
     pub initial_statements: Option<Vec<veryl_analyzer::ir::Statement>>,
     /// Functions defined in the top-level module (for testbench function calls).
@@ -137,26 +135,30 @@ impl Program {
         four_state: bool,
         mode: crate::backend::memory_layout::MemoryLayoutMode,
     ) -> LaidOutProgram {
-        if !self.runtime_schema.comb_observers.is_empty() && !self.address_aliases.is_empty() {
+        if !self.runtime_schema.comb_observers.is_empty() && !self.layout_requirements.is_empty() {
             let observed_written: crate::HashSet<AbsoluteAddr> = self
                 .runtime_schema
                 .comb_observers
                 .iter()
                 .flat_map(|observer| observer.written_inputs.iter().copied())
                 .collect();
-            self.address_aliases
+            self.layout_requirements
+                .state_aliases_mut()
                 .retain(|alias_addr, _| !observed_written.contains(alias_addr));
-            self.address_aliases.retain(|alias_addr, _| {
-                !comb_capture_enable_needs_unaliased_old_value(&self.sir.eval_comb, *alias_addr)
-            });
+            self.layout_requirements
+                .state_aliases_mut()
+                .retain(|alias_addr, _| {
+                    !comb_capture_enable_needs_unaliased_old_value(&self.sir.eval_comb, *alias_addr)
+                });
         }
         crate::optimizer::coalescing::retain_final_identity_aliases(&mut self, four_state);
         let layout = crate::backend::MemoryLayout::build(&self, four_state, mode);
 
         // Remove identity Stores for aliases validated by the layout
-        if !self.address_aliases.is_empty() {
+        if !self.layout_requirements.is_empty() {
             let aliased: crate::HashMap<AbsoluteAddr, AbsoluteAddr> = self
-                .address_aliases
+                .layout_requirements
+                .state_aliases()
                 .iter()
                 .filter(|(alias_addr, canonical_addr)| {
                     layout
@@ -173,6 +175,7 @@ impl Program {
                 );
             }
         }
+        self.layout_requirements.clear();
 
         LaidOutProgram {
             program: self,
