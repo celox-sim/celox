@@ -31,8 +31,10 @@ expression opcode and operator vocabulary is owned by `celox-testbench`; the cur
 testbench compiler translates source operators at that boundary and emits bytecode with semantic
 state addresses plus relative byte offsets. A separate binding step resolves those locations from
 the finalized physical layout before the VM executes the bound bytecode. Source statements are
-still retained until simulator construction, so moving this compilation before layout and storing
-the resulting source-independent artifact remains the next step. Moving the remaining parser implementation,
+still retained until simulator construction, but the statement/control vocabulary is now also a
+generic `celox-testbench` contract over event identities, signal identities, expressions, and
+formatted arguments. Moving frontend construction of that contract before layout and storing the
+resulting source-independent artifact remains the next step. Moving the remaining parser implementation,
 symbolic, optimizer, and testbench payload into the phase-specific target types below remains part
 of Milestone 3.
 

@@ -44,6 +44,86 @@ pub enum TestbenchOperator {
     BitNot,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLocation {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+}
+
+pub enum AssertMessage<Argument> {
+    Formatted {
+        template: String,
+        args: Vec<Argument>,
+    },
+    DynamicArgs(Vec<Argument>),
+}
+
+pub enum ClockCount<Expression> {
+    Static(u64),
+    Dynamic(Expression),
+}
+
+pub enum LoopBound<Expression> {
+    Static(usize),
+    Dynamic {
+        expr: Expression,
+        width: usize,
+        signed: bool,
+    },
+}
+
+/// Source-independent testbench control program.
+///
+/// Frontends instantiate this with semantic state/event identities and
+/// unbound expressions. Runtime binding instantiates the same contract with
+/// backend event/signal handles and executable expressions.
+pub enum TestbenchStatement<Event, Signal, Expression, Argument> {
+    ClockNext {
+        clock_event: Event,
+        count: ClockCount<Expression>,
+    },
+    ResetAssert {
+        reset_signal: Signal,
+        clock_event: Event,
+        duration: u64,
+        assert_value: u8,
+        deassert_value: u8,
+    },
+    Assert {
+        expr: Expression,
+        site_id: u32,
+        continue_on_fail: bool,
+        message: Option<AssertMessage<Argument>>,
+        location: Option<SourceLocation>,
+    },
+    Display {
+        message: Option<AssertMessage<Argument>>,
+        newline: bool,
+    },
+    If {
+        expr: Expression,
+        then_block: Vec<Self>,
+        else_block: Vec<Self>,
+    },
+    For {
+        loop_var: Option<(Signal, usize, bool)>,
+        start: LoopBound<Expression>,
+        end: LoopBound<Expression>,
+        inclusive: bool,
+        step: usize,
+        step_op: Option<TestbenchOperator>,
+        reverse: bool,
+        body: Vec<Self>,
+    },
+    Assign {
+        dst: Signal,
+        expr: Expression,
+    },
+    Break,
+    Finish,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExprOpcode<L = usize> {
     ConstU64(u64),
@@ -301,5 +381,28 @@ mod tests {
         }]);
 
         assert_eq!(code.bind_with(|_| None), Err(BindError { address: 9 }));
+    }
+
+    #[test]
+    fn control_program_is_independent_of_runtime_handles() {
+        type SemanticStatement = TestbenchStatement<u32, u32, ExprBytecode<StateLocation<u32>>, ()>;
+
+        let statement = SemanticStatement::If {
+            expr: ExprBytecode::new(vec![ExprOpcode::LoadU64 {
+                location: StateLocation {
+                    address: 1,
+                    byte_offset: 0,
+                },
+                byte_size: 1,
+                mask: 1,
+            }]),
+            then_block: vec![SemanticStatement::ClockNext {
+                clock_event: 2,
+                count: ClockCount::Static(1),
+            }],
+            else_block: vec![SemanticStatement::Finish],
+        };
+
+        assert!(matches!(statement, SemanticStatement::If { .. }));
     }
 }

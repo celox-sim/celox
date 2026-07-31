@@ -18,8 +18,11 @@ use crate::context_width::{
 use crate::display_format::{DisplayFormatArg, format_display_arg};
 use crate::ir::{AbsoluteAddr, Program, RuntimeEventKind, RuntimeEventSite, SignalRef};
 use crate::simulator::{RuntimeEvent, RuntimeFormatContext, Simulator};
+pub use celox_testbench::SourceLocation;
 use celox_testbench::{
-    ExprBytecode, ExprOpcode as TbOpcode, StateLocation, TestbenchOperator as Op,
+    AssertMessage as GenericAssertMessage, ClockCount as GenericClockCount, ExprBytecode,
+    ExprOpcode as TbOpcode, LoopBound as GenericLoopBound, StateLocation, TestbenchOperator as Op,
+    TestbenchStatement as GenericTestbenchStatement,
 };
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
@@ -43,14 +46,6 @@ type UnboundTbOpcode = TbOpcode<StateLocation<AbsoluteAddr>>;
 pub enum TestResult {
     Pass,
     Fail(String),
-}
-
-/// Source location of a testbench statement in the original Veryl source.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceLocation {
-    pub file: String,
-    pub line: u32,
-    pub column: u32,
 }
 
 /// Result of a single `$assert` evaluation.
@@ -82,76 +77,15 @@ pub struct LimitedTestbenchResult {
     pub tick_limit_reached: bool,
 }
 
-pub(crate) enum AssertMessage {
-    Formatted {
-        template: String,
-        args: Vec<CompiledAssertArg>,
-    },
-    DynamicArgs(Vec<CompiledAssertArg>),
-}
+pub(crate) type AssertMessage = GenericAssertMessage<CompiledAssertArg>;
 
 /// Clock cycle count: either a compile-time constant or a runtime expression.
-pub enum ClockCount {
-    Static(u64),
-    Dynamic(CompiledExpr),
-}
+pub type ClockCount = GenericClockCount<CompiledExpr>;
 
-pub enum LoopBound {
-    Static(usize),
-    Dynamic {
-        expr: CompiledExpr,
-        width: usize,
-        signed: bool,
-    },
-}
+pub type LoopBound = GenericLoopBound<CompiledExpr>;
 
-pub(crate) enum TestbenchStatement<B: SimBackend> {
-    ClockNext {
-        clock_event: B::Event,
-        count: ClockCount,
-    },
-    ResetAssert {
-        reset_signal: SignalRef,
-        clock_event: B::Event,
-        duration: u64,
-        /// Value to drive when reset is asserted (0 for active-low, 1 for active-high).
-        assert_value: u8,
-        /// Value to drive when reset is deasserted.
-        deassert_value: u8,
-    },
-    Assert {
-        expr: CompiledExpr,
-        site_id: u32,
-        continue_on_fail: bool,
-        message: Option<AssertMessage>,
-        location: Option<SourceLocation>,
-    },
-    Display {
-        message: Option<AssertMessage>,
-        newline: bool,
-    },
-    If {
-        expr: CompiledExpr,
-        then_block: Vec<TestbenchStatement<B>>,
-        else_block: Vec<TestbenchStatement<B>>,
-    },
-    For {
-        loop_var: Option<(SignalRef, usize, bool)>,
-        start: LoopBound,
-        end: LoopBound,
-        inclusive: bool,
-        step: usize,
-        step_op: Option<Op>,
-        reverse: bool,
-        body: Vec<TestbenchStatement<B>>,
-    },
-    Assign {
-        dst: SignalRef,
-        expr: CompiledExpr,
-    },
-    Break,
-    Finish,
-}
+pub(crate) type TestbenchStatement<B> =
+    GenericTestbenchStatement<<B as SimBackend>::Event, SignalRef, CompiledExpr, CompiledAssertArg>;
 
 pub(crate) struct CompiledAssertArg {
     expr: CompiledExpr,
@@ -2440,7 +2374,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                 SystemFunctionKind::Assert { kind, cond, args } => {
                     let site_id = *next_assert_site_id;
                     *next_assert_site_id = next_assert_site_id.saturating_add(1);
-                    Some(TestbenchStatement::Assert {
+                    Some(GenericTestbenchStatement::Assert {
                         expr: ec.compile(&cond.0),
                         site_id,
                         continue_on_fail: matches!(kind, AssertKind::Continue),
@@ -2448,18 +2382,18 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                         location: extract_source_location(&sf.comptime.token),
                     })
                 }
-                SystemFunctionKind::Finish => Some(TestbenchStatement::Finish),
-                SystemFunctionKind::Display(args) => Some(TestbenchStatement::Display {
+                SystemFunctionKind::Finish => Some(GenericTestbenchStatement::Finish),
+                SystemFunctionKind::Display(args) => Some(GenericTestbenchStatement::Display {
                     message: compile_assert_message(args, ec),
                     newline: true,
                 }),
-                SystemFunctionKind::Write(args) => Some(TestbenchStatement::Display {
+                SystemFunctionKind::Write(args) => Some(GenericTestbenchStatement::Display {
                     message: compile_assert_message(args, ec),
                     newline: false,
                 }),
                 _ => None,
             },
-            Statement::If(s) => Some(TestbenchStatement::If {
+            Statement::If(s) => Some(GenericTestbenchStatement::If {
                 expr: ec.compile(&s.cond),
                 then_block: s
                     .true_side
@@ -2487,7 +2421,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                         end,
                         inclusive,
                         step,
-                    } => Some(TestbenchStatement::For {
+                    } => Some(GenericTestbenchStatement::For {
                         loop_var: lv,
                         start: convert_for_bound(start, ec),
                         end: convert_for_bound(end, ec),
@@ -2502,7 +2436,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                         end,
                         inclusive,
                         step,
-                    } => Some(TestbenchStatement::For {
+                    } => Some(GenericTestbenchStatement::For {
                         loop_var: lv,
                         start: convert_for_bound(start, ec),
                         end: convert_for_bound(end, ec),
@@ -2518,7 +2452,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                         inclusive,
                         step,
                         op,
-                    } => Some(TestbenchStatement::For {
+                    } => Some(GenericTestbenchStatement::For {
                         loop_var: lv,
                         start: convert_for_bound(start, ec),
                         end: convert_for_bound(end, ec),
@@ -2534,11 +2468,11 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                 .dst
                 .first()
                 .and_then(|d| ec.resolve_var(&d.id))
-                .map(|dst| TestbenchStatement::Assign {
+                .map(|dst| GenericTestbenchStatement::Assign {
                     dst,
                     expr: ec.compile_with_width(&a.expr, dst.width),
                 }),
-            Statement::Break => Some(TestbenchStatement::Break),
+            Statement::Break => Some(GenericTestbenchStatement::Break),
             Statement::FunctionCall(fc) => self.convert_function_call(fc, ec, next_assert_site_id),
             _ => None,
         }
@@ -2567,7 +2501,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         for (arg_path, arg_expr) in &fc.inputs {
             if let Some(&arg_var_id) = func_body.arg_map.get(arg_path) {
                 if let Some(sig) = ec.resolve_var(&arg_var_id) {
-                    stmts.push(TestbenchStatement::Assign {
+                    stmts.push(GenericTestbenchStatement::Assign {
                         dst: sig,
                         expr: ec.compile_with_width(arg_expr, sig.width),
                     });
@@ -2590,7 +2524,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
             // Actually, we can return None and use a different approach:
             // flatten into the parent's statement list.
             // For now, wrap in an always-true If:
-            Some(TestbenchStatement::If {
+            Some(GenericTestbenchStatement::If {
                 expr: CompiledExpr {
                     bytecode: ExprBytecode::new(vec![TbOpcode::ConstU64(1)]),
                 },
@@ -2618,7 +2552,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                     }
                     None => ClockCount::Static(1),
                 };
-                Some(TestbenchStatement::ClockNext {
+                Some(GenericTestbenchStatement::ClockNext {
                     clock_event: ev,
                     count: clock_count,
                 })
@@ -2632,7 +2566,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
                     .unwrap_or(self.default_reset_duration);
                 // Determine reset polarity from the variable's DomainKind
                 let (assert_value, deassert_value) = self.resolve_reset_polarity(&tb.inst);
-                Some(TestbenchStatement::ResetAssert {
+                Some(GenericTestbenchStatement::ResetAssert {
                     reset_signal,
                     clock_event,
                     duration: dur,
@@ -3522,7 +3456,7 @@ fn exec_one_detailed<B: SimBackend>(
         return ExecResult::Finished;
     }
     match stmt {
-        TestbenchStatement::ClockNext { clock_event, count } => {
+        GenericTestbenchStatement::ClockNext { clock_event, count } => {
             match eval_clock_count(sim, count) {
                 Ok(n) => {
                     let progress_every = testbench_progress_every();
@@ -3566,7 +3500,7 @@ fn exec_one_detailed<B: SimBackend>(
                 Err(e) => ExecResult::Fail(e),
             }
         }
-        TestbenchStatement::ResetAssert {
+        GenericTestbenchStatement::ResetAssert {
             reset_signal,
             clock_event,
             duration,
@@ -3603,7 +3537,7 @@ fn exec_one_detailed<B: SimBackend>(
             sim_set_u64(sim, *reset_signal, (*deassert_value).into());
             ExecResult::Continue
         }
-        TestbenchStatement::Assert {
+        GenericTestbenchStatement::Assert {
             expr,
             site_id,
             continue_on_fail,
@@ -3637,7 +3571,7 @@ fn exec_one_detailed<B: SimBackend>(
                 }
             }
         }
-        TestbenchStatement::Display { message, newline } => {
+        GenericTestbenchStatement::Display { message, newline } => {
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
@@ -3647,7 +3581,7 @@ fn exec_one_detailed<B: SimBackend>(
             forward_display(&rendered, *newline);
             ExecResult::Continue
         }
-        TestbenchStatement::If {
+        GenericTestbenchStatement::If {
             expr,
             then_block,
             else_block,
@@ -3662,7 +3596,7 @@ fn exec_one_detailed<B: SimBackend>(
                 exec_detailed(sim, else_block, ctx)
             }
         }
-        TestbenchStatement::For {
+        GenericTestbenchStatement::For {
             loop_var,
             start,
             end,
@@ -3682,7 +3616,7 @@ fn exec_one_detailed<B: SimBackend>(
             *reverse,
             |sim| exec_detailed(sim, body, ctx),
         ),
-        TestbenchStatement::Assign { dst, expr } => {
+        GenericTestbenchStatement::Assign { dst, expr } => {
             if let Err(e) = sim.eval_comb() {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
@@ -3694,8 +3628,8 @@ fn exec_one_detailed<B: SimBackend>(
             }
             ExecResult::Continue
         }
-        TestbenchStatement::Break => ExecResult::Break,
-        TestbenchStatement::Finish => ExecResult::Finished,
+        GenericTestbenchStatement::Break => ExecResult::Break,
+        GenericTestbenchStatement::Finish => ExecResult::Finished,
     }
 }
 
@@ -3750,13 +3684,16 @@ mod tests {
 
         assert!(matches!(
             tb.stmts.first(),
-            Some(TestbenchStatement::Display { newline: true, .. })
+            Some(GenericTestbenchStatement::Display { newline: true, .. })
         ));
         assert!(matches!(
             tb.stmts.get(1),
-            Some(TestbenchStatement::Display { newline: false, .. })
+            Some(GenericTestbenchStatement::Display { newline: false, .. })
         ));
-        assert!(matches!(tb.stmts.get(2), Some(TestbenchStatement::Finish)));
+        assert!(matches!(
+            tb.stmts.get(2),
+            Some(GenericTestbenchStatement::Finish)
+        ));
     }
 
     #[test]
