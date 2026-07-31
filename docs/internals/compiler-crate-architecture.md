@@ -36,9 +36,9 @@ stored before optimization; a separate binding step resolves those locations fro
 physical layout before the VM executes the bound bytecode. Native, Cranelift, and WASM execution
 therefore share the same testbench binding path. Moving the remaining parser implementation,
 symbolic, optimizer, and runtime payload into the phase-specific target crates below remains.
-`celox-slt` now owns the frontend-independent bit-range store and a symbolic-state contract generic
-over both semantic addresses and node identities; the arena, facts, scheduler, and lowerer remain
-in the facade until their Veryl construction dependencies are separated.
+`celox-slt` now owns the frontend-independent bit-range store, symbolic-state contract, SLT node
+arena, and iterative facts/verifier. Veryl AST traversal remains in the facade as an arena builder;
+the source-independent path graph, scheduler, and lowerer are the remaining SLT moves.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making

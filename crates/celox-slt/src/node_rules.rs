@@ -5,7 +5,7 @@
 
 use num_bigint::BigUint;
 
-use crate::ir::{BinaryOp, BitAccess, UnaryOp};
+use celox_design::{BinaryOp, BitAccess, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct NodeRuleError {

@@ -8,9 +8,24 @@ use std::collections::BTreeSet;
 use celox_design::VarAtomBase;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
+mod node;
+mod node_facts;
+mod node_rules;
 pub mod range_store;
 
+pub use node::{
+    NodeId, SLTForEffect, SLTForFoldGroupState, SLTForUpdate, SLTIndex, SLTIndexKind, SLTLoopBound,
+    SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTStepOp,
+};
+pub use node_facts::{SLTNodeFacts, SLTNodeFactsError};
 pub use range_store::{RangeStore, RangeStoreError};
+
+/// Return the construction-time width cached when a node was interned.
+pub fn get_width<A: std::hash::Hash + Eq + Clone>(node: NodeId, arena: &SLTNodeArena<A>) -> usize {
+    arena
+        .width(node)
+        .unwrap_or_else(|| panic!("SLT node id n{} is outside the arena", node.0))
+}
 
 /// Symbolic state keyed by a frontend-independent semantic address.
 ///
