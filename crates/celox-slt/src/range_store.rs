@@ -1,4 +1,4 @@
-use crate::ir::BitAccess;
+use celox_design::BitAccess;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;

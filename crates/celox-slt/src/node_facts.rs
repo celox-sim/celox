@@ -1,6 +1,6 @@
 use std::{fmt, hash::Hash};
 
-use crate::ir::BitAccess;
+use celox_design::BitAccess;
 
 use super::node::{NodeId, SLTLoopBound, SLTNode, SLTNodeArena, SLTStepOp};
 use super::node_rules;
@@ -372,7 +372,7 @@ pub struct SLTNodeFactsError {
 }
 
 impl SLTNodeFactsError {
-    pub(crate) fn new(invariant: &'static str, node: NodeId, message: impl Into<String>) -> Self {
+    pub fn new(invariant: &'static str, node: NodeId, message: impl Into<String>) -> Self {
         Self {
             invariant,
             node,
@@ -847,12 +847,10 @@ where
 mod tests {
     use num_bigint::{BigInt, BigUint};
 
-    use crate::ir::{BinaryOp, UnaryOp, VarAtomBase};
+    use celox_design::{BinaryOp, UnaryOp, VarAtomBase};
 
     use super::*;
-    use crate::logic_tree::comb::node::{
-        SLTForEffect, SLTForFoldGroupState, SLTForUpdate, SLTStepOp,
-    };
+    use crate::node::{SLTForEffect, SLTForFoldGroupState, SLTForUpdate, SLTStepOp};
 
     fn arena(nodes: Vec<SLTNode<u32>>) -> SLTNodeArena<u32> {
         SLTNodeArena::try_from_nodes(nodes).expect("test node graph must verify")

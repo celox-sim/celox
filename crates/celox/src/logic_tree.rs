@@ -1,7 +1,9 @@
 mod comb;
-pub mod const_inline;
-mod lower;
-pub mod range_store;
+pub use celox_slt::const_inline;
+pub(crate) use celox_slt::matches_slt_count_idiom;
+#[cfg(test)]
+pub(crate) use celox_slt::matches_slt_or_scan_group;
+pub use celox_slt::range_store;
 pub use comb::SLTLoopBound;
 pub use comb::SLTNode;
 pub(crate) use comb::SLTNodeArenaEditError;
@@ -14,7 +16,3 @@ pub use comb::{
 };
 #[cfg(test)]
 pub(crate) use comb::{SLTForUpdate, SLTStepOp};
-pub use lower::SLTToSIRLowerer;
-pub(crate) use lower::matches_slt_count_idiom;
-#[cfg(test)]
-pub(crate) use lower::matches_slt_or_scan_group;

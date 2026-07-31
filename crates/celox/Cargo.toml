@@ -19,6 +19,7 @@ celox-analysis        = { path = "../celox-analysis" }
 celox-design          = { path = "../celox-design" }
 celox-frontend-veryl  = { path = "../celox-frontend-veryl" }
 celox-sir             = { path = "../celox-sir" }
+celox-slt             = { path = "../celox-slt" }
 celox-state-layout    = { path = "../celox-state-layout" }
 celox-testbench       = { path = "../celox-testbench" }
 fxhash                = { workspace = true }

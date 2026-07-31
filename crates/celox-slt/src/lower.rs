@@ -1,9 +1,7 @@
-use crate::ir::{
-    BinaryOp, BitAccess, RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIROffset,
-    SIRTerminator, SIRValue, UnaryOp, VarAtomBase,
-};
-use crate::logic_tree::{
-    NodeId, SLTForFoldGroupState, SLTLoopBound, SLTNode, SLTNodeArena, comb::SLTStepOp,
+use crate::{NodeId, SLTForFoldGroupState, SLTLoopBound, SLTNode, SLTNodeArena, SLTStepOp};
+use celox_design::{BinaryOp, BitAccess, UnaryOp, VarAtomBase};
+use celox_sir::{
+    RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator, SIRValue,
 };
 use num_bigint::{BigInt, BigUint};
 use num_traits::{ToPrimitive, Zero};
@@ -32,7 +30,7 @@ fn try_const_eval<A: Hash + Eq + Clone>(
             if lm != BigUint::from(0u32) || rm != BigUint::from(0u32) {
                 return None;
             }
-            let width = crate::logic_tree::comb::get_width(node_id, arena);
+            let width = crate::get_width(node_id, arena);
             let width_mask = slt_value_mask(width);
             let result = match op {
                 BinaryOp::And => &lv & &rv,
@@ -94,7 +92,7 @@ enum SLTBitOrigin<A: Hash + Eq + Clone> {
         node: NodeId,
         variable: A,
         signed: bool,
-        index: Vec<crate::logic_tree::comb::SLTIndex>,
+        index: Vec<crate::SLTIndex>,
     },
 }
 
@@ -236,7 +234,7 @@ fn slt_literal_u64<A: Hash + Eq + Clone>(node: NodeId, arena: &SLTNodeArena<A>) 
 }
 
 fn slt_width<A: Hash + Eq + Clone>(node: NodeId, arena: &SLTNodeArena<A>) -> usize {
-    crate::logic_tree::comb::get_width(node, arena)
+    crate::get_width(node, arena)
 }
 
 /// Procedural control represents truth as `ToTwoState(Or(cond))`. Count-idiom
@@ -1108,7 +1106,7 @@ fn match_slt_count_idiom_with_materialized<A: Hash + Eq + Clone>(
 /// Whether the ordinary expanded SLT already matches a native count idiom.
 /// Loop recovery uses this as a semantic priority check so it does not replace
 /// an exact PopCount/CLZ/CTZ plan with a slower counted loop.
-pub(crate) fn matches_slt_count_idiom<A: Hash + Eq + Clone>(
+pub fn matches_slt_count_idiom<A: Hash + Eq + Clone>(
     root: NodeId,
     arena: &SLTNodeArena<A>,
 ) -> bool {
@@ -1450,7 +1448,7 @@ fn slt_is_scan_loop_value<A: Hash + Eq + Clone>(
 
 fn match_slt_scan_indexed_input<A: Hash + Eq + Clone>(
     variable: &A,
-    index: &[crate::logic_tree::comb::SLTIndex],
+    index: &[crate::SLTIndex],
     input_access: BitAccess,
     spec: &FoldGroupLowerSpec<'_, A>,
     state_variables: &[&A],
@@ -1476,8 +1474,8 @@ fn match_slt_scan_indexed_input<A: Hash + Eq + Clone>(
         return None;
     };
     let unpacked_element_width = match entry.kind {
-        crate::logic_tree::comb::SLTIndexKind::Unpacked { element_width } => Some(element_width),
-        crate::logic_tree::comb::SLTIndexKind::Packed => None,
+        crate::SLTIndexKind::Unpacked { element_width } => Some(element_width),
+        crate::SLTIndexKind::Packed => None,
     };
     Some(SLTVectorExpr::StaticInput {
         variable: variable.clone(),
@@ -1861,8 +1859,7 @@ fn match_slt_or_scan_plan<A: Hash + Eq + Clone>(
     None
 }
 
-#[cfg(test)]
-pub(crate) fn matches_slt_or_scan_group<A: Hash + Eq + Clone>(
+pub fn matches_slt_or_scan_group<A: Hash + Eq + Clone>(
     root: NodeId,
     arena: &SLTNodeArena<A>,
 ) -> bool {
@@ -1906,7 +1903,7 @@ impl SLTToSIRLowerer {
         builder: &mut SIRBuilder<A>,
         node: NodeId,
         variable: &A,
-        index: &[crate::logic_tree::comb::SLTIndex],
+        index: &[crate::SLTIndex],
         width: usize,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
@@ -1945,7 +1942,7 @@ impl SLTToSIRLowerer {
         builder: &mut SIRBuilder<A>,
         node: NodeId,
         id: &A,
-        index: &[crate::logic_tree::comb::SLTIndex],
+        index: &[crate::SLTIndex],
         access: &BitAccess,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
@@ -2001,9 +1998,7 @@ impl SLTToSIRLowerer {
     /// scheduler remains responsible for proving that the roots are mutually
     /// unordered in its dependency graph; this method rechecks every local
     /// property needed by the joint loop itself.
-    pub(crate) fn lower_fold_groups_jointly<
-        A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
-    >(
+    pub fn lower_fold_groups_jointly<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
         &self,
         builder: &mut SIRBuilder<A>,
         roots: &[NodeId],
@@ -2500,7 +2495,7 @@ impl SLTToSIRLowerer {
     /// Project a value which has already been lowered without retaining every
     /// projection at once.  Grouped folds use this after the packed result has
     /// been computed, immediately before the corresponding state Store.
-    pub(crate) fn project_materialized<A>(
+    pub fn project_materialized<A>(
         &self,
         builder: &mut SIRBuilder<A>,
         value: RegisterId,
@@ -2705,7 +2700,7 @@ impl SLTToSIRLowerer {
         &self,
         builder: &mut SIRBuilder<A>,
         id: &A,
-        index: &[crate::logic_tree::comb::SLTIndex],
+        index: &[crate::SLTIndex],
         access: &BitAccess,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
@@ -2740,20 +2735,16 @@ impl SLTToSIRLowerer {
             }
 
             let element_width = index.iter().find_map(|entry| match entry.kind {
-                crate::logic_tree::comb::SLTIndexKind::Unpacked { element_width } => {
-                    Some(element_width)
-                }
-                crate::logic_tree::comb::SLTIndexKind::Packed => None,
+                crate::SLTIndexKind::Unpacked { element_width } => Some(element_width),
+                crate::SLTIndexKind::Packed => None,
             });
             let element_access = element_width.filter(|element_width| {
                 access.msb < *element_width
                     && index.iter().all(|entry| match entry.kind {
-                        crate::logic_tree::comb::SLTIndexKind::Unpacked {
+                        crate::SLTIndexKind::Unpacked {
                             element_width: width,
                         } => width == *element_width && entry.stride % *element_width == 0,
-                        crate::logic_tree::comb::SLTIndexKind::Packed => {
-                            entry.stride < *element_width
-                        }
+                        crate::SLTIndexKind::Packed => entry.stride < *element_width,
                     })
             });
             let mut element_dynamic = None;
@@ -2765,12 +2756,10 @@ impl SLTToSIRLowerer {
 
                 let (stride, accumulator) = if let Some(element_width) = element_access {
                     match idx_entry.kind {
-                        crate::logic_tree::comb::SLTIndexKind::Unpacked { .. } => {
+                        crate::SLTIndexKind::Unpacked { .. } => {
                             (idx_entry.stride / element_width, &mut element_dynamic)
                         }
-                        crate::logic_tree::comb::SLTIndexKind::Packed => {
-                            (idx_entry.stride, &mut packed_dynamic)
-                        }
+                        crate::SLTIndexKind::Packed => (idx_entry.stride, &mut packed_dynamic),
                     }
                 } else {
                     (idx_entry.stride, &mut logical_dynamic)
@@ -2851,7 +2840,7 @@ impl SLTToSIRLowerer {
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
         env: Option<&LowerEnv<'_, A>>,
-        index: &[crate::logic_tree::comb::SLTIndex],
+        index: &[crate::SLTIndex],
         access: &BitAccess,
     ) -> RegisterId {
         let off_reg = builder.alloc_bit(64, false);
@@ -2912,7 +2901,7 @@ impl SLTToSIRLowerer {
         cache: &mut crate::HashMap<NodeId, RegisterId>,
         env: &LowerEnv<'_, A>,
         id: &A,
-        index: &[crate::logic_tree::comb::SLTIndex],
+        index: &[crate::SLTIndex],
         access: &BitAccess,
     ) -> Option<RegisterId> {
         let exact = VarAtomBase::new(id.clone(), access.lsb, access.msb);
@@ -3020,7 +3009,7 @@ impl SLTToSIRLowerer {
         cache: &mut crate::HashMap<NodeId, RegisterId>,
         env: &LowerEnv<'_, A>,
         id: &A,
-        index: &[crate::logic_tree::comb::SLTIndex],
+        index: &[crate::SLTIndex],
         access: &BitAccess,
     ) -> Option<RegisterId> {
         if !index.is_empty() {
@@ -3121,13 +3110,13 @@ impl SLTToSIRLowerer {
         self.rebuild_override_range(builder, node, arena, cache, env, id, index, access)
     }
 
-    /// Get width (references information from veryl-analyzer)
+    /// Get the width recorded by frontend construction.
     fn get_width<A: Hash + Eq + Clone + std::fmt::Debug>(
         &self,
         node: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> usize {
-        crate::logic_tree::comb::get_width(node, arena)
+        crate::get_width(node, arena)
     }
 
     fn get_bound_signed<A: Hash + Eq + Clone + std::fmt::Debug>(
@@ -3202,7 +3191,7 @@ impl SLTToSIRLowerer {
         &self,
         builder: &mut SIRBuilder<A>,
         expr: NodeId,
-        access: &crate::ir::BitAccess,
+        access: &BitAccess,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
         env: Option<&LowerEnv<'_, A>>,
@@ -3244,7 +3233,7 @@ impl SLTToSIRLowerer {
         &self,
         builder: &mut SIRBuilder<A>,
         expr: NodeId,
-        access: &crate::ir::BitAccess,
+        access: &BitAccess,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
     ) -> RegisterId {
@@ -4892,11 +4881,7 @@ impl SLTToSIRLowerer {
         builder.emit(SIRInstruction::Binary(masked, reg, BinaryOp::And, mask_reg));
         let sliced = self.slice_reg(builder, masked, &BitAccess::new(0, width - 1));
         let dest = alloc_like_source(builder, width, signed);
-        builder.emit(SIRInstruction::Unary(
-            dest,
-            crate::ir::UnaryOp::Ident,
-            sliced,
-        ));
+        builder.emit(SIRInstruction::Unary(dest, UnaryOp::Ident, sliced));
         dest
     }
 
@@ -5419,9 +5404,9 @@ impl SLTToSIRLowerer {
         step_op: SLTStepOp,
         reverse: bool,
         result: &VarAtomBase<A>,
-        initials: &[crate::logic_tree::comb::SLTForUpdate<A>],
-        updates: &[crate::logic_tree::comb::SLTForUpdate<A>],
-        effects: &[crate::logic_tree::comb::SLTForEffect],
+        initials: &[crate::SLTForUpdate<A>],
+        updates: &[crate::SLTForUpdate<A>],
+        effects: &[crate::SLTForEffect],
         continue_cond: NodeId,
     ) -> RegisterId {
         let mut counter_width = loop_width.max(1);
@@ -5895,7 +5880,7 @@ impl SLTToSIRLowerer {
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
         env: &LowerEnv<'_, A>,
-        effects: &[crate::logic_tree::comb::SLTForEffect],
+        effects: &[crate::SLTForEffect],
     ) {
         for effect in effects {
             let emit = |builder: &mut SIRBuilder<A>,
@@ -5972,8 +5957,9 @@ impl Drop for SLTToSIRLowerer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{BitAccess, BlockId, ExecutionUnit};
-    use crate::logic_tree::comb::SLTNodeArena;
+    use crate::SLTNodeArena;
+    use celox_design::BitAccess;
+    use celox_sir::{BlockId, ExecutionUnit};
 
     fn input(arena: &mut SLTNodeArena<u32>, variable: u32, width: usize) -> NodeId {
         arena
@@ -6525,13 +6511,13 @@ mod tests {
             .alloc(SLTNode::Input {
                 variable,
                 signed: false,
-                index: vec![crate::logic_tree::comb::SLTIndex {
+                index: vec![crate::SLTIndex {
                     node: loop_value,
                     stride,
                     kind: if unpacked {
-                        crate::logic_tree::comb::SLTIndexKind::Unpacked { element_width: 1 }
+                        crate::SLTIndexKind::Unpacked { element_width: 1 }
                     } else {
-                        crate::logic_tree::comb::SLTIndexKind::Packed
+                        crate::SLTIndexKind::Packed
                     },
                 }],
                 access: BitAccess::new(0, 0),
@@ -8519,15 +8505,15 @@ mod tests {
                 step_op: SLTStepOp::Add,
                 reverse: false,
                 result: target,
-                initials: vec![crate::logic_tree::comb::SLTForUpdate {
+                initials: vec![crate::SLTForUpdate {
                     target,
                     expr: initial,
                 }],
-                updates: vec![crate::logic_tree::comb::SLTForUpdate {
+                updates: vec![crate::SLTForUpdate {
                     target,
                     expr: update,
                 }],
-                effects: vec![crate::logic_tree::comb::SLTForEffect {
+                effects: vec![crate::SLTForEffect {
                     site_id: 1,
                     guard: None,
                     emit_on_true: true,
@@ -9163,10 +9149,10 @@ mod tests {
             .alloc(SLTNode::Input {
                 variable: 30,
                 signed: false,
-                index: vec![crate::logic_tree::comb::SLTIndex {
+                index: vec![crate::SLTIndex {
                     node: loop_index,
                     stride: 8,
-                    kind: crate::logic_tree::comb::SLTIndexKind::Packed,
+                    kind: crate::SLTIndexKind::Packed,
                 }],
                 access: BitAccess::new(0, 255),
             })
@@ -9226,10 +9212,10 @@ mod tests {
             .alloc(SLTNode::Input {
                 variable: 30,
                 signed: false,
-                index: vec![crate::logic_tree::comb::SLTIndex {
+                index: vec![crate::SLTIndex {
                     node: index,
                     stride: 14,
-                    kind: crate::logic_tree::comb::SLTIndexKind::Unpacked { element_width: 14 },
+                    kind: crate::SLTIndexKind::Unpacked { element_width: 14 },
                 }],
                 access: BitAccess::new(4, 7),
             })
@@ -9968,7 +9954,7 @@ mod tests {
         );
         assert!(matches!(
             builder.register(&reg),
-            crate::ir::RegisterType::Logic { width: 9 }
+            RegisterType::Logic { width: 9 }
         ));
         assert!(!lowerer.get_bound_signed(casted, &arena));
     }

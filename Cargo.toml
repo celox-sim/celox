@@ -5,6 +5,7 @@ members = [
     "crates/celox-design",
     "crates/celox-frontend-veryl",
     "crates/celox-sir",
+    "crates/celox-slt",
     "crates/celox-state-layout",
     "crates/celox-testbench",
     "crates/celox-bench-sv",
