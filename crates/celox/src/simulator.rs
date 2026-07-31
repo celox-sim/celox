@@ -526,7 +526,7 @@ impl<B: SimBackend> Simulator<B> {
     fn decorate_runtime_error(&self, err: RuntimeErrorCode) -> RuntimeErrorCode {
         match err {
             RuntimeErrorCode::DetectedTrueLoopCode(code) => {
-                let Some(info) = self.program.runtime_errors.get(&code) else {
+                let Some(info) = self.program.runtime_schema.runtime_errors.get(&code) else {
                     return RuntimeErrorCode::DetectedTrueLoop;
                 };
                 let signals = info
@@ -696,7 +696,9 @@ impl<B: SimBackend> Simulator<B> {
         }
         self.collect_backend_runtime_events()
             .into_iter()
-            .filter_map(|raw| render_raw_runtime_event(raw, &self.program.runtime_event_sites, ctx))
+            .filter_map(|raw| {
+                render_raw_runtime_event(raw, &self.program.runtime_schema.runtime_event_sites, ctx)
+            })
             .collect()
     }
 
@@ -706,7 +708,7 @@ impl<B: SimBackend> Simulator<B> {
         if let Some(buffer) = self.backend.runtime_event_buffer() {
             let events = collect_runtime_events(
                 layout,
-                &self.program.runtime_event_sites,
+                &self.program.runtime_schema.runtime_event_sites,
                 &mut read_seq,
                 buffer.byte_size(),
                 |offset| buffer.read_u64(offset),
@@ -722,7 +724,7 @@ impl<B: SimBackend> Simulator<B> {
             };
             let events = collect_runtime_events(
                 layout,
-                &self.program.runtime_event_sites,
+                &self.program.runtime_schema.runtime_event_sites,
                 &mut read_seq,
                 size,
                 read_u64,
@@ -749,7 +751,7 @@ impl<B: SimBackend> Simulator<B> {
         if let Some(buffer) = self.backend.runtime_event_buffer() {
             collect_runtime_events(
                 layout,
-                &self.program.runtime_event_sites,
+                &self.program.runtime_schema.runtime_event_sites,
                 &mut read_seq,
                 buffer.byte_size(),
                 |offset| buffer.read_u64(offset),
@@ -762,7 +764,7 @@ impl<B: SimBackend> Simulator<B> {
             };
             collect_runtime_events(
                 layout,
-                &self.program.runtime_event_sites,
+                &self.program.runtime_schema.runtime_event_sites,
                 &mut read_seq,
                 size,
                 read_u64,
@@ -779,7 +781,7 @@ impl<B: SimBackend> Simulator<B> {
         Some(RuntimeEventDrain {
             buffer,
             layout: self.backend.layout().clone(),
-            sites: self.program.runtime_event_sites.clone(),
+            sites: self.program.runtime_schema.runtime_event_sites.clone(),
             read_seq: self.runtime_event_read_seq.load(Ordering::Acquire),
             shared_read_seq: Arc::clone(&self.runtime_event_read_seq),
             active: Arc::clone(&self.runtime_event_drain_active),
@@ -860,7 +862,7 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     pub(crate) fn eval_comb_checked(&mut self) -> Result<(), RuntimeErrorCode> {
-        if self.program.runtime_event_sites.is_empty() {
+        if self.program.runtime_schema.runtime_event_sites.is_empty() {
             return self
                 .backend
                 .eval_comb()
@@ -885,7 +887,7 @@ impl<B: SimBackend> Simulator<B> {
             .zip(&self.comb_observer_snapshots)
             .map(|(now, prev)| now != prev)
             .collect();
-        let mut active_sites = vec![false; self.program.runtime_event_sites.len()];
+        let mut active_sites = vec![false; self.program.runtime_schema.runtime_event_sites.len()];
         for (observer, is_active) in self
             .program
             .comb_observers
@@ -910,8 +912,13 @@ impl<B: SimBackend> Simulator<B> {
         let after = self.snapshot_all_comb_observers();
         let runtime_events = self.peek_backend_runtime_events_from(runtime_event_start_seq);
         let fatal_error = self.fatal_comb_capture_error(&runtime_events);
-        self.backend
-            .set_comb_capture_event_enabled(&vec![false; self.program.runtime_event_sites.len()]);
+        self.backend.set_comb_capture_event_enabled(&vec![
+            false;
+            self.program
+                .runtime_schema
+                .runtime_event_sites
+                .len()
+        ]);
         self.comb_observer_snapshots = after;
         self.comb_observer_initial_eval = false;
         if let Some(err) = fatal_error {
@@ -950,7 +957,11 @@ impl<B: SimBackend> Simulator<B> {
             let RawRuntimeEvent::Event { site_id, args } = raw else {
                 return None;
             };
-            let site = self.program.runtime_event_sites.get(*site_id)?;
+            let site = self
+                .program
+                .runtime_schema
+                .runtime_event_sites
+                .get(*site_id)?;
             if !matches!(site.kind, RuntimeEventKind::AssertFatal) {
                 return None;
             }

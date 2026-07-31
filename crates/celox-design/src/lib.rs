@@ -1,5 +1,6 @@
 //! Source-language-independent design identities and semantic vocabulary.
 
+use fxhash::FxHashMap as HashMap;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fmt};
@@ -96,6 +97,22 @@ pub struct InitialStateValue<A> {
 pub struct RuntimeErrorInfo<A> {
     pub message: String,
     pub signals: Vec<A>,
+}
+
+/// Source-independent runtime diagnostics and observable event descriptions.
+#[derive(Clone, Debug)]
+pub struct RuntimeSchema<A> {
+    pub runtime_errors: HashMap<i64, RuntimeErrorInfo<A>>,
+    pub runtime_event_sites: Vec<RuntimeEventSite>,
+}
+
+impl<A> Default for RuntimeSchema<A> {
+    fn default() -> Self {
+        Self {
+            runtime_errors: HashMap::default(),
+            runtime_event_sites: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -454,9 +471,20 @@ mod tests {
             message: "failed".to_string(),
             signals: vec![initial.address],
         };
+        let mut runtime = RuntimeSchema::default();
+        runtime.runtime_errors.insert(1, error.clone());
+        runtime.runtime_event_sites.push(RuntimeEventSite {
+            kind: RuntimeEventKind::AssertFatal,
+            template: Some("failed".to_string()),
+            arg_widths: Vec::new(),
+            arg_signed: Vec::new(),
+            arg_is_string: Vec::new(),
+        });
 
         assert_eq!(error.signals, vec![initial.address]);
         assert!(matches!(initial.data, InitialStateData::Writes(_)));
+        assert_eq!(runtime.runtime_errors[&1], error);
+        assert_eq!(runtime.runtime_event_sites.len(), 1);
     }
 
     #[test]

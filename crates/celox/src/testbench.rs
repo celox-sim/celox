@@ -667,7 +667,7 @@ pub(crate) fn register_runtime_event_sites(program: &mut Program) {
     };
     let mut sites = Vec::new();
     collect_runtime_event_sites(stmts, &program.tb_functions, &mut sites);
-    program.runtime_event_sites.extend(sites);
+    program.runtime_schema.runtime_event_sites.extend(sites);
 }
 
 /// Return top-module signals read by the native testbench. Testbench bytecode
@@ -2385,6 +2385,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         };
         let site_count = count_assert_statements(stmts, &p.tb_functions) as u32;
         let mut next_assert_site_id = p
+            .runtime_schema
             .runtime_event_sites
             .len()
             .saturating_sub(site_count as usize) as u32;

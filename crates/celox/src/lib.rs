@@ -53,6 +53,7 @@ pub use backend::wasm_runtime::WasmBackend;
 pub use backend::{EventHandle, MemoryLayout, MemoryLayoutMode, get_byte_size};
 #[cfg(not(target_arch = "wasm32"))]
 pub use backend::{JitBackend, SimBackend};
+pub use celox_design::RuntimeSchema;
 pub use celox_macros::veryl_test;
 #[cfg(not(target_arch = "wasm32"))]
 pub use debug::CompilationTraceResult;

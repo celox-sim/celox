@@ -759,6 +759,7 @@ fn build_cache_key(
 #[cfg(not(target_arch = "wasm32"))]
 fn runtime_errors_by_name(program: &celox::Program) -> HashMap<i64, (String, Vec<String>)> {
     program
+        .runtime_schema
         .runtime_errors
         .iter()
         .map(|(&code, info)| {
