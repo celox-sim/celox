@@ -7,5 +7,9 @@ license.workspace     = true
 description           = "Physical simulation-state layout contracts for Celox"
 edition.workspace     = true
 
+[dependencies]
+celox-design = { path = "../celox-design" }
+fxhash       = { workspace = true }
+
 [lints]
 workspace = true

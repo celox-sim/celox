@@ -519,6 +519,10 @@ dependencies = [
 [[package]]
 name = "celox-state-layout"
 version = "0.18.0"
+dependencies = [
+ "celox-design",
+ "fxhash",
+]
 
 [[package]]
 name = "celox-ts-gen"
