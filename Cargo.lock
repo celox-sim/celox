@@ -411,6 +411,7 @@ dependencies = [
  "celox-design",
  "celox-macros",
  "celox-sir",
+ "celox-state-layout",
  "chrono",
  "clap",
  "cranelift",
@@ -514,6 +515,10 @@ dependencies = [
  "num-traits",
  "serde",
 ]
+
+[[package]]
+name = "celox-state-layout"
+version = "0.18.0"
 
 [[package]]
 name = "celox-ts-gen"
