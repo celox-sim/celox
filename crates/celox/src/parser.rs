@@ -1622,6 +1622,7 @@ pub(crate) fn flatten(
             runtime_errors,
             runtime_event_sites,
             comb_observers: runtime_comb_observers,
+            testbench_read_roots: Default::default(),
         },
         layout_requirements: Default::default(),
         initial_statements,
@@ -2556,6 +2557,10 @@ pub fn parse(
             trace.as_deref_mut(),
         )
     )?;
+    timed_phase!(
+        "project_testbench_observability",
+        crate::testbench::project_observability(&mut program)
+    );
 
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.pre_optimized_sir

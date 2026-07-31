@@ -1,6 +1,6 @@
 //! Source-language-independent design identities and semantic vocabulary.
 
-use fxhash::FxHashMap as HashMap;
+use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fmt};
@@ -118,6 +118,9 @@ pub struct RuntimeSchema<A> {
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<A>>,
     pub runtime_event_sites: Vec<RuntimeEventSite>,
     pub comb_observers: Vec<RuntimeCombObserver<A>>,
+    /// Persistent state read directly by host-side testbench execution. These
+    /// are optimization roots even when no SIR instruction loads them.
+    pub testbench_read_roots: HashSet<A>,
 }
 
 impl<A> Default for RuntimeSchema<A> {
@@ -126,6 +129,7 @@ impl<A> Default for RuntimeSchema<A> {
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
             comb_observers: Vec::new(),
+            testbench_read_roots: HashSet::default(),
         }
     }
 }
@@ -567,12 +571,14 @@ mod tests {
             }],
             written_inputs: vec![initial.address],
         });
+        runtime.testbench_read_roots.insert(initial.address);
 
         assert_eq!(error.signals, vec![initial.address]);
         assert!(matches!(initial.data, InitialStateData::Writes(_)));
         assert_eq!(runtime.runtime_errors[&1], error);
         assert_eq!(runtime.runtime_event_sites.len(), 1);
         assert_eq!(runtime.comb_observers[0].sensitivity[0].id, initial.address);
+        assert!(runtime.testbench_read_roots.contains(&initial.address));
     }
 
     #[test]
