@@ -28,10 +28,11 @@ testbench runtime-event sites and direct state-read roots are projected into the
 AST. The remaining Veryl statements/functions are now one explicit
 `celox-frontend-veryl::VerylTestbenchSource` input owned by the frontend. The source-independent
 expression opcode and operator vocabulary is owned by `celox-testbench`; the current Veryl
-testbench compiler translates source operators at that boundary and the VM executes only the
-shared bytecode types. The bytecode still names physical layout offsets and source statements are
-still retained until simulator construction, so compiling an address-independent testbench
-artifact before layout remains the next step. Moving the remaining parser implementation,
+testbench compiler translates source operators at that boundary and emits bytecode with semantic
+state addresses plus relative byte offsets. A separate binding step resolves those locations from
+the finalized physical layout before the VM executes the bound bytecode. Source statements are
+still retained until simulator construction, so moving this compilation before layout and storing
+the resulting source-independent artifact remains the next step. Moving the remaining parser implementation,
 symbolic, optimizer, and testbench payload into the phase-specific target types below remains part
 of Milestone 3.
 
