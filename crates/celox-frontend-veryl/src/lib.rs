@@ -11,6 +11,7 @@ mod config;
 pub mod context_width;
 mod error;
 pub mod ff;
+pub mod hierarchy;
 pub mod logic_tree;
 pub mod loop_provenance;
 pub mod module;
@@ -20,6 +21,7 @@ mod types;
 
 pub use config::BuildConfig;
 pub use error::{LoweringPhase, ParserError, SourceLocation};
+pub use hierarchy::{ParseIrResult, parse_ir, parse_ir_with_loop_provenance};
 pub use module_artifact::SimModule;
 pub use types::{resolve_dims, resolve_total_width};
 
