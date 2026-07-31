@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bit_set::BitSet;
 use num_bigint::BigUint;
 
-use crate::ir::{AbsoluteAddr, Program, SignalArrayLayout, SignalRef};
+use crate::ir::{AbsoluteAddr, LaidOutProgram, Program, SignalArrayLayout, SignalRef};
 use crate::{HashMap, SimulatorError, SimulatorOptions};
 
 use super::super::RuntimeEventBuffer;
@@ -502,16 +502,14 @@ fn format_native_codegen_trace(
 }
 
 fn compile_program(
-    sir: &Program,
+    laid_out: &LaidOutProgram,
     options: &SimulatorOptions,
     capture_trace: bool,
 ) -> Result<(SharedNativeCode, Option<NativeCodegenTrace>), SimulatorError> {
     const MAX_PARALLEL_NATIVE_FUNCTIONS: usize = 4;
 
-    let layout = sir
-        .layout
-        .as_ref()
-        .expect("layout must be built before backend");
+    let sir = laid_out.program();
+    let layout = laid_out.layout();
     let (compile_tasks, task_bindings) = collect_ff_compile_tasks(sir);
     let next_task = AtomicUsize::new(0);
     let (comb_jit, mut compiled_ff_codes) = std::thread::scope(|scope| {
@@ -747,18 +745,21 @@ pub struct NativeBackend {
 }
 
 impl NativeBackend {
-    pub fn new(sir: &Program, options: &SimulatorOptions) -> Result<Self, SimulatorError> {
-        let (shared, trace) = compile_program(sir, options, false)?;
+    pub fn new(
+        laid_out: &LaidOutProgram,
+        options: &SimulatorOptions,
+    ) -> Result<Self, SimulatorError> {
+        let (shared, trace) = compile_program(laid_out, options, false)?;
         debug_assert!(trace.is_none());
         let shared = Arc::new(shared);
         Ok(Self::from_shared(shared))
     }
 
     pub(crate) fn new_with_codegen_trace(
-        sir: &Program,
+        laid_out: &LaidOutProgram,
         options: &SimulatorOptions,
     ) -> Result<(Self, NativeCodegenTrace), SimulatorError> {
-        let (shared, trace) = compile_program(sir, options, true)?;
+        let (shared, trace) = compile_program(laid_out, options, true)?;
         let backend = Self::from_shared(Arc::new(shared));
         Ok((
             backend,

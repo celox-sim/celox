@@ -162,25 +162,22 @@ pub struct JitBackend {
 
 impl JitBackend {
     pub fn new(
-        sir: &crate::ir::Program,
+        laid_out: &crate::ir::LaidOutProgram,
         options: &SimulatorOptions,
         trace: Option<&mut crate::debug::CompilationTrace>,
     ) -> Result<Self, crate::SimulatorError> {
-        let shared = Arc::new(Self::compile(sir, options, trace)?);
+        let shared = Arc::new(Self::compile(laid_out, options, trace)?);
         Ok(Self::from_shared(shared))
     }
 
     /// Build the shared JIT code from a Program.
     fn compile(
-        sir: &crate::ir::Program,
+        laid_out: &crate::ir::LaidOutProgram,
         options: &SimulatorOptions,
         mut trace: Option<&mut crate::debug::CompilationTrace>,
     ) -> Result<SharedJitCode, crate::SimulatorError> {
-        let layout = sir
-            .layout
-            .as_ref()
-            .expect("layout must be built before backend")
-            .clone();
+        let sir = laid_out.program();
+        let layout = laid_out.layout().clone();
 
         // Auto-select SinglePass RA for large designs where Backtracking RA's
         // superlinear compile time would dominate. The threshold is half the

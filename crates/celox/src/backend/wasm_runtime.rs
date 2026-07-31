@@ -15,7 +15,7 @@ use crate::{
             STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
         },
     },
-    ir::{AbsoluteAddr, Program, SignalRef},
+    ir::{AbsoluteAddr, SignalRef},
 };
 
 use super::wasm_codegen;
@@ -152,13 +152,13 @@ pub struct WasmBackend {
 }
 
 impl WasmBackend {
-    pub fn new(sir: &Program, options: &SimulatorOptions) -> Result<Self, crate::SimulatorError> {
+    pub fn new(
+        laid_out: &crate::ir::LaidOutProgram,
+        options: &SimulatorOptions,
+    ) -> Result<Self, crate::SimulatorError> {
         let engine = Engine::default();
-        let layout = sir
-            .layout
-            .as_ref()
-            .expect("layout must be built before backend")
-            .clone();
+        let sir = laid_out.program();
+        let layout = laid_out.layout().clone();
 
         // Compile eval_comb
         let comb_wasm = wasm_codegen::compile_units(

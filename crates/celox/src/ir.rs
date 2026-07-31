@@ -140,14 +140,44 @@ pub struct Program {
     /// Memory layout aliases: non-canonical → canonical address.
     /// Variables with identity Store→Load roundtrips share physical memory.
     pub address_aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
-    /// Pre-computed memory layout. Built after optimization, before backend codegen.
-    pub layout: Option<crate::backend::MemoryLayout>,
     /// Initial memory contents loaded from synthesizable initial blocks.
     pub initial_memory_values: Vec<InitialMemoryValue>,
     /// Initial block statements from the top-level module (for native testbenches).
     pub initial_statements: Option<Vec<veryl_analyzer::ir::Statement>>,
     /// Functions defined in the top-level module (for testbench function calls).
     pub tb_functions: fxhash::FxHashMap<veryl_analyzer::ir::VarId, veryl_analyzer::ir::Function>,
+}
+
+/// A [`Program`] whose physical state layout has been finalized.
+///
+/// Backend code generation accepts this artifact instead of a bare `Program`,
+/// making it impossible to enter code generation before layout construction.
+#[derive(Clone, Debug)]
+pub struct LaidOutProgram {
+    program: Program,
+    layout: crate::backend::MemoryLayout,
+}
+
+impl LaidOutProgram {
+    pub fn program(&self) -> &Program {
+        &self.program
+    }
+
+    pub fn layout(&self) -> &crate::backend::MemoryLayout {
+        &self.layout
+    }
+
+    pub(crate) fn program_mut(&mut self) -> &mut Program {
+        &mut self.program
+    }
+
+    pub fn into_program(self) -> Program {
+        self.program
+    }
+
+    pub fn into_parts(self) -> (Program, crate::backend::MemoryLayout) {
+        (self.program, self.layout)
+    }
 }
 
 impl fmt::Debug for Program {
@@ -159,20 +189,19 @@ impl fmt::Debug for Program {
 }
 
 impl Program {
-    /// Build and store the memory layout. Also removes identity Stores for
-    /// validated aliases and runs DCE to clean up dead instruction chains.
-    pub fn build_layout(&mut self, four_state: bool) {
-        self.build_layout_with_mode(
+    /// Finalize the physical state layout and consume the pre-layout program.
+    pub fn into_laid_out(self, four_state: bool) -> LaidOutProgram {
+        self.into_laid_out_with_mode(
             four_state,
             crate::backend::memory_layout::MemoryLayoutMode::Packed,
-        );
+        )
     }
 
-    pub fn build_layout_with_mode(
-        &mut self,
+    pub fn into_laid_out_with_mode(
+        mut self,
         four_state: bool,
         mode: crate::backend::memory_layout::MemoryLayoutMode,
-    ) {
+    ) -> LaidOutProgram {
         if !self.comb_observers.is_empty() && !self.address_aliases.is_empty() {
             let observed_written: crate::HashSet<AbsoluteAddr> = self
                 .comb_observers
@@ -185,8 +214,8 @@ impl Program {
                 !comb_capture_enable_needs_unaliased_old_value(&self.eval_comb, *alias_addr)
             });
         }
-        crate::optimizer::coalescing::retain_final_identity_aliases(self, four_state);
-        let layout = crate::backend::MemoryLayout::build(self, four_state, mode);
+        crate::optimizer::coalescing::retain_final_identity_aliases(&mut self, four_state);
+        let layout = crate::backend::MemoryLayout::build(&self, four_state, mode);
 
         // Remove identity Stores for aliases validated by the layout
         if !self.address_aliases.is_empty() {
@@ -204,12 +233,15 @@ impl Program {
                 .collect();
             if !aliased.is_empty() {
                 crate::optimizer::coalescing::remove_final_identity_alias_stores(
-                    self, &aliased, four_state,
+                    &mut self, &aliased, four_state,
                 );
             }
         }
 
-        self.layout = Some(layout);
+        LaidOutProgram {
+            program: self,
+            layout,
+        }
     }
 
     pub fn get_addr(

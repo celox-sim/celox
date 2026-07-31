@@ -1,7 +1,7 @@
 use wasm_bindgen::prelude::*;
 
 use celox::wasm_codegen;
-use celox::{MemoryLayout, OptimizeOptions, Program};
+use celox::{LaidOutProgram, MemoryLayout, OptimizeOptions, Program};
 // MemoryLayout imported for SimHandle::layout() return type
 
 /// Initialize panic hook for better error messages in the browser console.
@@ -16,13 +16,17 @@ pub fn init() {
 /// hierarchy) so the JS side can instantiate and drive the simulation.
 #[wasm_bindgen]
 pub struct SimHandle {
-    program: Program,
+    program: LaidOutProgram,
     four_state: bool,
 }
 
 impl SimHandle {
+    fn program(&self) -> &Program {
+        self.program.program()
+    }
+
     fn layout(&self) -> &MemoryLayout {
-        self.program.layout.as_ref().unwrap()
+        self.program.layout()
     }
 }
 
@@ -36,7 +40,7 @@ impl SimHandle {
         let trace_opts = celox::TraceOptions::default();
         let optimize_options = OptimizeOptions::default();
 
-        let (mut program, _warnings) = celox::compile_to_sir(
+        let (program, _warnings) = celox::compile_to_sir(
             &[(source, std::path::Path::new("input.veryl"))],
             top,
             &[],
@@ -52,7 +56,7 @@ impl SimHandle {
         )
         .map_err(|e| JsError::new(&e.to_string()))?;
 
-        program.build_layout(false);
+        let program = program.into_laid_out(false);
 
         Ok(SimHandle {
             program,
@@ -64,7 +68,7 @@ impl SimHandle {
     #[wasm_bindgen(js_name = "combWasmBytes")]
     pub fn comb_wasm_bytes(&self) -> Vec<u8> {
         let wasm = wasm_codegen::compile_units(
-            &self.program.eval_comb,
+            &self.program().eval_comb,
             self.layout(),
             self.four_state,
             false,
@@ -78,8 +82,8 @@ impl SimHandle {
     #[wasm_bindgen(js_name = "eventWasmBytes")]
     pub fn event_wasm_bytes(&self, event_name: &str) -> Result<Vec<u8>, JsError> {
         // Search through eval_apply_ffs to find matching event
-        for (addr, units) in &self.program.eval_apply_ffs {
-            let event_path = self.program.get_path(addr);
+        for (addr, units) in &self.program().eval_apply_ffs {
+            let event_path = self.program().get_path(addr);
             if event_path == event_name {
                 let wasm =
                     wasm_codegen::compile_units(units, self.layout(), self.four_state, false);
@@ -90,10 +94,10 @@ impl SimHandle {
         Err(JsError::new(&format!(
             "Event '{}' not found. Available events: {}",
             event_name,
-            self.program
+            self.program()
                 .eval_apply_ffs
                 .keys()
-                .map(|addr| self.program.get_path(addr))
+                .map(|addr| self.program().get_path(addr))
                 .collect::<Vec<_>>()
                 .join(", ")
         )))
@@ -108,9 +112,9 @@ impl SimHandle {
 
         let mut layout_map: BTreeMap<String, serde_json::Value> = BTreeMap::new();
 
-        for (instance_id, module_id) in &self.program.instance_module {
-            let variables = &self.program.module_variables[module_id];
-            let path_index = &self.program.module_var_path_index[module_id];
+        for (instance_id, module_id) in &self.program().instance_module {
+            let variables = &self.program().module_variables[module_id];
+            let path_index = &self.program().module_var_path_index[module_id];
 
             for info in variables.values() {
                 if path_index.get(&info.path) == Some(&None) {
@@ -157,12 +161,10 @@ impl SimHandle {
         use std::collections::BTreeMap;
 
         let mut events: BTreeMap<String, usize> = BTreeMap::new();
-        let mut next_id = 0usize;
 
-        for addr in self.program.eval_apply_ffs.keys() {
-            let name = self.program.get_path(addr);
+        for (next_id, addr) in self.program().eval_apply_ffs.keys().enumerate() {
+            let name = self.program().get_path(addr);
             events.insert(name, next_id);
-            next_id += 1;
         }
 
         serde_json::to_string(&events).unwrap_or_else(|_| "{}".to_string())

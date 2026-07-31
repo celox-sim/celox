@@ -1450,7 +1450,7 @@ impl NativeSimulatorHandle {
             .collect();
 
         let trace_opts = celox::TraceOptions::default();
-        let (mut program, warnings) = celox::compile_to_sir(
+        let (program, warnings) = celox::compile_to_sir(
             &source_refs,
             &top,
             &opts
@@ -1474,8 +1474,9 @@ impl NativeSimulatorHandle {
         )
         .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        program.build_layout(opts.four_state);
-        let layout = program.layout.as_ref().unwrap();
+        let laid_out = program.into_laid_out(opts.four_state);
+        let program = laid_out.program();
+        let layout = laid_out.layout();
 
         let layout_json = Self::build_layout_json(&program, layout, opts.four_state);
         let events_json = Self::build_events_json(&program);
@@ -1484,7 +1485,7 @@ impl NativeSimulatorHandle {
 
         let stable_size = layout.total_size as u32;
         let total_size = layout.merged_total_size as u32;
-        let layout = layout.clone();
+        let (program, layout) = laid_out.into_parts();
 
         Ok(Self {
             program,
@@ -1516,7 +1517,7 @@ impl NativeSimulatorHandle {
             .collect();
 
         let trace_opts = celox::TraceOptions::default();
-        let (mut program, warnings) = celox::compile_to_sir(
+        let (program, warnings) = celox::compile_to_sir(
             &source_refs,
             &top,
             &opts
@@ -1540,8 +1541,9 @@ impl NativeSimulatorHandle {
         )
         .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        program.build_layout(opts.four_state);
-        let layout = program.layout.as_ref().unwrap();
+        let laid_out = program.into_laid_out(opts.four_state);
+        let program = laid_out.program();
+        let layout = laid_out.layout();
 
         let layout_json = Self::build_layout_json(&program, layout, opts.four_state);
         let events_json = Self::build_events_json(&program);
@@ -1550,7 +1552,7 @@ impl NativeSimulatorHandle {
 
         let stable_size = layout.total_size as u32;
         let total_size = layout.merged_total_size as u32;
-        let layout = layout.clone();
+        let (program, layout) = laid_out.into_parts();
 
         Ok(Self {
             program,
