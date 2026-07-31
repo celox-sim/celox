@@ -5,6 +5,7 @@
 //! immutable event tables before invoking an analysis.
 
 pub mod cfg;
+pub mod cfg_order;
 pub mod dag_schedule;
 pub mod dependence;
 pub mod interval;

@@ -36,7 +36,7 @@ impl SirVerifyError {
         }
     }
 
-    pub(crate) fn instruction(
+    pub fn instruction(
         invariant: &'static str,
         block: BlockId,
         instruction: usize,
@@ -1004,7 +1004,7 @@ impl Dominators {
 #[cfg(test)]
 mod tests {
     use crate::HashMap;
-    use crate::ir::{SIRInstruction, SIRValue};
+    use crate::{SIRInstruction, SIRValue};
 
     use super::*;
 

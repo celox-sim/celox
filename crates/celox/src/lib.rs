@@ -12,7 +12,6 @@ mod parser;
 pub(crate) mod portable;
 #[cfg(not(target_arch = "wasm32"))]
 mod scheduler;
-pub(crate) mod serde_helpers;
 #[cfg(not(target_arch = "wasm32"))]
 mod simulation;
 mod simulator;

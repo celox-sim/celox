@@ -1,4 +1,4 @@
-//! Serde helpers for types without native serde support.
+//! Serde helpers used by serialized SIR values.
 #![allow(dead_code)]
 
 /// Serialize/deserialize `num_bigint::BigUint` as little-endian bytes.
