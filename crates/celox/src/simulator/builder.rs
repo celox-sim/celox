@@ -1012,8 +1012,5 @@ fn run_dead_store_elimination(
         program,
         &externally_live,
         options.four_state,
-        options
-            .optimize_options
-            .is_enabled(crate::optimizer::SirPass::TailCallSplit),
     );
 }

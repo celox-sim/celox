@@ -21,10 +21,6 @@ pub type MemoryLayout = celox_state_layout::MemoryLayout<AbsoluteAddr>;
 
 impl LayoutSource<AbsoluteAddr> for Program {
     fn layout_input(&self, mode: MemoryLayoutMode) -> LayoutInput<AbsoluteAddr> {
-        let scratch_bytes = match &self.eval_comb_plan {
-            Some(crate::ir::EvalCombPlan::MemorySpilled(plan)) => plan.scratch_bytes,
-            _ => 0,
-        };
         let unpacked_arrays = if mode == MemoryLayoutMode::ElementStrided {
             collect_strided_array_layouts(self)
         } else {
@@ -62,7 +58,6 @@ impl LayoutSource<AbsoluteAddr> for Program {
                 .collect(),
             ff_referenced_addresses: collect_ff_referenced_addresses(self),
             num_events: self.num_events(),
-            scratch_bytes,
             runtime_event_sites: self.runtime_schema.runtime_event_sites.clone(),
         }
     }

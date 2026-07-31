@@ -75,16 +75,6 @@ impl fmt::Debug for VariableInfo {
     }
 }
 
-/// Compilation plan for eval_comb when the CLIF instruction count exceeds
-/// Cranelift's limit. Mutually exclusive strategies.
-#[derive(Debug, Clone)]
-pub enum EvalCombPlan {
-    /// EU-boundary / single-block splitting with live regs in tail-call args.
-    TailCallChunks(Vec<crate::optimizer::coalescing::TailCallChunk>),
-    /// Memory-spilled multi-block splitting with scratch memory.
-    MemorySpilled(crate::optimizer::coalescing::pass_tail_call_split::MemorySpilledPlan),
-}
-
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LogicPathId(pub usize);
 
@@ -114,9 +104,6 @@ pub struct Program {
     pub comb_semantic_regions: HashMap<VarAtomBase<AbsoluteAddr>, u64>,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
     pub comb_observers: Vec<CombObserver<AbsoluteAddr>>,
-    /// Tail-call chain compilation plan, populated by the optimizer when the
-    /// estimated CLIF instruction count exceeds Cranelift's limit.
-    pub eval_comb_plan: Option<EvalCombPlan>,
     pub instance_ids: HashMap<InstancePath, InstanceId>,
     pub instance_module: HashMap<InstanceId, ModuleId>,
     pub module_variables: HashMap<ModuleId, HashMap<VarId, VariableInfo>>,

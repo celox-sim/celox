@@ -287,7 +287,6 @@ pub(crate) fn optimize_rooted_comb_memory(
     program: &mut Program,
     externally_live: &crate::HashSet<AbsoluteAddr>,
     four_state: bool,
-    enable_tail_split: bool,
 ) {
     pass_dead_store_elimination::eliminate_dead_stores(program, externally_live);
     let options = PassOptions {
@@ -303,21 +302,6 @@ pub(crate) fn optimize_rooted_comb_memory(
         pass_guarded_region_sinking::eliminate_dead_control_regions(eu);
         pass_manager::ExecutionUnitPass::run(&ControlFlowSimplifyPass, eu, &options);
         pass_vectorize_concat::remove_dead_definitions(eu);
-    }
-
-    // The old plan refers to the pre-DSE EUs. Rebuild it from the
-    // transformed function instead of compiling stale chunks.
-    program.eval_comb_plan = None;
-    if enable_tail_split {
-        if let Some(chunks) =
-            pass_tail_call_split::split_if_needed(&program.sir.eval_comb, four_state)
-        {
-            program.eval_comb_plan = Some(EvalCombPlan::TailCallChunks(chunks));
-        } else if let Some(plan) =
-            pass_tail_call_split::split_if_needed_spilled(&program.sir.eval_comb, four_state)
-        {
-            program.eval_comb_plan = Some(EvalCombPlan::MemorySpilled(plan));
-        }
     }
 }
 
@@ -1391,65 +1375,5 @@ fn optimize_with_options(
     optimize_late_comb(program, opt, &options, &unpacked_element_widths);
     if std::env::var_os("CELOX_MUX_CHAIN_STATS").is_some() {
         dump_mux_chain_stats(&program.sir.eval_comb);
-    }
-
-    // 5. Tail-call chain splitting for eval_comb.
-    // When the estimated CLIF instruction count exceeds Cranelift's limit,
-    // split into a chain of smaller functions connected by tail calls.
-    //
-    // Try EU-boundary / single-block splitting first (zero live-reg cost).
-    // Fall back to memory-spilled multi-block splitting if needed.
-    if on(SirPass::TailCallSplit) {
-        if timing {
-            for (i, eu) in program.sir.eval_comb.iter().enumerate() {
-                let inst_cost = cost_model::estimate_eu_cost(eu, four_state);
-                let value_count = cost_model::estimate_eu_value_count(eu, four_state);
-                eprintln!(
-                    "[split-check] eval_comb eu[{i}]: blocks={} insts={} clif_cost={inst_cost}/{} values={value_count}/{}",
-                    eu.blocks.len(),
-                    eu.blocks
-                        .values()
-                        .map(|b| b.instructions.len())
-                        .sum::<usize>(),
-                    cost_model::CLIF_INST_THRESHOLD,
-                    cost_model::VREG_VALUE_THRESHOLD,
-                );
-            }
-        }
-        let split_start = timing.then(crate::timing::now);
-        if let Some(chunks) =
-            pass_tail_call_split::split_if_needed(&program.sir.eval_comb, four_state)
-        {
-            if timing {
-                eprintln!(
-                    "[split] TailCallChunks: {} chunks, took {:?}",
-                    chunks.len(),
-                    split_start.unwrap().elapsed()
-                );
-            }
-            program.eval_comb_plan = Some(crate::ir::EvalCombPlan::TailCallChunks(chunks));
-        } else if let Some(plan) =
-            pass_tail_call_split::split_if_needed_spilled(&program.sir.eval_comb, four_state)
-        {
-            if timing {
-                eprintln!(
-                    "[split] MemorySpilled: {} chunks, scratch={}B, took {:?}",
-                    plan.chunks.len(),
-                    plan.scratch_bytes,
-                    split_start.unwrap().elapsed()
-                );
-                for (i, chunk) in plan.chunks.iter().enumerate() {
-                    let blocks = chunk.eu.blocks.len();
-                    let insts: usize = chunk.eu.blocks.values().map(|b| b.instructions.len()).sum();
-                    eprintln!(
-                        "[split]   chunk[{i}]: blocks={blocks} insts={insts} in_spills={} out_spills={} cross_edges={}",
-                        chunk.incoming_spills.len(),
-                        chunk.outgoing_spills.len(),
-                        chunk.cross_chunk_edges.len()
-                    );
-                }
-            }
-            program.eval_comb_plan = Some(crate::ir::EvalCombPlan::MemorySpilled(plan));
-        }
     }
 }

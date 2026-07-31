@@ -1402,7 +1402,6 @@ pub(crate) fn flatten(
                 comb_semantic_regions: HashMap::default(),
                 runtime_schema: celox_design::RuntimeSchema::default(),
                 comb_observers: Vec::new(),
-                eval_comb_plan: None,
                 instance_ids: expanded.clone(),
                 instance_module: instance_modules.clone(),
                 module_variables: err_vars,
@@ -1594,7 +1593,6 @@ pub(crate) fn flatten(
             runtime_event_sites,
         },
         comb_observers,
-        eval_comb_plan: None,
         instance_ids: expanded,
         instance_module: instance_modules,
         module_variables: mod_vars,
@@ -2552,8 +2550,9 @@ pub fn parse(
         verify_program_sir(&program, "before optimization")
     )?;
 
-    // Always run the optimizer — even at O0, individual passes (e.g. TailCallSplit)
-    // may be enabled and need to execute.
+    // Always run the SIR pipeline so required canonicalization and explicit
+    // per-pass overrides are applied consistently. Concrete backend planning
+    // (including Cranelift function splitting) happens after this phase.
     timed_phase!("optimize", {
         if preserve_element_storage_layout {
             crate::optimizer::optimize_preserving_element_storage(

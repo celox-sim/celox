@@ -9,9 +9,10 @@ crates already exist.
 Migration note: `celox-state-layout` now owns the generic layout algorithm and the compiler driver
 uses a consuming `Program -> LaidOutProgram` transition. The current facade artifact still wraps
 the mixed `Program`, whose execution-unit groups are now held by `celox-sir::SirProgram` and whose
-runtime diagnostics are held by `celox-design::RuntimeSchema`. Dissolving the remaining design,
-symbolic, optimizer, and testbench payload into the phase-specific target types below remains part
-of Milestone 3.
+runtime diagnostics are held by `celox-design::RuntimeSchema`. Cranelift oversized-function
+planning is now constructed from final SIR at the backend boundary; backend scratch extends only
+the backend's private layout copy. Dissolving the remaining design, symbolic, optimizer, and
+testbench payload into the phase-specific target types below remains part of Milestone 3.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making
@@ -22,7 +23,7 @@ phase ownership explicit.
 The problem is not merely that several source files are large. The current ownership graph has
 cycles hidden by Rust modules inside one crate.
 
-`ir::Program` currently owns all of the following at once:
+At the start of this migration, `ir::Program` owned all of the following at once:
 
 - scheduled and lowered SIR execution units;
 - the SLT arena and combinational observers that still refer to `NodeId`;
@@ -35,14 +36,14 @@ cycles hidden by Rust modules inside one crate.
 This creates concrete reverse dependencies:
 
 - `ir` refers to `logic_tree`, `optimizer`, and `backend::MemoryLayout`;
-- `optimizer` accepts `Program`, calls parser verification, and writes optimizer-specific plans
+- `optimizer` accepted `Program`, called parser verification, and wrote optimizer-specific plans
   back into `Program`;
-- `backend::memory_layout` accepts `Program` and inspects optimizer plans;
+- `backend::memory_layout` accepted `Program` and inspected optimizer plans;
 - SLT construction imports parser and Veryl expression helpers, while SLT lowering emits SIR;
 - the facade, compiler driver, backend selection, runtime, and testbench VM all live in `celox`.
 
 The result is one mutable object whose valid fields depend on which phase happened to run. An
-`Option<MemoryLayout>` and an `Option<EvalCombPlan>` encode pipeline state implicitly, and a backend
+`Option<MemoryLayout>` and the former `Option<EvalCombPlan>` encoded pipeline state implicitly, and a backend
 can see frontend structures that should have ceased to exist before code generation.
 
 The split must therefore dissolve `Program`; moving directories into crates without changing that
@@ -413,7 +414,7 @@ optional testbench bytecode. It has no compiler IR.
 | runtime errors and event sites | design/runtime schema |
 | `address_aliases` | `LayoutRequirements` with proof identity |
 | `layout: Option<MemoryLayout>` | separate `LaidOutProgram` |
-| `eval_comb_plan` | concrete backend planning result |
+| former `eval_comb_plan` | Cranelift-private planning result, constructed from final SIR at the backend boundary |
 | initial memory values | design initial state, then laid-out memory image |
 | Veryl `initial_statements` and `tb_functions` | compiled by frontend into `celox-testbench` bytecode |
 
