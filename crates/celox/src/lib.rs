@@ -63,6 +63,7 @@ pub(crate) use fxhash::FxHashSet as HashSet;
 pub use ir::{
     AbsoluteAddr, AddrLookupError, InstancePath, LaidOutProgram, PortTypeKind, Program,
     RuntimeErrorInfo, SignalRef, SirProgram, VariableInfo, VerylFrontendLookup,
+    VerylTestbenchSource,
 };
 #[cfg(target_arch = "x86_64")]
 pub mod native_backend {

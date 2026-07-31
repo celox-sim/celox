@@ -1408,8 +1408,7 @@ pub(crate) fn flatten(
                 },
                 runtime_schema: celox_design::RuntimeSchema::default(),
                 layout_requirements: Default::default(),
-                initial_statements: None,
-                tb_functions: fxhash::FxHashMap::default(),
+                testbench_source: Default::default(),
             };
             let source_locations = scheduler_source_locations(&error, module_ir, &instance_modules);
             let mut target_arena = SLTNodeArena::new();
@@ -1625,11 +1624,13 @@ pub(crate) fn flatten(
             testbench_read_roots: Default::default(),
         },
         layout_requirements: Default::default(),
-        initial_statements,
-        tb_functions: module_ir
-            .get(root_id)
-            .map(|m| m.functions.clone())
-            .unwrap_or_default(),
+        testbench_source: crate::ir::VerylTestbenchSource {
+            initial_statements,
+            functions: module_ir
+                .get(root_id)
+                .map(|m| m.functions.clone())
+                .unwrap_or_default(),
+        },
     };
 
     // --- Trigger Injection ---

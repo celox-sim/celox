@@ -662,11 +662,11 @@ fn count_assert_statements(
 }
 
 pub(crate) fn project_observability(program: &mut Program) {
-    let Some(stmts) = program.initial_statements.as_ref() else {
+    let Some(stmts) = program.testbench_source.initial_statements.as_ref() else {
         return;
     };
     let mut sites = Vec::new();
-    collect_runtime_event_sites(stmts, &program.tb_functions, &mut sites);
+    collect_runtime_event_sites(stmts, &program.testbench_source.functions, &mut sites);
     program.runtime_schema.runtime_event_sites.extend(sites);
     program.runtime_schema.testbench_read_roots = initial_read_addresses(program);
 }
@@ -675,7 +675,7 @@ pub(crate) fn project_observability(program: &mut Program) {
 /// reads these directly from simulator memory, so they are external roots for
 /// dead-store elimination even though no SIR execution unit loads them.
 fn initial_read_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
-    let Some(stmts) = program.initial_statements.as_ref() else {
+    let Some(stmts) = program.testbench_source.initial_statements.as_ref() else {
         return crate::HashSet::default();
     };
     let Some(&root_instance_id) = program
@@ -696,7 +696,7 @@ fn initial_read_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
     let mut active_functions = crate::HashSet::default();
     collect_statement_reads(
         stmts,
-        &program.tb_functions,
+        &program.testbench_source.functions,
         &mut active_functions,
         &mut reads,
     );
@@ -1933,7 +1933,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
     /// Inline-expands: store args → emit body assigns → load return value.
     fn emit_function_call(&self, fc: &veryl_analyzer::ir::FunctionCall, ops: &mut Vec<TbOpcode>) {
         let p = self.sim.program();
-        let func = match p.tb_functions.get(&fc.id) {
+        let func = match p.testbench_source.functions.get(&fc.id) {
             Some(f) => f,
             None => {
                 ops.push(TbOpcode::ConstU64(0));
@@ -2390,7 +2390,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
             root_instance_id,
             root_module_id,
         };
-        let site_count = count_assert_statements(stmts, &p.tb_functions) as u32;
+        let site_count = count_assert_statements(stmts, &p.testbench_source.functions) as u32;
         let mut next_assert_site_id = p
             .runtime_schema
             .runtime_event_sites
@@ -2541,7 +2541,7 @@ impl<'a, B: SimBackend> TestbenchBuilder<'a, B> {
         next_assert_site_id: &mut u32,
     ) -> Option<TestbenchStatement<B>> {
         let program = self.sim.program();
-        let func = program.tb_functions.get(&fc.id)?;
+        let func = program.testbench_source.functions.get(&fc.id)?;
         let func_body = if let Some(idx) = &fc.index {
             func.get_function(idx)?
         } else {
@@ -3243,7 +3243,7 @@ fn run_testbench_limited<B: SimBackend>(
 pub fn compile_initial_testbench<B: SimBackend>(
     sim: &Simulator<B>,
 ) -> Option<CompiledTestbench<B>> {
-    let initial_stmts = sim.program().initial_statements.as_ref()?;
+    let initial_stmts = sim.program().testbench_source.initial_statements.as_ref()?;
     let mut tb_builder = TestbenchBuilder::new(sim);
     tb_builder.build_event_map(initial_stmts);
     Some(CompiledTestbench {
