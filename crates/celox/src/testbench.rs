@@ -18,7 +18,9 @@ use crate::context_width::{
 use crate::display_format::{DisplayFormatArg, format_display_arg};
 use crate::ir::{AbsoluteAddr, Program, RuntimeEventKind, RuntimeEventSite, SignalRef};
 use crate::simulator::{RuntimeEvent, RuntimeFormatContext, Simulator};
-use celox_testbench::{ExprBytecode, ExprOpcode as TbOpcode, TestbenchOperator as Op};
+use celox_testbench::{
+    ExprBytecode, ExprOpcode as TbOpcode, StateLocation, TestbenchOperator as Op,
+};
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use std::sync::{
@@ -32,6 +34,8 @@ use veryl_analyzer::ir::{
 };
 use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::{self, StrId};
+
+type UnboundTbOpcode = TbOpcode<StateLocation<AbsoluteAddr>>;
 
 // ── Public types ───────────────────────────────────────────────────────
 
@@ -247,21 +251,21 @@ impl CompiledExpr {
                 *pc += 1;
             }
             TbOpcode::LoadU64 {
-                offset,
+                location,
                 byte_size,
                 mask,
             } => {
                 // SAFETY: caller guarantees `memory` is valid simulator memory
-                let val = unsafe { read_le_u64(memory.add(*offset), *byte_size) } & mask;
+                let val = unsafe { read_le_u64(memory.add(*location), *byte_size) } & mask;
                 stack.push(TbValue::U64(val));
                 *pc += 1;
             }
             TbOpcode::LoadWide {
-                offset,
+                location,
                 byte_size,
                 width,
             } => {
-                let val = unsafe { read_le_wide(memory.add(*offset), *byte_size, *width) };
+                let val = unsafe { read_le_wide(memory.add(*location), *byte_size, *width) };
                 stack.push(TbValue::Wide(val));
                 *pc += 1;
             }
@@ -381,7 +385,7 @@ impl CompiledExpr {
                 }
             }
             TbOpcode::LoadIndexed {
-                base_offset,
+                location,
                 stride_bytes,
                 element_byte_size,
                 element_width,
@@ -391,7 +395,7 @@ impl CompiledExpr {
                     TbValue::U64(0)
                 });
                 let i = idx.to_u64() as usize;
-                let offset = base_offset + i * stride_bytes;
+                let offset = location + i * stride_bytes;
                 let mask = if *element_width >= 64 {
                     u64::MAX
                 } else {
@@ -402,7 +406,7 @@ impl CompiledExpr {
                 *pc += 1;
             }
             TbOpcode::LoadBitSelect {
-                base_offset,
+                location,
                 base_byte_size,
                 select_width,
             } => {
@@ -411,7 +415,7 @@ impl CompiledExpr {
                     TbValue::U64(0)
                 });
                 let shift = bit_idx.to_u64() as usize;
-                let full_val = unsafe { read_le_u64(memory.add(*base_offset), *base_byte_size) };
+                let full_val = unsafe { read_le_u64(memory.add(*location), *base_byte_size) };
                 let mask = if *select_width >= 64 {
                     u64::MAX
                 } else {
@@ -421,7 +425,10 @@ impl CompiledExpr {
                 stack.push(TbValue::U64(val));
                 *pc += 1;
             }
-            TbOpcode::StoreU64 { offset, byte_size } => {
+            TbOpcode::StoreU64 {
+                location,
+                byte_size,
+            } => {
                 let val = stack.pop().unwrap_or_else(|| {
                     debug_assert!(false, "testbench bytecode: StoreU64 underflow");
                     TbValue::U64(0)
@@ -430,7 +437,7 @@ impl CompiledExpr {
                 let bytes = v.to_le_bytes();
                 let n = (*byte_size).min(8);
                 unsafe {
-                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), memory.add(*offset), n);
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), memory.add(*location), n);
                 }
                 *pc += 1;
             }
@@ -1592,7 +1599,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         let mut ops = Vec::new();
         self.emit(expr, &mut ops);
         CompiledExpr {
-            bytecode: ExprBytecode::new(ops),
+            bytecode: self.bind(ops),
         }
     }
 
@@ -1607,8 +1614,26 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
             }),
         );
         CompiledExpr {
-            bytecode: ExprBytecode::new(ops),
+            bytecode: self.bind(ops),
         }
+    }
+
+    fn bind(&self, ops: Vec<UnboundTbOpcode>) -> ExprBytecode {
+        ExprBytecode::new(ops)
+            .bind_with(|address| {
+                self.sim
+                    .backend_ref()
+                    .layout()
+                    .offsets
+                    .get(address)
+                    .copied()
+            })
+            .unwrap_or_else(|error| {
+                panic!(
+                    "testbench bytecode references state absent from physical layout: {:?}",
+                    error.address
+                )
+            })
     }
 
     fn natural_width(&self, expr: &Expression) -> usize {
@@ -1626,13 +1651,13 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         }
     }
 
-    fn emit(&self, expr: &Expression, ops: &mut Vec<TbOpcode>) {
+    fn emit(&self, expr: &Expression, ops: &mut Vec<UnboundTbOpcode>) {
         self.emit_in_context(expr, ops, Some(self.root_context(expr)));
     }
 
     fn resize_result(
         &self,
-        ops: &mut Vec<TbOpcode>,
+        ops: &mut Vec<UnboundTbOpcode>,
         source: ValueContext,
         target: Option<ValueContext>,
     ) -> ValueContext {
@@ -1652,7 +1677,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
     fn emit_in_context(
         &self,
         expr: &Expression,
-        ops: &mut Vec<TbOpcode>,
+        ops: &mut Vec<UnboundTbOpcode>,
         context: Option<ValueContext>,
     ) -> ValueContext {
         match expr {
@@ -1838,7 +1863,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         }
     }
 
-    fn emit_factor(&self, factor: &Factor, ops: &mut Vec<TbOpcode>) {
+    fn emit_factor(&self, factor: &Factor, ops: &mut Vec<UnboundTbOpcode>) {
         match factor {
             Factor::Variable(var_id, index, select, comptime) => {
                 if comptime.is_const
@@ -1884,7 +1909,11 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         }
     }
 
-    fn emit_constant_value(&self, value: &veryl_analyzer::value::Value, ops: &mut Vec<TbOpcode>) {
+    fn emit_constant_value(
+        &self,
+        value: &veryl_analyzer::value::Value,
+        ops: &mut Vec<UnboundTbOpcode>,
+    ) {
         if value.width() <= 64 {
             ops.push(TbOpcode::ConstU64(value.payload_u64()));
         } else {
@@ -1894,7 +1923,11 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
 
     /// Emit bytecode for a function call used as an expression value.
     /// Inline-expands: store args → emit body assigns → load return value.
-    fn emit_function_call(&self, fc: &veryl_analyzer::ir::FunctionCall, ops: &mut Vec<TbOpcode>) {
+    fn emit_function_call(
+        &self,
+        fc: &veryl_analyzer::ir::FunctionCall,
+        ops: &mut Vec<UnboundTbOpcode>,
+    ) {
         let p = self.sim.program();
         let func = match p.testbench_source.functions.get(&fc.id) {
             Some(f) => f,
@@ -1928,7 +1961,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                         }),
                     );
                     ops.push(TbOpcode::StoreU64 {
-                        offset: sig.offset,
+                        location: self.state_location(arg_var_id, 0),
                         byte_size: get_byte_size(sig.width),
                     });
                 }
@@ -1949,7 +1982,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                             }),
                         );
                         ops.push(TbOpcode::StoreU64 {
-                            offset: dst_sig.offset,
+                            location: self.state_location(first_dst.id, 0),
                             byte_size: get_byte_size(dst_sig.width),
                         });
                     }
@@ -1962,7 +1995,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         // 3. Load return value
         if let Some(ret_var_id) = &func_body.ret {
             if let Some(sig) = self.resolve_var(ret_var_id) {
-                self.emit_load(sig.offset, sig.width, ops);
+                self.emit_load(*ret_var_id, 0, sig.width, ops);
             } else {
                 ops.push(TbOpcode::ConstU64(0));
             }
@@ -1979,7 +2012,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         sig: SignalRef,
         index: &veryl_analyzer::ir::VarIndex,
         select: &veryl_analyzer::ir::VarSelect,
-        ops: &mut Vec<TbOpcode>,
+        ops: &mut Vec<UnboundTbOpcode>,
     ) {
         let p = self.sim.program();
         let info = match p
@@ -1990,14 +2023,14 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         {
             Some(i) => i,
             None => {
-                self.emit_load(sig.offset, sig.width, ops);
+                self.emit_load(*var_id, 0, sig.width, ops);
                 return;
             }
         };
 
         // No index or select → whole variable
         if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
-            self.emit_load(sig.offset, sig.width, ops);
+            self.emit_load(*var_id, 0, sig.width, ops);
             return;
         }
 
@@ -2029,12 +2062,12 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                 static_bit_offset += idx_val * stride;
             } else {
                 // Dynamic index: emit the index expression, then LoadIndexed
-                let base_byte_offset = sig.offset + static_bit_offset / 8;
+                let base_byte_offset = static_bit_offset / 8;
                 let stride_bytes = get_byte_size(stride);
                 let elem_byte_size = get_byte_size(element_width);
                 self.emit(idx_expr, ops);
                 ops.push(TbOpcode::LoadIndexed {
-                    base_offset: base_byte_offset,
+                    location: self.state_location(*var_id, base_byte_offset),
                     stride_bytes,
                     element_byte_size: elem_byte_size,
                     element_width,
@@ -2065,13 +2098,13 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
 
         if select.0.is_empty() && select.1.is_none() {
             // No bit select, just load the element
-            let byte_offset = sig.offset + static_bit_offset / 8;
+            let byte_offset = static_bit_offset / 8;
             let sub = static_bit_offset % 8;
             if sub == 0 {
-                self.emit_load(byte_offset, accessed_width, ops);
+                self.emit_load(*var_id, byte_offset, accessed_width, ops);
             } else {
                 let load_width = accessed_width + sub;
-                self.emit_load(byte_offset, load_width, ops);
+                self.emit_load(*var_id, byte_offset, load_width, ops);
                 ops.push(TbOpcode::ConstU64(sub as u64));
                 ops.push(TbOpcode::BinOp(Op::LogicShiftR));
                 if accessed_width < 64 {
@@ -2087,10 +2120,10 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
 
         if is_dynamic_select {
             // Dynamic bit select: load full value, shift by dynamic amount, mask
-            let byte_offset = sig.offset + static_bit_offset / 8;
+            let byte_offset = static_bit_offset / 8;
             let total_byte_size = get_byte_size(accessed_width);
             ops.push(TbOpcode::LoadBitSelect {
-                base_offset: byte_offset,
+                location: self.state_location(*var_id, byte_offset),
                 base_byte_size: total_byte_size,
                 select_width: sel_width,
             });
@@ -2098,13 +2131,13 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         }
 
         let bit_offset = static_bit_offset + sel_lsb;
-        let byte_offset = sig.offset + bit_offset / 8;
+        let byte_offset = bit_offset / 8;
         let sub = bit_offset % 8;
         if sub == 0 {
-            self.emit_load(byte_offset, sel_width, ops);
+            self.emit_load(*var_id, byte_offset, sel_width, ops);
         } else {
             let load_width = sel_width + sub;
-            self.emit_load(byte_offset, load_width, ops);
+            self.emit_load(*var_id, byte_offset, load_width, ops);
             ops.push(TbOpcode::ConstU64(sub as u64));
             ops.push(TbOpcode::BinOp(Op::LogicShiftR));
             if sel_width < 64 {
@@ -2120,7 +2153,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
     fn resolve_select(
         &self,
         select: &veryl_analyzer::ir::VarSelect,
-        ops: &mut Vec<TbOpcode>,
+        ops: &mut Vec<UnboundTbOpcode>,
     ) -> (usize, usize, bool) {
         if let Some((op, range_expr)) = &select.1 {
             let anchor_expr = select.0.last();
@@ -2166,7 +2199,7 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
         &self,
         select: &veryl_analyzer::ir::VarSelect,
         _base_width: usize,
-        ops: &mut Vec<TbOpcode>,
+        ops: &mut Vec<UnboundTbOpcode>,
     ) {
         let (lsb, width, is_dynamic) = self.resolve_select(select, ops);
         if is_dynamic {
@@ -2189,7 +2222,13 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
     }
 
     /// Emit a LoadU64 or LoadWide opcode for the given byte offset and bit width.
-    fn emit_load(&self, offset: usize, width: usize, ops: &mut Vec<TbOpcode>) {
+    fn emit_load(
+        &self,
+        var_id: VarId,
+        byte_offset: usize,
+        width: usize,
+        ops: &mut Vec<UnboundTbOpcode>,
+    ) {
         let byte_size = get_byte_size(width);
         if byte_size <= 8 {
             let mask = if width >= 64 {
@@ -2198,16 +2237,26 @@ impl<'a, B: SimBackend> ExprCompiler<'a, B> {
                 (1u64 << width) - 1
             };
             ops.push(TbOpcode::LoadU64 {
-                offset,
+                location: self.state_location(var_id, byte_offset),
                 byte_size,
                 mask,
             });
         } else {
             ops.push(TbOpcode::LoadWide {
-                offset,
+                location: self.state_location(var_id, byte_offset),
                 byte_size,
                 width,
             });
+        }
+    }
+
+    fn state_location(&self, var_id: VarId, byte_offset: usize) -> StateLocation<AbsoluteAddr> {
+        StateLocation {
+            address: AbsoluteAddr {
+                instance_id: self.root_instance_id,
+                var_id,
+            },
+            byte_offset,
         }
     }
 
