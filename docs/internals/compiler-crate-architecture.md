@@ -19,7 +19,11 @@ Veryl source identities retained for diagnostics and public path lookup are grou
 `celox-frontend-veryl::VerylFrontendLookup`; optimizer and backend code no longer inspect that
 artifact. The unused semantic-process provenance formerly copied from `LogicPath` through the
 scheduler into `Program` has been removed instead of being assigned to a target crate. Moving the
-remaining parser implementation, symbolic, optimizer, and testbench payload
+optimizer-to-layout state-alias contract is now represented by
+`celox-state-layout::LayoutRequirements` and is cleared after physical layout is finalized. Tests
+and consumers construct each backend from an unlaid-out `Program` rather than attempting to
+re-layout the finalized program after identity Stores have been removed. Moving the remaining
+parser implementation, symbolic, optimizer, and testbench payload
 into the phase-specific target types below remains part of Milestone 3.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The

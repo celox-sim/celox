@@ -3651,11 +3651,11 @@ module Top (
     .build()
     .unwrap();
 
-    let y_addr = sim.program().get_addr(&[], &["y"]).unwrap();
+    let x = sim.signal("x");
+    let y = sim.signal("y");
     assert!(
-        !sim.program().address_aliases.contains_key(&y_addr),
-        "capture-enabled duplicate store must not be removed as an alias: {:?}",
-        sim.program().address_aliases,
+        x.offset != y.offset,
+        "capture-enabled duplicate store must retain a distinct state home",
     );
 }
 

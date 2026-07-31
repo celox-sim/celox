@@ -1,15 +1,16 @@
 //! Regression tests: run Veryl designs through both JitBackend and WasmBackend,
 //! comparing results to ensure they match.
 
-use celox::{BigUint, SimulatorOptions, WasmBackend};
+use celox::{BigUint, WasmBackend};
 
 /// Build a Simulator (JIT) and a WasmBackend from the same Veryl code.
 /// Returns (jit_simulator, wasm_backend).
 fn build_both(code: &str, top: &str) -> (celox::Simulator, WasmBackend) {
     let sim = celox::Simulator::builder(code, top).build().unwrap();
-    let opts = SimulatorOptions::default();
-    let program = sim.program().clone().into_laid_out(opts.four_state);
-    let wasm = WasmBackend::new(&program, &opts).expect("WasmBackend::new failed");
+    let wasm = celox::Simulator::builder(code, top)
+        .build_wasm()
+        .expect("WASM simulator build failed")
+        .into_backend();
     (sim, wasm)
 }
 

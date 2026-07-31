@@ -50,7 +50,7 @@ pub use backend::EventRef;
 pub use backend::SharedJitCode;
 #[cfg(not(target_arch = "wasm32"))]
 pub use backend::wasm_runtime::WasmBackend;
-pub use backend::{EventHandle, MemoryLayout, MemoryLayoutMode, get_byte_size};
+pub use backend::{EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, get_byte_size};
 #[cfg(not(target_arch = "wasm32"))]
 pub use backend::{JitBackend, SimBackend};
 pub use celox_design::{ElaboratedDesign, EventTopology, RuntimeSchema};

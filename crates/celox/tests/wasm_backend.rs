@@ -1,11 +1,9 @@
-use celox::{BigUint, SimulatorOptions, WasmBackend};
+use celox::{BigUint, Program, WasmBackend};
 
-fn build_wasm(code: &str, top: &str) -> (WasmBackend, celox::Simulator) {
-    let sim = celox::Simulator::builder(code, top).build().unwrap();
-    let opts = SimulatorOptions::default();
-    let program = sim.program().clone().into_laid_out(opts.four_state);
-    let backend = WasmBackend::new(&program, &opts).expect("WasmBackend::new failed");
-    (backend, sim)
+fn build_wasm(code: &str, top: &str) -> (WasmBackend, Program) {
+    let sim = celox::Simulator::builder(code, top).build_wasm().unwrap();
+    let program = sim.program().clone();
+    (sim.into_backend(), program)
 }
 
 #[test]
@@ -184,11 +182,11 @@ fn test_wasm_adder_combinational() {
             assign s = a + b;
         }
     "#;
-    let (mut backend, sim) = build_wasm(code, "Top");
+    let (mut backend, program) = build_wasm(code, "Top");
 
-    let a_addr = sim.program().get_addr(&[], &["a"]).unwrap();
-    let b_addr = sim.program().get_addr(&[], &["b"]).unwrap();
-    let s_addr = sim.program().get_addr(&[], &["s"]).unwrap();
+    let a_addr = program.get_addr(&[], &["a"]).unwrap();
+    let b_addr = program.get_addr(&[], &["b"]).unwrap();
+    let s_addr = program.get_addr(&[], &["s"]).unwrap();
 
     let a_sig = backend.resolve_signal(&a_addr);
     let b_sig = backend.resolve_signal(&b_addr);
@@ -220,12 +218,12 @@ fn test_wasm_mux_branching() {
             }
         }
     "#;
-    let (mut backend, sim) = build_wasm(code, "Top");
+    let (mut backend, program) = build_wasm(code, "Top");
 
-    let sel_addr = sim.program().get_addr(&[], &["sel"]).unwrap();
-    let a_addr = sim.program().get_addr(&[], &["a"]).unwrap();
-    let b_addr = sim.program().get_addr(&[], &["b"]).unwrap();
-    let y_addr = sim.program().get_addr(&[], &["y"]).unwrap();
+    let sel_addr = program.get_addr(&[], &["sel"]).unwrap();
+    let a_addr = program.get_addr(&[], &["a"]).unwrap();
+    let b_addr = program.get_addr(&[], &["b"]).unwrap();
+    let y_addr = program.get_addr(&[], &["y"]).unwrap();
 
     let sel = backend.resolve_signal(&sel_addr);
     let a = backend.resolve_signal(&a_addr);
@@ -263,12 +261,12 @@ fn test_wasm_counter_sequential() {
             }
         }
     "#;
-    let (mut backend, sim) = build_wasm(code, "Top");
+    let (mut backend, program) = build_wasm(code, "Top");
 
-    let clk_addr = sim.program().get_addr(&[], &["clk"]).unwrap();
-    let rst_addr = sim.program().get_addr(&[], &["rst"]).unwrap();
-    let en_addr = sim.program().get_addr(&[], &["en"]).unwrap();
-    let cnt_addr = sim.program().get_addr(&[], &["cnt"]).unwrap();
+    let clk_addr = program.get_addr(&[], &["clk"]).unwrap();
+    let rst_addr = program.get_addr(&[], &["rst"]).unwrap();
+    let en_addr = program.get_addr(&[], &["en"]).unwrap();
+    let cnt_addr = program.get_addr(&[], &["cnt"]).unwrap();
 
     let rst_sig = backend.resolve_signal(&rst_addr);
     let en_sig = backend.resolve_signal(&en_addr);
@@ -303,11 +301,11 @@ fn test_wasm_wide_value_128bit() {
             assign s = a + b;
         }
     "#;
-    let (mut backend, sim) = build_wasm(code, "Top");
+    let (mut backend, program) = build_wasm(code, "Top");
 
-    let a_addr = sim.program().get_addr(&[], &["a"]).unwrap();
-    let b_addr = sim.program().get_addr(&[], &["b"]).unwrap();
-    let s_addr = sim.program().get_addr(&[], &["s"]).unwrap();
+    let a_addr = program.get_addr(&[], &["a"]).unwrap();
+    let b_addr = program.get_addr(&[], &["b"]).unwrap();
+    let s_addr = program.get_addr(&[], &["s"]).unwrap();
 
     let a_sig = backend.resolve_signal(&a_addr);
     let b_sig = backend.resolve_signal(&b_addr);

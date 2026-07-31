@@ -73,7 +73,7 @@ pub(super) fn optimize_program_identity_stores(
         &mut program.sir.eval_comb,
         &metadata,
         &blocked_aliases,
-        &program.address_aliases,
+        program.layout_requirements.state_aliases(),
         four_state,
     )
 }
@@ -122,11 +122,11 @@ fn optimize_eval_comb_identity_stores(
 /// every remaining write to the removable side must still be the exact
 /// full-width identity recipe that justified sharing its home.
 pub(crate) fn retain_final_identity_aliases(program: &mut Program, four_state: bool) {
-    if program.address_aliases.is_empty() {
+    if program.layout_requirements.is_empty() {
         return;
     }
     let metadata = address_metadata(program);
-    let aliases = program.address_aliases.clone();
+    let aliases = program.layout_requirements.state_aliases().clone();
     let mut valid = aliases.keys().copied().collect::<HashSet<_>>();
 
     retain_aliases_valid_for_units(
@@ -140,7 +140,8 @@ pub(crate) fn retain_final_identity_aliases(program: &mut Program, four_state: b
         retain_aliases_valid_for_units(units, &aliases, &metadata, four_state, &mut valid);
     }
     program
-        .address_aliases
+        .layout_requirements
+        .state_aliases_mut()
         .retain(|alias, _| valid.contains(alias));
 }
 

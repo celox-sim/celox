@@ -1407,7 +1407,7 @@ pub(crate) fn flatten(
                     module_names: module_names.clone(),
                 },
                 runtime_schema: celox_design::RuntimeSchema::default(),
-                address_aliases: HashMap::default(),
+                layout_requirements: Default::default(),
                 initial_statements: None,
                 tb_functions: fxhash::FxHashMap::default(),
             };
@@ -1623,7 +1623,7 @@ pub(crate) fn flatten(
             runtime_event_sites,
             comb_observers: runtime_comb_observers,
         },
-        address_aliases: HashMap::default(),
+        layout_requirements: Default::default(),
         initial_statements,
         tb_functions: module_ir
             .get(root_id)

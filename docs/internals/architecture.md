@@ -84,7 +84,7 @@ The simulator employs a **multi-region model on a single memory buffer**.
 -   **Triggered-bits region**: One bit per event, used for cascade/gated clock trigger detection. After a `Store` instruction, the backend compares old and new values and sets the corresponding trigger bit if changed.
 -   **Scratch region**: Used by the tail-call splitting pass for inter-chunk register value spilling.
 -   **SignalRef**: A handle that caches offsets and metadata, enabling direct memory access without going through a `HashMap`.
--   **Address Aliases**: The `IdentityStoreBypass` optimization detects variables that are identity copies (Store→Load roundtrips) and registers them as aliases in `Program::address_aliases`. Aliased variables share physical memory, eliminating redundant copies.
+-   **Layout Requirements**: The `IdentityStoreBypass` optimization detects variables that are identity copies (Store→Load roundtrips) and records non-canonical → canonical state-home aliases in `Program::layout_requirements`. Physical layout validates compatible representations before sharing memory, then consumes the requirements when producing `LaidOutProgram`.
 
 For 4-state variables, each variable occupies `2 × ceil(width/8)` bytes (value + mask pair).
 

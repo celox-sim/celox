@@ -765,7 +765,10 @@ fn optimize_late_comb(
             options.four_state,
         );
         if !identity_aliases.is_empty() {
-            program.address_aliases.extend(identity_aliases);
+            program
+                .layout_requirements
+                .state_aliases_mut()
+                .extend(identity_aliases);
         }
     }
     verify_stage(program, "identity-store bypass");
@@ -818,7 +821,8 @@ fn optimize_late_comb(
         eprintln!("[branchify-stats] late guarded");
     }
     if opt.opt_level() != crate::optimizer::OptLevel::O0 {
-        let sparse_case_pass = SparseCaseDispatchPass::new(&program.address_aliases);
+        let sparse_case_pass =
+            SparseCaseDispatchPass::new(program.layout_requirements.state_aliases());
         if trace {
             eprintln!("[branchify-stats] late sparse constructed");
         }
@@ -1094,7 +1098,9 @@ fn optimize_with_options(
         .with_unpacked_element_widths(Arc::clone(&unpacked_element_widths));
     if opt.opt_level() != crate::optimizer::OptLevel::O0 {
         comb_ff_late_passes.add_pass(GuardedRegionSinkingPass);
-        comb_ff_late_passes.add_pass(SparseCaseDispatchPass::new(&program.address_aliases));
+        comb_ff_late_passes.add_pass(SparseCaseDispatchPass::new(
+            program.layout_requirements.state_aliases(),
+        ));
     }
     if on(SirPass::Gvn) {
         comb_ff_late_passes.add_pass(DeadCodeEliminationPass);
