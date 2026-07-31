@@ -201,6 +201,22 @@ impl OptimizedSir {
 }
 
 impl Program {
+    pub(crate) fn from_scheduled(
+        scheduled: celox_frontend_veryl::ScheduledRtl,
+    ) -> (Self, celox_frontend_veryl::VerylTestbenchSource) {
+        (
+            Self {
+                sir: scheduled.sir,
+                design: scheduled.design,
+                frontend: scheduled.frontend_lookup,
+                runtime_schema: scheduled.runtime_schema,
+                layout_requirements: Default::default(),
+                testbench: None,
+            },
+            scheduled.testbench_source,
+        )
+    }
+
     pub fn get_addr(
         &self,
         instance_path: &[(&str, usize)],
@@ -244,42 +260,7 @@ impl Program {
     }
 
     pub fn get_path(&self, addr: &AbsoluteAddr) -> String {
-        let instance_id = addr.instance_id;
-        let var_id = addr.var_id;
-
-        let instance_path = self
-            .frontend
-            .instance_ids
-            .iter()
-            .find(|(_, id)| **id == instance_id)
-            .map(|(path, _)| path);
-        let module_id = self.frontend.instance_module.get(&instance_id).unwrap();
-        let module_vars = self.frontend.module_variables.get(module_id).unwrap();
-        let var_path = module_vars
-            .values()
-            .find(|info| info.id == var_id)
-            .map(|info| &info.path);
-
-        let mut res = Vec::new();
-        if let Some(ip) = instance_path {
-            for part in &ip.0 {
-                res.push(format!(
-                    "{}[{}]",
-                    veryl_parser::resource_table::get_str_value(part.0).unwrap(),
-                    part.1
-                ));
-            }
-        }
-        if let Some(vp) = var_path {
-            for part in &vp.0 {
-                res.push(
-                    veryl_parser::resource_table::get_str_value(*part)
-                        .unwrap()
-                        .to_string(),
-                );
-            }
-        }
-        res.join(".")
+        self.frontend.get_path(addr)
     }
 
     pub fn get_variable_info(&self, addr: &AbsoluteAddr) -> Option<&VariableInfo> {
