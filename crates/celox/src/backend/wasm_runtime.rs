@@ -162,7 +162,7 @@ impl WasmBackend {
 
         // Compile eval_comb
         let comb_wasm = wasm_codegen::compile_units(
-            &sir.eval_comb,
+            &sir.sir.eval_comb,
             &layout,
             options.four_state,
             options.emit_triggers,
@@ -225,7 +225,7 @@ impl WasmBackend {
         };
 
         compile_ffs(
-            &sir.eval_apply_ffs,
+            &sir.sir.eval_apply_ffs,
             &mut event_modules,
             &mut event_map,
             &mut addr_to_id,
@@ -233,7 +233,7 @@ impl WasmBackend {
             &mut id_to_addr,
         )?;
         compile_ffs(
-            &sir.eval_only_ffs,
+            &sir.sir.eval_only_ffs,
             &mut eval_only_modules,
             &mut eval_only_event_map,
             &mut addr_to_id,
@@ -241,7 +241,7 @@ impl WasmBackend {
             &mut id_to_addr,
         )?;
         compile_ffs(
-            &sir.apply_ffs,
+            &sir.sir.apply_ffs,
             &mut apply_modules,
             &mut apply_event_map,
             &mut addr_to_id,

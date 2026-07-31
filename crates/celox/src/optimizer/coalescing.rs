@@ -294,7 +294,7 @@ pub(crate) fn optimize_rooted_comb_memory(
         four_state,
         ..PassOptions::default()
     };
-    for eu in &mut program.eval_comb {
+    for eu in &mut program.sir.eval_comb {
         pass_vectorize_concat::remove_dead_definitions(eu);
         pass_guarded_region_sinking::eliminate_dead_control_regions(eu);
         pass_manager::ExecutionUnitPass::run(&ControlFlowSimplifyPass, eu, &options);
@@ -309,11 +309,12 @@ pub(crate) fn optimize_rooted_comb_memory(
     // transformed function instead of compiling stale chunks.
     program.eval_comb_plan = None;
     if enable_tail_split {
-        if let Some(chunks) = pass_tail_call_split::split_if_needed(&program.eval_comb, four_state)
+        if let Some(chunks) =
+            pass_tail_call_split::split_if_needed(&program.sir.eval_comb, four_state)
         {
             program.eval_comb_plan = Some(EvalCombPlan::TailCallChunks(chunks));
         } else if let Some(plan) =
-            pass_tail_call_split::split_if_needed_spilled(&program.eval_comb, four_state)
+            pass_tail_call_split::split_if_needed_spilled(&program.sir.eval_comb, four_state)
         {
             program.eval_comb_plan = Some(EvalCombPlan::MemorySpilled(plan));
         }
@@ -746,7 +747,7 @@ fn optimize_late_comb(
         if std::env::var_os("CELOX_SIR_VERIFY_PASSES").is_none() {
             return;
         }
-        for (unit, eu) in program.eval_comb.iter().enumerate() {
+        for (unit, eu) in program.sir.eval_comb.iter().enumerate() {
             if let Err(error) = crate::parser::verify_memory_offset_contract(program, eu) {
                 panic!("after late comb stage {stage} in unit {unit}: {error}");
             }
@@ -766,6 +767,7 @@ fn optimize_late_comb(
         };
     }
     let branchify_watermarks = program
+        .sir
         .eval_comb
         .iter()
         .map(|eu| eu.blocks.keys().map(|block| block.0).max().unwrap_or(0))
@@ -790,7 +792,7 @@ fn optimize_late_comb(
 
     // Identity-store bypass can make an entire expression DAG dead.
     if opt.opt_level() != crate::optimizer::OptLevel::O0 {
-        for eu in &mut program.eval_comb {
+        for eu in &mut program.sir.eval_comb {
             pass_manager::ExecutionUnitPass::run(&LoopIdiomPass, eu, options);
         }
     }
@@ -801,7 +803,7 @@ fn optimize_late_comb(
     }
     if opt.opt_level() != crate::optimizer::OptLevel::O0 {
         let packed_scatter_store = PackedScatterStorePass::for_program(program);
-        for eu in &mut program.eval_comb {
+        for eu in &mut program.sir.eval_comb {
             pass_manager::ExecutionUnitPass::run(&packed_scatter_store, eu, options);
         }
     }
@@ -812,7 +814,7 @@ fn optimize_late_comb(
     }
     if on(SirPass::IndexedStoreRecovery) {
         let indexed_store_recovery = IndexedStoreRecoveryPass::for_program(program);
-        for eu in &mut program.eval_comb {
+        for eu in &mut program.sir.eval_comb {
             pass_manager::ExecutionUnitPass::run(&indexed_store_recovery, eu, options);
         }
     }
@@ -822,7 +824,7 @@ fn optimize_late_comb(
         eprintln!("[branchify-stats] late indexed");
     }
     if opt.opt_level() != crate::optimizer::OptLevel::O0 {
-        for eu in &mut program.eval_comb {
+        for eu in &mut program.sir.eval_comb {
             pass_manager::ExecutionUnitPass::run(&GuardedRegionSinkingPass, eu, options);
         }
     }
@@ -836,7 +838,7 @@ fn optimize_late_comb(
         if trace {
             eprintln!("[branchify-stats] late sparse constructed");
         }
-        for eu in &mut program.eval_comb {
+        for eu in &mut program.sir.eval_comb {
             pass_manager::ExecutionUnitPass::run(&sparse_case_pass, eu, options);
         }
     }
@@ -849,10 +851,10 @@ fn optimize_late_comb(
     // Recover control dependence created by the program-wide transforms, then
     // repair value placement and correlated merge state on that final CFG.
     if on(SirPass::BranchifyMux) {
-        for (eu, watermark) in program.eval_comb.iter_mut().zip(branchify_watermarks) {
+        for (eu, watermark) in program.sir.eval_comb.iter_mut().zip(branchify_watermarks) {
             pass_branchify_mux::run_late_branchify_mux(eu, options, watermark);
         }
-        for eu in &mut program.eval_comb {
+        for eu in &mut program.sir.eval_comb {
             pass_guarded_region_sinking::sink_pure_values_with_predicate_repair(eu);
             pass_manager::ExecutionUnitPass::run(&PhiOutcomeCompressionPass, eu, options);
         }
@@ -863,14 +865,14 @@ fn optimize_late_comb(
     // Final canonicalization must precede native lowering, which fixes live
     // ranges and spill slots.
     if on(SirPass::Gvn) {
-        for eu in &mut program.eval_comb {
+        for eu in &mut program.sir.eval_comb {
             pass_manager::ExecutionUnitPass::run(&GvnPass, eu, options);
         }
     }
     verify_stage(program, "final GVN");
     checkpoint!("final GVN");
     if on(SirPass::ControlFlowSimplify) {
-        for eu in &mut program.eval_comb {
+        for eu in &mut program.sir.eval_comb {
             pass_manager::ExecutionUnitPass::run(&ControlFlowSimplifyPass, eu, options);
         }
     }
@@ -946,13 +948,13 @@ fn optimize_with_options(
     // Sparse next-state data must stay invisible until every evaluator for the
     // event has sampled STABLE.  Keep the commit in the same unified generated
     // function, but place it in a final EU after all evaluator EUs.
-    move_sparse_commits_to_event_tail(&mut program.eval_apply_ffs);
-    move_sparse_commits_to_event_tail(&mut program.eval_comb_apply_ffs);
+    move_sparse_commits_to_event_tail(&mut program.sir.eval_apply_ffs);
+    move_sparse_commits_to_event_tail(&mut program.sir.eval_comb_apply_ffs);
 
     // 1. Unified Case (Fast Path): Full optimizations are safe.
     let phase_start = timing.then(crate::timing::now);
     if timing {
-        for (trigger, units) in &program.eval_apply_ffs {
+        for (trigger, units) in &program.sir.eval_apply_ffs {
             for (index, eu) in units.iter().enumerate() {
                 let instruction_count: usize = eu
                     .blocks
@@ -1100,11 +1102,15 @@ fn optimize_with_options(
         comb_ff_passes.add_pass(CircularPriorityPass::for_program(program));
     }
 
-    let ff_eu_count: usize = program.eval_apply_ffs.values().map(Vec::len).sum();
-    let comb_ff_eu_count: usize = program.eval_comb_apply_ffs.values().map(Vec::len).sum();
+    let ff_eu_count: usize = program.sir.eval_apply_ffs.values().map(Vec::len).sum();
+    let comb_ff_eu_count: usize = program.sir.eval_comb_apply_ffs.values().map(Vec::len).sum();
     let eu_count = ff_eu_count + comb_ff_eu_count;
-    optimize_unit_groups_cached(&mut program.eval_apply_ffs, &ff_passes, &options);
-    optimize_unit_groups_cached(&mut program.eval_comb_apply_ffs, &comb_ff_passes, &options);
+    optimize_unit_groups_cached(&mut program.sir.eval_apply_ffs, &ff_passes, &options);
+    optimize_unit_groups_cached(
+        &mut program.sir.eval_comb_apply_ffs,
+        &comb_ff_passes,
+        &options,
+    );
 
     // The late comb pipeline must start from the CFG produced by the complete
     // initial pipeline. Keep it in the same exact-equivalence cache: clock
@@ -1122,18 +1128,18 @@ fn optimize_with_options(
         comb_ff_late_passes.add_pass(SplitWideCommitsPass);
     }
     optimize_unit_groups_cached(
-        &mut program.eval_comb_apply_ffs,
+        &mut program.sir.eval_comb_apply_ffs,
         &comb_ff_late_passes,
         &options,
     );
 
     optimize_unified_commit_groups(
-        &mut program.eval_apply_ffs,
+        &mut program.sir.eval_apply_ffs,
         on(SirPass::CommitSinking),
         on(SirPass::InlineCommitForwarding),
     );
     optimize_unified_commit_groups(
-        &mut program.eval_comb_apply_ffs,
+        &mut program.sir.eval_comb_apply_ffs,
         on(SirPass::CommitSinking),
         on(SirPass::InlineCommitForwarding),
     );
@@ -1165,9 +1171,9 @@ fn optimize_with_options(
             max_store_width: max_native_memory_width,
         });
     }
-    optimize_unit_groups_cached(&mut program.eval_apply_ffs, &ff_post_passes, &options);
+    optimize_unit_groups_cached(&mut program.sir.eval_apply_ffs, &ff_post_passes, &options);
     optimize_unit_groups_cached(
-        &mut program.eval_comb_apply_ffs,
+        &mut program.sir.eval_comb_apply_ffs,
         &comb_ff_post_passes,
         &options,
     );
@@ -1226,8 +1232,8 @@ fn optimize_with_options(
         eval_only_passes.add_pass(ReschedulePass);
     }
 
-    let eu_count: usize = program.eval_only_ffs.values().map(|v| v.len()).sum();
-    optimize_unit_groups_cached(&mut program.eval_only_ffs, &eval_only_passes, &options);
+    let eu_count: usize = program.sir.eval_only_ffs.values().map(|v| v.len()).sum();
+    optimize_unit_groups_cached(&mut program.sir.eval_only_ffs, &eval_only_passes, &options);
     if let Some(s) = phase_start {
         eprintln!("[phase] eval_only_ffs ({eu_count} EUs): {:?}", s.elapsed());
     }
@@ -1270,8 +1276,8 @@ fn optimize_with_options(
         apply_passes.add_pass(ReschedulePass);
     }
 
-    let eu_count: usize = program.apply_ffs.values().map(|v| v.len()).sum();
-    for units in program.apply_ffs.values_mut() {
+    let eu_count: usize = program.sir.apply_ffs.values().map(|v| v.len()).sum();
+    for units in program.sir.apply_ffs.values_mut() {
         for eu in units {
             apply_passes.run(eu, &options);
         }
@@ -1369,8 +1375,8 @@ fn optimize_with_options(
         comb_passes.add_pass(DeadCodeEliminationPass);
     }
 
-    let eu_count = program.eval_comb.len();
-    for (i, eu) in program.eval_comb.iter_mut().enumerate() {
+    let eu_count = program.sir.eval_comb.len();
+    for (i, eu) in program.sir.eval_comb.iter_mut().enumerate() {
         if timing {
             let inst_count: usize = eu.blocks.values().map(|b| b.instructions.len()).sum();
             let block_count = eu.blocks.len();
@@ -1384,7 +1390,7 @@ fn optimize_with_options(
 
     optimize_late_comb(program, opt, &options, &unpacked_element_widths);
     if std::env::var_os("CELOX_MUX_CHAIN_STATS").is_some() {
-        dump_mux_chain_stats(&program.eval_comb);
+        dump_mux_chain_stats(&program.sir.eval_comb);
     }
 
     // 5. Tail-call chain splitting for eval_comb.
@@ -1395,7 +1401,7 @@ fn optimize_with_options(
     // Fall back to memory-spilled multi-block splitting if needed.
     if on(SirPass::TailCallSplit) {
         if timing {
-            for (i, eu) in program.eval_comb.iter().enumerate() {
+            for (i, eu) in program.sir.eval_comb.iter().enumerate() {
                 let inst_cost = cost_model::estimate_eu_cost(eu, four_state);
                 let value_count = cost_model::estimate_eu_value_count(eu, four_state);
                 eprintln!(
@@ -1411,7 +1417,8 @@ fn optimize_with_options(
             }
         }
         let split_start = timing.then(crate::timing::now);
-        if let Some(chunks) = pass_tail_call_split::split_if_needed(&program.eval_comb, four_state)
+        if let Some(chunks) =
+            pass_tail_call_split::split_if_needed(&program.sir.eval_comb, four_state)
         {
             if timing {
                 eprintln!(
@@ -1422,7 +1429,7 @@ fn optimize_with_options(
             }
             program.eval_comb_plan = Some(crate::ir::EvalCombPlan::TailCallChunks(chunks));
         } else if let Some(plan) =
-            pass_tail_call_split::split_if_needed_spilled(&program.eval_comb, four_state)
+            pass_tail_call_split::split_if_needed_spilled(&program.sir.eval_comb, four_state)
         {
             if timing {
                 eprintln!(

@@ -61,7 +61,7 @@ pub(crate) use fxhash::FxHashMap as HashMap;
 pub(crate) use fxhash::FxHashSet as HashSet;
 pub use ir::{
     AbsoluteAddr, AddrLookupError, LaidOutProgram, PortTypeKind, Program, RuntimeErrorInfo,
-    SignalRef,
+    SignalRef, SirProgram,
 };
 #[cfg(target_arch = "x86_64")]
 pub mod native_backend {

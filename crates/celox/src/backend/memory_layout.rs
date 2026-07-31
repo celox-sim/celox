@@ -181,12 +181,13 @@ pub(crate) fn collect_strided_array_layouts(
         }
     };
     for eu in program
+        .sir
         .eval_comb
         .iter()
-        .chain(program.eval_apply_ffs.values().flatten())
-        .chain(program.eval_comb_apply_ffs.values().flatten())
-        .chain(program.eval_only_ffs.values().flatten())
-        .chain(program.apply_ffs.values().flatten())
+        .chain(program.sir.eval_apply_ffs.values().flatten())
+        .chain(program.sir.eval_comb_apply_ffs.values().flatten())
+        .chain(program.sir.eval_only_ffs.values().flatten())
+        .chain(program.sir.apply_ffs.values().flatten())
     {
         let mut zero_roots = eu
             .blocks
@@ -228,11 +229,12 @@ fn collect_ff_referenced_addresses(program: &Program) -> crate::HashSet<Absolute
     // scanning the fused form would conservatively reject every useful comb
     // identity alias.
     let ff_eus = program
+        .sir
         .eval_apply_ffs
         .values()
         .flat_map(|v| v.iter())
-        .chain(program.eval_only_ffs.values().flat_map(|v| v.iter()))
-        .chain(program.apply_ffs.values().flat_map(|v| v.iter()));
+        .chain(program.sir.eval_only_ffs.values().flat_map(|v| v.iter()))
+        .chain(program.sir.apply_ffs.values().flat_map(|v| v.iter()));
     for eu in ff_eus {
         for block in eu.blocks.values() {
             for inst in &block.instructions {

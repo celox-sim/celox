@@ -1607,7 +1607,7 @@ impl NativeSimulatorHandle {
     #[napi]
     pub fn comb_wasm_bytes(&self) -> Vec<u8> {
         let wasm = celox::wasm_codegen::compile_units(
-            &self.program.eval_comb,
+            &self.program.sir.eval_comb,
             &self.layout,
             self.four_state,
             false,
@@ -1620,7 +1620,7 @@ impl NativeSimulatorHandle {
     /// `event_name` should match a clock or reset port name (e.g. "clk", "rst").
     #[napi]
     pub fn event_wasm_bytes(&self, event_name: String) -> Result<Vec<u8>> {
-        for (addr, units) in &self.program.eval_apply_ffs {
+        for (addr, units) in &self.program.sir.eval_apply_ffs {
             let event_path = self.program.get_path(addr);
             if event_path == event_name {
                 let wasm =
@@ -1633,6 +1633,7 @@ impl NativeSimulatorHandle {
             "Event '{}' not found. Available events: {}",
             event_name,
             self.program
+                .sir
                 .eval_apply_ffs
                 .keys()
                 .map(|addr| self.program.get_path(addr))
@@ -1712,7 +1713,7 @@ impl NativeSimulatorHandle {
         let mut events: BTreeMap<String, usize> = BTreeMap::new();
         let mut next_id = 0usize;
 
-        for addr in program.eval_apply_ffs.keys() {
+        for addr in program.sir.eval_apply_ffs.keys() {
             let name = program.get_path(addr);
             events.insert(name, next_id);
             next_id += 1;

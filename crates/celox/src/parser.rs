@@ -1392,11 +1392,13 @@ pub(crate) fn flatten(
         Err(error) => {
             let (err_vars, err_path_idx) = module_variables(module_ir, config).unwrap_or_default();
             let program = Program {
-                eval_apply_ffs: HashMap::default(),
-                eval_comb_apply_ffs: HashMap::default(),
-                eval_only_ffs: HashMap::default(),
-                apply_ffs: HashMap::default(),
-                eval_comb: Vec::new(),
+                sir: crate::ir::SirProgram {
+                    eval_apply_ffs: HashMap::default(),
+                    eval_comb_apply_ffs: HashMap::default(),
+                    eval_only_ffs: HashMap::default(),
+                    apply_ffs: HashMap::default(),
+                    eval_comb: Vec::new(),
+                },
                 comb_semantic_regions: HashMap::default(),
                 runtime_errors: HashMap::default(),
                 runtime_event_sites: Vec::new(),
@@ -1580,11 +1582,13 @@ pub(crate) fn flatten(
         })
         .collect();
     let program = Program {
-        eval_apply_ffs,
-        eval_comb_apply_ffs,
-        eval_only_ffs,
-        apply_ffs,
-        eval_comb,
+        sir: crate::ir::SirProgram {
+            eval_apply_ffs,
+            eval_comb_apply_ffs,
+            eval_only_ffs,
+            apply_ffs,
+            eval_comb,
+        },
         comb_semantic_regions,
         runtime_errors,
         runtime_event_sites,
@@ -1631,9 +1635,10 @@ pub(crate) fn flatten(
 
     let mut program = program;
     for units in program
+        .sir
         .eval_apply_ffs
         .values_mut()
-        .chain(program.eval_comb_apply_ffs.values_mut())
+        .chain(program.sir.eval_comb_apply_ffs.values_mut())
     {
         for eu in units {
             for bb in eu.blocks.values_mut() {
@@ -1659,7 +1664,7 @@ pub(crate) fn flatten(
             }
         }
     }
-    for units in program.eval_only_ffs.values_mut() {
+    for units in program.sir.eval_only_ffs.values_mut() {
         for eu in units {
             for bb in eu.blocks.values_mut() {
                 for inst in &mut bb.instructions {
@@ -1684,7 +1689,7 @@ pub(crate) fn flatten(
             }
         }
     }
-    for units in program.apply_ffs.values_mut() {
+    for units in program.sir.apply_ffs.values_mut() {
         for eu in units {
             for bb in eu.blocks.values_mut() {
                 for inst in &mut bb.instructions {
@@ -1715,7 +1720,7 @@ pub(crate) fn flatten(
             }
         }
     }
-    for eu in &mut program.eval_comb {
+    for eu in &mut program.sir.eval_comb {
         for bb in eu.blocks.values_mut() {
             for inst in &mut bb.instructions {
                 match inst {
@@ -2125,12 +2130,14 @@ fn expand(
 
 fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), ParserError> {
     let units = program
+        .sir
         .eval_comb
         .iter()
         .enumerate()
         .map(|(unit, eu)| ("eval_comb", unit, eu))
         .chain(
             program
+                .sir
                 .eval_apply_ffs
                 .values()
                 .flatten()
@@ -2139,6 +2146,7 @@ fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), Pars
         )
         .chain(
             program
+                .sir
                 .eval_comb_apply_ffs
                 .values()
                 .flatten()
@@ -2147,6 +2155,7 @@ fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), Pars
         )
         .chain(
             program
+                .sir
                 .eval_only_ffs
                 .values()
                 .flatten()
@@ -2155,6 +2164,7 @@ fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), Pars
         )
         .chain(
             program
+                .sir
                 .apply_ffs
                 .values()
                 .flatten()

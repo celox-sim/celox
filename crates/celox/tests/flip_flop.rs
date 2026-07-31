@@ -1810,8 +1810,8 @@ fn test_single_clock_optimization() {
     "#;
     let trace = setup_and_trace(code, "Top");
     let program = trace.post_optimized_sir.unwrap();
-    assert!(program.eval_only_ffs.is_empty());
-    assert!(program.apply_ffs.is_empty());
+    assert!(program.sir.eval_only_ffs.is_empty());
+    assert!(program.sir.apply_ffs.is_empty());
 }
 
 #[test]
@@ -1824,8 +1824,8 @@ fn test_multi_clock_no_optimization() {
     "#;
     let trace = setup_and_trace(code, "Top");
     let program = trace.post_optimized_sir.unwrap();
-    assert!(!program.eval_only_ffs.is_empty());
-    assert!(!program.apply_ffs.is_empty());
+    assert!(!program.sir.eval_only_ffs.is_empty());
+    assert!(!program.sir.apply_ffs.is_empty());
 }
 
 #[test]

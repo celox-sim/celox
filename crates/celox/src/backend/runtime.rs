@@ -187,11 +187,13 @@ impl JitBackend {
         {
             use crate::optimizer::coalescing::cost_model::*;
             let _comb_cost: usize = sir
+                .sir
                 .eval_comb
                 .iter()
                 .map(|eu| estimate_eu_cost(eu, options.four_state))
                 .sum();
             let comb_vregs: usize = sir
+                .sir
                 .eval_comb
                 .iter()
                 .map(|eu| estimate_eu_value_count(eu, options.four_state))
@@ -247,7 +249,9 @@ impl JitBackend {
             Some(crate::ir::EvalCombPlan::TailCallChunks(chunks)) => {
                 engine.compile_chunks(chunks, pre_clif_ptr, post_clif_ptr, native_ptr)
             }
-            None => engine.compile_units(&sir.eval_comb, pre_clif_ptr, post_clif_ptr, native_ptr),
+            None => {
+                engine.compile_units(&sir.sir.eval_comb, pre_clif_ptr, post_clif_ptr, native_ptr)
+            }
         };
 
         if let Some(t) = trace.as_deref_mut() {
@@ -285,7 +289,7 @@ impl JitBackend {
                 let layout_ref = layout_for_mir.as_ref().unwrap();
 
                 mir_output.push_str("=== MIR (eval_comb) ===\n");
-                for (idx, eu) in sir.eval_comb.iter().enumerate() {
+                for (idx, eu) in sir.sir.eval_comb.iter().enumerate() {
                     let mut mfunc = lower_execution_unit(eu, layout_ref, options.four_state);
                     mir_legalize::legalize(&mut mfunc);
                     mir_opt::optimize(&mut mfunc);
@@ -319,7 +323,7 @@ impl JitBackend {
                     }
                     mir_output.push('\n');
                 }
-                for (addr, units) in &sir.eval_apply_ffs {
+                for (addr, units) in &sir.sir.eval_apply_ffs {
                     mir_output.push_str(&format!(
                         "=== MIR (eval_apply_ffs) Trigger: {} ===\n",
                         sir.get_path(addr)
@@ -432,19 +436,19 @@ impl JitBackend {
         };
 
         let mut event_map = compile_ffs(
-            &sir.eval_apply_ffs,
+            &sir.sir.eval_apply_ffs,
             &mut addr_to_id,
             &mut next_id,
             &mut id_to_addr,
         )?;
         let mut eval_only_event_map = compile_ffs(
-            &sir.eval_only_ffs,
+            &sir.sir.eval_only_ffs,
             &mut addr_to_id,
             &mut next_id,
             &mut id_to_addr,
         )?;
         let mut apply_event_map = compile_ffs(
-            &sir.apply_ffs,
+            &sir.sir.apply_ffs,
             &mut addr_to_id,
             &mut next_id,
             &mut id_to_addr,

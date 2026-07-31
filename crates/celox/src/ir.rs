@@ -28,6 +28,7 @@ pub type AbsoluteAddr = AbsoluteAddrBase<VarId>;
 pub type RegionedVarAddr = RegionedVarAddrBase<VarId>;
 /// Concrete regioned address using the Veryl analyzer's `VarId`.
 pub type RegionedAbsoluteAddr = RegionedAbsoluteAddrBase<VarId>;
+pub type SirProgram = celox_sir::SirProgram<AbsoluteAddr, RegionedAbsoluteAddr>;
 
 /// Error returned by [`Program::get_addr`] when a path-based variable lookup fails.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -107,13 +108,7 @@ pub struct CombObserver<A = AbsoluteAddr> {
 
 #[derive(Clone)]
 pub struct Program {
-    pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    /// Native fast path in which the required comb LogicPaths and one FF
-    /// domain were scheduled and lowered through the same SIRBuilder.
-    pub eval_comb_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+    pub sir: SirProgram,
     /// Semantic comb process for each exact published range. Physical
     /// ExecutionUnit boundaries deliberately do not define these regions.
     pub comb_semantic_regions: HashMap<VarAtomBase<AbsoluteAddr>, u64>,
@@ -211,7 +206,7 @@ impl Program {
             self.address_aliases
                 .retain(|alias_addr, _| !observed_written.contains(alias_addr));
             self.address_aliases.retain(|alias_addr, _| {
-                !comb_capture_enable_needs_unaliased_old_value(&self.eval_comb, *alias_addr)
+                !comb_capture_enable_needs_unaliased_old_value(&self.sir.eval_comb, *alias_addr)
             });
         }
         crate::optimizer::coalescing::retain_final_identity_aliases(&mut self, four_state);
@@ -368,10 +363,10 @@ impl Program {
                 }
             };
 
-        scan_units(&self.eval_apply_ffs, &mut addrs);
-        scan_units(&self.eval_comb_apply_ffs, &mut addrs);
-        scan_units(&self.eval_only_ffs, &mut addrs);
-        scan_units(&self.apply_ffs, &mut addrs);
+        scan_units(&self.sir.eval_apply_ffs, &mut addrs);
+        scan_units(&self.sir.eval_comb_apply_ffs, &mut addrs);
+        scan_units(&self.sir.eval_only_ffs, &mut addrs);
+        scan_units(&self.sir.apply_ffs, &mut addrs);
 
         addrs
     }
@@ -379,10 +374,11 @@ impl Program {
     pub fn collect_sparse_working_region_addrs(&self) -> std::collections::HashSet<AbsoluteAddr> {
         let mut addrs = std::collections::HashSet::new();
         for units in self
+            .sir
             .eval_apply_ffs
             .values()
-            .chain(self.eval_comb_apply_ffs.values())
-            .chain(self.eval_only_ffs.values())
+            .chain(self.sir.eval_comb_apply_ffs.values())
+            .chain(self.sir.eval_only_ffs.values())
         {
             for eu in units {
                 for block in eu.blocks.values() {

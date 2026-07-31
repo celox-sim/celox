@@ -259,21 +259,21 @@ fn collect_ff_compile_tasks(sir: &Program) -> (Vec<NativeCompileTask<'_>>, Nativ
     let mut task_bindings = HashMap::default();
     collect_ff_compile_tasks_from(
         sir,
-        &sir.eval_apply_ffs,
+        &sir.sir.eval_apply_ffs,
         "eval_apply_ff",
         &mut tasks,
         &mut task_bindings,
     );
     collect_ff_compile_tasks_from(
         sir,
-        &sir.eval_only_ffs,
+        &sir.sir.eval_only_ffs,
         "eval_only_ff",
         &mut tasks,
         &mut task_bindings,
     );
     collect_ff_compile_tasks_from(
         sir,
-        &sir.apply_ffs,
+        &sir.sir.apply_ffs,
         "apply_ff",
         &mut tasks,
         &mut task_bindings,
@@ -288,12 +288,12 @@ fn collect_comb_apply_compile_tasks<'a>(
     task_bindings: &mut NativeTaskBindings,
 ) {
     const LABEL: &str = "eval_comb_apply_ff";
-    for (addr, ff_units) in &sir.eval_apply_ffs {
-        let fused_units = sir.eval_comb_apply_ffs.get(addr);
+    for (addr, ff_units) in &sir.sir.eval_apply_ffs {
+        let fused_units = sir.sir.eval_comb_apply_ffs.get(addr);
         let (unit_refs, first_ff_unit) = if let Some(fused_units) = fused_units {
             (fused_units.iter().collect::<Vec<_>>(), None)
         } else {
-            let mut unit_refs = sir.eval_comb.iter().collect::<Vec<_>>();
+            let mut unit_refs = sir.sir.eval_comb.iter().collect::<Vec<_>>();
             let first_ff_unit =
                 (!unit_refs.is_empty() && !ff_units.is_empty()).then_some(unit_refs.len());
             unit_refs.extend(ff_units);
@@ -517,7 +517,7 @@ fn compile_program(
         let enable_x86_slp = options.optimize_options.x86_slp_enabled();
         let comb_handle = scope.spawn(move || {
             compile_units(
-                &sir.eval_comb,
+                &sir.sir.eval_comb,
                 layout,
                 four_state,
                 "eval_comb",
@@ -653,7 +653,7 @@ fn compile_program(
     };
 
     compile_ff_group(
-        &sir.eval_apply_ffs,
+        &sir.sir.eval_apply_ffs,
         "eval_apply_ff",
         &mut event_map,
         &mut addr_to_id,
@@ -664,7 +664,7 @@ fn compile_program(
         &mut id_to_event,
     )?;
     compile_ff_group(
-        &sir.eval_only_ffs,
+        &sir.sir.eval_only_ffs,
         "eval_only_ff",
         &mut eval_only_event_map,
         &mut addr_to_id,
@@ -675,7 +675,7 @@ fn compile_program(
         &mut id_to_event,
     )?;
     compile_ff_group(
-        &sir.apply_ffs,
+        &sir.sir.apply_ffs,
         "apply_ff",
         &mut apply_event_map,
         &mut addr_to_id,
