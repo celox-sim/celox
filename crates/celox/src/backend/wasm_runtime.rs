@@ -193,7 +193,7 @@ impl WasmBackend {
                            id_to_addr: &mut Vec<AbsoluteAddr>|
          -> Result<(), crate::SimulatorError> {
             for (clock, units) in ff_map {
-                let canonical = sir.clock_domains.get(clock).copied().unwrap_or(*clock);
+                let canonical = sir.design.events.canonical(*clock);
                 let id = *addr_to_id.entry(canonical).or_insert_with(|| {
                     let id = *next_id;
                     *next_id += 1;
@@ -250,7 +250,7 @@ impl WasmBackend {
         )?;
 
         // Insert clock domain aliases
-        for (alias, canonical) in &sir.clock_domains {
+        for (alias, canonical) in &sir.design.events.aliases {
             if let Some(ev) = event_map.get(canonical).cloned() {
                 event_map.insert(*alias, ev);
             }
@@ -267,9 +267,11 @@ impl WasmBackend {
         if options.four_state {
             for (addr, &offset) in &layout.offsets {
                 let width = layout.widths[addr];
-                let is_4state = sir.module_variables[&sir.instance_module[&addr.instance_id]]
-                    .get(&addr.var_id)
-                    .map(|v| v.is_4state)
+                let is_4state = sir
+                    .design
+                    .state_objects
+                    .get(addr)
+                    .map(|metadata| metadata.is_4state)
                     .unwrap_or(false);
                 if is_4state {
                     four_state_inits.push((offset, get_byte_size(width)));
@@ -278,9 +280,11 @@ impl WasmBackend {
             for (addr, &rel_offset) in &layout.working_offsets {
                 let offset = layout.working_base_offset + rel_offset;
                 let width = layout.widths[addr];
-                let is_4state = sir.module_variables[&sir.instance_module[&addr.instance_id]]
-                    .get(&addr.var_id)
-                    .map(|v| v.is_4state)
+                let is_4state = sir
+                    .design
+                    .state_objects
+                    .get(addr)
+                    .map(|metadata| metadata.is_4state)
                     .unwrap_or(false);
                 if is_4state {
                     four_state_inits.push((offset, get_byte_size(width)));

@@ -569,7 +569,7 @@ impl<B: SimBackend> Simulator<B> {
 
     pub(crate) fn apply_initial_values(&mut self) {
         let mut applied = false;
-        let initial_memory_values = std::mem::take(&mut self.program.initial_memory_values);
+        let initial_memory_values = std::mem::take(&mut self.program.design.initial_state);
         for init in &initial_memory_values {
             applied = true;
             let signal = self.backend.resolve_signal(&init.address);
@@ -602,7 +602,7 @@ impl<B: SimBackend> Simulator<B> {
         if applied {
             self.dirty = true;
         }
-        self.program.initial_memory_values = initial_memory_values;
+        self.program.design.initial_state = initial_memory_values;
     }
 
     fn apply_initial_memory_writes(&mut self, signal: SignalRef, runs: &[InitialMemoryWriteRun]) {
@@ -1281,7 +1281,9 @@ impl<B: SimBackend> Simulator<B> {
             // Resolve associated clock for reset signals
             let associated_clock = self
                 .program
-                .reset_clock_map
+                .design
+                .events
+                .reset_clocks
                 .get(&addr)
                 .map(|clock_addr| self.program.get_path(clock_addr));
 

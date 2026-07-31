@@ -18,7 +18,6 @@ pub(crate) use celox_sir::{
     SirMergeProvenance, inline_single_predecessor_jumps, merge_sir_eu_refs_with_provenance,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use std::fmt;
 use veryl_analyzer::ir::{VarId, VarPath, Variable};
 
@@ -99,6 +98,7 @@ pub struct CombObserver<A = AbsoluteAddr> {
 #[derive(Clone)]
 pub struct Program {
     pub sir: SirProgram,
+    pub design: celox_design::ElaboratedDesign<AbsoluteAddr>,
     /// Semantic comb process for each exact published range. Physical
     /// ExecutionUnit boundaries deliberately do not define these regions.
     pub comb_semantic_regions: HashMap<VarAtomBase<AbsoluteAddr>, u64>,
@@ -111,18 +111,10 @@ pub struct Program {
     /// `None` marks ambiguous paths (multiple VarIds share the same VarPath).
     pub module_var_path_index: HashMap<ModuleId, HashMap<VarPath, Option<VarId>>>,
     pub module_names: HashMap<ModuleId, StrId>,
-    pub clock_domains: HashMap<AbsoluteAddr, AbsoluteAddr>,
-    pub topological_clocks: Vec<AbsoluteAddr>,
-    pub cascaded_clocks: BTreeSet<AbsoluteAddr>,
     pub arena: SLTNodeArena<AbsoluteAddr>,
-    pub num_events: usize,
-    /// Maps reset AbsoluteAddr → clock AbsoluteAddr (from FfDeclaration).
-    pub reset_clock_map: HashMap<AbsoluteAddr, AbsoluteAddr>,
     /// Memory layout aliases: non-canonical → canonical address.
     /// Variables with identity Store→Load roundtrips share physical memory.
     pub address_aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
-    /// Initial memory contents loaded from synthesizable initial blocks.
-    pub initial_memory_values: Vec<InitialMemoryValue>,
     /// Initial block statements from the top-level module (for native testbenches).
     pub initial_statements: Option<Vec<veryl_analyzer::ir::Statement>>,
     /// Functions defined in the top-level module (for testbench function calls).
@@ -164,7 +156,7 @@ impl LaidOutProgram {
 impl fmt::Debug for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Program")
-            .field("num_events", &self.num_events)
+            .field("num_events", &self.design.events.len())
             .finish_non_exhaustive()
     }
 }
@@ -311,7 +303,42 @@ impl Program {
     }
 
     pub fn num_events(&self) -> usize {
-        self.num_events
+        self.design.events.len()
+    }
+
+    /// Verify the temporary migration projection from frontend lookup tables
+    /// into the source-independent elaborated design. This can be removed once
+    /// the frontend tables are consumed rather than retained beside `design`.
+    pub(crate) fn verify_design_projection(&self) -> Result<(), String> {
+        let expected_count = self
+            .instance_module
+            .values()
+            .map(|module_id| self.module_variables[module_id].len())
+            .sum::<usize>();
+        if self.design.state_objects.len() != expected_count {
+            return Err(format!(
+                "state object count differs: design={} frontend={expected_count}",
+                self.design.state_objects.len()
+            ));
+        }
+
+        for (&instance_id, module_id) in &self.instance_module {
+            for info in self.module_variables[module_id].values() {
+                let address = AbsoluteAddr {
+                    instance_id,
+                    var_id: info.id,
+                };
+                let Some(metadata) = self.design.state_objects.get(&address) else {
+                    return Err(format!("missing flattened state object {address}"));
+                };
+                if metadata != &info.metadata {
+                    return Err(format!(
+                        "metadata differs for flattened state object {address}"
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Collect the set of `AbsoluteAddr` values that are accessed in the working

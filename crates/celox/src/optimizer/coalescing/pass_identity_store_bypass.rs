@@ -66,12 +66,7 @@ pub(super) fn optimize_program_identity_stores(
             .iter()
             .flat_map(|observer| observer.written_inputs.iter().copied()),
     );
-    blocked_aliases.extend(
-        program
-            .initial_memory_values
-            .iter()
-            .map(|init| init.address),
-    );
+    blocked_aliases.extend(program.design.initial_state.iter().map(|init| init.address));
 
     optimize_eval_comb_identity_stores(
         &mut program.sir.eval_comb,
