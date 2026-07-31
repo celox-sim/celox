@@ -1157,8 +1157,8 @@ pub(crate) fn lower_execution_unit_with_lane_aggregate(
         None
     };
     let exact_constants = (!four_state).then(|| collect_exact_sir_constants(eu));
-    let dense_branch_table_plans = if !four_state {
-        find_dense_branch_table_plans(
+    let selector_branch_table_plans = if !four_state {
+        find_selector_branch_table_plans(
             eu,
             exact_constants
                 .as_ref()
@@ -1168,9 +1168,9 @@ pub(crate) fn lower_execution_unit_with_lane_aggregate(
                 .expect("two-state branch tables require SIR uses"),
         )
     } else {
-        DenseBranchTablePlans::default()
+        SelectorBranchTablePlans::default()
     };
-    block_ids.retain(|block| !dense_branch_table_plans.removed_blocks.contains(block));
+    block_ids.retain(|block| !selector_branch_table_plans.removed_blocks.contains(block));
     let mut dense_lookup_plans_by_block: HashMap<crate::ir::BlockId, DenseLookupPlans> =
         HashMap::default();
     if !four_state {
@@ -1299,7 +1299,7 @@ pub(crate) fn lower_execution_unit_with_lane_aggregate(
         let lookup_plans = dense_lookup_plans_by_block
             .remove(&sir_block_id)
             .unwrap_or_default();
-        let branch_table_plan = dense_branch_table_plans.roots.get(&sir_block_id);
+        let branch_table_plan = selector_branch_table_plans.roots.get(&sir_block_id);
         let packed_lane_compare_plans = if !four_state {
             find_packed_lane_compare_plans(
                 sir_block,
@@ -1595,7 +1595,7 @@ pub(crate) fn lower_execution_unit_with_lane_aggregate(
 
         // Lower terminator
         if let Some(plan) = branch_table_plan {
-            lower_dense_branch_table(&mut ctx, &mut mblock, plan);
+            lower_selector_branch_table(&mut ctx, &mut mblock, plan);
         } else {
             lower_terminator(&mut ctx, &mut mblock, &sir_block.terminator);
         }
@@ -2945,12 +2945,12 @@ struct ExactSirConstant {
 }
 
 #[derive(Default)]
-struct DenseBranchTablePlans {
-    roots: HashMap<crate::ir::BlockId, DenseBranchTablePlan>,
+struct SelectorBranchTablePlans {
+    roots: HashMap<crate::ir::BlockId, SelectorBranchTablePlan>,
     removed_blocks: HashSet<crate::ir::BlockId>,
 }
 
-struct DenseBranchTablePlan {
+struct SelectorBranchTablePlan {
     selector: RegisterId,
     selector_width: usize,
     targets: Box<[crate::ir::BlockId]>,
@@ -2993,11 +2993,11 @@ fn match_dense_branch_condition(
     let SIRInstruction::Binary(_, lhs, operation, rhs) = &block.instructions[compare_index] else {
         return None;
     };
-    let (selector, key) = match operation {
-        BinaryOp::EqWildcard => (*lhs, constants.get(rhs)?.value),
+    let (selector, key_register, key) = match operation {
+        BinaryOp::EqWildcard => (*lhs, *rhs, constants.get(rhs)?.value),
         BinaryOp::Eq => match (constants.get(lhs), constants.get(rhs)) {
-            (None, Some(key)) => (*lhs, key.value),
-            (Some(key), None) => (*rhs, key.value),
+            (None, Some(key)) => (*lhs, *rhs, key.value),
+            (Some(key), None) => (*rhs, *lhs, key.value),
             _ => return None,
         },
         _ => return None,
@@ -3007,6 +3007,9 @@ fn match_dense_branch_condition(
         return None;
     }
     covered_indices.insert(compare_index);
+    if let Some(&key_index) = definitions.get(&key_register) {
+        covered_indices.insert(key_index);
+    }
 
     for &index in &covered_indices {
         let definition = sir_def_reg(&block.instructions[index])?;
@@ -3031,11 +3034,11 @@ fn match_dense_branch_condition(
     })
 }
 
-fn find_dense_branch_table_plans(
+fn find_selector_branch_table_plans(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     constants: &HashMap<RegisterId, ExactSirConstant>,
     uses: &HashMap<RegisterId, Vec<SirUseSite>>,
-) -> DenseBranchTablePlans {
+) -> SelectorBranchTablePlans {
     let mut predecessors: HashMap<crate::ir::BlockId, Vec<crate::ir::BlockId>> =
         eu.blocks.keys().map(|&block| (block, Vec::new())).collect();
     for block in eu.blocks.values() {
@@ -3058,7 +3061,7 @@ fn find_dense_branch_table_plans(
         }
     }
 
-    let mut result = DenseBranchTablePlans::default();
+    let mut result = SelectorBranchTablePlans::default();
     for root in ordered_sir_blocks(eu) {
         if result.removed_blocks.contains(&root) {
             continue;
@@ -3069,6 +3072,7 @@ fn find_dense_branch_table_plans(
         let mut targets = Vec::<Option<crate::ir::BlockId>>::new();
         let mut decision_blocks = Vec::new();
         let mut root_skip = HashSet::default();
+        let mut default = None;
         let mut valid = true;
 
         loop {
@@ -3079,20 +3083,32 @@ fn find_dense_branch_table_plans(
                 false_block,
             } = &block.terminator
             else {
-                valid = false;
+                if selector.is_some() {
+                    default = Some(current);
+                } else {
+                    valid = false;
+                }
                 break;
             };
             if !true_block.1.is_empty()
                 || !false_block.1.is_empty()
                 || !eu.blocks[&true_block.0].params.is_empty()
             {
-                valid = false;
+                if selector.is_some() {
+                    default = Some(current);
+                } else {
+                    valid = false;
+                }
                 break;
             }
             let Some(condition) =
                 match_dense_branch_condition(block, &eu.register_map, constants, uses, *cond)
             else {
-                valid = false;
+                if selector.is_some() {
+                    default = Some(current);
+                } else {
+                    valid = false;
+                }
                 break;
             };
             if let Some(expected) = selector {
@@ -3102,12 +3118,9 @@ fn find_dense_branch_table_plans(
                         .instructions
                         .iter()
                         .enumerate()
-                        .any(|(index, instruction)| {
-                            !condition.covered_indices.contains(&index)
-                                && !matches!(instruction, SIRInstruction::Imm(..))
-                        })
+                        .any(|(index, _)| !condition.covered_indices.contains(&index))
                 {
-                    valid = false;
+                    default = Some(current);
                     break;
                 }
             } else {
@@ -3117,12 +3130,14 @@ fn find_dense_branch_table_plans(
                 root_skip = condition.covered_indices.clone();
             }
             let key = condition.key as usize;
-            if targets[key].replace(true_block.0).is_some() {
-                valid = false;
+            if targets[key].is_some() {
+                default = Some(current);
                 break;
             }
+            targets[key] = Some(true_block.0);
             decision_blocks.push(current);
             if targets.iter().all(Option::is_some) {
+                default = targets[0];
                 break;
             }
 
@@ -3131,16 +3146,26 @@ fn find_dense_branch_table_plans(
                 || !eu.blocks[&next].params.is_empty()
                 || predecessors.get(&next).map(Vec::as_slice) != Some([current].as_slice())
             {
-                valid = false;
+                default = Some(next);
                 break;
             }
             current = next;
         }
 
-        if !valid || targets.len() < 4 || targets.iter().any(Option::is_none) {
+        let case_count = targets.iter().filter(|target| target.is_some()).count();
+        if !valid
+            || case_count < 4
+            || case_count.saturating_mul(8) < targets.len()
+            || default.is_none()
+        {
             continue;
         }
-        let target_blocks = targets.iter().flatten().copied().collect::<HashSet<_>>();
+        let default = default.expect("accepted selector dispatch has a default");
+        let targets = targets
+            .into_iter()
+            .map(|target| target.unwrap_or(default))
+            .collect::<Vec<_>>();
+        let target_blocks = targets.iter().copied().collect::<HashSet<_>>();
         if decision_blocks
             .iter()
             .skip(1)
@@ -3153,13 +3178,10 @@ fn find_dense_branch_table_plans(
             .extend(decision_blocks.iter().skip(1).copied());
         result.roots.insert(
             root,
-            DenseBranchTablePlan {
+            SelectorBranchTablePlan {
                 selector: selector.expect("valid branch table has a selector"),
                 selector_width: selector_width.expect("valid branch table has a width"),
-                targets: targets
-                    .into_iter()
-                    .map(|target| target.expect("full domain has every target"))
-                    .collect(),
+                targets: targets.into(),
                 skip_indices: root_skip,
             },
         );
@@ -12215,10 +12237,10 @@ fn sign_extend_pair(
     (sl, sr)
 }
 
-fn lower_dense_branch_table(
+fn lower_selector_branch_table(
     ctx: &mut ISelContext,
     block: &mut MBlock,
-    plan: &DenseBranchTablePlan,
+    plan: &SelectorBranchTablePlan,
 ) {
     if plan
         .targets
@@ -17520,11 +17542,11 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_full_domain_dense_branch_spine() {
+    fn recognizes_full_domain_selector_branch_spine() {
         let fixture = dense_branch_table_fixture();
         let constants = collect_exact_sir_constants(&fixture);
         let uses = collect_sir_use_sites(&fixture);
-        let plans = find_dense_branch_table_plans(&fixture, &constants, &uses);
+        let plans = find_selector_branch_table_plans(&fixture, &constants, &uses);
 
         let plan = &plans.roots[&SirBlockId(0)];
         assert_eq!(plan.selector, RegisterId(0));
@@ -17539,7 +17561,45 @@ mod tests {
                 .into_iter()
                 .collect()
         );
-        assert_eq!(plan.skip_indices, [1, 2, 3].into_iter().collect());
+        assert_eq!(plan.skip_indices, [0, 1, 2, 3].into_iter().collect());
+    }
+
+    #[test]
+    fn recognizes_partial_selector_branch_spine_with_original_default() {
+        let mut fixture = dense_branch_table_fixture();
+        let bit3 = RegisterType::Bit {
+            width: 3,
+            signed: false,
+        };
+        fixture.register_map.insert(RegisterId(0), bit3.clone());
+        for key_register in [1, 5, 9, 13].map(RegisterId) {
+            fixture.register_map.insert(key_register, bit3.clone());
+        }
+        let constants = collect_exact_sir_constants(&fixture);
+        let uses = collect_sir_use_sites(&fixture);
+        let plans = find_selector_branch_table_plans(&fixture, &constants, &uses);
+
+        let plan = &plans.roots[&SirBlockId(0)];
+        assert_eq!(plan.selector_width, 3);
+        assert_eq!(
+            plan.targets.as_ref(),
+            &[
+                SirBlockId(4),
+                SirBlockId(5),
+                SirBlockId(6),
+                SirBlockId(7),
+                SirBlockId(7),
+                SirBlockId(7),
+                SirBlockId(7),
+                SirBlockId(7),
+            ]
+        );
+        assert_eq!(
+            plans.removed_blocks,
+            [SirBlockId(1), SirBlockId(2), SirBlockId(3)]
+                .into_iter()
+                .collect()
+        );
     }
 
     #[test]

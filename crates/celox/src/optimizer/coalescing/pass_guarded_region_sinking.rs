@@ -18,6 +18,23 @@ use std::collections::{BTreeMap, VecDeque};
 
 pub(super) struct GuardedRegionSinkingPass;
 
+/// Recover effect/value regions which become visible only after native EUs
+/// have been merged into one CFG.
+///
+/// This deliberately runs only the coupled-store and closed same-predicate
+/// planners. Replaying the complete source-EU pass after fusion would also
+/// perform unrelated edge sinking and repeated CFG repair.
+pub(super) fn recover_merged_effect_regions(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    four_state: bool,
+) {
+    if four_state || eu.verify_result().is_err() {
+        return;
+    }
+    form_coupled_store_regions(eu);
+    form_same_predicate_regions(eu);
+}
+
 #[derive(Clone)]
 struct DistributedStore {
     index: usize,

@@ -16,7 +16,7 @@ use celox_analysis::memory_ssa::{
 };
 
 use crate::backend::native::memory_effect::{self, MemoryObject, analysis_effects};
-use crate::backend::native::mir::{BaseReg, BlockId, MFunction, MInst, OpSize, VReg};
+use crate::backend::native::mir::{BaseReg, BlockId, CmpKind, MFunction, MInst, OpSize, VReg};
 
 use super::cfg::NormalizedCfg;
 
@@ -306,18 +306,55 @@ pub(super) struct PureRecipeId(pub u32);
 /// separate variants; no arbitrary HDL bit width is attached to a VReg.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PureRecipe {
-    Copy64 { source: VReg },
-    Copy32 { source: VReg },
-    AndImm64 { source: VReg, immediate: u64 },
-    AndImm32 { source: VReg, immediate: u32 },
-    OrImm64 { source: VReg, immediate: u64 },
-    ShrImm64 { source: VReg, immediate: u8 },
-    ShlImm64 { source: VReg, immediate: u8 },
-    SarImm64 { source: VReg, immediate: u8 },
-    AddImm64 { source: VReg, immediate: i32 },
-    SubImm64 { source: VReg, immediate: i32 },
-    BitNot64 { source: VReg },
-    Neg64 { source: VReg },
+    Copy64 {
+        source: VReg,
+    },
+    Copy32 {
+        source: VReg,
+    },
+    AndImm64 {
+        source: VReg,
+        immediate: u64,
+    },
+    AndImm32 {
+        source: VReg,
+        immediate: u32,
+    },
+    OrImm64 {
+        source: VReg,
+        immediate: u64,
+    },
+    ShrImm64 {
+        source: VReg,
+        immediate: u8,
+    },
+    ShlImm64 {
+        source: VReg,
+        immediate: u8,
+    },
+    SarImm64 {
+        source: VReg,
+        immediate: u8,
+    },
+    AddImm64 {
+        source: VReg,
+        immediate: i32,
+    },
+    SubImm64 {
+        source: VReg,
+        immediate: i32,
+    },
+    CmpImm64 {
+        source: VReg,
+        immediate: i32,
+        kind: CmpKind,
+    },
+    BitNot64 {
+        source: VReg,
+    },
+    Neg64 {
+        source: VReg,
+    },
 }
 
 impl PureRecipe {
@@ -333,6 +370,7 @@ impl PureRecipe {
             | Self::SarImm64 { source, .. }
             | Self::AddImm64 { source, .. }
             | Self::SubImm64 { source, .. }
+            | Self::CmpImm64 { source, .. }
             | Self::BitNot64 { source }
             | Self::Neg64 { source } => source,
         }
@@ -350,6 +388,9 @@ impl PureRecipe {
             Self::SarImm64 { immediate, .. } => PureStep::SarImm64 { immediate },
             Self::AddImm64 { immediate, .. } => PureStep::AddImm64 { immediate },
             Self::SubImm64 { immediate, .. } => PureStep::SubImm64 { immediate },
+            Self::CmpImm64 {
+                immediate, kind, ..
+            } => PureStep::CmpImm64 { immediate, kind },
             Self::BitNot64 { .. } => PureStep::BitNot64,
             Self::Neg64 { .. } => PureStep::Neg64,
         }
@@ -368,6 +409,7 @@ pub(super) enum PureStep {
     SarImm64 { immediate: u8 },
     AddImm64 { immediate: i32 },
     SubImm64 { immediate: i32 },
+    CmpImm64 { immediate: i32, kind: CmpKind },
     BitNot64,
     Neg64,
 }
@@ -421,6 +463,12 @@ pub(super) fn materialize_pure_step(step: PureStep, dst: VReg, source: VReg) -> 
             dst,
             src: source,
             imm: immediate,
+        },
+        PureStep::CmpImm64 { immediate, kind } => MInst::CmpImm {
+            dst,
+            lhs: source,
+            imm: immediate,
+            kind,
         },
         PureStep::BitNot64 => MInst::BitNot { dst, src: source },
         PureStep::Neg64 => MInst::Neg { dst, src: source },
@@ -2067,6 +2115,11 @@ fn pure_expression(inst: &MInst) -> Option<PureRecipe> {
             source: *src,
             immediate: *imm,
         }),
+        MInst::CmpImm { lhs, imm, kind, .. } => Some(PureRecipe::CmpImm64 {
+            source: *lhs,
+            immediate: *imm,
+            kind: *kind,
+        }),
         MInst::BitNot { src, .. } => Some(PureRecipe::BitNot64 { source: *src }),
         MInst::Neg { src, .. } => Some(PureRecipe::Neg64 { source: *src }),
         _ => None,
@@ -3519,6 +3572,53 @@ mod tests {
             Some(ResolvedRecipe {
                 base: ResolvedBase::State(analysis.state_recipe(values[0]).unwrap().clone()),
                 steps: vec![PureStep::Copy32],
+            })
+        );
+        assert_eq!(
+            analyze_for_planning(&func, &cfg)
+                .unwrap()
+                .global_materialization_costs()
+                .unwrap(),
+            vec![Some(1), Some(2)]
+        );
+    }
+
+    #[test]
+    fn comparison_immediate_is_an_exact_pure_recipe() {
+        let (mut func, values) = function_with_values(2);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: values[0],
+            base: BaseReg::SimState,
+            offset: 24,
+            size: OpSize::S64,
+        });
+        block.push(MInst::CmpImm {
+            dst: values[1],
+            lhs: values[0],
+            imm: 53,
+            kind: CmpKind::Eq,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+        let (func, cfg, analysis) = analyze_function(func);
+
+        assert_eq!(
+            analysis.pure_recipe(values[1]),
+            Some(PureRecipe::CmpImm64 {
+                source: values[0],
+                immediate: 53,
+                kind: CmpKind::Eq,
+            })
+        );
+        assert_eq!(
+            analysis.resolved_recipe(values[1]).unwrap(),
+            Some(ResolvedRecipe {
+                base: ResolvedBase::State(analysis.state_recipe(values[0]).unwrap().clone()),
+                steps: vec![PureStep::CmpImm64 {
+                    immediate: 53,
+                    kind: CmpKind::Eq,
+                }],
             })
         );
         assert_eq!(

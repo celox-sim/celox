@@ -2408,6 +2408,7 @@ fn allocator_can_recover_extended_gvn_leader(inst: &MInst) -> bool {
             | MInst::SarImm { .. }
             | MInst::AddImm { .. }
             | MInst::SubImm { .. }
+            | MInst::CmpImm { .. }
             | MInst::BitNot { .. }
             | MInst::Neg { .. }
             | MInst::Load {

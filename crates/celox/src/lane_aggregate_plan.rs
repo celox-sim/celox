@@ -98,8 +98,11 @@ pub(crate) struct LaneAggregatePlanRoot {
     /// These are verified Slice/Store pairs in the original block.  ISel must
     /// not infer the replacement extent from lane count or adjacency.
     pub(crate) publication_instruction_indices: Vec<usize>,
-    pub(crate) publication_address: RegionedAbsoluteAddr,
-    pub(crate) publication_bit_offset: usize,
+    /// Present only when this aggregate publishes an RTL state value.  A
+    /// transient aggregate replaces an ordinary packed SSA definition and has
+    /// no state destination.
+    pub(crate) publication_address: Option<RegionedAbsoluteAddr>,
+    pub(crate) publication_bit_offset: Option<usize>,
     pub(crate) publication_locations: Vec<LaneAggregateBitLocation>,
     pub(crate) lane_count: usize,
 }

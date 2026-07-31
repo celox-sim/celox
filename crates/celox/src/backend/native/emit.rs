@@ -667,6 +667,107 @@ fn mem_operand_ptr_indexed(
     ptr + index + offset
 }
 
+fn emit_direct_memcopy_chunk(
+    asm: &mut CodeAssembler,
+    src_offset: i32,
+    dst_offset: i32,
+    bytes: usize,
+) -> Result<(), IcedError> {
+    let src = mem_operand(BaseReg::SimState, src_offset);
+    let dst = mem_operand(BaseReg::SimState, dst_offset);
+    match bytes {
+        16 => {
+            asm.movdqu(xmm0, xmmword_ptr(src))?;
+            asm.movdqu(xmmword_ptr(dst), xmm0)?;
+        }
+        8 => {
+            asm.mov(rax, qword_ptr(src))?;
+            asm.mov(qword_ptr(dst), rax)?;
+        }
+        4 => {
+            asm.mov(eax, dword_ptr(src))?;
+            asm.mov(dword_ptr(dst), eax)?;
+        }
+        2 => {
+            asm.mov(ax, word_ptr(src))?;
+            asm.mov(word_ptr(dst), ax)?;
+        }
+        1 => {
+            asm.mov(al, byte_ptr(src))?;
+            asm.mov(byte_ptr(dst), al)?;
+        }
+        _ => unreachable!("invalid direct memory-copy chunk {bytes}"),
+    }
+    Ok(())
+}
+
+fn emit_direct_memcopy(
+    asm: &mut CodeAssembler,
+    src_offset: i32,
+    dst_offset: i32,
+    byte_len: usize,
+    backward: bool,
+) -> Result<(), IcedError> {
+    let scalar_bytes = byte_len % 16;
+    if scalar_bytes != 0 {
+        asm.mov(qword_ptr(scratch_operand(0)), rax)?;
+    }
+
+    if backward {
+        let mut cursor = byte_len;
+        while cursor >= 16 {
+            cursor -= 16;
+            emit_direct_memcopy_chunk(
+                asm,
+                src_offset + cursor as i32,
+                dst_offset + cursor as i32,
+                16,
+            )?;
+        }
+        for bytes in [8usize, 4, 2, 1] {
+            if cursor >= bytes {
+                cursor -= bytes;
+                emit_direct_memcopy_chunk(
+                    asm,
+                    src_offset + cursor as i32,
+                    dst_offset + cursor as i32,
+                    bytes,
+                )?;
+            }
+        }
+        debug_assert_eq!(cursor, 0);
+    } else {
+        let vector_bytes = byte_len / 16 * 16;
+        let mut cursor = 0usize;
+        while cursor < vector_bytes {
+            emit_direct_memcopy_chunk(
+                asm,
+                src_offset + cursor as i32,
+                dst_offset + cursor as i32,
+                16,
+            )?;
+            cursor += 16;
+        }
+        for bytes in [8usize, 4, 2, 1] {
+            if cursor + bytes <= byte_len {
+                emit_direct_memcopy_chunk(
+                    asm,
+                    src_offset + cursor as i32,
+                    dst_offset + cursor as i32,
+                    bytes,
+                )?;
+                cursor += bytes;
+            }
+        }
+        debug_assert_eq!(cursor, byte_len);
+    }
+
+    if scalar_bytes != 0 {
+        asm.mov(rax, qword_ptr(scratch_operand(0)))?;
+    }
+    Ok(())
+}
+
 fn emit_sparse_chunk_copy(
     asm: &mut CodeAssembler,
     src_offset: i32,
@@ -3008,6 +3109,31 @@ fn emit_aggregate_input(
     )
 }
 
+fn emit_lane_aggregate_input_to_gpr(
+    asm: &mut CodeAssembler,
+    destination: PhysReg,
+    register: RegisterId,
+    width: usize,
+    input_stack_offsets: &HashMap<RegisterId, i32>,
+) -> Result<(), IcedError> {
+    let memory = mem_operand(BaseReg::StackFrame, input_stack_offsets[&register]);
+    if width <= 16 {
+        asm.movzx(preg_to_reg32(destination), word_ptr(memory))
+    } else if width <= 32 {
+        asm.mov(preg_to_reg32(destination), dword_ptr(memory))
+    } else {
+        asm.mov(preg_to_reg64(destination), qword_ptr(memory))
+    }
+}
+
+fn lane_aggregate_scratch_gpr(output: PhysReg) -> PhysReg {
+    ALLOCATABLE_REGS
+        .iter()
+        .copied()
+        .find(|register| *register != output && *register != PhysReg::RCX)
+        .expect("legalized aggregate pseudo reserves a scratch GPR")
+}
+
 fn emit_aggregate_scalar_node(
     asm: &mut CodeAssembler,
     plan: &LaneAggregatePlan,
@@ -3379,7 +3505,7 @@ fn lane_aggregate_vector_graph_eligible(
             LaneAggregatePlanOp::ShiftConstant { operation, amount } => {
                 matches!(operation, BinaryOp::Shl | BinaryOp::Shr) && *amount < 64
             }
-            LaneAggregatePlanOp::Mux => node.children.len() == 3,
+            LaneAggregatePlanOp::Mux | LaneAggregatePlanOp::ControlMux => node.children.len() == 3,
             LaneAggregatePlanOp::OneHotDecode { .. } => {
                 allow_qword_variable_ops && node.children.len() == 1
             }
@@ -3397,7 +3523,6 @@ fn lane_aggregate_vector_graph_eligible(
             LaneAggregatePlanOp::StateRead(_)
             | LaneAggregatePlanOp::Affine(_)
             | LaneAggregatePlanOp::ScalarInsert { .. }
-            | LaneAggregatePlanOp::ControlMux
             | LaneAggregatePlanOp::Slice { .. } => false,
         };
         if !supported {
@@ -3479,6 +3604,144 @@ fn lane_aggregate_ymm_qword_eligible(plan: &LaneAggregatePlan, root_index: usize
         && plan.roots[root_index].publication_locations.is_empty()
         && plan.roots[root_index].lane_count >= 4
         && plan.roots[root_index].lane_count.is_multiple_of(4)
+}
+
+/// Return a postorder for recipes whose one-bit lanes are already a packed
+/// machine-word value.
+///
+/// A regular one-bit `PackedExtract([0, 1, ...])` from one scalar is not a
+/// vector gather: the scalar's low bits are exactly the bit-sliced lane mask.
+/// Keeping that representation through boolean operations evaluates all 32
+/// or 64 lanes with one GPR instruction instead of expanding four lanes at a
+/// time into qword SIMD elements.
+fn lane_aggregate_gpr_bitmask_schedule(
+    plan: &LaneAggregatePlan,
+    root_index: usize,
+) -> Option<Vec<usize>> {
+    fn visit(
+        plan: &LaneAggregatePlan,
+        node_index: usize,
+        lane_count: usize,
+        visited: &mut HashSet<usize>,
+        schedule: &mut Vec<usize>,
+    ) -> bool {
+        if !visited.insert(node_index) {
+            return true;
+        }
+        let Some(node) = plan.nodes.get(node_index) else {
+            return false;
+        };
+        if node.lane_count != lane_count || node.lane_width != 1 {
+            return false;
+        }
+        let recurse = match &node.operation {
+            LaneAggregatePlanOp::BroadcastScalar(_) => node.children.is_empty(),
+            LaneAggregatePlanOp::Constant(values) => {
+                node.children.is_empty()
+                    && values.len() == lane_count
+                    && values.iter().all(|value| *value <= 1)
+            }
+            LaneAggregatePlanOp::PackedExtract(offsets) => {
+                let Some(&source_index) = node.children.first() else {
+                    return false;
+                };
+                if node.children.len() != 1
+                    || offsets.len() != lane_count
+                    || offsets
+                        .iter()
+                        .enumerate()
+                        .any(|(lane, offset)| *offset != lane)
+                {
+                    return false;
+                }
+                let Some(source) = plan.nodes.get(source_index) else {
+                    return false;
+                };
+                source.lane_count == lane_count
+                    && source.lane_width >= lane_count
+                    && source.children.is_empty()
+                    && matches!(source.operation, LaneAggregatePlanOp::BroadcastScalar(_))
+            }
+            LaneAggregatePlanOp::Unary(operation) => {
+                node.children.len() == 1
+                    && matches!(
+                        operation,
+                        UnaryOp::Ident | UnaryOp::BitNot | UnaryOp::LogicNot
+                    )
+                    && visit(plan, node.children[0], lane_count, visited, schedule)
+            }
+            LaneAggregatePlanOp::Binary(operation) => {
+                node.children.len() == 2
+                    && matches!(
+                        operation,
+                        BinaryOp::And
+                            | BinaryOp::Or
+                            | BinaryOp::Xor
+                            | BinaryOp::LogicAnd
+                            | BinaryOp::LogicOr
+                            | BinaryOp::Eq
+                            | BinaryOp::Ne
+                    )
+                    && node
+                        .children
+                        .iter()
+                        .all(|child| visit(plan, *child, lane_count, visited, schedule))
+            }
+            LaneAggregatePlanOp::Mux | LaneAggregatePlanOp::ControlMux => {
+                node.children.len() == 3
+                    && node
+                        .children
+                        .iter()
+                        .all(|child| visit(plan, *child, lane_count, visited, schedule))
+            }
+            _ => false,
+        };
+        if recurse {
+            schedule.push(node_index);
+        }
+        recurse
+    }
+
+    let root = plan.roots.get(root_index)?;
+    if !root.publication_locations.is_empty()
+        || !matches!(root.lane_count, 32 | 64)
+        || plan
+            .nodes
+            .get(root.recipe_root)
+            .is_none_or(|node| node.lane_width != 1)
+    {
+        return None;
+    }
+    let mut visited = HashSet::default();
+    let mut schedule = Vec::new();
+    if !visit(
+        plan,
+        root.recipe_root,
+        root.lane_count,
+        &mut visited,
+        &mut schedule,
+    ) {
+        return None;
+    }
+
+    // The packed mask uses root-lane order. Reject recipes with a hidden lane
+    // permutation instead of silently interpreting a node's bit positions in
+    // its local order.
+    for lane in 0..root.lane_count {
+        let positions = aggregate_lane_positions(plan, root.recipe_root, lane)?;
+        for &node_index in &schedule {
+            if matches!(
+                plan.nodes[node_index].operation,
+                LaneAggregatePlanOp::BroadcastScalar(_)
+            ) {
+                continue;
+            }
+            if positions[node_index] != Some(lane) {
+                return None;
+            }
+        }
+    }
+    Some(schedule)
 }
 
 fn emit_lane_xmm_mask(
@@ -3732,34 +3995,34 @@ fn emit_lane_aggregate_xmm_node(
             free.push(temporary);
         }
         LaneAggregatePlanOp::BroadcastScalar(register) => {
-            let memory = mem_operand(BaseReg::StackFrame, input_stack_offsets[register]);
-            if node.lane_width <= 16 {
-                asm.movzx(preg_to_reg32(gpr), word_ptr(memory))?;
-                asm.movq(destination, preg_to_reg64(gpr))?;
-            } else {
-                asm.movq(destination, qword_ptr(memory))?;
-            }
+            emit_lane_aggregate_input_to_gpr(
+                asm,
+                gpr,
+                *register,
+                node.lane_width,
+                input_stack_offsets,
+            )?;
+            asm.movq(destination, preg_to_reg64(gpr))?;
             asm.punpcklqdq(destination, destination)?;
         }
         LaneAggregatePlanOp::SsaPack { values, .. } => {
             let temporary = free.pop().expect("XMM aggregate SSA-pair scratch");
-            let low = mem_operand(
-                BaseReg::StackFrame,
-                input_stack_offsets[&values[low_position]],
-            );
-            let high = mem_operand(
-                BaseReg::StackFrame,
-                input_stack_offsets[&values[high_position]],
-            );
-            if node.lane_width <= 16 {
-                asm.movzx(preg_to_reg32(gpr), word_ptr(low))?;
-                asm.movq(destination, preg_to_reg64(gpr))?;
-                asm.movzx(preg_to_reg32(gpr), word_ptr(high))?;
-                asm.movq(temporary, preg_to_reg64(gpr))?;
-            } else {
-                asm.movq(destination, qword_ptr(low))?;
-                asm.movq(temporary, qword_ptr(high))?;
-            }
+            emit_lane_aggregate_input_to_gpr(
+                asm,
+                gpr,
+                values[low_position],
+                node.lane_width,
+                input_stack_offsets,
+            )?;
+            asm.movq(destination, preg_to_reg64(gpr))?;
+            emit_lane_aggregate_input_to_gpr(
+                asm,
+                gpr,
+                values[high_position],
+                node.lane_width,
+                input_stack_offsets,
+            )?;
+            asm.movq(temporary, preg_to_reg64(gpr))?;
             asm.punpcklqdq(destination, temporary)?;
             free.push(temporary);
         }
@@ -3822,7 +4085,7 @@ fn emit_lane_aggregate_xmm_node(
                 _ => unreachable!("operation was checked by XMM eligibility"),
             }
         }
-        LaneAggregatePlanOp::Mux => {
+        LaneAggregatePlanOp::Mux | LaneAggregatePlanOp::ControlMux => {
             let temporary = free.pop().expect("XMM aggregate mux scratch");
             asm.pxor(temporary, temporary)?;
             asm.psubq(temporary, child(0))?;
@@ -3992,7 +4255,7 @@ fn emit_lane_aggregate_xmm_word_node(
                 _ => unreachable!("operation was checked by word XMM eligibility"),
             }
         }
-        LaneAggregatePlanOp::Mux => {
+        LaneAggregatePlanOp::Mux | LaneAggregatePlanOp::ControlMux => {
             let temporary = free.pop().expect("word aggregate mux scratch");
             asm.pxor(temporary, temporary)?;
             asm.psubw(temporary, child(0))?;
@@ -4079,7 +4342,7 @@ fn lane_aggregate_qword_result_is_canonical(plan: &LaneAggregatePlan, node_index
             operation: BinaryOp::Shr,
             ..
         } => child_width(0).is_some_and(|width| width <= node.lane_width),
-        LaneAggregatePlanOp::Mux => {
+        LaneAggregatePlanOp::Mux | LaneAggregatePlanOp::ControlMux => {
             child_width(1).is_some_and(|width| width <= node.lane_width)
                 && child_width(2).is_some_and(|width| width <= node.lane_width)
         }
@@ -4157,19 +4420,18 @@ fn emit_lane_aggregate_ymm_qword_node(
             }
         }
         LaneAggregatePlanOp::BroadcastScalar(register) => {
-            let memory = mem_operand(BaseReg::StackFrame, input_stack_offsets[register]);
-            if node.lane_width <= 16 {
-                asm.movzx(preg_to_reg32(gpr), word_ptr(memory))?;
-                asm.vpbroadcastq(destination, preg_to_reg64(gpr))?;
-            } else if node.lane_width <= 32 {
-                asm.mov(preg_to_reg32(gpr), dword_ptr(memory))?;
-                asm.vpbroadcastq(destination, preg_to_reg64(gpr))?;
-            } else {
-                asm.vpbroadcastq(destination, qword_ptr(memory))?;
-            }
+            emit_lane_aggregate_input_to_gpr(
+                asm,
+                gpr,
+                *register,
+                node.lane_width,
+                input_stack_offsets,
+            )?;
+            asm.vpbroadcastq(destination, preg_to_reg64(gpr))?;
         }
         LaneAggregatePlanOp::SsaPack { values, .. } => {
-            let offsets = positions.map(|position| input_stack_offsets[&values[position]]);
+            let selected = positions.map(|position| values[position]);
+            let offsets = selected.map(|register| input_stack_offsets[&register]);
             let base = offsets[0];
             if node.lane_width <= 16
                 && offsets
@@ -4204,70 +4466,38 @@ fn emit_lane_aggregate_ymm_qword_node(
                 let high = free.pop().expect("YMM qword SSA gather scratch");
                 let low_xmm = ymm_to_xmm(destination);
                 let high_xmm = ymm_to_xmm(high);
-                if node.lane_width <= 16 {
-                    asm.movzx(
-                        preg_to_reg32(gpr),
-                        word_ptr(mem_operand(BaseReg::StackFrame, offsets[0])),
-                    )?;
-                    asm.vmovq(low_xmm, preg_to_reg64(gpr))?;
-                    asm.movzx(
-                        preg_to_reg32(gpr),
-                        word_ptr(mem_operand(BaseReg::StackFrame, offsets[1])),
-                    )?;
-                    asm.vpinsrq(low_xmm, low_xmm, preg_to_reg64(gpr), 1)?;
-                    asm.movzx(
-                        preg_to_reg32(gpr),
-                        word_ptr(mem_operand(BaseReg::StackFrame, offsets[2])),
-                    )?;
-                    asm.vmovq(high_xmm, preg_to_reg64(gpr))?;
-                    asm.movzx(
-                        preg_to_reg32(gpr),
-                        word_ptr(mem_operand(BaseReg::StackFrame, offsets[3])),
-                    )?;
-                    asm.vpinsrq(high_xmm, high_xmm, preg_to_reg64(gpr), 1)?;
-                } else if node.lane_width <= 32 {
-                    asm.mov(
-                        preg_to_reg32(gpr),
-                        dword_ptr(mem_operand(BaseReg::StackFrame, offsets[0])),
-                    )?;
-                    asm.vmovq(low_xmm, preg_to_reg64(gpr))?;
-                    asm.mov(
-                        preg_to_reg32(gpr),
-                        dword_ptr(mem_operand(BaseReg::StackFrame, offsets[1])),
-                    )?;
-                    asm.vpinsrq(low_xmm, low_xmm, preg_to_reg64(gpr), 1)?;
-                    asm.mov(
-                        preg_to_reg32(gpr),
-                        dword_ptr(mem_operand(BaseReg::StackFrame, offsets[2])),
-                    )?;
-                    asm.vmovq(high_xmm, preg_to_reg64(gpr))?;
-                    asm.mov(
-                        preg_to_reg32(gpr),
-                        dword_ptr(mem_operand(BaseReg::StackFrame, offsets[3])),
-                    )?;
-                    asm.vpinsrq(high_xmm, high_xmm, preg_to_reg64(gpr), 1)?;
-                } else {
-                    asm.vmovq(
-                        low_xmm,
-                        qword_ptr(mem_operand(BaseReg::StackFrame, offsets[0])),
-                    )?;
-                    asm.vpinsrq(
-                        low_xmm,
-                        low_xmm,
-                        qword_ptr(mem_operand(BaseReg::StackFrame, offsets[1])),
-                        1,
-                    )?;
-                    asm.vmovq(
-                        high_xmm,
-                        qword_ptr(mem_operand(BaseReg::StackFrame, offsets[2])),
-                    )?;
-                    asm.vpinsrq(
-                        high_xmm,
-                        high_xmm,
-                        qword_ptr(mem_operand(BaseReg::StackFrame, offsets[3])),
-                        1,
-                    )?;
-                }
+                emit_lane_aggregate_input_to_gpr(
+                    asm,
+                    gpr,
+                    selected[0],
+                    node.lane_width,
+                    input_stack_offsets,
+                )?;
+                asm.vmovq(low_xmm, preg_to_reg64(gpr))?;
+                emit_lane_aggregate_input_to_gpr(
+                    asm,
+                    gpr,
+                    selected[1],
+                    node.lane_width,
+                    input_stack_offsets,
+                )?;
+                asm.vpinsrq(low_xmm, low_xmm, preg_to_reg64(gpr), 1)?;
+                emit_lane_aggregate_input_to_gpr(
+                    asm,
+                    gpr,
+                    selected[2],
+                    node.lane_width,
+                    input_stack_offsets,
+                )?;
+                asm.vmovq(high_xmm, preg_to_reg64(gpr))?;
+                emit_lane_aggregate_input_to_gpr(
+                    asm,
+                    gpr,
+                    selected[3],
+                    node.lane_width,
+                    input_stack_offsets,
+                )?;
+                asm.vpinsrq(high_xmm, high_xmm, preg_to_reg64(gpr), 1)?;
                 asm.vinserti128(destination, destination, high_xmm, 1)?;
                 free.push(high);
             }
@@ -4347,7 +4577,7 @@ fn emit_lane_aggregate_ymm_qword_node(
                 )?;
             }
         }
-        LaneAggregatePlanOp::Mux => {
+        LaneAggregatePlanOp::Mux | LaneAggregatePlanOp::ControlMux => {
             let temporary = free.pop().expect("YMM qword mux scratch");
             asm.vpxor(temporary, temporary, temporary)?;
             asm.vpsubq(temporary, temporary, child(0))?;
@@ -4569,7 +4799,7 @@ fn emit_lane_aggregate_ymm_word_node(
             BinaryOp::Shr => asm.vpsrlw(destination, child(0), *amount as u32)?,
             _ => unreachable!("operation was checked by YMM eligibility"),
         },
-        LaneAggregatePlanOp::Mux => {
+        LaneAggregatePlanOp::Mux | LaneAggregatePlanOp::ControlMux => {
             let temporary = free.pop().expect("YMM aggregate mux scratch");
             asm.vpxor(temporary, temporary, temporary)?;
             asm.vpsubw(temporary, temporary, child(0))?;
@@ -4667,9 +4897,207 @@ fn lane_aggregate_xmm_reusable_child(node: &LaneAggregatePlanNode) -> Option<usi
             node.children.first().copied()
         }
         LaneAggregatePlanOp::Binary(_) => node.children.first().copied(),
-        LaneAggregatePlanOp::Mux => node.children.get(1).copied(),
+        LaneAggregatePlanOp::Mux | LaneAggregatePlanOp::ControlMux => node.children.get(1).copied(),
         _ => None,
     }
+}
+
+fn emit_lane_aggregate_gpr_bitmask(
+    asm: &mut CodeAssembler,
+    plan: &LaneAggregatePlan,
+    root_index: usize,
+    schedule: &[usize],
+    input_stack_offsets: &HashMap<RegisterId, i32>,
+    output: PhysReg,
+) -> Result<(), IcedError> {
+    let root = &plan.roots[root_index];
+    let word32 = root.lane_count <= 32;
+    let scheduled = schedule.iter().copied().collect::<HashSet<_>>();
+    let mut remaining = vec![0usize; plan.nodes.len()];
+    for &node_index in schedule {
+        if matches!(
+            plan.nodes[node_index].operation,
+            LaneAggregatePlanOp::PackedExtract(_)
+        ) {
+            continue;
+        }
+        for &child in &plan.nodes[node_index].children {
+            if scheduled.contains(&child) {
+                remaining[child] += 1;
+            }
+        }
+    }
+    remaining[root.recipe_root] += 1;
+
+    let mut free = ALLOCATABLE_REGS
+        .iter()
+        .copied()
+        .filter(|register| *register != output)
+        .collect::<Vec<_>>();
+    let mut node_registers = vec![None; plan.nodes.len()];
+
+    for &node_index in schedule {
+        let node = &plan.nodes[node_index];
+        let reusable_child = if node_index == root.recipe_root {
+            None
+        } else {
+            match node.operation {
+                LaneAggregatePlanOp::Unary(_) => node.children.first().copied(),
+                LaneAggregatePlanOp::Binary(_) => node.children.first().copied(),
+                LaneAggregatePlanOp::Mux | LaneAggregatePlanOp::ControlMux => {
+                    node.children.get(1).copied()
+                }
+                _ => None,
+            }
+            .filter(|child| remaining[*child] == 1)
+        };
+        let destination = if node_index == root.recipe_root {
+            output
+        } else {
+            reusable_child
+                .and_then(|child| node_registers[child])
+                .unwrap_or_else(|| free.pop().expect("GPR bitmask aggregate pressure"))
+        };
+        let child_register = |slot: usize| {
+            node_registers[node.children[slot]]
+                .expect("verified GPR bitmask child must be available")
+        };
+        let copy = |asm: &mut CodeAssembler,
+                    destination: PhysReg,
+                    source: PhysReg|
+         -> Result<(), IcedError> {
+            if destination != source {
+                if word32 {
+                    asm.mov(preg_to_reg32(destination), preg_to_reg32(source))?;
+                } else {
+                    asm.mov(preg_to_reg64(destination), preg_to_reg64(source))?;
+                }
+            }
+            Ok(())
+        };
+
+        match &node.operation {
+            LaneAggregatePlanOp::BroadcastScalar(register) => {
+                let memory = mem_operand(BaseReg::StackFrame, input_stack_offsets[register]);
+                asm.movzx(preg_to_reg32(destination), word_ptr(memory))?;
+                if word32 {
+                    asm.and(preg_to_reg32(destination), 1)?;
+                    asm.neg(preg_to_reg32(destination))?;
+                } else {
+                    asm.and(preg_to_reg64(destination), 1)?;
+                    asm.neg(preg_to_reg64(destination))?;
+                }
+            }
+            LaneAggregatePlanOp::Constant(values) => {
+                let packed = values
+                    .iter()
+                    .enumerate()
+                    .fold(0u64, |bits, (lane, value)| bits | (value << lane));
+                emit_aggregate_immediate(asm, destination, packed)?;
+            }
+            LaneAggregatePlanOp::PackedExtract(_) => {
+                let source = &plan.nodes[node.children[0]];
+                let LaneAggregatePlanOp::BroadcastScalar(register) = source.operation else {
+                    unreachable!("verified GPR packed extract source")
+                };
+                let memory = mem_operand(BaseReg::StackFrame, input_stack_offsets[&register]);
+                if root.lane_count <= 16 {
+                    asm.movzx(preg_to_reg32(destination), word_ptr(memory))?;
+                } else if word32 {
+                    asm.mov(preg_to_reg32(destination), dword_ptr(memory))?;
+                } else {
+                    asm.mov(preg_to_reg64(destination), qword_ptr(memory))?;
+                }
+            }
+            LaneAggregatePlanOp::Unary(operation) => {
+                copy(asm, destination, child_register(0))?;
+                match operation {
+                    UnaryOp::Ident => {}
+                    UnaryOp::BitNot | UnaryOp::LogicNot => {
+                        if word32 {
+                            asm.not(preg_to_reg32(destination))?;
+                        } else {
+                            asm.not(preg_to_reg64(destination))?;
+                        }
+                    }
+                    _ => unreachable!("verified GPR bitmask unary operation"),
+                }
+            }
+            LaneAggregatePlanOp::Binary(operation) => {
+                copy(asm, destination, child_register(0))?;
+                let right = child_register(1);
+                match operation {
+                    BinaryOp::And | BinaryOp::LogicAnd => {
+                        if word32 {
+                            asm.and(preg_to_reg32(destination), preg_to_reg32(right))?;
+                        } else {
+                            asm.and(preg_to_reg64(destination), preg_to_reg64(right))?;
+                        }
+                    }
+                    BinaryOp::Or | BinaryOp::LogicOr => {
+                        if word32 {
+                            asm.or(preg_to_reg32(destination), preg_to_reg32(right))?;
+                        } else {
+                            asm.or(preg_to_reg64(destination), preg_to_reg64(right))?;
+                        }
+                    }
+                    BinaryOp::Xor | BinaryOp::Ne => {
+                        if word32 {
+                            asm.xor(preg_to_reg32(destination), preg_to_reg32(right))?;
+                        } else {
+                            asm.xor(preg_to_reg64(destination), preg_to_reg64(right))?;
+                        }
+                    }
+                    BinaryOp::Eq => {
+                        if word32 {
+                            asm.xor(preg_to_reg32(destination), preg_to_reg32(right))?;
+                            asm.not(preg_to_reg32(destination))?;
+                        } else {
+                            asm.xor(preg_to_reg64(destination), preg_to_reg64(right))?;
+                            asm.not(preg_to_reg64(destination))?;
+                        }
+                    }
+                    _ => unreachable!("verified GPR bitmask binary operation"),
+                }
+            }
+            LaneAggregatePlanOp::Mux | LaneAggregatePlanOp::ControlMux => {
+                copy(asm, destination, child_register(1))?;
+                if word32 {
+                    asm.xor(preg_to_reg32(destination), preg_to_reg32(child_register(2)))?;
+                    asm.and(preg_to_reg32(destination), preg_to_reg32(child_register(0)))?;
+                    asm.xor(preg_to_reg32(destination), preg_to_reg32(child_register(2)))?;
+                } else {
+                    asm.xor(preg_to_reg64(destination), preg_to_reg64(child_register(2)))?;
+                    asm.and(preg_to_reg64(destination), preg_to_reg64(child_register(0)))?;
+                    asm.xor(preg_to_reg64(destination), preg_to_reg64(child_register(2)))?;
+                }
+            }
+            _ => unreachable!("verified GPR bitmask operation"),
+        }
+
+        node_registers[node_index] = Some(destination);
+
+        if !matches!(node.operation, LaneAggregatePlanOp::PackedExtract(_)) {
+            for &child in &node.children {
+                if !scheduled.contains(&child) {
+                    continue;
+                }
+                remaining[child] -= 1;
+                if remaining[child] == 0 {
+                    let register = node_registers[child]
+                        .take()
+                        .expect("GPR bitmask child must be live");
+                    if Some(child) != reusable_child {
+                        free.push(register);
+                    } else {
+                        debug_assert_eq!(register, destination);
+                    }
+                }
+            }
+        }
+    }
+    debug_assert_eq!(node_registers[root.recipe_root], Some(output));
+    Ok(())
 }
 
 fn emit_lane_aggregate_ymm_qword(
@@ -4680,11 +5108,7 @@ fn emit_lane_aggregate_ymm_qword(
     output: PhysReg,
 ) -> Result<(), IcedError> {
     let root = &plan.roots[root_index];
-    let scratch_gpr = ALLOCATABLE_REGS
-        .iter()
-        .copied()
-        .find(|register| *register != output && *register != PhysReg::RCX)
-        .expect("aggregate pseudo clobbers at least one scratch GPR");
+    let scratch_gpr = lane_aggregate_scratch_gpr(output);
     asm.xor(preg_to_reg32(output), preg_to_reg32(output))?;
     for lane_base in (0..root.lane_count).step_by(4) {
         let lane_positions = (lane_base..lane_base + 4)
@@ -5060,11 +5484,7 @@ fn emit_lane_aggregate_xmm(
     output: PhysReg,
 ) -> Result<(), IcedError> {
     let root = &plan.roots[root_index];
-    let scratch_gpr = ALLOCATABLE_REGS
-        .iter()
-        .copied()
-        .find(|register| *register != output && *register != PhysReg::RCX)
-        .expect("aggregate pseudo clobbers at least one scratch GPR");
+    let scratch_gpr = lane_aggregate_scratch_gpr(output);
     asm.xor(preg_to_reg32(output), preg_to_reg32(output))?;
     for lane_base in (0..root.lane_count).step_by(2) {
         let low_positions = aggregate_lane_positions(plan, root.recipe_root, lane_base)
@@ -5318,70 +5738,25 @@ fn emit_inst(
             if *byte_len == 0 {
                 return Ok(false);
             }
+            if src_offset == dst_offset {
+                return Ok(false);
+            }
             let src_end = i64::from(*src_offset) + *byte_len as i64;
             let dst_end = i64::from(*dst_offset) + *byte_len as i64;
             let nonoverlapping =
                 src_end <= i64::from(*dst_offset) || dst_end <= i64::from(*src_offset);
-            if nonoverlapping && *byte_len >= 16 {
-                let vector_bytes = byte_len / 16 * 16;
-                for copied in (0..vector_bytes).step_by(16) {
-                    asm.movdqu(
-                        xmm0,
-                        xmmword_ptr(mem_operand(BaseReg::SimState, src_offset + copied as i32)),
-                    )?;
-                    asm.movdqu(
-                        xmmword_ptr(mem_operand(BaseReg::SimState, dst_offset + copied as i32)),
-                        xmm0,
-                    )?;
-                }
-                let mut copied = vector_bytes;
-                if copied != *byte_len {
-                    asm.mov(qword_ptr(scratch_operand(0)), rax)?;
-                    if copied + 8 <= *byte_len {
-                        asm.mov(
-                            rax,
-                            qword_ptr(mem_operand(BaseReg::SimState, src_offset + copied as i32)),
-                        )?;
-                        asm.mov(
-                            qword_ptr(mem_operand(BaseReg::SimState, dst_offset + copied as i32)),
-                            rax,
-                        )?;
-                        copied += 8;
-                    }
-                    if copied + 4 <= *byte_len {
-                        asm.mov(
-                            eax,
-                            dword_ptr(mem_operand(BaseReg::SimState, src_offset + copied as i32)),
-                        )?;
-                        asm.mov(
-                            dword_ptr(mem_operand(BaseReg::SimState, dst_offset + copied as i32)),
-                            eax,
-                        )?;
-                        copied += 4;
-                    }
-                    if copied + 2 <= *byte_len {
-                        asm.mov(
-                            ax,
-                            word_ptr(mem_operand(BaseReg::SimState, src_offset + copied as i32)),
-                        )?;
-                        asm.mov(
-                            word_ptr(mem_operand(BaseReg::SimState, dst_offset + copied as i32)),
-                            ax,
-                        )?;
-                        copied += 2;
-                    }
-                    if copied < *byte_len {
-                        asm.mov(
-                            al,
-                            byte_ptr(mem_operand(BaseReg::SimState, src_offset + copied as i32)),
-                        )?;
-                        asm.mov(
-                            byte_ptr(mem_operand(BaseReg::SimState, dst_offset + copied as i32)),
-                            al,
-                        )?;
-                    }
-                    asm.mov(rax, qword_ptr(scratch_operand(0)))?;
-                }
+            // Exact offsets let short copies use segment-relative operands
+            // directly. For overlap, choose memmove's safe direction. This
+            // avoids materializing the GS/FS base and borrowing RSI/RDI/RCX
+            // for what is commonly only one scalar or vector transfer.
+            if nonoverlapping || *byte_len <= 256 {
+                emit_direct_memcopy(
+                    asm,
+                    *src_offset,
+                    *dst_offset,
+                    *byte_len,
+                    !nonoverlapping && dst_offset > src_offset,
+                )?;
                 return Ok(false);
             }
             let qwords = byte_len / 8;
@@ -6101,12 +6476,14 @@ fn emit_inst(
                 inputs.len().max(usize::from(*captured_inputs))
             );
             let root_index = usize::from(*root);
+            let gpr_bitmask_schedule = lane_aggregate_gpr_bitmask_schedule(plan, root_index);
             let ymm_word_eligible =
                 func.target_features.avx2() && lane_aggregate_ymm_word_eligible(plan, root_index);
             let ymm_qword_eligible =
                 func.target_features.avx2() && lane_aggregate_ymm_qword_eligible(plan, root_index);
             let xmm_word_eligible = lane_aggregate_xmm_word_eligible(plan, root_index);
             let xmm_eligible = lane_aggregate_xmm_eligible(plan, root_index);
+            let output = resolve(assignment, *dst);
             for (index, input) in inputs.iter().enumerate() {
                 let byte_offset = input_base_offset
                     .checked_add(input_layout[index].2)
@@ -6135,46 +6512,25 @@ fn emit_inst(
                     (register, aggregate_input_stack_offset(byte_offset))
                 })
                 .collect::<HashMap<_, _>>();
-            if ymm_word_eligible {
-                emit_lane_aggregate_ymm_word(
+            if let Some(schedule) = gpr_bitmask_schedule.as_deref() {
+                emit_lane_aggregate_gpr_bitmask(
                     asm,
                     plan,
                     root_index,
+                    schedule,
                     &input_stack_offsets,
-                    resolve(assignment, *dst),
+                    output,
                 )?;
+            } else if ymm_word_eligible {
+                emit_lane_aggregate_ymm_word(asm, plan, root_index, &input_stack_offsets, output)?;
             } else if ymm_qword_eligible {
-                emit_lane_aggregate_ymm_qword(
-                    asm,
-                    plan,
-                    root_index,
-                    &input_stack_offsets,
-                    resolve(assignment, *dst),
-                )?;
+                emit_lane_aggregate_ymm_qword(asm, plan, root_index, &input_stack_offsets, output)?;
             } else if xmm_word_eligible {
-                emit_lane_aggregate_xmm_word(
-                    asm,
-                    plan,
-                    root_index,
-                    &input_stack_offsets,
-                    resolve(assignment, *dst),
-                )?;
+                emit_lane_aggregate_xmm_word(asm, plan, root_index, &input_stack_offsets, output)?;
             } else if xmm_eligible {
-                emit_lane_aggregate_xmm(
-                    asm,
-                    plan,
-                    root_index,
-                    &input_stack_offsets,
-                    resolve(assignment, *dst),
-                )?;
+                emit_lane_aggregate_xmm(asm, plan, root_index, &input_stack_offsets, output)?;
             } else {
-                emit_lane_aggregate_scalar(
-                    asm,
-                    plan,
-                    root_index,
-                    &input_stack_offsets,
-                    resolve(assignment, *dst),
-                )?;
+                emit_lane_aggregate_scalar(asm, plan, root_index, &input_stack_offsets, output)?;
             }
         }
 
@@ -7480,24 +7836,17 @@ pub(crate) fn emit_chained_eu_refs(
                 start.elapsed()
             );
         }
-    } else if label == "eval_comb_apply_ff" {
-        let dse_start = timing.then(crate::timing::now);
-        let removed = crate::optimizer::coalescing::eliminate_shared_comb_state_stores(&mut sir_eu)
-            .map_err(|message| ChainedEmitError::Analysis {
-                phase: "shared comb/FF state-publication DSE",
+    }
+    if label == "eval_comb_apply_ff"
+        && crate::optimizer::coalescing::promote_fused_comb_static_slots(&mut sir_eu).map_err(
+            |message| ChainedEmitError::Analysis {
+                phase: "final fused comb StateSSA promotion",
                 message,
-            })?;
-        if removed != 0 {
-            crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
-            verify_sir(&sir_eu, "after shared comb/FF state-publication DSE")?;
-        }
-        if let Some(start) = dse_start {
-            eprintln!(
-                "[native-timing] shared comb/FF state-publication DSE removed={} elapsed={:?}",
-                removed,
-                start.elapsed()
-            );
-        }
+            },
+        )?
+    {
+        crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
+        verify_sir(&sir_eu, "after final fused comb StateSSA promotion")?;
     }
     if crate::optimizer::coalescing::promote_eval_apply_working_round_trips(&mut sir_eu) {
         verify_sir(&sir_eu, "after native working StateSSA")?;
@@ -7510,8 +7859,13 @@ pub(crate) fn emit_chained_eu_refs(
         &sir_boundaries,
     );
     verify_sir(&sir_eu, "after native direct working rewrite")?;
-    crate::optimizer::coalescing::optimize_native_merged_chain(&mut sir_eu, layout, four_state)
-        .map_err(|(phase, error)| ChainedEmitError::Sir { phase, error })?;
+    crate::optimizer::coalescing::optimize_native_merged_chain(
+        &mut sir_eu,
+        layout,
+        four_state,
+        label == "eval_comb_apply_ff",
+    )
+    .map_err(|(phase, error)| ChainedEmitError::Sir { phase, error })?;
     verify_sir(&sir_eu, "after native merged-chain cleanup")?;
     let mut lane_aggregate_coverage = None;
     let mut lane_aggregate_codegen_plan = None;
@@ -7735,7 +8089,11 @@ pub(crate) fn emit_chained_eu_refs(
             phase: "after MIR optimization",
             error,
         })?;
-    super::mir_legalize::legalize_lane_aggregate_inputs(&mut mfunc, ALLOCATABLE_REGS.len());
+    let direct_aggregate_inputs = mfunc
+        .target_features
+        .allocatable_register_count()
+        .saturating_sub(2);
+    super::mir_legalize::legalize_lane_aggregate_inputs(&mut mfunc, direct_aggregate_inputs);
     mfunc
         .verify_result()
         .map_err(|error| ChainedEmitError::Mir {
@@ -8685,8 +9043,8 @@ mod shift_encoding_tests {
                 original_root: RegisterId(16),
                 recipe_root: 1,
                 publication_instruction_indices: (1..=32).collect(),
-                publication_address: address,
-                publication_bit_offset: 0,
+                publication_address: Some(address),
+                publication_bit_offset: Some(0),
                 publication_locations: (16..32)
                     .map(|offset| LaneAggregateBitLocation {
                         native_byte_offset: offset,
@@ -8800,8 +9158,8 @@ mod shift_encoding_tests {
                 original_root: RegisterId(8),
                 recipe_root: 1,
                 publication_instruction_indices: Vec::new(),
-                publication_address: address,
-                publication_bit_offset: 0,
+                publication_address: Some(address),
+                publication_bit_offset: Some(0),
                 publication_locations: Vec::new(),
                 lane_count: 8,
             }],
@@ -8872,8 +9230,8 @@ mod shift_encoding_tests {
                 original_root: RegisterId(100),
                 recipe_root,
                 publication_instruction_indices: Vec::new(),
-                publication_address: address,
-                publication_bit_offset: 0,
+                publication_address: Some(address),
+                publication_bit_offset: Some(0),
                 publication_locations: Vec::new(),
                 lane_count,
             }],
@@ -8922,7 +9280,11 @@ mod shift_encoding_tests {
         function.blocks.push(block);
         function.verify();
 
-        mir_legalize::legalize_lane_aggregate_inputs(&mut function, ALLOCATABLE_REGS.len());
+        let direct_aggregate_inputs = function
+            .target_features
+            .allocatable_register_count()
+            .saturating_sub(2);
+        mir_legalize::legalize_lane_aggregate_inputs(&mut function, direct_aggregate_inputs);
         let allocation = regalloc::run_regalloc(&mut function).unwrap();
         let emitted = emit(
             &function,
@@ -8980,6 +9342,94 @@ mod shift_encoding_tests {
         assert_eq!(
             execute_predicate_recipe(nodes, 3, 8, &[(source, packed)]),
             0b1111_1011
+        );
+    }
+
+    #[test]
+    fn lane_aggregate_keeps_identity_predicate_extracts_as_one_gpr_mask() {
+        use crate::ir::{
+            AbsoluteAddr, BlockId as SirBlockId, InstanceId, RegionedAbsoluteAddr, RegisterId,
+            STABLE_REGION,
+        };
+        use crate::lane_aggregate_plan::{
+            LaneAggregatePlan, LaneAggregatePlanNode, LaneAggregatePlanOp, LaneAggregatePlanRoot,
+        };
+        use veryl_analyzer::ir::VarId;
+
+        let lhs = RegisterId(100);
+        let rhs = RegisterId(101);
+        let lanes = (0..32).map(RegisterId).collect::<Vec<_>>();
+        let nodes = vec![
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::BroadcastScalar(lhs),
+                children: Vec::new(),
+                lanes: vec![lhs; 32],
+                lane_width: 32,
+                lane_count: 32,
+            },
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::PackedExtract((0..32).collect()),
+                children: vec![0],
+                lanes: lanes.clone(),
+                lane_width: 1,
+                lane_count: 32,
+            },
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::BroadcastScalar(rhs),
+                children: Vec::new(),
+                lanes: vec![rhs; 32],
+                lane_width: 32,
+                lane_count: 32,
+            },
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::PackedExtract((0..32).collect()),
+                children: vec![2],
+                lanes: lanes.clone(),
+                lane_width: 1,
+                lane_count: 32,
+            },
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::Unary(UnaryOp::LogicNot),
+                children: vec![3],
+                lanes: lanes.clone(),
+                lane_width: 1,
+                lane_count: 32,
+            },
+            LaneAggregatePlanNode {
+                operation: LaneAggregatePlanOp::Binary(BinaryOp::LogicAnd),
+                children: vec![1, 4],
+                lanes,
+                lane_width: 1,
+                lane_count: 32,
+            },
+        ];
+        let plan = LaneAggregatePlan {
+            nodes: nodes.clone(),
+            roots: vec![LaneAggregatePlanRoot {
+                block: SirBlockId(0),
+                original_root: RegisterId(200),
+                recipe_root: 5,
+                publication_instruction_indices: Vec::new(),
+                publication_address: Some(RegionedAbsoluteAddr::from_absolute_addr(
+                    STABLE_REGION,
+                    AbsoluteAddr {
+                        instance_id: InstanceId(0),
+                        var_id: VarId::default(),
+                    },
+                )),
+                publication_bit_offset: Some(0),
+                publication_locations: Vec::new(),
+                lane_count: 32,
+            }],
+            dead_scalar_registers: crate::HashSet::default(),
+        };
+        assert!(lane_aggregate_gpr_bitmask_schedule(&plan, 0).is_some());
+
+        let lhs_value = 0xf0f0_aa55;
+        let rhs_value = 0x3333_0f0f;
+        assert_eq!(
+            execute_predicate_recipe(nodes, 5, 32, &[(lhs, lhs_value), (rhs, rhs_value)]),
+            u64::from(lhs_value & !rhs_value)
         );
     }
 
@@ -9629,8 +10079,8 @@ mod shift_encoding_tests {
                 original_root: RegisterId(1),
                 recipe_root: 1,
                 publication_instruction_indices: vec![1, 2],
-                publication_address: address,
-                publication_bit_offset: 8,
+                publication_address: Some(address),
+                publication_bit_offset: Some(8),
                 publication_locations: vec![LaneAggregateBitLocation {
                     native_byte_offset: 1,
                     bit: 0,
@@ -10219,6 +10669,64 @@ mod shift_encoding_tests {
         assert_eq!(&state[DST..DST + LEN], expected);
         assert_eq!(state[DST - 1], 0xa5);
         assert_eq!(state[DST + LEN], 0xa5);
+    }
+
+    #[test]
+    fn overlapping_memcopy_executes_backward_without_corrupting_source() {
+        const SRC: usize = 3;
+        const DST: usize = 8;
+        const LEN: usize = 37;
+
+        let mut func = MFunction::new(VRegAllocator::new(), vec![]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::MemCopy {
+            src_offset: SRC as i32,
+            dst_offset: DST as i32,
+            byte_len: LEN,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0xa5u8; 64];
+        for (index, byte) in state.iter_mut().enumerate() {
+            *byte = index as u8 ^ 0x6d;
+        }
+        let mut expected = state;
+        expected.copy_within(SRC..SRC + LEN, DST);
+
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(state, expected);
+    }
+
+    #[test]
+    fn overlapping_memcopy_executes_forward_without_corrupting_source() {
+        const SRC: usize = 8;
+        const DST: usize = 3;
+        const LEN: usize = 37;
+
+        let mut func = MFunction::new(VRegAllocator::new(), vec![]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::MemCopy {
+            src_offset: SRC as i32,
+            dst_offset: DST as i32,
+            byte_len: LEN,
+        });
+        block.push(MInst::Return);
+        func.push_block(block);
+
+        let emitted = emit(&func, &AssignmentMap::default(), 0).unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = [0xa5u8; 64];
+        for (index, byte) in state.iter_mut().enumerate() {
+            *byte = index as u8 ^ 0xb3;
+        }
+        let mut expected = state;
+        expected.copy_within(SRC..SRC + LEN, DST);
+
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(state, expected);
     }
 
     #[test]

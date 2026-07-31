@@ -56,27 +56,33 @@ pub(super) fn eliminate(
             provenance.unit_entries.len()
         ));
     }
-    eliminate_candidates(eu, |block| {
-        provenance
-            .block_units
-            .get(&block)
-            .is_some_and(|unit| *unit < first_ff_unit)
-    })
+    eliminate_candidates(
+        eu,
+        |block| {
+            provenance
+                .block_units
+                .get(&block)
+                .is_some_and(|unit| *unit < first_ff_unit)
+        },
+        &[],
+    )
 }
 
-/// Shared comb/FF lowering emits FF updates only to WORKING or
-/// SPARSE_WORKING. Therefore every ordinary STABLE Store in this EU is a comb
-/// publication and can use the same StateSSA liveness test without an
-/// artificial source-EU boundary.
+/// Shared comb/FF lowering may publish acyclic FF updates directly to STABLE.
+/// Those exact ranges are semantic state updates. Every other ordinary STABLE
+/// Store is a comb publication and can use the StateSSA liveness test without
+/// an artificial source-EU boundary.
 pub(super) fn eliminate_shared(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    direct_ff_writes: &[VarAtomBase<RegionedAbsoluteAddr>],
 ) -> Result<usize, String> {
-    eliminate_candidates(eu, |_| true)
+    eliminate_candidates(eu, |_| true, direct_ff_writes)
 }
 
 fn eliminate_candidates(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     is_comb_block: impl Fn(BlockId) -> bool,
+    protected_writes: &[VarAtomBase<RegionedAbsoluteAddr>],
 ) -> Result<usize, String> {
     let cfg = SirCfg::analyze(eu).map_err(|error| error.to_string())?;
     let state =
@@ -181,6 +187,20 @@ fn eliminate_candidates(
             {
                 continue;
             }
+            let range = StaticRange {
+                addr: *addr,
+                start,
+                width: *width,
+            };
+            if protected_writes.iter().any(|protected| {
+                range.overlaps(StaticRange {
+                    addr: protected.id,
+                    start: protected.access.lsb,
+                    width: protected.access.msb - protected.access.lsb + 1,
+                })
+            }) {
+                continue;
+            }
 
             if let Some(accesses) = definitions.get(&(block_id, instruction)) {
                 if accesses.iter().all(|&access| !live[access]) {
@@ -189,11 +209,6 @@ fn eliminate_candidates(
                 continue;
             }
 
-            let range = StaticRange {
-                addr: *addr,
-                start,
-                width: *width,
-            };
             let may_be_read = dynamic_reads.contains(addr)
                 || static_reads
                     .get(addr)
@@ -315,7 +330,7 @@ mod tests {
             SIRInstruction::Load(RegisterId(2), address(1), SIROffset::Static(0), 8),
         ]);
 
-        assert_eq!(eliminate_shared(&mut fused).unwrap(), 1);
+        assert_eq!(eliminate_shared(&mut fused, &[]).unwrap(), 1);
         assert_eq!(
             fused.blocks[&BlockId(0)].instructions,
             vec![
@@ -332,7 +347,7 @@ mod tests {
             SIRInstruction::Load(RegisterId(2), address(1), SIROffset::Static(0), 8),
         ]);
 
-        assert_eq!(eliminate_shared(&mut fused).unwrap(), 1);
+        assert_eq!(eliminate_shared(&mut fused, &[]).unwrap(), 1);
         assert_eq!(
             fused.blocks[&BlockId(0)].instructions,
             vec![SIRInstruction::Load(
@@ -355,10 +370,19 @@ mod tests {
             SIRInstruction::Load(RegisterId(2), address(0), packed, 8),
         ]);
 
-        assert_eq!(eliminate_shared(&mut fused).unwrap(), 0);
+        assert_eq!(eliminate_shared(&mut fused, &[]).unwrap(), 0);
         assert!(matches!(
             fused.blocks[&BlockId(0)].instructions.as_slice(),
             [SIRInstruction::Store(..), SIRInstruction::Load(..)]
         ));
+    }
+
+    #[test]
+    fn keeps_direct_ff_state_update_without_a_later_read() {
+        let mut fused = unit(vec![store(0, 0), store(1, 1)]);
+        let direct_ff_write = VarAtomBase::new(address(0), 0, 7);
+
+        assert_eq!(eliminate_shared(&mut fused, &[direct_ff_write]).unwrap(), 1);
+        assert_eq!(fused.blocks[&BlockId(0)].instructions, vec![store(0, 0)]);
     }
 }

@@ -334,11 +334,18 @@ fn collect_function_call_effects(
             continue;
         };
         collect_expression_effects(module, store, arg_expr, arena, collector)?;
+        let mut actual_inputs = HashSet::default();
+        collect_expression_position_inputs(module, arg_expr, &mut actual_inputs)?;
+        collector.sensitivity.extend(actual_inputs);
 
         let formal = &module.variables[arg_id];
         let arg_width = resolve_total_width(module, formal)?;
         let ((arg_node, arg_sources), _) =
             eval_expression(module, store, arg_expr, arena, Some(arg_width))?;
+        // A runtime effect inside the callee executes as part of the caller's
+        // always_comb process.  Its formal is only a local symbolic binding;
+        // sensitivity must therefore retain the actual argument's sources.
+        collector.sensitivity.extend(arg_sources.iter().copied());
         local_store.insert(
             *arg_id,
             RangeStore::new(Some((arg_node, arg_sources)), arg_width),
@@ -378,6 +385,7 @@ pub(super) fn statements_contain_runtime_effect(module: &Module, statements: &[S
 
 fn statement_contains_runtime_effect(module: &Module, stmt: &Statement) -> bool {
     match stmt {
+        Statement::Assign(assign) => expression_contains_runtime_effect(module, &assign.expr),
         Statement::SystemFunctionCall(call) => matches!(
             call.kind,
             SystemFunctionKind::Display(_)
@@ -407,12 +415,77 @@ fn statement_contains_runtime_effect(module: &Module, stmt: &Statement) -> bool 
                 }
             })
             .is_some_and(|body| statements_contain_runtime_effect(module, &body.statements)),
-        Statement::Assign(_)
-        | Statement::IfReset(_)
+        Statement::IfReset(_)
         | Statement::TbMethodCall(_)
         | Statement::Break
         | Statement::Unsupported(_)
         | Statement::Null => false,
+    }
+}
+
+fn expression_contains_runtime_effect(module: &Module, expression: &Expression) -> bool {
+    match expression {
+        Expression::Term(factor) => match &**factor {
+            Factor::FunctionCall(call) => module
+                .functions
+                .get(&call.id)
+                .and_then(|function| {
+                    if let Some(index) = &call.index {
+                        function.get_function(index)
+                    } else {
+                        function.get_function(&[])
+                    }
+                })
+                .is_some_and(|body| statements_contain_runtime_effect(module, &body.statements)),
+            Factor::Variable(_, index, select, _) => index
+                .0
+                .iter()
+                .chain(select.0.iter())
+                .chain(select.1.iter().map(|(_, expression)| expression))
+                .any(|expression| expression_contains_runtime_effect(module, expression)),
+            Factor::SystemFunctionCall(call) => match &call.kind {
+                SystemFunctionKind::Bits(input)
+                | SystemFunctionKind::Size(input)
+                | SystemFunctionKind::Clog2(input)
+                | SystemFunctionKind::Onehot(input)
+                | SystemFunctionKind::Signed(input)
+                | SystemFunctionKind::Unsigned(input) => {
+                    expression_contains_runtime_effect(module, &input.0)
+                }
+                _ => false,
+            },
+            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+        },
+        Expression::Unary(_, inner, _) => expression_contains_runtime_effect(module, inner),
+        Expression::Binary(lhs, _, rhs, _) => {
+            expression_contains_runtime_effect(module, lhs)
+                || expression_contains_runtime_effect(module, rhs)
+        }
+        Expression::Ternary(cond, then_expr, else_expr, _) => {
+            expression_contains_runtime_effect(module, cond)
+                || expression_contains_runtime_effect(module, then_expr)
+                || expression_contains_runtime_effect(module, else_expr)
+        }
+        Expression::Concatenation(items, _) => items.iter().any(|(expression, repeat)| {
+            expression_contains_runtime_effect(module, expression)
+                || repeat
+                    .as_ref()
+                    .is_some_and(|repeat| expression_contains_runtime_effect(module, repeat))
+        }),
+        Expression::ArrayLiteral(items, _) => items.iter().any(|item| match item {
+            ArrayLiteralItem::Value(expression, repeat) => {
+                expression_contains_runtime_effect(module, expression)
+                    || repeat
+                        .as_ref()
+                        .is_some_and(|repeat| expression_contains_runtime_effect(module, repeat))
+            }
+            ArrayLiteralItem::Defaul(expression) => {
+                expression_contains_runtime_effect(module, expression)
+            }
+        }),
+        Expression::StructConstructor(_, fields, _) => fields
+            .iter()
+            .any(|(_, expression)| expression_contains_runtime_effect(module, expression)),
     }
 }
 

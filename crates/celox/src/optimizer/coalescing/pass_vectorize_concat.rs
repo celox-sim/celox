@@ -15,6 +15,8 @@
 
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::{def_reg, sir_value_to_u64};
+use crate::backend::MemoryLayout;
+use crate::ir::cfg::SirCfg;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
@@ -177,6 +179,444 @@ struct PackedBitStoreSink {
     destination_start: usize,
     packed: RegisterId,
     width: usize,
+}
+
+#[derive(Clone, Copy)]
+enum PackedChainDefinition {
+    Parameter(BlockId),
+    Instruction(BlockId, usize),
+}
+
+#[derive(Clone)]
+struct PackedConditionalStoreChain {
+    start: BlockId,
+    endpoint: BlockId,
+    destination: RegionedAbsoluteAddr,
+    destination_start: usize,
+    stored_value: bool,
+    predicates: Vec<RegisterId>,
+    remove_blocks: HashSet<BlockId>,
+}
+
+#[derive(Clone, Copy)]
+struct PackedConditionalStoreDiamond {
+    predicate: RegisterId,
+    destination: RegionedAbsoluteAddr,
+    destination_offset: usize,
+    stored_value: bool,
+    merge: BlockId,
+    store_arm: BlockId,
+    empty_arm: BlockId,
+}
+
+fn packed_chain_definitions(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> HashMap<RegisterId, PackedChainDefinition> {
+    let mut definitions = HashMap::default();
+    for (&block_id, block) in &eu.blocks {
+        for &parameter in &block.params {
+            definitions.insert(parameter, PackedChainDefinition::Parameter(block_id));
+        }
+        for (index, instruction) in block.instructions.iter().enumerate() {
+            if let Some(register) = def_reg(instruction) {
+                definitions.insert(
+                    register,
+                    PackedChainDefinition::Instruction(block_id, index),
+                );
+            }
+        }
+    }
+    definitions
+}
+
+fn packed_chain_value_dominates(
+    definitions: &HashMap<RegisterId, PackedChainDefinition>,
+    cfg: &SirCfg,
+    value: RegisterId,
+    insertion_block: BlockId,
+) -> bool {
+    match definitions.get(&value) {
+        Some(PackedChainDefinition::Parameter(block)) => cfg.dominates(*block, insertion_block),
+        Some(PackedChainDefinition::Instruction(block, index)) => {
+            let _ = index;
+            *block == insertion_block || cfg.dominates(*block, insertion_block)
+        }
+        None => false,
+    }
+}
+
+fn packed_chain_bit_constant(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, PackedChainDefinition>,
+    mut value: RegisterId,
+) -> Option<bool> {
+    for _ in 0..8 {
+        let Some(PackedChainDefinition::Instruction(block, index)) = definitions.get(&value) else {
+            return None;
+        };
+        match &eu.blocks[block].instructions[*index] {
+            SIRInstruction::Imm(_, immediate) => {
+                return match sir_value_to_u64(immediate) {
+                    Some(0) => Some(false),
+                    Some(1) => Some(true),
+                    _ => None,
+                };
+            }
+            SIRInstruction::Unary(_, UnaryOp::Ident, source) => value = *source,
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn packed_chain_single_predecessor(cfg: &SirCfg, block: BlockId, expected: BlockId) -> bool {
+    let Some(index) = cfg.block_index(block) else {
+        return false;
+    };
+    cfg.predecessors[index].as_slice()
+        == cfg
+            .block_index(expected)
+            .as_ref()
+            .map(std::slice::from_ref)
+            .unwrap_or_default()
+}
+
+fn packed_chain_merge_predecessors(
+    cfg: &SirCfg,
+    merge: BlockId,
+    left: BlockId,
+    right: BlockId,
+) -> bool {
+    let (Some(merge), Some(left), Some(right)) = (
+        cfg.block_index(merge),
+        cfg.block_index(left),
+        cfg.block_index(right),
+    ) else {
+        return false;
+    };
+    let mut actual = cfg.predecessors[merge].clone();
+    actual.sort_unstable();
+    let mut expected = vec![left, right];
+    expected.sort_unstable();
+    actual == expected
+}
+
+fn packed_constant_store_arm(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    definitions: &HashMap<RegisterId, PackedChainDefinition>,
+    arm: BlockId,
+) -> Option<(RegionedAbsoluteAddr, usize, bool, BlockId)> {
+    let block = eu.blocks.get(&arm)?;
+    let [
+        SIRInstruction::Store(
+            destination,
+            SIROffset::Static(offset),
+            1,
+            source,
+            triggers,
+            captures,
+        ),
+    ] = block.instructions.as_slice()
+    else {
+        return None;
+    };
+    if !block.params.is_empty() || !triggers.is_empty() || !captures.is_empty() {
+        return None;
+    }
+    let stored_value = packed_chain_bit_constant(eu, definitions, *source)?;
+    let SIRTerminator::Jump(merge, arguments) = &block.terminator else {
+        return None;
+    };
+    arguments
+        .is_empty()
+        .then_some((*destination, *offset, stored_value, *merge))
+}
+
+fn packed_empty_store_arm(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    arm: BlockId,
+) -> Option<BlockId> {
+    let block = eu.blocks.get(&arm)?;
+    if !block.params.is_empty() || !block.instructions.is_empty() {
+        return None;
+    }
+    let SIRTerminator::Jump(merge, arguments) = &block.terminator else {
+        return None;
+    };
+    arguments.is_empty().then_some(*merge)
+}
+
+fn packed_conditional_store_diamond(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &SirCfg,
+    definitions: &HashMap<RegisterId, PackedChainDefinition>,
+    head: BlockId,
+) -> Option<PackedConditionalStoreDiamond> {
+    let block = eu.blocks.get(&head)?;
+    let SIRTerminator::Branch {
+        cond,
+        true_block,
+        false_block,
+    } = &block.terminator
+    else {
+        return None;
+    };
+    if !true_block.1.is_empty() || !false_block.1.is_empty() {
+        return None;
+    }
+    let Some(PackedChainDefinition::Instruction(condition_block, condition_index)) =
+        definitions.get(cond)
+    else {
+        return None;
+    };
+    if *condition_block != head {
+        return None;
+    }
+    let SIRInstruction::Unary(_, UnaryOp::ToTwoState, predicate) =
+        block.instructions.get(*condition_index)?
+    else {
+        return None;
+    };
+    if eu.register_map.get(predicate).map(RegisterType::width) != Some(1) {
+        return None;
+    }
+
+    // The current lowering emits the Store on the true edge. Supporting the
+    // inverse form is straightforward, but accepting only this exact shape
+    // keeps the initial transform free of synthetic per-lane LogicNot values.
+    let (destination, destination_offset, stored_value, merge) =
+        packed_constant_store_arm(eu, definitions, true_block.0)?;
+    if packed_empty_store_arm(eu, false_block.0)? != merge
+        || !eu.blocks.get(&merge)?.params.is_empty()
+        || !packed_chain_single_predecessor(cfg, true_block.0, head)
+        || !packed_chain_single_predecessor(cfg, false_block.0, head)
+        || !packed_chain_merge_predecessors(cfg, merge, true_block.0, false_block.0)
+    {
+        return None;
+    }
+    Some(PackedConditionalStoreDiamond {
+        predicate: *predicate,
+        destination,
+        destination_offset,
+        stored_value,
+        merge,
+        store_arm: true_block.0,
+        empty_arm: false_block.0,
+    })
+}
+
+fn packed_range_is_physically_contiguous(
+    layout: &MemoryLayout,
+    destination: RegionedAbsoluteAddr,
+    start: usize,
+    width: usize,
+) -> bool {
+    let Some((base_byte, base_bit)) = layout.regioned_static_byte_and_intra(&destination, start)
+    else {
+        return false;
+    };
+    (0..width).all(|bit| {
+        let Some(bit_offset) = start.checked_add(bit) else {
+            return false;
+        };
+        let Some((byte, intra)) = layout.regioned_static_byte_and_intra(&destination, bit_offset)
+        else {
+            return false;
+        };
+        let physical_bit = base_bit + bit;
+        byte == base_byte + i32::try_from(physical_bit / 8).unwrap_or(i32::MAX)
+            && intra == physical_bit % 8
+    })
+}
+
+fn plan_packed_conditional_store_chain(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    cfg: &SirCfg,
+    definitions: &HashMap<RegisterId, PackedChainDefinition>,
+    start: BlockId,
+    physically_contiguous: &impl Fn(RegionedAbsoluteAddr, usize, usize) -> bool,
+) -> Option<PackedConditionalStoreChain> {
+    let mut head = start;
+    let mut destination = None;
+    let mut destination_start = None;
+    let mut stored_value = None;
+    let mut predicates = Vec::new();
+    let mut remove_blocks = HashSet::default();
+    let mut seen = HashSet::default();
+
+    while predicates.len() < 64 && seen.insert(head) {
+        let Some(diamond) = packed_conditional_store_diamond(eu, cfg, definitions, head) else {
+            break;
+        };
+        let expected_offset = destination_start
+            .unwrap_or(diamond.destination_offset)
+            .checked_add(predicates.len())?;
+        if destination.is_some_and(|known| known != diamond.destination)
+            || stored_value.is_some_and(|known| known != diamond.stored_value)
+            || diamond.destination_offset != expected_offset
+            || !packed_chain_value_dominates(definitions, cfg, diamond.predicate, start)
+        {
+            break;
+        }
+        destination.get_or_insert(diamond.destination);
+        destination_start.get_or_insert(diamond.destination_offset);
+        stored_value.get_or_insert(diamond.stored_value);
+        predicates.push(diamond.predicate);
+        if head != start {
+            remove_blocks.insert(head);
+        }
+        remove_blocks.insert(diamond.store_arm);
+        remove_blocks.insert(diamond.empty_arm);
+        head = diamond.merge;
+    }
+
+    let destination = destination?;
+    let destination_start = destination_start?;
+    let stored_value = stored_value?;
+    if predicates.len() < 8
+        || !physically_contiguous(destination, destination_start, predicates.len())
+    {
+        return None;
+    }
+    Some(PackedConditionalStoreChain {
+        start,
+        endpoint: head,
+        destination,
+        destination_start,
+        stored_value,
+        predicates,
+        remove_blocks,
+    })
+}
+
+fn collapse_packed_conditional_store_chains_with(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    physically_contiguous: impl Fn(RegionedAbsoluteAddr, usize, usize) -> bool,
+) -> usize {
+    let Ok(cfg) = SirCfg::analyze_forward_structure(eu) else {
+        return 0;
+    };
+    let definitions = packed_chain_definitions(eu);
+    let mut candidates = cfg
+        .block_ids
+        .iter()
+        .copied()
+        .filter_map(|block| {
+            plan_packed_conditional_store_chain(
+                eu,
+                &cfg,
+                &definitions,
+                block,
+                &physically_contiguous,
+            )
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable_by(|left, right| {
+        right
+            .predicates
+            .len()
+            .cmp(&left.predicates.len())
+            .then_with(|| left.start.cmp(&right.start))
+    });
+
+    let mut occupied = HashSet::default();
+    let mut plans = Vec::new();
+    for plan in candidates {
+        let mut region = plan.remove_blocks.clone();
+        region.insert(plan.start);
+        if region.iter().any(|block| occupied.contains(block)) {
+            continue;
+        }
+        occupied.extend(region);
+        plans.push(plan);
+    }
+    if plans.is_empty() {
+        return 0;
+    }
+
+    let mut next_register = eu
+        .register_map
+        .keys()
+        .map(|register| register.0)
+        .max()
+        .unwrap_or(0);
+    let mut allocate = |eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, width: usize| {
+        loop {
+            next_register += 1;
+            let register = RegisterId(next_register);
+            if !eu.register_map.contains_key(&register) {
+                eu.register_map
+                    .insert(register, RegisterType::Logic { width });
+                return register;
+            }
+        }
+    };
+
+    let mut removed_blocks = HashSet::default();
+    for plan in &plans {
+        let width = plan.predicates.len();
+        let packed = allocate(eu, width);
+        let old = allocate(eu, width);
+        let inverted = (!plan.stored_value).then(|| allocate(eu, width));
+        let updated = allocate(eu, width);
+        let mut replacement = vec![
+            SIRInstruction::Concat(packed, plan.predicates.iter().rev().copied().collect()),
+            SIRInstruction::Load(
+                old,
+                plan.destination,
+                SIROffset::PackedElements {
+                    bit_offset: plan.destination_start,
+                    element_width: 1,
+                },
+                width,
+            ),
+        ];
+        if let Some(inverted) = inverted {
+            replacement.push(SIRInstruction::Unary(inverted, UnaryOp::BitNot, packed));
+            replacement.push(SIRInstruction::Binary(
+                updated,
+                old,
+                BinaryOp::And,
+                inverted,
+            ));
+        } else {
+            replacement.push(SIRInstruction::Binary(updated, old, BinaryOp::Or, packed));
+        }
+        replacement.push(SIRInstruction::Store(
+            plan.destination,
+            SIROffset::PackedElements {
+                bit_offset: plan.destination_start,
+                element_width: 1,
+            },
+            width,
+            updated,
+            Vec::new(),
+            Vec::new(),
+        ));
+        let block = eu
+            .blocks
+            .get_mut(&plan.start)
+            .expect("planned packed-store chain head remains present");
+        block.instructions.extend(replacement);
+        block.terminator = SIRTerminator::Jump(plan.endpoint, Vec::new());
+        removed_blocks.extend(plan.remove_blocks.iter().copied());
+    }
+    for block in removed_blocks {
+        eu.blocks.remove(&block);
+    }
+    plans.len()
+}
+
+/// Collapse a serial CFG of conditional one-bit constant stores into one
+/// packed read/modify/write. The physical-layout proof prevents a semantic
+/// packed range from becoming an invalid cross-element native access.
+pub(super) fn collapse_native_packed_conditional_store_chains(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    layout: &MemoryLayout,
+) -> usize {
+    collapse_packed_conditional_store_chains_with(eu, |destination, start, width| {
+        packed_range_is_physically_contiguous(layout, destination, start, width)
+    })
 }
 
 /// Make a complete set of scalar one-bit publications consume the packed
@@ -420,17 +860,15 @@ fn push_instruction_uses(
     }
 }
 
-fn push_terminator_uses(terminator: &SIRTerminator, worklist: &mut Vec<RegisterId>) {
+fn push_terminator_control_uses(terminator: &SIRTerminator, worklist: &mut Vec<RegisterId>) {
     match terminator {
-        SIRTerminator::Jump(_, args) => worklist.extend(args.iter().copied()),
+        SIRTerminator::Jump(..) => {}
         SIRTerminator::Branch {
             cond,
-            true_block,
-            false_block,
+            true_block: _,
+            false_block: _,
         } => {
             worklist.push(*cond);
-            worklist.extend(true_block.1.iter().copied());
-            worklist.extend(false_block.1.iter().copied());
         }
         SIRTerminator::Switch { selector, .. } => worklist.push(*selector),
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
@@ -452,7 +890,20 @@ fn collect_register_use_counts(
             }
         }
         uses.clear();
-        push_terminator_uses(&block.terminator, &mut uses);
+        match &block.terminator {
+            SIRTerminator::Jump(_, args) => uses.extend(args.iter().copied()),
+            SIRTerminator::Branch {
+                cond,
+                true_block,
+                false_block,
+            } => {
+                uses.push(*cond);
+                uses.extend(true_block.1.iter().copied());
+                uses.extend(false_block.1.iter().copied());
+            }
+            SIRTerminator::Switch { selector, .. } => uses.push(*selector),
+            SIRTerminator::Return | SIRTerminator::Error(_) => {}
+        }
         for register in uses.iter().copied() {
             let count = counts.entry(register).or_insert(0usize);
             *count = count.saturating_add(1);
@@ -463,9 +914,13 @@ fn collect_register_use_counts(
 
 /// Remove dead pure definitions in one O(instructions + operand edges)
 /// mark/sweep. Loads are pure SIR values; stores, commits and runtime/capture
-/// events are observable roots.
+/// events are observable roots. Block parameters are phi definitions: an
+/// incoming edge argument is live only when its corresponding parameter is
+/// live. Treating every edge argument as a root retains complete producer
+/// cones for unused merge parameters.
 pub(super) fn remove_dead_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     let mut definitions = HashMap::<RegisterId, (BlockId, usize)>::default();
+    let mut parameter_inputs = HashMap::<RegisterId, Vec<RegisterId>>::default();
     let mut worklist = Vec::new();
     let mut observable_definitions = Vec::new();
 
@@ -486,9 +941,30 @@ pub(super) fn remove_dead_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAdd
                 push_instruction_uses(inst, &mut worklist);
             }
         }
-        // Edge arguments are conservatively terminator roots. This is the
-        // existing SIR convention and also keeps live block parameters sound.
-        push_terminator_uses(&block.terminator, &mut worklist);
+        push_terminator_control_uses(&block.terminator, &mut worklist);
+
+        let mut record_edge = |target: BlockId, arguments: &[RegisterId]| {
+            let parameters = &eu.blocks[&target].params;
+            debug_assert_eq!(parameters.len(), arguments.len());
+            for (&parameter, &argument) in parameters.iter().zip(arguments) {
+                parameter_inputs
+                    .entry(parameter)
+                    .or_default()
+                    .push(argument);
+            }
+        };
+        match &block.terminator {
+            SIRTerminator::Jump(target, arguments) => record_edge(*target, arguments),
+            SIRTerminator::Branch {
+                true_block,
+                false_block,
+                ..
+            } => {
+                record_edge(true_block.0, &true_block.1);
+                record_edge(false_block.0, &false_block.1);
+            }
+            SIRTerminator::Switch { .. } | SIRTerminator::Return | SIRTerminator::Error(_) => {}
+        }
     }
     worklist.extend(observable_definitions);
 
@@ -499,13 +975,75 @@ pub(super) fn remove_dead_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAdd
         }
         if let Some(&(block, instruction)) = definitions.get(&register) {
             push_instruction_uses(&eu.blocks[&block].instructions[instruction], &mut worklist);
+        } else if let Some(inputs) = parameter_inputs.get(&register) {
+            worklist.extend(inputs.iter().copied());
+        }
+    }
+
+    let mut dead_parameters = HashMap::<BlockId, Vec<usize>>::default();
+    let mut removed_registers = HashSet::default();
+    for (&block_id, block) in &eu.blocks {
+        for (index, &parameter) in block.params.iter().enumerate() {
+            if !live.contains(&parameter) {
+                dead_parameters.entry(block_id).or_default().push(index);
+                removed_registers.insert(parameter);
+            }
+        }
+    }
+
+    if !dead_parameters.is_empty() {
+        for (&block_id, positions) in &dead_parameters {
+            for &position in positions.iter().rev() {
+                eu.blocks
+                    .get_mut(&block_id)
+                    .unwrap()
+                    .params
+                    .remove(position);
+            }
+        }
+        for block in eu.blocks.values_mut() {
+            let remove_arguments =
+                |target: BlockId,
+                 arguments: &mut Vec<RegisterId>,
+                 dead_parameters: &HashMap<BlockId, Vec<usize>>| {
+                    let Some(positions) = dead_parameters.get(&target) else {
+                        return;
+                    };
+                    for &position in positions.iter().rev() {
+                        arguments.remove(position);
+                    }
+                };
+            match &mut block.terminator {
+                SIRTerminator::Jump(target, arguments) => {
+                    remove_arguments(*target, arguments, &dead_parameters);
+                }
+                SIRTerminator::Branch {
+                    true_block,
+                    false_block,
+                    ..
+                } => {
+                    remove_arguments(true_block.0, &mut true_block.1, &dead_parameters);
+                    remove_arguments(false_block.0, &mut false_block.1, &dead_parameters);
+                }
+                SIRTerminator::Switch { .. } | SIRTerminator::Return | SIRTerminator::Error(_) => {}
+            }
         }
     }
 
     for block in eu.blocks.values_mut() {
-        block
-            .instructions
-            .retain(|inst| def_reg(inst).is_none_or(|definition| live.contains(&definition)));
+        block.instructions.retain(|inst| {
+            let Some(definition) = def_reg(inst) else {
+                return true;
+            };
+            let retain = live.contains(&definition);
+            if !retain {
+                removed_registers.insert(definition);
+            }
+            retain
+        });
+    }
+    for register in removed_registers {
+        eu.register_map.remove(&register);
     }
 }
 
@@ -2300,6 +2838,211 @@ mod tests {
             blocks,
             register_map,
         }
+    }
+
+    fn packed_conditional_store_chain_fixture(
+        stored_value: bool,
+    ) -> ExecutionUnit<RegionedAbsoluteAddr> {
+        const LANES: usize = 8;
+        let logic = |width| RegisterType::Logic { width };
+        let constant = RegisterId(0);
+        let predicates = (0..LANES)
+            .map(|lane| RegisterId(1 + lane))
+            .collect::<Vec<_>>();
+        let conditions = (0..LANES)
+            .map(|lane| RegisterId(1 + LANES + lane))
+            .collect::<Vec<_>>();
+        let mut register_map = [(constant, logic(1))]
+            .into_iter()
+            .chain(
+                predicates
+                    .iter()
+                    .copied()
+                    .map(|register| (register, logic(1))),
+            )
+            .chain(conditions.iter().copied().map(|register| {
+                (
+                    register,
+                    RegisterType::Bit {
+                        width: 1,
+                        signed: false,
+                    },
+                )
+            }))
+            .collect::<HashMap<_, _>>();
+        let mut blocks = HashMap::default();
+
+        for lane in 0..LANES {
+            let head = BlockId(lane * 3);
+            let store_arm = BlockId(lane * 3 + 1);
+            let empty_arm = BlockId(lane * 3 + 2);
+            let merge = BlockId(lane * 3 + 3);
+            let mut instructions = Vec::new();
+            if lane == 0 {
+                instructions.push(SIRInstruction::Imm(
+                    constant,
+                    SIRValue::new(u8::from(stored_value)),
+                ));
+                for (index, &predicate) in predicates.iter().enumerate() {
+                    instructions.push(SIRInstruction::Imm(
+                        predicate,
+                        SIRValue::new((index & 1) as u8),
+                    ));
+                }
+            }
+            instructions.push(SIRInstruction::Unary(
+                conditions[lane],
+                UnaryOp::ToTwoState,
+                predicates[lane],
+            ));
+            blocks.insert(
+                head,
+                BasicBlock {
+                    id: head,
+                    params: Vec::new(),
+                    instructions,
+                    terminator: SIRTerminator::Branch {
+                        cond: conditions[lane],
+                        true_block: (store_arm, Vec::new()),
+                        false_block: (empty_arm, Vec::new()),
+                    },
+                },
+            );
+            blocks.insert(
+                store_arm,
+                BasicBlock {
+                    id: store_arm,
+                    params: Vec::new(),
+                    instructions: vec![SIRInstruction::Store(
+                        test_addr(),
+                        SIROffset::Static(lane),
+                        1,
+                        constant,
+                        Vec::new(),
+                        Vec::new(),
+                    )],
+                    terminator: SIRTerminator::Jump(merge, Vec::new()),
+                },
+            );
+            blocks.insert(
+                empty_arm,
+                BasicBlock {
+                    id: empty_arm,
+                    params: Vec::new(),
+                    instructions: Vec::new(),
+                    terminator: SIRTerminator::Jump(merge, Vec::new()),
+                },
+            );
+        }
+        let endpoint = BlockId(LANES * 3);
+        blocks.insert(
+            endpoint,
+            BasicBlock {
+                id: endpoint,
+                params: Vec::new(),
+                instructions: Vec::new(),
+                terminator: SIRTerminator::Return,
+            },
+        );
+        // Keep the mutable binding intentional: adding generated result types
+        // in the test below must not depend on a fixed register ID.
+        register_map.shrink_to_fit();
+        ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        }
+    }
+
+    #[test]
+    fn collapses_serial_conditional_zero_stores_to_one_packed_rmw() {
+        let mut eu = packed_conditional_store_chain_fixture(false);
+        assert_eq!(eu.verify_result(), Ok(()));
+
+        assert_eq!(
+            collapse_packed_conditional_store_chains_with(&mut eu, |_, _, _| true),
+            1
+        );
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert_eq!(eu.blocks.len(), 2);
+        assert_eq!(
+            eu.blocks[&BlockId(0)].terminator,
+            SIRTerminator::Jump(BlockId(24), Vec::new())
+        );
+
+        let instructions = &eu.blocks[&BlockId(0)].instructions;
+        assert!(instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                SIRInstruction::Concat(_, arguments)
+                    if arguments
+                        == &(1..=8)
+                            .rev()
+                            .map(RegisterId)
+                            .collect::<Vec<_>>()
+            )
+        }));
+        assert!(instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                SIRInstruction::Load(
+                    _,
+                    address,
+                    SIROffset::PackedElements {
+                        bit_offset: 0,
+                        element_width: 1,
+                    },
+                    8,
+                ) if *address == test_addr()
+            )
+        }));
+        assert!(instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                SIRInstruction::Store(
+                    address,
+                    SIROffset::PackedElements {
+                        bit_offset: 0,
+                        element_width: 1,
+                    },
+                    8,
+                    _,
+                    triggers,
+                    captures,
+                ) if *address == test_addr() && triggers.is_empty() && captures.is_empty()
+            )
+        }));
+        assert!(instructions.iter().any(|instruction| {
+            matches!(instruction, SIRInstruction::Binary(_, _, BinaryOp::And, _))
+        }));
+    }
+
+    #[test]
+    fn collapses_serial_conditional_one_stores_to_packed_or() {
+        let mut eu = packed_conditional_store_chain_fixture(true);
+        assert_eq!(
+            collapse_packed_conditional_store_chains_with(&mut eu, |_, _, _| true),
+            1
+        );
+        assert_eq!(eu.verify_result(), Ok(()));
+        let instructions = &eu.blocks[&BlockId(0)].instructions;
+        assert!(instructions.iter().any(|instruction| {
+            matches!(instruction, SIRInstruction::Binary(_, _, BinaryOp::Or, _))
+        }));
+        assert!(!instructions.iter().any(|instruction| {
+            matches!(instruction, SIRInstruction::Unary(_, UnaryOp::BitNot, _))
+        }));
+    }
+
+    #[test]
+    fn keeps_conditional_zero_store_chain_when_layout_is_not_packed() {
+        let mut eu = packed_conditional_store_chain_fixture(false);
+        assert_eq!(
+            collapse_packed_conditional_store_chains_with(&mut eu, |_, _, _| false),
+            0
+        );
+        assert_eq!(eu.blocks.len(), 25);
+        assert_eq!(eu.verify_result(), Ok(()));
     }
 
     #[test]

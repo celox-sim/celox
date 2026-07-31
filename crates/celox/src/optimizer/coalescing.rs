@@ -37,6 +37,7 @@ mod pass_loop_idiom;
 mod pass_manager;
 mod pass_masked_array_any;
 mod pass_optimize_blocks;
+mod pass_pack_concat_phi;
 mod pass_packed_scatter_store;
 mod pass_partial_forward;
 mod pass_phi_outcome_compression;
@@ -91,8 +92,16 @@ pub(crate) fn eliminate_unobserved_comb_state_stores(
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn eliminate_shared_comb_state_stores(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    direct_ff_writes: &[crate::ir::VarAtomBase<RegionedAbsoluteAddr>],
 ) -> Result<usize, String> {
-    fused_comb_dse::eliminate_shared(eu)
+    fused_comb_dse::eliminate_shared(eu, direct_ff_writes)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn promote_fused_comb_static_slots(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+) -> Result<bool, String> {
+    pass_global_store_load_forwarding::promote_fused_comb_static_slots(eu)
 }
 
 pub(crate) fn retain_final_identity_aliases(program: &mut Program, four_state: bool) {
@@ -233,6 +242,7 @@ pub(crate) fn optimize_native_merged_chain(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &crate::backend::MemoryLayout,
     four_state: bool,
+    recover_merged_effect_regions: bool,
 ) -> Result<(), (&'static str, crate::ir::verify::SirVerifyError)> {
     let mut changed = false;
     if crate::ir::inline_single_predecessor_jumps(eu)
@@ -279,6 +289,36 @@ pub(crate) fn optimize_native_merged_chain(
     );
     eu.verify_result()
         .map_err(|error| ("after native merged-chain CFG simplification", error))?;
+    if recover_merged_effect_regions && !four_state {
+        pass_guarded_region_sinking::recover_merged_effect_regions(eu, four_state);
+        pass_guarded_region_sinking::eliminate_dead_control_regions(eu);
+        ControlFlowSimplifyPass.run(
+            eu,
+            &PassOptions {
+                four_state,
+                ..PassOptions::default()
+            },
+        );
+        pass_vectorize_concat::remove_dead_definitions(eu);
+        eu.verify_result()
+            .map_err(|error| ("after native merged effect-region recovery", error))?;
+        changed = true;
+    }
+    if !four_state {
+        let collapsed =
+            pass_vectorize_concat::collapse_native_packed_conditional_store_chains(eu, layout);
+        if collapsed != 0 {
+            changed = true;
+            // The recovered packed predicate is a real sink for the complete
+            // scalar lane graph. Run the ordinary recursive packer now, while
+            // that graph is still available, rather than lowering the new
+            // Concat back into scalar shifts in ISel.
+            VectorizeConcatPass::default().run(eu, &PassOptions::default());
+            GvnPass.run(eu, &PassOptions::default());
+            eu.verify_result()
+                .map_err(|error| ("after native packed conditional-store recovery", error))?;
+        }
+    }
     if !four_state && pass_vectorize_concat::expose_packed_bit_store_sinks(eu) {
         changed = true;
         // Lane-aggregate analysis consumes the exact packed publication shape
@@ -349,6 +389,12 @@ pub(crate) fn optimize_native_merged_chain(
         );
         eu.verify_result()
             .map_err(|error| ("after native effect-case dispatch", error))?;
+    }
+    if !four_state && pass_pack_concat_phi::pack_concat_phis(eu) != 0 {
+        changed = true;
+        GvnPass.run(eu, &PassOptions::default());
+        eu.verify_result()
+            .map_err(|error| ("after native packed phi forwarding", error))?;
     }
     if changed {
         pass_vectorize_concat::remove_dead_definitions(eu);
@@ -438,20 +484,6 @@ impl ProgramPass for CoalescingPass {
             &options.optimize_options,
             options.preserve_element_storage_layout,
         );
-    }
-}
-
-struct FusedCombDsePass;
-
-impl ExecutionUnitPass for FusedCombDsePass {
-    fn name(&self) -> &'static str {
-        "fused_comb_dse"
-    }
-
-    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, _options: &PassOptions) {
-        if fused_comb_dse::eliminate_shared(eu).is_ok() {
-            pass_vectorize_concat::remove_dead_definitions(eu);
-        }
     }
 }
 
@@ -1107,11 +1139,6 @@ fn optimize_with_options(
     // lowering contract of eval_apply_ff.
     let mut comb_ff_passes = ExecutionUnitPassManager::new()
         .with_unpacked_element_widths(Arc::clone(&unpacked_element_widths));
-    // A shared comb/FF EU does not publish its intermediate comb state: the
-    // deferred tick marks that state dirty and the next observation settles
-    // comb again. Run this through the group cache so equivalent clock/reset
-    // trigger bodies pay for StateSSA only once.
-    comb_ff_passes.add_pass(FusedCombDsePass);
     if on(SirPass::StoreLoadForwarding) {
         comb_ff_passes.add_pass(StoreLoadForwardingPass);
         if on(SirPass::PartialForward) {

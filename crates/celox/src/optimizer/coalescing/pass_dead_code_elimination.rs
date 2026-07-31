@@ -93,4 +93,85 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn removes_unused_phi_inputs_and_their_producer_cones() {
+        let address = RegionedAbsoluteAddr::from_absolute_addr(
+            STABLE_REGION,
+            AbsoluteAddr {
+                instance_id: InstanceId(0),
+                var_id: VarId::from_raw(0),
+            },
+        );
+        let live_value = RegisterId(0);
+        let dead_leaf = RegisterId(1);
+        let dead_value = RegisterId(2);
+        let live_parameter = RegisterId(3);
+        let dead_parameter = RegisterId(4);
+        let bit = || RegisterType::Bit {
+            width: 1,
+            signed: false,
+        };
+        let mut eu = ExecutionUnit {
+            blocks: [
+                (
+                    BlockId(0),
+                    BasicBlock {
+                        id: BlockId(0),
+                        params: Vec::new(),
+                        instructions: vec![
+                            SIRInstruction::Imm(live_value, SIRValue::new(1u8)),
+                            SIRInstruction::Imm(dead_leaf, SIRValue::new(0u8)),
+                            SIRInstruction::Unary(dead_value, crate::ir::UnaryOp::Ident, dead_leaf),
+                        ],
+                        terminator: SIRTerminator::Jump(BlockId(1), vec![live_value, dead_value]),
+                    },
+                ),
+                (
+                    BlockId(1),
+                    BasicBlock {
+                        id: BlockId(1),
+                        params: vec![live_parameter, dead_parameter],
+                        instructions: vec![SIRInstruction::Store(
+                            address,
+                            SIROffset::Static(0),
+                            1,
+                            live_parameter,
+                            Vec::new(),
+                            Vec::new(),
+                        )],
+                        terminator: SIRTerminator::Return,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            entry_block_id: BlockId(0),
+            register_map: [
+                (live_value, bit()),
+                (dead_leaf, bit()),
+                (dead_value, bit()),
+                (live_parameter, bit()),
+                (dead_parameter, bit()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        DeadCodeEliminationPass.run(&mut eu, &PassOptions::default());
+
+        assert_eq!(eu.verify_result(), Ok(()));
+        assert_eq!(eu.blocks[&BlockId(1)].params, vec![live_parameter]);
+        assert_eq!(
+            eu.blocks[&BlockId(0)].terminator,
+            SIRTerminator::Jump(BlockId(1), vec![live_value])
+        );
+        assert_eq!(
+            eu.blocks[&BlockId(0)].instructions,
+            vec![SIRInstruction::Imm(live_value, SIRValue::new(1u8))]
+        );
+        assert!(!eu.register_map.contains_key(&dead_leaf));
+        assert!(!eu.register_map.contains_key(&dead_value));
+        assert!(!eu.register_map.contains_key(&dead_parameter));
+    }
 }

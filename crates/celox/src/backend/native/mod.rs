@@ -32,7 +32,7 @@ fn enabled_by_default(name: &str) -> bool {
 }
 
 pub(crate) fn lane_aggregate_codegen_enabled() -> bool {
-    enabled_by_default("CELOX_LANE_AGGREGATE_CODEGEN")
+    std::env::var_os("CELOX_LANE_AGGREGATE_CODEGEN").is_some_and(|value| value != "0")
 }
 
 pub(crate) fn native_tick_loop_enabled() -> bool {

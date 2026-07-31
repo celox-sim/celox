@@ -10,7 +10,7 @@ use crate::ir::SIRValue;
 use crate::ir::{BitAccess, BlockId, ExecutionUnit, RuntimeErrorInfo, VarAtomBase};
 use crate::logic_tree::NodeId;
 use crate::logic_tree::{LogicPath, LogicPathTarget, SLTNode, SLTNodeArena, SLTNodeFactsError};
-use celox_analysis::dag_schedule::schedule_min_live_values;
+use celox_analysis::dag_schedule::schedule_min_live_values_and_tokens;
 use celox_analysis::interval::{DisjointIntervalError, DisjointIntervalMap, ExactInterval};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
@@ -496,19 +496,21 @@ fn component_map(adj: &Vec<Vec<usize>>) -> Vec<usize> {
 fn add_acyclic_ff_write_order_edges(
     adj: &mut Vec<Vec<usize>>,
     optional_edges: impl IntoIterator<Item = (usize, usize)>,
-) {
+) -> HashSet<(usize, usize)> {
+    let mut requested = HashSet::default();
     let mut added = vec![Vec::<usize>::new(); adj.len()];
     for (source, target) in optional_edges {
         if source == target || source >= adj.len() || target >= adj.len() {
             continue;
         }
+        requested.insert((source, target));
         if !adj[source].contains(&target) {
             adj[source].push(target);
             added[source].push(target);
         }
     }
     if added.iter().all(Vec::is_empty) {
-        return;
+        return requested;
     }
 
     let component_by_node = component_map(adj);
@@ -519,6 +521,8 @@ fn add_acyclic_ff_write_order_edges(
             adj[source].retain(|target| targets.binary_search(target).is_err());
         }
     }
+    requested.retain(|(source, target)| adj[*source].contains(target));
+    requested
 }
 
 /// Memory definitions and uses induced by one set of LogicPaths.
@@ -2150,17 +2154,30 @@ pub struct ScheduleResult<Addr> {
     /// Exact comb range definitions grouped by their source semantic process.
     /// This survives physical EU coalescing and is not an ordering constraint.
     pub semantic_regions: HashMap<VarAtomBase<Addr>, u64>,
+    /// Persistent-state ranges published directly by FF actions in the shared
+    /// comb/FF schedule. These Stores are semantic state updates rather than
+    /// disposable comb publications.
+    pub direct_ff_writes: Vec<VarAtomBase<Addr>>,
 }
 
 pub(crate) trait ClockFfLowering<Addr> {
     fn summaries(&self) -> &[crate::ir::FfAccessSummary<Addr>];
-    fn begin(&mut self, builder: &mut SIRBuilder<Addr>) -> Result<(), super::ParserError>;
+    fn begin(
+        &mut self,
+        builder: &mut SIRBuilder<Addr>,
+        direct: &[bool],
+    ) -> Result<(), super::ParserError>;
     fn lower(
         &mut self,
         index: usize,
+        direct: bool,
         builder: &mut SIRBuilder<Addr>,
     ) -> Result<(), super::ParserError>;
-    fn finish(&mut self, builder: &mut SIRBuilder<Addr>) -> Result<(), super::ParserError>;
+    fn finish(
+        &mut self,
+        builder: &mut SIRBuilder<Addr>,
+        direct: &[bool],
+    ) -> Result<(), super::ParserError>;
 }
 
 pub(crate) enum ClockSortError<Addr: Display + Debug + Eq + Hash + Clone> {
@@ -2378,10 +2395,112 @@ fn logic_path_is_scheduling_barrier<Addr: Clone + Eq + Hash>(path: &LogicPath<Ad
         || !path.comb_capture_enable_sites.is_empty()
 }
 
+fn cached_logic_path_roots<Addr: Clone + Eq + Hash>(path: &LogicPath<Addr>) -> Vec<NodeId> {
+    let mut roots = path
+        .local_inputs
+        .iter()
+        .map(|(_, node)| *node)
+        .collect::<Vec<_>>();
+    if path.local_inputs.is_empty() && matches!(path.target, LogicPathTarget::Var(_)) {
+        roots.extend(path.pre_lower_nodes.iter().copied());
+        roots.push(path.expr);
+    }
+    roots
+}
+
+/// Build the sparse incidence relation between LogicPaths and SLT values
+/// which can actually survive in `lower_cache` across path boundaries.
+///
+/// A tree-only node cannot be independently reused: a cached ancestor hides
+/// it from later lowering.  Only DAG joins (including roots named by multiple
+/// paths) therefore become materialization tokens.  Constants are deliberately
+/// omitted because target lowering can rematerialize them without retaining a
+/// source register.
+fn logic_path_materialization_tokens<Addr: Clone + Eq + Hash>(
+    input: &[LogicPath<Addr>],
+    arena: &SLTNodeArena<Addr>,
+) -> (Vec<Vec<usize>>, Vec<usize>) {
+    let mut references = vec![0usize; arena.len()];
+    let mut children = Vec::new();
+    for raw in 0..arena.len() {
+        children.clear();
+        push_scheduler_node_children(NodeId(raw), arena, &mut children);
+        children.sort_unstable();
+        children.dedup();
+        for &child in &children {
+            references[child.0] = references[child.0].saturating_add(1);
+        }
+    }
+    for path in input {
+        let mut roots = cached_logic_path_roots(path);
+        roots.sort_unstable();
+        roots.dedup();
+        for root in roots {
+            references[root.0] = references[root.0].saturating_add(1);
+        }
+    }
+
+    let candidates = references
+        .iter()
+        .enumerate()
+        .map(|(raw, references)| {
+            *references > 1 && !matches!(arena.get(NodeId(raw)), SLTNode::Constant(..))
+        })
+        .collect::<Vec<_>>();
+    let mut raw_tokens = vec![Vec::<usize>::new(); input.len()];
+    let mut token_users = vec![0usize; arena.len()];
+    let mut visited = vec![0usize; arena.len()];
+    let mut epoch = 0usize;
+    let mut work = Vec::new();
+    for (path_index, path) in input.iter().enumerate() {
+        epoch = epoch.wrapping_add(1);
+        if epoch == 0 {
+            visited.fill(0);
+            epoch = 1;
+        }
+        work.extend(cached_logic_path_roots(path));
+        while let Some(node) = work.pop() {
+            if visited[node.0] == epoch {
+                continue;
+            }
+            visited[node.0] = epoch;
+            if candidates[node.0] {
+                raw_tokens[path_index].push(node.0);
+            }
+            push_scheduler_node_children(node, arena, &mut work);
+        }
+        raw_tokens[path_index].sort_unstable();
+        raw_tokens[path_index].dedup();
+        for &token in &raw_tokens[path_index] {
+            token_users[token] = token_users[token].saturating_add(1);
+        }
+    }
+
+    let mut dense_by_raw = vec![usize::MAX; arena.len()];
+    let mut weights = Vec::new();
+    for (raw, users) in token_users.into_iter().enumerate() {
+        if users < 2 {
+            continue;
+        }
+        dense_by_raw[raw] = weights.len();
+        let width = crate::logic_tree::get_width(NodeId(raw), arena);
+        weights.push(width.div_ceil(64).max(1));
+    }
+    for row in &mut raw_tokens {
+        row.retain(|raw| dense_by_raw[*raw] != usize::MAX);
+        for token in row.iter_mut() {
+            *token = dense_by_raw[*token];
+        }
+    }
+    (raw_tokens, weights)
+}
+
 fn schedule_acyclic_path_region(
     paths: &[usize],
     dependencies: &[Vec<usize>],
     value_dependencies: &[Vec<usize>],
+    materialization_tokens: &[Vec<usize>],
+    token_weights: &[usize],
     local_by_path: &mut [usize],
 ) -> Option<Vec<Vec<usize>>> {
     for (local, &path) in paths.iter().enumerate() {
@@ -2397,7 +2516,9 @@ fn schedule_acyclic_path_region(
     let result = (|| {
         let mut local_dependencies = vec![Vec::<usize>::new(); paths.len()];
         let mut local_values = vec![Vec::<usize>::new(); paths.len()];
+        let mut local_tokens = vec![Vec::<usize>::new(); paths.len()];
         for (definition, &path) in paths.iter().enumerate() {
+            local_tokens[definition] = materialization_tokens.get(path)?.clone();
             for &user_path in dependencies.get(path)? {
                 let user = *local_by_path.get(user_path)?;
                 if user != usize::MAX && definition != user {
@@ -2419,7 +2540,13 @@ fn schedule_acyclic_path_region(
             row.sort_unstable();
             row.dedup();
         }
-        let order = schedule_min_live_values(&local_dependencies, &local_values).ok()?;
+        let order = schedule_min_live_values_and_tokens(
+            &local_dependencies,
+            &local_values,
+            &local_tokens,
+            token_weights,
+        )
+        .ok()?;
         Some(order.into_iter().map(|local| vec![paths[local]]).collect())
     })();
 
@@ -2436,9 +2563,14 @@ fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
     topological_sccs: Vec<Vec<usize>>,
     dependencies: &[Vec<usize>],
     value_dependencies: &[Vec<usize>],
+    materialization_tokens: &[Vec<usize>],
+    token_weights: &[usize],
     input: &[LogicPath<Addr>],
 ) -> Option<Vec<Vec<usize>>> {
-    if dependencies.len() != value_dependencies.len() || dependencies.len() < input.len() {
+    if dependencies.len() != value_dependencies.len()
+        || dependencies.len() != materialization_tokens.len()
+        || dependencies.len() < input.len()
+    {
         return None;
     }
     let mut local_by_path = vec![usize::MAX; dependencies.len()];
@@ -2455,6 +2587,8 @@ fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
             pending,
             dependencies,
             value_dependencies,
+            materialization_tokens,
+            token_weights,
             local_by_path,
         )?);
         pending.clear();
@@ -2537,6 +2671,8 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     // This is the source dataflow adapter; interval indexing and DAG
     // scheduling remain IR-independent in celox-analysis.
     let n = input.len();
+    let (mut materialization_tokens, token_weights) =
+        logic_path_materialization_tokens(&input, arena);
     let semantic_regions = input
         .iter()
         .filter_map(|path| Some((*path.target.var()?, path.semantic_region?)))
@@ -2552,9 +2688,11 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     let ff_count = ff
         .as_deref()
         .map_or(0, |lowering| lowering.summaries().len());
+    let mut direct_ff = vec![false; ff_count];
     if let Some(plan) = &ff_plan {
         adj.resize_with(n + ff_count, Vec::new);
         value_users.resize_with(n + ff_count, Vec::new);
+        materialization_tokens.resize_with(n + ff_count, Vec::new);
         for (ff_index, predecessors) in plan.comb_value_predecessors.iter().enumerate() {
             let ff_node = n + ff_index;
             for &definition in predecessors {
@@ -2562,35 +2700,57 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                 value_users[definition].push(ff_node);
             }
         }
-        let comb_write_order_edges =
-            plan.comb_before_direct_write
-                .iter()
-                .enumerate()
-                .flat_map(|(writer, readers)| {
-                    readers
-                        .iter()
-                        .copied()
-                        .map(move |reader| (reader, n + writer))
-                });
-        let ff_write_order_edges =
-            plan.ff_before_direct_write
-                .iter()
-                .enumerate()
-                .flat_map(|(writer, readers)| {
-                    readers
-                        .iter()
-                        .copied()
-                        .map(move |reader| (n + reader, n + writer))
-                });
-        add_acyclic_ff_write_order_edges(
-            &mut adj,
-            comb_write_order_edges.chain(ff_write_order_edges),
-        );
+        let write_order_edges = plan
+            .comb_before_direct_write
+            .iter()
+            .zip(&plan.ff_before_direct_write)
+            .enumerate()
+            .map(|(writer, (comb_readers, ff_readers))| {
+                comb_readers
+                    .iter()
+                    .copied()
+                    .map(|reader| (reader, n + writer))
+                    .chain(
+                        ff_readers
+                            .iter()
+                            .copied()
+                            .map(|reader| (n + reader, n + writer)),
+                    )
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let retained =
+            add_acyclic_ff_write_order_edges(&mut adj, write_order_edges.iter().flatten().copied());
+        for (writer, requirements) in write_order_edges.iter().enumerate() {
+            // An FF action with no old-state users is directly publishable.
+            // Otherwise every reader-before-writer anti-dependence must have
+            // survived cycle removal.  A partial set is not a proof.
+            direct_ff[writer] = requirements.iter().all(|edge| retained.contains(edge));
+        }
         for edges in adj.iter_mut().chain(&mut value_users) {
             edges.sort_unstable();
             edges.dedup();
         }
     }
+    let direct_ff_writes =
+        ff.as_deref()
+            .map(|lowering| {
+                lowering
+                    .summaries()
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| direct_ff.get(*index).copied().unwrap_or(false))
+                    .flat_map(|(_, summary)| {
+                        summary.writes.iter().filter_map(|write| {
+                            let reads_old_value = summary.reads.iter().any(|read| {
+                                read.id == write.id && read.access.overlaps(&write.access)
+                            });
+                            (!reads_old_value).then_some(*write)
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
     // 2. SCC extraction identifies the synchronization boundaries at which
     // the dataflow equations must be iterated rather than freely reordered.
@@ -2614,10 +2774,17 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         stable_topological_sccs(ctx.sccs, &adj, &path_domains).ok_or(ClockSortError::Scheduler(
             SchedulerError::InvalidDependencyGraph,
         ))?;
-    let scheduled_nodes = schedule_logic_path_regions(topological_sccs, &adj, &value_users, &input)
-        .ok_or(ClockSortError::Scheduler(
-            SchedulerError::InvalidDependencyGraph,
-        ))?;
+    let scheduled_nodes = schedule_logic_path_regions(
+        topological_sccs,
+        &adj,
+        &value_users,
+        &materialization_tokens,
+        &token_weights,
+        &input,
+    )
+    .ok_or(ClockSortError::Scheduler(
+        SchedulerError::InvalidDependencyGraph,
+    ))?;
     let mut scheduled_work = Vec::with_capacity(scheduled_nodes.len());
     for nodes in scheduled_nodes {
         if nodes.iter().all(|node| *node < n) {
@@ -2636,7 +2803,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     let mut builder = SIRBuilder::new();
     if let Some(ff_lowering) = ff.as_deref_mut() {
         ff_lowering
-            .begin(&mut builder)
+            .begin(&mut builder, &direct_ff)
             .map_err(ClockSortError::Lowering)?;
     }
     let lowerer = crate::logic_tree::SLTToSIRLowerer::new(four_state)
@@ -2699,7 +2866,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
                     .ok_or(ClockSortError::Scheduler(
                         SchedulerError::InvalidDependencyGraph,
                     ))?
-                    .lower(index, &mut builder)
+                    .lower(index, direct_ff[index], &mut builder)
                     .map_err(ClockSortError::Lowering)?;
                 // FF state is staged in WORKING/SPARSE_WORKING and is invisible
                 // to the STABLE-only comb graph until the final publish. Values
@@ -3048,7 +3215,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
 
     if let Some(ff_lowering) = ff.as_deref_mut() {
         ff_lowering
-            .finish(&mut builder)
+            .finish(&mut builder, &direct_ff)
             .map_err(ClockSortError::Lowering)?;
     }
     builder.seal_block(SIRTerminator::Return);
@@ -3062,6 +3229,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         execution_units: result_eus,
         runtime_errors,
         semantic_regions,
+        direct_ff_writes,
     })
 }
 
@@ -3261,6 +3429,19 @@ mod tests {
         assert_eq!(plan.comb_value_predecessors, vec![vec![0, 1], vec![]]);
         assert_eq!(plan.comb_before_direct_write, vec![vec![1], vec![]]);
         assert_eq!(plan.ff_before_direct_write, vec![vec![1], vec![]]);
+    }
+
+    #[test]
+    fn ff_plan_keeps_same_recipe_old_state_reads_local_to_lowering() {
+        let summary = crate::ir::FfAccessSummary {
+            reads: vec![VarAtomBase::new(20, 0, 7)],
+            writes: vec![VarAtomBase::new(20, 0, 7)],
+            dynamic_writes: HashSet::default(),
+        };
+
+        let plan = plan_ff_comb_schedule(&[], &[summary]).unwrap();
+
+        assert_eq!(plan.ff_before_direct_write, vec![Vec::<usize>::new()]);
     }
 
     #[test]

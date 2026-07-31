@@ -417,6 +417,54 @@ fn rewrite_global_static_slots_in_place(
     Some(changed)
 }
 
+/// Promote exact STABLE-region slots which are entirely defined inside a
+/// fused comb/FF evaluation.
+///
+/// A persistent RTL value is live on entry and therefore cannot be selected.
+/// The remaining eligible slots are compiler-created comb temporaries: every
+/// path defines them before use, they do not alias an imprecise access, and
+/// their stores carry no trigger or capture effect.  Keeping those values in
+/// memory would merely encode an edge in the comb dependency graph as a
+/// Store/Load pair.
+pub(crate) fn promote_fused_comb_static_slots(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+) -> Result<bool, String> {
+    let cfg = SirCfg::analyze(eu).map_err(|error| error.to_string())?;
+    let state =
+        StateSsa::analyze(eu, &cfg, STABLE_REGION, None).map_err(|error| error.to_string())?;
+    let promotable = state
+        .slots
+        .iter()
+        .filter(|slot| {
+            !slot.has_effectful_store
+                && !slot.has_kill
+                && !slot.escapes
+                && !slot.live_in_entry
+                && !slot.phi_blocks.contains(&0)
+        })
+        .map(|slot| slot.fragment)
+        .collect::<HashSet<_>>();
+    if promotable.is_empty() {
+        return Ok(false);
+    }
+
+    let mut stable_passthroughs = HashMap::default();
+    let changed = rewrite_global_static_slots_in_place(
+        eu,
+        STABLE_REGION,
+        PromotionPolicy::Exact(&promotable),
+        &HashMap::default(),
+        None,
+        &mut stable_passthroughs,
+    )
+    .ok_or_else(|| "failed to construct fused comb STABLE StateSSA".to_string())?;
+    if !changed {
+        return Ok(false);
+    }
+    eu.verify_result().map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct WorkingRoundTripKey {
     address: AbsoluteAddr,

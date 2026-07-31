@@ -2517,6 +2517,24 @@ impl SLTToSIRLowerer {
                         self.lookup_override(builder, arena, cache, env, id, index, access)
                 {
                     reg
+                } else if index.is_empty()
+                    && let Some(&element_width) = self.unpacked_input_element_widths.get(&node)
+                    && access.lsb % element_width == 0
+                    && (access.msb - access.lsb + 1) % element_width == 0
+                    && access.msb - access.lsb + 1 > element_width
+                {
+                    let width = access.msb - access.lsb + 1;
+                    let destination = builder.alloc_logic(width);
+                    builder.emit(SIRInstruction::Load(
+                        destination,
+                        id.clone(),
+                        SIROffset::PackedElements {
+                            bit_offset: access.lsb,
+                            element_width,
+                        },
+                        width,
+                    ));
+                    destination
                 } else {
                     self.lower_input(builder, id, index, access, arena, cache, env)
                 }

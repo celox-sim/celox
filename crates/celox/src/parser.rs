@@ -1507,7 +1507,27 @@ pub(crate) fn flatten(
         if let Some(start) = fused_start {
             eprintln!("[flatten] scheduler::sort_clock: {:?}", start.elapsed());
         }
-        let units = fused.execution_units;
+        let direct_ff_writes = fused.direct_ff_writes;
+        let mut units = fused.execution_units;
+        for unit in &mut units {
+            let removed = crate::optimizer::coalescing::eliminate_shared_comb_state_stores(
+                unit,
+                &direct_ff_writes,
+            )
+            .map_err(|message| {
+                ParserError::illegal_context("shared comb/FF state-publication DSE", message, None)
+            })?;
+            if removed != 0 {
+                crate::optimizer::coalescing::remove_dead_sir_definitions(unit);
+            }
+            if crate::optimizer::coalescing::promote_fused_comb_static_slots(unit).map_err(
+                |message| {
+                    ParserError::illegal_context("fused comb StateSSA promotion", message, None)
+                },
+            )? {
+                crate::optimizer::coalescing::remove_dead_sir_definitions(unit);
+            }
+        }
         fused_schedule_cache.insert(recipe_ids, units.clone());
         eval_comb_apply_ffs.insert(trigger, units);
     }
@@ -2774,19 +2794,53 @@ impl<'a> SharedClockLowering<'a> {
         }
     }
 
+    fn direct_var(
+        summary: &crate::ir::FfAccessSummary<RegionedAbsoluteAddr>,
+        action_direct: bool,
+        address: AbsoluteAddr,
+    ) -> bool {
+        action_direct
+            && summary.writes.iter().any(|write| {
+                write.id.absolute_addr() == address
+                    && !summary
+                        .reads
+                        .iter()
+                        .any(|read| read.id == write.id && read.access.overlaps(&write.access))
+            })
+            && !summary.writes.iter().any(|write| {
+                write.id.absolute_addr() == address
+                    && summary
+                        .reads
+                        .iter()
+                        .any(|read| read.id == write.id && read.access.overlaps(&write.access))
+            })
+    }
+
     fn emit_region_copies(
         builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
         summaries: &[crate::ir::FfAccessSummary<RegionedAbsoluteAddr>],
+        direct: &[bool],
         src_region: u32,
         dst_region: u32,
     ) {
         let dynamic = summaries
             .iter()
-            .flat_map(|summary| summary.dynamic_writes.iter())
+            .enumerate()
+            .flat_map(|(index, summary)| {
+                let action_direct = direct.get(index).copied().unwrap_or(false);
+                summary.dynamic_writes.iter().filter(move |address| {
+                    !Self::direct_var(summary, action_direct, address.absolute_addr())
+                })
+            })
             .map(RegionedAbsoluteAddr::absolute_addr)
             .collect::<HashSet<_>>();
         let mut ranges = BTreeMap::<AbsoluteAddr, Vec<crate::ir::BitAccess>>::new();
-        for target in summaries.iter().flat_map(|summary| &summary.writes) {
+        for target in summaries.iter().enumerate().flat_map(|(index, summary)| {
+            let action_direct = direct.get(index).copied().unwrap_or(false);
+            summary.writes.iter().filter(move |target| {
+                !Self::direct_var(summary, action_direct, target.id.absolute_addr())
+            })
+        }) {
             let addr = target.id.absolute_addr();
             if !dynamic.contains(&addr) {
                 ranges.entry(addr).or_default().push(target.access);
@@ -2819,14 +2873,26 @@ impl<'a> SharedClockLowering<'a> {
     fn emit_sparse_commits(
         builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
         summaries: &[crate::ir::FfAccessSummary<RegionedAbsoluteAddr>],
+        direct: &[bool],
     ) {
         let dynamic = summaries
             .iter()
-            .flat_map(|summary| summary.dynamic_writes.iter())
+            .enumerate()
+            .flat_map(|(index, summary)| {
+                let action_direct = direct.get(index).copied().unwrap_or(false);
+                summary.dynamic_writes.iter().filter(move |address| {
+                    !Self::direct_var(summary, action_direct, address.absolute_addr())
+                })
+            })
             .map(RegionedAbsoluteAddr::absolute_addr)
             .collect::<HashSet<_>>();
         let mut widths = BTreeMap::<AbsoluteAddr, usize>::new();
-        for target in summaries.iter().flat_map(|summary| &summary.writes) {
+        for target in summaries.iter().enumerate().flat_map(|(index, summary)| {
+            let action_direct = direct.get(index).copied().unwrap_or(false);
+            summary.writes.iter().filter(move |target| {
+                !Self::direct_var(summary, action_direct, target.id.absolute_addr())
+            })
+        }) {
             let addr = target.id.absolute_addr();
             if dynamic.contains(&addr) {
                 widths
@@ -2852,17 +2918,27 @@ impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_
         &self.summaries
     }
 
-    fn begin(&mut self, builder: &mut SIRBuilder<RegionedAbsoluteAddr>) -> Result<(), ParserError> {
-        // One invocation represents one active trigger event.  Every FF in
-        // that event must observe the same pre-event STABLE snapshot, so seed
-        // all staging ranges before lowering any FF action.
-        Self::emit_region_copies(builder, &self.summaries, STABLE_REGION, WORKING_REGION);
+    fn begin(
+        &mut self,
+        builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
+        direct: &[bool],
+    ) -> Result<(), ParserError> {
+        // Only actions whose old-state anti-dependencies form a cycle need a
+        // private snapshot. Direct actions run after every old-state reader.
+        Self::emit_region_copies(
+            builder,
+            &self.summaries,
+            direct,
+            STABLE_REGION,
+            WORKING_REGION,
+        );
         Ok(())
     }
 
     fn lower(
         &mut self,
         index: usize,
+        direct: bool,
         builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
     ) -> Result<(), ParserError> {
         let recipe = self.recipes.get(index).ok_or_else(|| {
@@ -2884,10 +2960,34 @@ impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_
                 recipe.runtime.event_site_base,
             )
             .with_sparse_write_vars(sparse_write_vars);
+        let direct_vars = recipe
+            .summary
+            .writes
+            .iter()
+            .filter_map(|write| {
+                let address = write.id.absolute_addr();
+                let reads_old_value = recipe.summary.writes.iter().any(|candidate| {
+                    candidate.id.absolute_addr() == address
+                        && recipe.summary.reads.iter().any(|read| {
+                            read.id == candidate.id && read.access.overlaps(&candidate.access)
+                        })
+                });
+                (direct && !reads_old_value).then_some(write.id.var_id)
+            })
+            .collect::<HashSet<_>>();
+        let target_region = |var_id, region| {
+            if direct_vars.contains(&var_id)
+                && matches!(region, WORKING_REGION | SPARSE_WORKING_REGION)
+            {
+                STABLE_REGION
+            } else {
+                region
+            }
+        };
         parser.parse_ff_group_into(
             &recipe.declarations,
             &|var_id, region| RegionedAbsoluteAddr {
-                region,
+                region: target_region(var_id, region),
                 instance_id: recipe.instance_id,
                 var_id,
             },
@@ -2899,12 +2999,18 @@ impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_
     fn finish(
         &mut self,
         builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
+        direct: &[bool],
     ) -> Result<(), ParserError> {
-        // Publish once, after every FF has evaluated from the common old-state
-        // snapshot.  Publishing per recipe would turn nonblocking FF updates
-        // into source-order-dependent blocking updates.
-        Self::emit_region_copies(builder, &self.summaries, WORKING_REGION, STABLE_REGION);
-        Self::emit_sparse_commits(builder, &self.summaries);
+        // Cyclic actions retain the common snapshot and publish together.
+        // Direct actions have already published at their proven placement.
+        Self::emit_region_copies(
+            builder,
+            &self.summaries,
+            direct,
+            WORKING_REGION,
+            STABLE_REGION,
+        );
+        Self::emit_sparse_commits(builder, &self.summaries, direct);
         Ok(())
     }
 }
