@@ -23,7 +23,9 @@ pub const STATE_HEADER_SIZE: usize = 32;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET: usize = 0;
 /// Remaining iterations for an in-function native tick loop.
+#[cfg(target_arch = "x86_64")]
 pub const STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET: usize = 8;
+#[cfg(target_arch = "x86_64")]
 pub const STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET: usize = 24;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET: usize = 16;
@@ -380,6 +382,7 @@ impl MemoryLayout {
         )
     }
 
+    #[cfg(any(target_arch = "x86_64", test))]
     pub(crate) fn regioned_static_byte_and_intra(
         &self,
         addr: &RegionedAbsoluteAddr,

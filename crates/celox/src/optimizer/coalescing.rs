@@ -23,7 +23,6 @@ pub(crate) mod pass_dead_store_elimination;
 mod pass_effect_case_dispatch;
 mod pass_eliminate_dead_working_stores;
 pub(crate) mod pass_eliminate_working_round_trip;
-#[cfg(target_arch = "x86_64")]
 mod pass_global_store_load_forwarding;
 mod pass_guarded_region_sinking;
 mod pass_gvn;
@@ -35,6 +34,7 @@ mod pass_loop_idiom;
 mod pass_manager;
 mod pass_masked_array_any;
 mod pass_optimize_blocks;
+#[cfg(any(target_arch = "x86_64", test))]
 mod pass_pack_concat_phi;
 mod pass_packed_scatter_store;
 mod pass_partial_forward;
@@ -58,6 +58,7 @@ pub use pass_tail_call_split::TailCallChunk;
 /// arrays must remain free to coalesce reset/initialization runs before the
 /// ordinary SIR passes; their dynamic element accesses can still use a
 /// strided native layout when the resulting whole Store is a bulk zero fill.
+#[cfg(target_arch = "x86_64")]
 fn preserve_native_element_boundaries(
     array: &crate::backend::memory_layout::UnpackedArrayLayout,
 ) -> bool {
@@ -73,7 +74,6 @@ pub(crate) fn promote_eval_apply_working_round_trips(
     pass_global_store_load_forwarding::promote_eval_apply_working_round_trips(eu)
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn remove_dead_sir_definitions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     pass_vectorize_concat::remove_dead_definitions(eu);
 }
@@ -87,7 +87,6 @@ pub(crate) fn eliminate_unobserved_comb_state_stores(
     fused_comb_dse::eliminate(eu, provenance, first_ff_unit)
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn eliminate_shared_comb_state_stores(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     direct_ff_writes: &[crate::ir::VarAtomBase<RegionedAbsoluteAddr>],
@@ -95,7 +94,6 @@ pub(crate) fn eliminate_shared_comb_state_stores(
     fused_comb_dse::eliminate_shared(eu, direct_ff_writes)
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn promote_fused_comb_static_slots(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Result<bool, String> {
@@ -336,7 +334,9 @@ use pass_gvn::GvnPass;
 use pass_hoist_common_branch_loads::HoistCommonBranchLoadsPass;
 use pass_indexed_store_recovery::IndexedStoreRecoveryPass;
 use pass_loop_idiom::LoopIdiomPass;
-use pass_manager::{ExecutionUnitPass, ExecutionUnitPassManager};
+#[cfg(target_arch = "x86_64")]
+use pass_manager::ExecutionUnitPass;
+use pass_manager::ExecutionUnitPassManager;
 use pass_masked_array_any::MaskedArrayAnyPass;
 use pass_optimize_blocks::OptimizeBlocksPass;
 use pass_packed_scatter_store::PackedScatterStorePass;

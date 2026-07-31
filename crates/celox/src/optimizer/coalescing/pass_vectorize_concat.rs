@@ -15,7 +15,9 @@
 
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::{def_reg, sir_value_to_u64};
+#[cfg(any(target_arch = "x86_64", test))]
 use crate::backend::MemoryLayout;
+#[cfg(any(target_arch = "x86_64", test))]
 use crate::ir::cfg::SirCfg;
 use crate::ir::*;
 use crate::optimizer::PassOptions;
@@ -148,12 +150,14 @@ struct PackedBitStoreSink {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(any(target_arch = "x86_64", test))]
 enum PackedChainDefinition {
     Parameter(BlockId),
     Instruction(BlockId, usize),
 }
 
 #[derive(Clone)]
+#[cfg(any(target_arch = "x86_64", test))]
 struct PackedConditionalStoreChain {
     start: BlockId,
     endpoint: BlockId,
@@ -165,6 +169,7 @@ struct PackedConditionalStoreChain {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(any(target_arch = "x86_64", test))]
 struct PackedConditionalStoreDiamond {
     predicate: RegisterId,
     destination: RegionedAbsoluteAddr,
@@ -175,6 +180,7 @@ struct PackedConditionalStoreDiamond {
     empty_arm: BlockId,
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn packed_chain_definitions(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> HashMap<RegisterId, PackedChainDefinition> {
@@ -195,6 +201,7 @@ fn packed_chain_definitions(
     definitions
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn packed_chain_value_dominates(
     definitions: &HashMap<RegisterId, PackedChainDefinition>,
     cfg: &SirCfg,
@@ -211,6 +218,7 @@ fn packed_chain_value_dominates(
     }
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn packed_chain_bit_constant(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     definitions: &HashMap<RegisterId, PackedChainDefinition>,
@@ -235,6 +243,7 @@ fn packed_chain_bit_constant(
     None
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn packed_chain_single_predecessor(cfg: &SirCfg, block: BlockId, expected: BlockId) -> bool {
     let Some(index) = cfg.block_index(block) else {
         return false;
@@ -242,6 +251,7 @@ fn packed_chain_single_predecessor(cfg: &SirCfg, block: BlockId, expected: Block
     cfg.predecessors[index].as_slice() == cfg.block_index(expected).as_slice()
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn packed_chain_merge_predecessors(
     cfg: &SirCfg,
     merge: BlockId,
@@ -262,6 +272,7 @@ fn packed_chain_merge_predecessors(
     actual == expected
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn packed_constant_store_arm(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     definitions: &HashMap<RegisterId, PackedChainDefinition>,
@@ -293,6 +304,7 @@ fn packed_constant_store_arm(
         .then_some((*destination, *offset, stored_value, *merge))
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn packed_empty_store_arm(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     arm: BlockId,
@@ -307,6 +319,7 @@ fn packed_empty_store_arm(
     arguments.is_empty().then_some(*merge)
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn packed_conditional_store_diamond(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     cfg: &SirCfg,
@@ -366,6 +379,7 @@ fn packed_conditional_store_diamond(
     })
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn packed_range_is_physically_contiguous(
     layout: &MemoryLayout,
     destination: RegionedAbsoluteAddr,
@@ -390,6 +404,7 @@ fn packed_range_is_physically_contiguous(
     })
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn plan_packed_conditional_store_chain(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     cfg: &SirCfg,
@@ -450,6 +465,7 @@ fn plan_packed_conditional_store_chain(
     })
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn collapse_packed_conditional_store_chains_with(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     physically_contiguous: impl Fn(RegionedAbsoluteAddr, usize, usize) -> bool,
@@ -572,6 +588,7 @@ fn collapse_packed_conditional_store_chains_with(
 /// Collapse a serial CFG of conditional one-bit constant stores into one
 /// packed read/modify/write. The physical-layout proof prevents a semantic
 /// packed range from becoming an invalid cross-element native access.
+#[cfg(any(target_arch = "x86_64", test))]
 pub(super) fn collapse_native_packed_conditional_store_chains(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &MemoryLayout,
@@ -591,6 +608,7 @@ pub(super) fn collapse_native_packed_conditional_store_chains(
 /// preserves their observable order while giving the vectorizer one real
 /// packed sink. Native ISel may subsequently combine the exact Slice/Store
 /// pairs when the physical element layout permits it.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn expose_packed_bit_store_sinks(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
     let mut next_register = eu
         .register_map

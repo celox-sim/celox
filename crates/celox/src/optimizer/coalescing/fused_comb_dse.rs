@@ -45,6 +45,7 @@ fn mark_reaching(state: &StateSsa, version: MemoryVersionId, live: &mut [bool]) 
 /// Store is required only when its exact StateSSA version reaches a load in
 /// the FF suffix (or another read before it is overwritten).  Stores carrying
 /// runtime effects and accesses with imprecise aliases remain explicit.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn eliminate(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     provenance: &crate::ir::SirMergeProvenance,

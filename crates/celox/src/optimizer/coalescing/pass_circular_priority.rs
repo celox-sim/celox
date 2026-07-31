@@ -420,6 +420,7 @@ impl ExecutionUnitPass for CircularPriorityPass {
 /// broader circular-priority patterns, the bit-map proof is entirely in the
 /// merged CFG and SSA recurrence. It runs once at the final native SIR
 /// boundary, where branch-expanded predecessors have been inlined.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn recover_native_fixed_bit_map_loops(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> usize {

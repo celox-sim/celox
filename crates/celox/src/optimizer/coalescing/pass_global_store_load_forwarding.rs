@@ -466,12 +466,14 @@ pub(crate) fn promote_fused_comb_static_slots(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg(any(target_arch = "x86_64", test))]
 struct WorkingRoundTripKey {
     address: AbsoluteAddr,
     bit_offset: usize,
     width: usize,
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 impl WorkingRoundTripKey {
     fn overlaps(self, other: Self) -> bool {
         self.address == other.address
@@ -490,6 +492,7 @@ impl WorkingRoundTripKey {
 }
 
 #[derive(Default)]
+#[cfg(any(target_arch = "x86_64", test))]
 struct WorkingRoundTripFacts {
     ty: Option<RegisterType>,
     invalid: bool,
@@ -498,6 +501,7 @@ struct WorkingRoundTripFacts {
     has_apply: bool,
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 impl WorkingRoundTripFacts {
     fn record_type(&mut self, ty: &RegisterType, width: usize) {
         if width == 0
@@ -510,6 +514,7 @@ impl WorkingRoundTripFacts {
     }
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn normalize_working_commits(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     block_order: &[BlockId],
@@ -621,6 +626,7 @@ fn normalize_working_commits(
 /// definitions, and `Commit(WORKING→STABLE)` becomes the sole writeback. This
 /// handles any number of disjoint exact fragments. Sparse, dynamic, overlapping,
 /// escaping, or effectful next-state storage keeps its memory representation.
+#[cfg(any(target_arch = "x86_64", test))]
 pub(crate) fn promote_eval_apply_working_round_trips(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> bool {
@@ -813,10 +819,12 @@ pub(crate) fn promote_eval_apply_working_round_trips(
     true
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn add_register_use(counts: &mut HashMap<RegisterId, usize>, register: RegisterId) {
     *counts.entry(register).or_default() += 1;
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn count_register_uses(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<RegisterId, usize> {
     let mut counts = HashMap::default();
     for block in eu.blocks.values() {
@@ -893,6 +901,7 @@ fn count_register_uses(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> HashMap<Regi
     counts
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn ranges_overlap(
     left_offset: usize,
     left_width: usize,
@@ -903,6 +912,7 @@ fn ranges_overlap(
         && right_offset < left_offset.saturating_add(left_width)
 }
 
+#[cfg(any(target_arch = "x86_64", test))]
 fn instruction_blocks_writeback_motion(
     instruction: &SIRInstruction<RegionedAbsoluteAddr>,
     address: RegionedAbsoluteAddr,
@@ -941,6 +951,7 @@ fn instruction_blocks_writeback_motion(
 /// A writeback whose only operand is a merge value does not need an actual
 /// phi copy. Put the writeback on each single-successor incoming edge instead.
 /// Repeating this peels chains of merge-only live ranges back to their defs.
+#[cfg(any(target_arch = "x86_64", test))]
 fn sink_phi_writebacks_to_predecessors(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     stable_passthroughs: &HashMap<RegisterId, StateFragment>,

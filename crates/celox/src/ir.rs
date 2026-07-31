@@ -818,6 +818,7 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
 #[derive(Debug, Clone)]
 pub(crate) struct SirMergeProvenance {
     pub unit_entries: Vec<BlockId>,
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     pub block_units: crate::HashMap<BlockId, usize>,
 }
 
