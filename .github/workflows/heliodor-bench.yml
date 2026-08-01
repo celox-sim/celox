@@ -39,6 +39,9 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install --yes ripgrep
+
       - name: Run fixed Heliodor correctness and performance gate
         id: gate
         shell: bash
