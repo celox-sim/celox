@@ -457,11 +457,11 @@ dependencies = [
  "celox-design",
  "celox-sir",
  "celox-state-layout",
- "cranelift",
- "cranelift-frontend 0.133.1",
+ "cranelift 0.134.2",
+ "cranelift-frontend 0.134.2",
  "cranelift-jit",
- "cranelift-module",
- "cranelift-native 0.133.1",
+ "cranelift-module 0.134.2",
+ "cranelift-native",
  "fxhash",
  "num-bigint",
 ]
@@ -492,7 +492,7 @@ dependencies = [
  "fxhash",
  "iced-x86",
  "libc",
- "memmap2 0.9.11",
+ "memmap2",
  "num-bigint",
 ]
 
@@ -889,7 +889,18 @@ checksum = "8ce1a521b51cb415f320ea1257bf6caaf08a112d048e7d875c855959918fc436"
 dependencies = [
  "cranelift-codegen 0.133.1",
  "cranelift-frontend 0.133.1",
- "cranelift-module",
+ "cranelift-module 0.133.1",
+]
+
+[[package]]
+name = "cranelift"
+version = "0.134.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acb6f5299ee35492ba1a70a3c80e8b76291bac7503ebff4a8815958060d3b2af"
+dependencies = [
+ "cranelift-codegen 0.134.2",
+ "cranelift-frontend 0.134.2",
+ "cranelift-module 0.134.2",
 ]
 
 [[package]]
@@ -1143,22 +1154,22 @@ checksum = "b6f1c1dc4d6b4bc4f0be12b08cee0e59f7610287827aa62590f8e9ec6f45dff4"
 
 [[package]]
 name = "cranelift-jit"
-version = "0.133.1"
+version = "0.134.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acac8da2c71d03c39756866a4bbf31f43d912f054cf9cbbaacc33bf80360366a"
+checksum = "fc96ccb592b046be204bf2fbeb397761384e5da10cbf0c2095078af3eaaebe55"
 dependencies = [
  "anyhow",
- "cranelift-codegen 0.133.1",
- "cranelift-control 0.133.1",
- "cranelift-entity 0.133.1",
- "cranelift-module",
- "cranelift-native 0.133.1",
+ "cranelift-codegen 0.134.2",
+ "cranelift-control 0.134.2",
+ "cranelift-entity 0.134.2",
+ "cranelift-module 0.134.2",
+ "cranelift-native",
  "libc",
  "log",
- "memmap2 0.2.3",
+ "memmap2",
  "region",
  "target-lexicon",
- "wasmtime-internal-jit-icache-coherence 46.0.1",
+ "wasmtime-internal-jit-icache-coherence",
  "windows-sys 0.61.2",
 ]
 
@@ -1174,14 +1185,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "cranelift-native"
-version = "0.133.1"
+name = "cranelift-module"
+version = "0.134.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d506ef23a60715bde451b06620b14402166ded3b648454fccbf04f3e46a4aa70"
+checksum = "790e3fa73ee25bbb25eee937986051f8b6f6a2f5582477662f95e09d1e9f85f3"
 dependencies = [
- "cranelift-codegen 0.133.1",
- "libc",
- "target-lexicon",
+ "anyhow",
+ "cranelift-codegen 0.134.2",
+ "cranelift-control 0.134.2",
 ]
 
 [[package]]
@@ -2424,15 +2435,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ad38eb12aea514a0466ea40a80fd8cc83637065948eb4a426e4aa46261175227"
 dependencies = [
  "rustix",
-]
-
-[[package]]
-name = "memmap2"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "723e3ebdcdc5c023db1df315364573789f8857c11b631a2fdfad7c00f5c046b4"
-dependencies = [
- "libc",
 ]
 
 [[package]]
@@ -4121,14 +4123,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f13508dc62977434fab2013cf58aaf29172727686c813eeb2020610d5e0ed5ca"
 dependencies = [
  "clap",
- "cranelift",
+ "cranelift 0.133.1",
  "daggy",
  "fst-writer",
  "fxhash",
  "indent",
  "libloading",
  "log",
- "memmap2 0.9.11",
+ "memmap2",
  "miette",
  "num-bigint",
  "num-traits",
@@ -4392,7 +4394,7 @@ dependencies = [
  "wasmtime-internal-cranelift",
  "wasmtime-internal-fiber",
  "wasmtime-internal-jit-debug",
- "wasmtime-internal-jit-icache-coherence 47.0.2",
+ "wasmtime-internal-jit-icache-coherence",
  "wasmtime-internal-unwinder",
  "wasmtime-internal-versioned-export-macros",
  "wat",
@@ -4505,7 +4507,7 @@ dependencies = [
  "cranelift-control 0.134.2",
  "cranelift-entity 0.134.2",
  "cranelift-frontend 0.134.2",
- "cranelift-native 0.134.2",
+ "cranelift-native",
  "gimli 0.33.0",
  "itertools 0.14.0",
  "log",
@@ -4546,18 +4548,6 @@ dependencies = [
  "object 0.39.1",
  "rustix",
  "wasmtime-internal-versioned-export-macros",
-]
-
-[[package]]
-name = "wasmtime-internal-jit-icache-coherence"
-version = "46.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eba651d44ab0faad4c58106b3adb45068189fb65ef50f0c404b6d9e3bf81a357"
-dependencies = [
- "cfg-if",
- "libc",
- "wasmtime-internal-core 46.0.1",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
