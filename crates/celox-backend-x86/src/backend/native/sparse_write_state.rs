@@ -18,9 +18,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use celox_analysis::ssa::{self, Event, Version};
 
 use crate::HashMap;
-use crate::backend::memory_layout::MemoryLayout;
-use crate::ir::cfg::SirCfg;
-use crate::ir::{
+use crate::MemoryLayout;
+use crate::cfg::SirCfg;
+use crate::{
     AbsoluteAddr, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction,
     SIROffset, SIRTerminator, collect_exact_zero_registers,
 };
@@ -172,7 +172,7 @@ fn finish_zero_fill_group(
     let Some(&logical_width) = layout.widths.get(&object) else {
         return;
     };
-    let multiple_native_chunks = if address.region == crate::ir::STABLE_REGION {
+    let multiple_native_chunks = if address.region == crate::STABLE_REGION {
         layout.plane_size(&object) > 8
     } else {
         layout
@@ -355,7 +355,7 @@ fn find_dead_zero_definitions(
 }
 
 fn is_sparse_origin_zero_fill_region(region: u32) -> bool {
-    region == crate::ir::SPARSE_WORKING_REGION || region == crate::ir::STABLE_REGION
+    region == crate::SPARSE_WORKING_REGION || region == crate::STABLE_REGION
 }
 
 /// Find a whole-object zero overwrite before lowering expands every logical
@@ -377,7 +377,7 @@ fn find_sparse_zero_fills(
             SIRInstruction::Store(address, offset, width, source, triggers, capture_sites)
                 if is_sparse_origin_zero_fill_region(address.region)
                     && offset.constant_bit_offset().is_some()
-                    && (address.region == crate::ir::STABLE_REGION
+                    && (address.region == crate::STABLE_REGION
                         || layout.sparse_layouts.contains_key(&address.absolute_addr()))
                     && *width != 0
                     && triggers.is_empty()
@@ -399,7 +399,7 @@ fn find_sparse_zero_fills(
                 SIRInstruction::Store(address, offset, width, source, triggers, capture_sites)
                     if is_sparse_origin_zero_fill_region(address.region)
                         && offset.constant_bit_offset().is_some()
-                        && (address.region == crate::ir::STABLE_REGION
+                        && (address.region == crate::STABLE_REGION
                             || layout.sparse_layouts.contains_key(&address.absolute_addr()))
                         && *width != 0
                         && triggers.is_empty()
@@ -492,7 +492,7 @@ impl SparseWriteStates {
                 }
                 match inst {
                     SIRInstruction::Store(address, offset, width, _, _, _)
-                        if address.region == crate::ir::SPARSE_WORKING_REGION && *width != 0 =>
+                        if address.region == crate::SPARSE_WORKING_REGION && *width != 0 =>
                     {
                         let object = address.absolute_addr();
                         let footprint = static_chunk_range(layout, object, offset, *width)
@@ -524,8 +524,8 @@ impl SparseWriteStates {
                         stores.push((point, block_id, object, chunk));
                     }
                     SIRInstruction::Commit(source, destination, ..)
-                        if source.region == crate::ir::SPARSE_WORKING_REGION
-                            && destination.region == crate::ir::STABLE_REGION =>
+                        if source.region == crate::SPARSE_WORKING_REGION
+                            && destination.region == crate::STABLE_REGION =>
                     {
                         let object = source.absolute_addr();
                         chunk_plans.entry(object).or_default().commit_count += 1;
@@ -580,7 +580,7 @@ impl SparseWriteStates {
                 }
                 match inst {
                     SIRInstruction::Store(address, offset, width, _, _, _)
-                        if address.region == crate::ir::SPARSE_WORKING_REGION && *width != 0 =>
+                        if address.region == crate::SPARSE_WORKING_REGION && *width != 0 =>
                     {
                         let object = address.absolute_addr();
                         if !partitioned_objects.contains(&object) {
@@ -604,8 +604,8 @@ impl SparseWriteStates {
                         });
                     }
                     SIRInstruction::Commit(source, destination, ..)
-                        if source.region == crate::ir::SPARSE_WORKING_REGION
-                            && destination.region == crate::ir::STABLE_REGION =>
+                        if source.region == crate::SPARSE_WORKING_REGION
+                            && destination.region == crate::STABLE_REGION =>
                     {
                         let object = source.absolute_addr();
                         if !partitioned_objects.contains(&object) {
@@ -902,7 +902,7 @@ fn plan_metadata_batches(
             }
             let candidate = match inst {
                 SIRInstruction::Store(address, offset, width, _, triggers, capture_sites)
-                    if address.region == crate::ir::SPARSE_WORKING_REGION
+                    if address.region == crate::SPARSE_WORKING_REGION
                         && *width != 0
                         && triggers.is_empty()
                         && capture_sites.is_empty() =>
@@ -1383,11 +1383,11 @@ fn classify_chunk_state(possible: u8) -> SparseChunkState {
 mod tests {
     use super::*;
     use crate::HashMap;
-    use crate::backend::memory_layout::MemoryLayoutMode;
-    use crate::ir::{
+    use crate::{
         BasicBlock, InstanceId, RegisterId, RegisterType, SIROffset, SIRTerminator, STABLE_REGION,
     };
     use celox_design::StateObjectId as VarId;
+    use celox_state_layout::MemoryLayoutMode;
 
     fn address(region: u32, variable: u32) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {
@@ -1407,7 +1407,7 @@ mod tests {
         source: RegisterId,
     ) -> SIRInstruction<RegionedAbsoluteAddr> {
         SIRInstruction::Store(
-            address(crate::ir::SPARSE_WORKING_REGION, variable),
+            address(crate::SPARSE_WORKING_REGION, variable),
             SIROffset::Static(bit_offset),
             1,
             source,
@@ -1418,7 +1418,7 @@ mod tests {
 
     fn commit(variable: u32) -> SIRInstruction<RegionedAbsoluteAddr> {
         SIRInstruction::Commit(
-            address(crate::ir::SPARSE_WORKING_REGION, variable),
+            address(crate::SPARSE_WORKING_REGION, variable),
             address(STABLE_REGION, variable),
             SIROffset::Static(0),
             1,
@@ -1448,8 +1448,8 @@ mod tests {
         let sparse_layouts = (0..=1)
             .map(|variable| {
                 (
-                    address(crate::ir::SPARSE_WORKING_REGION, variable).absolute_addr(),
-                    crate::backend::memory_layout::SparseWorkingLayout {
+                    address(crate::SPARSE_WORKING_REGION, variable).absolute_addr(),
+                    celox_state_layout::SparseWorkingLayout {
                         active_index: variable as usize,
                         chunk_count: 128,
                         dirty_words_offset: 0,
@@ -1498,7 +1498,7 @@ mod tests {
     fn zero_fill_layout() -> MemoryLayout {
         let mut layout = layout();
         for variable in 0..=1 {
-            let object = address(crate::ir::SPARSE_WORKING_REGION, variable).absolute_addr();
+            let object = address(crate::SPARSE_WORKING_REGION, variable).absolute_addr();
             layout.widths.insert(object, 128);
             let sparse = layout.sparse_layouts.get_mut(&object).unwrap();
             sparse.chunk_count = 2;
@@ -1532,7 +1532,7 @@ mod tests {
     }
 
     fn zero_store(variable: u32, bit_offset: usize) -> SIRInstruction<RegionedAbsoluteAddr> {
-        zero_store_in_region(crate::ir::SPARSE_WORKING_REGION, variable, bit_offset)
+        zero_store_in_region(crate::SPARSE_WORKING_REGION, variable, bit_offset)
     }
 
     fn zero_store_in_region(
@@ -1553,7 +1553,7 @@ mod tests {
     #[test]
     fn zero_fill_crosses_only_unrelated_operations() {
         let unit = zero_fill_unit(vec![
-            SIRInstruction::Imm(RegisterId(0), crate::ir::SIRValue::new(0u8)),
+            SIRInstruction::Imm(RegisterId(0), crate::SIRValue::new(0u8)),
             zero_store(0, 0),
             zero_store(1, 0),
             SIRInstruction::RuntimeEvent {
@@ -1571,18 +1571,18 @@ mod tests {
         assert!(plans.is_dead_zero_definition(BlockId(0), 0));
         assert_eq!(
             plans.root(BlockId(0), 4),
-            Some(address(crate::ir::SPARSE_WORKING_REGION, 0))
+            Some(address(crate::SPARSE_WORKING_REGION, 0))
         );
         assert_eq!(
             plans.root(BlockId(0), 5),
-            Some(address(crate::ir::SPARSE_WORKING_REGION, 1))
+            Some(address(crate::SPARSE_WORKING_REGION, 1))
         );
     }
 
     #[test]
     fn direct_stable_zero_fill_keeps_the_sparse_origin_bulk_plan() {
         let unit = zero_fill_unit(vec![
-            SIRInstruction::Imm(RegisterId(0), crate::ir::SIRValue::new(0u8)),
+            SIRInstruction::Imm(RegisterId(0), crate::SIRValue::new(0u8)),
             zero_store_in_region(STABLE_REGION, 0, 0),
             zero_store_in_region(STABLE_REGION, 0, 64),
         ]);
@@ -1597,7 +1597,7 @@ mod tests {
     #[test]
     fn direct_stable_zero_fill_does_not_require_a_sparse_home() {
         let unit = zero_fill_unit(vec![
-            SIRInstruction::Imm(RegisterId(0), crate::ir::SIRValue::new(0u8)),
+            SIRInstruction::Imm(RegisterId(0), crate::SIRValue::new(0u8)),
             zero_store_in_region(STABLE_REGION, 0, 0),
             zero_store_in_region(STABLE_REGION, 0, 64),
         ]);
@@ -1616,11 +1616,11 @@ mod tests {
     #[test]
     fn same_object_read_prevents_zero_fill_reordering() {
         let unit = zero_fill_unit(vec![
-            SIRInstruction::Imm(RegisterId(0), crate::ir::SIRValue::new(0u8)),
+            SIRInstruction::Imm(RegisterId(0), crate::SIRValue::new(0u8)),
             zero_store(0, 0),
             SIRInstruction::Load(
                 RegisterId(1),
-                address(crate::ir::SPARSE_WORKING_REGION, 0),
+                address(crate::SPARSE_WORKING_REGION, 0),
                 SIROffset::Static(0),
                 64,
             ),
@@ -1635,7 +1635,7 @@ mod tests {
     #[test]
     fn partial_zero_overwrite_is_not_a_fill() {
         let unit = zero_fill_unit(vec![
-            SIRInstruction::Imm(RegisterId(0), crate::ir::SIRValue::new(0u8)),
+            SIRInstruction::Imm(RegisterId(0), crate::SIRValue::new(0u8)),
             zero_store(0, 0),
         ]);
 
@@ -1647,10 +1647,10 @@ mod tests {
     #[test]
     fn zero_fill_elides_its_wide_concat_tree() {
         let mut unit = zero_fill_unit(vec![
-            SIRInstruction::Imm(RegisterId(0), crate::ir::SIRValue::new(0u8)),
+            SIRInstruction::Imm(RegisterId(0), crate::SIRValue::new(0u8)),
             SIRInstruction::Concat(RegisterId(1), vec![RegisterId(0), RegisterId(0)]),
             SIRInstruction::Store(
-                address(crate::ir::SPARSE_WORKING_REGION, 0),
+                address(crate::SPARSE_WORKING_REGION, 0),
                 SIROffset::Static(0),
                 128,
                 RegisterId(1),
@@ -2047,7 +2047,7 @@ mod tests {
                 instructions: vec![
                     store(0, RegisterId(0)),
                     SIRInstruction::Store(
-                        address(crate::ir::SPARSE_WORKING_REGION, 0),
+                        address(crate::SPARSE_WORKING_REGION, 0),
                         SIROffset::Dynamic(RegisterId(0)),
                         1,
                         RegisterId(0),
@@ -2100,7 +2100,7 @@ mod tests {
                     id: BlockId(1),
                     params: vec![],
                     instructions: vec![SIRInstruction::Store(
-                        address(crate::ir::SPARSE_WORKING_REGION, 0),
+                        address(crate::SPARSE_WORKING_REGION, 0),
                         SIROffset::Dynamic(RegisterId(0)),
                         1,
                         RegisterId(0),
@@ -2148,7 +2148,7 @@ mod tests {
                 params: vec![],
                 instructions: vec![
                     SIRInstruction::Store(
-                        address(crate::ir::SPARSE_WORKING_REGION, 0),
+                        address(crate::SPARSE_WORKING_REGION, 0),
                         SIROffset::Static(0),
                         128,
                         RegisterId(0),

@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use crate::backend::native::mir::{BlockId, MFunction, VReg};
+use crate::native::mir::{BlockId, MFunction, VReg};
 
 use super::analysis::AnalysisResult;
 use super::assignment::{RegConstraint, clobbers, use_constraints};

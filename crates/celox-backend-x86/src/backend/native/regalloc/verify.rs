@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::backend::native::mir::{BlockId, MFunction, VReg};
+use crate::native::mir::{BlockId, MFunction, VReg};
 
 use super::analysis::AnalysisResult;
 use super::assignment::{
@@ -242,10 +242,8 @@ fn error(block: BlockId, instruction: Option<usize>, message: String) -> Allocat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::features::X86Features;
-    use crate::backend::native::mir::{
-        BaseReg, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator,
-    };
+    use crate::native::features::X86Features;
+    use crate::native::mir::{BaseReg, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator};
 
     fn shift_function(bmi2: bool) -> MFunction {
         let mut vregs = VRegAllocator::new();

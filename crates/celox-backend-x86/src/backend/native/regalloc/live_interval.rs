@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use fxhash::FxHashSet;
 
-use crate::backend::native::mir::{BlockId, MFunction, Uses, VReg};
+use crate::native::mir::{BlockId, MFunction, Uses, VReg};
 
 use super::cfg::NormalizedCfg;
 
@@ -3390,7 +3390,7 @@ impl DominatorIntervals {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{
+    use crate::native::mir::{
         BaseReg, MBlock, MFunction, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator,
     };
 

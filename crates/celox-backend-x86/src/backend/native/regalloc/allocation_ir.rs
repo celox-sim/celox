@@ -9,9 +9,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 
-use crate::backend::native::features::VariableShiftEncoding;
-use crate::backend::native::memory_effect::{self, UnknownMemory};
-use crate::backend::native::mir::{
+use crate::native::features::VariableShiftEncoding;
+use crate::native::memory_effect::{self, UnknownMemory};
+use crate::native::mir::{
     BaseReg, BlockId, MBlock, MFunction, MInst, OpSize, PackedStateHome, PhiNode, SpillDesc,
     StateHomeId, Uses, VReg,
 };
@@ -4924,10 +4924,8 @@ pub(super) fn verify_materialized_state_homes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{
-        BaseReg, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator,
-    };
-    use crate::backend::native::regalloc::assignment::AssignmentMap;
+    use crate::native::mir::{BaseReg, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator};
+    use crate::native::regalloc::assignment::AssignmentMap;
 
     fn function(value_count: u32, blocks: Vec<MBlock>) -> MFunction {
         let mut values = VRegAllocator::new();
@@ -6209,10 +6207,7 @@ mod tests {
         assignment.set(second, PhysReg::RDX);
 
         assert_eq!(
-            crate::backend::native::mir_opt::post_regalloc_direct_load_cse(
-                &mut lowered,
-                &assignment,
-            ),
+            crate::native::mir_opt::post_regalloc_direct_load_cse(&mut lowered, &assignment,),
             1
         );
         assert!(lowered.blocks[0].insts.iter().any(|instruction| matches!(
@@ -6276,10 +6271,7 @@ mod tests {
         assignment.set(second, PhysReg::RDX);
 
         assert_eq!(
-            crate::backend::native::mir_opt::post_regalloc_direct_load_cse(
-                &mut lowered,
-                &assignment,
-            ),
+            crate::native::mir_opt::post_regalloc_direct_load_cse(&mut lowered, &assignment,),
             0
         );
         assert!(lowered.blocks[0].insts.iter().any(|instruction| matches!(
@@ -6331,10 +6323,7 @@ mod tests {
         assignment.set(second, PhysReg::RDX);
 
         assert_eq!(
-            crate::backend::native::mir_opt::post_regalloc_direct_load_cse(
-                &mut lowered,
-                &assignment,
-            ),
+            crate::native::mir_opt::post_regalloc_direct_load_cse(&mut lowered, &assignment,),
             0
         );
         assert!(lowered.blocks[0].insts.iter().any(|instruction| matches!(

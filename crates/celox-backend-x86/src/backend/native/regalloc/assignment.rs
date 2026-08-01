@@ -6,8 +6,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use crate::backend::native::features::VariableShiftEncoding;
-use crate::backend::native::mir::*;
+use crate::native::features::VariableShiftEncoding;
+use crate::native::mir::*;
 
 // ────────────────────────────────────────────────────────────────
 // Physical registers
@@ -193,7 +193,7 @@ pub fn is_reg_shift(inst: &MInst) -> bool {
 
 /// Compute clobber points for a block (for use by unified allocator).
 pub fn block_clobber_points_for(
-    block: &crate::backend::native::mir::MBlock,
+    block: &crate::native::mir::MBlock,
 ) -> Vec<(usize, &'static [PhysReg])> {
     block
         .insts

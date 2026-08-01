@@ -7,8 +7,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::backend::native::features::VariableShiftEncoding;
-use crate::backend::native::mir::*;
+use crate::native::features::VariableShiftEncoding;
+use crate::native::mir::*;
 use crate::{HashMap, HashSet};
 
 use super::analysis::AnalysisResult;

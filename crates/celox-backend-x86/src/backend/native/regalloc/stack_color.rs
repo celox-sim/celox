@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 
-use crate::backend::native::mir::{BlockId, MFunction, SpillKind, Uses, VReg};
+use crate::native::mir::{BlockId, MFunction, SpillKind, Uses, VReg};
 
 use super::allocation_ir::StackHomeId;
 use super::cfg::NormalizedCfg;
@@ -975,7 +975,7 @@ fn color_planned_stack_program(
 mod tests {
     use super::super::cfg;
     use super::*;
-    use crate::backend::native::mir::{MBlock, MFunction, MInst, SpillDesc, VRegAllocator};
+    use crate::native::mir::{MBlock, MFunction, MInst, SpillDesc, VRegAllocator};
 
     fn function(value_count: u32, instructions: Vec<MInst>) -> MFunction {
         let mut values = VRegAllocator::new();

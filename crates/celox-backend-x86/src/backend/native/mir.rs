@@ -7,7 +7,7 @@
 
 use std::{collections::HashMap, fmt};
 
-use crate::ir::RegionedAbsoluteAddr;
+use crate::RegionedAbsoluteAddr;
 
 // ────────────────────────────────────────────────────────────────
 // Uses: fixed-size operand list

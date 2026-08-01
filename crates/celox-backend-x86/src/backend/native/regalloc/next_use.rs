@@ -3,7 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
-use crate::backend::native::mir::{BlockId, MFunction, VReg};
+use crate::native::mir::{BlockId, MFunction, VReg};
 
 use super::cfg::NormalizedCfg;
 
@@ -1827,7 +1827,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::backend::native::mir::{
+    use crate::native::mir::{
         BaseReg, BlockId, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator,
     };
 
@@ -2242,10 +2242,10 @@ mod tests {
 
         let mut outer_header = MBlock::new(BlockId(1));
         outer_header.push(MInst::Store {
-            base: crate::backend::native::mir::BaseReg::SimState,
+            base: crate::native::mir::BaseReg::SimState,
             offset: 0,
             src: outer_value,
-            size: crate::backend::native::mir::OpSize::S64,
+            size: crate::native::mir::OpSize::S64,
         });
         outer_header.push(MInst::Branch {
             cond: outer_condition,
@@ -2261,10 +2261,10 @@ mod tests {
         });
         let mut inner_body = MBlock::new(BlockId(3));
         inner_body.push(MInst::Store {
-            base: crate::backend::native::mir::BaseReg::SimState,
+            base: crate::native::mir::BaseReg::SimState,
             offset: 8,
             src: inner_value,
-            size: crate::backend::native::mir::OpSize::S64,
+            size: crate::native::mir::OpSize::S64,
         });
         inner_body.push(MInst::Jump { target: BlockId(2) });
         let mut outer_latch = MBlock::new(BlockId(4));
@@ -2468,10 +2468,10 @@ mod tests {
             byte_len: 8,
         }));
         header.push(MInst::Store {
-            base: crate::backend::native::mir::BaseReg::SimState,
+            base: crate::native::mir::BaseReg::SimState,
             offset: 0,
             src: inside_value,
-            size: crate::backend::native::mir::OpSize::S64,
+            size: crate::native::mir::OpSize::S64,
         });
         header.push(MInst::Branch {
             cond: condition,
@@ -2481,10 +2481,10 @@ mod tests {
 
         let mut exit = MBlock::new(BlockId(2));
         exit.push(MInst::Store {
-            base: crate::backend::native::mir::BaseReg::SimState,
+            base: crate::native::mir::BaseReg::SimState,
             offset: 8,
             src: exit_value,
-            size: crate::backend::native::mir::OpSize::S64,
+            size: crate::native::mir::OpSize::S64,
         });
         exit.push(MInst::Return);
         func.blocks = vec![entry, header, exit];

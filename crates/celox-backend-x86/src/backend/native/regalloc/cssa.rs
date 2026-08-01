@@ -12,9 +12,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 
-use crate::backend::native::mir::{
-    BlockId, MFunction, MInst, PhiNode, SpillDesc, VReg, VRegAllocator,
-};
+use crate::native::mir::{BlockId, MFunction, MInst, PhiNode, SpillDesc, VReg, VRegAllocator};
 use crate::{HashMap, HashSet};
 
 use super::cfg::NormalizedCfg;
@@ -816,7 +814,7 @@ impl<'a> LiveClasses<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{MBlock, SpillDesc};
+    use crate::native::mir::{MBlock, SpillDesc};
 
     fn diamond_with_phi(use_source_after_join: bool) -> (MFunction, VReg, VReg, VReg) {
         let mut vregs = VRegAllocator::new();

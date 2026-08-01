@@ -15,8 +15,8 @@ use celox_analysis::memory_ssa::{
     MemoryClobber, MemoryPointMap,
 };
 
-use crate::backend::native::memory_effect::{self, MemoryObject, analysis_effects};
-use crate::backend::native::mir::{BaseReg, BlockId, CmpKind, MFunction, MInst, OpSize, VReg};
+use crate::native::memory_effect::{self, MemoryObject, analysis_effects};
+use crate::native::mir::{BaseReg, BlockId, CmpKind, MFunction, MInst, OpSize, VReg};
 
 use super::cfg::NormalizedCfg;
 
@@ -1888,12 +1888,12 @@ fn canonical_instruction_bits(
                 .then(|| func.spill_desc(*dst))
                 .flatten()
                 .and_then(|descriptor| match descriptor.kind {
-                    crate::backend::native::mir::SpillKind::SimState { width_bits, .. }
-                    | crate::backend::native::mir::SpillKind::SimStateAlias {
-                        width_bits, ..
-                    } => u8::try_from(width_bits).ok(),
-                    crate::backend::native::mir::SpillKind::Stack
-                    | crate::backend::native::mir::SpillKind::Remat { .. } => None,
+                    crate::native::mir::SpillKind::SimState { width_bits, .. }
+                    | crate::native::mir::SpillKind::SimStateAlias { width_bits, .. } => {
+                        u8::try_from(width_bits).ok()
+                    }
+                    crate::native::mir::SpillKind::Stack
+                    | crate::native::mir::SpillKind::Remat { .. } => None,
                 });
             logical.map_or(physical, |logical| logical.min(physical))
         }
@@ -3508,10 +3508,8 @@ fn available_fragment_recipe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{
-        MBlock, MemoryAliasRange, PhiNode, SpillDesc, VRegAllocator,
-    };
-    use crate::ir::{InstanceId, RegionedAbsoluteAddr, STABLE_REGION};
+    use crate::native::mir::{MBlock, MemoryAliasRange, PhiNode, SpillDesc, VRegAllocator};
+    use crate::{InstanceId, RegionedAbsoluteAddr, STABLE_REGION};
     use celox_design::StateObjectId as VarId;
 
     fn function_with_values(count: usize) -> (MFunction, Vec<VReg>) {

@@ -6,7 +6,7 @@
 //! spill placement cannot silently assign different prices to the same
 //! machine value.
 
-use crate::backend::native::mir::{MFunction, VReg};
+use crate::native::mir::{MFunction, VReg};
 
 use super::reload::{EdgeUse, PlanningRecipes, PointUse};
 
@@ -62,7 +62,7 @@ impl<'a> MachineSpillCosts<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{SpillDesc, VRegAllocator};
+    use crate::native::mir::{SpillDesc, VRegAllocator};
 
     #[test]
     fn descriptors_and_global_recipes_share_one_cost_model() {

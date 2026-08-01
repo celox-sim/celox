@@ -7,15 +7,15 @@ use super::mir::*;
 use super::sparse_write_state::{
     SparseChunkState, SparseMetadataAction, SparseWriteState, SparseWriteStates,
 };
-use crate::backend::MemoryLayout;
-#[cfg(test)]
-use crate::backend::memory_layout::MemoryLayoutMode;
-use crate::ir::{
+use crate::MemoryLayout;
+use crate::{
     BasicBlock, BinaryOp, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
     SIRTerminator, UnaryOp,
 };
-use crate::ir::{RegionedAbsoluteAddr, STABLE_REGION};
 use crate::{HashMap, HashSet};
+use crate::{RegionedAbsoluteAddr, STABLE_REGION};
+#[cfg(test)]
+use celox_state_layout::MemoryLayoutMode;
 
 /// Maps SIR RegisterId → MIR VReg for the current execution unit.
 struct RegMap {
@@ -53,14 +53,14 @@ fn parse_trace_sir_regs() -> HashSet<RegisterId> {
 
 fn find_sparse_worklist_run(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-) -> Option<(crate::ir::BlockId, usize, usize)> {
+) -> Option<(crate::BlockId, usize, usize)> {
     let stored = eu
         .blocks
         .values()
         .flat_map(|block| &block.instructions)
         .filter_map(|instruction| match instruction {
             SIRInstruction::Store(address, ..)
-                if address.region == crate::ir::SPARSE_WORKING_REGION =>
+                if address.region == crate::SPARSE_WORKING_REGION =>
             {
                 Some(address.absolute_addr())
             }
@@ -79,7 +79,7 @@ fn find_sparse_worklist_run(
                 matches!(
                     instruction,
                     SIRInstruction::Commit(source, destination, ..)
-                        if source.region == crate::ir::SPARSE_WORKING_REGION
+                        if source.region == crate::SPARSE_WORKING_REGION
                             && destination.region == STABLE_REGION
                 )
             };
@@ -391,7 +391,7 @@ struct StaticLaneLoad {
 }
 
 fn static_lane_load(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     defs: &HashMap<RegisterId, usize>,
     constants: &HashMap<RegisterId, ExactSirConstant>,
     register_types: &HashMap<RegisterId, RegisterType>,
@@ -400,7 +400,7 @@ fn static_lane_load(
     lane: usize,
 ) -> Option<StaticLaneLoad> {
     fn constant_offset(
-        block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+        block: &crate::BasicBlock<RegionedAbsoluteAddr>,
         defs: &HashMap<RegisterId, usize>,
         constants: &HashMap<RegisterId, ExactSirConstant>,
         register_types: &HashMap<RegisterId, RegisterType>,
@@ -535,7 +535,7 @@ fn swap_compare_kind(kind: CmpKind) -> CmpKind {
 }
 
 fn byte_affine_lane(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     defs: &HashMap<RegisterId, usize>,
     constants: &HashMap<RegisterId, ExactSirConstant>,
     register_types: &HashMap<RegisterId, RegisterType>,
@@ -543,7 +543,7 @@ fn byte_affine_lane(
     lane: usize,
 ) -> Option<(RegisterId, usize)> {
     fn constant_in_block(
-        block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+        block: &crate::BasicBlock<RegionedAbsoluteAddr>,
         defs: &HashMap<RegisterId, usize>,
         constants: &HashMap<RegisterId, ExactSirConstant>,
         register_types: &HashMap<RegisterId, RegisterType>,
@@ -638,7 +638,7 @@ fn byte_affine_lane(
 /// shape is one byte-vector operation; scalarizing every lane creates a long
 /// compare/shift/or chain and unnecessary register pressure.
 fn find_packed_byte_affine_compare_plans(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     register_types: &HashMap<RegisterId, RegisterType>,
     constants: &HashMap<RegisterId, ExactSirConstant>,
     uses: &HashMap<RegisterId, Vec<SirUseSite>>,
@@ -746,7 +746,7 @@ fn find_packed_byte_affine_compare_plans(
 /// may interleave independent work, so memory-version safety is proved by
 /// checking the interval from the earliest load to the root for an object write.
 fn find_packed_lane_compare_plans(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     register_types: &HashMap<RegisterId, RegisterType>,
     constants: &HashMap<RegisterId, ExactSirConstant>,
     layout: &MemoryLayout,
@@ -960,7 +960,7 @@ struct PackedFieldSource {
 }
 
 fn resolve_packed_field_source(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     defs: &HashMap<RegisterId, usize>,
     constants: &HashMap<RegisterId, ExactSirConstant>,
     register_types: &HashMap<RegisterId, RegisterType>,
@@ -1027,7 +1027,7 @@ fn resolve_packed_field_source(
 /// companion recognizes bit-packed fields such as 32 consecutive 12-bit
 /// entries and lowers them with word-level SWAR plus BMI2 PEXT.
 fn find_packed_field_compare_plans(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     register_types: &HashMap<RegisterId, RegisterType>,
     constants: &HashMap<RegisterId, ExactSirConstant>,
     uses: &HashMap<RegisterId, Vec<SirUseSite>>,
@@ -1250,7 +1250,7 @@ pub fn lower_execution_unit(
         SelectorBranchTablePlans::default()
     };
     block_ids.retain(|block| !selector_branch_table_plans.removed_blocks.contains(block));
-    let mut dense_lookup_plans_by_block: HashMap<crate::ir::BlockId, DenseLookupPlans> =
+    let mut dense_lookup_plans_by_block: HashMap<crate::BlockId, DenseLookupPlans> =
         HashMap::default();
     if !four_state {
         let uses = sir_use_sites
@@ -1278,7 +1278,7 @@ pub fn lower_execution_unit(
     }
 
     let mut next_extra_block_id = block_ids.iter().map(|bid| bid.0).max().unwrap_or(0) + 1;
-    let mut sir_exit_mir_blocks: std::collections::HashMap<crate::ir::BlockId, BlockId> =
+    let mut sir_exit_mir_blocks: std::collections::HashMap<crate::BlockId, BlockId> =
         std::collections::HashMap::new();
 
     let mut mask_map = RegMap::new(max_sir_regs);
@@ -1598,9 +1598,8 @@ pub fn lower_execution_unit(
                     write_block.push(MInst::Load {
                         dst: enabled_ptr,
                         base: BaseReg::SimState,
-                        offset:
-                            crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET
-                                as i32,
+                        offset: celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET
+                            as i32,
                         size: OpSize::S64,
                     });
                     let zero = ctx.alloc_vreg(SpillDesc::remat(0));
@@ -1696,7 +1695,7 @@ pub fn lower_execution_unit(
 
         // Capture mask phi sources from this block's terminator (before mask_map changes)
         if four_state {
-            let edges: Vec<(crate::ir::BlockId, &[RegisterId])> = match &sir_block.terminator {
+            let edges: Vec<(crate::BlockId, &[RegisterId])> = match &sir_block.terminator {
                 SIRTerminator::Jump(target, args) => vec![(*target, args.as_slice())],
                 SIRTerminator::Branch {
                     true_block,
@@ -1759,7 +1758,7 @@ pub fn lower_execution_unit(
                 .get(&sir_block_id)
                 .copied()
                 .unwrap_or(BlockId(sir_block_id.0 as u32));
-            let edges: Vec<(crate::ir::BlockId, &[RegisterId])> = match &sir_block.terminator {
+            let edges: Vec<(crate::BlockId, &[RegisterId])> = match &sir_block.terminator {
                 SIRTerminator::Jump(target, args) => vec![(*target, args.as_slice())],
                 SIRTerminator::Branch {
                     true_block,
@@ -1802,7 +1801,7 @@ pub fn lower_execution_unit(
         // Build phi nodes on target blocks
         for mblock in &mut func.blocks {
             if let Some(sources) = phi_sources.remove(&mblock.id) {
-                let sir_block_id = crate::ir::BlockId(mblock.id.0 as usize);
+                let sir_block_id = crate::BlockId(mblock.id.0 as usize);
                 let sir_block = &eu.blocks[&sir_block_id];
                 for (param_idx, param_reg) in sir_block.params.iter().enumerate() {
                     if let Some(dst_chunks) = saved_wide_regs.get(param_reg) {
@@ -1889,8 +1888,8 @@ pub fn lower_execution_unit(
     func
 }
 
-fn ordered_sir_blocks(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Vec<crate::ir::BlockId> {
-    fn successors(term: &SIRTerminator) -> Vec<crate::ir::BlockId> {
+fn ordered_sir_blocks(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Vec<crate::BlockId> {
+    fn successors(term: &SIRTerminator) -> Vec<crate::BlockId> {
         match term {
             SIRTerminator::Jump(target, _) => vec![*target],
             SIRTerminator::Branch {
@@ -1909,9 +1908,9 @@ fn ordered_sir_blocks(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Vec<crate::ir
 
     fn visit_from(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
-        start: crate::ir::BlockId,
-        visited: &mut HashSet<crate::ir::BlockId>,
-        postorder: &mut Vec<crate::ir::BlockId>,
+        start: crate::BlockId,
+        visited: &mut HashSet<crate::BlockId>,
+        postorder: &mut Vec<crate::BlockId>,
     ) {
         let mut stack = vec![(start, false)];
         while let Some((block_id, expanded)) = stack.pop() {
@@ -2534,7 +2533,7 @@ fn load_runtime_event_ptr(ctx: &mut ISelContext, block: &mut MBlock) -> VReg {
     block.push(MInst::Load {
         dst: event_ptr,
         base: BaseReg::SimState,
-        offset: crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
+        offset: celox_state_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
         size: OpSize::S64,
     });
     event_ptr
@@ -2549,14 +2548,14 @@ fn load_runtime_event_ptr_and_comb_capture_enabled(
     block.push(MInst::Load {
         dst: event_ptr,
         base: BaseReg::SimState,
-        offset: crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
+        offset: celox_state_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
         size: OpSize::S64,
     });
     let enabled_ptr = ctx.alloc_vreg(SpillDesc::transient());
     block.push(MInst::Load {
         dst: enabled_ptr,
         base: BaseReg::SimState,
-        offset: crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET as i32,
+        offset: celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET as i32,
         size: OpSize::S64,
     });
     let enabled_byte = ctx.alloc_vreg(SpillDesc::transient());
@@ -2586,7 +2585,7 @@ fn emit_enable_comb_capture_sites(
     block.push(MInst::Load {
         dst: enabled_ptr,
         base: BaseReg::SimState,
-        offset: crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET as i32,
+        offset: celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET as i32,
         size: OpSize::S64,
     });
     let one = ctx.alloc_vreg(SpillDesc::remat(1));
@@ -2825,7 +2824,7 @@ fn lower_runtime_event_write(
     site_id: u32,
     args: &[RegisterId],
 ) {
-    use crate::backend::memory_layout::{
+    use celox_state_layout::{
         RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
         RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
         RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
@@ -3013,7 +3012,7 @@ fn lower_low_bit(ctx: &mut ISelContext, block: &mut MBlock, src: VReg) -> VReg {
 
 #[derive(Clone, Copy)]
 struct SirUseSite {
-    block: crate::ir::BlockId,
+    block: crate::BlockId,
     inst_idx: Option<usize>,
 }
 
@@ -3038,14 +3037,14 @@ struct ExactSirConstant {
 
 #[derive(Default)]
 struct SelectorBranchTablePlans {
-    roots: HashMap<crate::ir::BlockId, SelectorBranchTablePlan>,
-    removed_blocks: HashSet<crate::ir::BlockId>,
+    roots: HashMap<crate::BlockId, SelectorBranchTablePlan>,
+    removed_blocks: HashSet<crate::BlockId>,
 }
 
 struct SelectorBranchTablePlan {
     selector: RegisterId,
     selector_width: usize,
-    targets: Box<[crate::ir::BlockId]>,
+    targets: Box<[crate::BlockId]>,
     skip_indices: HashSet<usize>,
 }
 
@@ -3131,7 +3130,7 @@ fn find_selector_branch_table_plans(
     constants: &HashMap<RegisterId, ExactSirConstant>,
     uses: &HashMap<RegisterId, Vec<SirUseSite>>,
 ) -> SelectorBranchTablePlans {
-    let mut predecessors: HashMap<crate::ir::BlockId, Vec<crate::ir::BlockId>> =
+    let mut predecessors: HashMap<crate::BlockId, Vec<crate::BlockId>> =
         eu.blocks.keys().map(|&block| (block, Vec::new())).collect();
     for block in eu.blocks.values() {
         let successors = match &block.terminator {
@@ -3161,7 +3160,7 @@ fn find_selector_branch_table_plans(
         let mut current = root;
         let mut selector = None;
         let mut selector_width = None;
-        let mut targets = Vec::<Option<crate::ir::BlockId>>::new();
+        let mut targets = Vec::<Option<crate::BlockId>>::new();
         let mut decision_blocks = Vec::new();
         let mut root_skip = HashSet::default();
         let mut default = None;
@@ -3341,7 +3340,7 @@ struct DenseLookupEmitCache {
     table_addrs: HashMap<ConstantTableId, VReg>,
 }
 
-fn exact_sir_constant(value: &crate::ir::SIRValue) -> Option<ExactSirConstant> {
+fn exact_sir_constant(value: &crate::SIRValue) -> Option<ExactSirConstant> {
     if value.mask != num_bigint::BigUint::ZERO {
         return None;
     }
@@ -3380,7 +3379,7 @@ fn collect_exact_sir_constants(
 }
 
 fn find_dense_lookup_plans(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     register_types: &HashMap<RegisterId, RegisterType>,
     constants: &HashMap<RegisterId, ExactSirConstant>,
     uses: &HashMap<RegisterId, Vec<SirUseSite>>,
@@ -3484,7 +3483,7 @@ fn find_dense_lookup_plans(
 }
 
 fn collect_dense_lookup_candidate(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     register_types: &HashMap<RegisterId, RegisterType>,
     constants: &HashMap<RegisterId, ExactSirConstant>,
     defs: &HashMap<RegisterId, usize>,
@@ -3608,7 +3607,7 @@ struct DenseLookupCondition {
 }
 
 fn match_dense_lookup_condition(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     register_types: &HashMap<RegisterId, RegisterType>,
     constants: &HashMap<RegisterId, ExactSirConstant>,
     defs: &HashMap<RegisterId, usize>,
@@ -3755,9 +3754,7 @@ fn collect_sir_inst_uses(
     }
 }
 
-fn collect_sir_defs(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
-) -> HashMap<RegisterId, usize> {
+fn collect_sir_defs(block: &crate::BasicBlock<RegionedAbsoluteAddr>) -> HashMap<RegisterId, usize> {
     let mut defs = HashMap::default();
     for (idx, inst) in block.instructions.iter().enumerate() {
         if let Some(dst) = sir_def_reg(inst) {
@@ -3795,7 +3792,7 @@ fn collect_sir_term_uses(term: &SIRTerminator, mut add: impl FnMut(RegisterId)) 
 }
 
 fn find_priority_encode_plans(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     uses: &HashMap<RegisterId, Vec<SirUseSite>>,
 ) -> PriorityEncodePlans {
     const MIN_PRIORITY_ENCODE_WIDTH: usize = 32;
@@ -3857,7 +3854,7 @@ fn find_priority_encode_plans(
 }
 
 fn collect_priority_encode_candidate(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     defs: &HashMap<RegisterId, usize>,
     root_idx: usize,
     root_dst: RegisterId,
@@ -3950,7 +3947,7 @@ fn collect_priority_encode_candidate(
 }
 
 fn match_priority_encode_cond(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     defs: &HashMap<RegisterId, usize>,
     cond: RegisterId,
     prev_acc: RegisterId,
@@ -3974,7 +3971,7 @@ fn match_priority_encode_cond(
 }
 
 fn match_acc_eq_default(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     defs: &HashMap<RegisterId, usize>,
     eq_reg: RegisterId,
     prev_acc: RegisterId,
@@ -3995,7 +3992,7 @@ fn match_acc_eq_default(
 }
 
 fn match_priority_bit_guard(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     defs: &HashMap<RegisterId, usize>,
     guard: RegisterId,
 ) -> Option<(RegisterId, usize, Vec<usize>, Vec<usize>)> {
@@ -4031,7 +4028,7 @@ fn match_priority_bit_guard(
 }
 
 fn match_bit_extract(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     defs: &HashMap<RegisterId, usize>,
     bit_reg: RegisterId,
 ) -> Option<(RegisterId, usize, Vec<usize>, Vec<usize>)> {
@@ -4073,7 +4070,7 @@ fn match_bit_extract(
 }
 
 fn sir_imm_u64(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     defs: &HashMap<RegisterId, usize>,
     reg: RegisterId,
 ) -> Option<u64> {
@@ -4110,7 +4107,7 @@ fn sir_def_reg(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<RegisterId
 }
 
 fn def_used_only_by_candidate(
-    block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     idx: usize,
     candidate_indices: &HashSet<usize>,
     uses: &HashMap<RegisterId, Vec<SirUseSite>>,
@@ -4516,7 +4513,7 @@ fn lower_four_state_mux_chunk(
 fn emit_sparse_mark_active(
     ctx: &mut ISelContext,
     block: &mut MBlock,
-    sparse: &crate::backend::memory_layout::SparseWorkingLayout,
+    sparse: &celox_state_layout::SparseWorkingLayout,
 ) {
     if ctx.sparse_descriptor_table.is_some() {
         block.push(MInst::SparseMarkActive {
@@ -4581,7 +4578,7 @@ fn emit_state_zero_fill(ctx: &mut ISelContext, block: &mut MBlock, address: Regi
         return;
     }
 
-    debug_assert_eq!(address.region, crate::ir::SPARSE_WORKING_REGION);
+    debug_assert_eq!(address.region, crate::SPARSE_WORKING_REGION);
     let sparse = ctx.layout.sparse_layouts[&object].clone();
     let sparse_base = ctx.layout.sparse_base_offset + ctx.layout.sparse_offsets[&object];
 
@@ -4813,7 +4810,7 @@ fn recomposed_element_byte_offset(
     block: &mut MBlock,
     addr: &RegionedAbsoluteAddr,
     offset: &SIROffset,
-    sir_block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     sir_defs: &HashMap<RegisterId, usize>,
 ) -> Option<VReg> {
     let SIROffset::Element {
@@ -5317,11 +5314,11 @@ fn try_emit_single_chunk_sparse_store(
     offset: &SIROffset,
     width: usize,
     src_reg: RegisterId,
-    triggers: &[crate::ir::TriggerIdWithKind],
+    triggers: &[crate::TriggerIdWithKind],
     comb_capture_sites: &[u32],
     write_state: SparseWriteState,
 ) -> bool {
-    if addr.region != crate::ir::SPARSE_WORKING_REGION
+    if addr.region != crate::SPARSE_WORKING_REGION
         || width == 0
         || width > 64
         || !triggers.is_empty()
@@ -6510,7 +6507,7 @@ fn lower_instruction(
     ctx: &mut ISelContext,
     block: &mut MBlock,
     inst: &SIRInstruction<RegionedAbsoluteAddr>,
-    sir_block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     sir_defs: &HashMap<RegisterId, usize>,
     sparse_write_state: SparseWriteState,
     sparse_chunk_state: SparseChunkState,
@@ -6518,7 +6515,7 @@ fn lower_instruction(
     sparse_metadata_action: SparseMetadataAction,
 ) {
     if let SIRInstruction::Commit(src, dst, _, _, _) = inst
-        && src.region == crate::ir::SPARSE_WORKING_REGION
+        && src.region == crate::SPARSE_WORKING_REGION
         && dst.region == STABLE_REGION
     {
         let abs = src.absolute_addr();
@@ -7325,7 +7322,7 @@ fn lower_instruction(
             ) {
                 return;
             }
-            if addr.region == crate::ir::SPARSE_WORKING_REGION && *width_bits != 0 {
+            if addr.region == crate::SPARSE_WORKING_REGION && *width_bits != 0 {
                 prepare_sparse_store(
                     ctx,
                     block,
@@ -9639,7 +9636,7 @@ fn lower_instruction(
 fn match_guarded_cmp_select_cond(
     ctx: &mut ISelContext,
     block: &mut MBlock,
-    sir_block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     sir_defs: &HashMap<RegisterId, usize>,
     cond: RegisterId,
 ) -> Option<(VReg, VReg, VReg, CmpKind)> {
@@ -9661,7 +9658,7 @@ fn match_guarded_cmp_select_cond(
 
 fn match_cmp_sir_value(
     ctx: &ISelContext,
-    sir_block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     sir_defs: &HashMap<RegisterId, usize>,
     reg: RegisterId,
 ) -> Option<(VReg, VReg, CmpKind)> {
@@ -9838,7 +9835,7 @@ fn try_lower_concat_of_muxes(
     block: &mut MBlock,
     dst: RegisterId,
     args: &[RegisterId],
-    sir_block: &crate::ir::BasicBlock<RegionedAbsoluteAddr>,
+    sir_block: &crate::BasicBlock<RegionedAbsoluteAddr>,
     sir_defs: &HashMap<RegisterId, usize>,
 ) -> bool {
     if ctx.four_state || args.len() < 2 {
@@ -14550,8 +14547,8 @@ fn lower_wide_unary_mask(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::{emit, jit_mem::JitCode, mir_legalize, mir_opt, regalloc};
-    use crate::ir::{AbsoluteAddr, BasicBlock, BlockId as SirBlockId, InstanceId, SIRValue};
+    use crate::native::{emit, jit_mem::JitCode, mir_legalize, mir_opt, regalloc};
+    use crate::{AbsoluteAddr, BasicBlock, BlockId as SirBlockId, InstanceId, SIRValue};
     use celox_design::StateObjectId as VarId;
     use num_bigint::BigUint;
 
@@ -14585,7 +14582,7 @@ mod tests {
 
     #[test]
     fn lowers_bit_packed_field_compare_to_word_swar() {
-        if !crate::backend::native::features::X86Features::detect().bmi2() {
+        if !crate::native::features::X86Features::detect().bmi2() {
             return;
         }
 
@@ -14877,7 +14874,7 @@ mod tests {
         layout.is_4states.insert(absolute, false);
         layout.unpacked_arrays.insert(
             absolute,
-            crate::backend::memory_layout::UnpackedArrayLayout {
+            celox_state_layout::UnpackedArrayLayout {
                 element_width: 1,
                 element_count: 8,
                 element_stride: 1,
@@ -14899,7 +14896,7 @@ mod tests {
         assert_eq!(plan.source, source);
         assert_eq!(plan.lane_count, 8);
 
-        if crate::backend::native::features::X86Features::detect().bmi2() {
+        if crate::native::features::X86Features::detect().bmi2() {
             let function = lower_execution_unit(&unit, &layout, false);
             function.verify();
             assert_eq!(
@@ -15601,7 +15598,7 @@ mod tests {
             .collect();
         layout.unpacked_arrays.insert(
             array_abs,
-            crate::backend::memory_layout::UnpackedArrayLayout {
+            celox_state_layout::UnpackedArrayLayout {
                 element_width: 64,
                 element_count: 2,
                 element_stride,
@@ -15755,7 +15752,7 @@ mod tests {
             .collect();
         layout.unpacked_arrays.insert(
             array_abs,
-            crate::backend::memory_layout::UnpackedArrayLayout {
+            celox_state_layout::UnpackedArrayLayout {
                 element_width: 64,
                 element_count: 16,
                 element_stride: 8,
@@ -15886,7 +15883,7 @@ mod tests {
         layout.is_4states.insert(array_abs, false);
         layout.unpacked_arrays.insert(
             array_abs,
-            crate::backend::memory_layout::UnpackedArrayLayout {
+            celox_state_layout::UnpackedArrayLayout {
                 element_width: 128,
                 element_count: 2,
                 element_stride: 16,
@@ -16005,7 +16002,7 @@ mod tests {
             .collect();
         layout.unpacked_arrays.insert(
             array_abs,
-            crate::backend::memory_layout::UnpackedArrayLayout {
+            celox_state_layout::UnpackedArrayLayout {
                 element_width: 12,
                 element_count: 2,
                 element_stride: 2,
@@ -16099,7 +16096,7 @@ mod tests {
             var_id: VarId::default(),
         };
         let sparse =
-            RegionedAbsoluteAddr::from_absolute_addr(crate::ir::SPARSE_WORKING_REGION, absolute);
+            RegionedAbsoluteAddr::from_absolute_addr(crate::SPARSE_WORKING_REGION, absolute);
         let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
         let value = RegisterId(0);
         let unit = ExecutionUnit {
@@ -16145,7 +16142,7 @@ mod tests {
         layout.is_4states.insert(absolute, false);
         layout.unpacked_arrays.insert(
             absolute,
-            crate::backend::memory_layout::UnpackedArrayLayout {
+            celox_state_layout::UnpackedArrayLayout {
                 element_width: 1,
                 element_count: 4,
                 element_stride: 1,
@@ -16158,7 +16155,7 @@ mod tests {
         layout.sparse_offsets.insert(absolute, 0);
         layout.sparse_layouts.insert(
             absolute,
-            crate::backend::memory_layout::SparseWorkingLayout {
+            celox_state_layout::SparseWorkingLayout {
                 active_index: 0,
                 chunk_count: 1,
                 dirty_words_offset: DIRTY,
@@ -16235,7 +16232,7 @@ mod tests {
             var_id: VarId::default(),
         };
         let sparse =
-            RegionedAbsoluteAddr::from_absolute_addr(crate::ir::SPARSE_WORKING_REGION, absolute);
+            RegionedAbsoluteAddr::from_absolute_addr(crate::SPARSE_WORKING_REGION, absolute);
         let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
         let zero = RegisterId(0);
         let wide_zero = RegisterId(1);
@@ -16283,7 +16280,7 @@ mod tests {
         layout.is_4states.insert(absolute, false);
         layout.unpacked_arrays.insert(
             absolute,
-            crate::backend::memory_layout::UnpackedArrayLayout {
+            celox_state_layout::UnpackedArrayLayout {
                 element_width: 51,
                 element_count: 4,
                 element_stride: 8,
@@ -16296,7 +16293,7 @@ mod tests {
         layout.sparse_offsets.insert(absolute, 0);
         layout.sparse_layouts.insert(
             absolute,
-            crate::backend::memory_layout::SparseWorkingLayout {
+            celox_state_layout::SparseWorkingLayout {
                 active_index: 0,
                 chunk_count: 4,
                 dirty_words_offset: DIRTY,
@@ -16464,7 +16461,7 @@ mod tests {
             var_id: VarId::default(),
         };
         let sparse =
-            RegionedAbsoluteAddr::from_absolute_addr(crate::ir::SPARSE_WORKING_REGION, absolute);
+            RegionedAbsoluteAddr::from_absolute_addr(crate::SPARSE_WORKING_REGION, absolute);
         let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
         let value = RegisterId(0);
         let unit = ExecutionUnit {
@@ -16521,7 +16518,7 @@ mod tests {
         layout.sparse_offsets.insert(absolute, 0);
         layout.sparse_layouts.insert(
             absolute,
-            crate::backend::memory_layout::SparseWorkingLayout {
+            celox_state_layout::SparseWorkingLayout {
                 active_index: 0,
                 chunk_count: 1,
                 dirty_words_offset: DIRTY,
@@ -16586,7 +16583,7 @@ mod tests {
             var_id: VarId::default(),
         };
         let sparse =
-            RegionedAbsoluteAddr::from_absolute_addr(crate::ir::SPARSE_WORKING_REGION, absolute);
+            RegionedAbsoluteAddr::from_absolute_addr(crate::SPARSE_WORKING_REGION, absolute);
         let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
         let one = RegisterId(0);
         let unit = ExecutionUnit {
@@ -16660,7 +16657,7 @@ mod tests {
         layout.sparse_offsets.insert(absolute, 0);
         layout.sparse_layouts.insert(
             absolute,
-            crate::backend::memory_layout::SparseWorkingLayout {
+            celox_state_layout::SparseWorkingLayout {
                 active_index: 0,
                 chunk_count: 4,
                 dirty_words_offset: DIRTY,
@@ -16925,7 +16922,7 @@ mod tests {
                 .into_iter()
                 .map(|absolute| (absolute, four_state))
                 .collect();
-            let array_layout = crate::backend::memory_layout::UnpackedArrayLayout {
+            let array_layout = celox_state_layout::UnpackedArrayLayout {
                 element_width: 2,
                 element_count: 4,
                 element_stride: 1,
@@ -16984,7 +16981,7 @@ mod tests {
             var_id: VarId::default(),
         };
         let stable = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, absolute);
-        let working = RegionedAbsoluteAddr::from_absolute_addr(crate::ir::WORKING_REGION, absolute);
+        let working = RegionedAbsoluteAddr::from_absolute_addr(crate::WORKING_REGION, absolute);
         let eu = ExecutionUnit {
             entry_block_id: SirBlockId(0),
             blocks: [(
@@ -18384,11 +18381,11 @@ mod tests {
                     terminator: SIRTerminator::Switch {
                         selector,
                         cases: vec![
-                            crate::ir::SIRSwitchCase {
+                            crate::SIRSwitchCase {
                                 value: BigUint::from(1_u8),
                                 target: SirBlockId(1),
                             },
-                            crate::ir::SIRSwitchCase {
+                            crate::SIRSwitchCase {
                                 value: BigUint::from(7_u8),
                                 target: SirBlockId(1),
                             },

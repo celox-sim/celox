@@ -8,9 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::backend::native::mir::{
-    BaseReg, BlockId, MFunction, MInst, PackedStateHome, SpillKind, VReg,
-};
+use crate::native::mir::{BaseReg, BlockId, MFunction, MInst, PackedStateHome, SpillKind, VReg};
 
 use super::cfg::NormalizedCfg;
 use super::reload::{PointUse, ResolvedBase, ResolvedRecipe};
@@ -681,8 +679,8 @@ fn overlap_components(homes: &BTreeMap<SpillHome, PackedStateHome>) -> Vec<Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{MBlock, OpSize, SpillDesc, StateHomeId, VRegAllocator};
-    use crate::backend::native::regalloc::{cfg, next_use, reconstruct, reload, spill_plan};
+    use crate::native::mir::{MBlock, OpSize, SpillDesc, StateHomeId, VRegAllocator};
+    use crate::native::regalloc::{cfg, next_use, reconstruct, reload, spill_plan};
 
     fn home(id: u32, offset: i32) -> PackedStateHome {
         PackedStateHome {

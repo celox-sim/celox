@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
-use crate::backend::native::mir::{BlockId, MBlock, MFunction, MInst, PhiNode, SpillDesc, VReg};
+use crate::native::mir::{BlockId, MBlock, MFunction, MInst, PhiNode, SpillDesc, VReg};
 
 use super::analysis::AnalysisResult;
 use super::assignment::{ALLOCATABLE_REGS, PhysReg, RegConstraint, clobbers, use_constraints};
@@ -507,7 +507,7 @@ fn all_color_bits() -> u16 {
 }
 
 fn alloc_copy(
-    vregs: &mut crate::backend::native::mir::VRegAllocator,
+    vregs: &mut crate::native::mir::VRegAllocator,
     spill_descs: &mut Vec<SpillDesc>,
     source: VReg,
 ) -> Result<VReg, PermError> {
@@ -570,7 +570,7 @@ fn constraint_boundary_liveness(
 
 fn constraint_boundaries(
     block: &MBlock,
-    shift_encoding: crate::backend::native::features::VariableShiftEncoding,
+    shift_encoding: crate::native::features::VariableShiftEncoding,
 ) -> Vec<usize> {
     let mut result = BTreeSet::new();
     for (instruction, inst) in block.insts.iter().enumerate() {
@@ -930,8 +930,8 @@ fn perm_logical(logical_for_vreg: &[VReg], value: VReg, block: BlockId) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::features::X86Features;
-    use crate::backend::native::mir::{BaseReg, OpSize, SpillDesc, VRegAllocator};
+    use crate::native::features::X86Features;
+    use crate::native::mir::{BaseReg, OpSize, SpillDesc, VRegAllocator};
 
     fn select_legacy_shifts(func: &mut MFunction) {
         func.target_features = X86Features::for_test(false);

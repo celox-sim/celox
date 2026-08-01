@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
-use crate::backend::native::memory_effect::{self, UnknownMemory};
-use crate::backend::native::mir::{
+use crate::native::memory_effect::{self, UnknownMemory};
+use crate::native::mir::{
     BaseReg, BlockId, MBlock, MFunction, MInst, OpSize, PhiNode, SpillDesc, SpillKind, VReg,
 };
 
@@ -111,7 +111,7 @@ struct PreparedRecipeCache {
 struct PendingStateStore {
     block: usize,
     instruction: usize,
-    home: crate::backend::native::mir::PackedStateHome,
+    home: crate::native::mir::PackedStateHome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1864,7 +1864,7 @@ fn rematerialized_logical_value(func: &MFunction, logical: LogicalValue) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{BlockId, MBlock, VRegAllocator};
+    use crate::native::mir::{BlockId, MBlock, VRegAllocator};
 
     #[test]
     fn reconstruction_reports_vreg_exhaustion() {

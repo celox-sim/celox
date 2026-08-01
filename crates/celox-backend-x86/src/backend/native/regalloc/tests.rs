@@ -1,8 +1,8 @@
 use super::analysis;
 use super::assignment::*;
 use super::*;
-use crate::backend::native::mir::*;
-use crate::backend::native::{emit, jit_mem};
+use crate::native::mir::*;
+use crate::native::{emit, jit_mem};
 
 #[test]
 fn invalid_input_is_a_structured_error_not_a_panic() {

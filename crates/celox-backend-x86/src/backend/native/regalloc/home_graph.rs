@@ -9,7 +9,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
-use crate::backend::native::mir::{BlockId, MFunction, PackedStateHome, StateHomeId, VReg};
+use crate::native::mir::{BlockId, MFunction, PackedStateHome, StateHomeId, VReg};
 
 use super::cfg::NormalizedCfg;
 use super::live_interval::{
@@ -1001,7 +1001,7 @@ impl HomeGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{BaseReg, MBlock, MInst, OpSize, SpillDesc, VRegAllocator};
+    use crate::native::mir::{BaseReg, MBlock, MInst, OpSize, SpillDesc, VRegAllocator};
 
     fn function(value_count: u32, descriptors: Vec<SpillDesc>, insts: Vec<MInst>) -> MFunction {
         let mut values = VRegAllocator::new();
@@ -1365,7 +1365,7 @@ mod tests {
         let mut right = MBlock::new(BlockId(2));
         right.push(MInst::Jump { target: BlockId(3) });
         let mut merge = MBlock::new(BlockId(3));
-        merge.phis.push(crate::backend::native::mir::PhiNode {
+        merge.phis.push(crate::native::mir::PhiNode {
             dst: VReg(4),
             sources: vec![(BlockId(1), VReg(0)), (BlockId(2), VReg(0))],
         });

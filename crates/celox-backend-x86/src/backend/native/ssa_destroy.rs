@@ -1025,10 +1025,8 @@ fn checked_operation_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::emit::{self, EmitError};
-    use crate::backend::native::mir::{
-        BaseReg, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator,
-    };
+    use crate::native::emit::{self, EmitError};
+    use crate::native::mir::{BaseReg, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator};
 
     fn register_copy(
         destination_value: u32,
@@ -1358,7 +1356,7 @@ mod tests {
 
     #[cfg(target_arch = "x86_64")]
     fn execute_single_stack_destination(source: EdgeLocation, expected: u64) -> u64 {
-        use crate::backend::native::jit_mem::JitCode;
+        use crate::native::jit_mem::JitCode;
 
         let mut vregs = VRegAllocator::new();
         let source_value = vregs.alloc();
@@ -1437,7 +1435,7 @@ mod tests {
         first_destination: PhysReg,
         second_destination: PhysReg,
     ) -> (Vec<iced_x86::Mnemonic>, ParallelCopyWork, [u64; 2]) {
-        use crate::backend::native::jit_mem::JitCode;
+        use crate::native::jit_mem::JitCode;
         use iced_x86::{Decoder, DecoderOptions};
 
         let mut vregs = VRegAllocator::new();
@@ -1596,7 +1594,7 @@ mod tests {
             dst: condition,
             lhs,
             rhs,
-            kind: crate::backend::native::mir::CmpKind::Eq,
+            kind: crate::native::mir::CmpKind::Eq,
         });
         entry.push(MInst::Branch {
             cond: condition,
@@ -1643,7 +1641,7 @@ mod tests {
         assignment.set_edge_location(BlockId(0), value, EdgeLocation::Register(PhysReg::RSI));
 
         assert_eq!(
-            crate::backend::native::mir_opt::fold_register_branch_predicates(&mut function),
+            crate::native::mir_opt::fold_register_branch_predicates(&mut function),
             1
         );
         let plan = SsaDestructionPlan::build(&function, &assignment).unwrap();
@@ -1680,7 +1678,7 @@ mod tests {
 
     #[test]
     fn consecutive_empty_fallthrough_blocks_alias_the_next_instruction() {
-        use crate::backend::native::jit_mem::JitCode;
+        use crate::native::jit_mem::JitCode;
         use iced_x86::{Decoder, DecoderOptions, Mnemonic};
         use std::collections::HashMap;
 
@@ -1765,7 +1763,7 @@ mod tests {
 
     #[test]
     fn trailing_continuation_label_aliases_an_empty_fallthrough_chain() {
-        use crate::backend::native::jit_mem::JitCode;
+        use crate::native::jit_mem::JitCode;
         use iced_x86::{Decoder, DecoderOptions, Mnemonic};
         use std::collections::HashMap;
 
@@ -1832,7 +1830,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn branch_executes_only_the_selected_edge_copy_plan() {
-        use crate::backend::native::jit_mem::JitCode;
+        use crate::native::jit_mem::JitCode;
 
         let mut vregs = VRegAllocator::new();
         let true_source = vregs.alloc();
@@ -1960,7 +1958,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn mixed_register_stack_immediate_cycles_preserve_parallel_semantics() {
-        use crate::backend::native::jit_mem::JitCode;
+        use crate::native::jit_mem::JitCode;
 
         let mut vregs = VRegAllocator::new();
         let values = (0..15).map(|_| vregs.alloc()).collect::<Vec<_>>();

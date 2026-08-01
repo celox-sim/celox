@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-use crate::backend::native::memory_effect::{self, UnknownMemory};
-use crate::backend::native::mir::BaseReg;
+use crate::native::memory_effect::{self, UnknownMemory};
+use crate::native::mir::BaseReg;
 
 use super::*;
 
@@ -121,7 +121,7 @@ fn validate_cfg(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), Alloc
 }
 
 fn affected_bytes(
-    instruction: &crate::backend::native::mir::MInst,
+    instruction: &crate::native::mir::MInst,
     byte_index: &BTreeMap<i64, ByteId>,
     block: BlockId,
     position: usize,
@@ -736,8 +736,8 @@ fn resolve_owners(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{MBlock, SpillDesc, VRegAllocator};
-    use crate::backend::native::regalloc::{cfg, home_graph, live_interval};
+    use crate::native::mir::{MBlock, SpillDesc, VRegAllocator};
+    use crate::native::regalloc::{cfg, home_graph, live_interval};
 
     fn function(value_count: u32, blocks: Vec<MBlock>) -> MFunction {
         let mut values = VRegAllocator::new();

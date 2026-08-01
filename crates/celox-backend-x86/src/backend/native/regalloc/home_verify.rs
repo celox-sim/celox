@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 
-use crate::backend::native::mir::{BlockId, MFunction, SpillKind, VReg};
+use crate::native::mir::{BlockId, MFunction, SpillKind, VReg};
 
 use super::cfg::NormalizedCfg;
 use super::spill_plan::{
@@ -1017,7 +1017,7 @@ fn structural_error(rule: &'static str, message: impl Into<String>) -> HomeVerif
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{MBlock, MInst, PhiNode, SpillDesc, VRegAllocator};
+    use crate::native::mir::{MBlock, MInst, PhiNode, SpillDesc, VRegAllocator};
 
     use super::super::{cfg, next_use, spill_plan};
 

@@ -18,19 +18,16 @@ impl Default for X86BackendOptions {
     }
 }
 
-/// Source-independent vocabulary consumed by instruction selection.
-pub mod ir {
-    pub use celox_design::{
-        AbsoluteAddrBase, BinaryOp, DomainKind, InstanceId, RegionedAbsoluteAddrBase,
-        RuntimeEventKind, SPARSE_WORKING_REGION, STABLE_REGION, StateAddr, TriggerIdWithKind,
-        UnaryOp, WORKING_REGION,
-    };
-    pub use celox_sir::*;
+pub use celox_design::{
+    AbsoluteAddrBase, BinaryOp, DomainKind, InstanceId, RegionedAbsoluteAddrBase, RuntimeEventKind,
+    SPARSE_WORKING_REGION, STABLE_REGION, StateAddr, TriggerIdWithKind, UnaryOp, WORKING_REGION,
+};
+pub use celox_sir::*;
 
-    pub type AbsoluteAddr = celox_design::StateAddr;
-    pub type RegionedAbsoluteAddr = celox_design::RegionedStateAddr;
-    pub type SirProgram = celox_sir::SirProgram<AbsoluteAddr, RegionedAbsoluteAddr>;
-}
+pub type AbsoluteAddr = celox_design::StateAddr;
+pub type RegionedAbsoluteAddr = celox_design::RegionedStateAddr;
+pub type SirProgram = celox_sir::SirProgram<AbsoluteAddr, RegionedAbsoluteAddr>;
+pub type MemoryLayout = celox_state_layout::MemoryLayout<AbsoluteAddr>;
 
 pub mod timing {
     pub fn now() -> std::time::Instant {
@@ -38,16 +35,7 @@ pub mod timing {
     }
 }
 
-/// Compatibility namespace retained while the moved implementation is made
-/// internally idiomatic. It contains backend contracts only.
-pub mod backend {
-    pub mod memory_layout {
-        pub use celox_state_layout::*;
-        pub type MemoryLayout = celox_state_layout::MemoryLayout<celox_design::StateAddr>;
-    }
+#[path = "backend/native/mod.rs"]
+pub mod native;
 
-    pub use memory_layout::MemoryLayout;
-    pub mod native;
-}
-
-pub use backend::native::*;
+pub use native::*;

@@ -11259,7 +11259,7 @@ mod tests {
 
     #[test]
     fn folds_chunk_deposit_chain_to_pdep() {
-        if !crate::backend::native::features::X86Features::detect().bmi2() {
+        if !crate::native::features::X86Features::detect().bmi2() {
             return;
         }
 
@@ -11420,7 +11420,7 @@ mod tests {
 
     #[test]
     fn folds_chunk_extract_chain_to_pext() {
-        if !crate::backend::native::features::X86Features::detect().bmi2() {
+        if !crate::native::features::X86Features::detect().bmi2() {
             return;
         }
 

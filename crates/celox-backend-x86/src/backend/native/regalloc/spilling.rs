@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::backend::native::mir::*;
+use crate::native::mir::*;
 
 // ────────────────────────────────────────────────────────────────
 // Spill slot allocator

@@ -1,6 +1,6 @@
 //! Stable machine-constraint facts after legalization.
 
-use crate::backend::native::mir::{BlockId, MFunction, VReg};
+use crate::native::mir::{BlockId, MFunction, VReg};
 
 use super::assignment::{PhysReg, RegConstraint, clobbers, use_constraints};
 use super::cfg::NormalizedCfg;
@@ -155,7 +155,7 @@ impl ConstraintModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{MBlock, MInst, SpillDesc, VRegAllocator};
+    use crate::native::mir::{MBlock, MInst, SpillDesc, VRegAllocator};
 
     #[test]
     fn stale_instruction_model_is_a_structured_error() {

@@ -12,7 +12,7 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::Deref;
 use std::sync::Arc;
 
-use crate::backend::native::mir::BlockId;
+use crate::native::mir::BlockId;
 
 use super::assignment::PhysReg;
 use super::cfg::NormalizedCfg;
@@ -1724,7 +1724,7 @@ pub(super) fn live_length(segments: &[LiveSegment]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{
+    use crate::native::mir::{
         BaseReg, MBlock, MFunction, MInst, OpSize, PhiNode, SpillDesc, VReg, VRegAllocator,
     };
 

@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::backend::native::mir::{BlockId, MFunction, MInst, PhiNode, VReg};
+use crate::native::mir::{BlockId, MFunction, MInst, PhiNode, VReg};
 
 use super::analysis::AnalysisResult;
 use super::assignment::{
@@ -998,8 +998,8 @@ fn register_bit(register: PhysReg) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::features::X86Features;
-    use crate::backend::native::mir::{MBlock, MFunction, MInst, SpillDesc, VRegAllocator};
+    use crate::native::features::X86Features;
+    use crate::native::mir::{MBlock, MFunction, MInst, SpillDesc, VRegAllocator};
 
     fn analyze_and_color(func: &mut MFunction) -> Result<ColoringResult, ColorError> {
         let cfg = super::super::cfg::normalize(func).unwrap();

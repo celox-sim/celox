@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::backend::native::mir::{MFunction, VReg};
+use crate::native::mir::{MFunction, VReg};
 
 use super::assignment::AssignmentMap;
 use super::cfg::NormalizedCfg;

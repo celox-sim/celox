@@ -380,7 +380,7 @@ pub(crate) fn writes(inst: &MInst) -> MemoryEffects {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{
+    use crate::native::mir::{
         BlockId, BranchPredicate, CmpKind, MemoryAliasRange, OpSize, PackedLaneCompareRhs, VReg,
     };
 

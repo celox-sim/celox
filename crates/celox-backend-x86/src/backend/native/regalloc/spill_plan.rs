@@ -3,7 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::backend::native::mir::{BlockId, MFunction, MInst, PackedStateHome, VReg};
+use crate::native::mir::{BlockId, MFunction, MInst, PackedStateHome, VReg};
 
 use super::assignment::clobbers;
 use super::cfg::NormalizedCfg;
@@ -2970,9 +2970,7 @@ impl SpillPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{
-        BaseReg, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator,
-    };
+    use crate::native::mir::{BaseReg, MBlock, MInst, OpSize, PhiNode, SpillDesc, VRegAllocator};
 
     #[test]
     fn integrated_ready_walk_closes_resident_lanes_before_starting_new_roots() {
@@ -4501,8 +4499,8 @@ mod tests {
 
     #[test]
     fn irreducible_scc_entries_prioritize_values_used_in_the_region() {
-        use crate::backend::native::mir::{BaseReg, OpSize, SpillDesc};
-        use crate::backend::native::regalloc::next_use::{self, LoopRegionKind};
+        use crate::native::mir::{BaseReg, OpSize, SpillDesc};
+        use crate::native::regalloc::next_use::{self, LoopRegionKind};
 
         let mut vregs = VRegAllocator::new();
         let hot = vregs.alloc();

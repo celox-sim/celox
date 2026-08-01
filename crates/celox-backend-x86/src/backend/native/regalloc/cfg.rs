@@ -6,7 +6,7 @@ use celox_analysis::cfg::ForwardControlFlowGraph;
 pub(super) use celox_analysis::cfg::NaturalLoop;
 use celox_analysis::ssa::SsaCfg;
 
-use crate::backend::native::mir::{BlockId, MBlock, MFunction, MInst};
+use crate::native::mir::{BlockId, MBlock, MFunction, MInst};
 
 #[derive(Debug)]
 pub(super) struct NormalizedCfg {
@@ -576,7 +576,7 @@ fn graph(func: &MFunction) -> (HashMap<BlockId, usize>, Vec<Vec<usize>>, Vec<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{PhiNode, SpillDesc, VRegAllocator};
+    use crate::native::mir::{PhiNode, SpillDesc, VRegAllocator};
 
     fn two_block_cfg() -> (MFunction, NormalizedCfg) {
         let mut func = MFunction::new(VRegAllocator::new(), Vec::new());

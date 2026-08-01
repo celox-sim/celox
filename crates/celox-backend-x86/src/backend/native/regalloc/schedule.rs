@@ -7,12 +7,12 @@ use std::fmt;
 
 use celox_analysis::dependence::MemoryDependencyTracker;
 
-use crate::backend::native::memory_effect::{self, MemoryObject, analysis_effects};
+use crate::native::memory_effect::{self, MemoryObject, analysis_effects};
 #[cfg(test)]
-use crate::backend::native::mir::BlockId;
+use crate::native::mir::BlockId;
 #[cfg(test)]
-use crate::backend::native::mir::MFunction;
-use crate::backend::native::mir::{MInst, VReg};
+use crate::native::mir::MFunction;
+use crate::native::mir::{MInst, VReg};
 
 #[cfg(test)]
 use super::analysis::AnalysisResult;
@@ -1238,7 +1238,7 @@ fn is_pressure_schedulable_kind(inst: &MInst) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{
+    use crate::native::mir::{
         BaseReg, BlockId, MBlock, MemoryAliasRange, OpSize, SpillDesc, VRegAllocator,
     };
 

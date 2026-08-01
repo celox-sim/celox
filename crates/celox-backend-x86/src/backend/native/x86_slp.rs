@@ -860,7 +860,7 @@ pub(crate) fn clobbers_xmm(inst: &MInst, register: X86PhysVec) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::native::mir::{BlockId, MBlock, PhiNode, SpillDesc, VRegAllocator};
+    use crate::native::mir::{BlockId, MBlock, PhiNode, SpillDesc, VRegAllocator};
 
     #[test]
     fn shared_adjacent_load_pair_becomes_one_vector_value() {

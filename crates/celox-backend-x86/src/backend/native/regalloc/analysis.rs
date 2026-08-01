@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 
-use crate::backend::native::mir::*;
+use crate::native::mir::*;
 use crate::{HashMap, HashSet};
 
 use super::assignment::{AssignmentMap, EdgeLocation};

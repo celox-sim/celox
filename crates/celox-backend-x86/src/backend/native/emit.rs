@@ -16,21 +16,21 @@ use iced_x86::code_asm::*;
 
 use celox_analysis::cfg::ForwardControlFlowGraph;
 
-use crate::backend::memory_layout::{
-    STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET, STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET,
-    STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
-};
-use crate::backend::native::features::{StateBaseStrategy, VariableShiftEncoding};
-use crate::backend::native::mir::*;
-use crate::backend::native::regalloc::assignment::{
+use crate::native::features::{StateBaseStrategy, VariableShiftEncoding};
+use crate::native::mir::*;
+use crate::native::regalloc::assignment::{
     AssignmentMap, PhysReg, PhysRegSet, X86PhysVec, X86VectorLocation, clobbers,
 };
-use crate::backend::native::ssa_destroy::{
+use crate::native::ssa_destroy::{
     EdgeCopyPlan, ParallelCopyDestination, ParallelCopyOperation, ParallelCopySource,
     SsaDestructionPlan,
 };
+use celox_state_layout::{
+    STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET, STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET,
+    STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
+};
 
-pub use crate::backend::native::ssa_destroy::SsaDestructionError;
+pub use crate::native::ssa_destroy::SsaDestructionError;
 
 // ────────────────────────────────────────────────────────────────
 // PhysReg → iced-x86 register mapping
@@ -1118,7 +1118,7 @@ impl std::error::Error for EmitInputError {}
 /// Structured failure while validating SSA destruction or encoding x86-64.
 #[derive(Debug)]
 pub enum EmitError {
-    Mir(crate::backend::native::mir_verify::MirVerifyError),
+    Mir(crate::native::mir_verify::MirVerifyError),
     Input(EmitInputError),
     SsaDestruction(SsaDestructionError),
     Assembly(IcedError),
@@ -1171,17 +1171,17 @@ impl From<IcedError> for EmitError {
 pub enum ChainedEmitError {
     Sir {
         phase: &'static str,
-        error: crate::ir::verify::SirVerifyError,
+        error: crate::verify::SirVerifyError,
     },
     Mir {
         phase: &'static str,
-        error: crate::backend::native::mir_verify::MirVerifyError,
+        error: crate::native::mir_verify::MirVerifyError,
     },
     Analysis {
         phase: &'static str,
         message: String,
     },
-    Regalloc(crate::backend::native::regalloc::RegallocError),
+    Regalloc(crate::native::regalloc::RegallocError),
     Input(EmitInputError),
     SsaDestruction(SsaDestructionError),
     Assembly(IcedError),
@@ -1215,8 +1215,8 @@ impl std::error::Error for ChainedEmitError {
     }
 }
 
-impl From<crate::backend::native::regalloc::RegallocError> for ChainedEmitError {
-    fn from(error: crate::backend::native::regalloc::RegallocError) -> Self {
+impl From<crate::native::regalloc::RegallocError> for ChainedEmitError {
+    fn from(error: crate::native::regalloc::RegallocError) -> Self {
         Self::Regalloc(error)
     }
 }
@@ -5173,8 +5173,8 @@ fn emit_and_imm64(asm: &mut CodeAssembler, d: AsmRegister64, imm: u64) -> Result
 /// SIR merging and backend-boundary SIR optimization happen before this call;
 /// the x86 crate therefore consumes an immutable backend-independent artifact.
 pub fn emit_prepared_eu(
-    sir_eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>,
-    layout: &crate::backend::MemoryLayout,
+    sir_eu: &crate::ExecutionUnit<crate::RegionedAbsoluteAddr>,
+    layout: &crate::MemoryLayout,
     four_state: bool,
     label: &str,
     enable_x86_slp: bool,
@@ -5403,8 +5403,8 @@ pub fn emit_prepared_eu(
             block.instructions.iter().any(|instruction| {
                 matches!(
                     instruction,
-                    crate::ir::SIRInstruction::RuntimeEvent { .. }
-                        | crate::ir::SIRInstruction::CombCaptureEvent { .. }
+                    crate::SIRInstruction::RuntimeEvent { .. }
+                        | crate::SIRInstruction::CombCaptureEvent { .. }
                 )
             })
         });
@@ -5750,7 +5750,7 @@ fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
 fn dump_native_block_context(
     label: &str,
     stage: &str,
-    eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>,
+    eu: &crate::ExecutionUnit<crate::RegionedAbsoluteAddr>,
     func: &super::mir::MFunction,
 ) {
     let Some(raw) = std::env::var_os("CELOX_NATIVE_DUMP_BLOCK") else {
@@ -5775,7 +5775,7 @@ fn dump_native_block_context(
     let mir_limit = std::env::var_os("CELOX_NATIVE_DUMP_MIR_LIMIT")
         .and_then(|raw| raw.to_string_lossy().parse::<usize>().ok())
         .unwrap_or(64);
-    let sir_id = crate::ir::BlockId(block_id as usize);
+    let sir_id = crate::BlockId(block_id as usize);
     eprintln!("[native-dump] label={label} stage={stage} block={block_id}");
     if dump_sir {
         if let Some(block) = eu.blocks.get(&sir_id) {
@@ -5817,8 +5817,8 @@ fn dump_native_block_context(
 }
 
 fn dump_sir_operand_defs(
-    eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>,
-    block: &crate::ir::BasicBlock<crate::ir::RegionedAbsoluteAddr>,
+    eu: &crate::ExecutionUnit<crate::RegionedAbsoluteAddr>,
+    block: &crate::BasicBlock<crate::RegionedAbsoluteAddr>,
 ) {
     let mut regs = Vec::new();
     for inst in &block.instructions {
@@ -5850,9 +5850,9 @@ fn dump_sir_operand_defs(
 }
 
 fn sir_inst_def(
-    inst: &crate::ir::SIRInstruction<crate::ir::RegionedAbsoluteAddr>,
-) -> Option<crate::ir::RegisterId> {
-    use crate::ir::SIRInstruction;
+    inst: &crate::SIRInstruction<crate::RegionedAbsoluteAddr>,
+) -> Option<crate::RegisterId> {
+    use crate::SIRInstruction;
     match inst {
         SIRInstruction::Imm(dst, _)
         | SIRInstruction::Load(dst, _, _, _)
@@ -5870,10 +5870,10 @@ fn sir_inst_def(
 }
 
 fn collect_sir_inst_uses(
-    inst: &crate::ir::SIRInstruction<crate::ir::RegionedAbsoluteAddr>,
-    out: &mut Vec<crate::ir::RegisterId>,
+    inst: &crate::SIRInstruction<crate::RegionedAbsoluteAddr>,
+    out: &mut Vec<crate::RegisterId>,
 ) {
-    use crate::ir::SIRInstruction;
+    use crate::SIRInstruction;
     match inst {
         SIRInstruction::Binary(_, lhs, _, rhs) => {
             out.push(*lhs);
@@ -5901,8 +5901,8 @@ fn collect_sir_inst_uses(
     }
 }
 
-fn log_sir_width_stats(eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>) {
-    use crate::ir::{RegisterType, SIRInstruction};
+fn log_sir_width_stats(eu: &crate::ExecutionUnit<crate::RegionedAbsoluteAddr>) {
+    use crate::{RegisterType, SIRInstruction};
 
     let mut max_reg_width = 0usize;
     let mut regs_gt_1024 = 0usize;
@@ -6000,9 +6000,9 @@ fn log_sir_width_stats(eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsolute
 #[cfg(test)]
 mod shift_encoding_tests {
     use super::*;
-    use crate::backend::native::features::{StateBaseStrategy, X86Features};
-    use crate::backend::native::jit_mem::JitCode;
-    use crate::backend::native::{mir_legalize, mir_opt, regalloc};
+    use crate::native::features::{StateBaseStrategy, X86Features};
+    use crate::native::jit_mem::JitCode;
+    use crate::native::{mir_legalize, mir_opt, regalloc};
     use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, Register};
 
     #[test]
