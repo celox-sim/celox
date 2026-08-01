@@ -141,16 +141,27 @@ fn atomize_logic_paths(
                 atom_infos.push((*atom_access, filtered_sources, filtered_source_ids));
             }
 
-            // Group consecutive atoms with the same source variable ID set.
+            // Preserve coarse propagated boundaries.  Source-range identity
+            // remains the general coalescing rule; source-ID identity is only
+            // used to collapse runs which were split all the way to single
+            // bits.  Treating a 16-bit propagated boundary like those
+            // artificial bit boundaries would undo hierarchy boundary
+            // propagation.
             let mut i = 0;
             while i < atom_infos.len() {
                 let group_start = i;
-                let group_source_ids = &atom_infos[i].2;
-                while i + 1 < atom_infos.len()
-                    && atom_infos[i + 1].2 == *group_source_ids
-                    && element_width
-                        .is_none_or(|width| !atom_infos[i + 1].0.lsb.is_multiple_of(width))
-                {
+                while i + 1 < atom_infos.len() {
+                    let current = &atom_infos[i];
+                    let next = &atom_infos[i + 1];
+                    let exact_sources_match = next.1 == current.1;
+                    let pointwise_single_bits = current.0.lsb == current.0.msb
+                        && next.0.lsb == next.0.msb
+                        && next.2 == current.2;
+                    if !(exact_sources_match || pointwise_single_bits)
+                        || element_width.is_some_and(|width| next.0.lsb.is_multiple_of(width))
+                    {
+                        break;
+                    }
                     i += 1;
                 }
                 let group_end = i;
