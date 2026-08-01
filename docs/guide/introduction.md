@@ -1,38 +1,49 @@
 # Introduction
 
-Celox is a JIT (Just-In-Time) simulator for [Veryl HDL](https://veryl-lang.org/). It lowers Veryl designs through Celox's simulation IR and compiles them to executable code. On x86-64, Celox uses its own native backend by default; on other targets, it falls back to [Cranelift](https://cranelift.dev/).
+Celox is a simulator for [Veryl HDL](https://veryl-lang.org/) with type-safe
+TypeScript testbenches. Import a `.veryl` module, drive its inputs, advance its
+clocks, and assert its outputs with Vitest.
 
 ::: tip Try it in your browser
-The [Celox Playground](https://celox-sim.github.io/celox/playground/) lets you write Veryl modules and run simulations directly in the browser -- no installation required.
+The [Celox Playground](https://celox-sim.github.io/celox/playground/) runs Veryl
+designs without installing a local toolchain.
 :::
 
-## Key Features
+## What you can do
 
-- **JIT Compilation** -- Veryl designs are compiled through a multi-stage pipeline (Veryl &rarr; SLT &rarr; SIR &rarr; native code).
-- **Native x86-64 Backend** -- On x86-64, Celox uses its own experimental code generator. Whole-design performance remains an open validation target.
-- **Cranelift Fallback** -- On ARM, RISC-V, and other non-x86-64 targets, Celox can still JIT-compile and run designs.
-- **Event-Driven Scheduling** -- An event-driven scheduler with multi-clock domain support handles complex timing interactions.
-- **4-State Simulation** -- IEEE 1800-compliant 4-state value representation with proper X propagation.
-- **TypeScript Testbenches** -- Write testbenches in TypeScript with type-safe signal access and modern developer tooling.
-- **VCD Waveform Output** -- Generate VCD files for waveform inspection with standard viewers.
+- Import Veryl modules directly from TypeScript with generated port types.
+- Test combinational and sequential designs with manual or scheduled clocks.
+- Access child-instance ports when a test needs hierarchy visibility.
+- Simulate `X` and `Z` values with optional four-state mode.
+- Write VCD waveforms for GTKWave, Surfer, and other viewers.
+- Override value parameters and include test-only Veryl sources.
 
-## Project Structure
+Celox compiles the design when the simulator is created. x86-64 hosts use the
+native backend by default; other native hosts use the Cranelift JIT, and the
+Playground uses WebAssembly. Backend selection is normally automatic and does
+not change the TypeScript testbench API.
 
-Celox is organized as a Rust + TypeScript workspace:
+## Choose a simulation style
 
-| Crate / Package | Description |
-|---|---|
-| `crates/celox` | Core simulator (IR, native x86-64 backend, Cranelift JIT, runtime) |
-| `crates/celox-macros` | Procedural macros |
-| `crates/celox-napi` | N-API bindings for Node.js |
-| `crates/celox-ts-gen` | TypeScript type generation library |
-| `packages/celox` | TypeScript runtime package |
-| `packages/vite-plugin` | Vite / Vitest plugin for typed `.veryl` imports |
+Use `Simulator` when a test should control events explicitly. It is a good fit
+for cycle-oriented unit tests:
 
-## How It Works
+```typescript
+const sim = Simulator.create(Counter);
+sim.dut.enable = 1n;
+sim.tick();
+expect(sim.dut.count).toBe(1n);
+sim.dispose();
+```
 
-1. **Frontend** -- The Veryl source is analyzed and lowered into module hierarchy, signals, events, and combinational / sequential blocks.
-2. **Middle-end** -- The logic is transformed through SLT and SIR, then optimized for simulation.
-3. **Backend** -- On x86-64, Celox emits native machine code directly. On other targets, it uses Cranelift JIT as the fallback execution backend.
+Use `Simulation` when a test needs scheduled clocks and simulation time. It is a
+better fit for multi-clock or time-oriented scenarios.
 
-For a deeper look at the architecture, see the [Architecture](../internals/architecture.md) internals document.
+## Next steps
+
+Start with [Getting Started](./getting-started.md) to set up a project, then use
+[Writing Tests](./writing-tests.md) for the complete testbench workflow. The
+[API Reference](/api/) lists the available TypeScript classes and options.
+
+Compiler and runtime design details are kept separately in
+[Simulator Architecture](/internals/architecture).

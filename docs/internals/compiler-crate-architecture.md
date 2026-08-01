@@ -1,723 +1,132 @@
-# Compiler Crate Architecture
+# Compiler Components
 
-## Status
+Celox separates source-language analysis, simulator IR, target code generation,
+and runtime execution into crates with one-way dependencies. This page describes
+the current ownership boundaries. It is not a migration plan or a record of past
+refactors.
 
-This document defines the target crate architecture and the migration contract for splitting the
-current `celox` compiler/runtime monolith. It is both the target design and the migration record;
-the status below distinguishes completed ownership boundaries from remaining work.
-
-Migration note: `celox-state-layout` now owns the generic layout algorithm and the compiler driver
-uses a consuming `UnoptimizedSir -> OptimizedSir -> LaidOutProgram` transition. Only the optimizer
-driver can construct `OptimizedSir`, and physical layout is unavailable before that transition.
-The former mixed `Program` has been deleted. Its execution-unit groups are held by
-`celox-sir::SirProgram`, while its
-flattened state metadata, event topology, and initial state are held by
-`celox-design::ElaboratedDesign`. Runtime diagnostics are held by
-`celox-design::RuntimeSchema`; its combinational observation recipes retain only persistent-state
-ranges, so no post-frontend artifact owns an SLT arena or observer `NodeId`s. Cranelift
-oversized-function planning is constructed from final SIR
-at the backend boundary; backend scratch extends only the backend's private layout copy.
-Veryl source identities retained for diagnostics and public path lookup are grouped in
-`celox-frontend-veryl::VerylFrontendLookup`; optimizer and backend code no longer inspect that
-artifact to recover semantic state identity. `schedule_symbolic_rtl` assigns dense
-`StateObjectId`s exactly once and projects SIR, design metadata, event topology, runtime schema,
-and fused-optimization hints before returning `ScheduledRtl`. The facade, layout, optimizer, and
-backends therefore use `StateAddr`; the bidirectional source map remains a diagnostics and public
-path-lookup side table. WASM layout export enumerates finalized design objects and layout entries
-instead of reconstructing addresses from Veryl variables. The unused semantic-process provenance formerly copied from `LogicPath` through the
-scheduler into `Program` has been removed instead of being assigned to a target crate. Moving the
-optimizer-to-layout state-alias contract is now represented by
-`celox-state-layout::LayoutRequirements` and is cleared after physical layout is finalized. Tests
-and consumers construct each backend from `OptimizedSir` rather than attempting to
-re-layout the finalized program after identity Stores have been removed. Veryl
-testbench runtime-event sites and direct state-read roots are projected into the source-independent
-`RuntimeSchema` before SIR optimization, so optimization and layout no longer traverse testbench
-AST. Veryl statements/functions are an explicit
-`celox-frontend-veryl::VerylTestbenchSource` input consumed during frontend flattening. The source-independent
-expression opcode and operator vocabulary is owned by `celox-testbench`.
-`celox-frontend-veryl` translates source operators and control statements into bytecode with
-semantic state addresses plus relative byte offsets. The resulting source-independent
-`TestbenchProgram` is stored before optimization; `celox-runtime` resolves those locations and
-event identities from the finalized physical layout and backend before the VM executes the bound
-bytecode. Native, Cranelift, and WASM execution therefore share the same testbench binding path.
-`celox-slt` now owns the frontend-independent bit-range store, symbolic-state contract, SLT node
-arena, iterative facts/verifier, symbolic-root verification, path graph, fused comb/FF scheduler,
-glue contract, and SLT-to-SIR lowerer. The FF lowering callback has an associated frontend-owned
-error type, so the scheduler no longer imports parser errors. `celox-frontend-veryl` owns lowering
-diagnostics, context-width and bit-select semantics, analyzer loop provenance, the Veryl comb arena
-builder, FF construction, module construction, and the resulting per-module symbolic artifact.
-It also owns Veryl module discovery, per-instance hierarchy flattening/atomization, global
-relocation, clock-domain assembly, observer-path construction, comb/FF scheduling and lowering,
-trigger injection, and the resulting design/runtime projection. Module discovery produces an
-explicit `celox-frontend-veryl::SymbolicRtl`, which is consumed exactly once by
-`schedule_symbolic_rtl`. That transition returns
-`celox-frontend-veryl::ScheduledRtl`; this artifact contains SIR, the elaborated design, runtime
-schema, frontend lookup, and testbench source, but cannot contain an SLT arena or `NodeId`.
-Diagnostic trace collection is part of that frontend transition rather than a facade flattening
-wrapper. The obsolete facade flattening, logic-tree, scheduler, and FF compatibility modules have
-been removed. The facade now only executes the fused-SIR optimization hints, compiles the
-semantic testbench, invokes the SIR optimizer through a source-independent borrowed view, and
-converts the result into `OptimizedSir`. After backend code generation, `Simulator` retains only
-`RuntimeProgram`; SIR and layout requirements cannot leak into runtime ownership.
-`celox-sir-opt` owns the complete pass
-manager, all backend-independent passes, StateSSA/placement analyses, and the design-metadata
-memory-offset contract. Its normal dependency graph contains no Veryl, frontend, testbench,
-physical layout, or facade crate. Physical-contiguity facts needed by the native merged-chain
-pipeline are supplied by the native adapter as a proof callback rather than exposing
-`MemoryLayout` to the optimizer. The facade optimizer module is now an orchestration and
-compatibility adapter only. Milestone 5's ownership boundary is complete.
-
-Milestone 6 is complete. `celox-backend-x86` owns feature detection, SIR instruction selection,
-x86 MIR and verification, SLP, register allocation/spilling/reload reconstruction, SSA
-destruction, iced emission, executable memory, and the in-function native tick loop.
-`celox-backend-cranelift` owns the translator, wide operations, JIT engine, Cranelift options,
-cost model, and oversized-function tail-call/memory-spill plans. `celox-backend-wasm` owns
-SIR-to-Wasm module construction. Their normal dependency graphs contain design, SIR, layout, and
-target libraries only: no frontend, facade, testbench, or SIR optimizer. The facade prepares the
-mutable merged SIR before crossing the immutable x86 codegen boundary; target codegen cannot
-silently rerun or mutate SIR optimization. Target-owned x86 SLP and Cranelift split policy are
-carried by their backend option types, while the public `SirPass::TailCallSplit` spelling remains
-only as a facade compatibility selector.
-
-Milestone 7 is complete. `celox-testbench` owns source-independent bytecode, executable testbench
-types, values, formatting, and the raw-memory expression VM. `celox-frontend-veryl` owns
-testbench AST traversal, observability projection, and semantic bytecode construction.
-`celox-runtime` owns event/backend contracts, runtime errors and event buffers, VCD writing,
-the timed scheduler and multi-phase cascade engine, plus semantic-to-physical testbench binding.
-The facade retains compiler orchestration, runtime-event presentation, default backend selection,
-and public API re-exports. Runtime's normal dependency graph contains design, layout, and
-testbench contracts but no frontend, SLT, SIR optimizer, or concrete backend.
-
-Milestone 8 is complete. Obsolete facade, SIR optimizer, Cranelift, Wasm, and x86 compatibility
-namespaces have been removed. The x86 allocator no longer carries the unused allocation-editing
-IR, HomeGraph, CSSA normalizer, stable-slot incremental liveness engine, or parallel diagnostic
-allocator; production keeps one W/S planning and SSA reconstruction path, plus the independent
-final-MIR state-home verifier and exact sparse stack-slot coloring it uses.
-
-The final acceptance audit verified the normal Cargo dependency graph for every extracted crate,
-strict workspace Clippy and formatting, the complete workspace semantic suite (including the
-consolidated large-design scaling gate), and development-profile cross checks for AArch64 Linux,
-x86-64 Windows, and Wasm. The final paired release measurement used one build configuration and
-the same Heliodor revision for both simulators. Both reached the exact Linux completion marker
-`cy=9ae070 x3=aa` through kernel power-down; Celox executed it in 56.644620359 seconds and Veryl-CC
-in 59.664975152 seconds. The extraction therefore leaves no unexplained generated-code or runtime
-regression and all migration milestones are complete.
-
-The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
-split must preserve RTL semantics, generated-code quality, and the public `celox` API while making
-phase ownership explicit.
-
-## Why the current boundary is wrong
-
-The problem is not merely that several source files are large. The current ownership graph has
-cycles hidden by Rust modules inside one crate.
-
-At the start of this migration, `ir::Program` owned all of the following at once:
-
-- scheduled and lowered SIR execution units;
-- the SLT arena and combinational observers that still refer to `NodeId`;
-- hierarchy, module, variable, clock, reset, and runtime-event metadata;
-- optimizer output such as `EvalCombPlan` and address aliases;
-- an optional physical `MemoryLayout`;
-- initial memory contents;
-- uncompiled Veryl testbench statements and functions.
-
-This creates concrete reverse dependencies:
-
-- `ir` refers to `logic_tree`, `optimizer`, and `backend::MemoryLayout`;
-- `optimizer` accepted `Program`, called parser verification, and wrote optimizer-specific plans
-  back into `Program`;
-- `backend::memory_layout` accepted `Program` and inspected optimizer plans;
-- SLT construction imports parser and Veryl expression helpers, while SLT lowering emits SIR;
-- the facade, compiler driver, backend selection, runtime, and testbench VM all live in `celox`.
-
-The result is one mutable object whose valid fields depend on which phase happened to run. An
-`Option<MemoryLayout>` and the former `Option<EvalCombPlan>` encoded pipeline state implicitly, and a backend
-can see frontend structures that should have ceased to exist before code generation.
-
-The split must therefore dissolve `Program`; moving directories into crates without changing that
-ownership would only reproduce the monolith across package boundaries.
-
-## Goals
-
-1. Make the compilation dependency graph a directed acyclic graph visible to Cargo.
-2. Give every phase an input and output type that is valid by construction.
-3. Keep source-language objects out of SIR, optimizers, layouts, backends, and runtime.
-4. Keep target-specific MIR, register allocation, and emission inside the target backend.
-5. Preserve one backend-independent SIR and one shared physical state layout.
-6. Allow SLT scheduling and lowering to combine comb and FF work without depending on the Veryl
-   parser implementation.
-7. Keep `celox-analysis` IR-independent and reusable by SLT, SIR, and backend MIR adapters.
-8. Preserve existing public API paths through facade re-exports during migration.
-9. Run a relevant semantic test gate after every migration step; do not defer validation until the
-   final move.
-
-## Non-goals
-
-- This migration does not redesign RTL event semantics.
-- It does not replace SIR, the fused comb/FF scheduler, or the native MIR pipeline.
-- It does not require every proposed crate to be created up front.
-- It does not create a generic register-allocation crate for an allocator whose constraints are
-  currently x86-specific.
-- It does not use crate boundaries to justify duplicated IRs, conversion copies, or fallback
-  pipelines.
-- It does not require release/LTO builds for each mechanical extraction. Release/LTO remains a
-  final performance acceptance gate.
-
-## Architectural rules
-
-### Crate dependencies are semantic dependencies
-
-A crate is introduced only when it owns a coherent contract and can be tested through that
-contract. Empty placeholder crates and crates that merely re-export another crate are not useful
-milestones.
-
-Lower layers never depend on the `celox` facade. A dependency may point down the graph below but
-must never be hidden through callbacks, re-export modules, or feature-selected reverse imports.
-
-### Pipeline state is represented by types
-
-The compiler driver moves through distinct artifacts:
+## Pipeline
 
 ```text
-Veryl sources
-    |
-    v
-ElaboratedDesign + SymbolicRtl
-    |
-    v
-ScheduledRtl
-    |
-    v
-SirProgram
-    |
-    v
-OptimizedSir + LayoutRequirements
-    |
-    v
-LaidOutProgram
-    |
-    v
-BackendArtifact
-    |
-    v
-ExecutableProgram
+Veryl source
+    │
+    ▼
+celox-frontend-veryl ──► SymbolicRtl ──► ScheduledRtl
+          │                    │                │
+          │              celox-slt              ▼
+          │                              UnoptimizedSir
+          │                                    │
+          │                              celox-sir-opt
+          │                                    ▼
+          │                               OptimizedSir
+          │                                    │
+          │                           celox-state-layout
+          │                                    ▼
+          │                              LaidOutProgram
+          │                                    │
+          │                 ┌──────────────────┼──────────────────┐
+          │                 ▼                  ▼                  ▼
+          │          backend-x86      backend-cranelift    backend-wasm
+          │                 └──────────────────┼──────────────────┘
+          │                                    ▼
+          └───────────────────────────── RuntimeProgram
+                                               │
+                                         celox-runtime
 ```
 
-These are separate types, not one structure with phase-dependent optional fields. A phase may
-consume an artifact or borrow it immutably; it must not leave a partially updated artifact behind
-on failure.
-
-### Semantic and physical addresses remain separate
-
-Frontend source IDs must not become backend identities.
-
-- `SourceVarId` and Veryl AST/IR identities exist only in `celox-frontend-veryl`.
-- `DesignVarId`, `InstanceId`, and `StateObjectId` are dense Celox-owned semantic identities.
-- `StateRef { object, range, role }` identifies a semantic state range in SIR.
-- `MemoryLayout` maps a semantic state reference to a physical region and byte/bit offset.
-- A backend-specific address form may cache resolved offsets, but it cannot become the canonical
-  identity used by SIR optimization.
-
-The state role is a typed enum such as `Stable`, `Working`, `SparseWorking`, `Triggered`, or
-`Scratch`, not an unvalidated integer passed between phases.
-
-### Physical layout is an immutable compilation result
-
-`MemoryLayout` is not stored as `Option<MemoryLayout>` inside a general program. Layout construction
-returns `LaidOutProgram { sir, design, layout, runtime_schema }`.
-
-Pre-layout optimization may produce aliases and placement requirements using semantic objects and
-bit ranges. Post-layout transforms may only perform rewrites proven to preserve:
-
-- object liveness;
-- alias equivalence;
-- allocated byte extent;
-- runtime-visible signal identity;
-- trigger and event-buffer ranges.
-
-A post-layout pass that changes one of those facts must return to layout construction explicitly;
-it cannot mutate the layout behind a backend's back.
-
-### Backend plans do not live in SIR
-
-`EvalCombPlan`, Cranelift tail-call chunks, native MIR spill recipes, and x86 register assignments
-are backend or pass-pipeline products. They are not fields of `SirProgram` or `Design`.
-
-The compiler driver may keep a backend plan beside a `LaidOutProgram`, but another backend must be
-able to consume the same laid-out SIR without understanding that plan.
-
-## Target crates
-
-### `celox-analysis` (existing)
-
-Owns IR-independent algorithms:
-
-- CFG, dominators, postdominators, loops, and control dependence;
-- SSA and MemorySSA construction;
-- range-based dependence and interval indexing;
-- generic DAG scheduling and pressure-aware ordering.
-
-It owns no SIR, SLT, MIR, backend, or source-language types. Callers adapt their IDs and effects to
-dense analysis inputs. The current crate already follows this rule; `cfg_order` should move here or
-be replaced by the existing CFG API rather than be copied into another crate.
-
-### `celox-design`
-
-Owns source-language-independent elaborated design data:
-
-- Celox-owned module, instance, variable, event, and state-object IDs;
-- hierarchy and variable metadata;
-- widths, signedness, two-state/four-state classification, ports, and clock/reset domains;
-- bit ranges, state roles, triggers, and runtime-event schema;
-- initial state represented without Veryl AST nodes;
-- semantic operators shared by SLT and SIR.
-
-It does not own SLT nodes, SIR blocks, physical offsets, compiler options, or executable code.
-
-### `celox-sir`
-
-Owns the backend-independent Simulator IR kernel:
-
-- `ExecutionUnit`, `BasicBlock`, block and register IDs;
-- SIR instructions, terminators, values, operators, and register types;
-- builder, verifier, display, cloning/remapping, CFG adapter, and EU merge utilities;
-- serialization required by tracing and snapshots.
-
-It does not own `Program`, `MemoryLayout`, optimizer passes, SLT nodes, Veryl types, or backend plans.
-The IR may initially remain generic over address identity during extraction, but the final public
-form uses `celox-design::StateRef`.
-
-### `celox-slt`
-
-Owns source-language-independent symbolic RTL and scheduling:
-
-- `NodeId`, `SLTNode`, arena interning, node facts, and verification;
-- symbolic stores, ranges, logic paths, effects, and FF access recipes;
-- comb/FF dependency graph construction;
-- scheduling, SCC handling, and fused comb/FF ordering;
-- SLT-to-SIR lowering through a shared SIR builder.
-
-It may depend on `celox-design`, `celox-sir`, and `celox-analysis`. It must not import Veryl ASTs or
-parser helpers. The current `logic_tree::comb` must therefore be split: node/fact/path/state logic
-moves here, while Veryl expression traversal stays in the frontend.
-
-### `celox-sir-opt`
-
-Owns backend-independent SIR optimization:
-
-- pass manager, pass options, and pass ordering;
-- CFG simplification, GVN, DCE, store/load forwarding, alias discovery, scheduling, and SIR idiom
-  recovery;
-- pre-layout `LayoutRequirements` and alias proofs;
-- explicitly constrained post-layout SIR finalization.
-
-It may use `celox-analysis` and `celox-state-layout`. It must not call parser verification or access
-frontend state. Verification needed by a pass belongs in `celox-sir`, `celox-design`, or this crate.
-
-`SirOptimizeOptions` lives here. Cranelift and x86 options do not.
-
-### `celox-state-layout`
-
-Owns shared physical simulation-state layout:
-
-- stable, working, sparse-working, triggered, runtime-event, and scratch region layouts;
-- packed and unpacked array layout policy;
-- conversion from semantic state objects and layout requirements to immutable offsets;
-- layout verification and backend-facing lookup APIs.
-
-It depends on `celox-design` and `celox-sir`, not on optimizers or concrete backends. Scratch
-requirements are explicit input data rather than discovered by inspecting an optimizer enum hidden
-inside the program.
-
-### `celox-frontend-veryl`
-
-Owns every dependency on Veryl analyzer/parser IR:
-
-- source parsing, analyzer setup, parameter overrides, and diagnostics;
-- Veryl expression/type/context-width interpretation;
-- module elaboration, hierarchy flattening, and conversion from `VarId` to Celox design IDs;
-- construction of source-independent SLT nodes and FF recipes;
-- compilation of Veryl initial blocks/functions to testbench bytecode.
-
-It produces `ElaboratedDesign` and `SymbolicRtl`; it does not optimize SIR, choose a memory layout, or
-invoke a backend.
-
-### `celox-backend-x86`
-
-Owns the complete self-hosted x86 backend:
-
-- x86 feature detection and target policy;
-- SIR instruction selection;
-- MIR, legalization, verification, and MIR optimization;
-- x86-specific SLP/vector selection;
-- register allocation, spill planning, reload recipes, and SSA destruction;
-- iced-x86 emission, executable memory, and native tick-loop construction.
-
-The current allocator belongs here because its constraints include GPR/XMM classes, fixed x86
-operands, FS/GS state addressing, and x86 reload costs. It must not be named `celox-regalloc` unless
-a future allocator has a genuinely target-neutral machine contract and a second user.
-
-The crate name is `celox-backend-x86`, not `celox-native`: the implementation and ABI assumptions
-are specifically x86/x86-64 even when the resulting API works on multiple operating systems.
-
-### `celox-backend-cranelift`
-
-Owns Cranelift translation, module/JIT setup, and Cranelift-specific compile options. Its tail-call
-or memory-spill plan is returned by its own planning phase and never stored in SIR.
-
-### `celox-backend-wasm`
-
-Owns SIR-to-WebAssembly code generation. Host instantiation through wasmtime may be an optional
-feature of this crate; browser consumers use the generated bytes without depending on wasmtime.
-Splitting host instantiation into another crate is deferred until the feature boundary proves
-insufficient.
-
-### `celox-testbench`
-
-Owns language-independent testbench bytecode, values, formatting, and VM execution. The Veryl
-frontend emits this bytecode. The VM accesses signals through a small semantic `TestbenchIo` trait;
-`celox-runtime` implements that trait using the physical layout. This keeps testbench bytecode and
-the frontend independent of `celox-state-layout`. Runtime executes it without retaining Veryl
-statements or functions.
-
-### `celox-runtime`
-
-Owns executable simulation behavior after compilation:
-
-- backend/runtime traits and event handles;
-- simulation time scheduler and multi-phase/cascade execution;
-- runtime event buffers, signal access, and memory ownership;
-- VCD integration and runtime errors;
-- `ExecutableProgram` assembled from backend artifacts and runtime metadata.
-
-It depends on design/layout/testbench contracts, not on frontend, SLT, SIR optimization, or concrete
-backend crates. Concrete backends implement runtime traits and are selected by the facade.
-
-### `celox` facade
-
-Remains the user-facing crate and compiler orchestrator:
-
-- `SimulatorBuilder`, compile pipeline assembly, backend selection, and trace aggregation;
-- stable public options assembled from phase-specific option types;
-- compatibility re-exports for existing public APIs;
-- default-backend selection by target.
-
-It contains no optimizer implementation, machine IR, register allocator, parser internals, or
-runtime VM implementation after migration.
-
-## Dependency graph
-
-The intended direct dependencies are listed below. An arrow means "depends on".
-
-```text
-celox-analysis             -> (none)
-celox-design               -> (none of the compiler crates)
-celox-sir                  -> celox-design, celox-analysis
-celox-slt                  -> celox-design, celox-sir, celox-analysis
-celox-state-layout         -> celox-design, celox-sir
-celox-sir-opt              -> celox-design, celox-sir,
-                              celox-analysis, celox-state-layout
-celox-testbench            -> celox-design
-celox-runtime              -> celox-design, celox-state-layout, celox-testbench
-celox-frontend-veryl       -> celox-design, celox-slt, celox-testbench
-celox-backend-x86          -> celox-design, celox-sir,
-                              celox-state-layout, celox-runtime
-celox-backend-cranelift    -> celox-design, celox-sir,
-                              celox-state-layout, celox-runtime
-celox-backend-wasm         -> celox-design, celox-sir,
-                              celox-state-layout, celox-runtime
-celox facade               -> frontend, SLT, SIR optimization, layout,
-                              selected backends, testbench, runtime
-```
-
-These are allowed dependencies, not a requirement that every crate import every listed crate. In
-particular:
-
-- backends consume finalized SIR/layout/runtime contracts but do not import `celox-sir-opt`;
-- runtime does not import concrete backends;
-- frontend does not import optimizers or concrete backends;
-- `celox-analysis` imports none of the other crates.
-
-Cargo features may remove optional dependencies; they must not reverse these edges.
-
-## Phase artifact contracts
-
-### `ElaboratedDesign`
-
-Contains semantic hierarchy identities, flattened semantic state objects, clocks/resets, initial
-values, and runtime event schema. Source-language paths and IDs used for diagnostics or public
-lookup stay in a separate frontend/facade lookup artifact. It contains no SLT/SIR/layout/backend
-plan.
+The `celox` crate is the public facade and compiler driver. It wires these phases
+together, selects a backend, and exposes the simulator API. Lower-level crates do
+not depend on the facade.
+
+## Component ownership
+
+| Crate | Owns | Must not own |
+|---|---|---|
+| `celox-analysis` | Reusable graph and data-flow algorithms | Veryl or backend-specific types |
+| `celox-design` | Source-independent design identities, hierarchy, events, and runtime schema | Parser nodes or physical addresses |
+| `celox-frontend-veryl` | Veryl analysis, source lookup, module construction, and frontend diagnostics | Optimization or target code generation |
+| `celox-slt` | Symbolic logic trees, dependency scheduling, and SLT-to-SIR lowering | Veryl parser details or physical layout |
+| `celox-sir` | Backend-independent simulator IR and control-flow structures | Target instructions or runtime scheduling |
+| `celox-sir-opt` | Backend-independent SIR analyses and transformation passes | Veryl ASTs or target MIR |
+| `celox-state-layout` | Semantic-to-physical state mapping and layout validation | Optimization policy or executable memory |
+| `celox-backend-x86` | x86 MIR, instruction selection, register allocation, and machine-code emission | Frontend or runtime policy |
+| `celox-backend-cranelift` | Cranelift translation and JIT construction | Frontend or x86-specific MIR |
+| `celox-backend-wasm` | WebAssembly module generation | Host runtime behavior |
+| `celox-testbench` | Source-independent testbench bytecode and values | Veryl AST traversal or simulator memory ownership |
+| `celox-runtime` | Events, timed scheduling, VCD output, testbench execution, and backend contracts | Frontend, SIR optimization, or concrete backend internals |
+| `celox` | Public API, compilation orchestration, and backend selection | New reusable compiler algorithms |
+
+## Phase artifacts
+
+Each major transition consumes an artifact and returns the next one. This keeps
+phase validity in the type system instead of representing it with optional fields
+on a shared mutable object.
 
 ### `SymbolicRtl`
 
-Contains SLT arena roots, logic paths, FF recipes, observer recipes, and symbolic stores keyed by
-design IDs. Every `NodeId` refers to the arena owned by this artifact.
+Frontend-owned modules with symbolic combinational and sequential logic. It may
+contain SLT identities and Veryl-specific lookup information because it has not
+crossed the frontend boundary yet.
 
 ### `ScheduledRtl`
 
-Contains the selected comb/FF order, SCC execution policy, semantic regions, and lowering recipes.
-Scheduling legality is complete at this boundary. SIR lowering may choose instruction details but
-may not silently change RTL ordering.
+The result of flattening hierarchy, assigning source-independent state identities,
+scheduling logic, and lowering symbolic roots. No downstream component needs the
+SLT arena to reconstruct runtime behavior.
 
-### `SirProgram`
+### `UnoptimizedSir`
 
-Contains named groups of SIR execution units and runtime-event references. It has no SLT arena,
-`NodeId`, Veryl AST, physical offset, or backend plan.
+Backend-independent SIR plus the design and runtime metadata needed by later
+phases. Physical offsets have not been assigned.
 
 ### `OptimizedSir`
 
-Contains verified optimized SIR plus semantic alias proofs and `LayoutRequirements`. Its constructor
-is private to the optimizer pipeline so callers cannot label unverified SIR as optimized.
+SIR after the pass manager has applied the selected optimization policy. Only the
+optimizer transition constructs this artifact, so layout and code generation
+cannot accidentally consume unoptimized input.
 
 ### `LaidOutProgram`
 
-Contains a verified `SirProgram`, immutable `MemoryLayout`, design/runtime schema, and initial
-physical-memory image. All semantic objects referenced by SIR resolve through the layout. No
-backend has run yet.
+Optimized SIR paired with an immutable physical memory layout. All backend-visible
+state addresses can now be resolved without consulting Veryl source objects.
 
-This type is owned by `celox-state-layout`, which must not depend on `celox-sir-opt`. Layout
-construction consumes `OptimizedSir` through an `into_verified_sir()` boundary plus explicit
-`LayoutRequirements`; it stores the underlying SIR rather than the optimizer's newtype. A
-layout-preserving finalizer in `celox-sir-opt` may consume and return `LaidOutProgram`, but layout
-construction never calls back into the optimizer.
+### `RuntimeProgram`
 
-### `BackendArtifact`
+The source-independent metadata retained after code generation: elaborated design
+metadata, public path lookup, runtime schema, and bound testbench bytecode. A
+running `Simulator` stores this artifact beside the executable backend; compiler
+IR and layout requirements do not remain live during simulation.
 
-Contains backend-owned compiled functions/code and an implementation of the runtime execution ABI.
-MIR, register assignments, Cranelift plans, and relocation tables remain private to the producing
-backend unless tracing explicitly requests a serialized diagnostic.
+## Dependency rules
 
-### `ExecutableProgram`
+The following rules define the intended architecture:
 
-Contains backend artifacts, initialized state memory, event handles, signal lookup tables, and
-optional testbench bytecode. It has no compiler IR.
+1. Source-language types stop at the frontend boundary.
+2. Semantic state identities remain distinct from physical memory offsets until
+   layout finalization.
+3. SIR optimizations are independent of any concrete backend.
+4. Target MIR, register allocation, and emission remain private to their backend.
+5. Runtime code depends on backend contracts, not concrete compiler pipelines.
+6. Testbench execution uses source-independent bytecode; only the frontend parses
+   Veryl testbench syntax.
+7. The facade coordinates phases but does not become a second owner of their
+   algorithms or data structures.
 
-## Dissolving the current `Program`
+These rules are enforced primarily by Cargo dependencies and artifact types. A
+new dependency that points from a lower layer back toward the facade or frontend
+is therefore an architectural change, not a convenient shortcut.
 
-| Current field group | Destination |
-| --- | --- |
-| `eval_comb`, `eval_*_ffs`, `eval_comb_apply_ffs` | `SirProgram` |
-| `comb_semantic_regions` | `ScheduledRtl`, then explicit SIR provenance if still needed |
-| `arena`, `comb_observers` containing `NodeId` | `SymbolicRtl`; consumed before `SirProgram` |
-| semantic hierarchy/state/clock/reset maps | `ElaboratedDesign` |
-| Veryl module, variable, and path lookup maps | temporary frontend/facade lookup artifact, then compiled diagnostics |
-| runtime errors and event sites | design/runtime schema |
-| `address_aliases` | `LayoutRequirements` with proof identity |
-| `layout: Option<MemoryLayout>` | separate `LaidOutProgram` |
-| former `eval_comb_plan` | Cranelift-private planning result, constructed from final SIR at the backend boundary |
-| initial memory values | design initial state, then laid-out memory image |
-| Veryl `initial_statements` and `tb_functions` | compiled by frontend into `celox-testbench` bytecode |
+## Where changes belong
 
-No replacement structure may simply contain all of these fields under another name.
+- A new Veryl construct or source diagnostic belongs in `celox-frontend-veryl`.
+- A symbolic scheduling rule belongs in `celox-slt`.
+- A backend-independent instruction or CFG rule belongs in `celox-sir`.
+- A backend-independent transformation belongs in `celox-sir-opt`.
+- A memory-region or address-placement rule belongs in `celox-state-layout`.
+- An x86 instruction, register constraint, or emission rule belongs in
+  `celox-backend-x86`.
+- Event ordering, timed execution, or VCD behavior belongs in `celox-runtime`.
+- Public construction options and backend selection belong in the `celox` facade.
 
-## Option ownership
-
-The current `OptimizeOptions` mixes SIR passes, Cranelift settings, layout choices, and simulator
-policy. It is split into:
-
-- `SirOptimizeOptions` in `celox-sir-opt`;
-- `LayoutOptions` in `celox-state-layout`;
-- `X86BackendOptions` in `celox-backend-x86`;
-- `CraneliftOptions` in `celox-backend-cranelift`;
-- `WasmBackendOptions` in `celox-backend-wasm`;
-- runtime policy in `celox-runtime`;
-- user-facing `CompileOptions`/`SimulatorOptions` in the facade, which translate to the above.
-
-An option owned by one backend cannot change the semantics or optimization pipeline seen by another
-backend.
-
-## Source relocation map
-
-This is the intended ownership, not a command to move whole files unchanged.
-
-| Current area | Target |
-| --- | --- |
-| `ir::{builder,cfg,verify}` and generic SIR types in `ir.rs` | `celox-sir` |
-| address/hierarchy/domain/variable metadata in `ir.rs` | `celox-design` |
-| `logic_tree` node/facts/path/state/range/lower core | `celox-slt` |
-| Veryl expression traversal currently under `logic_tree::comb` | `celox-frontend-veryl` |
-| `parser`, `flatting`, context-width and Veryl bit-access handling | `celox-frontend-veryl` |
-| `parser::scheduler` generic dependency scheduling | `celox-slt` after parser types are removed |
-| `optimizer` and backend-independent `optimizer::coalescing` passes | `celox-sir-opt` |
-| `backend::memory_layout` | `celox-state-layout` |
-| `backend::native` | `celox-backend-x86` |
-| Cranelift translator/JIT code | `celox-backend-cranelift` |
-| `wasm_codegen` and optional host WASM runtime | `celox-backend-wasm` |
-| `testbench` VM | `celox-testbench` |
-| `simulation`, runtime scheduler, event buffer, backend traits | `celox-runtime` |
-| `simulator::builder`, backend choice, compilation trace assembly | `celox` facade |
-
-Small helpers move to their semantic owner. There will be no `celox-utils`, `celox-core`, or
-`celox-ir` dumping-ground crate.
-
-## Migration plan and gates
-
-Each milestone is independently reviewable and leaves the workspace buildable. Pure moves must not
-change snapshots or generated code.
-
-### Milestone 0: design contract
-
-- Commit this document alone.
-- Record the branch dependency on PR #322.
-- Make no source change.
-
-Gate:
-
-- Markdown formatting and link inspection;
-- clean diff containing only this document.
-
-### Milestone 1: extract the SIR kernel
-
-- Add `celox-sir`.
-- Move generic SIR types, builder, verifier, CFG adapter, display, and merge utilities.
-- Keep concrete design addresses and the mixed `Program` temporarily in `celox`.
-- Re-export existing public SIR-facing names from `celox` where compatibility requires it.
-- Move generic CFG ordering to `celox-analysis` instead of making SIR depend on the facade.
-
-Gate:
-
-- `cargo test -p celox-sir`;
-- all existing SIR verifier/builder/serialization tests;
-- `cargo test -p celox`;
-- unchanged optimized-SIR snapshots;
-- host `cargo clippy` and format checks.
-
-### Milestone 2: introduce design-owned identities
-
-- Add `celox-design`.
-- Introduce Celox-owned dense IDs and source-to-design conversion maps.
-- Move bit ranges, semantic state references, operators, hierarchy, domains, and initial-state schema.
-- Keep Veryl IDs behind frontend conversion tables.
-- Adapt SIR to `StateRef` without changing physical layout.
-
-Gate:
-
-- hierarchy, parameter override, initial state, multi-clock, four-state, and serialization tests;
-- SIR snapshots differ only in intentionally renamed address formatting;
-- native/Cranelift/WASM cross-validation corpus.
-
-### Milestone 3: split phase artifacts and layout
-
-- Replace mutable mixed `Program` use with `ElaboratedDesign`, `SirProgram`, `OptimizedSir`, and
-  `LaidOutProgram` at compiler-driver boundaries.
-- Add `celox-state-layout` and move layout construction/verification.
-- Replace optimizer enums inspected by layout with explicit `LayoutRequirements`.
-- Remove `Program::build_layout*` and `Option<MemoryLayout>`.
-
-Gate:
-
-- memory-layout unit tests;
-- packed/unpacked boundary and alias tests;
-- initial-memory and runtime-event layout tests;
-- all three backend correctness tests;
-- no source-language dependency in `celox-state-layout`.
-
-### Milestone 4: separate SLT core from Veryl construction
-
-- Add `celox-slt` and `celox-frontend-veryl`.
-- Move source-independent arena, facts, symbolic state, scheduling, and lowerer into `celox-slt`.
-- Keep Veryl AST traversal, context widths, case construction, and diagnostics in the frontend.
-- Make comb and FF dependencies inputs to one scheduling/lowering contract; do not recreate a
-  post-hoc concatenation path.
-- Consume `SymbolicRtl` when producing `SirProgram`, proving no `NodeId` reaches later phases.
-
-Gate:
-
-- SLT node-fact/verifier tests;
-- comb-loop/SCC and fused comb/FF scheduler tests;
-- FF ordering, NBA, multi-clock, and observer semantics;
-- Heliodor SIR shape and native execution correctness;
-- no Veryl dependency in `celox-slt`.
-
-### Milestone 5: extract SIR optimization
-
-- Add `celox-sir-opt`.
-- Move pass manager and backend-independent passes.
-- Remove optimizer calls into parser modules.
-- Split pre-layout and layout-preserving finalization contracts.
-- Split `OptimizeOptions` by owner.
-
-Gate:
-
-- every pass unit test and snapshot;
-- pass-by-pass verifier execution in tests;
-- optimized SIR and generated MIR comparison for representative designs;
-- compile-time/RSS scaling tests for large SIR;
-- Heliodor correctness and non-LTO development performance check.
-
-### Milestone 6: extract concrete backends
-
-- Add `celox-backend-x86`, then Cranelift and WASM backend crates.
-- Move x86 MIR/regalloc/emitter together; do not expose MIR as generic compiler API.
-- Make backend inputs immutable `LaidOutProgram` views.
-- Keep backend traces diagnostic-only.
-
-Gate:
-
-- backend unit and cross-validation tests after each backend move;
-- Windows x86-64 check for the x86 backend;
-- Linux x86-64 native tests;
-- Linux AArch64 GNU NAPI build through Cranelift;
-- browser and wasmtime WASM tests;
-- unchanged native MIR/disassembly snapshots for pure moves.
-
-### Milestone 7: extract testbench and runtime
-
-- Add `celox-testbench` and compile Veryl testbench constructs before runtime.
-- Add `celox-runtime`; move scheduler, simulation state, event handles, VCD, and backend traits.
-- Leave orchestration and stable API re-exports in `celox`.
-- Delete obsolete compatibility modules after downstream crates have migrated.
-
-Gate:
-
-- native testbench, formatting, runtime-event, VCD, and scheduler tests;
-- NAPI and WASM package builds;
-- public API compatibility tests;
-- full workspace pre-push suite.
-
-### Milestone 8: cleanup and final acceptance
-
-- Delete dead modules, transitional type aliases, duplicate adapters, and unused feature paths.
-- Verify the Cargo dependency graph against this document.
-- Update architecture and IR reference documentation.
-- Re-establish compile-time and runtime baselines.
-
-Gate:
-
-- clean workspace build on supported targets;
-- complete semantic suite;
-- final release/LTO Heliodor compilation and execution benchmark;
-- generated-code comparison against the pre-split baseline;
-- no unexplained regression accepted as a consequence of crate separation.
-
-## Per-commit verification policy
-
-Every implementation commit runs the smallest complete gate for the boundary being changed. Before
-moving to the next milestone, the enclosing crate and `celox` integration tests both pass.
-
-The normal iteration profile is the development profile. Release/LTO is used at performance
-milestones and final acceptance, not on every mechanical move. Cross-target checks run when a moved
-boundary contains target configuration or public API, rather than being postponed until all crates
-have moved.
-
-If a move changes generated SIR, MIR, machine code, RTL behavior, compile time, or runtime, that
-change is treated as a functional change and explained separately. A crate extraction is not an
-acceptable reason for an unexplained change.
-
-## Completion criteria
-
-The split is complete when:
-
-- Cargo exposes a dependency DAG matching the ownership rules above;
-- no type equivalent to the current mixed `Program` exists;
-- SIR contains no SLT/Veryl/layout/backend-plan fields;
-- backend crates consume immutable design/SIR/layout contracts;
-- runtime contains no compiler or source-language IR;
-- the x86 allocator and MIR remain fully encapsulated by `celox-backend-x86`;
-- the `celox` facade preserves the intended public API without containing compiler implementations;
-- semantic tests and final release/LTO performance gates pass.
-
-The objective is not a larger number of crates. The objective is to make illegal phase coupling
-unrepresentable while preserving the compiler's ability to generate fast simulation binaries.
+See [Simulator Architecture](./architecture.md) for the end-to-end data flow and
+[SIR Reference](./ir-reference.md) for the backend-independent instruction model.

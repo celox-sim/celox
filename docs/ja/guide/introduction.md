@@ -1,34 +1,49 @@
 # はじめに
 
-Celox は [Veryl HDL](https://veryl-lang.org/) 向けの JIT（Just-In-Time）シミュレータです。Veryl 設計を中間表現に変換し、x86-64 では Celox 独自のネイティブバックエンド、その他の環境では Cranelift JIT を使って実行可能コードにコンパイルします。
+Celox は [Veryl HDL](https://veryl-lang.org/) 向けのシミュレータです。`.veryl`
+モジュールを TypeScript から型安全に import し、入力を操作してクロックを進め、
+Vitest で出力を検証できます。
 
-## 主な特徴
+::: tip ブラウザで試す
+[Celox Playground](https://celox-sim.github.io/celox/playground/) では、ローカルに
+ツールチェーンを入れずに Veryl 設計を実行できます。
+:::
 
-- **JIT コンパイル** -- Veryl 設計は多段パイプライン（Veryl → SLT → SIR → ネイティブコード）を通じてコンパイルされます。
-- **ネイティブ x86-64 バックエンド** -- x86-64 環境では開発中の Celox 独自コード生成器を使います。大規模設計の性能は現在も検証中です。
-- **Cranelift フォールバック** -- ARM や RISC-V など、ネイティブバックエンドが使えない環境でも JIT 実行できます。
-- **イベント駆動スケジューリング** -- マルチクロックドメイン対応のイベント駆動スケジューラが、複雑なタイミングインタラクションを処理します。
-- **4 値シミュレーション** -- IEEE 1800 準拠の 4 値表現と適切な X 伝搬をサポートします。
-- **TypeScript テストベンチ** -- 型安全なシグナルアクセスとモダンな開発ツールを使用して、TypeScript でテストベンチを記述できます。
-- **VCD 波形出力** -- 標準的なビューアで波形を確認するための VCD ファイルを生成します。
+## できること
 
-## プロジェクト構成
+- Veryl モジュールを、生成されたポート型付きで TypeScript から import する。
+- 組み合わせ回路と順序回路を、手動クロックまたはスケジュールクロックでテストする。
+- 必要に応じて子インスタンスのポートへアクセスする。
+- 4 値モードを有効にして `X` と `Z` を扱う。
+- GTKWave や Surfer で確認できる VCD 波形を出力する。
+- 値パラメータを上書きし、テスト専用の Veryl ソースを読み込む。
 
-Celox は Rust + TypeScript のワークスペースとして構成されています：
+Celox はシミュレータ作成時に設計をコンパイルします。x86-64 ではネイティブ
+バックエンド、それ以外のネイティブ環境では Cranelift JIT、Playground では
+WebAssembly を使います。通常は自動選択され、TypeScript テストベンチ API は
+変わりません。
 
-| クレート / パッケージ | 説明 |
-|---|---|
-| `crates/celox` | コアシミュレータ（IR、ネイティブ x86-64 バックエンド、Cranelift JIT、ランタイム） |
-| `crates/celox-macros` | 手続きマクロ |
-| `crates/celox-napi` | Node.js 向け N-API バインディング |
-| `crates/celox-ts-gen` | TypeScript 型生成ライブラリ |
-| `packages/celox` | TypeScript ランタイムパッケージ |
-| `packages/vite-plugin` | `.veryl` を型付きで import するための Vite / Vitest プラグイン |
+## シミュレーション方法を選ぶ
 
-## 動作の仕組み
+イベントをテスト側で明示的に制御する場合は `Simulator` を使います。サイクル単位の
+ユニットテストに向いています。
 
-1. **フロントエンド** -- Veryl ソースコードを解析し、モジュール階層、ポート、イベント、組み合わせ回路 / 順序回路ブロックを抽出します。
-2. **ミドルエンド** -- ロジックを SLT と SIR に変換し、シミュレーション向けの最適化を適用します。
-3. **バックエンド** -- x86-64 ではネイティブコードに直接コンパイルし、それ以外の環境では Cranelift JIT を使って実行コードを生成します。
+```typescript
+const sim = Simulator.create(Counter);
+sim.dut.enable = 1n;
+sim.tick();
+expect(sim.dut.count).toBe(1n);
+sim.dispose();
+```
 
-アーキテクチャの詳細については、[アーキテクチャ](/internals/architecture)の内部ドキュメントを参照してください。
+クロックのスケジュールやシミュレーション時刻が必要な場合は `Simulation` を使います。
+マルチクロックや時間ベースのテストに向いています。
+
+## 次に読むページ
+
+[はじめる](./getting-started.md)でプロジェクトをセットアップし、
+[テストの書き方](./writing-tests.md)でテストベンチ API を確認してください。
+[API リファレンス](/api/)には TypeScript のクラスとオプションを掲載しています。
+
+コンパイラとランタイムの設計は、ユーザーガイドとは分けて
+[シミュレータアーキテクチャ](/internals/architecture)にまとめています。

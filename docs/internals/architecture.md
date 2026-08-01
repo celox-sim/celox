@@ -1,135 +1,123 @@
 # Simulator Architecture
 
-Celox is an engine that generates JIT-compiled native code from Veryl RTL and executes cycle-based simulation.
+Celox compiles Veryl RTL into executable simulation kernels and runs them with an
+event-driven runtime. The architecture is optimized for synchronous RTL
+verification rather than gate-level timing or detailed delta-cycle emulation.
 
-## Design Philosophy and Target
-
-This simulator is designed with the goal of **maximizing verification efficiency for modern synchronous circuit designs (RTL)**.
-
--   **RTL-focused**: Physical timing reproduction that trades off against simulation speed -- such as gate-level delays (# delays) and detailed delta-cycle behavior -- is intentionally simplified by restricting the design scope to RTL-level logic verification.
--   **Performance-first**: Rather than interpreter-style emulation, the simulator compiles from SIR (Simulator IR) to native machine code to achieve execution throughput close to hand-written C.
--   **Consistency as a design goal**: Mechanisms such as "multi-phase evaluation" and "cascade clock detection" have been designed and implemented to guarantee consistency for challenges encountered in real RTL designs, such as multi-clock domains and zero-delay clock trees. However, there are currently [race condition limitations under certain conditions](./cascade-limitations.md).
-
-## Compilation Pipeline
-
-Compilation crosses explicit ownership boundaries rather than mutating one phase-dependent
-`Program` object:
+## System overview
 
 ```text
-Veryl analyzer IR
-  → SymbolicRtl / SimModule              (celox-frontend-veryl)
-  → ScheduledRtl + optimization hints   (celox-frontend-veryl + celox-slt)
-  → UnoptimizedSir
-  → OptimizedSir                         (celox-sir-opt)
-  → LaidOutProgram                       (celox-state-layout)
-  → target code                          (x86, Cranelift, or Wasm backend)
-  → RuntimeProgram                       (celox-runtime)
+Veryl source
+    │
+    ▼
+frontend analysis and hierarchy elaboration
+    │
+    ▼
+symbolic logic (SLT) and dependency scheduling
+    │
+    ▼
+Simulator IR (SIR) and backend-independent optimization
+    │
+    ▼
+physical state layout
+    │
+    ├──► native x86-64 code
+    ├──► Cranelift JIT code
+    └──► WebAssembly
+             │
+             ▼
+      event-driven runtime
 ```
 
-1.  **Frontend and symbolic lowering**:
-    -   Veryl analyzer modules become module-local `SimModule`s containing SLT symbolic state,
-        combinational paths, FF summaries, and already-lowered phase-specific SIR where required.
-    -   `SymbolicRtl` owns this frontend-only hierarchy. `schedule_symbolic_rtl` atomizes and
-        flattens it, schedules comb and fused comb/FF work, assigns source-independent
-        `StateAddr`s, and consumes every SLT arena before returning `ScheduledRtl`.
-    -   Veryl identities retained for diagnostics and path lookup live in
-        `VerylFrontendLookup`; downstream optimization never recovers semantic identity from it.
+Compilation uses distinct artifacts for each phase. Source-language objects do
+not leak into optimization or code generation, and target-specific IR does not
+leak back into SIR. See [Compiler Components](./compiler-crate-architecture.md)
+for the crate and artifact boundaries.
 
-2.  **Backend-independent optimization and layout**:
-    -   `UnoptimizedSir` contains `SirProgram`, runtime metadata, and semantic layout
-        requirements. `celox-sir-opt` is the only owner of the pass pipeline and produces
-        `OptimizedSir`.
-    -   Layout finalization validates alias requirements, assigns Stable, Working,
-        SparseWorking, Triggered, and Scratch storage, and consumes `OptimizedSir` to produce
-        `LaidOutProgram`. A backend cannot be entered before this transition.
+## Frontend and scheduling
 
-3.  **Target code generation and runtime**:
-    -   The x86, Cranelift, and Wasm crates consume the same immutable laid-out SIR. Their MIR,
-        split plans, register assignments, and emitted-code state remain backend-private.
-    -   After code generation, only `RuntimeProgram` is retained. It contains the elaborated
-        design, source lookup, runtime schema, and compiled source-independent testbench bytecode;
-        it cannot contain SIR or layout requirements.
+The Veryl frontend analyzes modules, elaborates hierarchy, and records the source
+lookup information needed by diagnostics and public signal paths. Combinational
+expressions are represented as symbolic logic trees (SLT).
+
+The scheduler then:
+
+1. flattens the elaborated hierarchy;
+2. assigns source-independent state identities;
+3. derives combinational dependencies and clock domains;
+4. orders combinational work and detects dependency cycles;
+5. lowers scheduled logic into SIR execution units.
+
+After this transition, downstream phases use design identities and SIR rather
+than Veryl parser nodes or SLT arena identifiers. The scheduling algorithm is
+described in [Combinational Analysis](./combinational-analysis.md).
+
+## SIR, optimization, and layout
+
+SIR is the common source- and target-independent control-flow IR. It represents
+bit-precise loads, stores, arithmetic, selection, and the execution units needed
+for combinational and sequential phases.
+
+Backend-independent passes simplify and reschedule SIR before physical addresses
+are assigned. Layout then maps semantic state objects into regions of one
+simulation buffer:
+
+- **Stable** contains committed signal and register values.
+- **Working** contains next-state values during split-phase sequential evaluation.
+- **Sparse working metadata** tracks state that only needs selective commit.
+- **Triggered bits** record event-producing changes.
+- **Scratch** is backend-requested temporary storage when a kernel must be split.
+
+Four-state objects store a value plane and a mask plane. Layout is immutable once
+code generation begins, so every backend sees the same state representation.
+
+See [SIR Reference](./ir-reference.md) and
+[Optimization Architecture](./optimizations.md) for these layers.
 
 ## Backends
 
-Celox supports multiple compilation backends, selected at build time based on the target architecture.
+All backends consume laid-out SIR and implement the runtime's backend contract.
 
-### Native x86-64 Backend (Default)
+### Native x86-64
 
-The self-hosted native backend is the default on x86-64 platforms. It compiles SIR through a dedicated pipeline:
+The default x86-64 backend lowers SIR to a private machine IR, performs
+machine-level optimization and register allocation, and emits executable code.
+Its instruction selection, allocation data, and executable-memory management are
+not part of the shared compiler model.
 
-```
-SIR (bit-level)
-  → ISel (Instruction Selection)
-    → MIR (word-level SSA with VRegs)
-      → mir_opt (MIR optimization passes)
-        → regalloc (integrated scheduling, W/S planning, SSA reconstruction and coloring)
-          → emit (x86-64 machine code via iced-x86)
-```
+### Cranelift
 
-Key features of the native backend:
+The Cranelift backend translates SIR to Cranelift IR and uses Cranelift's JIT. It
+is the native fallback where the custom x86-64 backend is unavailable.
 
--   **MIR**: A word-level SSA IR with virtual registers (`VReg`). Instructions operate on 64-bit values; bit-level access information is preserved in `SpillDesc` side-tables for cost-aware spill decisions.
--   **MIR Optimization**: Constant folding, copy propagation, algebraic simplification, GVN, DCE, if-conversion (Branch → Select/cmov), CFG simplification, PEXT fusion for XOR chains, and more. An adaptive pipeline runs the full pass set iteratively for high-pressure functions (VRegs > 40) and a lightweight variant for small functions.
--   **Register Allocator**: A verified, non-iterative SSA pipeline. A dependency-ready walk jointly
-    chooses instruction order and W/S residency, with point-specific MemorySSA reload recipes and
-    explicit phi-edge transfers. Reconstruction inserts only the selected stack, persistent-state,
-    or rematerialized homes; stack slots are colored from exact CFG-sparse stack-home liveness.
-    Machine constraints are materialized as late permutations, then strict-SSA values are colored
-    in dominance order. Final MIR independently verifies every materialized state-home version.
--   **EU Merge**: Multiple execution units are merged into a single function with shared prologue/epilogue and `jmp`-linked boundaries, reducing call overhead.
--   **Cmp+Branch Fusion**: When a comparison result only feeds a branch, the `setcc`+`movzx`+`test` sequence is replaced by a direct `cmp`+`jcc`.
+### WebAssembly
 
-### Cranelift Backend (Fallback)
+The WebAssembly backend translates the same SIR and layout into a Wasm module. It
+supports both the Rust host path and the browser playground.
 
-The Cranelift-based JIT backend (`JitBackend`) remains available for non-x86-64 targets and as a fallback. It compiles SIR directly to native code via [Cranelift](https://cranelift.dev/). Cranelift-specific options (`CraneliftOptLevel`, `RegallocAlgorithm`, `enable_alias_analysis`, `enable_verifier`) are configured through `CraneliftOptions`.
+## Runtime execution
 
-### WASM Backend
+The runtime owns scheduling and observable simulator behavior. A simulation step
+has four conceptual stages:
 
-A WebAssembly backend (`wasm_codegen`) generates WASM bytecode from SIR. The Rust-side `WasmBackend` instantiates that bytecode via wasmtime, while the TypeScript playground path exposes the same generated bytes and runs them through the browser's WebAssembly APIs.
+1. take all events scheduled for the current time;
+2. detect clock edges and collect triggered domains;
+3. evaluate next state from the current stable state;
+4. commit updates and repeat combinational propagation until the step settles.
 
-### Backend Trait
+When several domains trigger together, evaluation and commit are separated so
+that every domain reads the same pre-update state. If a committed result drives
+another clock, the runtime discovers that domain and continues within the same
+step. [Runtime Semantics](./cascade-limitations.md) describes this behavior and
+its boundaries.
 
-All backends implement the `SimBackend` trait, which provides a unified interface for:
+A running simulator retains the elaborated design, source lookup, runtime schema,
+bound testbench bytecode, and compiled backend. The backend owns the finalized
+layout. Frontend and optimizer state are discarded after compilation.
 
--   Combinational evaluation (`eval_comb`)
--   Single-phase FF evaluation (`eval_apply_ff_at`) — fast path when a step can use combined evaluate+apply semantics
--   Split-phase FF evaluation (`eval_only_ff_at`, `apply_ff_at`) — for cascade clock consistency
--   Signal/event access (`resolve_signal`, `resolve_event`, `resolve_event_opt`, `resolve_eval_only_event`, `resolve_apply_event`)
--   Get/set operations (`get`, `set`, `set_wide`, `get_four_state`, `set_four_state`)
--   Memory/layout access (`memory_as_ptr`, `memory_as_mut_ptr`, `stable_region_size`, `layout`)
--   Triggered-bits management (`clear_triggered_bits`, `mark_triggered_bit`, `get_triggered_bits`)
+## Public API boundary
 
-## Memory Model
-
-The simulator employs a **multi-region model on a single memory buffer**.
-
--   **Stable region**: Holds the current committed values. Combinational logic inputs and outputs reference this region.
--   **Working region**: Temporarily holds the next state of flip-flops. Only variables that are actually written have Working region slots allocated.
--   **Triggered-bits region**: One bit per event, used for cascade/gated clock trigger detection. After a `Store` instruction, the backend compares old and new values and sets the corresponding trigger bit if changed.
--   **Scratch region**: Used by the tail-call splitting pass for inter-chunk register value spilling.
--   **SignalRef**: A handle that caches offsets and metadata, enabling direct memory access without going through a `HashMap`.
--   **Layout Requirements**: The `IdentityStoreBypass` optimization detects variables that are identity copies (Store→Load roundtrips) and records non-canonical → canonical state-home aliases in `OptimizedSir::layout_requirements`. Physical layout validates compatible representations before sharing memory, then consumes the requirements when producing `LaidOutProgram`.
-
-For 4-state variables, each variable occupies `2 × ceil(width/8)` bytes (value + mask pair).
-
-## Execution Control Logic
-
-`Simulation::step` advances the simulation time by one step using the following flow.
-
-1.  **Event extraction**: Retrieves all events occurring at the current time (such as clock changes) from the scheduler.
-2.  **Clock edge detection**:
-    -   Previous values are retained in a `BitSet` and compared with the updated values to determine `posedge` / `negedge`.
-    -   Based on `DomainKind`, checks whether the target flip-flop groups have been triggered.
-3.  **Silent edge skipping**: When a signal value has changed but the flip-flop trigger condition is not met (e.g., a falling edge when a rising edge is specified), unnecessary flip-flop evaluation is skipped.
-4.  **Multi-phase evaluation**:
-    -   When multiple domains are triggered simultaneously, to maintain consistency as an event-driven model, next-state computation via `eval_only` is first performed across all domains. Then, after all computations are complete, values are written to the Stable region all at once via `apply`. This avoids value inconsistencies between simultaneously occurring events.
-5.  **Cascade clock detection**:
-    -   To handle cases where a flip-flop output serves as the clock for another flip-flop (zero-delay clock tree), clock signal changes are re-scanned after domain evaluation, and evaluation is repeated until the state stabilizes.
-
-## Related Components
-
--   **`SimBackend`**: Trait abstracting over compilation backends. `NativeBackend` (x86-64), `JitBackend` (Cranelift), and `WasmBackend` (wasmtime) implement this trait.
--   **`Scheduler`**: Manages events using a `BinaryHeap` and dispatches them in chronological order with deterministic ordering (time → event ID → signal).
--   **`VcdWriter`**: Records signal changes during simulation in VCD format.
--   **`MemoryLayout`**: Pre-computed offset map shared by all backends. Contains stable/working region offsets, variable widths, 4-state flags, triggered-bits region, and scratch region for inter-chunk spilling.
+The Rust `celox` crate is a facade over the compiler and runtime components. The
+Node binding and TypeScript package expose that facade to user testbenches. API
+options select compiler policy or runtime behavior, but callers do not construct
+phase artifacts or depend on concrete backend internals.

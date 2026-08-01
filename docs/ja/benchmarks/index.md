@@ -1,157 +1,52 @@
 # ベンチマーク
 
-CeloxにはRustコア、TypeScriptランタイム、参照baselineのVerilator、およびnative
-JITコード品質を測るHeliodor Linux workloadのベンチマークがあります。CIは履歴を
-interactive dashboardへ公開し、Heliodorに関係するpull requestでは許容値を超える
-生成JIT性能の退行も拒否します。
+Celox は、各バックエンドおよび Verilator との間でコンパイル時間とシミュレーション
+速度を継続的に計測しています。ダッシュボードは傾向の確認に使うもので、すべての
+RTL 設計の性能を予測するものではありません。
 
 ## ダッシュボード
 
 <ClientOnly><BenchmarkDashboard /></ClientOnly>
 
-このページでは主要なグラフだけを表示します。メインの順序回路ワークロード、主要なテストベンチ指標、代表的な stdlib ワークロードだけに絞っています。stdlib タブは網羅的なカタログではなく、一般的な組合せ最適化、liveness や DSE に敏感な組合せ回路、大きめの構造化データパス、順序回路/ランタイム支配の系、という観点で整理しています。必要な場合は DSE のような Celox 側の系列だけ同じグラフ内に残します。
-完全なベンチマーク行列と生データは[外部ダッシュボード](https://celox-sim.github.io/celox/dev/bench/)を見てください。
-より compiler 向けの細かいグラフは[診断用ページ](/ja/benchmarks/diagnostic)を見てください。
-長時間の外部 Veryl project ベンチは [Heliodor マクロベンチマーク](/ja/benchmarks/heliodor)を見てください。
+完全なベンチマーク行列と履歴の生データは
+[外部ダッシュボード](https://celox-sim.github.io/celox/dev/bench/)で確認できます。
 
-## 測定対象
+## ワークロード
 
-### Counter (N=1000)
-
-メインワークロードは **N=1000** 個の並列 32 ビットカウンタインスタンスを持つカウンタモジュール（`Top`）を使用します。現実的なワークロードで JIT パイプライン全体を検証します。Rust、TypeScript、Verilator すべてで同一設計を使用し、直接比較が可能です。
-
-| ベンチマーク | Rust | TS | Verilator |
-|---|---|---|---|
-| `simulation_build_top_n1000` | JIT コンパイル | NAPI ビルド | Verilate + C++ コンパイル |
-| `simulation_tick_top_n1000_x1` | 単一ティック | 単一ティック | 単一ティック |
-| `simulation_tick_top_n1000_x1000000` | 100 万ティック | 100 万ティック | 100 万ティック |
-| `testbench_tick_top_n1000_x1` | ティック + 読出 | ティック + 読出 | ティック + 読出 |
-| `testbench_tick_top_n1000_x1000000` | 100 万テストベンチサイクル | 100 万テストベンチサイクル | 100 万テストベンチサイクル |
-| `testbench_array_tick_top_n1000_x1` | — | 配列 `.at()` 単一 | — |
-| `testbench_array_tick_top_n1000_x1000000` | — | 配列 `.at()` 100 万 | — |
-
-### 標準ライブラリモジュール
-
-Veryl 標準ライブラリモジュールのベンチマーク。
-
-**Linear SEC (P=6)** — ハミング単一誤り訂正エンコーダ/デコーダ（57 ビットデータ、63 ビット符号語）。組合せ回路。
-
-| ベンチマーク | Rust | TS | Verilator |
-|---|---|---|---|
-| `simulation_build_linear_sec_p6` | JIT コンパイル | NAPI ビルド | Verilate + C++ コンパイル |
-| `simulation_eval_linear_sec_p6_x1` | 単一評価 | 単一評価 | 単一評価 |
-| `simulation_eval_linear_sec_p6_x1000000` | 100 万評価 | 100 万評価 | 100 万評価 |
-| `testbench_eval_linear_sec_p6_x1000000` | 100 万評価 + 訂正フラグ読出 | 100 万評価 + 訂正フラグ読出 | 100 万評価 + 訂正フラグ読出 |
-
-**Countones (W=64)** — 再帰的組合せポップカウントツリー。
-
-| ベンチマーク | Rust | TS | Verilator |
-|---|---|---|---|
-| `simulation_build_countones_w64` | JIT コンパイル | NAPI ビルド | Verilate + C++ コンパイル |
-| `simulation_eval_countones_w64_x1` | 単一評価 | 単一評価 | 単一評価 |
-| `simulation_eval_countones_w64_x1000000` | 100 万評価 | 100 万評価 | 100 万評価 |
-
-**std::counter (WIDTH=32)** — マルチモード アップ/ダウンカウンタ（ラップアラウンド付き）。
-
-| ベンチマーク | Rust | TS | Verilator |
-|---|---|---|---|
-| `simulation_build_std_counter_w32` | JIT コンパイル | NAPI ビルド | Verilate + C++ コンパイル |
-| `simulation_tick_std_counter_w32_x1` | 単一ティック | 単一ティック | 単一ティック |
-| `simulation_tick_std_counter_w32_x1000000` | 100 万ティック | 100 万ティック | 100 万ティック |
-| `testbench_tick_std_counter_w32_x1000000` | 100 万ティック + 読出 | 100 万ティック + 読出 | 100 万ティック + 読出 |
-
-**std::gray_counter (WIDTH=32)** — Gray エンコード付きカウンタ（counter + gray_encoder）。
-
-| ベンチマーク | Rust | TS | Verilator |
-|---|---|---|---|
-| `simulation_build_gray_counter_w32` | JIT コンパイル | NAPI ビルド | Verilate + C++ コンパイル |
-| `simulation_tick_gray_counter_w32_x1` | 単一ティック | 単一ティック | 単一ティック |
-| `simulation_tick_gray_counter_w32_x1000000` | 100 万ティック | 100 万ティック | 100 万ティック |
-| `testbench_tick_gray_counter_w32_x1000000` | 100 万ティック + 読出 | 100 万ティック + 読出 | 100 万ティック + 読出 |
-
-**std::fifo (WIDTH=8, DEPTH=16)** — 同期 FIFO（コントローラ + RAM）。順序回路。
-
-| ベンチマーク | Rust | Verilator |
-|---|---|---|
-| `simulation_build_fifo_w8_d16` | JIT コンパイル | Verilate + C++ コンパイル |
-| `simulation_tick_fifo_w8_d16_x1` | 単一ティック（push/pop 交互） | 単一ティック（push/pop 交互） |
-| `simulation_tick_fifo_w8_d16_x1000000` | 100 万ティック（pure runtime） | 100 万ティック（pure runtime） |
-| `testbench_tick_fifo_w8_d16_x1000000` | 100 万ティック + 読出 | 100 万ティック + 読出 |
-
-**std::gray_encoder + gray_decoder (WIDTH=32)** — Gray エンコード/デコードラウンドトリップ。組合せ回路。
-
-| ベンチマーク | Rust | Verilator |
-|---|---|---|
-| `simulation_build_gray_codec_w32` | JIT コンパイル | Verilate + C++ コンパイル |
-| `simulation_eval_gray_codec_w32_x1` | 単一評価 | 単一評価 |
-| `simulation_eval_gray_codec_w32_x1000000` | 100 万評価 | 100 万評価 |
-
-**std::edge_detector (WIDTH=32)** — ビット単位エッジ検出（posedge/negedge）。順序回路。
-
-| ベンチマーク | Rust | Verilator |
-|---|---|---|
-| `simulation_build_edge_detector_w32` | JIT コンパイル | Verilate + C++ コンパイル |
-| `simulation_tick_edge_detector_w32_x1` | 単一ティック | 単一ティック |
-| `testbench_tick_edge_detector_w32_x1000000` | 100 万ティック + 読出 | 100 万ティック + 読出 |
-
-**std::onehot (W=64)** — ワンホット検出・ゼロ検出。組合せ回路。
-
-| ベンチマーク | Rust | Verilator |
-|---|---|---|
-| `simulation_build_onehot_w64` | JIT コンパイル | Verilate + C++ コンパイル |
-| `simulation_eval_onehot_w64_x1` | 単一評価 | 単一評価 |
-| `simulation_eval_onehot_w64_x1000000` | 100 万評価 | 100 万評価 |
-
-**std::lfsr_galois (SIZE=32)** — ガロアモード線形帰還シフトレジスタ。順序回路。
-
-| ベンチマーク | Rust | Verilator |
-|---|---|---|
-| `simulation_build_lfsr_w32` | JIT コンパイル | Verilate + C++ コンパイル |
-| `simulation_tick_lfsr_w32_x1` | 単一ティック | 単一ティック |
-| `simulation_tick_lfsr_w32_x1000000` | 100 万ティック | 100 万ティック |
-| `testbench_tick_lfsr_w32_x1000000` | 100 万ティック + 読出 | 100 万ティック + 読出 |
-
-### API & オーバーヘッド
-
-| ベンチマーク | 説明 |
+| グループ | 測定対象 |
 |---|---|
-| `simulator_tick_x10000` | 生の Simulator::tick オーバーヘッド（Rust & TS） |
-| `simulation_step_x20000` | Simulation::step 時間ベース API オーバーヘッド（Rust & TS） |
+| Counter | 順序状態の更新とクロックイベントのオーバーヘッド |
+| 標準ライブラリ | 組み合わせ回路、順序回路、構造化データパス |
+| TypeScript テストベンチ | N-API 呼び出し、型付き信号アクセス、スケジューラ |
+| Verilator 比較 | 同等の生成シミュレータによる基準値 |
+| Heliodor Linux | 大規模な外部設計での生成コード実行速度 |
+
+コンパイルと実行は分けて報告します。コンパイルが速くても生成コードが速いとは
+限らず、マイクロベンチマークだけで設計全体の性能は判断できません。
+
+## 結果の読み方
+
+- 同じワークロード、バックエンド、リビジョン、ホスト環境を比較する。
+- 共有 CI ランナー上の小さな差は、再現するまでノイズとして扱う。
+- 実行速度は十分に長いワークロードで判断する。
+- 開発時の反復時間にはシミュレータ作成時間も含める。
+- 最適化設定は実際に使う設計で検証する。
+
+Heliodor では固定入力の追加ワークロードを使います。測定方法は
+[Heliodor Linux ベンチマーク](./heliodor.md)を参照してください。
 
 ## ローカル実行
 
-### Rust
-
 ```bash
+# Rust ベンチマーク
 cargo bench -p celox
-```
 
-### TypeScript
-
-```bash
+# TypeScript / N-API ベンチマーク
 pnpm bench
-```
 
-リリースモードで NAPI アドオンをビルドし、パッケージをビルドした後、Vitest ベンチマークを実行します。
-
-### Verilator
-
-```bash
+# Verilator 比較（Verilator と C++ ツールチェーンが必要）
 bash scripts/run-verilator-bench.sh
 ```
 
-`verilator` と C++ ツールチェーンが必要です。
-
-### Heliodor
-
-```bash
-bash scripts/run-heliodor-bench.sh run
-```
-
-初回は Heliodor checkout のために network access が必要です。デフォルトの同期
-Veryl timing runner と Celox runner はこの workspace から build します。任意指定の
-Veryl CLI runner には別途 `veryl` が必要です。
-
-## CI 環境
-
-ベンチマークは GitHub Actions の共有ランナー（`ubuntu-latest`）で実行されます。共有ハードウェアのため、結果にノイズが含まれることがあります。誤検知を避けるため、アラート閾値は 200% に設定されています。個々のデータポイントではなく、長期的なトレンドに注目してください。
+ローカル計測は、同じマシン上で 2 つのリビジョンを比較する場合に最も有効です。
+CI 履歴は、単発の小さな差より長期的な傾向の確認に向いています。

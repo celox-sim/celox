@@ -1,158 +1,53 @@
 # Benchmarks
 
-Celox includes benchmark suites for the Rust core, the TypeScript runtime,
-Verilator as a reference baseline, and the Heliodor Linux workload for native
-JIT code quality. CI publishes their history to the interactive dashboard;
-Heliodor pull requests additionally reject generated-JIT regressions above the
-configured tolerance.
+Celox tracks compile time and simulation throughput against its own backends and
+Verilator. The dashboard is useful for trends; it is not a universal prediction
+for every RTL design.
 
 ## Dashboard
 
 <ClientOnly><BenchmarkDashboard /></ClientOnly>
 
-This page shows only the primary graphs: one main sequential workload, one main testbench workload, and a small set of representative stdlib workloads. The stdlib tab is organized by optimization character, not by catalog completeness: general combinational optimization, combinational workloads that are sensitive to liveness and DSE, larger structured datapaths, and sequential/runtime-dominated modules. Where relevant, Celox-specific variants such as DSE remain visible as separate series on the same chart.
-For the full benchmark matrix and raw data, use the [external dashboard](https://celox-sim.github.io/celox/dev/bench/).
-For more compiler-facing graphs, use the [diagnostic page](/benchmarks/diagnostic).
-For a long-running external Veryl project benchmark, see the [Heliodor macro benchmark](/benchmarks/heliodor).
+The complete benchmark matrix and raw history are available on the
+[external dashboard](https://celox-sim.github.io/celox/dev/bench/).
 
-## What is Measured
+## Workload groups
 
-### Counter (N=1000)
-
-The main workload uses a counter module (`Top`) with **N=1000** parallel 32-bit counter instances. This exercises the full JIT pipeline under a realistic workload. Rust, TypeScript, and Verilator all benchmark the same design for direct comparison.
-
-| Benchmark | Rust | TS | Verilator |
-|---|---|---|---|
-| `simulation_build_top_n1000` | JIT compile | NAPI build | Verilate + C++ compile |
-| `simulation_tick_top_n1000_x1` | Single tick | Single tick | Single tick |
-| `simulation_tick_top_n1000_x1000000` | 1M ticks | 1M ticks | 1M ticks |
-| `testbench_tick_top_n1000_x1` | Tick + read | Tick + read | Tick + read |
-| `testbench_tick_top_n1000_x1000000` | 1M testbench cycles | 1M testbench cycles | 1M testbench cycles |
-| `testbench_array_tick_top_n1000_x1` | — | Array `.at()` single | — |
-| `testbench_array_tick_top_n1000_x1000000` | — | Array `.at()` 1M | — |
-
-### Standard Library Modules
-
-Benchmarks for Veryl stdlib modules across all three runtimes.
-
-**Linear SEC (P=6)** — Hamming single-error-correcting encoder/decoder (57-bit data, 63-bit codeword). Combinational.
-
-| Benchmark | Rust | TS | Verilator |
-|---|---|---|---|
-| `simulation_build_linear_sec_p6` | JIT compile | NAPI build | Verilate + C++ compile |
-| `simulation_eval_linear_sec_p6_x1` | Single eval | Single eval | Single eval |
-| `simulation_eval_linear_sec_p6_x1000000` | 1M evals | 1M evals | 1M evals |
-| `testbench_eval_linear_sec_p6_x1000000` | 1M evals + read corrected | 1M evals + read corrected | 1M evals + read corrected |
-
-**Countones (W=64)** — Recursive combinational popcount tree.
-
-| Benchmark | Rust | TS | Verilator |
-|---|---|---|---|
-| `simulation_build_countones_w64` | JIT compile | NAPI build | Verilate + C++ compile |
-| `simulation_eval_countones_w64_x1` | Single eval | Single eval | Single eval |
-| `simulation_eval_countones_w64_x1000000` | 1M evals | 1M evals | 1M evals |
-
-**std::counter (WIDTH=32)** — Multi-mode up/down counter with wrap-around.
-
-| Benchmark | Rust | TS | Verilator |
-|---|---|---|---|
-| `simulation_build_std_counter_w32` | JIT compile | NAPI build | Verilate + C++ compile |
-| `simulation_tick_std_counter_w32_x1` | Single tick | Single tick | Single tick |
-| `simulation_tick_std_counter_w32_x1000000` | 1M ticks | 1M ticks | 1M ticks |
-| `testbench_tick_std_counter_w32_x1000000` | 1M tick + read | 1M tick + read | 1M tick + read |
-
-**std::gray_counter (WIDTH=32)** — Gray-encoded counter (counter + gray_encoder).
-
-| Benchmark | Rust | TS | Verilator |
-|---|---|---|---|
-| `simulation_build_gray_counter_w32` | JIT compile | NAPI build | Verilate + C++ compile |
-| `simulation_tick_gray_counter_w32_x1` | Single tick | Single tick | Single tick |
-| `simulation_tick_gray_counter_w32_x1000000` | 1M ticks | 1M ticks | 1M ticks |
-| `testbench_tick_gray_counter_w32_x1000000` | 1M tick + read | 1M tick + read | 1M tick + read |
-
-**std::fifo (WIDTH=8, DEPTH=16)** — Synchronous FIFO with controller and RAM. Sequential.
-
-| Benchmark | Rust | Verilator |
-|---|---|---|
-| `simulation_build_fifo_w8_d16` | JIT compile | Verilate + C++ compile |
-| `simulation_tick_fifo_w8_d16_x1` | Single tick (push/pop alternating) | Single tick (push/pop alternating) |
-| `simulation_tick_fifo_w8_d16_x1000000` | 1M ticks (pure runtime) | 1M ticks (pure runtime) |
-| `testbench_tick_fifo_w8_d16_x1000000` | 1M tick + read | 1M tick + read |
-
-**std::gray_encoder + gray_decoder (WIDTH=32)** — Gray encode/decode roundtrip. Combinational.
-
-| Benchmark | Rust | Verilator |
-|---|---|---|
-| `simulation_build_gray_codec_w32` | JIT compile | Verilate + C++ compile |
-| `simulation_eval_gray_codec_w32_x1` | Single eval | Single eval |
-| `simulation_eval_gray_codec_w32_x1000000` | 1M evals | 1M evals |
-
-**std::edge_detector (WIDTH=32)** — Per-bit edge detection (posedge/negedge). Sequential.
-
-| Benchmark | Rust | Verilator |
-|---|---|---|
-| `simulation_build_edge_detector_w32` | JIT compile | Verilate + C++ compile |
-| `simulation_tick_edge_detector_w32_x1` | Single tick | Single tick |
-| `testbench_tick_edge_detector_w32_x1000000` | 1M tick + read | 1M tick + read |
-
-**std::onehot (W=64)** — One-hot and zero detection. Combinational.
-
-| Benchmark | Rust | Verilator |
-|---|---|---|
-| `simulation_build_onehot_w64` | JIT compile | Verilate + C++ compile |
-| `simulation_eval_onehot_w64_x1` | Single eval | Single eval |
-| `simulation_eval_onehot_w64_x1000000` | 1M evals | 1M evals |
-
-**std::lfsr_galois (SIZE=32)** — Galois-mode linear feedback shift register. Sequential.
-
-| Benchmark | Rust | Verilator |
-|---|---|---|
-| `simulation_build_lfsr_w32` | JIT compile | Verilate + C++ compile |
-| `simulation_tick_lfsr_w32_x1` | Single tick | Single tick |
-| `simulation_tick_lfsr_w32_x1000000` | 1M ticks | 1M ticks |
-| `testbench_tick_lfsr_w32_x1000000` | 1M tick + read | 1M tick + read |
-
-### API & Overhead
-
-| Benchmark | Description |
+| Group | What it exercises |
 |---|---|
-| `simulator_tick_x10000` | Raw Simulator::tick overhead (Rust & TS) |
-| `simulation_step_x20000` | Simulation::step time-based API overhead (Rust & TS) |
+| Counter | Sequential state updates and clock-event overhead |
+| Standard library | A mix of combinational, sequential, and structured datapaths |
+| TypeScript testbench | N-API calls, typed signal access, and scheduler overhead |
+| Verilator comparison | Equivalent generated simulators for a reference baseline |
+| Heliodor Linux | Whole-design generated-code throughput on a large external design |
 
-## Running Locally
+Compilation and execution are reported separately. A faster compile does not
+imply faster generated code, and a microbenchmark result does not establish
+whole-design performance.
 
-### Rust
+## Reading results
+
+- Compare the same workload, backend, revision, and host environment.
+- Treat small changes on shared CI runners as noise until repeated.
+- Use long-running execution measurements for throughput conclusions.
+- Include simulator construction when evaluating developer iteration time.
+- Validate any optimization choice on the design it will actually run.
+
+Heliodor uses an additional fixed-input acceptance workload. Its methodology is
+described in [Heliodor Linux Benchmark](./heliodor.md).
+
+## Run locally
 
 ```bash
+# Rust benchmarks
 cargo bench -p celox
-```
 
-### TypeScript
-
-```bash
+# TypeScript and N-API benchmarks
 pnpm bench
-```
 
-This builds the NAPI addon in release mode, builds packages, then runs Vitest benchmarks.
-
-### Verilator
-
-```bash
+# Verilator comparison (requires Verilator and a C++ toolchain)
 bash scripts/run-verilator-bench.sh
 ```
 
-Requires `verilator` and a C++ toolchain.
-
-### Heliodor
-
-```bash
-bash scripts/run-heliodor-bench.sh run
-```
-
-Requires network access for the first Heliodor checkout. The default synchronous
-Veryl timing runner and the Celox runner are built from this workspace; the
-optional Veryl CLI runners additionally require `veryl`.
-
-## CI Environment
-
-Benchmarks run on GitHub Actions shared runners (`ubuntu-latest`). Because these runners share hardware with other workloads, some noise in the results is expected. The alert threshold is set to 200% to avoid false positives. Focus on long-term trends rather than individual data points.
+Local measurements are most useful for comparing two revisions on the same
+machine. CI history is better for long-term trends than for small one-off deltas.

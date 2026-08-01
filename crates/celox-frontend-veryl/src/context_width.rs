@@ -104,7 +104,8 @@ pub fn factor_signed(factor: &Factor) -> bool {
         // describing the pre-selection base. The evaluated Value is the only
         // remaining unsigned-select fact in that AIR shape. Cases where
         // folding also erases a type-cast boundary are an upstream AIR loss,
-        // tracked in docs/internals/veryl-analyzer-upstream-issues.md.
+        // This compensates for analyzer metadata that does not retain the
+        // operation-specific signedness required by simulator lowering.
         Factor::Value(comptime) => comptime
             .get_value()
             .map(|value| value.signed())
