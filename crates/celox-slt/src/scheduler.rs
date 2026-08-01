@@ -979,6 +979,96 @@ fn invalidate_logic_path_target<Addr: Clone + Eq + Ord + Hash + Debug + Copy + D
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_scheduled_guard_region<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
+    lowerer: &crate::SLTToSIRLowerer,
+    builder: &mut SIRBuilder<Addr>,
+    condition: NodeId,
+    paths: &[usize],
+    input: &[LogicPath<Addr>],
+    arena: &SLTNodeArena<Addr>,
+    lower_cache: &mut HashMap<NodeId, RegisterId>,
+    dep_memo: &mut HashMap<NodeId, HashSet<Addr>>,
+    inverse_dep_memo: &mut HashMap<Addr, HashSet<NodeId>>,
+    unpacked_element_widths: &HashMap<Addr, usize>,
+) {
+    for &path in paths {
+        collect_logic_path_input_deps(&input[path], arena, dep_memo, inverse_dep_memo);
+    }
+
+    let condition_value = lowerer.lower(builder, condition, arena, lower_cache);
+    let then_block = builder.new_block();
+    let else_block = builder.new_block();
+    let merge_block = builder.new_block();
+    builder.seal_block(SIRTerminator::Branch {
+        cond: condition_value,
+        true_block: (then_block, Vec::new()),
+        false_block: (else_block, Vec::new()),
+    });
+
+    let mut affected = paths
+        .iter()
+        .filter_map(|path| input[*path].target.var())
+        .filter_map(|target| inverse_dep_memo.get(&target.id))
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    affected.sort_unstable();
+    affected.dedup();
+    let saved_cache = affected
+        .iter()
+        .filter_map(|node| lower_cache.get(node).copied().map(|value| (*node, value)))
+        .collect::<Vec<_>>();
+
+    let emit_arm = |builder: &mut SIRBuilder<Addr>,
+                    lower_cache: &mut HashMap<NodeId, RegisterId>,
+                    take_true: bool| {
+        let mut inserted = Vec::new();
+        for &path in paths {
+            let (_, then_expr, else_expr) = scheduled_root_mux(&input[path], arena)
+                .expect("scheduled guard region must retain root Muxes");
+            let root = if take_true { then_expr } else { else_expr };
+            // Keep the existing per-LogicPath lowering model for nested
+            // decisions. The scheduled region owns only the common outer
+            // guard; changing fanout/cost facts for all nested Muxes at once
+            // would silently replace the established branch decisions.
+            let value = lowerer.lower(builder, root, arena, lower_cache);
+            inserted.extend(lowerer.take_scheduled_region_insertions());
+            emit_logic_path_store_with_result(
+                lowerer,
+                builder,
+                &input[path],
+                arena,
+                lower_cache,
+                unpacked_element_widths,
+                Some(value),
+            );
+            invalidate_logic_path_target(&input[path], inverse_dep_memo, lower_cache);
+        }
+        builder.seal_block(SIRTerminator::Jump(merge_block, Vec::new()));
+        for node in inserted {
+            lower_cache.remove(&node);
+        }
+        for node in &affected {
+            lower_cache.remove(node);
+        }
+        lower_cache.extend(saved_cache.iter().copied());
+    };
+
+    builder.switch_to_block(then_block);
+    emit_arm(builder, lower_cache, true);
+    builder.switch_to_block(else_block);
+    emit_arm(builder, lower_cache, false);
+    builder.switch_to_block(merge_block);
+
+    // Both arms publish every path target, so cached expressions reading any
+    // such target are invalid at the merge even when both arm caches happened
+    // to contain the same SLT node identity.
+    for node in affected {
+        lower_cache.remove(&node);
+    }
+}
+
 fn projected_for_fold_group<Addr: Clone + Eq + Hash>(
     mut node: NodeId,
     arena: &SLTNodeArena<Addr>,
@@ -2216,7 +2306,258 @@ pub enum ClockSortError<Addr: Display + Debug + Eq + Hash + Clone, E> {
 
 enum ScheduledWork {
     Comb(Vec<usize>),
+    /// A dependency-ordered run of state publications selected by one SLT
+    /// condition.  The path scheduler has already fixed the order; lowering
+    /// only preserves the exclusivity which would otherwise become several
+    /// independent Muxes and later need to be rediscovered from SIR.
+    GuardedComb {
+        condition: NodeId,
+        paths: Vec<usize>,
+    },
     Ff(usize),
+}
+
+fn scheduled_root_mux<A: Clone + Eq + Hash>(
+    path: &LogicPath<A>,
+    arena: &SLTNodeArena<A>,
+) -> Option<(NodeId, NodeId, NodeId)> {
+    if path.target.var().is_none()
+        || !path.local_inputs.is_empty()
+        || !path.pre_lower_nodes.is_empty()
+    {
+        return None;
+    }
+    let SLTNode::Mux {
+        cond,
+        then_expr,
+        else_expr,
+    } = arena.get(path.expr)
+    else {
+        return None;
+    };
+    Some((*cond, *then_expr, *else_expr))
+}
+
+fn collect_pure_scheduled_nodes<A: Clone + Eq + Hash>(
+    root: NodeId,
+    arena: &SLTNodeArena<A>,
+    nodes: &mut HashSet<NodeId>,
+) -> bool {
+    if !nodes.insert(root) {
+        return true;
+    }
+    match arena.get(root) {
+        SLTNode::Input { index, .. } => index
+            .iter()
+            .all(|index| collect_pure_scheduled_nodes(index.node, arena, nodes)),
+        SLTNode::Constant(..) => true,
+        SLTNode::Binary(lhs, _, rhs) => {
+            collect_pure_scheduled_nodes(*lhs, arena, nodes)
+                && collect_pure_scheduled_nodes(*rhs, arena, nodes)
+        }
+        SLTNode::Unary(_, inner) | SLTNode::Slice { expr: inner, .. } => {
+            collect_pure_scheduled_nodes(*inner, arena, nodes)
+        }
+        SLTNode::Mux {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            collect_pure_scheduled_nodes(*cond, arena, nodes)
+                && collect_pure_scheduled_nodes(*then_expr, arena, nodes)
+                && collect_pure_scheduled_nodes(*else_expr, arena, nodes)
+        }
+        SLTNode::Concat(parts) => parts
+            .iter()
+            .all(|(part, _)| collect_pure_scheduled_nodes(*part, arena, nodes)),
+        SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => false,
+    }
+}
+
+fn scheduled_node_cost<A: Clone + Eq + Hash>(node: NodeId, arena: &SLTNodeArena<A>) -> u128 {
+    match arena.get(node) {
+        SLTNode::Input { .. } | SLTNode::Constant(..) => 0,
+        _ => crate::get_width(node, arena).div_ceil(64).max(1) as u128,
+    }
+}
+
+fn scheduled_condition_probability<A: Clone + Eq + Hash>(
+    mut condition: NodeId,
+    arena: &SLTNodeArena<A>,
+) -> (u128, u128) {
+    let mut inverted = false;
+    loop {
+        match arena.get(condition) {
+            SLTNode::Unary(UnaryOp::Ident | UnaryOp::ToTwoState, inner) => condition = *inner,
+            SLTNode::Unary(UnaryOp::LogicNot, inner) => {
+                inverted = !inverted;
+                condition = *inner;
+            }
+            _ => break,
+        }
+    }
+    let constant = |node| matches!(arena.get(node), SLTNode::Constant(..));
+    let equality = matches!(
+        arena.get(condition),
+        SLTNode::Binary(lhs, BinaryOp::Eq | BinaryOp::EqWildcard, rhs)
+            if constant(*lhs) || constant(*rhs)
+    );
+    let inequality = matches!(
+        arena.get(condition),
+        SLTNode::Binary(lhs, BinaryOp::Ne | BinaryOp::NeWildcard, rhs)
+            if constant(*lhs) || constant(*rhs)
+    );
+    let true_weight = if equality {
+        1
+    } else if inequality {
+        4
+    } else {
+        return (1, 2);
+    };
+    if inverted {
+        (5 - true_weight, 5)
+    } else {
+        (true_weight, 5)
+    }
+}
+
+fn scheduled_guard_region_is_profitable<A: Clone + Eq + Hash>(
+    condition: NodeId,
+    paths: &[usize],
+    input: &[LogicPath<A>],
+    arena: &SLTNodeArena<A>,
+) -> bool {
+    const CONTROL_COST: u128 = 2;
+    const MISPREDICT_COST: u128 = 16;
+
+    let mut true_nodes = HashSet::default();
+    let mut false_nodes = HashSet::default();
+    for &path in paths {
+        let Some((actual, then_expr, else_expr)) = scheduled_root_mux(&input[path], arena) else {
+            return false;
+        };
+        if actual != condition
+            || !collect_pure_scheduled_nodes(then_expr, arena, &mut true_nodes)
+            || !collect_pure_scheduled_nodes(else_expr, arena, &mut false_nodes)
+        {
+            return false;
+        }
+    }
+    let true_owned = true_nodes
+        .difference(&false_nodes)
+        .map(|node| scheduled_node_cost(*node, arena))
+        .sum::<u128>();
+    let false_owned = false_nodes
+        .difference(&true_nodes)
+        .map(|node| scheduled_node_cost(*node, arena))
+        .sum::<u128>();
+    let (true_weight, total_weight) = scheduled_condition_probability(condition, arena);
+    let false_weight = total_weight - true_weight;
+    let removed_mux_cost = total_weight.saturating_mul(paths.len() as u128);
+    let saved = false_weight
+        .saturating_mul(true_owned)
+        .saturating_add(true_weight.saturating_mul(false_owned))
+        .saturating_add(removed_mux_cost);
+    let introduced = total_weight.saturating_mul(CONTROL_COST).saturating_add(
+        true_weight
+            .min(false_weight)
+            .saturating_mul(MISPREDICT_COST),
+    );
+    saved > introduced
+}
+
+fn condition_reads_target<A: Clone + Eq + Hash>(
+    condition: NodeId,
+    targets: &HashSet<A>,
+    arena: &SLTNodeArena<A>,
+) -> bool {
+    let mut visited = HashSet::default();
+    let mut work = vec![condition];
+    while let Some(node) = work.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        match arena.get(node) {
+            SLTNode::Input {
+                variable, index, ..
+            } => {
+                if targets.contains(variable) {
+                    return true;
+                }
+                work.extend(index.iter().map(|index| index.node));
+            }
+            SLTNode::Constant(..) => {}
+            SLTNode::Binary(lhs, _, rhs) => work.extend([*lhs, *rhs]),
+            SLTNode::Unary(_, inner) | SLTNode::Slice { expr: inner, .. } => work.push(*inner),
+            SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => work.extend([*cond, *then_expr, *else_expr]),
+            SLTNode::Concat(parts) => work.extend(parts.iter().map(|(part, _)| *part)),
+            SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => return true,
+        }
+    }
+    false
+}
+
+fn form_scheduled_guard_regions<A: Clone + Eq + Hash>(
+    work: Vec<ScheduledWork>,
+    input: &[LogicPath<A>],
+    arena: &SLTNodeArena<A>,
+    four_state: bool,
+) -> Vec<ScheduledWork> {
+    if four_state {
+        return work;
+    }
+    let mut result = Vec::with_capacity(work.len());
+    let mut pending = work.into_iter().peekable();
+    while let Some(item) = pending.next() {
+        let ScheduledWork::Comb(first) = item else {
+            result.push(item);
+            continue;
+        };
+        let [first_path] = first.as_slice() else {
+            result.push(ScheduledWork::Comb(first));
+            continue;
+        };
+        let Some((condition, _, _)) = scheduled_root_mux(&input[*first_path], arena) else {
+            result.push(ScheduledWork::Comb(first));
+            continue;
+        };
+
+        let mut paths = vec![*first_path];
+        while let Some(ScheduledWork::Comb(next)) = pending.peek() {
+            let [next_path] = next.as_slice() else {
+                break;
+            };
+            if scheduled_root_mux(&input[*next_path], arena)
+                .is_none_or(|(next_condition, _, _)| next_condition != condition)
+            {
+                break;
+            }
+            paths.push(*next_path);
+            pending.next();
+        }
+
+        let targets = paths
+            .iter()
+            .filter_map(|path| input[*path].target.var().map(|target| target.id.clone()))
+            .collect::<HashSet<_>>();
+        if paths.len() >= 2
+            && !condition_reads_target(condition, &targets, arena)
+            && scheduled_guard_region_is_profitable(condition, &paths, input, arena)
+        {
+            result.push(ScheduledWork::GuardedComb { condition, paths });
+        } else {
+            result.extend(
+                paths
+                    .into_iter()
+                    .map(|path| ScheduledWork::Comb(vec![path])),
+            );
+        }
+    }
+    result
 }
 
 /// Lower a consecutive set of exact grouped-fold paths.  The packed fold
@@ -2826,6 +3167,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
             ));
         }
     }
+    let scheduled_work = form_scheduled_guard_regions(scheduled_work, &input, arena, four_state);
 
     let mut builder = SIRBuilder::new();
     if let Some(ff_lowering) = ff.as_deref_mut() {
@@ -2882,6 +3224,35 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     for work in scheduled_work {
         let scc = match work {
             ScheduledWork::Comb(scc) => scc,
+            ScheduledWork::GuardedComb { condition, paths } => {
+                flush_pending_fold_paths(
+                    &mut pending_fold_indices,
+                    &input,
+                    &fold_group_schedule_index,
+                    &lowerer,
+                    &mut builder,
+                    arena,
+                    &mut lower_cache,
+                    &mut dep_memo,
+                    &mut inverse_dep_memo,
+                    unpacked_element_widths,
+                    four_state,
+                );
+                pending_fold_roots.clear();
+                emit_scheduled_guard_region(
+                    &lowerer,
+                    &mut builder,
+                    condition,
+                    &paths,
+                    &input,
+                    arena,
+                    &mut lower_cache,
+                    &mut dep_memo,
+                    &mut inverse_dep_memo,
+                    unpacked_element_widths,
+                );
+                continue;
+            }
             ScheduledWork::Ff(index) => {
                 flush_pending_fold_paths(
                     &mut pending_fold_indices,
@@ -3442,6 +3813,224 @@ mod tests {
             pre_lower_nodes: Vec::new(),
             expr,
         }
+    }
+
+    #[test]
+    fn scheduled_paths_share_one_high_level_guard_without_changing_store_order() {
+        let mut arena = SLTNodeArena::new();
+        let condition = arena
+            .alloc(SLTNode::Input {
+                variable: 100,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let mut paths = Vec::new();
+        for target in 0u32..12 {
+            let then_expr = arena
+                .alloc(SLTNode::Constant(
+                    BigUint::from(target),
+                    BigUint::from(0u8),
+                    8,
+                    false,
+                ))
+                .unwrap();
+            let else_expr = arena
+                .alloc(SLTNode::Constant(
+                    BigUint::from(target + 32),
+                    BigUint::from(0u8),
+                    8,
+                    false,
+                ))
+                .unwrap();
+            let expr = arena
+                .alloc(SLTNode::Mux {
+                    cond: condition,
+                    then_expr,
+                    else_expr,
+                })
+                .unwrap();
+            paths.push(LogicPath {
+                target: LogicPathTarget::Var(VarAtomBase::new(target, 0, 7)),
+                sources: [VarAtomBase::new(100, 0, 0)].into_iter().collect(),
+                previous_sources: crate::HashSet::default(),
+                address_sources: crate::HashSet::default(),
+                local_inputs: Vec::new(),
+                order_before: crate::HashSet::default(),
+                comb_capture_enable_sites: Vec::new(),
+                pre_lower_nodes: Vec::new(),
+                expr,
+            });
+        }
+
+        let result = sort(
+            paths,
+            &arena,
+            &crate::HashSet::default(),
+            &crate::HashMap::default(),
+            false,
+            &crate::HashMap::default(),
+            0,
+        )
+        .unwrap();
+        let eu = &result.execution_units[0];
+        let branches = eu
+            .blocks
+            .values()
+            .filter(|block| matches!(block.terminator, SIRTerminator::Branch { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(branches.len(), 1);
+        assert_eq!(
+            eu.blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .filter(|instruction| matches!(instruction, SIRInstruction::Mux(..)))
+                .count(),
+            0
+        );
+
+        let SIRTerminator::Branch {
+            true_block,
+            false_block,
+            ..
+        } = &branches[0].terminator
+        else {
+            unreachable!()
+        };
+        for block in [true_block.0, false_block.0] {
+            let stores = eu.blocks[&block]
+                .instructions
+                .iter()
+                .filter_map(|instruction| match instruction {
+                    SIRInstruction::Store(target, ..) => Some(*target),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(stores, (0..12).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn scheduled_outer_guard_keeps_nested_mux_lowering_decisions() {
+        let mut arena = SLTNodeArena::new();
+        let outer_condition = arena
+            .alloc(SLTNode::Input {
+                variable: 100,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let inner_condition = arena
+            .alloc(SLTNode::Input {
+                variable: 101,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let input_value = arena
+            .alloc(SLTNode::Input {
+                variable: 102,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 7),
+            })
+            .unwrap();
+        let one = arena
+            .alloc(SLTNode::Constant(
+                BigUint::from(1u8),
+                BigUint::from(0u8),
+                8,
+                false,
+            ))
+            .unwrap();
+        let mut inner_true = input_value;
+        let mut inner_false = input_value;
+        for _ in 0..16 {
+            inner_true = arena
+                .alloc(SLTNode::Binary(inner_true, BinaryOp::Add, one))
+                .unwrap();
+            inner_false = arena
+                .alloc(SLTNode::Binary(inner_false, BinaryOp::Xor, one))
+                .unwrap();
+        }
+        let nested = arena
+            .alloc(SLTNode::Mux {
+                cond: inner_condition,
+                then_expr: inner_true,
+                else_expr: inner_false,
+            })
+            .unwrap();
+
+        let mut paths = Vec::new();
+        for target in 0u32..12 {
+            let then_expr = if target == 0 {
+                nested
+            } else {
+                arena
+                    .alloc(SLTNode::Constant(
+                        BigUint::from(target),
+                        BigUint::from(0u8),
+                        8,
+                        false,
+                    ))
+                    .unwrap()
+            };
+            let else_expr = arena
+                .alloc(SLTNode::Constant(
+                    BigUint::from(target + 32),
+                    BigUint::from(0u8),
+                    8,
+                    false,
+                ))
+                .unwrap();
+            let expr = arena
+                .alloc(SLTNode::Mux {
+                    cond: outer_condition,
+                    then_expr,
+                    else_expr,
+                })
+                .unwrap();
+            paths.push(LogicPath {
+                target: LogicPathTarget::Var(VarAtomBase::new(target, 0, 7)),
+                sources: [
+                    VarAtomBase::new(100, 0, 0),
+                    VarAtomBase::new(101, 0, 0),
+                    VarAtomBase::new(102, 0, 7),
+                ]
+                .into_iter()
+                .collect(),
+                previous_sources: crate::HashSet::default(),
+                address_sources: crate::HashSet::default(),
+                local_inputs: Vec::new(),
+                order_before: crate::HashSet::default(),
+                comb_capture_enable_sites: Vec::new(),
+                pre_lower_nodes: Vec::new(),
+                expr,
+            });
+        }
+
+        let result = sort(
+            paths,
+            &arena,
+            &crate::HashSet::default(),
+            &crate::HashMap::default(),
+            false,
+            &crate::HashMap::default(),
+            0,
+        )
+        .unwrap();
+        let branch_count = result.execution_units[0]
+            .blocks
+            .values()
+            .filter(|block| matches!(block.terminator, SIRTerminator::Branch { .. }))
+            .count();
+        assert_eq!(
+            branch_count, 2,
+            "outer region and nested Mux must both branch"
+        );
     }
 
     #[test]

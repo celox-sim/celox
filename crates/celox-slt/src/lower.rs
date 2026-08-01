@@ -3889,6 +3889,13 @@ impl SLTToSIRLowerer {
         }
     }
 
+    /// Return the cache entries created by the most recent top-level `lower`
+    /// call. A scheduler-owned control arm keeps them available to subsequent
+    /// paths in that arm, then removes them before lowering the sibling arm.
+    pub(crate) fn take_scheduled_region_insertions(&self) -> Vec<NodeId> {
+        std::mem::take(&mut *self.cache_insert_log.borrow_mut())
+    }
+
     fn prepare_cost_cache<A: Hash + Eq + Clone>(&self, arena: &SLTNodeArena<A>) {
         let mut cache = self.cost_cache.borrow_mut();
         if cache.tree_costs.len() < arena.len() {
