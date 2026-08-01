@@ -307,7 +307,6 @@ pub struct OptimizeOptions {
     enabled: HashSet<SirPass>,
     disabled: HashSet<SirPass>,
     max_native_memory_width: usize,
-    x86_slp: bool,
 }
 
 impl Default for OptimizeOptions {
@@ -328,7 +327,6 @@ impl OptimizeOptions {
             } else {
                 64
             },
-            x86_slp: cfg!(target_arch = "x86_64"),
         }
     }
 
@@ -371,18 +369,6 @@ impl OptimizeOptions {
 
     pub fn max_native_memory_width(&self) -> usize {
         self.max_native_memory_width
-    }
-
-    /// Enable or disable target-owned x86 SLP selection after scalar MIR
-    /// optimization. This is independent of SIR memory coalescing width so
-    /// profitability can be measured without conflating the two transforms.
-    pub fn with_x86_slp(mut self, enable: bool) -> Self {
-        self.x86_slp = enable;
-        self
-    }
-
-    pub fn x86_slp_enabled(&self) -> bool {
-        self.x86_slp
     }
 
     /// Query whether a specific pass is active.

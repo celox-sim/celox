@@ -3,18 +3,14 @@ use crate::ir::{
     AbsoluteAddr, Program, RegisterId, SIRInstruction, SIROffset, STABLE_REGION,
     collect_exact_zero_registers,
 };
-#[cfg(any(target_arch = "x86_64", test))]
-pub use celox_state_layout::SparseWorkingLayout;
+#[cfg(target_arch = "x86_64")]
+pub use celox_state_layout::STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET;
 pub use celox_state_layout::{
     LayoutInput, LayoutRequirements, LayoutSource, MemoryLayoutMode, RUNTIME_EVENT_HEADER_SIZE,
     RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET, RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET,
     RUNTIME_EVENT_SLOT_SEQ_OFFSET, RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
     STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
     StateObjectLayout, UnpackedArrayLayout, get_byte_size,
-};
-#[cfg(target_arch = "x86_64")]
-pub use celox_state_layout::{
-    STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET, STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET,
 };
 
 pub type MemoryLayout = celox_state_layout::MemoryLayout<AbsoluteAddr>;

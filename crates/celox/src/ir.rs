@@ -1,18 +1,19 @@
 use crate::HashMap;
 pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
-    AbsoluteAddrBase, BinaryOp, DomainKind, InitialStateData, InitialStateWriteRun, InstanceId,
-    ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeEventKind, RuntimeEventSite,
-    RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION, TriggerIdWithKind, UnaryOp,
-    WORKING_REGION,
-};
-pub use celox_frontend_veryl::{InstancePath, VariableInfo, VerylFrontendLookup};
-pub(crate) use celox_sir::{
-    BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
-    SIRTerminator, SIRValue, collect_exact_zero_registers, merge_sir_eu_refs_with_provenance,
+    AbsoluteAddrBase, DomainKind, InitialStateData, InitialStateWriteRun, InstanceId, ModuleId,
+    RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeEventKind, RuntimeEventSite,
+    RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION,
 };
 #[cfg(test)]
-pub(crate) use celox_sir::{SIRSwitchCase, inline_single_predecessor_jumps};
+pub(crate) use celox_design::{BinaryOp, UnaryOp};
+pub use celox_frontend_veryl::{InstancePath, VariableInfo, VerylFrontendLookup};
+#[cfg(test)]
+pub(crate) use celox_sir::{BasicBlock, SIRValue, inline_single_predecessor_jumps};
+pub(crate) use celox_sir::{
+    BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset, SIRTerminator,
+    collect_exact_zero_registers,
+};
 use celox_testbench::TestbenchProgram;
 use std::fmt;
 use veryl_analyzer::ir::VarPath;
@@ -421,9 +422,6 @@ fn comb_capture_enable_needs_unaliased_old_value(
     false
 }
 
-pub(crate) mod cfg {
-    pub(crate) use celox_sir::cfg::*;
-}
 pub(crate) mod verify {
     pub(crate) use celox_sir::verify::*;
 }

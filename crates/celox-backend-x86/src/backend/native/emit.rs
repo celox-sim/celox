@@ -1056,7 +1056,7 @@ pub struct EmitResult {
 /// the same merged SIR, MIR, allocation, and machine code as the executable
 /// function instead of independently lowering the source execution units.
 #[derive(Default)]
-pub(crate) struct NativeFunctionTrace {
+pub struct NativeFunctionTrace {
     pub optimized_sir: String,
     pub reactive_graph: String,
     pub state_layout: String,
@@ -5167,47 +5167,20 @@ fn emit_and_imm64(asm: &mut CodeAssembler, d: AsmRegister64, imm: u64) -> Result
 // Multi-EU chained emission
 // ────────────────────────────────────────────────────────────────
 
-/// Compile multiple EUs into a single JIT function.
+/// Lower one fully prepared SIR function through x86 ISel, MIR optimization,
+/// register allocation, and emission.
 ///
-/// Each EU is independently compiled (ISel + regalloc + emit) producing
-/// Compile multiple EUs into a single merged function.
-///
-/// Instead of compiling each EU independently and concatenating machine code,
-/// this merges all EUs into one MFunction at the MIR level. This enables:
-/// - Single prologue/epilogue (no redundant push/pop between EUs)
-/// - Cross-EU register allocation (values survive EU boundaries in registers)
-/// - Cross-EU MIR optimization (CSE, constant propagation across EU boundaries)
-pub fn emit_chained_eus(
-    units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+/// SIR merging and backend-boundary SIR optimization happen before this call;
+/// the x86 crate therefore consumes an immutable backend-independent artifact.
+pub fn emit_prepared_eu(
+    sir_eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>,
     layout: &crate::backend::MemoryLayout,
     four_state: bool,
     label: &str,
-) -> Result<EmitResult, ChainedEmitError> {
-    emit_chained_eu_list(units, layout, four_state, label, None)
-}
-
-fn emit_chained_eu_list(
-    units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
-    layout: &crate::backend::MemoryLayout,
-    four_state: bool,
-    label: &str,
-    trace: Option<&mut NativeFunctionTrace>,
-) -> Result<EmitResult, ChainedEmitError> {
-    let unit_refs = units.iter().collect::<Vec<_>>();
-    emit_chained_eu_refs(&unit_refs, layout, four_state, label, None, true, trace)
-}
-
-pub(crate) fn emit_chained_eu_refs(
-    units: &[&crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
-    layout: &crate::backend::MemoryLayout,
-    four_state: bool,
-    label: &str,
-    first_ff_unit: Option<usize>,
     enable_x86_slp: bool,
     mut trace: Option<&mut NativeFunctionTrace>,
 ) -> Result<EmitResult, ChainedEmitError> {
     use super::{isel, regalloc};
-    assert!(!units.is_empty(), "cannot emit an empty chained EU list");
     let timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let mir_stats = std::env::var_os("CELOX_MIR_STATS").is_some();
     let copy_stats = timing
@@ -5216,126 +5189,22 @@ pub(crate) fn emit_chained_eu_refs(
         || std::env::var_os("CELOX_REGALLOC_STATS").is_some();
     let total_start = timing.then(crate::timing::now);
 
-    // SIR-level EU merge: combine all EUs into one SIR EU
-    let merge_start = timing.then(crate::timing::now);
-    for (unit_index, unit) in units.iter().enumerate() {
-        if let Err(error) = unit.verify_result() {
-            let context = error
-                .block
-                .and_then(|block| unit.blocks.get(&block))
-                .map(|block| {
-                    let source = error
-                        .instruction
-                        .and_then(|instruction| block.instructions.get(instruction))
-                        .and_then(|instruction| match instruction {
-                            crate::ir::SIRInstruction::Store(_, _, _, source, _, _) => {
-                                Some(*source)
-                            }
-                            _ => None,
-                        });
-                    let definition = source.and_then(|source| {
-                        unit.blocks.values().find_map(|block| {
-                            block
-                                .instructions
-                                .iter()
-                                .find(|instruction| instruction.defined_register() == Some(source))
-                                .map(|instruction| format!("; definition: {instruction}"))
-                        })
-                    });
-                    format!("\n{block}{}", definition.as_deref().unwrap_or_default())
-                })
-                .unwrap_or_default();
-            return Err(ChainedEmitError::Analysis {
-                phase: "before native source-unit merge",
-                message: format!("{label} source unit {unit_index}: {error}{context}"),
-            });
-        }
-    }
-    let (mut sir_eu, merge_provenance) = crate::ir::merge_sir_eu_refs_with_provenance(units);
-    let sir_boundaries = merge_provenance.unit_entries[1..].to_vec();
-    let verify_sir = |eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, phase| {
-        eu.verify_result()
-            .map_err(|error| ChainedEmitError::Sir { phase, error })
-    };
-    verify_sir(&sir_eu, "before native StateSSA")?;
-    if let Some(first_ff_unit) = first_ff_unit {
-        let dse_start = timing.then(crate::timing::now);
-        let removed = crate::optimizer::coalescing::eliminate_unobserved_comb_state_stores(
-            &mut sir_eu,
-            &merge_provenance,
-            first_ff_unit,
-        )
-        .map_err(|message| ChainedEmitError::Analysis {
-            phase: "comb/FF state-publication DSE",
-            message,
+    sir_eu
+        .verify_result()
+        .map_err(|error| ChainedEmitError::Sir {
+            phase: "at x86 backend boundary",
+            error,
         })?;
-        if removed != 0 {
-            crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
-            verify_sir(&sir_eu, "after comb/FF state-publication DSE")?;
-        }
-        if let Some(start) = dse_start {
-            eprintln!(
-                "[native-timing] comb/FF state-publication DSE removed={} elapsed={:?}",
-                removed,
-                start.elapsed()
-            );
-        }
-    }
-    if label == "eval_comb_apply_ff"
-        && crate::optimizer::coalescing::promote_fused_comb_static_slots(&mut sir_eu).map_err(
-            |message| ChainedEmitError::Analysis {
-                phase: "final fused comb StateSSA promotion",
-                message,
-            },
-        )?
-    {
-        crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
-        verify_sir(&sir_eu, "after final fused comb StateSSA promotion")?;
-    }
-    if crate::optimizer::coalescing::promote_eval_apply_working_round_trips(&mut sir_eu) {
-        verify_sir(&sir_eu, "after native working StateSSA")?;
-        crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
-        verify_sir(&sir_eu, "after native working StateSSA DCE")?;
-    }
-    // Eliminate exact local round trips which do not require global StateSSA.
-    crate::optimizer::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
-        &mut sir_eu,
-        &sir_boundaries,
-    );
-    verify_sir(&sir_eu, "after native direct working rewrite")?;
-    crate::optimizer::coalescing::optimize_native_merged_chain(
-        &mut sir_eu,
-        layout,
-        four_state,
-        label == "eval_comb_apply_ff",
-    )
-    .map_err(|(phase, error)| ChainedEmitError::Sir { phase, error })?;
-    verify_sir(&sir_eu, "after native merged-chain cleanup")?;
     if let Some(trace) = trace.as_deref_mut() {
         trace.optimized_sir = sir_eu.to_string();
     }
-    if let Some(start) = merge_start {
-        let sir_insts: usize = sir_eu
-            .blocks
-            .values()
-            .map(|block| block.instructions.len())
-            .sum();
-        eprintln!(
-            "[native-timing] emit_chained merge eus={} sir_blocks={} sir_insts={} ff_blocks={} elapsed={:?}",
-            units.len(),
-            sir_eu.blocks.len(),
-            sir_insts,
-            0,
-            start.elapsed()
-        );
-    }
     if timing {
-        log_sir_width_stats(&sir_eu);
+        log_sir_width_stats(sir_eu);
     }
 
     // Single ISel + optimize + regalloc + emit
     let isel_start = timing.then(crate::timing::now);
-    let mut mfunc = isel::lower_execution_unit(&sir_eu, layout, four_state);
+    let mut mfunc = isel::lower_execution_unit(sir_eu, layout, four_state);
     if let Some(start) = isel_start {
         eprintln!(
             "[native-timing] emit_chained isel mir_blocks={} mir_insts={} vregs={} elapsed={:?}",
@@ -5345,7 +5214,7 @@ pub(crate) fn emit_chained_eu_refs(
             start.elapsed()
         );
     }
-    dump_native_block_context(label, "after_isel", &sir_eu, &mfunc);
+    dump_native_block_context(label, "after_isel", sir_eu, &mfunc);
     if timing {
         eprintln!("[native-timing] emit_chained verify after_isel label={label}");
     }
@@ -5366,7 +5235,7 @@ pub(crate) fn emit_chained_eu_refs(
             start.elapsed()
         );
     }
-    dump_native_block_context(label, "after_legalize", &sir_eu, &mfunc);
+    dump_native_block_context(label, "after_legalize", sir_eu, &mfunc);
     if timing {
         eprintln!("[native-timing] emit_chained verify after_legalize label={label}");
     }
@@ -5432,7 +5301,7 @@ pub(crate) fn emit_chained_eu_refs(
     if std::env::var_os("CELOX_MIR_BLOCK_STATS").is_some() {
         log_mir_block_stats(label, "after_mir_opt", &mfunc);
     }
-    dump_native_block_context(label, "after_mir_opt", &sir_eu, &mfunc);
+    dump_native_block_context(label, "after_mir_opt", sir_eu, &mfunc);
     if timing {
         eprintln!("[native-timing] emit_chained verify after_mir_opt label={label}");
     }
@@ -5500,7 +5369,7 @@ pub(crate) fn emit_chained_eu_refs(
     if std::env::var_os("CELOX_MIR_BLOCK_STATS").is_some() {
         log_mir_block_stats(label, "after_regalloc", &mfunc);
     }
-    dump_native_block_context(label, "after_regalloc", &sir_eu, &mfunc);
+    dump_native_block_context(label, "after_regalloc", sir_eu, &mfunc);
     // Post-allocation peepholes and CFG cleanup can change the physical value
     // present on a phi edge. Build the edge-copy plan from this final MIR, not
     // from the pre-cleanup allocation input.

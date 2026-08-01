@@ -1,16 +1,21 @@
+#[cfg(target_arch = "x86_64")]
 use std::sync::Arc;
 
+use crate::ir::{AbsoluteAddr, Program};
+#[cfg(target_arch = "x86_64")]
 use crate::ir::{
-    AbsoluteAddr, ExecutionUnit, Program, RegionedAbsoluteAddr, SPARSE_WORKING_REGION,
-    STABLE_REGION, WORKING_REGION,
+    ExecutionUnit, RegionedAbsoluteAddr, SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION,
 };
 
+#[cfg(target_arch = "x86_64")]
 pub use celox_sir_opt::coalescing::pass_eliminate_working_round_trip;
-pub use celox_sir_opt::coalescing::{TailCallChunk, cost_model, pass_tail_call_split};
 pub(crate) use celox_sir_opt::coalescing::{
-    eliminate_shared_comb_state_stores, eliminate_unobserved_comb_state_stores,
-    promote_eval_apply_working_round_trips, promote_fused_comb_static_slots,
+    eliminate_shared_comb_state_stores, promote_fused_comb_static_slots,
     remove_dead_sir_definitions,
+};
+#[cfg(target_arch = "x86_64")]
+pub(crate) use celox_sir_opt::coalescing::{
+    eliminate_unobserved_comb_state_stores, promote_eval_apply_working_round_trips,
 };
 
 pub(crate) fn retain_final_identity_aliases(program: &mut Program, four_state: bool) {
@@ -49,7 +54,7 @@ pub(crate) fn optimize_native_merged_chain(
     layout: &crate::backend::MemoryLayout,
     four_state: bool,
     recover_merged_effect_regions: bool,
-) -> Result<(), (&'static str, crate::ir::verify::SirVerifyError)> {
+) -> Result<(), (&'static str, celox_sir::verify::SirVerifyError)> {
     let element_widths = Arc::new(
         layout
             .unpacked_arrays

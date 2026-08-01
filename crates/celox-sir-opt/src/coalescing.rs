@@ -41,15 +41,12 @@ mod pass_sparse_case_dispatch;
 mod pass_split_coalesced_stores;
 mod pass_split_wide_commits;
 mod pass_store_load_forwarding;
-pub mod pass_tail_call_split;
 mod pass_vectorize_concat;
 mod pass_xor_chain_folding;
 mod placement_analysis;
 pub(crate) mod shared;
 mod sir_analysis;
 mod state_ssa;
-
-pub use pass_tail_call_split::TailCallChunk;
 
 pub fn promote_eval_apply_working_round_trips(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,

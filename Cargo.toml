@@ -2,6 +2,9 @@
 members = [
     "crates/celox",
     "crates/celox-analysis",
+    "crates/celox-backend-cranelift",
+    "crates/celox-backend-wasm",
+    "crates/celox-backend-x86",
     "crates/celox-design",
     "crates/celox-frontend-veryl",
     "crates/celox-sir",

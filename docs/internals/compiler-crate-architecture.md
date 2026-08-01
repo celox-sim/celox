@@ -3,8 +3,8 @@
 ## Status
 
 This document defines the target crate architecture and the migration contract for splitting the
-current `celox` compiler/runtime monolith. It is a design document, not a claim that the described
-crates already exist.
+current `celox` compiler/runtime monolith. It is both the target design and the migration record;
+the status below distinguishes completed ownership boundaries from remaining work.
 
 Migration note: `celox-state-layout` now owns the generic layout algorithm and the compiler driver
 uses a consuming `Program -> OptimizedSir -> LaidOutProgram` transition. Only the optimizer driver
@@ -64,8 +64,20 @@ memory-offset contract. Its normal dependency graph contains no Veryl, frontend,
 physical layout, or facade crate. Physical-contiguity facts needed by the native merged-chain
 pipeline are supplied by the native adapter as a proof callback rather than exposing
 `MemoryLayout` to the optimizer. The facade optimizer module is now an orchestration and
-compatibility adapter only. Milestone 5's ownership boundary is complete; target-option
-compatibility selectors and concrete codegen plans move with their backends in Milestone 6.
+compatibility adapter only. Milestone 5's ownership boundary is complete.
+
+Milestone 6 is complete. `celox-backend-x86` owns feature detection, SIR instruction selection,
+x86 MIR and verification, SLP, register allocation/spilling/reload reconstruction, SSA
+destruction, iced emission, executable memory, and the in-function native tick loop.
+`celox-backend-cranelift` owns the translator, wide operations, JIT engine, Cranelift options,
+cost model, and oversized-function tail-call/memory-spill plans. `celox-backend-wasm` owns
+SIR-to-Wasm module construction. Their normal dependency graphs contain design, SIR, layout, and
+target libraries only: no frontend, facade, testbench, or SIR optimizer. The facade prepares the
+mutable merged SIR before crossing the immutable x86 codegen boundary; target codegen cannot
+silently rerun or mutate SIR optimization. Target-owned x86 SLP and Cranelift split policy are
+carried by their backend option types, while the public `SirPass::TailCallSplit` spelling remains
+only as a facade compatibility selector. Simulator execution adapters and optional host Wasmtime
+ownership remain in the monolith until the runtime contract is extracted in Milestone 7.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making

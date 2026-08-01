@@ -1,0 +1,25 @@
+[package]
+name = "celox-backend-cranelift"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Celox Cranelift code-generation backend"
+edition.workspace = true
+
+[dependencies]
+celox-design = { path = "../celox-design" }
+celox-sir = { path = "../celox-sir" }
+celox-state-layout = { path = "../celox-state-layout" }
+fxhash = { workspace = true }
+cranelift = "0.133.0"
+cranelift-module = "0.133.0"
+cranelift-jit = "0.133.0"
+cranelift-frontend = "0.133.0"
+cranelift-native = "0.133.0"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+num-bigint = { workspace = true }

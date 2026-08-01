@@ -408,6 +408,9 @@ version = "0.18.0"
 dependencies = [
  "bit-set 0.11.1",
  "celox-analysis",
+ "celox-backend-cranelift",
+ "celox-backend-wasm",
+ "celox-backend-x86",
  "celox-design",
  "celox-frontend-veryl",
  "celox-macros",
@@ -418,18 +421,11 @@ dependencies = [
  "celox-testbench",
  "chrono",
  "clap",
- "cranelift",
- "cranelift-frontend 0.133.1",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native 0.133.1",
  "criterion",
  "fxhash",
- "iced-x86",
  "insta",
  "itertools 0.15.0",
  "libc",
- "memmap2 0.9.11",
  "miette",
  "num-bigint",
  "num-traits",
@@ -446,13 +442,58 @@ dependencies = [
  "veryl-path",
  "veryl-simulator",
  "veryl-std",
- "wasm-encoder 0.254.0",
  "wasmtime",
 ]
 
 [[package]]
 name = "celox-analysis"
 version = "0.18.0"
+
+[[package]]
+name = "celox-backend-cranelift"
+version = "0.18.0"
+dependencies = [
+ "celox-design",
+ "celox-sir",
+ "celox-state-layout",
+ "cranelift",
+ "cranelift-frontend 0.133.1",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native 0.133.1",
+ "fxhash",
+ "num-bigint",
+]
+
+[[package]]
+name = "celox-backend-wasm"
+version = "0.18.0"
+dependencies = [
+ "celox-backend-cranelift",
+ "celox-design",
+ "celox-sir",
+ "celox-state-layout",
+ "fxhash",
+ "num-bigint",
+ "wasm-encoder 0.254.0",
+ "wasmtime",
+]
+
+[[package]]
+name = "celox-backend-x86"
+version = "0.18.0"
+dependencies = [
+ "celox-analysis",
+ "celox-design",
+ "celox-sir",
+ "celox-sir-opt",
+ "celox-state-layout",
+ "fxhash",
+ "iced-x86",
+ "libc",
+ "memmap2 0.9.11",
+ "num-bigint",
+]
 
 [[package]]
 name = "celox-bench-sv"

@@ -1,11 +1,11 @@
 use cranelift::{codegen::ir::MemFlagsData as MemFlags, prelude::*};
 use cranelift_frontend::FunctionBuilder;
 
+use super::core::promote_to_physical;
 use super::core::{
     MEM_SHIFT_THRESHOLD, TransValue, alloc_stack_slot, cast_type, get_chunk_as_i64, get_cl_type,
 };
 use super::{SIRTranslator, TranslationState, wide_ops};
-use crate::backend::translator::core::promote_to_physical;
 use crate::ir::{BinaryOp, RegisterId, SIRValue, UnaryOp};
 
 impl SIRTranslator {

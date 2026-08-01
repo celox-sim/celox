@@ -63,6 +63,8 @@ pub struct CraneliftOptions {
     /// Enable the Cranelift IR verifier (default: true).
     /// Disabling saves compile time at the cost of less validation.
     pub enable_verifier: bool,
+    /// Enable backend-owned splitting for oversized functions.
+    pub tail_call_split: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -73,6 +75,7 @@ impl Default for CraneliftOptions {
             regalloc_algorithm: RegallocAlgorithm::default(),
             enable_alias_analysis: true,
             enable_verifier: true,
+            tail_call_split: true,
         }
     }
 }
@@ -86,14 +89,16 @@ impl CraneliftOptions {
             regalloc_algorithm: RegallocAlgorithm::SinglePass,
             enable_alias_analysis: false,
             enable_verifier: false,
+            tail_call_split: true,
         }
     }
 
-    /// Select backend defaults corresponding to the facade optimization preset.
-    pub fn for_opt_level(level: celox_sir_opt::OptLevel) -> Self {
-        match level {
-            celox_sir_opt::OptLevel::O0 => Self::fast_compile(),
-            celox_sir_opt::OptLevel::O1 | celox_sir_opt::OptLevel::O2 => Self::default(),
+    /// Select backend defaults without importing the facade's optimization policy.
+    pub fn for_speed_optimization(enabled: bool) -> Self {
+        if enabled {
+            Self::default()
+        } else {
+            Self::fast_compile()
         }
     }
 }

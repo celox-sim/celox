@@ -232,6 +232,8 @@ pub struct SimulatorOptions {
     pub optimize_options: crate::optimizer::OptimizeOptions,
     /// Fine-grained Cranelift backend options.
     pub cranelift_options: crate::backend::CraneliftOptions,
+    #[cfg(target_arch = "x86_64")]
+    pub x86_options: crate::backend::X86BackendOptions,
     pub trace: crate::debug::TraceOptions,
     /// When true, JIT-compiled functions emit trigger detection code for
     /// edge-based event discovery. Only needed by [`crate::Simulation`].
@@ -244,11 +246,15 @@ pub struct SimulatorOptions {
 impl Default for SimulatorOptions {
     fn default() -> Self {
         let opt = crate::optimizer::OptimizeOptions::default();
-        let cranelift = crate::backend::CraneliftOptions::for_opt_level(opt.opt_level());
+        let cranelift = crate::backend::CraneliftOptions::for_speed_optimization(
+            opt.opt_level() != crate::optimizer::OptLevel::O0,
+        );
         Self {
             four_state: false,
             optimize_options: opt,
             cranelift_options: cranelift,
+            #[cfg(target_arch = "x86_64")]
+            x86_options: crate::backend::X86BackendOptions::default(),
             trace: Default::default(),
             emit_triggers: false,
             dead_store_policy: DeadStorePolicy::Off,
@@ -338,7 +344,9 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     /// Cranelift options, and DSE policy. Per-pass overrides can be applied after.
     pub fn opt_level(mut self, level: crate::optimizer::OptLevel) -> Self {
         self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level);
-        self.options.cranelift_options = crate::backend::CraneliftOptions::for_opt_level(level);
+        self.options.cranelift_options = crate::backend::CraneliftOptions::for_speed_optimization(
+            level != crate::optimizer::OptLevel::O0,
+        );
         self.options.dead_store_policy = match level {
             crate::optimizer::OptLevel::O2 => DeadStorePolicy::PreserveTopPorts,
             _ => DeadStorePolicy::Off,
@@ -348,12 +356,18 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
 
     /// Enable a specific SIR pass, overriding the OptLevel default.
     pub fn enable_pass(mut self, pass: crate::optimizer::SirPass) -> Self {
+        if pass == crate::optimizer::SirPass::TailCallSplit {
+            self.options.cranelift_options.tail_call_split = true;
+        }
         self.options.optimize_options = self.options.optimize_options.enable(pass);
         self
     }
 
     /// Disable a specific SIR pass, overriding the OptLevel default.
     pub fn disable_pass(mut self, pass: crate::optimizer::SirPass) -> Self {
+        if pass == crate::optimizer::SirPass::TailCallSplit {
+            self.options.cranelift_options.tail_call_split = false;
+        }
         self.options.optimize_options = self.options.optimize_options.disable(pass);
         self
     }
@@ -371,7 +385,15 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
 
     /// Set per-pass optimizer flags directly.
     pub fn optimize_options(mut self, options: crate::optimizer::OptimizeOptions) -> Self {
+        self.options.cranelift_options.tail_call_split =
+            options.is_enabled(crate::optimizer::SirPass::TailCallSplit);
         self.options.optimize_options = options;
+        self
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn x86_slp(mut self, enable: bool) -> Self {
+        self.options.x86_options.slp = enable;
         self
     }
 

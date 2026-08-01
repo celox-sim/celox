@@ -167,22 +167,19 @@ pub struct JitBackend {
 /// backend-neutral state layout.
 enum CraneliftEvalCombPlan {
     Unsplit,
-    TailCallChunks(Vec<crate::optimizer::coalescing::TailCallChunk>),
-    MemorySpilled(crate::optimizer::coalescing::pass_tail_call_split::MemorySpilledPlan),
+    TailCallChunks(Vec<celox_backend_cranelift::tail_call_split::TailCallChunk>),
+    MemorySpilled(celox_backend_cranelift::tail_call_split::MemorySpilledPlan),
 }
 
 impl CraneliftEvalCombPlan {
     fn build(sir: &crate::ir::Program, options: &SimulatorOptions) -> Self {
-        if !options
-            .optimize_options
-            .is_enabled(crate::optimizer::SirPass::TailCallSplit)
-        {
+        if !options.cranelift_options.tail_call_split {
             return Self::Unsplit;
         }
 
         let timing = std::env::var_os("CELOX_OPT_TIMING").is_some();
         if timing {
-            use crate::optimizer::coalescing::cost_model::{
+            use celox_backend_cranelift::cost_model::{
                 CLIF_INST_THRESHOLD, VREG_VALUE_THRESHOLD, estimate_eu_cost,
                 estimate_eu_value_count,
             };
@@ -201,9 +198,9 @@ impl CraneliftEvalCombPlan {
         }
 
         let split_start = timing.then(crate::timing::now);
-        use crate::optimizer::coalescing::pass_tail_call_split;
+        use celox_backend_cranelift::tail_call_split;
         if let Some(chunks) =
-            pass_tail_call_split::split_if_needed(&sir.sir.eval_comb, options.four_state)
+            tail_call_split::split_if_needed(&sir.sir.eval_comb, options.four_state)
         {
             if let Some(start) = split_start {
                 eprintln!(
@@ -214,7 +211,7 @@ impl CraneliftEvalCombPlan {
             }
             Self::TailCallChunks(chunks)
         } else if let Some(plan) =
-            pass_tail_call_split::split_if_needed_spilled(&sir.sir.eval_comb, options.four_state)
+            tail_call_split::split_if_needed_spilled(&sir.sir.eval_comb, options.four_state)
         {
             if let Some(start) = split_start {
                 eprintln!(
@@ -262,7 +259,7 @@ impl JitBackend {
         // between allocators are negligible compared to compile time savings.
         let mut options = options.clone();
         {
-            use crate::optimizer::coalescing::cost_model::*;
+            use celox_backend_cranelift::cost_model::*;
             let _comb_cost: usize = sir
                 .sir
                 .eval_comb
@@ -301,7 +298,12 @@ impl JitBackend {
         } else {
             None
         };
-        let mut engine = JitEngine::new(layout, &options).map_err(SimulatorError::from)?;
+        let compile_options = celox_backend_cranelift::CompileOptions {
+            four_state: options.four_state,
+            emit_triggers: options.emit_triggers,
+            cranelift: options.cranelift_options,
+        };
+        let mut engine = JitEngine::new(layout, &compile_options).map_err(SimulatorError::from)?;
 
         let mut pre_clif_buf = String::new();
         let mut post_clif_buf = String::new();
@@ -559,22 +561,19 @@ impl JitBackend {
         let comb_func: SimFunc = unsafe { std::mem::transmute(comb_code_ptr) };
 
         debug_assert_eq!(
-            engine.translator.layout.working_base_offset,
-            (engine.translator.layout.total_size + 7) & !7
+            engine.layout().working_base_offset,
+            (engine.layout().total_size + 7) & !7
         );
         debug_assert_eq!(
-            engine.translator.layout.merged_total_size,
-            (engine.translator.layout.scratch_base_offset
-                + engine.translator.layout.scratch_size
-                + 7)
-                & !7
+            engine.layout().merged_total_size,
+            (engine.layout().scratch_base_offset + engine.layout().scratch_size + 7) & !7
         );
 
         // Pre-compute 4-state initialization regions
         let mut four_state_inits = Vec::new();
         if options.four_state {
-            for (addr, &offset) in &engine.translator.layout.offsets {
-                let width = engine.translator.layout.widths[addr];
+            for (addr, &offset) in &engine.layout().offsets {
+                let width = engine.layout().widths[addr];
                 let is_4state = sir
                     .design
                     .state_objects
@@ -587,9 +586,9 @@ impl JitBackend {
                     four_state_inits.push((offset, allocated_size));
                 }
             }
-            for (addr, &rel_offset) in &engine.translator.layout.working_offsets {
-                let offset = engine.translator.layout.working_base_offset + rel_offset;
-                let width = engine.translator.layout.widths[addr];
+            for (addr, &rel_offset) in &engine.layout().working_offsets {
+                let offset = engine.layout().working_base_offset + rel_offset;
+                let width = engine.layout().widths[addr];
                 let is_4state = sir
                     .design
                     .state_objects
@@ -604,7 +603,7 @@ impl JitBackend {
             }
         }
 
-        let layout = engine.translator.layout.clone();
+        let layout = engine.layout().clone();
         let options = options.clone();
 
         Ok(SharedJitCode {

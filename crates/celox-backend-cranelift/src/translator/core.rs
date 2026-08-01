@@ -5,7 +5,7 @@ use cranelift::prelude::*;
 use cranelift_frontend::{FunctionBuilder, Switch};
 
 use crate::{
-    HashMap, SimulatorOptions,
+    HashMap,
     ir::{
         AbsoluteAddr, BinaryOp, BlockId, RegionedAbsoluteAddr, RegisterId, RegisterType,
         SIRInstruction,
@@ -174,7 +174,7 @@ use cranelift::codegen::ir::StackSlot;
 
 pub struct SIRTranslator {
     pub layout: MemoryLayout,
-    pub options: SimulatorOptions,
+    pub options: crate::CompileOptions,
 }
 
 /// Temporary state used only during translation

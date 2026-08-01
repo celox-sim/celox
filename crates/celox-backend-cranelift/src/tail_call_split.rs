@@ -1,7 +1,7 @@
 use crate::HashMap;
 use crate::ir::*;
 
-use super::cost_model::{
+use crate::cost_model::{
     CLIF_INST_THRESHOLD, VREG_VALUE_THRESHOLD, estimate_clif_cost, estimate_eu_cost,
     estimate_eu_value_count, estimate_units_cost,
 };
@@ -1447,7 +1447,7 @@ mod tests {
         let eu3 = make_large_eu(10);
 
         // Use a threshold that fits one EU but not two
-        let single_eu_cost = super::super::cost_model::estimate_eu_cost(&eu1, false);
+        let single_eu_cost = crate::cost_model::estimate_eu_cost(&eu1, false);
         let threshold = single_eu_cost + single_eu_cost / 2; // ~1.5× single EU
 
         let result = split_with_threshold(&[eu1, eu2, eu3], false, threshold, usize::MAX);
@@ -1468,7 +1468,7 @@ mod tests {
         let eu = make_large_eu(20);
 
         // Use a threshold that's about 1/3 the EU cost to force splitting
-        let eu_cost = super::super::cost_model::estimate_eu_cost(&eu, false);
+        let eu_cost = crate::cost_model::estimate_eu_cost(&eu, false);
         let threshold = eu_cost / 3;
 
         let result = split_with_threshold(&[eu], false, threshold, usize::MAX);
@@ -1625,7 +1625,7 @@ mod tests {
     fn test_multi_block_spilled_split() {
         // Create a multi-block EU with enough blocks/instructions to exceed a low threshold
         let eu = make_multi_block_chain_eu(6, 5);
-        let eu_cost = super::super::cost_model::estimate_eu_cost(&eu, false);
+        let eu_cost = crate::cost_model::estimate_eu_cost(&eu, false);
         // Use ~1/4 of EU cost as threshold to force multiple chunks
         let threshold = eu_cost / 4;
         assert!(
@@ -1728,7 +1728,7 @@ mod tests {
         // Verify that cross_chunk_edges include ALL block params (no silent dropping)
         let eu = make_multi_block_chain_eu(4, 3);
         // Use threshold that forces at least 2 chunks
-        let eu_cost = super::super::cost_model::estimate_eu_cost(&eu, false);
+        let eu_cost = crate::cost_model::estimate_eu_cost(&eu, false);
         let threshold = eu_cost / 3;
         let result = split_multi_block_with_threshold(
             std::slice::from_ref(&eu),

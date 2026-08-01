@@ -3,7 +3,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Module};
 
-use crate::SimulatorOptions;
+use crate::CompileOptions;
 use crate::backend::memory_layout::MemoryLayout;
 use crate::ir::RegionedAbsoluteAddr;
 use crate::optimizer::coalescing::TailCallChunk;
@@ -22,15 +22,15 @@ fn define_simulation_function(module: &mut JITModule, ctx: &mut Context) {
     ctx.func.signature.params.push(AbiParam::new(ptr_type)); // arg0: unified_mem
     ctx.func.signature.returns.push(AbiParam::new(types::I64));
 }
-pub(crate) struct JitEngine {
+pub struct JitEngine {
     module: JITModule,
     pub(super) translator: SIRTranslator,
 }
 
 impl JitEngine {
-    pub fn new(layout: MemoryLayout, options: &SimulatorOptions) -> Result<Self, String> {
+    pub fn new(layout: MemoryLayout, options: &CompileOptions) -> Result<Self, String> {
         let mut flag_builder = settings::builder();
-        let cl_opts = &options.cranelift_options;
+        let cl_opts = &options.cranelift;
 
         flag_builder
             .set("opt_level", cl_opts.opt_level.as_cranelift_str())
@@ -81,6 +81,10 @@ impl JitEngine {
                 options: options.clone(),
             },
         })
+    }
+
+    pub fn layout(&self) -> &MemoryLayout {
+        &self.translator.layout
     }
 
     /// Optimize a function context, define it in the module, and emit debug output.

@@ -12,10 +12,31 @@ use wasm_encoder::{
     MemoryType, Module, TypeSection, ValType,
 };
 
+pub type HashMap<K, V> = fxhash::FxHashMap<K, V>;
+
+pub mod backend {
+    pub mod memory_layout {
+        pub use celox_state_layout::*;
+        pub type MemoryLayout = celox_state_layout::MemoryLayout<celox_design::StateAddr>;
+    }
+
+    pub use memory_layout::MemoryLayout;
+}
+
+pub mod ir {
+    pub use celox_design::{
+        BinaryOp, InstanceId, RegionedAbsoluteAddrBase, SPARSE_WORKING_REGION, STABLE_REGION,
+        StateAddr, TriggerIdWithKind, UnaryOp,
+    };
+    pub use celox_sir::*;
+
+    pub type AbsoluteAddr = celox_design::StateAddr;
+    pub type RegionedAbsoluteAddr = celox_design::RegionedStateAddr;
+}
+
 #[cfg(test)]
 use crate::backend::memory_layout::MemoryLayoutMode;
 use crate::{
-    HashMap,
     backend::{
         MemoryLayout,
         memory_layout::{
@@ -32,7 +53,7 @@ use crate::{
     },
 };
 
-use super::get_byte_size;
+use celox_state_layout::get_byte_size;
 
 /// Compiled WASM module bytes for a set of execution units.
 pub struct WasmModule {
@@ -5208,12 +5229,12 @@ fn compile_concat(
 fn compile_terminator(
     term: &SIRTerminator,
     block_index: &HashMap<BlockId, usize>,
-    num_blocks: usize,
+    _num_blocks: usize,
     block_id_local: u32,
     br_dispatch_depth: u32,
     br_exit_depth: u32,
-    unit: &ExecutionUnit<RegionedAbsoluteAddr>,
-    four_state: bool,
+    _unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+    _four_state: bool,
     locals: &LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
@@ -5679,14 +5700,6 @@ fn emit_wide_get_chunk(instrs: &mut Vec<Instruction<'static>>, reg: &RegLocal, c
     }
 }
 
-fn emit_rmw_store(
-    _instrs: &mut Vec<Instruction<'static>>,
-    _byte_offset: usize,
-    _valid_bits: usize,
-) {
-    // TODO: read-modify-write for partial stores
-}
-
 fn collect_trigger_addrs(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
 ) -> Vec<(AbsoluteAddr, u32)> {
@@ -5772,11 +5785,8 @@ mod bit_count_tests {
     use wasmtime::{Engine, Linker, Memory, Module as WasmtimeModule, Store};
 
     use super::*;
-    use crate::{
-        SimulatorOptions,
-        backend::JitEngine,
-        ir::{BasicBlock, InstanceId},
-    };
+    use crate::ir::{BasicBlock, InstanceId};
+    use celox_backend_cranelift::{CompileOptions, CraneliftOptions, JitEngine};
 
     const OUTPUT_OFFSET: usize = 32;
     const SLOT_BITS: usize = 128;
@@ -5900,9 +5910,10 @@ mod bit_count_tests {
         layout: &MemoryLayout,
         four_state: bool,
     ) -> Vec<u8> {
-        let options = SimulatorOptions {
+        let options = CompileOptions {
             four_state,
-            ..SimulatorOptions::default()
+            emit_triggers: false,
+            cranelift: CraneliftOptions::default(),
         };
         let mut engine = JitEngine::new(layout.clone(), &options).expect("create JIT engine");
         let code = engine

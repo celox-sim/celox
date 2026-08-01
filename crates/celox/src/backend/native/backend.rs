@@ -112,6 +112,70 @@ pub(crate) struct NativeCodegenTrace {
     pub state_layout: String,
 }
 
+fn prepare_merged_sir(
+    units: &[&crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
+    layout: &MemoryLayout,
+    four_state: bool,
+    label: &str,
+    first_ff_unit: Option<usize>,
+) -> Result<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, SimulatorError> {
+    for (unit_index, unit) in units.iter().enumerate() {
+        if let Err(error) = unit.verify_result() {
+            return Err(codegen_err(format!(
+                "invalid SIR before x86 source-unit merge: {label} source unit {unit_index}: {error}"
+            )));
+        }
+    }
+
+    let (mut sir_eu, merge_provenance) = celox_sir::merge_sir_eu_refs_with_provenance(units);
+    let boundaries = merge_provenance.unit_entries[1..].to_vec();
+    let verify = |eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, phase| {
+        eu.verify_result()
+            .map_err(|error| codegen_err(format!("{phase}: {error}")))
+    };
+
+    verify(&sir_eu, "before x86 merged-SIR optimization")?;
+    if let Some(first_ff_unit) = first_ff_unit {
+        let removed = crate::optimizer::coalescing::eliminate_unobserved_comb_state_stores(
+            &mut sir_eu,
+            &merge_provenance,
+            first_ff_unit,
+        )
+        .map_err(|message| codegen_err(format!("comb/FF state-publication DSE: {message}")))?;
+        if removed != 0 {
+            crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
+            verify(&sir_eu, "after comb/FF state-publication DSE")?;
+        }
+    }
+    if label == "eval_comb_apply_ff"
+        && crate::optimizer::coalescing::promote_fused_comb_static_slots(&mut sir_eu).map_err(
+            |message| codegen_err(format!("final fused comb StateSSA promotion: {message}")),
+        )?
+    {
+        crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
+        verify(&sir_eu, "after final fused comb StateSSA promotion")?;
+    }
+    if crate::optimizer::coalescing::promote_eval_apply_working_round_trips(&mut sir_eu) {
+        verify(&sir_eu, "after x86 working StateSSA")?;
+        crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
+        verify(&sir_eu, "after x86 working StateSSA DCE")?;
+    }
+    crate::optimizer::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
+        &mut sir_eu,
+        &boundaries,
+    );
+    verify(&sir_eu, "after x86 direct working rewrite")?;
+    crate::optimizer::coalescing::optimize_native_merged_chain(
+        &mut sir_eu,
+        layout,
+        four_state,
+        label == "eval_comb_apply_ff",
+    )
+    .map_err(|(phase, error)| codegen_err(format!("{phase}: {error}")))?;
+    verify(&sir_eu, "after x86 merged-chain cleanup")?;
+    Ok(sir_eu)
+}
+
 fn compile_units(
     units: &[crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>],
     layout: &MemoryLayout,
@@ -179,13 +243,13 @@ fn compile_unit_refs(
         );
     }
     let start = timing.then(crate::timing::now);
+    let sir_eu = prepare_merged_sir(units, layout, four_state, label, first_ff_unit)?;
     let mut trace = capture_trace.then(emit::NativeFunctionTrace::default);
-    let emit_result = emit::emit_chained_eu_refs(
-        units,
+    let emit_result = emit::emit_prepared_eu(
+        &sir_eu,
         layout,
         four_state,
         label,
-        first_ff_unit,
         enable_x86_slp,
         trace.as_mut(),
     )
@@ -514,7 +578,7 @@ fn compile_program(
     let next_task = AtomicUsize::new(0);
     let (comb_jit, mut compiled_ff_codes) = std::thread::scope(|scope| {
         let four_state = options.four_state;
-        let enable_x86_slp = options.optimize_options.x86_slp_enabled();
+        let enable_x86_slp = options.x86_options.slp;
         let comb_handle = scope.spawn(move || {
             compile_units(
                 &sir.sir.eval_comb,
