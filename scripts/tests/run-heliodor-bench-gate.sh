@@ -268,13 +268,13 @@ chmod +x "$mock_cargo_dir/cargo"
     CELOX_RUNNER_BIN="$TMP/fixed-gate-target/release/celox-heliodor"
     build_celox_runner >/dev/null
 )
-target_arg_line="$(rg -n '^--target-dir$' "$TMP/cargo-args" | cut -d: -f1)"
+target_arg_line="$(grep -n -x -- '--target-dir' "$TMP/cargo-args" | cut -d: -f1)"
 [[ -n "$target_arg_line" ]] || fail "Celox build omitted --target-dir"
 assert_eq "$(sed -n "$((target_arg_line + 1))p" "$TMP/cargo-args")" \
     "$TMP/fixed-gate-target" "explicit Cargo target directory argument"
-rg -qx -- '--locked' "$TMP/cargo-args" || fail "Celox build omitted --locked"
-rg -qx -- 'celox-bench' "$TMP/cargo-args" || fail "Celox build did not select celox-bench"
-rg -qx -- 'celox-heliodor' "$TMP/cargo-args" || fail "Celox build did not select celox-heliodor"
+grep -qx -- '--locked' "$TMP/cargo-args" || fail "Celox build omitted --locked"
+grep -qx -- 'celox-bench' "$TMP/cargo-args" || fail "Celox build did not select celox-bench"
+grep -qx -- 'celox-heliodor' "$TMP/cargo-args" || fail "Celox build did not select celox-heliodor"
 assert_eq "$(sed -n '1p' "$TMP/cargo-env")" unset "CARGO_TARGET_DIR neutralization"
 assert_eq "$(sed -n '2p' "$TMP/cargo-env")" unset "CARGO_BUILD_TARGET neutralization"
 
@@ -321,6 +321,14 @@ assert_eq "$(sed -n '2p' "$TMP/cargo-env")" unset "CARGO_BUILD_TARGET neutraliza
     if test_source_files "$GATE_TEST" >/dev/null 2>&1; then
         fail "test_source_files hid a find pipeline failure"
     fi
+    PATH="$saved_path"
+    mkdir -p "$TMP/failing-rg"
+    printf '%s\n' '#!/bin/sh' 'exit 127' >"$TMP/failing-rg/rg"
+    chmod +x "$TMP/failing-rg/rg"
+    PATH="$TMP/failing-rg:$PATH"
+    assert_eq "$(test_source_files "$GATE_TEST")" \
+        $'src/dummy.veryl\ntb/test.veryl' \
+        "source enumeration without ripgrep"
     PATH="$saved_path"
     mkdir -p "$HELIODOR_DIR/tb/duplicate"
     printf '%s\n' '#[test(test_soc_linux_boot)]' \
