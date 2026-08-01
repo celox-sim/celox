@@ -1,7 +1,7 @@
 use crate::HashMap;
 use crate::HashSet;
+use crate::PassOptions;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
 use std::sync::Arc;
 
 use super::block_opt::aggregate_static_offset;

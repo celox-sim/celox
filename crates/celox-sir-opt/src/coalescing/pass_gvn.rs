@@ -11,9 +11,9 @@
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::def_reg;
 use super::state_ssa::{MemoryVersionId, StateFragment, StateSsa};
+use crate::PassOptions;
 use crate::ir::cfg::SirCfg;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
 
 pub(super) struct GvnPass;
@@ -822,8 +822,7 @@ fn process_gvn_block(
                 state.insert_value(key, dst);
                 state.set_canonical(dst, dst);
                 if let SIRInstruction::Imm(_, value) = inst
-                    && let Some(value) =
-                        crate::optimizer::coalescing::shared::sir_value_to_u64(value)
+                    && let Some(value) = crate::coalescing::shared::sir_value_to_u64(value)
                 {
                     state.set_constant(dst, value);
                 }

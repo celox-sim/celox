@@ -1,5 +1,5 @@
+use crate::PassOptions;
 use crate::ir::{ExecutionUnit, RegionedAbsoluteAddr};
-use crate::optimizer::PassOptions;
 
 use super::block_opt::schedule_instructions;
 use super::pass_manager::ExecutionUnitPass;

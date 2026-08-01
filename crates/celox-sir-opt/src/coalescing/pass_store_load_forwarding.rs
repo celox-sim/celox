@@ -4,8 +4,8 @@ use super::shared::{
     sir_value_to_u64,
 };
 use crate::HashMap;
+use crate::PassOptions;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
 use std::collections::BTreeMap;
 
 pub(super) struct StoreLoadForwardingPass;

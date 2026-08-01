@@ -10,8 +10,8 @@
 
 use super::pass_manager::ExecutionUnitPass;
 use crate::HashMap;
+use crate::PassOptions;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
 
 pub(super) struct PartialForwardPass;
 

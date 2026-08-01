@@ -9,9 +9,9 @@
 
 use super::pass_manager::ExecutionUnitPass;
 use super::sir_analysis::{collect_uses, predicate_facts};
+use crate::PassOptions;
 use crate::ir::cfg::SirCfg;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
 
 pub(super) struct PhiOutcomeCompressionPass;

@@ -1,5 +1,5 @@
+use crate::PassOptions;
 use crate::ir::{ExecutionUnit, RegionedAbsoluteAddr};
-use crate::optimizer::PassOptions;
 
 use super::commit_ops::split_wide_commits;
 use super::pass_manager::ExecutionUnitPass;

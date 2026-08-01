@@ -1,5 +1,5 @@
 use crate::HashMap;
-use crate::backend::MEM_SHIFT_THRESHOLD;
+use crate::MEM_SHIFT_THRESHOLD;
 use crate::ir::*;
 
 /// Safety margin: 50% of Cranelift's ~16M instruction index limit.

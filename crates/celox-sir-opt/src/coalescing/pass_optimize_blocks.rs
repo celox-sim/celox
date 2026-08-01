@@ -1,8 +1,8 @@
 use super::block_opt::{optimize_block, schedule_instructions};
 use super::shared::{batch_replace_in_inst, batch_replace_in_terminator};
 use crate::HashMap;
+use crate::PassOptions;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
 use std::sync::Arc;
 
 use super::pass_manager::ExecutionUnitPass;

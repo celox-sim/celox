@@ -4,8 +4,8 @@
 
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::{def_reg, sir_value_to_u64};
+use crate::PassOptions;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
 
 const MIN_CHAIN_LEN: usize = 4;

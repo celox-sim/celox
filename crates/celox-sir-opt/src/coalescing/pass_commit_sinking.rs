@@ -1,5 +1,5 @@
+use crate::PassOptions;
 use crate::ir::{ExecutionUnit, RegionedAbsoluteAddr};
-use crate::optimizer::PassOptions;
 
 use super::commit_ops::optimize_commit_sinking;
 use super::commit_ops::{DirectStableStoreHazards, optimize_commit_sinking_with_hazards};

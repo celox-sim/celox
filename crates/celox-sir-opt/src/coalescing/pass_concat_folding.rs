@@ -4,8 +4,8 @@
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::{collect_all_used_registers, def_reg};
 use crate::HashMap;
+use crate::PassOptions;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
 use std::sync::Arc;
 
 /// Tracks a bit-extraction source: either Slice(reg, off, w) or Load(addr, off, w).

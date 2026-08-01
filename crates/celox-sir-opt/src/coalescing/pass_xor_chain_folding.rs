@@ -17,8 +17,8 @@
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::{collect_all_used_registers, def_reg};
 use crate::HashMap;
+use crate::PassOptions;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
 use num_bigint::BigUint;
 
 pub(super) struct XorChainFoldingPass;

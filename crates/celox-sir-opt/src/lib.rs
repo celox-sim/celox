@@ -3,9 +3,8 @@
 pub type HashMap<K, V> = fxhash::FxHashMap<K, V>;
 pub type HashSet<K> = fxhash::FxHashSet<K>;
 
-/// Source-independent SIR and design vocabulary used by optimization passes.
-/// This compatibility module keeps the moved pass implementation readable;
-/// it deliberately exposes no frontend or physical-layout type.
+/// Source-independent SIR and design vocabulary specialized to semantic state
+/// addresses. It deliberately exposes no frontend or physical-layout type.
 pub mod ir {
     pub use celox_design::{
         BinaryOp, DomainKind, InstanceId, RegionedAbsoluteAddrBase, RuntimeSchema,
@@ -25,32 +24,23 @@ pub mod ir {
     pub mod verify {
         pub use celox_sir::verify::*;
     }
-
-    /// Mutable optimization view over the source-independent compiler state.
-    /// Frontend lookup tables and testbench source cannot enter this crate.
-    pub struct Program<'a> {
-        pub sir: &'a mut SirProgram,
-        pub design: &'a celox_design::ElaboratedDesign<AbsoluteAddr>,
-        pub runtime_schema: &'a RuntimeSchema<AbsoluteAddr>,
-        pub layout_requirements: &'a mut celox_state_layout::LayoutRequirements<AbsoluteAddr>,
-    }
-
-    impl Program<'_> {
-        pub fn variable_metadata(
-            &self,
-            address: &AbsoluteAddr,
-        ) -> Option<&celox_design::VariableMetadata> {
-            self.design.state_objects.get(address)
-        }
-    }
 }
 
-/// Compatibility path used by the moved implementation. Policy types are
-/// owned by this crate and are not facade callbacks.
-pub(crate) mod optimizer {
-    pub use crate::{OptLevel, OptimizeOptions, PassOptions, ProgramPass, SirPass};
-    pub(crate) mod coalescing {
-        pub(crate) use crate::coalescing::shared;
+/// Mutable optimization view over source-independent compiler state.
+/// Frontend lookup tables and testbench source cannot enter this crate.
+pub struct OptimizationContext<'a> {
+    pub sir: &'a mut ir::SirProgram,
+    pub design: &'a celox_design::ElaboratedDesign<ir::AbsoluteAddr>,
+    pub runtime_schema: &'a celox_design::RuntimeSchema<ir::AbsoluteAddr>,
+    pub layout_requirements: &'a mut celox_state_layout::LayoutRequirements<ir::AbsoluteAddr>,
+}
+
+impl OptimizationContext<'_> {
+    pub fn variable_metadata(
+        &self,
+        address: &ir::AbsoluteAddr,
+    ) -> Option<&celox_design::VariableMetadata> {
+        self.design.state_objects.get(address)
     }
 }
 
@@ -77,22 +67,19 @@ pub mod timing {
     }
 }
 
-pub mod backend {
-    /// Cost-model threshold for preferring chunked memory shifts.
-    pub const MEM_SHIFT_THRESHOLD: usize = 4;
-}
+/// Cost-model threshold for preferring chunked memory shifts.
+const MEM_SHIFT_THRESHOLD: usize = 4;
 
 pub mod coalescing;
 mod memory_contract;
 pub use memory_contract::verify_memory_offset_contract;
 
-pub trait ProgramPass {
-    fn name(&self) -> &'static str;
-    fn run(&self, program: &mut ir::Program<'_>, options: &PassOptions);
+trait SirProgramPass {
+    fn run(&self, program: &mut OptimizationContext<'_>, options: &PassOptions);
 }
 
 pub fn optimize(
-    program: &mut ir::Program<'_>,
+    program: &mut OptimizationContext<'_>,
     four_state: bool,
     optimize_options: &OptimizeOptions,
     preserve_element_storage_layout: bool,

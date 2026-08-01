@@ -1,6 +1,6 @@
 use crate::HashMap;
+use crate::PassOptions;
 use crate::ir::{AbsoluteAddr, ExecutionUnit, RegionedAbsoluteAddr, SIRInstruction, SIROffset};
-use crate::optimizer::PassOptions;
 use std::sync::Arc;
 
 pub(super) trait ExecutionUnitPass {

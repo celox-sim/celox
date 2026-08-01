@@ -1,5 +1,5 @@
 use crate::ir::*;
-use crate::optimizer::{PassOptions, ProgramPass, SirPass};
+use crate::{OptimizationContext, PassOptions, SirPass, SirProgramPass};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -79,12 +79,12 @@ pub fn promote_fused_comb_static_slots(
     pass_global_store_load_forwarding::promote_fused_comb_static_slots(eu)
 }
 
-pub fn retain_final_identity_aliases(program: &mut Program<'_>, four_state: bool) {
+pub fn retain_final_identity_aliases(program: &mut OptimizationContext<'_>, four_state: bool) {
     pass_identity_store_bypass::retain_final_identity_aliases(program, four_state);
 }
 
 pub fn remove_final_identity_alias_stores(
-    program: &mut Program<'_>,
+    program: &mut OptimizationContext<'_>,
     validated_aliases: &crate::HashMap<AbsoluteAddr, AbsoluteAddr>,
     four_state: bool,
 ) {
@@ -250,7 +250,7 @@ pub fn optimize_merged_chain(
 }
 
 pub fn optimize_rooted_comb_memory(
-    program: &mut Program<'_>,
+    program: &mut OptimizationContext<'_>,
     externally_live: &crate::HashSet<AbsoluteAddr>,
     four_state: bool,
 ) {
@@ -302,12 +302,8 @@ use pass_xor_chain_folding::XorChainFoldingPass;
 
 pub struct CoalescingPass;
 
-impl ProgramPass for CoalescingPass {
-    fn name(&self) -> &'static str {
-        "coalescing"
-    }
-
-    fn run(&self, program: &mut Program, options: &PassOptions) {
+impl SirProgramPass for CoalescingPass {
+    fn run(&self, program: &mut OptimizationContext, options: &PassOptions) {
         optimize_with_options(
             program,
             options.max_inflight_loads,
@@ -683,8 +679,8 @@ fn is_zero_mask_imm(
 /// them depend on address aliases or CFG shapes produced by earlier passes.
 /// Keeping the ordering in one named stage makes those dependencies explicit.
 fn optimize_late_comb(
-    program: &mut Program,
-    opt: &crate::optimizer::OptimizeOptions,
+    program: &mut OptimizationContext,
+    opt: &crate::OptimizeOptions,
     options: &PassOptions,
     unpacked_element_widths: &crate::HashMap<AbsoluteAddr, usize>,
 ) {
@@ -692,7 +688,7 @@ fn optimize_late_comb(
     let trace = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
     let timing = std::env::var_os("CELOX_PASS_TIMING").is_some();
     let mut checkpoint = crate::timing::now();
-    let verify_stage = |program: &Program, stage: &'static str| {
+    let verify_stage = |program: &OptimizationContext, stage: &'static str| {
         if std::env::var_os("CELOX_SIR_VERIFY_PASSES").is_none() {
             return;
         }
@@ -743,7 +739,7 @@ fn optimize_late_comb(
     }
 
     // Identity-store bypass can make an entire expression DAG dead.
-    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+    if opt.opt_level() != crate::OptLevel::O0 {
         for eu in &mut program.sir.eval_comb {
             pass_manager::ExecutionUnitPass::run(&LoopIdiomPass, eu, options);
         }
@@ -753,7 +749,7 @@ fn optimize_late_comb(
     if trace {
         eprintln!("[branchify-stats] late loop");
     }
-    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+    if opt.opt_level() != crate::OptLevel::O0 {
         let packed_scatter_store = PackedScatterStorePass::for_program(program);
         for eu in &mut program.sir.eval_comb {
             pass_manager::ExecutionUnitPass::run(&packed_scatter_store, eu, options);
@@ -775,7 +771,7 @@ fn optimize_late_comb(
     if trace {
         eprintln!("[branchify-stats] late indexed");
     }
-    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+    if opt.opt_level() != crate::OptLevel::O0 {
         for eu in &mut program.sir.eval_comb {
             pass_manager::ExecutionUnitPass::run(&GuardedRegionSinkingPass, eu, options);
         }
@@ -785,7 +781,7 @@ fn optimize_late_comb(
     if trace {
         eprintln!("[branchify-stats] late guarded");
     }
-    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+    if opt.opt_level() != crate::OptLevel::O0 {
         let sparse_case_pass =
             SparseCaseDispatchPass::new(program.layout_requirements.state_aliases());
         if trace {
@@ -835,10 +831,10 @@ fn optimize_late_comb(
 }
 
 fn optimize_with_options(
-    program: &mut Program,
+    program: &mut OptimizationContext,
     max_inflight_loads: usize,
     four_state: bool,
-    opt: &crate::optimizer::OptimizeOptions,
+    opt: &crate::OptimizeOptions,
     preserve_element_storage_layout: bool,
 ) {
     #[cfg(not(target_arch = "wasm32"))]
@@ -1001,12 +997,12 @@ fn optimize_with_options(
     if on(SirPass::HoistCommonBranchLoads) {
         comb_ff_passes.add_pass(HoistCommonBranchLoadsPass);
     }
-    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+    if opt.opt_level() != crate::OptLevel::O0 {
         comb_ff_passes.add_pass(GuardedRegionSinkingPass);
     }
     if on(SirPass::BranchifyMux) {
         comb_ff_passes.add_pass(BranchifyMuxPass);
-        if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        if opt.opt_level() != crate::OptLevel::O0 {
             comb_ff_passes.add_pass(GuardedRegionSinkingPass);
         }
     }
@@ -1016,7 +1012,7 @@ fn optimize_with_options(
     if on(SirPass::BitExtractPeephole) {
         comb_ff_passes.add_pass(BitExtractPeepholePass);
     }
-    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+    if opt.opt_level() != crate::OptLevel::O0 {
         comb_ff_passes.add_pass(LoopIdiomPass);
     }
     if on(SirPass::OptimizeBlocks) {
@@ -1036,7 +1032,7 @@ fn optimize_with_options(
             &unpacked_element_widths,
         )));
     }
-    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+    if opt.opt_level() != crate::OptLevel::O0 {
         comb_ff_passes.add_pass(LoopIdiomPass);
     }
     if on(SirPass::MaskedArrayAny) {
@@ -1061,7 +1057,7 @@ fn optimize_with_options(
     // and reset triggers commonly share the complete fused body.
     let mut comb_ff_late_passes = ExecutionUnitPassManager::new()
         .with_unpacked_element_widths(Arc::clone(&unpacked_element_widths));
-    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+    if opt.opt_level() != crate::OptLevel::O0 {
         comb_ff_late_passes.add_pass(GuardedRegionSinkingPass);
         comb_ff_late_passes.add_pass(SparseCaseDispatchPass::new(
             program.layout_requirements.state_aliases(),
@@ -1263,7 +1259,7 @@ fn optimize_with_options(
     if on(SirPass::HoistCommonBranchLoads) {
         comb_passes.add_pass(HoistCommonBranchLoadsPass);
     }
-    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+    if opt.opt_level() != crate::OptLevel::O0 {
         // Recover coupled observable outputs while their shared producer DAG
         // is still intact.  BranchifyMux may otherwise split an inner value
         // diamond first and hide the common result/flags control region behind
@@ -1272,14 +1268,14 @@ fn optimize_with_options(
     }
     if on(SirPass::BranchifyMux) {
         comb_passes.add_pass(BranchifyMuxPass);
-        if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+        if opt.opt_level() != crate::OptLevel::O0 {
             comb_passes.add_pass(GuardedRegionSinkingPass);
         }
     }
     if on(SirPass::BitExtractPeephole) {
         comb_passes.add_pass(BitExtractPeepholePass);
     }
-    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+    if opt.opt_level() != crate::OptLevel::O0 {
         comb_passes.add_pass(LoopIdiomPass);
     }
     if on(SirPass::OptimizeBlocks) {
@@ -1299,7 +1295,7 @@ fn optimize_with_options(
             &unpacked_element_widths,
         )));
     }
-    if opt.opt_level() != crate::optimizer::OptLevel::O0 {
+    if opt.opt_level() != crate::OptLevel::O0 {
         // Vectorization exposes the wide source of predicate concats.  A
         // second idiom/DCE sweep removes the scalar predicates it replaced.
         comb_passes.add_pass(LoopIdiomPass);

@@ -1,5 +1,5 @@
+use crate::PassOptions;
 use crate::ir::{ExecutionUnit, RegionedAbsoluteAddr};
-use crate::optimizer::PassOptions;
 
 use super::dead_working_stores::eliminate_dead_working_stores;
 use super::pass_manager::ExecutionUnitPass;

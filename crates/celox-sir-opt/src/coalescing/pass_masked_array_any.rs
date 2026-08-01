@@ -18,9 +18,9 @@
 use super::pass_manager::ExecutionUnitPass;
 use super::pass_vectorize_concat::remove_dead_definitions;
 use super::shared::def_reg;
+use crate::PassOptions;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
-use crate::{HashMap, HashSet};
+use crate::{HashMap, HashSet, OptimizationContext};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ArrayShape {
@@ -34,7 +34,7 @@ pub(super) struct MaskedArrayAnyPass {
 }
 
 impl MaskedArrayAnyPass {
-    pub(super) fn for_program(program: &Program) -> Self {
+    pub(super) fn for_program(program: &OptimizationContext) -> Self {
         let mut unpacked_arrays = HashMap::default();
         for (&address, info) in &program.design.state_objects {
             if info.array_dims.is_empty() {

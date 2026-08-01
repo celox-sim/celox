@@ -1,8 +1,8 @@
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::sir_value_to_u64;
 use crate::HashMap;
+use crate::PassOptions;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
 
 pub(super) struct BitExtractPeepholePass;
 

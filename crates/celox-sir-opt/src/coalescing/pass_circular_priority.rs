@@ -9,10 +9,10 @@
 use super::pass_manager::ExecutionUnitPass;
 use super::pass_vectorize_concat::remove_dead_definitions;
 use super::shared::{def_reg, sir_value_to_u64};
+use crate::PassOptions;
 use crate::ir::cfg::SirCfg;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
-use crate::{HashMap, HashSet};
+use crate::{HashMap, HashSet, OptimizationContext};
 use num_bigint::BigUint;
 
 #[derive(Clone, Copy, Debug)]
@@ -166,7 +166,7 @@ pub(super) struct CircularPriorityPass {
 }
 
 impl CircularPriorityPass {
-    pub(super) fn for_program(program: &Program) -> Self {
+    pub(super) fn for_program(program: &OptimizationContext) -> Self {
         let mut bit_array_elements = HashMap::default();
         let mut array_shapes = HashMap::default();
         for (&address, info) in &program.design.state_objects {
@@ -402,7 +402,7 @@ impl ExecutionUnitPass for CircularPriorityPass {
 
 /// Recover fixed lane-to-bit maps after native EU merging and jump inlining.
 ///
-/// This entry point deliberately needs no `Program` metadata: unlike the
+/// This entry point deliberately needs no `OptimizationContext` metadata: unlike the
 /// broader circular-priority patterns, the bit-map proof is entirely in the
 /// merged CFG and SSA recurrence. It runs once at the final native SIR
 /// boundary, where branch-expanded predecessors have been inlined.

@@ -1,12 +1,12 @@
 use super::pass_manager::ExecutionUnitPass;
 use super::placement_analysis::{PlacementAnalysis, ValueId, ValueOrigin, ValueSafety, ValueUse};
 use super::shared::{def_reg, normalize_branch_condition};
+use crate::PassOptions;
 use crate::ir::cfg::SirCfg;
 use crate::ir::{
     BasicBlock, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId, SIRInstruction,
     SIROffset, SIRTerminator,
 };
-use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, VecDeque};

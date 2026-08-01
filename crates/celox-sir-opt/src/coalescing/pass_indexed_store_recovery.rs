@@ -16,10 +16,10 @@
 
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::def_reg;
+use crate::PassOptions;
 use crate::ir::cfg::SirCfg;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
-use crate::{HashMap, HashSet};
+use crate::{HashMap, HashSet, OptimizationContext};
 use num_bigint::BigUint;
 use num_traits::{One, ToPrimitive, Zero};
 
@@ -36,7 +36,7 @@ pub(super) struct IndexedStoreRecoveryPass {
 }
 
 impl IndexedStoreRecoveryPass {
-    pub(super) fn for_program(program: &Program) -> Self {
+    pub(super) fn for_program(program: &OptimizationContext) -> Self {
         let mut arrays = HashMap::default();
         for (&address, info) in &program.design.state_objects {
             if info.array_dims.is_empty() {

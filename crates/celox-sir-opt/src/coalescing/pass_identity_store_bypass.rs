@@ -13,7 +13,7 @@
 use super::cost_model::estimate_clif_cost;
 use super::shared::{def_reg, sir_value_to_u64};
 use crate::ir::*;
-use crate::{HashMap, HashSet};
+use crate::{HashMap, HashSet, OptimizationContext};
 
 #[derive(Clone, Copy)]
 struct AddressMetadata {
@@ -46,12 +46,12 @@ struct GlobalIdentityFacts {
     stores: Vec<StoreCandidate>,
 }
 
-/// Analyze all combinational units before selecting any Program-global address
+/// Analyze all combinational units before selecting any whole-program address
 /// alias or memory-copy replacement. Alias selection has priority; the
 /// returned stores are still present until `OptimizedSir::into_laid_out` validates
 /// the selected aliases.
 pub(super) fn optimize_program_identity_stores(
-    program: &mut Program,
+    program: &mut OptimizationContext,
     four_state: bool,
 ) -> HashMap<AbsoluteAddr, AbsoluteAddr> {
     let metadata = address_metadata(program);
@@ -78,7 +78,7 @@ pub(super) fn optimize_program_identity_stores(
     )
 }
 
-fn address_metadata(program: &Program) -> HashMap<AbsoluteAddr, AddressMetadata> {
+fn address_metadata(program: &OptimizationContext) -> HashMap<AbsoluteAddr, AddressMetadata> {
     program
         .design
         .state_objects
@@ -121,7 +121,7 @@ fn optimize_eval_comb_identity_stores(
 /// lowered independently.  Therefore address identity alone is not enough:
 /// every remaining write to the removable side must still be the exact
 /// full-width identity recipe that justified sharing its home.
-pub(crate) fn retain_final_identity_aliases(program: &mut Program, four_state: bool) {
+pub(crate) fn retain_final_identity_aliases(program: &mut OptimizationContext, four_state: bool) {
     if program.layout_requirements.is_empty() {
         return;
     }
@@ -148,7 +148,7 @@ pub(crate) fn retain_final_identity_aliases(program: &mut Program, four_state: b
 /// Remove only the exact final-SIR Store sites whose identity recipes were
 /// re-proved and whose homes were actually merged by MemoryLayout.
 pub(crate) fn remove_final_identity_alias_stores(
-    program: &mut Program,
+    program: &mut OptimizationContext,
     validated_aliases: &HashMap<AbsoluteAddr, AbsoluteAddr>,
     four_state: bool,
 ) {
@@ -796,7 +796,7 @@ fn increment_saturating(value: &mut usize) {
     *value = value.saturating_add(1);
 }
 
-fn ff_referenced_addresses(program: &Program) -> HashSet<AbsoluteAddr> {
+fn ff_referenced_addresses(program: &OptimizationContext) -> HashSet<AbsoluteAddr> {
     let mut addresses = HashSet::default();
     // Do not scan eval_comb_apply_ffs here.  Those units contain the complete
     // combinational graph as well as FF actions, so treating every address in
@@ -1584,7 +1584,7 @@ mod tests {
     fn wide_read_destination_uses_commit_and_post_bypass_dce_removes_the_value_dag() {
         use super::super::pass_loop_idiom::LoopIdiomPass;
         use super::super::pass_manager::ExecutionUnitPass;
-        use crate::optimizer::PassOptions;
+        use crate::PassOptions;
 
         let source = address(0);
         let destination = address(1);

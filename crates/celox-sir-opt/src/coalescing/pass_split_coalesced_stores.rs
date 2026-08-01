@@ -6,8 +6,8 @@
 
 use super::pass_manager::ExecutionUnitPass;
 use super::sir_analysis::{UseSite, collect_uses};
+use crate::PassOptions;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
 use std::collections::HashMap;
 
 pub(super) struct SplitCoalescedStoresPass {

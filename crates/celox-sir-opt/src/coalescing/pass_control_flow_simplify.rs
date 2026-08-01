@@ -14,9 +14,9 @@
 
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::{collect_all_used_registers, def_reg};
+use crate::PassOptions;
 use crate::ir::cfg::SirCfg;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
 use num_bigint::BigUint;
 use num_traits::{One, Zero};

@@ -10,9 +10,9 @@
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::{def_reg, normalize_branch_condition};
 use super::sir_analysis::{UseSite, collect_uses, instruction_uses, predicate_facts};
+use crate::PassOptions;
 use crate::ir::cfg::SirCfg;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
 use std::collections::{BTreeMap, VecDeque};
 

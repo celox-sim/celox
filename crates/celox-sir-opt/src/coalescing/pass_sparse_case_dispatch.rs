@@ -1,10 +1,10 @@
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::def_reg;
+use crate::PassOptions;
 use crate::ir::{
     AbsoluteAddr, BasicBlock, BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId,
     RegisterType, SIRInstruction, SIROffset, SIRSwitchCase, SIRTerminator, STABLE_REGION, UnaryOp,
 };
-use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
 use num_bigint::BigUint;
 use num_traits::{One, Zero};

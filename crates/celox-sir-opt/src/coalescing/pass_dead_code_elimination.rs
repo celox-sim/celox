@@ -1,6 +1,6 @@
 use super::pass_manager::ExecutionUnitPass;
+use crate::PassOptions;
 use crate::ir::{ExecutionUnit, RegionedAbsoluteAddr};
-use crate::optimizer::PassOptions;
 
 /// Final mark/sweep DCE without value-numbering or cross-region CSE.
 pub(super) struct DeadCodeEliminationPass;

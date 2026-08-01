@@ -15,9 +15,9 @@
 
 use super::pass_manager::ExecutionUnitPass;
 use super::shared::{def_reg, sir_value_to_u64};
+use crate::PassOptions;
 use crate::ir::cfg::SirCfg;
 use crate::ir::*;
-use crate::optimizer::PassOptions;
 use crate::{HashMap, HashSet};
 use num_bigint::BigUint;
 use std::sync::Arc;

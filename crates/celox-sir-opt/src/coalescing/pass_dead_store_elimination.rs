@@ -1,5 +1,5 @@
-use crate::HashSet;
 use crate::ir::*;
+use crate::{HashSet, OptimizationContext};
 
 /// Remove stores from `eval_comb` whose target addresses are not live.
 ///
@@ -10,7 +10,7 @@ use crate::ir::*;
 /// - The store has non-empty triggers (edge-detection side effect), OR
 /// - The store has non-empty comb capture sites (observer activation side effect).
 pub(crate) fn eliminate_dead_stores(
-    program: &mut Program,
+    program: &mut OptimizationContext,
     externally_live: &HashSet<AbsoluteAddr>,
 ) {
     // 1. Collect all addresses loaded across ALL execution units.
