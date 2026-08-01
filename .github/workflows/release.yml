@@ -12,30 +12,46 @@ concurrency:
   group: release-management
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 jobs:
   release-please:
     name: Update release pull request
     runs-on: ubuntu-latest
     steps:
-      # A token other than GITHUB_TOKEN is required so that checks run on the
-      # generated pull request and the manifest push starts the publisher.
+      # Resources created with GITHUB_TOKEN do not start follow-up workflows.
+      # Mint a short-lived installation token so release PR checks and the
+      # manifest-triggered publisher run normally.
+      - name: Create release app token
+        id: release-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - uses: googleapis/release-please-action@v5
         with:
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          token: ${{ steps.release-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+          # The release app intentionally has no Issues permission. The weekly
+          # queue locates the deterministic Release Please branch instead.
+          skip-labeling: true
 
   queue-release:
     name: Queue weekly release
     needs: release-please
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     env:
-      GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+      # Enqueuing an existing PR does not need to trigger another workflow, so
+      # the job-scoped token is sufficient and avoids minting a second app token.
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Enable auto-merge for the release pull request
         shell: bash
@@ -44,9 +60,10 @@ jobs:
             gh pr list \
               --repo "$GITHUB_REPOSITORY" \
               --state open \
-              --label "autorelease: pending" \
-              --json number,labels \
-              --jq '[.[] | select((.labels | map(.name) | index("release:hold")) | not)][0].number // empty'
+              --base master \
+              --limit 1000 \
+              --json number,headRefName,isCrossRepository,labels \
+              --jq '[.[] | select(.isCrossRepository == false) | select(.headRefName == "release-please--branches--master--components--celox") | select((.labels | map(.name) | index("release:hold")) | not)][0].number // empty'
           )"
 
           if [ -z "$release_pr" ]; then
