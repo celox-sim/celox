@@ -54,10 +54,10 @@ assert_eq "$CELOX_JIT_EXECUTE_ELAPSED_NS" 5 "CPU-timed JIT execute elapsed"
 
 timed_veryl_log="$TMP/timed-veryl.log"
 write_log "$timed_veryl_log" \
-    'VERYL_TEST_TIMING test=boot compile_ns=6 execute_ns=7' \
+    'VERYL_TEST_TIMING test=boot compile_ns=6 execute_ns=7 execute_cpu_ns=8' \
     'VERYL_TEST_RESULT test=boot status=pass elapsed_ns=15'
 classify_timed_veryl_result "$timed_veryl_log" boot 0 \
-    || fail "well-formed timed Veryl result was rejected: $VERYL_TIMED_RESULT_DIAGNOSTIC"
+    || fail "CPU-timed Veryl result was rejected: $VERYL_TIMED_RESULT_DIAGNOSTIC"
 assert_eq "$VERYL_TIMED_SEMANTIC_STATUS" pass "timed Veryl semantic status"
 assert_eq "$VERYL_TIMED_REPORTED_ELAPSED_NS" 15 "timed Veryl reported elapsed"
 assert_eq "$VERYL_TIMED_COMPILE_ELAPSED_NS" 6 "timed Veryl compile elapsed"

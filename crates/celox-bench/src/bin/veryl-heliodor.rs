@@ -1,4 +1,9 @@
-use std::{error::Error, fs, path::PathBuf, time::Instant};
+use std::{
+    error::Error,
+    fs,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use clap::Parser as ClapParser;
 use veryl_analyzer::ir as air;
@@ -104,16 +109,30 @@ fn run() -> Result<(), Box<dyn Error>> {
     let testbench = convert_initial_to_testbench(initial_stmts, &event_map, &clock_periods, 3);
     let compile_elapsed = compile_start.elapsed();
 
+    let execute_cpu_start = process_cpu_time();
     let execute_start = Instant::now();
     let result = run_testbench(&mut sim, &testbench);
     let execute_elapsed = execute_start.elapsed();
+    let execute_cpu_elapsed = process_cpu_time()
+        .zip(execute_cpu_start)
+        .map(|(end, start)| end.saturating_sub(start));
     let elapsed = total_start.elapsed();
-    println!(
-        "VERYL_TEST_TIMING test={} compile_ns={} execute_ns={}",
-        options.test,
-        compile_elapsed.as_nanos(),
-        execute_elapsed.as_nanos()
-    );
+    if let Some(execute_cpu_elapsed) = execute_cpu_elapsed {
+        println!(
+            "VERYL_TEST_TIMING test={} compile_ns={} execute_ns={} execute_cpu_ns={}",
+            options.test,
+            compile_elapsed.as_nanos(),
+            execute_elapsed.as_nanos(),
+            execute_cpu_elapsed.as_nanos()
+        );
+    } else {
+        println!(
+            "VERYL_TEST_TIMING test={} compile_ns={} execute_ns={}",
+            options.test,
+            compile_elapsed.as_nanos(),
+            execute_elapsed.as_nanos()
+        );
+    }
 
     match result {
         TestResult::Pass => {
@@ -133,6 +152,26 @@ fn run() -> Result<(), Box<dyn Error>> {
             Err(message.into())
         }
     }
+}
+
+#[cfg(unix)]
+fn process_cpu_time() -> Option<Duration> {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let result = unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) };
+    (result == 0).then(|| {
+        Duration::new(
+            time.tv_sec.try_into().unwrap_or_default(),
+            time.tv_nsec.try_into().unwrap_or_default(),
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn process_cpu_time() -> Option<Duration> {
+    None
 }
 
 fn ensure_no_errors(stage: &str, diagnostics: Vec<AnalyzerError>) -> Result<(), Box<dyn Error>> {
