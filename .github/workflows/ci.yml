@@ -17,8 +17,32 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      docs: ${{ steps.classify.outputs.docs }}
+      javascript: ${{ steps.classify.outputs.javascript }}
+      napi: ${{ steps.classify.outputs.napi }}
+      napi_arm64: ${{ steps.classify.outputs.napi_arm64 }}
+      rust: ${{ steps.classify.outputs.rust }}
+      scripts: ${{ steps.classify.outputs.scripts }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed files
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+        run: node scripts/ci-changes.mjs "$BASE_SHA" "$HEAD_SHA"
+
   docs:
     name: Docs Build
+    needs: changes
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.docs == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -38,6 +62,8 @@ jobs:
 
   lint:
     name: Lint & Format
+    needs: changes
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.scripts == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -45,33 +71,48 @@ jobs:
           submodules: recursive
 
       - uses: ./.github/actions/setup-rust
+        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
 
       - uses: Swatinem/rust-cache@v2
+        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
 
       - name: cargo fmt
+        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
         run: cargo fmt --all -- --check
 
       - name: Verify vendored Veryl metadata
+        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
         run: node scripts/veryl-vendor.mjs check
 
       - name: cargo clippy
+        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
         run: cargo clippy --locked -p celox -p celox-macros -p celox-napi -p celox-ts-gen --all-targets --no-deps
 
       - uses: pnpm/action-setup@v6
+        if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true'
 
       - uses: actions/setup-node@v7
+        if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true'
         with:
           node-version: 24
           cache: pnpm
 
       - name: Install dependencies
+        if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true'
         run: pnpm install --frozen-lockfile
 
       - name: Biome check
+        if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true'
         run: pnpm run lint
+
+      - name: Test repository scripts
+        if: needs.changes.result != 'success' || needs.changes.outputs.scripts == 'true'
+        run: node --test scripts/*.test.mjs
 
   rust:
     name: Rust Test & NAPI Build
+    needs: changes
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -83,6 +124,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run tests
+        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
         run: cargo test --locked
 
       - uses: pnpm/action-setup@v6
@@ -109,6 +151,8 @@ jobs:
 
   napi-windows:
     name: NAPI Build (Windows)
+    needs: changes
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi == 'true')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -143,6 +187,8 @@ jobs:
 
   napi-linux-arm64:
     name: NAPI Build (Linux ARM64 GNU)
+    needs: changes
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.napi_arm64 == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -182,7 +228,8 @@ jobs:
 
   js-ubuntu:
     name: JS Test (Ubuntu)
-    needs: rust
+    needs: [changes, rust]
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -224,7 +271,8 @@ jobs:
 
   js-windows:
     name: JS Test (Windows)
-    needs: napi-windows
+    needs: [changes, napi-windows]
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
