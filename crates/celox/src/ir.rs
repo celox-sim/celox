@@ -112,7 +112,7 @@ impl OptimizedSir {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn into_runtime(self) -> RuntimeProgram {
         self.runtime
     }
