@@ -189,7 +189,7 @@ pub(crate) fn flatten(
     four_state: bool,
     trace_opts: &celox_frontend_veryl::FrontendTraceOptions,
     mut trace: Option<&mut celox_frontend_veryl::FrontendTrace>,
-) -> Result<celox_frontend_veryl::ScheduledRtl, ParserError> {
+) -> Result<celox_frontend_veryl::ScheduledRtlOutput, ParserError> {
     let celox_frontend_veryl::SymbolicRtl {
         modules,
         module_ir,
@@ -538,12 +538,19 @@ pub(crate) fn flatten(
         .collect();
     let eval_comb = schduled.clone();
     let mut eval_comb_apply_ffs = HashMap::default();
-    let mut fused_schedule_cache =
-        HashMap::<Vec<usize>, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>::default();
+    let mut fused_direct_ff_writes = HashMap::default();
+    let mut fused_schedule_cache = HashMap::<
+        Vec<usize>,
+        (
+            Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+            Vec<VarAtomBase<RegionedAbsoluteAddr>>,
+        ),
+    >::default();
     for (trigger, recipes) in ff_clock_recipes {
         let recipe_ids = recipes.iter().map(|recipe| recipe.id).collect::<Vec<_>>();
-        if let Some(units) = fused_schedule_cache.get(&recipe_ids) {
+        if let Some((units, direct_ff_writes)) = fused_schedule_cache.get(&recipe_ids) {
             eval_comb_apply_ffs.insert(trigger, units.clone());
+            fused_direct_ff_writes.insert(trigger, direct_ff_writes.clone());
             continue;
         }
         let mut ff_lowering = SharedClockLowering::new(recipes, *config);
@@ -572,28 +579,10 @@ pub(crate) fn flatten(
             eprintln!("[flatten] scheduler::sort_clock: {:?}", start.elapsed());
         }
         let direct_ff_writes = fused.direct_ff_writes;
-        let mut units = fused.execution_units;
-        for unit in &mut units {
-            let removed = crate::optimizer::coalescing::eliminate_shared_comb_state_stores(
-                unit,
-                &direct_ff_writes,
-            )
-            .map_err(|message| {
-                ParserError::illegal_context("shared comb/FF state-publication DSE", message, None)
-            })?;
-            if removed != 0 {
-                crate::optimizer::coalescing::remove_dead_sir_definitions(unit);
-            }
-            if crate::optimizer::coalescing::promote_fused_comb_static_slots(unit).map_err(
-                |message| {
-                    ParserError::illegal_context("fused comb StateSSA promotion", message, None)
-                },
-            )? {
-                crate::optimizer::coalescing::remove_dead_sir_definitions(unit);
-            }
-        }
-        fused_schedule_cache.insert(recipe_ids, units.clone());
+        let units = fused.execution_units;
+        fused_schedule_cache.insert(recipe_ids, (units.clone(), direct_ff_writes.clone()));
         eval_comb_apply_ffs.insert(trigger, units);
+        fused_direct_ff_writes.insert(trigger, direct_ff_writes);
     }
 
     if let Some(t) = trace
@@ -673,7 +662,7 @@ pub(crate) fn flatten(
             .map(|m| m.functions.clone())
             .unwrap_or_default(),
     };
-    let mut scheduled = celox_frontend_veryl::ScheduledRtl {
+    let scheduled = celox_frontend_veryl::ScheduledRtl {
         sir: crate::ir::SirProgram {
             eval_apply_ffs,
             eval_comb_apply_ffs,
@@ -707,13 +696,56 @@ pub(crate) fn flatten(
         testbench_source,
     };
 
-    // --- Trigger Injection ---
+    Ok(celox_frontend_veryl::ScheduledRtlOutput {
+        scheduled,
+        fused_optimization_hints: celox_frontend_veryl::FusedSirOptimizationHints {
+            direct_ff_writes: fused_direct_ff_writes,
+        },
+    })
+}
+
+fn apply_fused_optimization_hints(
+    scheduled: &mut celox_frontend_veryl::ScheduledRtl,
+    hints: celox_frontend_veryl::FusedSirOptimizationHints,
+) -> Result<(), ParserError> {
+    for (event, direct_ff_writes) in hints.direct_ff_writes {
+        let Some(units) = scheduled.sir.eval_comb_apply_ffs.get_mut(&event) else {
+            return Err(ParserError::illegal_context(
+                "fused comb/FF optimization hints",
+                format!("event {event} has hints but no scheduled SIR"),
+                None,
+            ));
+        };
+        for unit in units {
+            let removed = crate::optimizer::coalescing::eliminate_shared_comb_state_stores(
+                unit,
+                &direct_ff_writes,
+            )
+            .map_err(|message| {
+                ParserError::illegal_context("shared comb/FF state-publication DSE", message, None)
+            })?;
+            if removed != 0 {
+                crate::optimizer::coalescing::remove_dead_sir_definitions(unit);
+            }
+            if crate::optimizer::coalescing::promote_fused_comb_static_slots(unit).map_err(
+                |message| {
+                    ParserError::illegal_context("fused comb StateSSA promotion", message, None)
+                },
+            )? {
+                crate::optimizer::coalescing::remove_dead_sir_definitions(unit);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn inject_triggers(scheduled: &mut celox_frontend_veryl::ScheduledRtl) {
     let mut trigger_map: HashMap<AbsoluteAddr, Vec<crate::ir::TriggerIdWithKind>> =
         HashMap::default();
-    for (id, addr) in scheduled.design.events.ordered_events.iter().enumerate() {
-        if let Some(metadata) = scheduled.design.state_objects.get(addr) {
+    for (id, address) in scheduled.design.events.ordered_events.iter().enumerate() {
+        if let Some(metadata) = scheduled.design.state_objects.get(address) {
             trigger_map
-                .entry(*addr)
+                .entry(*address)
                 .or_default()
                 .push(crate::ir::TriggerIdWithKind {
                     kind: metadata.kind,
@@ -722,117 +754,35 @@ pub(crate) fn flatten(
         }
     }
 
-    for units in scheduled
+    let events = &scheduled.design.events;
+    for unit in scheduled
         .sir
         .eval_apply_ffs
         .values_mut()
-        .chain(scheduled.sir.eval_comb_apply_ffs.values_mut())
+        .flatten()
+        .chain(scheduled.sir.eval_comb_apply_ffs.values_mut().flatten())
+        .chain(scheduled.sir.eval_only_ffs.values_mut().flatten())
+        .chain(scheduled.sir.apply_ffs.values_mut().flatten())
+        .chain(scheduled.sir.eval_comb.iter_mut())
     {
-        for eu in units {
-            for bb in eu.blocks.values_mut() {
-                for inst in &mut bb.instructions {
-                    match inst {
-                        crate::ir::SIRInstruction::Store(addr, _, _, _, triggers, _) => {
-                            let abs = addr.absolute_addr();
-                            let canonical = scheduled.design.events.canonical(abs);
-                            if let Some(ts) = trigger_map.get(&canonical) {
-                                *triggers = ts.clone();
-                            }
-                        }
-                        crate::ir::SIRInstruction::Commit(_, dst, .., triggers) => {
-                            let abs = dst.absolute_addr();
-                            let canonical = scheduled.design.events.canonical(abs);
-                            if let Some(ts) = trigger_map.get(&canonical) {
-                                *triggers = ts.clone();
-                            }
-                        }
-                        _ => {}
+        for block in unit.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                let (address, triggers) = match instruction {
+                    crate::ir::SIRInstruction::Store(address, _, _, _, triggers, _) => {
+                        (address.absolute_addr(), triggers)
                     }
+                    crate::ir::SIRInstruction::Commit(_, address, .., triggers) => {
+                        (address.absolute_addr(), triggers)
+                    }
+                    _ => continue,
+                };
+                let canonical = events.canonical(address);
+                if let Some(event_triggers) = trigger_map.get(&canonical) {
+                    *triggers = event_triggers.clone();
                 }
             }
         }
     }
-    for units in scheduled.sir.eval_only_ffs.values_mut() {
-        for eu in units {
-            for bb in eu.blocks.values_mut() {
-                for inst in &mut bb.instructions {
-                    match inst {
-                        crate::ir::SIRInstruction::Store(addr, _, _, _, triggers, _) => {
-                            let abs = addr.absolute_addr();
-                            let canonical = scheduled.design.events.canonical(abs);
-                            if let Some(ts) = trigger_map.get(&canonical) {
-                                *triggers = ts.clone();
-                            }
-                        }
-                        crate::ir::SIRInstruction::Commit(_, dst, .., triggers) => {
-                            let abs = dst.absolute_addr();
-                            let canonical = scheduled.design.events.canonical(abs);
-                            if let Some(ts) = trigger_map.get(&canonical) {
-                                *triggers = ts.clone();
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-    for units in scheduled.sir.apply_ffs.values_mut() {
-        for eu in units {
-            for bb in eu.blocks.values_mut() {
-                for inst in &mut bb.instructions {
-                    match inst {
-                        crate::ir::SIRInstruction::Store(addr, ..) => {
-                            let abs = addr.absolute_addr();
-                            let canonical = scheduled.design.events.canonical(abs);
-                            if let Some(ts) = trigger_map.get(&canonical) {
-                                if let crate::ir::SIRInstruction::Store(_, _, _, _, triggers, _) =
-                                    inst
-                                {
-                                    *triggers = ts.clone();
-                                }
-                            }
-                        }
-                        crate::ir::SIRInstruction::Commit(_, dst, ..) => {
-                            let abs = dst.absolute_addr();
-                            let canonical = scheduled.design.events.canonical(abs);
-                            if let Some(ts) = trigger_map.get(&canonical) {
-                                if let crate::ir::SIRInstruction::Commit(.., triggers) = inst {
-                                    *triggers = ts.clone();
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-    for eu in &mut scheduled.sir.eval_comb {
-        for bb in eu.blocks.values_mut() {
-            for inst in &mut bb.instructions {
-                match inst {
-                    crate::ir::SIRInstruction::Store(addr, _, _, _, triggers, _) => {
-                        let abs = addr.absolute_addr();
-                        let canonical = scheduled.design.events.canonical(abs);
-                        if let Some(ts) = trigger_map.get(&canonical) {
-                            *triggers = ts.clone();
-                        }
-                    }
-                    crate::ir::SIRInstruction::Commit(_, dst, .., triggers) => {
-                        let abs = dst.absolute_addr();
-                        let canonical = scheduled.design.events.canonical(abs);
-                        if let Some(ts) = trigger_map.get(&canonical) {
-                            *triggers = ts.clone();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    Ok(scheduled)
 }
 
 fn dump_addr_map_if_requested(program: &Program) {
@@ -1631,7 +1581,10 @@ pub fn parse(
     if let Some(trace) = trace.as_deref_mut() {
         trace.absorb_frontend(frontend_trace);
     }
-    let scheduled = scheduled?;
+    let mut scheduled = scheduled?;
+    apply_fused_optimization_hints(&mut scheduled.scheduled, scheduled.fused_optimization_hints)?;
+    inject_triggers(&mut scheduled.scheduled);
+    let scheduled = scheduled.scheduled;
     let (mut program, testbench_source) = Program::from_scheduled(scheduled);
     crate::testbench::project_observability(&mut program, &testbench_source);
     program.testbench = crate::testbench::compile_semantic_testbench(&program, &testbench_source);

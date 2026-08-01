@@ -376,7 +376,7 @@ fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::Program {
         None,
     )
     .expect("Failed to flatten");
-    crate::ir::Program::from_scheduled(scheduled).0
+    crate::ir::Program::from_scheduled(scheduled.scheduled).0
 }
 
 #[test]

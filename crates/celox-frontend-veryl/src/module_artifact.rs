@@ -3,6 +3,7 @@ use std::{collections::BTreeSet, fmt};
 use celox_design::{
     AbsoluteAddrBase, ElaboratedDesign, InitialStateValue, RegionedAbsoluteAddrBase,
     RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, RuntimeSchema, TriggerSet,
+    VarAtomBase,
 };
 use celox_sir::{ExecutionUnit, SirProgram};
 use celox_slt::{
@@ -116,4 +117,17 @@ impl fmt::Debug for ScheduledRtl {
             .field("testbench_source", &self.testbench_source)
             .finish()
     }
+}
+
+/// Optimizer inputs derived while fused comb/FF scheduling still has exact
+/// action provenance. These hints are kept beside, not inside, `SirProgram`.
+#[derive(Clone, Debug, Default)]
+pub struct FusedSirOptimizationHints {
+    pub direct_ff_writes: HashMap<AbsoluteAddr, Vec<VarAtomBase<RegionedAbsoluteAddr>>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScheduledRtlOutput {
+    pub scheduled: ScheduledRtl,
+    pub fused_optimization_hints: FusedSirOptimizationHints,
 }
