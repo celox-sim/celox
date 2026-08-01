@@ -88,13 +88,20 @@ The facade retains compiler orchestration, runtime-event presentation, default b
 and public API re-exports. Runtime's normal dependency graph contains design, layout, and
 testbench contracts but no frontend, SLT, SIR optimizer, or concrete backend.
 
-Milestone 8 cleanup is in progress. Obsolete facade, SIR optimizer, Cranelift, Wasm, and x86
-compatibility namespaces have been removed. The x86 allocator no longer carries the unused
-allocation-editing IR, HomeGraph, CSSA normalizer, stable-slot incremental liveness engine, or
-parallel diagnostic allocator; production keeps one W/S planning and SSA reconstruction path,
-plus the independent final-MIR state-home verifier and exact sparse stack-slot coloring it uses.
-The remaining acceptance work is the supported-target workspace gate and the final release/LTO
-Heliodor generated-code and execution comparison.
+Milestone 8 is complete. Obsolete facade, SIR optimizer, Cranelift, Wasm, and x86 compatibility
+namespaces have been removed. The x86 allocator no longer carries the unused allocation-editing
+IR, HomeGraph, CSSA normalizer, stable-slot incremental liveness engine, or parallel diagnostic
+allocator; production keeps one W/S planning and SSA reconstruction path, plus the independent
+final-MIR state-home verifier and exact sparse stack-slot coloring it uses.
+
+The final acceptance audit verified the normal Cargo dependency graph for every extracted crate,
+strict workspace Clippy and formatting, the complete workspace semantic suite (including the
+consolidated large-design scaling gate), and development-profile cross checks for AArch64 Linux,
+x86-64 Windows, and Wasm. The final paired release measurement used one build configuration and
+the same Heliodor revision for both simulators. Both reached the exact Linux completion marker
+`cy=9ae070 x3=aa` through kernel power-down; Celox executed it in 56.644620359 seconds and Veryl-CC
+in 59.664975152 seconds. The extraction therefore leaves no unexplained generated-code or runtime
+regression and all migration milestones are complete.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making
