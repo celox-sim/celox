@@ -47,18 +47,19 @@ impl ParallelCopy {
 
 /// A dependency-ordered lowering step for one edge's parallel assignment.
 ///
-/// Register-only cycles use `SwapRegisters`.  For cycles involving a stack
-/// location, `SaveTemporary`/`RestoreTemporary` delimit one cycle at a time;
-/// while that temporary is live, it occupies one qword below the frame.
+/// Two-register cycles use `SwapRegisters`. Longer register cycles and cycles
+/// involving a stack location use `SaveTemporary`/`RestoreTemporary`; while
+/// that temporary is live, it occupies one qword below the frame. On x86 a
+/// register `xchg` is multiple uops, so K-1 exchanges are not competitive
+/// with K+1 ordinary moves once K is at least three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParallelCopyOperation {
     Move {
         destination: ParallelCopyDestination,
         source: ParallelCopySource,
     },
-    /// Exchange two allocated registers.  A register-only cycle of length K
-    /// is lowered to K-1 exchanges, without borrowing a register or touching
-    /// the stack.
+    /// Exchange two allocated registers for a two-cycle, without borrowing a
+    /// register or touching the stack.
     SwapRegisters {
         left: PhysReg,
         right: PhysReg,
@@ -840,10 +841,12 @@ fn resolve_parallel_copies(
         };
         cycle_search_start = cycle + 1;
 
-        // A pure register permutation needs no temporary.  Decomposing each
-        // cycle into transpositions is both the standard Perm lowering and a
-        // strict improvement over the old push/move/pop sequence.
-        if let Some((members, swaps)) = register_cycle(&copies, &destination_index, cycle) {
+        // One xchg is the compact lowering for a two-cycle. Longer cycles use
+        // the ordinary temporary path below: K+1 simple moves are fewer x86
+        // uops than K-1 register exchanges.
+        if let Some((members, swaps)) = register_cycle(&copies, &destination_index, cycle)
+            && members.len() == 2
+        {
             for (left, right) in swaps.iter().copied() {
                 operations.push(ParallelCopyOperation::SwapRegisters { left, right });
             }
@@ -1070,41 +1073,42 @@ mod tests {
     }
 
     #[test]
-    fn resolver_lowers_register_cycles_to_k_minus_one_swaps() {
-        for (rows, expected_swaps) in [
-            (
-                vec![
-                    register_copy(2, 0, PhysReg::RAX, PhysReg::RDX),
-                    register_copy(3, 1, PhysReg::RDX, PhysReg::RAX),
-                ],
-                1,
-            ),
-            (
-                vec![
-                    register_copy(3, 0, PhysReg::RAX, PhysReg::RDX),
-                    register_copy(4, 1, PhysReg::RDX, PhysReg::RSI),
-                    register_copy(5, 2, PhysReg::RSI, PhysReg::RAX),
-                ],
-                2,
-            ),
-        ] {
-            let (operations, work) =
-                resolve_parallel_copies(BlockId(0), BlockId(1), &rows).unwrap();
-            assert_eq!(work.cycle_breaks, 1, "{operations:?}");
-            assert_eq!(work.temporary_cycle_breaks, 0, "{operations:?}");
-            assert_eq!(work.register_swaps, expected_swaps, "{operations:?}");
-            assert_eq!(
-                operations
-                    .iter()
-                    .filter(|operation| matches!(
-                        operation,
-                        ParallelCopyOperation::SwapRegisters { .. }
-                    ))
-                    .count(),
-                expected_swaps
-            );
-            assert_eq!(operations.len(), rows.len() - 1);
-        }
+    fn resolver_uses_one_swap_only_for_a_two_register_cycle() {
+        let rows = vec![
+            register_copy(2, 0, PhysReg::RAX, PhysReg::RDX),
+            register_copy(3, 1, PhysReg::RDX, PhysReg::RAX),
+        ];
+        let (operations, work) = resolve_parallel_copies(BlockId(0), BlockId(1), &rows).unwrap();
+        assert_eq!(work.cycle_breaks, 1);
+        assert_eq!(work.temporary_cycle_breaks, 0);
+        assert_eq!(work.register_swaps, 1);
+        assert_eq!(operations.len(), 1);
+        assert!(matches!(
+            operations[0],
+            ParallelCopyOperation::SwapRegisters { .. }
+        ));
+    }
+
+    #[test]
+    fn resolver_uses_a_temporary_for_long_register_cycles() {
+        let rows = vec![
+            register_copy(3, 0, PhysReg::RAX, PhysReg::RDX),
+            register_copy(4, 1, PhysReg::RDX, PhysReg::RSI),
+            register_copy(5, 2, PhysReg::RSI, PhysReg::RAX),
+        ];
+        let (operations, work) = resolve_parallel_copies(BlockId(0), BlockId(1), &rows).unwrap();
+        assert_eq!(work.cycle_breaks, 1, "{operations:?}");
+        assert_eq!(work.temporary_cycle_breaks, 1, "{operations:?}");
+        assert_eq!(work.register_swaps, 0, "{operations:?}");
+        assert_eq!(operations.len(), rows.len() + 1);
+        assert!(matches!(
+            operations.first(),
+            Some(ParallelCopyOperation::SaveTemporary(_))
+        ));
+        assert!(matches!(
+            operations.last(),
+            Some(ParallelCopyOperation::RestoreTemporary(_))
+        ));
     }
 
     #[test]
