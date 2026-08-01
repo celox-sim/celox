@@ -15,7 +15,7 @@ use crate::ir::*;
 /// Empty for pre-merge (single EU) — all variables are trivially independent.
 pub fn eliminate_working_round_trip(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-    eu_boundary_blocks: &[BlockId],
+    _eu_boundary_blocks: &[BlockId],
 ) {
     use std::collections::HashMap;
 
@@ -38,35 +38,7 @@ pub fn eliminate_working_round_trip(
     let mut working_loads = std::collections::HashSet::new();
     let mut working_stores = std::collections::HashSet::new();
 
-    // Build block → EU index mapping (for cross-EU independence check)
-    let block_to_eu: HashMap<BlockId, usize> = if eu_boundary_blocks.is_empty() {
-        HashMap::new() // single EU, no mapping needed
-    } else {
-        let mut sorted_boundaries: Vec<BlockId> = eu_boundary_blocks.to_vec();
-        sorted_boundaries.sort_by_key(|b| b.0);
-
-        let mut mapping = HashMap::new();
-        let mut all_blocks: Vec<BlockId> = eu.blocks.keys().copied().collect();
-        all_blocks.sort_by_key(|b| b.0);
-
-        let mut eu_idx = 0;
-        let mut boundary_iter = sorted_boundaries.iter().peekable();
-        for &bid in &all_blocks {
-            if boundary_iter.peek().is_some_and(|&&b| b == bid) {
-                eu_idx += 1;
-                boundary_iter.next();
-            }
-            mapping.insert(bid, eu_idx);
-        }
-        mapping
-    };
-
-    // Track which EU indices access each WORKING variable (for independence check)
-    let mut var_eu_access: HashMap<AbsoluteAddr, std::collections::HashSet<usize>> = HashMap::new();
-
     for (&bid, block) in &eu.blocks {
-        let eu_idx = block_to_eu.get(&bid).copied().unwrap_or(0);
-
         for (ii, inst) in block.instructions.iter().enumerate() {
             match inst {
                 SIRInstruction::Commit(src, dst, offset, _bits, triggers) => {
@@ -84,7 +56,6 @@ pub fn eliminate_working_round_trip(
                         if has_dynamic {
                             entry.has_dynamic_commit = true;
                         }
-                        var_eu_access.entry(abs).or_default().insert(eu_idx);
                     } else if src.region == WORKING_REGION && dst.region == STABLE_REGION {
                         // Apply: WORKING → STABLE
                         let abs_w = src.absolute_addr();
@@ -99,7 +70,6 @@ pub fn eliminate_working_round_trip(
                         if has_dynamic {
                             entry.has_dynamic_commit = true;
                         }
-                        var_eu_access.entry(abs_w).or_default().insert(eu_idx);
                     } else if src.region == SPARSE_WORKING_REGION && dst.region == STABLE_REGION {
                         let invalid_apply = src.absolute_addr() != dst.absolute_addr()
                             || !matches!(offset, SIROffset::Static(0))
@@ -119,12 +89,10 @@ pub fn eliminate_working_round_trip(
                 SIRInstruction::Load(_, addr, _, _) if addr.region == WORKING_REGION => {
                     let abs = addr.absolute_addr();
                     working_loads.insert(abs);
-                    var_eu_access.entry(abs).or_default().insert(eu_idx);
                 }
                 SIRInstruction::Store(addr, _, _, _, _, _) if addr.region == WORKING_REGION => {
                     let abs = addr.absolute_addr();
                     working_stores.insert(abs);
-                    var_eu_access.entry(abs).or_default().insert(eu_idx);
                 }
                 SIRInstruction::Store(addr, _, _, _, _, _)
                     if addr.region == SPARSE_WORKING_REGION =>
@@ -165,14 +133,6 @@ pub fn eliminate_working_round_trip(
             // an intervening STABLE observation or competing write.
             if info.has_dynamic_commit {
                 return false;
-            }
-            // Independence: only accessed by one original EU
-            if !eu_boundary_blocks.is_empty() {
-                if let Some(eus) = var_eu_access.get(*abs) {
-                    if eus.len() > 1 {
-                        return false;
-                    }
-                }
             }
             true
         })
@@ -599,6 +559,45 @@ mod tests {
             SIRInstruction::Store(address, ..) if address.region == STABLE_REGION
         ));
         assert!(unit.blocks[&BlockId(2)].instructions.is_empty());
+    }
+
+    #[test]
+    fn ordinary_round_trip_preserves_store_order_across_two_evaluators() {
+        let store = |source| {
+            SIRInstruction::Store(
+                addr(WORKING_REGION),
+                SIROffset::Static(0),
+                8,
+                source,
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+        let mut unit = eu(vec![
+            block(
+                0,
+                vec![working_seed(SIROffset::Static(0), 8), store(RegisterId(1))],
+                SIRTerminator::Jump(BlockId(1), Vec::new()),
+            ),
+            block(
+                1,
+                vec![store(RegisterId(2)), working_apply(SIROffset::Static(0), 8)],
+                SIRTerminator::Return,
+            ),
+        ]);
+
+        eliminate_working_round_trip(&mut unit, &[BlockId(1)]);
+
+        assert!(matches!(
+            unit.blocks[&BlockId(0)].instructions.as_slice(),
+            [SIRInstruction::Store(address, _, 8, RegisterId(1), _, _)]
+                if address.region == STABLE_REGION
+        ));
+        assert!(matches!(
+            unit.blocks[&BlockId(1)].instructions.as_slice(),
+            [SIRInstruction::Store(address, _, 8, RegisterId(2), _, _)]
+                if address.region == STABLE_REGION
+        ));
     }
 
     #[test]

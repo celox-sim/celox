@@ -155,16 +155,18 @@ fn prepare_merged_sir(
         crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
         verify(&sir_eu, "after final fused comb StateSSA promotion")?;
     }
-    if crate::optimizer::coalescing::promote_eval_apply_working_round_trips(&mut sir_eu) {
-        verify(&sir_eu, "after x86 working StateSSA")?;
-        crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
-        verify(&sir_eu, "after x86 working StateSSA DCE")?;
-    }
     crate::optimizer::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
         &mut sir_eu,
         &boundaries,
     );
     verify(&sir_eu, "after x86 direct working rewrite")?;
+    let promoted_working =
+        crate::optimizer::coalescing::promote_eval_apply_working_round_trips(&mut sir_eu);
+    if promoted_working {
+        verify(&sir_eu, "after x86 working StateSSA")?;
+        crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
+        verify(&sir_eu, "after x86 working StateSSA DCE")?;
+    }
     crate::optimizer::coalescing::optimize_native_merged_chain(
         &mut sir_eu,
         layout,

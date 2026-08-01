@@ -11,6 +11,7 @@ use super::state_ssa::{StateFragment, StateSsa};
 use crate::ir::cfg::SirCfg;
 use crate::ir::*;
 use crate::{HashMap, HashSet};
+use std::collections::BTreeSet;
 
 struct SlotPlan {
     analysis_slot: usize,
@@ -37,6 +38,8 @@ fn alloc_register(
 fn append_edge_arguments(
     terminator: &mut SIRTerminator,
     successor_arguments: &HashMap<BlockId, Vec<RegisterId>>,
+    next_block: &mut usize,
+    edge_blocks: &mut Vec<BasicBlock<RegionedAbsoluteAddr>>,
 ) {
     match terminator {
         SIRTerminator::Jump(target, arguments) => {
@@ -57,14 +60,42 @@ fn append_edge_arguments(
             }
         }
         SIRTerminator::Switch { cases, default, .. } => {
-            debug_assert!(
-                cases
-                    .iter()
-                    .map(|case| case.target)
-                    .chain(std::iter::once(*default))
-                    .all(|target| successor_arguments.get(&target).is_none_or(Vec::is_empty)),
-                "switch edges cannot carry promoted state arguments"
-            );
+            // Switch has no argument list in SIR. Keep the dispatch itself and
+            // split only edges which need promoted MemorySSA values. A value
+            // available at the Switch dominates its empty trampoline, whose
+            // ordinary Jump can then satisfy the destination block params.
+            let mut trampolines = HashMap::<BlockId, BlockId>::default();
+            for target in cases
+                .iter()
+                .map(|case| case.target)
+                .chain(std::iter::once(*default))
+            {
+                let Some(arguments) = successor_arguments
+                    .get(&target)
+                    .filter(|arguments| !arguments.is_empty())
+                else {
+                    continue;
+                };
+                trampolines.entry(target).or_insert_with(|| {
+                    let trampoline = BlockId(*next_block);
+                    *next_block += 1;
+                    edge_blocks.push(BasicBlock {
+                        id: trampoline,
+                        params: Vec::new(),
+                        instructions: Vec::new(),
+                        terminator: SIRTerminator::Jump(target, arguments.clone()),
+                    });
+                    trampoline
+                });
+            }
+            for case in cases {
+                if let Some(&trampoline) = trampolines.get(&case.target) {
+                    case.target = trampoline;
+                }
+            }
+            if let Some(&trampoline) = trampolines.get(default) {
+                *default = trampoline;
+            }
         }
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
@@ -146,19 +177,6 @@ fn rewrite_global_static_slots_in_place(
             })
         })
         .collect::<Vec<_>>();
-    // A Switch edge deliberately carries no SSA arguments. Do not promote a
-    // fragment whose iterated dominance frontier would require adding one:
-    // the target remains memory-resident and other fragments are unaffected.
-    candidates.retain(|candidate| {
-        candidate.phi_blocks.iter().all(|&block| {
-            cfg.predecessors[block].iter().all(|&predecessor| {
-                !matches!(
-                    eu.blocks[&cfg.block_ids[predecessor]].terminator,
-                    SIRTerminator::Switch { .. }
-                )
-            })
-        })
-    });
     candidates.sort_by_key(|candidate| candidate.fragment);
     if candidates.is_empty() {
         return Some(false);
@@ -228,6 +246,14 @@ fn rewrite_global_static_slots_in_place(
     let mut aliases = HashMap::<RegisterId, RegisterId>::default();
     let mut visits = vec![Visit::Enter(0)];
     let mut changed = false;
+    let mut next_block = eu
+        .blocks
+        .keys()
+        .map(|block| block.0)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mut edge_blocks = Vec::new();
     while let Some(visit) = visits.pop() {
         match visit {
             Visit::Exit(pushed_slots) => {
@@ -405,7 +431,12 @@ fn rewrite_global_static_slots_in_place(
                 let block = eu.blocks.get_mut(&block_id).unwrap();
                 block.instructions = instructions;
                 batch_replace_in_terminator(&mut block.terminator, &aliases);
-                append_edge_arguments(&mut block.terminator, &successor_arguments);
+                append_edge_arguments(
+                    &mut block.terminator,
+                    &successor_arguments,
+                    &mut next_block,
+                    &mut edge_blocks,
+                );
 
                 visits.push(Visit::Exit(pushed_slots));
                 for &child in cfg.dom_children[block_index].iter().rev() {
@@ -413,6 +444,9 @@ fn rewrite_global_static_slots_in_place(
                 }
             }
         }
+    }
+    for block in edge_blocks {
+        eu.blocks.insert(block.id, block);
     }
     Some(changed)
 }
@@ -473,12 +507,6 @@ struct WorkingRoundTripKey {
 }
 
 impl WorkingRoundTripKey {
-    fn overlaps(self, other: Self) -> bool {
-        self.address == other.address
-            && self.bit_offset < other.bit_offset.saturating_add(other.width)
-            && other.bit_offset < self.bit_offset.saturating_add(self.width)
-    }
-
     fn working_fragment(self, ty: &RegisterType) -> StateFragment {
         StateFragment::from_access(
             RegionedAbsoluteAddr::from_absolute_addr(WORKING_REGION, self.address),
@@ -489,32 +517,133 @@ impl WorkingRoundTripKey {
     }
 }
 
-#[derive(Default)]
-struct WorkingRoundTripFacts {
-    ty: Option<RegisterType>,
-    invalid: bool,
-    has_seed: bool,
-    has_store: bool,
-    has_apply: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkingValueKind {
+    Bit,
+    Logic,
 }
 
-impl WorkingRoundTripFacts {
-    fn record_type(&mut self, ty: &RegisterType, width: usize) {
-        if width == 0
-            || ty.width() != width
-            || self.ty.as_ref().is_some_and(|previous| previous != ty)
-        {
+impl WorkingValueKind {
+    fn for_type(ty: &RegisterType) -> Self {
+        match ty {
+            RegisterType::Bit { .. } => Self::Bit,
+            RegisterType::Logic { .. } => Self::Logic,
+        }
+    }
+
+    fn type_for_width(self, width: usize) -> RegisterType {
+        match self {
+            Self::Bit => RegisterType::Bit {
+                width,
+                signed: false,
+            },
+            Self::Logic => RegisterType::Logic { width },
+        }
+    }
+}
+
+#[derive(Default)]
+struct WorkingAddressFacts {
+    endpoints: BTreeSet<usize>,
+    accesses: Vec<(usize, usize)>,
+    seeds: Vec<(usize, usize)>,
+    stores: Vec<(usize, usize)>,
+    applies: Vec<(usize, usize)>,
+    kind: Option<WorkingValueKind>,
+    invalid: bool,
+}
+
+impl WorkingAddressFacts {
+    fn record_range(&mut self, offset: usize, width: usize) -> Option<(usize, usize)> {
+        let end = offset.checked_add(width)?;
+        if width == 0 {
+            self.invalid = true;
+            return None;
+        }
+        self.endpoints.extend([offset, end]);
+        self.accesses.push((offset, end));
+        Some((offset, end))
+    }
+
+    fn record_typed_range(
+        &mut self,
+        offset: usize,
+        width: usize,
+        ty: &RegisterType,
+        two_state: bool,
+    ) -> Option<(usize, usize)> {
+        if ty.width() < width {
+            self.invalid = true;
+            return None;
+        }
+        let kind = if two_state {
+            WorkingValueKind::Bit
+        } else {
+            WorkingValueKind::for_type(ty)
+        };
+        if self.kind.is_some_and(|previous| previous != kind) {
             self.invalid = true;
         }
-        self.ty.get_or_insert_with(|| ty.clone());
+        self.kind.get_or_insert(kind);
+        self.record_range(offset, width)
+    }
+}
+
+#[derive(Default)]
+struct WorkingRoundTripLayout {
+    segments: HashMap<AbsoluteAddr, Vec<(WorkingRoundTripKey, StateFragment, RegisterType)>>,
+}
+
+impl WorkingRoundTripLayout {
+    fn fragments(&self) -> HashSet<StateFragment> {
+        self.segments
+            .values()
+            .flat_map(|segments| segments.iter().map(|(_, fragment, _)| *fragment))
+            .collect()
+    }
+
+    fn retain_fully_selected_addresses(&mut self, selected: &HashSet<StateFragment>) {
+        self.segments.retain(|_, segments| {
+            !segments.is_empty()
+                && segments
+                    .iter()
+                    .all(|(_, fragment, _)| selected.contains(fragment))
+        });
+    }
+
+    fn access_segments(
+        &self,
+        address: AbsoluteAddr,
+        offset: usize,
+        width: usize,
+    ) -> Option<&[(WorkingRoundTripKey, StateFragment, RegisterType)]> {
+        let end = offset.checked_add(width)?;
+        let segments = self.segments.get(&address)?;
+        let first = segments.partition_point(|(key, _, _)| key.bit_offset < offset);
+        let limit = segments.partition_point(|(key, _, _)| key.bit_offset < end);
+        let selected = segments.get(first..limit)?;
+        if selected.is_empty()
+            || selected.first()?.0.bit_offset != offset
+            || selected
+                .last()?
+                .0
+                .bit_offset
+                .checked_add(selected.last()?.0.width)?
+                != end
+            || selected
+                .windows(2)
+                .any(|pair| pair[0].0.bit_offset + pair[0].0.width != pair[1].0.bit_offset)
+        {
+            return None;
+        }
+        Some(selected)
     }
 }
 
 fn normalize_working_commits(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     block_order: &[BlockId],
-    eligible: &HashMap<WorkingRoundTripKey, (StateFragment, RegisterType)>,
-    selected: &HashSet<StateFragment>,
+    layout: &WorkingRoundTripLayout,
 ) -> HashMap<RegisterId, StateFragment> {
     let mut next_register = eu
         .register_map
@@ -530,6 +659,79 @@ fn normalize_working_commits(
         let mut instructions = Vec::with_capacity(old_instructions.len());
         for instruction in old_instructions {
             match instruction {
+                SIRInstruction::Load(destination, address, SIROffset::Static(offset), width)
+                    if address.region == WORKING_REGION
+                        && layout
+                            .access_segments(address.absolute_addr(), offset, width)
+                            .is_some() =>
+                {
+                    let segments = layout
+                        .access_segments(address.absolute_addr(), offset, width)
+                        .unwrap();
+                    let destination_ty = eu.register_map[&destination].clone();
+                    let mut parts = Vec::with_capacity(segments.len());
+                    for (key, _, ty) in segments.iter().rev() {
+                        let register = if segments.len() == 1 && destination_ty == *ty {
+                            destination
+                        } else {
+                            alloc_register(&mut eu.register_map, &mut next_register, ty)
+                        };
+                        instructions.push(SIRInstruction::Load(
+                            register,
+                            address,
+                            SIROffset::Static(key.bit_offset),
+                            key.width,
+                        ));
+                        parts.push(register);
+                    }
+                    if parts.as_slice() != [destination] {
+                        instructions.push(SIRInstruction::Concat(destination, parts));
+                    }
+                }
+                SIRInstruction::Store(
+                    address,
+                    SIROffset::Static(offset),
+                    width,
+                    source,
+                    triggers,
+                    capture_sites,
+                ) if address.region == WORKING_REGION
+                    && triggers.is_empty()
+                    && capture_sites.is_empty()
+                    && layout
+                        .access_segments(address.absolute_addr(), offset, width)
+                        .is_some() =>
+                {
+                    let segments = layout
+                        .access_segments(address.absolute_addr(), offset, width)
+                        .unwrap();
+                    let source_ty = eu.register_map[&source].clone();
+                    for (key, _, ty) in segments {
+                        let relative_offset = key.bit_offset - offset;
+                        let register =
+                            if relative_offset == 0 && key.width == width && source_ty == *ty {
+                                source
+                            } else {
+                                let register =
+                                    alloc_register(&mut eu.register_map, &mut next_register, ty);
+                                instructions.push(SIRInstruction::Slice(
+                                    register,
+                                    source,
+                                    relative_offset,
+                                    key.width,
+                                ));
+                                register
+                            };
+                        instructions.push(SIRInstruction::Store(
+                            address,
+                            SIROffset::Static(key.bit_offset),
+                            key.width,
+                            register,
+                            Vec::new(),
+                            Vec::new(),
+                        ));
+                    }
+                }
                 SIRInstruction::Commit(
                     source,
                     destination,
@@ -538,36 +740,32 @@ fn normalize_working_commits(
                     triggers,
                 ) if source.region == STABLE_REGION
                     && destination.region == WORKING_REGION
-                    && eligible
-                        .get(&WorkingRoundTripKey {
-                            address: destination.absolute_addr(),
-                            bit_offset: offset,
-                            width,
-                        })
-                        .is_some_and(|(fragment, _)| selected.contains(fragment)) =>
+                    && layout
+                        .access_segments(destination.absolute_addr(), offset, width)
+                        .is_some() =>
                 {
-                    let key = WorkingRoundTripKey {
-                        address: destination.absolute_addr(),
-                        bit_offset: offset,
-                        width,
-                    };
-                    let (fragment, ty) = &eligible[&key];
-                    let register = alloc_register(&mut eu.register_map, &mut next_register, ty);
-                    fallback_definitions.insert(register, *fragment);
-                    instructions.push(SIRInstruction::Load(
-                        register,
-                        source,
-                        SIROffset::Static(offset),
-                        width,
-                    ));
-                    instructions.push(SIRInstruction::Store(
-                        destination,
-                        SIROffset::Static(offset),
-                        width,
-                        register,
-                        triggers,
-                        Vec::new(),
-                    ));
+                    debug_assert!(triggers.is_empty());
+                    for (key, fragment, ty) in layout
+                        .access_segments(destination.absolute_addr(), offset, width)
+                        .unwrap()
+                    {
+                        let register = alloc_register(&mut eu.register_map, &mut next_register, ty);
+                        fallback_definitions.insert(register, *fragment);
+                        instructions.push(SIRInstruction::Load(
+                            register,
+                            source,
+                            SIROffset::Static(key.bit_offset),
+                            key.width,
+                        ));
+                        instructions.push(SIRInstruction::Store(
+                            destination,
+                            SIROffset::Static(key.bit_offset),
+                            key.width,
+                            register,
+                            Vec::new(),
+                            Vec::new(),
+                        ));
+                    }
                 }
                 SIRInstruction::Commit(
                     source,
@@ -577,35 +775,31 @@ fn normalize_working_commits(
                     triggers,
                 ) if source.region == WORKING_REGION
                     && destination.region == STABLE_REGION
-                    && eligible
-                        .get(&WorkingRoundTripKey {
-                            address: source.absolute_addr(),
-                            bit_offset: offset,
-                            width,
-                        })
-                        .is_some_and(|(fragment, _)| selected.contains(fragment)) =>
+                    && layout
+                        .access_segments(source.absolute_addr(), offset, width)
+                        .is_some() =>
                 {
-                    let key = WorkingRoundTripKey {
-                        address: source.absolute_addr(),
-                        bit_offset: offset,
-                        width,
-                    };
-                    let (_, ty) = &eligible[&key];
-                    let register = alloc_register(&mut eu.register_map, &mut next_register, ty);
-                    instructions.push(SIRInstruction::Load(
-                        register,
-                        source,
-                        SIROffset::Static(offset),
-                        width,
-                    ));
-                    instructions.push(SIRInstruction::Store(
-                        destination,
-                        SIROffset::Static(offset),
-                        width,
-                        register,
-                        triggers,
-                        Vec::new(),
-                    ));
+                    debug_assert!(triggers.is_empty());
+                    for (key, _, ty) in layout
+                        .access_segments(source.absolute_addr(), offset, width)
+                        .unwrap()
+                    {
+                        let register = alloc_register(&mut eu.register_map, &mut next_register, ty);
+                        instructions.push(SIRInstruction::Load(
+                            register,
+                            source,
+                            SIROffset::Static(key.bit_offset),
+                            key.width,
+                        ));
+                        instructions.push(SIRInstruction::Store(
+                            destination,
+                            SIROffset::Static(key.bit_offset),
+                            key.width,
+                            register,
+                            Vec::new(),
+                            Vec::new(),
+                        ));
+                    }
                 }
                 instruction => instructions.push(instruction),
             }
@@ -619,16 +813,24 @@ fn normalize_working_commits(
 ///
 /// `Commit(STABLE→WORKING)` becomes the SSA live-in, WORKING stores become SSA
 /// definitions, and `Commit(WORKING→STABLE)` becomes the sole writeback. This
-/// handles any number of disjoint exact fragments. Sparse, dynamic, overlapping,
-/// escaping, or effectful next-state storage keeps its memory representation.
+/// handles disjoint fragments and statically overlapping accesses. Overlapping
+/// accesses are atomized at their actual range endpoints before StateSSA is
+/// built, rather than pessimistically killing the whole state object. Sparse,
+/// dynamic, escaping, or effectful next-state storage keeps its memory form.
 pub(crate) fn promote_eval_apply_working_round_trips(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+) -> bool {
+    promote_eval_apply_working_round_trips_with_mode(eu, false)
+}
+
+pub(crate) fn promote_eval_apply_working_round_trips_with_mode(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    two_state: bool,
 ) -> bool {
     let Ok(cfg) = SirCfg::analyze(eu) else {
         return false;
     };
-    let mut facts = HashMap::<WorkingRoundTripKey, WorkingRoundTripFacts>::default();
-    let mut invalid_addresses = HashSet::<AbsoluteAddr>::default();
+    let mut facts = HashMap::<AbsoluteAddr, WorkingAddressFacts>::default();
     for &block_id in &cfg.block_ids {
         let block = &eu.blocks[&block_id];
         for instruction in &block.instructions {
@@ -636,15 +838,15 @@ pub(crate) fn promote_eval_apply_working_round_trips(
                 SIRInstruction::Load(destination, address, SIROffset::Static(offset), width)
                     if address.region == WORKING_REGION =>
                 {
-                    let key = WorkingRoundTripKey {
-                        address: address.absolute_addr(),
-                        bit_offset: *offset,
-                        width: *width,
-                    };
                     facts
-                        .entry(key)
+                        .entry(address.absolute_addr())
                         .or_default()
-                        .record_type(&eu.register_map[destination], *width);
+                        .record_typed_range(
+                            *offset,
+                            *width,
+                            &eu.register_map[destination],
+                            two_state,
+                        );
                 }
                 SIRInstruction::Store(
                     address,
@@ -654,14 +856,15 @@ pub(crate) fn promote_eval_apply_working_round_trips(
                     triggers,
                     capture_sites,
                 ) if address.region == WORKING_REGION => {
-                    let key = WorkingRoundTripKey {
-                        address: address.absolute_addr(),
-                        bit_offset: *offset,
-                        width: *width,
-                    };
-                    let entry = facts.entry(key).or_default();
-                    entry.record_type(&eu.register_map[source], *width);
-                    entry.has_store = true;
+                    let entry = facts.entry(address.absolute_addr()).or_default();
+                    if let Some(range) = entry.record_typed_range(
+                        *offset,
+                        *width,
+                        &eu.register_map[source],
+                        two_state,
+                    ) {
+                        entry.stores.push(range);
+                    }
                     entry.invalid |= !triggers.is_empty() || !capture_sites.is_empty();
                 }
                 SIRInstruction::Commit(
@@ -674,48 +877,45 @@ pub(crate) fn promote_eval_apply_working_round_trips(
                     && destination.region == WORKING_REGION
                     && source.absolute_addr() == destination.absolute_addr() =>
                 {
-                    let key = WorkingRoundTripKey {
-                        address: destination.absolute_addr(),
-                        bit_offset: *offset,
-                        width: *width,
-                    };
-                    let entry = facts.entry(key).or_default();
-                    entry.has_seed = true;
-                    entry.invalid |= *width == 0 || !triggers.is_empty();
+                    let entry = facts.entry(destination.absolute_addr()).or_default();
+                    if let Some(range) = entry.record_range(*offset, *width) {
+                        entry.seeds.push(range);
+                    }
+                    entry.invalid |= !triggers.is_empty();
                 }
                 SIRInstruction::Commit(
                     source,
                     destination,
                     SIROffset::Static(offset),
                     width,
-                    _,
+                    triggers,
                 ) if source.region == WORKING_REGION
                     && destination.region == STABLE_REGION
                     && source.absolute_addr() == destination.absolute_addr() =>
                 {
-                    let key = WorkingRoundTripKey {
-                        address: source.absolute_addr(),
-                        bit_offset: *offset,
-                        width: *width,
-                    };
-                    let entry = facts.entry(key).or_default();
-                    entry.has_apply = true;
-                    entry.invalid |= *width == 0;
+                    let entry = facts.entry(source.absolute_addr()).or_default();
+                    if let Some(range) = entry.record_range(*offset, *width) {
+                        entry.applies.push(range);
+                    }
+                    entry.invalid |= !triggers.is_empty();
                 }
                 SIRInstruction::Load(_, address, _, _)
                 | SIRInstruction::Store(address, _, _, _, _, _)
                     if address.region == WORKING_REGION =>
                 {
-                    invalid_addresses.insert(address.absolute_addr());
+                    facts.entry(address.absolute_addr()).or_default().invalid = true;
                 }
                 SIRInstruction::Commit(source, destination, _, _, _)
                     if source.region == WORKING_REGION || destination.region == WORKING_REGION =>
                 {
                     if source.region == WORKING_REGION {
-                        invalid_addresses.insert(source.absolute_addr());
+                        facts.entry(source.absolute_addr()).or_default().invalid = true;
                     }
                     if destination.region == WORKING_REGION {
-                        invalid_addresses.insert(destination.absolute_addr());
+                        facts
+                            .entry(destination.absolute_addr())
+                            .or_default()
+                            .invalid = true;
                     }
                 }
                 _ => {}
@@ -723,46 +923,50 @@ pub(crate) fn promote_eval_apply_working_round_trips(
         }
     }
 
-    let mut keys = facts.keys().copied().collect::<Vec<_>>();
-    keys.sort_unstable();
-    for left in 0..keys.len() {
-        let left_end = keys[left].bit_offset.saturating_add(keys[left].width);
-        let mut right = left + 1;
-        while right < keys.len()
-            && keys[left].address == keys[right].address
-            && keys[right].bit_offset < left_end
-        {
-            debug_assert!(keys[left].overlaps(keys[right]));
-            facts.get_mut(&keys[left]).unwrap().invalid = true;
-            facts.get_mut(&keys[right]).unwrap().invalid = true;
-            right += 1;
+    let mut layout = WorkingRoundTripLayout::default();
+    for (address, facts) in facts {
+        let Some(kind) = facts.kind else {
+            continue;
+        };
+        if facts.invalid {
+            continue;
+        }
+        let endpoints = facts.endpoints.into_iter().collect::<Vec<_>>();
+        let mut segments = Vec::new();
+        let mut complete = true;
+        for pair in endpoints.windows(2) {
+            let (start, end) = (pair[0], pair[1]);
+            let covered = |ranges: &[(usize, usize)]| {
+                ranges
+                    .iter()
+                    .any(|&(range_start, range_end)| range_start <= start && end <= range_end)
+            };
+            if !covered(&facts.accesses) {
+                continue;
+            }
+            if !covered(&facts.seeds) || !covered(&facts.stores) || !covered(&facts.applies) {
+                complete = false;
+                break;
+            }
+            let ty = kind.type_for_width(end - start);
+            let key = WorkingRoundTripKey {
+                address,
+                bit_offset: start,
+                width: end - start,
+            };
+            segments.push((key, key.working_fragment(&ty), ty));
+        }
+        if complete && !segments.is_empty() {
+            layout.segments.insert(address, segments);
         }
     }
-    for (key, entry) in &mut facts {
-        entry.invalid |= invalid_addresses.contains(&key.address);
-    }
-
-    let eligible = keys
-        .into_iter()
-        .filter_map(|key| {
-            let entry = &facts[&key];
-            if entry.invalid || !entry.has_seed || !entry.has_store || !entry.has_apply {
-                return None;
-            }
-            let ty = entry.ty.clone()?;
-            Some((key, (key.working_fragment(&ty), ty)))
-        })
-        .collect::<HashMap<_, _>>();
-    if eligible.is_empty() {
+    if layout.segments.is_empty() {
         return false;
     }
 
-    let all_slots = eligible
-        .values()
-        .map(|(fragment, _)| *fragment)
-        .collect::<HashSet<_>>();
+    let all_slots = layout.fragments();
     let mut preview = eu.clone();
-    normalize_working_commits(&mut preview, &cfg.block_ids, &eligible, &all_slots);
+    normalize_working_commits(&mut preview, &cfg.block_ids, &layout);
     let Ok(preview_cfg) = SirCfg::analyze(&preview) else {
         return false;
     };
@@ -786,11 +990,16 @@ pub(crate) fn promote_eval_apply_working_round_trips(
         return false;
     }
 
-    // Normalize and rewrite only proven promotable fragments on a fresh clone.
-    // This keeps rejected fragments byte-for-byte in their original form.
+    // An address is rewritten only when every endpoint-defined segment is
+    // promotable. This avoids leaving a partially atomized memory object when
+    // one fragment needs to retain its original representation.
+    layout.retain_fully_selected_addresses(&slots);
+    if layout.segments.is_empty() {
+        return false;
+    }
+    let slots = layout.fragments();
     let mut rewritten = eu.clone();
-    let fallback_definitions =
-        normalize_working_commits(&mut rewritten, &cfg.block_ids, &eligible, &slots);
+    let fallback_definitions = normalize_working_commits(&mut rewritten, &cfg.block_ids, &layout);
     let mut stable_passthroughs = HashMap::default();
     let Some(changed) = rewrite_global_static_slots_in_place(
         &mut rewritten,
@@ -1936,6 +2145,98 @@ mod tests {
         assert_eq!(eu.blocks[&BlockId(0)].instructions.len(), 2);
         assert!(eu.blocks[&BlockId(0)].instructions.iter().all(|instruction| {
             matches!(instruction, SIRInstruction::Store(addr, _, 8, _, _, _) if addr.region == STABLE_REGION)
+        }));
+    }
+
+    #[test]
+    fn promotes_overlapping_full_and_partial_working_stores_by_atomic_range() {
+        let stable = address(0);
+        let mut working = stable;
+        working.region = WORKING_REGION;
+        let mut eu = unit(
+            [
+                BasicBlock {
+                    id: BlockId(0),
+                    params: vec![RegisterId(0), RegisterId(1), RegisterId(2)],
+                    instructions: vec![SIRInstruction::Commit(
+                        stable,
+                        working,
+                        SIROffset::Static(0),
+                        8,
+                        Vec::new(),
+                    )],
+                    terminator: SIRTerminator::Branch {
+                        cond: RegisterId(0),
+                        true_block: (BlockId(1), Vec::new()),
+                        false_block: (BlockId(2), Vec::new()),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    params: Vec::new(),
+                    instructions: vec![SIRInstruction::Store(
+                        working,
+                        SIROffset::Static(2),
+                        3,
+                        RegisterId(1),
+                        Vec::new(),
+                        Vec::new(),
+                    )],
+                    terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    params: Vec::new(),
+                    instructions: vec![SIRInstruction::Store(
+                        working,
+                        SIROffset::Static(0),
+                        8,
+                        RegisterId(2),
+                        Vec::new(),
+                        Vec::new(),
+                    )],
+                    terminator: SIRTerminator::Jump(BlockId(3), Vec::new()),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    params: Vec::new(),
+                    instructions: vec![SIRInstruction::Commit(
+                        working,
+                        stable,
+                        SIROffset::Static(0),
+                        8,
+                        Vec::new(),
+                    )],
+                    terminator: SIRTerminator::Return,
+                },
+            ],
+            [
+                (RegisterId(0), bit(1)),
+                (RegisterId(1), bit(3)),
+                (RegisterId(2), bit(8)),
+            ],
+        );
+
+        assert!(promote_eval_apply_working_round_trips(&mut eu));
+        eu.verify_result().unwrap();
+        assert!(eu.blocks.values().all(|block| {
+            block.instructions.iter().all(|instruction| {
+                !matches!(
+                    instruction,
+                    SIRInstruction::Load(_, address, _, _)
+                        | SIRInstruction::Store(address, _, _, _, _, _)
+                        if address.region == WORKING_REGION
+                ) && !matches!(instruction, SIRInstruction::Commit(..))
+            })
+        }));
+        assert!(eu.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::Store(address, SIROffset::Static(2), 3, _, _, _)
+                        if *address == stable
+                )
+            })
         }));
     }
 
