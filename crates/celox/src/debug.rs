@@ -1,6 +1,6 @@
 use crate::HashMap;
 use crate::ir::{AbsoluteAddr, ExecutionUnit, ModuleId, RegionedAbsoluteAddr, SimModule};
-use crate::logic_tree::{LogicPath, SLTNodeArena};
+use celox_slt::{LogicPath, SLTNodeArena};
 mod output;
 
 /// One native JIT block selected by an external profile.
@@ -58,6 +58,28 @@ pub struct CompilationTrace {
     /// Analysis of profile-selected native state accesses captured from the
     /// exact merged SIR used by instruction selection.
     pub native_state_layout: Option<String>,
+}
+
+impl TraceOptions {
+    pub(crate) fn frontend(&self) -> celox_frontend_veryl::FrontendTraceOptions {
+        celox_frontend_veryl::FrontendTraceOptions {
+            sim_modules: self.sim_modules,
+            pre_atomized_comb_blocks: self.pre_atomized_comb_blocks,
+            atomized_comb_blocks: self.atomized_comb_blocks,
+            flattened_comb_blocks: self.flattened_comb_blocks,
+            scheduled_units: self.scheduled_units,
+        }
+    }
+}
+
+impl CompilationTrace {
+    pub(crate) fn absorb_frontend(&mut self, trace: celox_frontend_veryl::FrontendTrace) {
+        self.sim_modules = trace.sim_modules;
+        self.pre_atomized_comb_blocks = trace.pre_atomized_comb_blocks;
+        self.atomized_comb_blocks = trace.atomized_comb_blocks;
+        self.flattened_comb_blocks = trace.flattened_comb_blocks;
+        self.scheduled_units = trace.scheduled_units;
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

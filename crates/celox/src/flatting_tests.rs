@@ -1,8 +1,7 @@
 use crate::HashMap;
-use crate::flatting;
 use crate::ir::{AbsoluteAddr, InstanceId, InstancePath, ModuleId};
-use crate::logic_tree::SLTNodeArena;
 use crate::parser::module::ModuleParser;
+use celox_slt::SLTNodeArena;
 use veryl_analyzer::{
     Analyzer, Context,
     ir::{Component, Declaration, Ir, VarId},
@@ -14,9 +13,9 @@ fn setup_to_flatting(
     code: &str,
     top_name: &str,
 ) -> (
-    crate::ir::RelocationModule,
+    celox_frontend_veryl::RelocationModule,
     HashMap<ModuleId, crate::ir::SimModule>,
-    crate::logic_tree::SLTNodeArena<crate::ir::AbsoluteAddr>,
+    SLTNodeArena<crate::ir::AbsoluteAddr>,
 ) {
     let metadata = Metadata::create_default("prj").unwrap();
     let parser = Parser::parse(code, &"").unwrap();
@@ -114,7 +113,8 @@ fn setup_to_flatting(
             for (_, logic_path) in &glue.input_ports {
                 // logic_path.target is GlueAddr::Child
                 let target_glue_addr = logic_path.target.var().unwrap().id;
-                let target_addr = if let crate::ir::GlueAddr::Child(v) = target_glue_addr {
+                let target_addr = if let celox_frontend_veryl::GlueAddr::Child(v) = target_glue_addr
+                {
                     AbsoluteAddr {
                         instance_id: child_id,
                         var_id: v,
@@ -125,7 +125,7 @@ fn setup_to_flatting(
 
                 for source in &logic_path.sources {
                     // source.id is GlueAddr::Parent usually
-                    if let crate::ir::GlueAddr::Parent(parent_var) = source.id {
+                    if let celox_frontend_veryl::GlueAddr::Parent(parent_var) = source.id {
                         let parent_addr = AbsoluteAddr {
                             instance_id,
                             var_id: parent_var,
@@ -160,17 +160,15 @@ fn setup_to_flatting(
 
     // Call flatting
     let mut arena = SLTNodeArena::<AbsoluteAddr>::new();
-    let r = flatting::flatting(
+    let r = celox_frontend_veryl::flattening::flatten_module(
         sim_module,
         &path,
         &instance_ids,
         &global_boundaries,
         &HashMap::default(),
         &mut arena,
-        &crate::debug::TraceOptions::default(),
-        None,
     );
-    (r.unwrap(), modules, arena)
+    (r.unwrap().relocation, modules, arena)
 }
 
 #[test]
@@ -366,17 +364,17 @@ fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::Program {
     // crate::parser::parse(&top_id, &ir).expect("Failed to parse program")
     let build_config = crate::parser::BuildConfig::default();
     let result = crate::parser::parse_ir(&ir, &build_config, &top_id).expect("Failed to parse IR");
-    let scheduled = crate::parser::flatten(
+    let scheduled = celox_frontend_veryl::schedule_symbolic_rtl(
         result,
         &build_config,
         &[],
         &[],
         false,
-        &crate::debug::TraceOptions::default(),
+        &celox_frontend_veryl::FrontendTraceOptions::default(),
         None,
     )
     .expect("Failed to flatten");
-    crate::ir::Program::from_scheduled(scheduled).0
+    crate::ir::Program::from_scheduled(scheduled.scheduled).0
 }
 
 #[test]

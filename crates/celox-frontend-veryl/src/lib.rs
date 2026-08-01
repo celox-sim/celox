@@ -9,21 +9,31 @@ pub mod bitslicer;
 pub mod case;
 mod config;
 pub mod context_width;
+mod design_assembly;
 mod error;
 pub mod ff;
 pub mod flattening;
+mod global_ff;
 pub mod hierarchy;
 pub mod logic_tree;
 pub mod loop_provenance;
 pub mod module;
 mod module_artifact;
 pub mod registry;
+mod trace;
 mod types;
 
 pub use config::BuildConfig;
+pub use design_assembly::schedule_symbolic_rtl;
 pub use error::{LoweringPhase, ParserError, SourceLocation};
+pub use global_ff::{
+    FfClockRecipe, FfRuntimeRelocation, SharedClockLowering, build_ff_clock_recipes,
+};
 pub use hierarchy::{ParseIrResult, SymbolicRtl, parse_ir, parse_ir_with_loop_provenance};
-pub use module_artifact::{RelocationModule, ScheduledRtl, SimModule};
+pub use module_artifact::{
+    FusedSirOptimizationHints, RelocationModule, ScheduledRtl, ScheduledRtlOutput, SimModule,
+};
+pub use trace::{FrontendTrace, FrontendTraceOptions};
 pub use types::{resolve_dims, resolve_total_width};
 
 use celox_design::{InstanceId, ModuleId, VariableMetadata};
