@@ -34,6 +34,17 @@
   "packageRules": [
     {
       "matchManagers": [
+        "npm"
+      ],
+      "matchPackageNames": [
+        "emnapi",
+        "@emnapi/core",
+        "@emnapi/runtime"
+      ],
+      "groupName": "emnapi packages"
+    },
+    {
+      "matchManagers": [
         "cargo"
       ],
       "matchPackageNames": [
