@@ -1,0 +1,15 @@
+[package]
+name = "celox-sir-opt"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Backend-independent SIR optimization policy and passes for Celox"
+edition.workspace = true
+
+[dependencies]
+fxhash = { workspace = true }
+
+[lints]
+workspace = true
+

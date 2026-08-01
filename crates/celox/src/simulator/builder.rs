@@ -244,7 +244,7 @@ pub struct SimulatorOptions {
 impl Default for SimulatorOptions {
     fn default() -> Self {
         let opt = crate::optimizer::OptimizeOptions::default();
-        let cranelift = opt.opt_level().default_cranelift_options();
+        let cranelift = crate::optimizer::CraneliftOptions::for_opt_level(opt.opt_level());
         Self {
             four_state: false,
             optimize_options: opt,
@@ -338,7 +338,7 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     /// Cranelift options, and DSE policy. Per-pass overrides can be applied after.
     pub fn opt_level(mut self, level: crate::optimizer::OptLevel) -> Self {
         self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level);
-        self.options.cranelift_options = level.default_cranelift_options();
+        self.options.cranelift_options = crate::optimizer::CraneliftOptions::for_opt_level(level);
         self.options.dead_store_policy = match level {
             crate::optimizer::OptLevel::O2 => DeadStorePolicy::PreserveTopPorts,
             _ => DeadStorePolicy::Off,
