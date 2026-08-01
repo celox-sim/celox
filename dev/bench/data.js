@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785611608174,
+  "lastUpdate": 1785613452345,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -146500,6 +146500,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
             "value": 94001.34711,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+s@gmail.com",
+            "name": "tig",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5e35668f2065f64dd19e06f131ddcab1c229e016",
+          "message": "Merge pull request #385 from celox-sim/agent/extend-heliodor-gate-timeout\n\nfix(ci): extend Heliodor gate timeout",
+          "timestamp": "2026-08-01T18:29:57Z",
+          "tree_id": "b499a215c015839aa9031fe42ffa51c18398a7a2",
+          "url": "https://github.com/celox-sim/celox/commit/5e35668f2065f64dd19e06f131ddcab1c229e016"
+        },
+        "date": 1785613438796,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-jit/heliodor_linux_boot_execution",
+            "value": 111947.295199,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-total/heliodor_linux_boot_execution",
+            "value": 111974.679423,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl/heliodor_linux_boot_execution",
+            "value": 164495.537539,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-compile/heliodor_linux_boot_compilation",
+            "value": 115814.596218,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
+            "value": 123913.461654,
             "unit": "ms"
           }
         ]
