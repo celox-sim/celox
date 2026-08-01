@@ -1,6 +1,6 @@
 use crate::HashMap;
 use crate::ir::{AbsoluteAddr, ExecutionUnit, ModuleId, RegionedAbsoluteAddr, SimModule};
-use crate::logic_tree::{LogicPath, SLTNodeArena};
+use celox_slt::{LogicPath, SLTNodeArena};
 mod output;
 
 /// One native JIT block selected by an external profile.

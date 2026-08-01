@@ -1,10 +1,10 @@
 use crate::HashMap;
 pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
-    AbsoluteAddrBase, BinaryOp, DomainKind, InitialStateData, InitialStateValue,
-    InitialStateWriteRun, InstanceId, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
-    RuntimeEventKind, RuntimeEventSite, RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION,
-    TriggerIdWithKind, UnaryOp, VarAtomBase, WORKING_REGION,
+    AbsoluteAddrBase, BinaryOp, DomainKind, InitialStateData, InitialStateWriteRun, InstanceId,
+    ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeEventKind, RuntimeEventSite,
+    RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION, TriggerIdWithKind, UnaryOp, VarAtomBase,
+    WORKING_REGION,
 };
 pub use celox_frontend_veryl::{InstancePath, VariableInfo, VerylFrontendLookup};
 pub(crate) use celox_sir::{
@@ -21,8 +21,6 @@ use veryl_analyzer::ir::{VarId, VarPath};
 
 /// Concrete address type using the Veryl analyzer's `VarId` during frontend migration.
 pub type AbsoluteAddr = AbsoluteAddrBase<VarId>;
-/// Concrete regioned variable address using the Veryl analyzer's `VarId`.
-pub type RegionedVarAddr = RegionedVarAddrBase<VarId>;
 /// Concrete regioned address using the Veryl analyzer's `VarId`.
 pub type RegionedAbsoluteAddr = RegionedAbsoluteAddrBase<VarId>;
 pub type SirProgram = celox_sir::SirProgram<AbsoluteAddr, RegionedAbsoluteAddr>;
@@ -40,12 +38,7 @@ pub enum AddrLookupError {
 
 pub type InitialMemoryWriteRun = InitialStateWriteRun;
 pub type InitialMemoryData = InitialStateData;
-pub type InitialMemoryValue = InitialStateValue<AbsoluteAddr>;
 pub type RuntimeErrorInfo<Addr = AbsoluteAddr> = celox_design::RuntimeErrorInfo<Addr>;
-
-pub(crate) use celox_slt::LogicPathId;
-
-pub type CombObserver<A = AbsoluteAddr> = celox_slt::CombObserver<A>;
 
 #[derive(Clone)]
 pub struct Program {
@@ -432,11 +425,7 @@ pub struct SignalRef {
     pub is_4state: bool,
     pub array_layout: Option<SignalArrayLayout>,
 }
-pub use celox_frontend_veryl::{RelocationModule, SimModule};
-pub use celox_slt::FfAccessSummary;
-
-/// Concrete glue address type using the Veryl analyzer's `VarId`.
-pub type GlueAddr = GlueAddrBase<VarId>;
+pub use celox_frontend_veryl::SimModule;
 
 #[cfg(test)]
 mod tests {
@@ -501,12 +490,12 @@ mod tests {
 
     #[test]
     fn test_glueaddr_display() {
-        let parent_addr = GlueAddr::Parent(VarId::default());
+        let parent_addr = celox_frontend_veryl::GlueAddr::Parent(VarId::default());
         let parent_display = format!("{}", parent_addr);
         assert!(parent_display.contains("GlueAddr::Parent"));
         assert!(parent_display.contains("var0"));
 
-        let child_addr = GlueAddr::Child(VarId::default());
+        let child_addr = celox_frontend_veryl::GlueAddr::Child(VarId::default());
         let child_display = format!("{}", child_addr);
         assert!(child_display.contains("GlueAddr::Child"));
         assert!(child_display.contains("var0"));

@@ -4,9 +4,7 @@ mod context_width;
 mod debug;
 #[cfg(not(target_arch = "wasm32"))]
 mod display_format;
-mod flatting;
 mod ir;
-mod logic_tree;
 mod optimizer;
 mod parser;
 pub(crate) mod portable;
@@ -79,6 +77,8 @@ pub use backend::native::{NativeBackend, SharedNativeCode};
 pub type DefaultBackend = NativeBackend;
 #[cfg(all(not(target_arch = "wasm32"), not(target_arch = "x86_64")))]
 pub type DefaultBackend = backend::JitBackend;
+pub use celox_frontend_veryl::{LoweringPhase, ParserError};
+pub use celox_slt::scheduler::SchedulerError;
 pub use num_bigint::BigUint;
 #[cfg(not(target_arch = "wasm32"))]
 pub use optimizer::CraneliftOptLevel;
@@ -89,9 +89,6 @@ pub use optimizer::OptimizeOptions;
 #[cfg(not(target_arch = "wasm32"))]
 pub use optimizer::RegallocAlgorithm;
 pub use optimizer::SirPass;
-pub use parser::LoweringPhase;
-pub use parser::ParserError;
-pub use parser::SchedulerError;
 #[cfg(not(target_arch = "wasm32"))]
 pub use simulation::Simulation;
 #[cfg(not(target_arch = "wasm32"))]

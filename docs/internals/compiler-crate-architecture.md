@@ -42,16 +42,19 @@ glue contract, and SLT-to-SIR lowerer. The FF lowering callback has an associate
 error type, so the scheduler no longer imports parser errors. `celox-frontend-veryl` owns lowering
 diagnostics, context-width and bit-select semantics, analyzer loop provenance, the Veryl comb arena
 builder, FF construction, module construction, and the resulting per-module symbolic artifact.
-It also owns Veryl module discovery, per-instance hierarchy flattening/atomization, and the
-frontend-only relocation artifact. Global instance relocation, design assembly, trigger injection,
-and compiler-driver orchestration remain in the facade and are the remaining Milestone 4 ownership
-boundary. The facade's flattening compatibility wrapper owns diagnostic trace collection so the
-frontend crate does not depend on compiler-driver debug types. Module discovery now produces an
-explicit `celox-frontend-veryl::SymbolicRtl`, which is consumed exactly once by scheduling and
-lowering. That transition returns `celox-frontend-veryl::ScheduledRtl`; this artifact contains SIR,
-the elaborated design, runtime schema, frontend lookup, and testbench source, but cannot contain an
-SLT arena or `NodeId`. The facade converts it into the transitional `Program` before testbench
-compilation and SIR optimization.
+It also owns Veryl module discovery, per-instance hierarchy flattening/atomization, global
+relocation, clock-domain assembly, observer-path construction, comb/FF scheduling and lowering,
+trigger injection, and the resulting design/runtime projection. Module discovery produces an
+explicit `celox-frontend-veryl::SymbolicRtl`, which is consumed exactly once by
+`schedule_symbolic_rtl`. That transition returns
+`celox-frontend-veryl::ScheduledRtl`; this artifact contains SIR, the elaborated design, runtime
+schema, frontend lookup, and testbench source, but cannot contain an SLT arena or `NodeId`.
+Diagnostic trace collection is part of that frontend transition rather than a facade flattening
+wrapper. The obsolete facade flattening, logic-tree, scheduler, and FF compatibility modules have
+been removed. The facade now only executes the temporary fused-SIR optimization hints, compiles the
+semantic testbench, runs the SIR optimizer, and converts the result into the transitional
+`Program`. Moving those remaining pass and compiler-driver responsibilities starts Milestone 5;
+the Milestone 4 ownership boundary is complete.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making
