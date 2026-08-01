@@ -3204,6 +3204,20 @@ impl SLTToSIRLowerer {
         }
 
         match arena.get(expr) {
+            SLTNode::Binary(lhs, BinaryOp::And, rhs)
+                if slt_const_u64(*lhs, arena) == Some(0)
+                    || slt_const_u64(*rhs, arena) == Some(0) =>
+            {
+                // Do this before recursively lowering either operand. In a
+                // loop-carried environment an otherwise dead Input would be
+                // rebuilt as a dynamic read from the current state version,
+                // preserving a dependency and a large amount of address/RMW
+                // code which bitwise zero annihilates in four-state logic too.
+                let width = access.msb - access.lsb + 1;
+                let result = builder.alloc_bit(width, false);
+                builder.emit(SIRInstruction::Imm(result, SIRValue::new(0u8)));
+                result
+            }
             SLTNode::Input {
                 variable,
                 index,
@@ -6225,6 +6239,46 @@ mod tests {
             instruction,
             SIRInstruction::Load(_, 10 | 20, _, width) if *width != 4
         )));
+    }
+
+    #[test]
+    fn pointwise_slice_does_not_lower_an_input_annihilated_by_zero() {
+        let mut arena = SLTNodeArena::new();
+        let input = arena
+            .alloc(SLTNode::Input {
+                variable: 10,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(100, 115),
+            })
+            .unwrap();
+        let zero = arena
+            .alloc(SLTNode::Constant(0u8.into(), 0u8.into(), 16, false))
+            .unwrap();
+        let bitwise = arena
+            .alloc(SLTNode::Binary(input, BinaryOp::And, zero))
+            .unwrap();
+        let field = arena
+            .alloc(SLTNode::Slice {
+                expr: bitwise,
+                access: BitAccess::new(4, 7),
+            })
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(true).lower(
+            &mut builder,
+            field,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+        let instructions = &eu.blocks[&eu.entry_block_id].instructions;
+
+        assert!(matches!(
+            instructions.as_slice(),
+            [SIRInstruction::Imm(_, value)] if value.payload.is_zero() && value.mask.is_zero()
+        ));
     }
 
     #[test]
