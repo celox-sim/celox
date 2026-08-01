@@ -1,7 +1,7 @@
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 
-pub(crate) struct DisplayFormatArg<'a> {
+pub struct DisplayFormatArg<'a> {
     pub value: &'a BigUint,
     pub mask: Option<&'a BigUint>,
     pub width: usize,
@@ -106,7 +106,7 @@ fn format_masked_radix(arg: &DisplayFormatArg<'_>, bits_per_digit: usize) -> Str
     out
 }
 
-pub(crate) fn format_display_arg(arg: &DisplayFormatArg<'_>, spec: Option<char>) -> String {
+pub fn format_display_arg(arg: &DisplayFormatArg<'_>, spec: Option<char>) -> String {
     if arg.is_string {
         return value_to_utf8(arg.value, arg.width).unwrap_or_else(|| format!("{:?}", arg.value));
     }

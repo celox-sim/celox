@@ -1,7 +1,7 @@
 use crate::HashMap;
 pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
-    AbsoluteAddrBase, DomainKind, InitialStateData, InitialStateWriteRun, InstanceId, ModuleId,
+    AbsoluteAddrBase, InitialStateData, InitialStateWriteRun, InstanceId, ModuleId,
     RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeEventKind, RuntimeEventSite,
     RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION,
 };
@@ -427,22 +427,10 @@ pub(crate) mod verify {
 }
 pub use celox_slt::{GlueAddrBase, GlueBlockBase};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SignalArrayLayout {
-    pub element_width: usize,
-    pub element_count: usize,
-    pub element_stride: usize,
-    pub plane_size: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SignalRef {
-    pub offset: usize,
-    pub width: usize,
-    pub is_4state: bool,
-    pub array_layout: Option<SignalArrayLayout>,
-}
 pub use celox_frontend_veryl::SimModule;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use celox_runtime::SignalArrayLayout;
+pub use celox_runtime::SignalRef;
 
 #[cfg(test)]
 mod tests {

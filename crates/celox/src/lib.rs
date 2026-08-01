@@ -1,15 +1,10 @@
 mod backend;
 mod cfg_order;
-mod context_width;
 mod debug;
-#[cfg(not(target_arch = "wasm32"))]
-mod display_format;
 mod ir;
 mod optimizer;
 mod parser;
 pub(crate) mod portable;
-#[cfg(not(target_arch = "wasm32"))]
-mod scheduler;
 #[cfg(not(target_arch = "wasm32"))]
 mod simulation;
 mod simulator;
@@ -17,7 +12,9 @@ mod simulator;
 pub mod testbench;
 pub(crate) mod timing;
 #[cfg(not(target_arch = "wasm32"))]
-mod vcd;
+mod vcd {
+    pub use celox_runtime::{VcdSignalDesc, VcdWriter};
+}
 #[cfg(not(target_arch = "wasm32"))]
 pub use vcd::{VcdSignalDesc, VcdWriter};
 

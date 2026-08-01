@@ -414,6 +414,7 @@ dependencies = [
  "celox-design",
  "celox-frontend-veryl",
  "celox-macros",
+ "celox-runtime",
  "celox-sir",
  "celox-sir-opt",
  "celox-slt",
@@ -523,6 +524,7 @@ dependencies = [
  "celox-design",
  "celox-sir",
  "celox-slt",
+ "celox-testbench",
  "fxhash",
  "miette",
  "num-bigint",
@@ -567,6 +569,18 @@ dependencies = [
  "veryl-metadata",
  "veryl-parser",
  "veryl-path",
+]
+
+[[package]]
+name = "celox-runtime"
+version = "0.18.0"
+dependencies = [
+ "bit-set 0.11.1",
+ "celox-design",
+ "celox-state-layout",
+ "celox-testbench",
+ "chrono",
+ "num-bigint",
 ]
 
 [[package]]
@@ -624,6 +638,7 @@ name = "celox-testbench"
 version = "0.18.0"
 dependencies = [
  "num-bigint",
+ "num-traits",
 ]
 
 [[package]]

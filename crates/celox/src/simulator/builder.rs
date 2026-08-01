@@ -779,7 +779,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         })?;
         Ok(crate::testbench::run_testbench_detailed(
             &mut sim,
-            &testbench.stmts,
+            testbench.statements(),
         ))
     }
 
@@ -866,7 +866,7 @@ fn run_test_with_sim<B: crate::backend::SimBackend>(
             "no initial block found — this module is not a native testbench".into(),
         ))
     })?;
-    let result = crate::testbench::run_testbench(&mut sim, &testbench.stmts);
+    let result = crate::testbench::run_testbench(&mut sim, testbench.statements());
     if let Some(start) = testbench_start {
         eprintln!("[phase-timing] testbench: {:?}", start.elapsed());
     }

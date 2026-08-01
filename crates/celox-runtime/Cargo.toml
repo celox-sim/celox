@@ -1,0 +1,19 @@
+[package]
+name = "celox-runtime"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Backend-independent Celox simulation runtime contracts"
+edition.workspace = true
+
+[dependencies]
+celox-design = { path = "../celox-design" }
+celox-state-layout = { path = "../celox-state-layout" }
+celox-testbench = { path = "../celox-testbench" }
+bit-set = { workspace = true }
+chrono = "0.4"
+num-bigint = { workspace = true }
+
+[lints]
+workspace = true

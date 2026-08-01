@@ -12,6 +12,7 @@ bit-set        = { workspace = true }
 celox-design   = { path = "../celox-design" }
 celox-sir      = { path = "../celox-sir" }
 celox-slt      = { path = "../celox-slt" }
+celox-testbench = { path = "../celox-testbench" }
 fxhash         = { workspace = true }
 miette         = { workspace = true }
 num-bigint     = { workspace = true }

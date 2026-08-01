@@ -34,13 +34,12 @@ testbench runtime-event sites and direct state-read roots are projected into the
 `RuntimeSchema` before SIR optimization, so optimization and layout no longer traverse testbench
 AST. Veryl statements/functions are an explicit
 `celox-frontend-veryl::VerylTestbenchSource` input consumed during frontend flattening. The source-independent
-expression opcode and operator vocabulary is owned by `celox-testbench`; the current Veryl
-testbench compiler translates source operators at that boundary and emits bytecode with semantic
-state addresses plus relative byte offsets. The resulting source-independent `TestbenchProgram` is
-stored before optimization; a separate binding step resolves those locations from the finalized
-physical layout before the VM executes the bound bytecode. Native, Cranelift, and WASM execution
-therefore share the same testbench binding path. Moving the remaining parser implementation,
-symbolic, optimizer, and runtime payload into the phase-specific target crates below remains.
+expression opcode and operator vocabulary is owned by `celox-testbench`.
+`celox-frontend-veryl` translates source operators and control statements into bytecode with
+semantic state addresses plus relative byte offsets. The resulting source-independent
+`TestbenchProgram` is stored before optimization; `celox-runtime` resolves those locations and
+event identities from the finalized physical layout and backend before the VM executes the bound
+bytecode. Native, Cranelift, and WASM execution therefore share the same testbench binding path.
 `celox-slt` now owns the frontend-independent bit-range store, symbolic-state contract, SLT node
 arena, iterative facts/verifier, symbolic-root verification, path graph, fused comb/FF scheduler,
 glue contract, and SLT-to-SIR lowerer. The FF lowering callback has an associated frontend-owned
@@ -76,8 +75,16 @@ target libraries only: no frontend, facade, testbench, or SIR optimizer. The fac
 mutable merged SIR before crossing the immutable x86 codegen boundary; target codegen cannot
 silently rerun or mutate SIR optimization. Target-owned x86 SLP and Cranelift split policy are
 carried by their backend option types, while the public `SirPass::TailCallSplit` spelling remains
-only as a facade compatibility selector. Simulator execution adapters and optional host Wasmtime
-ownership remain in the monolith until the runtime contract is extracted in Milestone 7.
+only as a facade compatibility selector.
+
+Milestone 7 is complete. `celox-testbench` owns source-independent bytecode, executable testbench
+types, values, formatting, and the raw-memory expression VM. `celox-frontend-veryl` owns
+testbench AST traversal, observability projection, and semantic bytecode construction.
+`celox-runtime` owns event/backend contracts, runtime errors and event buffers, VCD writing,
+the timed scheduler and multi-phase cascade engine, plus semantic-to-physical testbench binding.
+The facade retains compiler orchestration, runtime-event presentation, default backend selection,
+and public API re-exports. Runtime's normal dependency graph contains design, layout, and
+testbench contracts but no frontend, SLT, SIR optimizer, or concrete backend.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making

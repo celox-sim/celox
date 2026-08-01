@@ -1,4 +1,4 @@
-use crate::backend::get_byte_size;
+use celox_state_layout::get_byte_size;
 use num_bigint::BigUint;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -7,7 +7,7 @@ use std::path::Path;
 /// Describes a signal for VCD recording.
 ///
 /// Self-contained — does not reference any IR types. Can be cached
-/// alongside [`SharedJitCode`](crate::backend::SharedJitCode) so that VCD
+/// alongside a shared backend artifact so that VCD
 /// works even on cache-hit paths.
 #[derive(Clone, Debug)]
 pub struct VcdSignalDesc {

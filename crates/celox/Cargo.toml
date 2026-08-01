@@ -22,6 +22,7 @@ celox-sir             = { path = "../celox-sir" }
 celox-sir-opt         = { path = "../celox-sir-opt" }
 celox-slt             = { path = "../celox-slt" }
 celox-state-layout    = { path = "../celox-state-layout" }
+celox-runtime         = { path = "../celox-runtime" }
 celox-testbench       = { path = "../celox-testbench" }
 fxhash                = { workspace = true }
 thiserror             = { workspace = true }

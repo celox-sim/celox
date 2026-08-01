@@ -20,6 +20,7 @@ pub mod loop_provenance;
 pub mod module;
 mod module_artifact;
 pub mod registry;
+mod testbench;
 mod trace;
 mod types;
 
@@ -33,6 +34,7 @@ pub use hierarchy::{ParseIrResult, SymbolicRtl, parse_ir, parse_ir_with_loop_pro
 pub use module_artifact::{
     FusedSirOptimizationHints, RelocationModule, ScheduledRtl, ScheduledRtlOutput, SimModule,
 };
+pub use testbench::{collect_testbench_observability, compile_semantic_testbench};
 pub use trace::{FrontendTrace, FrontendTraceOptions};
 pub use types::{resolve_dims, resolve_total_width};
 
@@ -109,6 +111,33 @@ impl fmt::Debug for VerylFrontendLookup {
 }
 
 impl VerylFrontendLookup {
+    pub fn root_instance_and_module(&self) -> Option<(InstanceId, ModuleId)> {
+        let instance_id = *self.instance_ids.get(&InstancePath(Vec::new()))?;
+        let module_id = *self.instance_module.get(&instance_id)?;
+        Some((instance_id, module_id))
+    }
+
+    pub fn root_variable(&self, var_id: VarId) -> Option<(StateAddr, &VariableInfo)> {
+        let (instance_id, module_id) = self.root_instance_and_module()?;
+        let info = self.module_variables.get(&module_id)?.get(&var_id)?;
+        let address = self.state_address(&AbsoluteAddr {
+            instance_id,
+            var_id,
+        })?;
+        Some((address, info))
+    }
+
+    pub fn root_named_variable(&self, name: StrId) -> Option<(StateAddr, &VariableInfo)> {
+        let (_, module_id) = self.root_instance_and_module()?;
+        let var_id = self
+            .module_var_path_index
+            .get(&module_id)?
+            .get(&VarPath(vec![name]))
+            .copied()
+            .flatten()?;
+        self.root_variable(var_id)
+    }
+
     pub fn get_path(&self, address: &AbsoluteAddr) -> String {
         let instance_path = self
             .instance_ids

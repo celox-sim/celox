@@ -11,12 +11,12 @@ use crate::backend::native::{NativeBackend, SharedNativeCode};
 use crate::{
     IOContext, RuntimeErrorCode,
     backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
-    display_format::{DisplayFormatArg, format_display_arg},
     ir::{
         InitialMemoryData, InitialMemoryWriteRun, InstancePath, Program, RuntimeEventKind,
         RuntimeEventSite, SignalRef, VariableInfo,
     },
 };
+use celox_testbench::{DisplayFormatArg, format_display_arg};
 #[cfg(not(target_arch = "wasm32"))]
 use num_bigint::BigUint;
 

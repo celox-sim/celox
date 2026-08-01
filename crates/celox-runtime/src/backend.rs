@@ -1,87 +1,9 @@
-use num_bigint::BigUint;
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
-use crate::ir::{AbsoluteAddr, SignalRef};
+use num_bigint::BigUint;
 
-use super::MemoryLayout;
-#[cfg(not(target_arch = "wasm32"))]
-use super::RuntimeEventBuffer;
-
-// SimulatorErrorCode: on native it's defined in runtime.rs; on wasm32 we define it here.
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(unused_imports)]
-pub use super::runtime::SimulatorErrorCode;
-
-#[cfg(target_arch = "wasm32")]
-#[derive(Debug, Clone, Eq)]
-#[allow(dead_code)]
-pub enum SimulatorErrorCode {
-    DetectedTrueLoop,
-    DetectedTrueLoopCode(i64),
-    DetectedTrueLoopAt {
-        signals: Vec<String>,
-    },
-    Runtime {
-        message: String,
-        signals: Vec<String>,
-    },
-    InternalError,
-    NotAnEvent(String),
-}
-#[cfg(target_arch = "wasm32")]
-impl PartialEq for SimulatorErrorCode {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::DetectedTrueLoop, Self::DetectedTrueLoop)
-            | (Self::DetectedTrueLoop, Self::DetectedTrueLoopCode(_))
-            | (Self::DetectedTrueLoop, Self::DetectedTrueLoopAt { .. })
-            | (Self::DetectedTrueLoopCode(_), Self::DetectedTrueLoop)
-            | (Self::DetectedTrueLoopCode(_), Self::DetectedTrueLoopCode(_))
-            | (Self::DetectedTrueLoopCode(_), Self::DetectedTrueLoopAt { .. })
-            | (Self::DetectedTrueLoopAt { .. }, Self::DetectedTrueLoopCode(_))
-            | (Self::DetectedTrueLoopAt { .. }, Self::DetectedTrueLoop)
-            | (Self::DetectedTrueLoopAt { .. }, Self::DetectedTrueLoopAt { .. }) => true,
-            (Self::InternalError, Self::InternalError) => true,
-            (
-                Self::Runtime {
-                    message: a,
-                    signals: sa,
-                },
-                Self::Runtime {
-                    message: b,
-                    signals: sb,
-                },
-            ) => a == b && sa == sb,
-            (Self::NotAnEvent(a), Self::NotAnEvent(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-#[cfg(target_arch = "wasm32")]
-impl std::fmt::Display for SimulatorErrorCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::DetectedTrueLoop | Self::DetectedTrueLoopCode(_) => {
-                write!(f, "Detected True Loop")
-            }
-            Self::DetectedTrueLoopAt { signals } if signals.is_empty() => {
-                write!(f, "Detected True Loop")
-            }
-            Self::DetectedTrueLoopAt { signals } => {
-                write!(f, "Detected True Loop: {}", signals.join(", "))
-            }
-            Self::Runtime { message, signals } if signals.is_empty() => write!(f, "{message}"),
-            Self::Runtime { message, signals } => {
-                write!(f, "{}: {}", message, signals.join(", "))
-            }
-            Self::InternalError => write!(f, "Internal Error"),
-            Self::NotAnEvent(name) => write!(f, "Not an event: {name}"),
-        }
-    }
-}
-#[cfg(target_arch = "wasm32")]
-impl std::error::Error for SimulatorErrorCode {}
+pub use crate::SimulatorErrorCode;
+use crate::{AbsoluteAddr, MemoryLayout, RuntimeEventBuffer, SignalRef};
 
 /// Marker trait for backend-specific event handles.
 ///
@@ -107,18 +29,15 @@ pub trait SimBackend {
     type Event: EventHandle;
 
     // ── evaluation ──────────────────────────────────────────────
-    fn eval_comb(&mut self) -> Result<(), super::SimulatorErrorCode>;
+    fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode>;
 
     /// Evaluate and apply a flip-flop domain for the given event.
-    fn eval_apply_ff_at(&mut self, event: Self::Event) -> Result<(), super::SimulatorErrorCode>;
+    fn eval_apply_ff_at(&mut self, event: Self::Event) -> Result<(), SimulatorErrorCode>;
 
     /// Evaluate combinational logic and then evaluate/apply one flip-flop
     /// domain. Backends may override this to compile the two phases as one
     /// function; the default preserves the same ordering with two calls.
-    fn eval_comb_apply_ff_at(
-        &mut self,
-        event: Self::Event,
-    ) -> Result<(), super::SimulatorErrorCode> {
+    fn eval_comb_apply_ff_at(&mut self, event: Self::Event) -> Result<(), SimulatorErrorCode> {
         self.eval_comb()?;
         self.eval_apply_ff_at(event)
     }
@@ -131,7 +50,7 @@ pub trait SimBackend {
         &mut self,
         event: Self::Event,
         count: u64,
-    ) -> (u64, Result<(), super::SimulatorErrorCode>) {
+    ) -> (u64, Result<(), SimulatorErrorCode>) {
         if count == 0 {
             return (0, Ok(()));
         }
@@ -139,10 +58,10 @@ pub trait SimBackend {
     }
 
     /// Evaluate FF domain without applying (for cascaded clocks).
-    fn eval_only_ff_at(&mut self, event: Self::Event) -> Result<(), super::SimulatorErrorCode>;
+    fn eval_only_ff_at(&mut self, event: Self::Event) -> Result<(), SimulatorErrorCode>;
 
     /// Apply (commit) an already-evaluated FF domain.
-    fn apply_ff_at(&mut self, event: Self::Event) -> Result<(), super::SimulatorErrorCode>;
+    fn apply_ff_at(&mut self, event: Self::Event) -> Result<(), SimulatorErrorCode>;
 
     // ── signal access ───────────────────────────────────────────
     fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef;
@@ -163,7 +82,6 @@ pub trait SimBackend {
     fn memory_as_ptr(&self) -> (*const u8, usize);
     fn memory_as_mut_ptr(&mut self) -> (*mut u8, usize);
     fn runtime_event_buffer_as_ptr(&self) -> (*const u8, usize);
-    #[cfg(not(target_arch = "wasm32"))]
     fn runtime_event_buffer(&self) -> Option<Arc<RuntimeEventBuffer>> {
         None
     }

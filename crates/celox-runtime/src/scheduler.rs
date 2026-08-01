@@ -1,6 +1,6 @@
 use crate::{
+    SignalRef,
     backend::{EventHandle, SimBackend},
-    ir::SignalRef,
 };
 use std::collections::BinaryHeap;
 
@@ -10,7 +10,7 @@ pub struct ClockDef {
 }
 
 #[derive(Debug, Clone)]
-pub struct SimEvent<B: SimBackend = crate::DefaultBackend> {
+pub struct SimEvent<B: SimBackend> {
     pub time: u64,
     pub event_ref: B::Event,
     pub signal: SignalRef,
@@ -49,10 +49,10 @@ impl<B: SimBackend> Ord for SimEvent<B> {
     }
 }
 
-pub struct Scheduler<B: SimBackend = crate::DefaultBackend> {
-    pub(crate) time: u64,
-    pub(crate) clocks: Vec<Option<ClockDef>>,
-    pub(crate) event_queue: BinaryHeap<SimEvent<B>>,
+pub struct Scheduler<B: SimBackend> {
+    pub time: u64,
+    pub clocks: Vec<Option<ClockDef>>,
+    pub event_queue: BinaryHeap<SimEvent<B>>,
 }
 
 impl<B: SimBackend> Scheduler<B> {
@@ -83,5 +83,11 @@ impl<B: SimBackend> Scheduler<B> {
             }
         }
         Some((next_time, events))
+    }
+}
+
+impl<B: SimBackend> Default for Scheduler<B> {
+    fn default() -> Self {
+        Self::new()
     }
 }

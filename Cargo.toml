@@ -11,6 +11,7 @@ members = [
     "crates/celox-sir-opt",
     "crates/celox-slt",
     "crates/celox-state-layout",
+    "crates/celox-runtime",
     "crates/celox-testbench",
     "crates/celox-bench-sv",
     "crates/celox-macros",
