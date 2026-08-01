@@ -452,7 +452,7 @@ version = "0.0.0"
 
 [[package]]
 name = "celox-backend-cranelift"
-version = "0.18.0"
+version = "0.0.0"
 dependencies = [
  "celox-design",
  "celox-sir",
@@ -468,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "celox-backend-wasm"
-version = "0.18.0"
+version = "0.0.0"
 dependencies = [
  "celox-backend-cranelift",
  "celox-design",
@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "celox-backend-x86"
-version = "0.18.0"
+version = "0.0.0"
 dependencies = [
  "celox-analysis",
  "celox-design",
@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "celox-runtime"
-version = "0.18.0"
+version = "0.0.0"
 dependencies = [
  "bit-set 0.11.1",
  "celox-design",
@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "celox-sir-opt"
-version = "0.18.0"
+version = "0.0.0"
 dependencies = [
  "bit-set 0.11.1",
  "celox-analysis",
