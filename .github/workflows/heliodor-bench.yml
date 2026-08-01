@@ -1,0 +1,112 @@
+name: Heliodor Benchmark
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    paths:
+      - ".github/actions/setup-rust/**"
+      - ".github/workflows/heliodor-bench.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "scripts/convert-heliodor-bench.mjs"
+      - "scripts/run-heliodor-bench.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_INCREMENTAL: "0"
+
+# This shares the gh-pages benchmark data with bench.yml. Serialize both
+# workflows so their independent benchmark-action pushes cannot race.
+concurrency:
+  group: bench
+  cancel-in-progress: false
+
+jobs:
+  heliodor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run fixed Heliodor correctness and performance gate
+        id: gate
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          output="$RUNNER_TEMP/heliodor-output.txt"
+          bash scripts/run-heliodor-bench.sh gate 2>&1 | tee "$output"
+          status=${PIPESTATUS[0]}
+          set -e
+          cp "$output" heliodor-output.txt
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+          result_file="$(find target/heliodor/results -path '*/gate_*/results.tsv' -type f -print -quit)"
+          if [ -z "$result_file" ]; then
+            echo "The Heliodor gate did not produce results.tsv" >&2
+            exit 1
+          fi
+          echo "result_file=$result_file" >> "$GITHUB_OUTPUT"
+
+      - name: Convert dashboard metrics
+        run: |
+          node scripts/convert-heliodor-bench.mjs "${{ steps.gate.outputs.result_file }}" heliodor-converted.json
+          node scripts/convert-heliodor-bench.mjs "${{ steps.gate.outputs.result_file }}" heliodor-jit.json --jit-only
+
+      - name: Store Heliodor benchmark history
+        if: github.event_name != 'pull_request'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Heliodor Benchmarks
+          tool: customSmallerIsBetter
+          output-file-path: heliodor-converted.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
+          auto-push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+          alert-threshold: "110%"
+          fail-on-alert: false
+          comment-on-alert: false
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check generated-JIT regression
+        if: github.event_name == 'pull_request'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Heliodor Benchmarks
+          tool: customSmallerIsBetter
+          output-file-path: heliodor-jit.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
+          auto-push: false
+          alert-threshold: "110%"
+          fail-on-alert: true
+          comment-on-alert: false
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Heliodor results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: heliodor-benchmark
+          path: |
+            heliodor-output.txt
+            heliodor-converted.json
+            heliodor-jit.json
+            target/heliodor/results/gate_*/results.tsv
+            target/heliodor/results/gate_*/*.log
+            target/heliodor/results/gate_*/*.before
+            target/heliodor/results/gate_*/*.after
+
+      - name: Enforce fixed gate result
+        if: always() && steps.gate.outputs.status != '0'
+        run: exit 1

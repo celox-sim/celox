@@ -1,6 +1,9 @@
 # ベンチマーク
 
-Celox には Rust コア、TypeScript ランタイム、および参照ベースラインとしての Verilator のベンチマークスイートが含まれています。CI は `master` への push ごとにベンチマークを自動実行し、インタラクティブなトレンドダッシュボードを公開します。
+CeloxにはRustコア、TypeScriptランタイム、参照baselineのVerilator、およびnative
+JITコード品質を測るHeliodor Linux workloadのベンチマークがあります。CIは履歴を
+interactive dashboardへ公開し、Heliodorに関係するpull requestでは許容値を超える
+生成JIT性能の退行も拒否します。
 
 ## ダッシュボード
 

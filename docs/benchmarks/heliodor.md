@@ -2,7 +2,13 @@
 
 Heliodor is a large Veryl RISC-V processor project with ignored Linux boot tests. It is useful as a macro benchmark because it stresses project loading, large memories initialized by `$readmemh`, native testbench scheduling, and long-running sequential simulation.
 
-This benchmark is not part of normal CI. It checks out Heliodor under
+The benchmark executables are owned by the workspace's `celox-bench` crate.
+They are deliberately not examples of the public `celox` API: `celox-heliodor`
+is the Celox measurement subject and `veryl-heliodor` is its synchronous Veryl
+reference. The shell driver prepares pinned external inputs, invokes those
+executables, and validates their machine-readable terminal records.
+
+The dedicated Heliodor CI workflow checks out Heliodor under
 `target/heliodor/source`, builds the timed Veryl and Celox runners before
 timing, runs the Veryl baseline before Celox by default, and writes a TSV
 summary plus full logs under `target/heliodor/results`.
@@ -41,7 +47,12 @@ HELIODOR_TIMEOUT_SEC=300 \
 scripts/run-heliodor-bench.sh run
 ```
 
-Both runners report build/prepare separately from testbench execution. The
+Both runners report build/prepare separately from testbench execution. Celox
+also reports `jit_execute_elapsed_ns`, the accumulated wall time spent inside
+generated native functions. Its timer is read once per host-side native batch,
+not once per simulated tick. `execute_elapsed_ns` remains the enclosing
+post-codegen interval and therefore includes testbench scheduling and runtime
+event handling. The
 compile interval includes frontend analysis, optimization, native code
 generation, simulator initialization, and initial-testbench lowering; it ends
 immediately before the already-built testbench is executed. The Veryl runner
@@ -106,10 +117,12 @@ contain exactly one architectural completion marker equal to
 `cy=9ae070 x3=aa pass=1`; leading hexadecimal zeroes are ignored.
 
 Each runner measures `compile_elapsed_ns` through simulator and initial
-testbench construction, then measures `execute_elapsed_ns` only around execution
-of that already-compiled testbench. The gate exits successfully only if both
-semantic checks pass and the Celox execution interval is no greater than the
-Veryl execution interval. It records and reports code-generation latency
+testbench construction, then measures `execute_elapsed_ns` around execution of
+that already-compiled testbench. Celox additionally measures generated native
+function calls as `jit_execute_elapsed_ns`. The gate exits successfully only if
+both semantic checks pass and the Celox JIT interval is no greater than the
+Veryl execution interval. It records the enclosing Celox execution interval and
+code-generation latency
 separately; compile latency is not folded into the execution-throughput
 decision. Subprocess time remains an end-to-end diagnostic. Compile-only
 completion, a partial window, or process exit zero without the exact markers is
@@ -154,7 +167,7 @@ Useful long tests include:
 
 | Runner | Command |
 |---|---|
-| `celox` | `target/<profile>/examples/run_veryl_project_test --project ... --test ...` |
+| `celox` | `target/<profile>/celox-heliodor --project ... --test ...` |
 | `veryl-cc-sync` | Direct Veryl 0.20.2 synchronous AOT-C runner with split timing |
 | `veryl-cc` | `veryl test --ignored --test ... --backend cc` |
 | `veryl-cranelift` | `veryl test --ignored --test ... --backend cranelift` |
@@ -184,12 +197,14 @@ from the simulated test result. Its columns are:
 | `reported_elapsed_ns` | Runner's internal total elapsed value, or `NA` when unavailable |
 | `compile_elapsed_ns` | Internal build/prepare time through simulator and testbench construction, or `NA` when unavailable |
 | `execute_elapsed_ns` | Internal testbench execution time after code generation, or `NA` when unavailable |
+| `jit_execute_elapsed_ns` | Celox time inside generated native functions; `NA` for backends/runners without this measurement |
 
 The original `runner`, `test`, `status`, `elapsed_ns`, and `log` columns remain
 in their original positions. A valid end-to-end process result exists only when
 `semantic_status=pass`, `exit_status=0`, and `elapsed_ns` is numeric. That legacy
-column is not a generated-code execution result: use `execute_elapsed_ns` for
-throughput and `compile_elapsed_ns` for compiler latency. `process_elapsed_ns`
+column is not a generated-code execution result: use `jit_execute_elapsed_ns`
+for native code quality, `execute_elapsed_ns` for post-codegen simulator
+throughput, and `compile_elapsed_ns` for compiler latency. `process_elapsed_ns`
 and `reported_elapsed_ns` are diagnostics and must not be used to claim
 full-test performance for `compile-only`, `fail`, `unreported`, or `invalid`
 rows.
@@ -197,7 +212,7 @@ rows.
 For Celox, the script requires exactly one timing line and one result line:
 
 ```text
-CELOX_TEST_TIMING test=<requested-test> compile_ns=<integer> execute_ns=<integer>
+CELOX_TEST_TIMING test=<requested-test> compile_ns=<integer> execute_ns=<integer> jit_execute_ns=<integer-or-NA>
 CELOX_TEST_RESULT test=<requested-test> status=pass|fail|compile-only elapsed_ns=<integer>
 ```
 
@@ -210,11 +225,22 @@ exit-status-inconsistent records cannot become a pass. An intentional
 `HELIODOR_CELOX_COMPILE_ONLY=1` run may finish successfully, but its
 `semantic_status` is `compile-only` and its `elapsed_ns` is `NA`.
 
-Existing five- and nine-column TSV files are migrated atomically on the next
+Existing five-, nine-, and eleven-column TSV files are migrated atomically on the next
 run. The script keeps the first copy as `results.tsv.v1.bak` or
-`results.tsv.v2.bak`, recovers split timing from referenced logs where possible,
+`results.tsv.v2.bak`/`results.tsv.v3.bak`, recovers split timing from referenced logs where possible,
 and marks unavailable timing as `NA`. Migration never promotes process exit
 zero alone to a Celox full pass.
+
+## CI and dashboard
+
+`.github/workflows/heliodor-bench.yml` runs the pinned full Linux workload on
+every relevant pull request, every push to `master`, and manual dispatches. The
+fixed semantic/Veryl gate remains mandatory. On pull requests,
+`github-action-benchmark` also fails when generated-JIT execution exceeds the
+published baseline by more than 10%. On `master`, Celox JIT execution, enclosing
+post-codegen execution, compile time, and the corresponding Veryl measurements
+are published to the **Heliodor Linux** tab on the [benchmark dashboard](/benchmarks/).
+Raw logs and the exact TSV are retained as workflow artifacts.
 
 The parser/migration and acceptance-gate fixtures run without checking out or
 executing Heliodor or either compiler:

@@ -1464,6 +1464,22 @@ impl Simulator<NativeBackend> {
         self.backend.shared_code()
     }
 
+    /// Start measuring time spent inside generated native simulator functions.
+    ///
+    /// The measurement is disabled by default, so ordinary simulation does not
+    /// read the host clock. Native tick loops are measured once per host-side
+    /// batch rather than once per simulated tick.
+    pub fn start_native_execution_timing(&mut self) {
+        self.backend.start_execution_timing();
+    }
+
+    /// Stop native execution timing and return the accumulated measurement.
+    pub fn finish_native_execution_timing(
+        &mut self,
+    ) -> Option<crate::native_backend::NativeExecutionTiming> {
+        self.backend.finish_execution_timing()
+    }
+
     /// Create a simulator from pre-compiled shared native code.
     pub fn from_shared(shared: Arc<SharedNativeCode>, program: crate::ir::OptimizedSir) -> Self {
         let backend = NativeBackend::from_shared(shared);

@@ -370,6 +370,24 @@ fn test_simulator_native_simple_assignment() {
 }
 
 #[test]
+fn test_native_execution_timing_is_opt_in_and_counts_host_calls() {
+    let code = r#"
+        module Top (a: input logic<32>, b: output logic<32>) {
+            assign b = a;
+        }
+    "#;
+    let mut sim = Simulator::builder(code, "Top").build_native().unwrap();
+    assert_eq!(sim.finish_native_execution_timing(), None);
+
+    sim.start_native_execution_timing();
+    sim.eval_comb().unwrap();
+    let timing = sim
+        .finish_native_execution_timing()
+        .expect("timing must be available after it is started");
+    assert_eq!(timing.calls(), 1);
+}
+
+#[test]
 fn test_simulator_native_add() {
     let code = r#"
         module Top (

@@ -30,6 +30,7 @@ write_valid_gate_logs() {
     local veryl_execute="${3:-40}"
     local celox_compile="${4:-10}"
     local celox_execute="${5:-20}"
+    local celox_jit_execute="${6:-$celox_execute}"
     local veryl_reported="$((veryl_compile + veryl_execute + 1))"
     local celox_reported="$((celox_compile + celox_execute + 1))"
     mkdir -p "$directory"
@@ -42,7 +43,7 @@ write_valid_gate_logs() {
     printf '%s\n%s\n%s\n%s\n' \
         "v4 SoC linux boot smoke: cy=9ae070 x3=aa pass=1" \
         "CELOX_TEST_CONFIG test=$GATE_TEST backend=native opt_level=O2 four_state=false compile_only=false" \
-        "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$celox_compile execute_ns=$celox_execute" \
+        "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$celox_compile execute_ns=$celox_execute jit_execute_ns=$celox_jit_execute" \
         "CELOX_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=$celox_reported" \
         >"$directory/celox.log"
 }
@@ -55,17 +56,18 @@ write_gate_results() {
     local veryl_execute="${5:-40}"
     local celox_compile="${6:-10}"
     local celox_execute="${7:-20}"
+    local celox_jit_execute="${8:-$celox_execute}"
     local veryl_reported="$((veryl_compile + veryl_execute + 1))"
     local celox_reported="$((celox_compile + celox_execute + 1))"
     write_valid_gate_logs "$directory" "$veryl_compile" "$veryl_execute" \
-        "$celox_compile" "$celox_execute"
-    printf '%s\n' "$RESULTS_HEADER_V3" >"$directory/results.tsv"
+        "$celox_compile" "$celox_execute" "$celox_jit_execute"
+    printf '%s\n' "$RESULTS_HEADER_V4" >"$directory/results.tsv"
     append_result_row "$directory/results.tsv" veryl-cc-sync "$GATE_TEST" 0 \
         "$veryl_elapsed" "$directory/veryl.log" pass "$veryl_elapsed" \
-        "$veryl_reported" "$veryl_compile" "$veryl_execute" >/dev/null
+        "$veryl_reported" "$veryl_compile" "$veryl_execute" NA >/dev/null
     append_result_row "$directory/results.tsv" celox "$GATE_TEST" 0 \
         "$celox_elapsed" "$directory/celox.log" pass "$celox_elapsed" \
-        "$celox_reported" "$celox_compile" "$celox_execute" >/dev/null
+        "$celox_reported" "$celox_compile" "$celox_execute" "$celox_jit_execute" >/dev/null
 }
 
 unit="$TMP/unit"
@@ -76,6 +78,7 @@ assert_eq "$GATE_VERYL_COMPILE_NS" 30 "Veryl gate compile interval"
 assert_eq "$GATE_VERYL_EXECUTE_NS" 40 "Veryl gate execute interval"
 assert_eq "$GATE_CELOX_COMPILE_NS" 10 "Celox gate compile interval"
 assert_eq "$GATE_CELOX_EXECUTE_NS" 20 "Celox gate execute interval"
+assert_eq "$GATE_CELOX_JIT_EXECUTE_NS" 20 "Celox gate JIT execute interval"
 
 trailing_empty="$TMP/trailing-empty"
 write_gate_results "$trailing_empty" 200 100
@@ -99,20 +102,25 @@ traversal="$TMP/traversal"
 outside="$TMP/outside"
 mkdir -p "$traversal" "$outside"
 write_valid_gate_logs "$outside"
-printf '%s\n' "$RESULTS_HEADER_V3" >"$traversal/results.tsv"
+printf '%s\n' "$RESULTS_HEADER_V4" >"$traversal/results.tsv"
 append_result_row "$traversal/results.tsv" veryl-cc-sync "$GATE_TEST" 0 200 \
-    "$traversal/../outside/veryl.log" pass 200 71 30 40 >/dev/null
+    "$traversal/../outside/veryl.log" pass 200 71 30 40 NA >/dev/null
 append_result_row "$traversal/results.tsv" celox "$GATE_TEST" 0 100 \
-    "$traversal/../outside/celox.log" pass 100 31 10 20 >/dev/null
+    "$traversal/../outside/celox.log" pass 100 31 10 20 20 >/dev/null
 if validate_gate_results "$traversal/results.tsv" "$traversal" 2>/dev/null; then
     fail "gate accepted path traversal to logs outside the invocation"
 fi
 
-slower_execute="$TMP/slower-execute"
-write_gate_results "$slower_execute" 200 100 30 40 10 41
-if validate_gate_results "$slower_execute/results.tsv" "$slower_execute" 2>/dev/null; then
-    fail "gate accepted slower Celox execution because its total process was faster"
+slower_jit="$TMP/slower-jit"
+write_gate_results "$slower_jit" 200 100 30 40 10 45 41
+if validate_gate_results "$slower_jit/results.tsv" "$slower_jit" 2>/dev/null; then
+    fail "gate accepted slower Celox generated-JIT execution"
 fi
+
+slower_harness="$TMP/slower-harness"
+write_gate_results "$slower_harness" 200 100 30 40 10 45 35
+validate_gate_results "$slower_harness/results.tsv" "$slower_harness" \
+    || fail "gate used testbench overhead instead of generated-JIT execution"
 
 slower_compile="$TMP/slower-compile"
 write_gate_results "$slower_compile" 200 100 30 40 50 20
@@ -127,11 +135,11 @@ fi
 
 reversed="$TMP/reversed"
 write_valid_gate_logs "$reversed"
-printf '%s\n' "$RESULTS_HEADER_V3" >"$reversed/results.tsv"
+printf '%s\n' "$RESULTS_HEADER_V4" >"$reversed/results.tsv"
 append_result_row "$reversed/results.tsv" celox "$GATE_TEST" 0 100 \
-    "$reversed/celox.log" pass 100 31 10 20 >/dev/null
+    "$reversed/celox.log" pass 100 31 10 20 20 >/dev/null
 append_result_row "$reversed/results.tsv" veryl-cc-sync "$GATE_TEST" 0 200 \
-    "$reversed/veryl.log" pass 200 71 30 40 >/dev/null
+    "$reversed/veryl.log" pass 200 71 30 40 NA >/dev/null
 if validate_gate_results "$reversed/results.tsv" "$reversed" 2>/dev/null; then
     fail "gate accepted reversed runner order"
 fi
@@ -139,7 +147,7 @@ fi
 extra="$TMP/extra"
 write_gate_results "$extra" 200 100
 append_result_row "$extra/results.tsv" celox "$GATE_TEST" 0 100 \
-    "$extra/celox.log" pass 100 31 10 20 >/dev/null
+    "$extra/celox.log" pass 100 31 10 20 20 >/dev/null
 if validate_gate_results "$extra/results.tsv" "$extra" 2>/dev/null; then
     fail "gate accepted an extra result row"
 fi
@@ -176,14 +184,14 @@ compile_only="$TMP/compile-only"
 write_valid_gate_logs "$compile_only"
 printf '%s\n%s\n%s\n' \
     "CELOX_TEST_CONFIG test=$GATE_TEST backend=native opt_level=O2 four_state=false compile_only=true" \
-    "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=30 execute_ns=0" \
+    "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=30 execute_ns=0 jit_execute_ns=0" \
     "CELOX_TEST_RESULT test=$GATE_TEST status=compile-only elapsed_ns=31" \
     >"$compile_only/celox.log"
-printf '%s\n' "$RESULTS_HEADER_V3" >"$compile_only/results.tsv"
+printf '%s\n' "$RESULTS_HEADER_V4" >"$compile_only/results.tsv"
 append_result_row "$compile_only/results.tsv" veryl-cc-sync "$GATE_TEST" 0 200 \
-    "$compile_only/veryl.log" pass 200 71 30 40 >/dev/null
+    "$compile_only/veryl.log" pass 200 71 30 40 NA >/dev/null
 append_result_row "$compile_only/results.tsv" celox "$GATE_TEST" 0 NA \
-    "$compile_only/celox.log" compile-only 100 31 30 0 >/dev/null
+    "$compile_only/celox.log" compile-only 100 31 30 0 0 >/dev/null
 if validate_gate_results "$compile_only/results.tsv" "$compile_only" 2>/dev/null; then
     fail "gate accepted compile-only Celox"
 fi
@@ -225,7 +233,7 @@ fi
 
 reported_mismatch="$TMP/reported-mismatch"
 write_gate_results "$reported_mismatch" 200 100
-sed -i $'s/\t31\t10\t20$/\t32\t10\t20/' "$reported_mismatch/results.tsv"
+sed -i $'s/\t31\t10\t20\t20$/\t32\t10\t20\t20/' "$reported_mismatch/results.tsv"
 if validate_gate_results "$reported_mismatch/results.tsv" "$reported_mismatch" 2>/dev/null; then
     fail "gate accepted a Celox row/log reported-time mismatch"
 fi
@@ -250,14 +258,14 @@ chmod +x "$mock_cargo_dir/cargo"
     export PATH="$mock_cargo_dir:$PATH"
     export CARGO_ARGS_LOG="$TMP/cargo-args"
     export CARGO_ENV_LOG="$TMP/cargo-env"
-    export MOCK_CARGO_RUNNER="$TMP/fixed-gate-target/release/examples/run_veryl_project_test"
+    export MOCK_CARGO_RUNNER="$TMP/fixed-gate-target/release/celox-heliodor"
     export CARGO_TARGET_DIR="$TMP/hostile-cargo-target"
     export CARGO_BUILD_TARGET=hostile-target-triple
     HELIODOR_RESULTS_DIR="$TMP/mock-build-results"
     HELIODOR_BUILD_CELOX_RUNNER=1
     HELIODOR_CELOX_TARGET_DIR="$TMP/fixed-gate-target"
     HELIODOR_CELOX_CARGO_PROFILE=release
-    CELOX_RUNNER_BIN="$TMP/fixed-gate-target/release/examples/run_veryl_project_test"
+    CELOX_RUNNER_BIN="$TMP/fixed-gate-target/release/celox-heliodor"
     build_celox_runner >/dev/null
 )
 target_arg_line="$(rg -n '^--target-dir$' "$TMP/cargo-args" | cut -d: -f1)"
@@ -265,6 +273,8 @@ target_arg_line="$(rg -n '^--target-dir$' "$TMP/cargo-args" | cut -d: -f1)"
 assert_eq "$(sed -n "$((target_arg_line + 1))p" "$TMP/cargo-args")" \
     "$TMP/fixed-gate-target" "explicit Cargo target directory argument"
 rg -qx -- '--locked' "$TMP/cargo-args" || fail "Celox build omitted --locked"
+rg -qx -- 'celox-bench' "$TMP/cargo-args" || fail "Celox build did not select celox-bench"
+rg -qx -- 'celox-heliodor' "$TMP/cargo-args" || fail "Celox build did not select celox-heliodor"
 assert_eq "$(sed -n '1p' "$TMP/cargo-env")" unset "CARGO_TARGET_DIR neutralization"
 assert_eq "$(sed -n '2p' "$TMP/cargo-env")" unset "CARGO_BUILD_TARGET neutralization"
 
@@ -369,7 +379,7 @@ CELOX_ROOT="$TMP/fake-celox"
 HELIODOR_DIR="$TMP/fake-heliodor"
 HELIODOR_RESULTS_DIR="$TMP/gate-results"
 HELIODOR_TOOLS_DIR="$TMP/fake-tools"
-mkdir -p "$CELOX_ROOT/target/release/examples" "$HELIODOR_DIR" "$HELIODOR_TOOLS_DIR"
+mkdir -p "$CELOX_ROOT/target/release" "$HELIODOR_DIR" "$HELIODOR_TOOLS_DIR"
 
 MOCK_RUNNERS=""
 MOCK_CELOX_ELAPSED=100
@@ -401,11 +411,11 @@ build_celox_runner() {
         "$HELIODOR_RESULTS_DIR/celox-target" \
         "fresh invocation-owned gate Cargo target directory"
     assert_eq "$CELOX_RUNNER_BIN" \
-        "$HELIODOR_CELOX_TARGET_DIR/release/examples/run_veryl_project_test" \
+        "$HELIODOR_CELOX_TARGET_DIR/release/celox-heliodor" \
         "gate executes the just-built target-dir artifact"
     [[ ! -e "$HELIODOR_CELOX_TARGET_DIR" ]] \
         || fail "gate Cargo target directory was not fresh"
-    [[ "$CELOX_RUNNER_BIN" != "$CELOX_ROOT/target/release/examples/run_veryl_project_test" ]] \
+    [[ "$CELOX_RUNNER_BIN" != "$CELOX_ROOT/target/release/celox-heliodor" ]] \
         || fail "gate selected a stale default-target runner"
     mkdir -p "$(dirname "$CELOX_RUNNER_BIN")"
     printf '%s\n' '#!/bin/sh' 'exit 0' >"$CELOX_RUNNER_BIN"
@@ -414,7 +424,7 @@ build_celox_runner() {
 
 build_timed_veryl_runner() {
     assert_eq "$VERYL_TIMED_RUNNER_BIN" \
-        "$HELIODOR_CELOX_TARGET_DIR/release/examples/run_veryl_project_test_timed" \
+        "$HELIODOR_CELOX_TARGET_DIR/release/veryl-heliodor" \
         "gate executes the just-built timed Veryl target-dir artifact"
     mkdir -p "$(dirname "$VERYL_TIMED_RUNNER_BIN")"
     printf '%s\n' '#!/bin/sh' 'exit 0' >"$VERYL_TIMED_RUNNER_BIN"
@@ -451,7 +461,7 @@ run_one() {
     local test="$2"
     local log="$HELIODOR_RESULTS_DIR/$runner.log"
     local process_status=0 semantic_status=pass elapsed reported=NA
-    local compile_elapsed=NA execute_elapsed=NA
+    local compile_elapsed=NA execute_elapsed=NA jit_execute_elapsed=NA
 
     assert_eq "$test" "$GATE_TEST" "fixed gate test"
     assert_eq "$HELIODOR_TESTS" "$GATE_TEST" "fixed test list"
@@ -483,6 +493,7 @@ run_one() {
             elapsed="$MOCK_CELOX_ELAPSED"
             compile_elapsed="$MOCK_CELOX_COMPILE"
             execute_elapsed="$MOCK_CELOX_EXECUTE"
+            jit_execute_elapsed="$MOCK_CELOX_EXECUTE"
             reported="$((compile_elapsed + execute_elapsed + 1))"
             if [[ "$MOCK_CELOX_STATUS" == fail ]]; then
                 process_status=1
@@ -492,7 +503,7 @@ run_one() {
             printf '%s\n%s\n%s\n%s\n' \
                 'v4 SoC linux boot smoke: cy=9ae070 x3=aa pass=1' \
                 "CELOX_TEST_CONFIG test=$GATE_TEST backend=native opt_level=O2 four_state=false compile_only=false" \
-                "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$compile_elapsed execute_ns=$execute_elapsed" \
+                "CELOX_TEST_TIMING test=$GATE_TEST compile_ns=$compile_elapsed execute_ns=$execute_elapsed jit_execute_ns=$jit_execute_elapsed" \
                 "CELOX_TEST_RESULT test=$GATE_TEST status=$MOCK_CELOX_STATUS elapsed_ns=$reported" >"$log"
             if [[ "$MOCK_MUTATE_SOURCE" == 1 ]]; then
                 : >"$HELIODOR_DIR/.fixture-mutated"
@@ -506,7 +517,8 @@ run_one() {
     MOCK_RUNNERS="${MOCK_RUNNERS:+$MOCK_RUNNERS }$runner"
     append_result_row "$HELIODOR_RESULTS_DIR/results.tsv" "$runner" "$test" \
         "$process_status" "$elapsed" "$log" "$semantic_status" \
-        "${elapsed/NA/100}" "$reported" "$compile_elapsed" "$execute_elapsed" >/dev/null
+        "${elapsed/NA/100}" "$reported" "$compile_elapsed" "$execute_elapsed" \
+        "$jit_execute_elapsed" >/dev/null
     [[ "$process_status" == 0 ]]
 }
 
@@ -515,10 +527,10 @@ run_gate_fixture() {
     local expect_success="$2"
     CELOX_ROOT="$TMP/fake-celox-$name"
     mkdir -p "$CELOX_ROOT"
-    mkdir -p "$CELOX_ROOT/target/release/examples"
+    mkdir -p "$CELOX_ROOT/target/release"
     printf '%s\n' '#!/bin/sh' 'echo stale runner; exit 9' \
-        >"$CELOX_ROOT/target/release/examples/run_veryl_project_test"
-    chmod +x "$CELOX_ROOT/target/release/examples/run_veryl_project_test"
+        >"$CELOX_ROOT/target/release/celox-heliodor"
+    chmod +x "$CELOX_ROOT/target/release/celox-heliodor"
     HELIODOR_DIR="$TMP/hostile-heliodor"
     HELIODOR_RESULTS_DIR="$TMP/hostile-results"
     HELIODOR_TOOLS_DIR="$TMP/hostile-tools"

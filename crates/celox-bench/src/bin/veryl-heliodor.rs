@@ -1,5 +1,6 @@
-use std::{env, error::Error, fs, path::PathBuf, time::Instant};
+use std::{error::Error, fs, path::PathBuf, time::Instant};
 
+use clap::Parser as ClapParser;
 use veryl_analyzer::ir as air;
 use veryl_analyzer::{Analyzer, AnalyzerError, Context};
 use veryl_metadata::Metadata;
@@ -10,9 +11,14 @@ use veryl_simulator::testbench::{
     TestResult, build_clock_periods, build_event_map, convert_initial_to_testbench, run_testbench,
 };
 
+#[derive(ClapParser)]
+#[command(about = "Run a Heliodor test with synchronous Veryl AOT-C")]
 struct Options {
+    #[arg(long)]
     project: PathBuf,
+    #[arg(long)]
     test: String,
+    #[arg(long = "source-file")]
     source_files: Vec<PathBuf>,
 }
 
@@ -24,7 +30,7 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let options = parse_args().map_err(|error| format!("{error}\n\n{}", usage()))?;
+    let options = Options::parse();
     let metadata_path = Metadata::search_from(&options.project)?;
     let mut metadata = Metadata::load(&metadata_path)?;
     let paths = metadata.paths(&options.source_files, false, true)?;
@@ -139,46 +145,4 @@ fn ensure_no_errors(stage: &str, diagnostics: Vec<AnalyzerError>) -> Result<(), 
     } else {
         Err(format!("{stage}: {errors:?}").into())
     }
-}
-
-fn parse_args() -> Result<Options, String> {
-    let mut project = None;
-    let mut test = None;
-    let mut source_files = Vec::new();
-    let mut args = env::args().skip(1);
-    while let Some(argument) = args.next() {
-        match argument.as_str() {
-            "-h" | "--help" => return Err(String::new()),
-            "--project" => {
-                project = Some(PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| "--project requires a path".to_string())?,
-                ));
-            }
-            "--test" => {
-                test = Some(
-                    args.next()
-                        .ok_or_else(|| "--test requires a module name".to_string())?,
-                );
-            }
-            "--source-file" => {
-                source_files.push(PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| "--source-file requires a path".to_string())?,
-                ));
-            }
-            other if project.is_none() => project = Some(PathBuf::from(other)),
-            other if test.is_none() => test = Some(other.to_string()),
-            other => return Err(format!("unexpected argument: {other}")),
-        }
-    }
-    Ok(Options {
-        project: project.ok_or_else(|| "missing project path".to_string())?,
-        test: test.ok_or_else(|| "missing test module".to_string())?,
-        source_files,
-    })
-}
-
-fn usage() -> &'static str {
-    "usage: cargo run -p celox --example run_veryl_project_test_timed -- --project <dir> --test <module> [--source-file <path> ...]"
 }

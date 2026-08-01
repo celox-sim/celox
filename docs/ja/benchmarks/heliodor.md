@@ -2,7 +2,12 @@
 
 Heliodor は Veryl で書かれた大規模な RISC-V プロセッサで、Linux boot の ignored test を持っています。プロジェクト読み込み、`$readmemh` による大きなメモリ初期化、native testbench scheduling、長時間の順序回路シミュレーションをまとめて踏むので、Celox を Veryl native simulator として見るためのマクロベンチに向いています。
 
-このベンチは通常 CI には含めません。Heliodor を
+ベンチマーク実行ファイルはworkspaceの`celox-bench` crateが所有します。
+これらは公開`celox` APIのexampleではありません。`celox-heliodor`がCeloxの
+計測対象、`veryl-heliodor`が同期Veryl referenceです。shell driverは固定された
+外部入力を準備し、これらを実行してmachine-readableな終了recordを検証します。
+
+専用の Heliodor CI workflow は Heliodor を
 `target/heliodor/source` に checkout し、計測前に時間分離版 Veryl runner と
 Celox runner を build します。デフォルトでは Veryl baseline を先に測ってから
 Celox を走らせ、TSV サマリとフルログを `target/heliodor/results` に出します。
@@ -40,7 +45,11 @@ HELIODOR_TIMEOUT_SEC=300 \
 scripts/run-heliodor-bench.sh run
 ```
 
-両 runner は build/prepare と testbench 実行を別々に報告します。compile 区間には
+両 runner は build/prepare と testbench 実行を別々に報告します。Celox はさらに、
+生成native関数内で消費したwall timeを`jit_execute_elapsed_ns`として報告します。
+時計を読むのはsimulated tickごとではなくhost側native batchごとです。
+`execute_elapsed_ns`はその外側の区間であり、testbench schedulingとruntime event処理も
+含みます。compile 区間には
 frontend 解析、最適化、native コード生成、Simulator 初期化、initial testbench
 lowering を含み、構築済みtestbenchを実行する直前で終了します。
 Veryl 側は Veryl 0.20.2 の Heliodor benchmark と同じ同期 AOT-C 設定
@@ -100,9 +109,10 @@ checkout identity、runner executable hash も検査します。
 16 進数の先頭 0 を除いて `cy=9ae070 x3=aa pass=1` と一致することを要求します。
 
 両 runner は Simulator と initial testbench の構築完了までを
-`compile_elapsed_ns`、構築済みtestbenchの実行だけを `execute_elapsed_ns` として
-測ります。両方の semantic check が成功し、Celox の実行区間が Veryl 以下の場合に
-だけ gate は 0 で終了します。コード生成 latency は別に記録・表示し、実行
+`compile_elapsed_ns`、構築済みtestbenchの実行を `execute_elapsed_ns` として
+測ります。Celoxは生成native関数の呼出しだけを`jit_execute_elapsed_ns`にも集計します。
+両方の semantic check が成功し、Celox のJIT実行区間が Veryl の実行区間以下の場合に
+だけ gate は 0 で終了します。Celoxの外側の実行区間とコード生成 latency は別に記録・表示し、実行
 throughput の判定には混ぜません。subprocess 時間は end-to-end の診断値です。
 compile-only、partial window、または正確な marker を伴わない process exit 0 は
 失敗です。`--kill-after` を持つ GNU `timeout` と Python 3 が必要です。
@@ -143,7 +153,7 @@ scripts/run-heliodor-bench.sh list
 
 | Runner | Command |
 |---|---|
-| `celox` | `target/<profile>/examples/run_veryl_project_test --project ... --test ...` |
+| `celox` | `target/<profile>/celox-heliodor --project ... --test ...` |
 | `veryl-cc-sync` | 分離計測を行う Veryl 0.20.2 同期 AOT-C runner |
 | `veryl-cc` | `veryl test --ignored --test ... --backend cc` |
 | `veryl-cranelift` | `veryl test --ignored --test ... --backend cranelift` |
@@ -173,12 +183,14 @@ Celox runner は Celox の default backend を使います。x86-64 host では 
 | `reported_elapsed_ns` | runner 内部の総 elapsed。取得できない場合は `NA` |
 | `compile_elapsed_ns` | Simulator・testbench 構築までを含む build/prepare 内部時間。取得できない場合は `NA` |
 | `execute_elapsed_ns` | コード生成完了後の testbench 実行時間。取得できない場合は `NA` |
+| `jit_execute_elapsed_ns` | Celox生成native関数内の実行時間。未対応backend/runnerは`NA` |
 
 従来の `runner`、`test`、`status`、`elapsed_ns`、`log` は同じ順序で
 残ります。end-to-end process 結果として扱えるのは `semantic_status=pass`、
 `exit_status=0` かつ `elapsed_ns` が数値の行だけです。この旧列は生成コードの
-実行性能ではありません。throughput には `execute_elapsed_ns`、compiler latency
-には `compile_elapsed_ns` を使います。`process_elapsed_ns` と
+実行性能ではありません。生成コード品質には`jit_execute_elapsed_ns`、コード生成後の
+simulator全体には`execute_elapsed_ns`、compiler latencyには
+`compile_elapsed_ns` を使います。`process_elapsed_ns` と
 `reported_elapsed_ns` は診断値であり、
 `compile-only`、`fail`、`unreported`、`invalid` の full-test 性能として
 扱ってはいけません。
@@ -186,7 +198,7 @@ Celox runner は Celox の default backend を使います。x86-64 host では 
 Celox については、ログ中に timing 行と result 行がそれぞれちょうど 1 個必要です。
 
 ```text
-CELOX_TEST_TIMING test=<requested-test> compile_ns=<integer> execute_ns=<integer>
+CELOX_TEST_TIMING test=<requested-test> compile_ns=<integer> execute_ns=<integer> jit_execute_ns=<integer-or-NA>
 CELOX_TEST_RESULT test=<requested-test> status=pass|fail|compile-only elapsed_ns=<integer>
 ```
 
@@ -199,8 +211,8 @@ process 終了 status との不一致は pass になりません。
 `HELIODOR_CELOX_COMPILE_ONLY=1` が正常終了しても、`semantic_status` は
 `compile-only`、`elapsed_ns` は `NA` です。
 
-既存の 5 列・9 列 TSV は次回実行時に atomic に移行します。最初の内容を
-`results.tsv.v1.bak` または `results.tsv.v2.bak` に保存し、参照先 log から
+既存の5列・9列・11列TSVは次回実行時にatomicに移行します。最初の内容を
+`results.tsv.v1.bak`、`results.tsv.v2.bak`、または`results.tsv.v3.bak`に保存し、参照先 log から
 分離時間を復元できる場合は復元し、取得できない値は `NA` にします。process の
 終了 status が 0 という事実だけで Celox full pass に昇格させることはありません。
 
@@ -211,6 +223,16 @@ checkout・実行せずにテストできます。
 bash scripts/tests/run-heliodor-bench-results.sh
 bash scripts/tests/run-heliodor-bench-gate.sh
 ```
+
+## CIとdashboard
+
+`.github/workflows/heliodor-bench.yml`は、関連するpull request、`master`へのpush、
+manual dispatchで固定Linux workloadを実行します。semantic checkとVeryl比較は常に
+必須です。pull requestでは、生成JIT実行時間が公開済みbaselineより10%を超えて悪化すると
+`github-action-benchmark`がjobを失敗させます。`master`ではCeloxのJIT実行、外側の
+post-codegen実行、compile時間、およびVerylの対応値を
+[benchmark dashboard](/ja/benchmarks/)の**Heliodor Linux** tabへ公開します。
+正確なTSVとlogはworkflow artifactにも保存します。
 
 ## Architectural completion marker
 

@@ -1,6 +1,10 @@
 # Benchmarks
 
-Celox includes benchmark suites for the Rust core, the TypeScript runtime, and Verilator as a reference baseline. CI runs benchmarks on every push to `master` and publishes an interactive trend dashboard.
+Celox includes benchmark suites for the Rust core, the TypeScript runtime,
+Verilator as a reference baseline, and the Heliodor Linux workload for native
+JIT code quality. CI publishes their history to the interactive dashboard;
+Heliodor pull requests additionally reject generated-JIT regressions above the
+configured tolerance.
 
 ## Dashboard
 

@@ -1,5 +1,4 @@
 use std::{
-    env,
     error::Error,
     fs,
     path::{Path, PathBuf},
@@ -10,7 +9,41 @@ use celox::testbench::{
     compile_initial_testbench, run_compiled_testbench, run_compiled_testbench_with_tick_limit,
 };
 use celox::{OptLevel, OptimizeOptions, Simulator, SirPass, TestResult};
+use clap::{Parser, ValueEnum};
 use veryl_metadata::Metadata;
+
+#[derive(Parser)]
+#[command(about = "Run a Heliodor test with Celox and report split benchmark timing")]
+struct Cli {
+    #[arg(long)]
+    project: PathBuf,
+    #[arg(long)]
+    test: String,
+    #[arg(long = "source-file")]
+    source_files: Vec<PathBuf>,
+    #[arg(long, value_enum, default_value = "o2")]
+    opt_level: OptimizationLevel,
+    #[arg(long, value_enum, default_value = "native")]
+    backend: Backend,
+    #[arg(long)]
+    four_state: bool,
+    #[arg(long)]
+    compile_only: bool,
+    #[arg(long, value_parser = parse_positive_u64)]
+    tick_limit: Option<u64>,
+    #[arg(long)]
+    dump_ir_dir: Option<PathBuf>,
+    #[arg(long)]
+    dump_ir_and_run: bool,
+    #[arg(long = "native-profile-block", value_parser = parse_native_profile_block)]
+    native_profile_blocks: Vec<celox::NativeProfileBlock>,
+    #[arg(long = "sir-pass", value_parser = parse_pass_override)]
+    pass_overrides: Vec<(bool, SirPass)>,
+    #[arg(long, value_parser = parse_native_memory_width)]
+    native_memory_width: Option<usize>,
+    #[arg(long, value_enum)]
+    x86_slp: Option<OnOff>,
+}
 
 struct Options {
     project: PathBuf,
@@ -29,10 +62,33 @@ struct Options {
     x86_slp: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, ValueEnum)]
 enum Backend {
     Native,
     Cranelift,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum OptimizationLevel {
+    O0,
+    O1,
+    O2,
+}
+
+impl From<OptimizationLevel> for OptLevel {
+    fn from(value: OptimizationLevel) -> Self {
+        match value {
+            OptimizationLevel::O0 => Self::O0,
+            OptimizationLevel::O1 => Self::O1,
+            OptimizationLevel::O2 => Self::O2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum OnOff {
+    On,
+    Off,
 }
 
 impl Backend {
@@ -52,7 +108,32 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let opts = parse_args().map_err(|e| format!("{e}\n\n{}", usage()))?;
+    let cli = Cli::parse();
+    let opts = Options {
+        project: cli.project,
+        test: cli.test,
+        source_files: cli.source_files,
+        opt_level: cli.opt_level.into(),
+        backend: cli.backend,
+        four_state: cli.four_state,
+        compile_only: cli.compile_only,
+        tick_limit: cli.tick_limit,
+        dump_ir_dir: cli.dump_ir_dir,
+        dump_ir_and_run: cli.dump_ir_and_run,
+        native_profile_blocks: cli.native_profile_blocks,
+        pass_overrides: cli.pass_overrides,
+        native_memory_width: cli.native_memory_width.unwrap_or({
+            if cfg!(target_arch = "x86_64") {
+                128
+            } else {
+                64
+            }
+        }),
+        x86_slp: cli
+            .x86_slp
+            .map(|value| matches!(value, OnOff::On))
+            .unwrap_or(cfg!(target_arch = "x86_64")),
+    };
     if !opts.native_profile_blocks.is_empty() && opts.dump_ir_dir.is_none() {
         return Err("--native-profile-block requires --dump-ir-dir".into());
     }
@@ -184,6 +265,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         if opts.dump_ir_and_run {
             let testbench = compile_initial_testbench(&sim)
                 .ok_or("no initial block found — this module is not a native testbench")?;
+            sim.start_native_execution_timing();
             let execute_cpu_start = process_cpu_time();
             let execute_start = Instant::now();
             let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
@@ -192,26 +274,21 @@ fn run() -> Result<(), Box<dyn Error>> {
             } else {
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
+            let jit_execute_elapsed = sim
+                .finish_native_execution_timing()
+                .expect("native execution timing was started")
+                .elapsed();
             let execute_elapsed = execute_start.elapsed();
             let execute_cpu_elapsed = process_cpu_time()
                 .zip(execute_cpu_start)
                 .map(|(end, start)| end.saturating_sub(start));
-            if let Some(execute_cpu_elapsed) = execute_cpu_elapsed {
-                println!(
-                    "CELOX_TEST_TIMING test={} compile_ns={} execute_ns={} execute_cpu_ns={}",
-                    opts.test,
-                    compile_elapsed.as_nanos(),
-                    execute_elapsed.as_nanos(),
-                    execute_cpu_elapsed.as_nanos()
-                );
-            } else {
-                println!(
-                    "CELOX_TEST_TIMING test={} compile_ns={} execute_ns={}",
-                    opts.test,
-                    compile_elapsed.as_nanos(),
-                    execute_elapsed.as_nanos()
-                );
-            }
+            print_celox_timing(
+                &opts.test,
+                compile_elapsed,
+                execute_elapsed,
+                Some(jit_execute_elapsed),
+                execute_cpu_elapsed,
+            );
             if opts.tick_limit.is_some() {
                 println!(
                     "CELOX_TEST_TICK_LIMIT test={} ticks={} reached={}",
@@ -265,10 +342,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         let compile_elapsed = compile_start.elapsed();
         let elapsed = total_start.elapsed();
-        println!(
-            "CELOX_TEST_TIMING test={} compile_ns={} execute_ns=0",
-            opts.test,
-            compile_elapsed.as_nanos()
+        print_celox_timing(
+            &opts.test,
+            compile_elapsed,
+            Duration::ZERO,
+            matches!(opts.backend, Backend::Native).then_some(Duration::ZERO),
+            None,
         );
         println!(
             "CELOX_TEST_RESULT test={} status=compile-only elapsed_ns={}",
@@ -279,76 +358,79 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     let compile_start = Instant::now();
-    let (result, ticks, tick_limit_reached, compile_elapsed, execute_elapsed, execute_cpu_elapsed) =
-        match opts.backend {
-            Backend::Native => {
-                let mut sim = builder.build_native()?;
-                let testbench = compile_initial_testbench(&sim)
-                    .ok_or("no initial block found — this module is not a native testbench")?;
-                let compile_elapsed = compile_start.elapsed();
-                let execute_cpu_start = process_cpu_time();
-                let execute_start = Instant::now();
-                let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
-                    let limited =
-                        run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
-                    (limited.result, limited.ticks, limited.tick_limit_reached)
-                } else {
-                    (run_compiled_testbench(&mut sim, &testbench), 0, false)
-                };
-                (
-                    result,
-                    ticks,
-                    tick_limit_reached,
-                    compile_elapsed,
-                    execute_start.elapsed(),
-                    process_cpu_time()
-                        .zip(execute_cpu_start)
-                        .map(|(end, start)| end.saturating_sub(start)),
-                )
-            }
-            Backend::Cranelift => {
-                let mut sim = builder.build_cranelift()?;
-                let testbench = compile_initial_testbench(&sim)
-                    .ok_or("no initial block found — this module is not a native testbench")?;
-                let compile_elapsed = compile_start.elapsed();
-                let execute_cpu_start = process_cpu_time();
-                let execute_start = Instant::now();
-                let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
-                    let limited =
-                        run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
-                    (limited.result, limited.ticks, limited.tick_limit_reached)
-                } else {
-                    (run_compiled_testbench(&mut sim, &testbench), 0, false)
-                };
-                (
-                    result,
-                    ticks,
-                    tick_limit_reached,
-                    compile_elapsed,
-                    execute_start.elapsed(),
-                    process_cpu_time()
-                        .zip(execute_cpu_start)
-                        .map(|(end, start)| end.saturating_sub(start)),
-                )
-            }
-        };
+    let (
+        result,
+        ticks,
+        tick_limit_reached,
+        compile_elapsed,
+        execute_elapsed,
+        jit_execute_elapsed,
+        execute_cpu_elapsed,
+    ) = match opts.backend {
+        Backend::Native => {
+            let mut sim = builder.build_native()?;
+            let testbench = compile_initial_testbench(&sim)
+                .ok_or("no initial block found — this module is not a native testbench")?;
+            let compile_elapsed = compile_start.elapsed();
+            sim.start_native_execution_timing();
+            let execute_cpu_start = process_cpu_time();
+            let execute_start = Instant::now();
+            let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
+                let limited = run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
+                (limited.result, limited.ticks, limited.tick_limit_reached)
+            } else {
+                (run_compiled_testbench(&mut sim, &testbench), 0, false)
+            };
+            let jit_execute_elapsed = sim
+                .finish_native_execution_timing()
+                .expect("native execution timing was started")
+                .elapsed();
+            (
+                result,
+                ticks,
+                tick_limit_reached,
+                compile_elapsed,
+                execute_start.elapsed(),
+                Some(jit_execute_elapsed),
+                process_cpu_time()
+                    .zip(execute_cpu_start)
+                    .map(|(end, start)| end.saturating_sub(start)),
+            )
+        }
+        Backend::Cranelift => {
+            let mut sim = builder.build_cranelift()?;
+            let testbench = compile_initial_testbench(&sim)
+                .ok_or("no initial block found — this module is not a native testbench")?;
+            let compile_elapsed = compile_start.elapsed();
+            let execute_cpu_start = process_cpu_time();
+            let execute_start = Instant::now();
+            let (result, ticks, tick_limit_reached) = if let Some(limit) = opts.tick_limit {
+                let limited = run_compiled_testbench_with_tick_limit(&mut sim, &testbench, limit);
+                (limited.result, limited.ticks, limited.tick_limit_reached)
+            } else {
+                (run_compiled_testbench(&mut sim, &testbench), 0, false)
+            };
+            (
+                result,
+                ticks,
+                tick_limit_reached,
+                compile_elapsed,
+                execute_start.elapsed(),
+                None,
+                process_cpu_time()
+                    .zip(execute_cpu_start)
+                    .map(|(end, start)| end.saturating_sub(start)),
+            )
+        }
+    };
     let elapsed = total_start.elapsed();
-    if let Some(execute_cpu_elapsed) = execute_cpu_elapsed {
-        println!(
-            "CELOX_TEST_TIMING test={} compile_ns={} execute_ns={} execute_cpu_ns={}",
-            opts.test,
-            compile_elapsed.as_nanos(),
-            execute_elapsed.as_nanos(),
-            execute_cpu_elapsed.as_nanos()
-        );
-    } else {
-        println!(
-            "CELOX_TEST_TIMING test={} compile_ns={} execute_ns={}",
-            opts.test,
-            compile_elapsed.as_nanos(),
-            execute_elapsed.as_nanos()
-        );
-    }
+    print_celox_timing(
+        &opts.test,
+        compile_elapsed,
+        execute_elapsed,
+        jit_execute_elapsed,
+        execute_cpu_elapsed,
+    );
     if opts.tick_limit.is_some() {
         println!(
             "CELOX_TEST_TICK_LIMIT test={} ticks={} reached={}",
@@ -384,6 +466,32 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 }
 
+fn print_celox_timing(
+    test: &str,
+    compile_elapsed: Duration,
+    execute_elapsed: Duration,
+    jit_execute_elapsed: Option<Duration>,
+    execute_cpu_elapsed: Option<Duration>,
+) {
+    let jit_execute_ns = jit_execute_elapsed
+        .map(|elapsed| elapsed.as_nanos().to_string())
+        .unwrap_or_else(|| "NA".to_string());
+    if let Some(execute_cpu_elapsed) = execute_cpu_elapsed {
+        println!(
+            "CELOX_TEST_TIMING test={test} compile_ns={} execute_ns={} jit_execute_ns={jit_execute_ns} execute_cpu_ns={}",
+            compile_elapsed.as_nanos(),
+            execute_elapsed.as_nanos(),
+            execute_cpu_elapsed.as_nanos()
+        );
+    } else {
+        println!(
+            "CELOX_TEST_TIMING test={test} compile_ns={} execute_ns={} jit_execute_ns={jit_execute_ns}",
+            compile_elapsed.as_nanos(),
+            execute_elapsed.as_nanos()
+        );
+    }
+}
+
 #[cfg(unix)]
 fn process_cpu_time() -> Option<Duration> {
     let mut time = libc::timespec {
@@ -404,151 +512,22 @@ fn process_cpu_time() -> Option<Duration> {
     None
 }
 
-fn parse_args() -> Result<Options, String> {
-    let mut project = None;
-    let mut test = None;
-    let mut source_files = Vec::new();
-    let mut opt_level = OptLevel::O2;
-    let mut backend = Backend::Native;
-    let mut four_state = false;
-    let mut compile_only = false;
-    let mut tick_limit = None;
-    let mut dump_ir_dir = None;
-    let mut dump_ir_and_run = false;
-    let mut native_profile_blocks = Vec::new();
-    let mut pass_overrides = Vec::new();
-    let mut native_memory_width = if cfg!(target_arch = "x86_64") {
-        128
+fn parse_positive_u64(value: &str) -> Result<u64, String> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| format!("invalid positive integer: {value}"))?;
+    if parsed == 0 {
+        Err("value must be greater than zero".to_string())
     } else {
-        64
-    };
-    let mut x86_slp = cfg!(target_arch = "x86_64");
-    let mut args = env::args().skip(1);
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-h" | "--help" => return Err(String::new()),
-            "--project" => {
-                project = Some(PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| "--project requires a path".to_string())?,
-                ));
-            }
-            "--test" => {
-                test = Some(
-                    args.next()
-                        .ok_or_else(|| "--test requires a module name".to_string())?,
-                );
-            }
-            "--opt-level" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--opt-level requires O0, O1, or O2".to_string())?;
-                opt_level = parse_opt_level(&value)?;
-            }
-            "--backend" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--backend requires native or cranelift".to_string())?;
-                backend = parse_backend(&value)?;
-            }
-            "--source-file" => {
-                source_files.push(PathBuf::from(
-                    args.next()
-                        .ok_or_else(|| "--source-file requires a path".to_string())?,
-                ));
-            }
-            "--sir-pass" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--sir-pass requires +name or -name".to_string())?;
-                pass_overrides.push(parse_pass_override(&value)?);
-            }
-            "--four-state" => four_state = true,
-            "--compile-only" => compile_only = true,
-            "--tick-limit" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--tick-limit requires a positive integer".to_string())?;
-                let value = value
-                    .parse::<u64>()
-                    .map_err(|_| format!("invalid tick limit: {value}"))?;
-                if value == 0 {
-                    return Err("--tick-limit must be greater than zero".to_string());
-                }
-                tick_limit = Some(value);
-            }
-            "--dump-ir-dir" => {
-                dump_ir_dir =
-                    Some(PathBuf::from(args.next().ok_or_else(|| {
-                        "--dump-ir-dir requires a directory".to_string()
-                    })?));
-            }
-            "--dump-ir-and-run" => dump_ir_and_run = true,
-            "--native-profile-block" => {
-                let value = args.next().ok_or_else(|| {
-                    "--native-profile-block requires FUNCTION:BLOCK:SAMPLES".to_string()
-                })?;
-                native_profile_blocks.push(parse_native_profile_block(&value)?);
-            }
-            "--native-memory-width" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--native-memory-width requires 64 or 128".to_string())?;
-                native_memory_width = match value.as_str() {
-                    "64" => 64,
-                    "128" => 128,
-                    _ => return Err(format!("invalid native memory width: {value}")),
-                };
-            }
-            "--x86-slp" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--x86-slp requires on or off".to_string())?;
-                x86_slp = match value.as_str() {
-                    "on" => true,
-                    "off" => false,
-                    _ => return Err(format!("invalid x86 SLP setting: {value}")),
-                };
-            }
-            other if project.is_none() => project = Some(PathBuf::from(other)),
-            other if test.is_none() => test = Some(other.to_string()),
-            other => return Err(format!("unexpected argument: {other}")),
-        }
-    }
-
-    Ok(Options {
-        project: project.ok_or_else(|| "missing project path".to_string())?,
-        test: test.ok_or_else(|| "missing test module".to_string())?,
-        source_files,
-        opt_level,
-        backend,
-        four_state,
-        compile_only,
-        tick_limit,
-        dump_ir_dir,
-        dump_ir_and_run,
-        native_profile_blocks,
-        pass_overrides,
-        native_memory_width,
-        x86_slp,
-    })
-}
-
-fn parse_opt_level(value: &str) -> Result<OptLevel, String> {
-    match value {
-        "O0" | "o0" | "0" => Ok(OptLevel::O0),
-        "O1" | "o1" | "1" => Ok(OptLevel::O1),
-        "O2" | "o2" | "2" => Ok(OptLevel::O2),
-        _ => Err(format!("invalid opt level: {value}")),
+        Ok(parsed)
     }
 }
 
-fn parse_backend(value: &str) -> Result<Backend, String> {
+fn parse_native_memory_width(value: &str) -> Result<usize, String> {
     match value {
-        "native" => Ok(Backend::Native),
-        "cranelift" => Ok(Backend::Cranelift),
-        _ => Err(format!("invalid backend: {value}")),
+        "64" => Ok(64),
+        "128" => Ok(128),
+        _ => Err(format!("invalid native memory width: {value}")),
     }
 }
 
@@ -586,10 +565,6 @@ fn parse_pass_override(value: &str) -> Result<(bool, SirPass), String> {
     };
     let pass = SirPass::parse(name).ok_or_else(|| format!("unknown SIR pass: {name}"))?;
     Ok((enable, pass))
-}
-
-fn usage() -> &'static str {
-    "usage: cargo run -p celox --example run_veryl_project_test -- --project <dir> --test <module> [--source-file <path> ...] [--backend native|cranelift] [--opt-level O2] [--sir-pass +/-name ...] [--native-memory-width 64|128] [--x86-slp on|off] [--four-state] [--compile-only] [--tick-limit N] [--dump-ir-dir <dir>] [--dump-ir-and-run] [--native-profile-block FUNCTION:BLOCK:SAMPLES ...]"
 }
 
 fn load_sources(
