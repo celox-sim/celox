@@ -281,11 +281,11 @@ impl JitBackend {
             if comb_vregs > VREG_VALUE_THRESHOLD / 4
                 && matches!(
                     options.cranelift_options.regalloc_algorithm,
-                    crate::optimizer::RegallocAlgorithm::Backtracking
+                    crate::backend::RegallocAlgorithm::Backtracking
                 )
             {
                 options.cranelift_options.regalloc_algorithm =
-                    crate::optimizer::RegallocAlgorithm::SinglePass;
+                    crate::backend::RegallocAlgorithm::SinglePass;
             }
         }
 

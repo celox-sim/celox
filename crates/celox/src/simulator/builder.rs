@@ -231,7 +231,7 @@ pub struct SimulatorOptions {
     /// Per-pass SIRT optimizer flags.
     pub optimize_options: crate::optimizer::OptimizeOptions,
     /// Fine-grained Cranelift backend options.
-    pub cranelift_options: crate::optimizer::CraneliftOptions,
+    pub cranelift_options: crate::backend::CraneliftOptions,
     pub trace: crate::debug::TraceOptions,
     /// When true, JIT-compiled functions emit trigger detection code for
     /// edge-based event discovery. Only needed by [`crate::Simulation`].
@@ -244,7 +244,7 @@ pub struct SimulatorOptions {
 impl Default for SimulatorOptions {
     fn default() -> Self {
         let opt = crate::optimizer::OptimizeOptions::default();
-        let cranelift = crate::optimizer::CraneliftOptions::for_opt_level(opt.opt_level());
+        let cranelift = crate::backend::CraneliftOptions::for_opt_level(opt.opt_level());
         Self {
             four_state: false,
             optimize_options: opt,
@@ -338,7 +338,7 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     /// Cranelift options, and DSE policy. Per-pass overrides can be applied after.
     pub fn opt_level(mut self, level: crate::optimizer::OptLevel) -> Self {
         self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level);
-        self.options.cranelift_options = crate::optimizer::CraneliftOptions::for_opt_level(level);
+        self.options.cranelift_options = crate::backend::CraneliftOptions::for_opt_level(level);
         self.options.dead_store_policy = match level {
             crate::optimizer::OptLevel::O2 => DeadStorePolicy::PreserveTopPorts,
             _ => DeadStorePolicy::Off,
@@ -376,13 +376,13 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     }
 
     /// Set fine-grained Cranelift backend options.
-    pub fn cranelift_options(mut self, options: crate::optimizer::CraneliftOptions) -> Self {
+    pub fn cranelift_options(mut self, options: crate::backend::CraneliftOptions) -> Self {
         self.options.cranelift_options = options;
         self
     }
 
     /// Set the register allocator algorithm.
-    pub fn regalloc_algorithm(mut self, algo: crate::optimizer::RegallocAlgorithm) -> Self {
+    pub fn regalloc_algorithm(mut self, algo: crate::backend::RegallocAlgorithm) -> Self {
         self.options.cranelift_options.regalloc_algorithm = algo;
         self
     }

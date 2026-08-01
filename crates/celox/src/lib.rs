@@ -77,17 +77,17 @@ pub use backend::native::{NativeBackend, SharedNativeCode};
 pub type DefaultBackend = NativeBackend;
 #[cfg(all(not(target_arch = "wasm32"), not(target_arch = "x86_64")))]
 pub type DefaultBackend = backend::JitBackend;
+#[cfg(not(target_arch = "wasm32"))]
+pub use backend::CraneliftOptLevel;
+#[cfg(not(target_arch = "wasm32"))]
+pub use backend::CraneliftOptions;
+#[cfg(not(target_arch = "wasm32"))]
+pub use backend::RegallocAlgorithm;
 pub use celox_frontend_veryl::{LoweringPhase, ParserError};
 pub use celox_slt::scheduler::SchedulerError;
 pub use num_bigint::BigUint;
-#[cfg(not(target_arch = "wasm32"))]
-pub use optimizer::CraneliftOptLevel;
-#[cfg(not(target_arch = "wasm32"))]
-pub use optimizer::CraneliftOptions;
 pub use optimizer::OptLevel;
 pub use optimizer::OptimizeOptions;
-#[cfg(not(target_arch = "wasm32"))]
-pub use optimizer::RegallocAlgorithm;
 pub use optimizer::SirPass;
 #[cfg(not(target_arch = "wasm32"))]
 pub use simulation::Simulation;

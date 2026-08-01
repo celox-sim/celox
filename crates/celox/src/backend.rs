@@ -1,4 +1,6 @@
 #[cfg(not(target_arch = "wasm32"))]
+mod cranelift_options;
+#[cfg(not(target_arch = "wasm32"))]
 mod jit_engine;
 pub(crate) mod memory_layout;
 #[cfg(target_arch = "x86_64")]
@@ -17,6 +19,8 @@ pub mod wasm_runtime;
 #[cfg(not(target_arch = "wasm32"))]
 mod wide_ops;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use cranelift_options::{CraneliftOptLevel, CraneliftOptions, RegallocAlgorithm};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use jit_engine::JitEngine;
 pub use memory_layout::{LayoutRequirements, MemoryLayout, MemoryLayoutMode, get_byte_size};
