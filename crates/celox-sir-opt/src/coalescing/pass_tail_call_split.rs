@@ -888,7 +888,7 @@ fn estimate_block_value_count(
 /// cyclic CFGs. The entry component is always emitted first. Invalid callers
 /// may still provide unreachable blocks; those are appended in deterministic
 /// reverse postorder without disturbing the entry component.
-pub(crate) fn reverse_postorder_blocks(
+pub fn reverse_postorder_blocks(
     blocks: &HashMap<BlockId, BasicBlock<RegionedAbsoluteAddr>>,
     entry: BlockId,
 ) -> Vec<BlockId> {

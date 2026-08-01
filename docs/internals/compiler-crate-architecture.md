@@ -57,9 +57,15 @@ schema, frontend lookup, and testbench source, but cannot contain an SLT arena o
 Diagnostic trace collection is part of that frontend transition rather than a facade flattening
 wrapper. The obsolete facade flattening, logic-tree, scheduler, and FF compatibility modules have
 been removed. The facade now only executes the temporary fused-SIR optimization hints, compiles the
-semantic testbench, runs the SIR optimizer, and converts the result into the transitional
-`Program`. Moving those remaining pass and compiler-driver responsibilities starts Milestone 5;
-the Milestone 4 ownership boundary is complete.
+semantic testbench, invokes the SIR optimizer through a source-independent borrowed view, and
+converts the result into the transitional `Program`. `celox-sir-opt` owns the complete pass
+manager, all backend-independent passes, StateSSA/placement analyses, and the design-metadata
+memory-offset contract. Its normal dependency graph contains no Veryl, frontend, testbench,
+physical layout, or facade crate. Physical-contiguity facts needed by the native merged-chain
+pipeline are supplied by the native adapter as a proof callback rather than exposing
+`MemoryLayout` to the optimizer. The facade optimizer module is now an orchestration and
+compatibility adapter only. Milestone 5's ownership boundary is complete; target-option
+compatibility selectors and concrete codegen plans move with their backends in Milestone 6.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making

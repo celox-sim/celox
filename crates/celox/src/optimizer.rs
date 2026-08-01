@@ -1,44 +1,17 @@
-use crate::ir::Program;
-pub use celox_sir_opt::{OptLevel, OptimizeOptions, PassOptions, SirPass};
+pub use celox_sir_opt::{OptLevel, OptimizeOptions, SirPass};
 
 pub mod coalescing;
 
-pub trait ProgramPass {
-    fn name(&self) -> &'static str;
-    fn run(&self, program: &mut Program, options: &PassOptions);
-}
-
-#[derive(Default)]
-pub struct PassManager {
-    passes: Vec<Box<dyn ProgramPass>>,
-}
-
-impl PassManager {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn add_pass<P>(&mut self, pass: P)
-    where
-        P: ProgramPass + 'static,
-    {
-        self.passes.push(Box::new(pass));
-    }
-
-    pub fn run(&self, program: &mut Program, options: &PassOptions) {
-        for pass in &self.passes {
-            let _ = pass.name();
-            pass.run(program, options);
-        }
-    }
-}
-
-pub fn optimize(program: &mut Program, four_state: bool, optimize_options: &OptimizeOptions) {
+pub fn optimize(
+    program: &mut crate::ir::Program,
+    four_state: bool,
+    optimize_options: &OptimizeOptions,
+) {
     optimize_impl(program, four_state, optimize_options, false);
 }
 
 pub(crate) fn optimize_preserving_element_storage(
-    program: &mut Program,
+    program: &mut crate::ir::Program,
     four_state: bool,
     optimize_options: &OptimizeOptions,
 ) {
@@ -46,20 +19,37 @@ pub(crate) fn optimize_preserving_element_storage(
 }
 
 fn optimize_impl(
-    program: &mut Program,
+    program: &mut crate::ir::Program,
     four_state: bool,
     optimize_options: &OptimizeOptions,
     preserve_element_storage_layout: bool,
 ) {
-    let mut manager = PassManager::new();
-    manager.add_pass(coalescing::CoalescingPass);
-    manager.run(
-        program,
-        &PassOptions {
+    with_optimization_program(program, |unit| {
+        celox_sir_opt::optimize(
+            unit,
             four_state,
-            optimize_options: optimize_options.clone(),
+            optimize_options,
             preserve_element_storage_layout,
-            ..PassOptions::default()
-        },
-    );
+        );
+    });
+}
+
+pub(crate) fn with_optimization_program<R>(
+    program: &mut crate::ir::Program,
+    operation: impl FnOnce(&mut celox_sir_opt::ir::Program<'_>) -> R,
+) -> R {
+    let crate::ir::Program {
+        sir,
+        design,
+        runtime_schema,
+        layout_requirements,
+        ..
+    } = program;
+    let mut unit = celox_sir_opt::ir::Program {
+        sir,
+        design,
+        runtime_schema,
+        layout_requirements,
+    };
+    operation(&mut unit)
 }

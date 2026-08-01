@@ -37,7 +37,3 @@ pub use traits::SimulatorErrorCode;
 pub use traits::{EventHandle, SimBackend};
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) use translator::SIRTranslator;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use translator::core::MEM_SHIFT_THRESHOLD;
-#[cfg(target_arch = "wasm32")]
-pub(crate) const MEM_SHIFT_THRESHOLD: usize = 4;

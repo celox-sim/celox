@@ -9,7 +9,6 @@ use crate::ir::*;
 /// - It has a dynamic offset (conservative), OR
 /// - The store has non-empty triggers (edge-detection side effect), OR
 /// - The store has non-empty comb capture sites (observer activation side effect).
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn eliminate_dead_stores(
     program: &mut Program,
     externally_live: &HashSet<AbsoluteAddr>,

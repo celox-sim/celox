@@ -415,7 +415,6 @@ impl StateSsa {
     /// contract. This is the placement counterpart of
     /// `analyze_all_loads_two_state`: source `bit`/`logic` distinctions do not
     /// split one physical state version.
-    #[cfg(target_arch = "x86_64")]
     pub fn analyze_selected_loads_two_state(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
         cfg: &SirCfg,

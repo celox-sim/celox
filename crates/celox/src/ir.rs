@@ -3,18 +3,16 @@ pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
     AbsoluteAddrBase, BinaryOp, DomainKind, InitialStateData, InitialStateWriteRun, InstanceId,
     ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeEventKind, RuntimeEventSite,
-    RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION, TriggerIdWithKind, UnaryOp, VarAtomBase,
+    RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION, TriggerIdWithKind, UnaryOp,
     WORKING_REGION,
 };
 pub use celox_frontend_veryl::{InstancePath, VariableInfo, VerylFrontendLookup};
 pub(crate) use celox_sir::{
     BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
-    SIRSwitchCase, SIRTerminator, SIRValue, collect_exact_zero_registers, merge_sir_eus,
+    SIRTerminator, SIRValue, collect_exact_zero_registers, merge_sir_eu_refs_with_provenance,
 };
-#[cfg(any(target_arch = "x86_64", test))]
-pub(crate) use celox_sir::{
-    SirMergeProvenance, inline_single_predecessor_jumps, merge_sir_eu_refs_with_provenance,
-};
+#[cfg(test)]
+pub(crate) use celox_sir::{SIRSwitchCase, inline_single_predecessor_jumps};
 use celox_testbench::TestbenchProgram;
 use std::fmt;
 use veryl_analyzer::ir::VarPath;

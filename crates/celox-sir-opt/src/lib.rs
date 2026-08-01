@@ -1,6 +1,113 @@
 //! Backend-independent SIR optimization policy and pass pipeline.
 
-use fxhash::FxHashSet as HashSet;
+pub type HashMap<K, V> = fxhash::FxHashMap<K, V>;
+pub type HashSet<K> = fxhash::FxHashSet<K>;
+
+/// Source-independent SIR and design vocabulary used by optimization passes.
+/// This compatibility module keeps the moved pass implementation readable;
+/// it deliberately exposes no frontend or physical-layout type.
+pub mod ir {
+    pub use celox_design::{
+        BinaryOp, DomainKind, InstanceId, RegionedAbsoluteAddrBase, RuntimeSchema,
+        SPARSE_WORKING_REGION, STABLE_REGION, StateAddr, StateObjectId, TriggerIdWithKind, UnaryOp,
+        VarAtomBase, WORKING_REGION,
+    };
+    pub use celox_sir::*;
+
+    pub type AbsoluteAddr = celox_design::StateAddr;
+    pub type RegionedAbsoluteAddr = celox_design::RegionedStateAddr;
+    pub type SirProgram = celox_sir::SirProgram<AbsoluteAddr, RegionedAbsoluteAddr>;
+
+    pub mod cfg {
+        pub use celox_sir::cfg::*;
+    }
+
+    pub mod verify {
+        pub use celox_sir::verify::*;
+    }
+
+    /// Mutable optimization view over the source-independent compiler state.
+    /// Frontend lookup tables and testbench source cannot enter this crate.
+    pub struct Program<'a> {
+        pub sir: &'a mut SirProgram,
+        pub design: &'a celox_design::ElaboratedDesign<AbsoluteAddr>,
+        pub runtime_schema: &'a RuntimeSchema<AbsoluteAddr>,
+        pub layout_requirements: &'a mut celox_state_layout::LayoutRequirements<AbsoluteAddr>,
+    }
+
+    impl Program<'_> {
+        pub fn variable_metadata(
+            &self,
+            address: &AbsoluteAddr,
+        ) -> Option<&celox_design::VariableMetadata> {
+            self.design.state_objects.get(address)
+        }
+    }
+}
+
+/// Compatibility path used by the moved implementation. Policy types are
+/// owned by this crate and are not facade callbacks.
+pub(crate) mod optimizer {
+    pub use crate::{OptLevel, OptimizeOptions, PassOptions, ProgramPass, SirPass};
+    pub(crate) mod coalescing {
+        pub(crate) use crate::coalescing::shared;
+    }
+}
+
+pub mod timing {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn now() -> std::time::Instant {
+        std::time::Instant::now()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn now() -> WasmInstant {
+        WasmInstant
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[derive(Clone, Copy)]
+    pub struct WasmInstant;
+
+    #[cfg(target_arch = "wasm32")]
+    impl WasmInstant {
+        pub fn elapsed(&self) -> std::time::Duration {
+            std::time::Duration::ZERO
+        }
+    }
+}
+
+pub mod backend {
+    /// Cost-model threshold for preferring chunked memory shifts.
+    pub const MEM_SHIFT_THRESHOLD: usize = 4;
+}
+
+pub mod coalescing;
+mod memory_contract;
+pub use memory_contract::verify_memory_offset_contract;
+
+pub trait ProgramPass {
+    fn name(&self) -> &'static str;
+    fn run(&self, program: &mut ir::Program<'_>, options: &PassOptions);
+}
+
+pub fn optimize(
+    program: &mut ir::Program<'_>,
+    four_state: bool,
+    optimize_options: &OptimizeOptions,
+    preserve_element_storage_layout: bool,
+) {
+    let pass = coalescing::CoalescingPass;
+    pass.run(
+        program,
+        &PassOptions {
+            four_state,
+            optimize_options: optimize_options.clone(),
+            preserve_element_storage_layout,
+            ..PassOptions::default()
+        },
+    );
+}
 
 // ── OptLevel / SirPass / OptimizeOptions ────────────────────────────
 

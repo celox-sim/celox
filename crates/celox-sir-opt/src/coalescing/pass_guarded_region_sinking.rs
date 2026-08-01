@@ -24,7 +24,6 @@ pub(super) struct GuardedRegionSinkingPass;
 /// This deliberately runs only the coupled-store and closed same-predicate
 /// planners. Replaying the complete source-EU pass after fusion would also
 /// perform unrelated edge sinking and repeated CFG repair.
-#[cfg(target_arch = "x86_64")]
 pub(super) fn recover_merged_effect_regions(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     four_state: bool,
