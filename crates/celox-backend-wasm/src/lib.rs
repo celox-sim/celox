@@ -14,46 +14,27 @@ use wasm_encoder::{
 
 pub type HashMap<K, V> = fxhash::FxHashMap<K, V>;
 
-pub mod backend {
-    pub mod memory_layout {
-        pub use celox_state_layout::*;
-        pub type MemoryLayout = celox_state_layout::MemoryLayout<celox_design::StateAddr>;
-    }
-
-    pub use memory_layout::MemoryLayout;
-}
-
-pub mod ir {
-    pub use celox_design::{
-        BinaryOp, InstanceId, RegionedAbsoluteAddrBase, SPARSE_WORKING_REGION, STABLE_REGION,
-        StateAddr, TriggerIdWithKind, UnaryOp,
-    };
-    pub use celox_sir::*;
-
-    pub type AbsoluteAddr = celox_design::StateAddr;
-    pub type RegionedAbsoluteAddr = celox_design::RegionedStateAddr;
-}
-
+use celox_design::{
+    BinaryOp, SPARSE_WORKING_REGION, STABLE_REGION, StateAddr, TriggerIdWithKind, UnaryOp,
+};
+use celox_sir::{
+    BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset, SIRTerminator,
+    SIRValue,
+};
 #[cfg(test)]
-use crate::backend::memory_layout::MemoryLayoutMode;
-use crate::{
-    backend::{
-        MemoryLayout,
-        memory_layout::{
-            RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
-            RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
-            RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
-            STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
-        },
-    },
-    ir::{
-        AbsoluteAddr, BinaryOp, BlockId, ExecutionUnit, RegionedAbsoluteAddr, RegisterId,
-        RegisterType, SIRInstruction, SIROffset, SIRTerminator, SIRValue, STABLE_REGION,
-        TriggerIdWithKind, UnaryOp,
-    },
+use celox_state_layout::MemoryLayoutMode;
+use celox_state_layout::{
+    RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
+    RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+    RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
+    STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
 };
 
 use celox_state_layout::get_byte_size;
+
+type AbsoluteAddr = StateAddr;
+type RegionedAbsoluteAddr = celox_design::RegionedStateAddr;
+type MemoryLayout = celox_state_layout::MemoryLayout<AbsoluteAddr>;
 
 /// Compiled WASM module bytes for a set of execution units.
 pub struct WasmModule {
@@ -486,7 +467,7 @@ fn compile_instruction(
             );
         }
         SIRInstruction::Commit(src_addr, dst_addr, offset, op_width, triggers) => {
-            if src_addr.region == crate::ir::SPARSE_WORKING_REGION {
+            if src_addr.region == SPARSE_WORKING_REGION {
                 compile_sparse_commit(
                     src_addr, dst_addr, *op_width, layout, four_state, locals, instrs,
                 );
@@ -605,8 +586,8 @@ fn compile_sparse_commit(
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
-    debug_assert_eq!(src_addr.region, crate::ir::SPARSE_WORKING_REGION);
-    debug_assert_eq!(dst_addr.region, crate::ir::STABLE_REGION);
+    debug_assert_eq!(src_addr.region, SPARSE_WORKING_REGION);
+    debug_assert_eq!(dst_addr.region, STABLE_REGION);
     let abs = src_addr.absolute_addr();
     let sparse = &layout.sparse_layouts[&abs];
     let byte_size = get_byte_size(layout.widths[&abs]);
@@ -4167,7 +4148,7 @@ fn compile_store(
         }
         return;
     }
-    if addr.region == crate::ir::SPARSE_WORKING_REGION {
+    if addr.region == SPARSE_WORKING_REGION {
         compile_prepare_sparse_store(addr, offset, op_width, layout, four_state, locals, instrs);
     }
     let s = locals.reg_map[src].clone();
@@ -5371,7 +5352,7 @@ fn compile_terminator(
 fn compute_byte_offset(layout: &MemoryLayout, abs: &AbsoluteAddr, region: u32) -> usize {
     match region {
         STABLE_REGION => layout.offsets[abs],
-        crate::ir::SPARSE_WORKING_REGION => layout.sparse_base_offset + layout.sparse_offsets[abs],
+        SPARSE_WORKING_REGION => layout.sparse_base_offset + layout.sparse_offsets[abs],
         _ => layout.working_base_offset + layout.working_offsets[abs],
     }
 }
@@ -5785,8 +5766,9 @@ mod bit_count_tests {
     use wasmtime::{Engine, Linker, Memory, Module as WasmtimeModule, Store};
 
     use super::*;
-    use crate::ir::{BasicBlock, InstanceId};
     use celox_backend_cranelift::{CompileOptions, CraneliftOptions, JitEngine};
+    use celox_design::InstanceId;
+    use celox_sir::BasicBlock;
 
     const OUTPUT_OFFSET: usize = 32;
     const SLOT_BITS: usize = 128;
