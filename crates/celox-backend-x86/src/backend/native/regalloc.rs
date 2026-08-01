@@ -5,25 +5,17 @@
 //! Perm boundaries, and colors chordal SSA live ranges without an explicit
 //! interference graph.
 
-#[allow(dead_code)]
-mod allocation_ir;
 mod analysis;
 pub mod assignment;
 mod cfg;
 mod color;
 mod constraints;
 mod cost;
-#[allow(dead_code)]
-mod cssa;
-#[allow(dead_code)]
-mod home_graph;
-#[allow(dead_code)]
 mod home_verify;
-#[allow(dead_code)]
 mod interval_union;
 mod legalize;
-#[allow(dead_code)]
 mod live_interval;
+mod materialized_state_home;
 mod next_use;
 mod pressure;
 mod reconstruct;
@@ -50,14 +42,6 @@ pub use assignment::AssignmentMap;
 /// x86-64: 16 GPRs - architectural stack pointer = 15. R15 is excluded at
 /// runtime when the host cannot use GS-base instructions.
 pub const NUM_REGS: usize = 15;
-
-/// Enable allocator-internal exhaustive consistency checks.
-///
-/// Repeating whole-session proofs after every incremental liveness edit is
-/// intentionally kept out of optimized compilation.
-pub(super) fn exhaustive_verification_enabled() -> bool {
-    cfg!(debug_assertions) || std::env::var_os("CELOX_REGALLOC_VERIFY").is_some()
-}
 
 /// Result of register allocation: assignment map + spill frame size.
 pub struct RegallocResult {
@@ -228,18 +212,6 @@ fn reload_recipe_error(phase: &'static str, error: reload::ReloadRecipeError) ->
     )
 }
 
-#[cfg(test)]
-fn cssa_error(phase: &'static str, error: cssa::CssaError) -> RegallocError {
-    RegallocError::new(
-        phase,
-        error.rule,
-        error.block,
-        error.instruction,
-        error.values,
-        error.message,
-    )
-}
-
 /// Run the full register allocation pipeline on an MFunction.
 /// Returns the assignment map and required spill frame size.
 pub fn run_regalloc(func: &mut MFunction) -> Result<RegallocResult, RegallocError> {
@@ -331,9 +303,9 @@ fn run_regalloc_in_place(
         .verify(func)
         .map_err(|error| constraint_error("placement constraint verification", error))?;
     // W/S planning owns independent homes, explicit phi-edge transfers, and
-    // the one authoritative dependency-ready instruction order. Inserting
-    // CSSA snapshots before that walk would lengthen the ranges it is meant
-    // to split and would make the snapshot order independently authoritative.
+    // the one authoritative dependency-ready instruction order. Introducing
+    // snapshot copies before that walk would lengthen the ranges it is meant
+    // to split and make a second instruction order authoritative.
     let reload_recipe_start = timing.then(crate::timing::now);
     let planning_recipes = reload::analyze_for_planning(func, &normalized_cfg)
         .map_err(|error| reload_recipe_error("reload-recipe planning analysis", error))?;

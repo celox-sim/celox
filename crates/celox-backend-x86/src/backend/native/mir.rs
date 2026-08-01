@@ -78,17 +78,6 @@ impl Uses {
     pub fn as_slice(&self) -> &[VReg] {
         &self.buf[..usize::from(self.len)]
     }
-
-    pub(crate) fn replace(&mut self, old: VReg, new: VReg) -> bool {
-        let mut changed = false;
-        for value in &mut self.buf[..usize::from(self.len)] {
-            if *value == old {
-                *value = new;
-                changed = true;
-            }
-        }
-        changed
-    }
 }
 
 impl std::ops::Deref for Uses {
@@ -2278,10 +2267,9 @@ mod tests {
     #[test]
     fn uses_keeps_all_machine_operands_inline() {
         let values = (0..MAX_USES as u32).map(VReg).collect::<Vec<_>>();
-        let mut uses = Uses::from_slice(&values);
+        let uses = Uses::from_slice(&values);
         assert_eq!(uses.as_slice(), values);
-        assert!(uses.replace(VReg(4), VReg(99)));
-        assert_eq!(uses.into_iter().next_back(), Some(VReg(99)));
+        assert_eq!(uses.into_iter().next_back(), Some(VReg(4)));
     }
 
     #[test]

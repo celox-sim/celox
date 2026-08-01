@@ -3,9 +3,88 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::native::memory_effect::{self, UnknownMemory};
-use crate::native::mir::BaseReg;
+use crate::native::mir::{BaseReg, BlockId, MFunction, MInst, PackedStateHome, StateHomeId, VReg};
 
-use super::*;
+use super::cfg::NormalizedCfg;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct SyntheticInstructionId(u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyntheticOperation {
+    StateStore { home: PackedStateHome },
+    StateReload { home: PackedStateHome },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateHomeInstructionOrigin {
+    Original,
+    Synthetic {
+        id: SyntheticInstructionId,
+        operation: SyntheticOperation,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StateHomeInstruction {
+    origin: StateHomeInstructionOrigin,
+    original: Option<MInst>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StateHomeBlock {
+    id: BlockId,
+    instructions: Vec<StateHomeInstruction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StateHomeProgram {
+    blocks: Vec<StateHomeBlock>,
+}
+
+/// One packed-state store emitted by SSA reconstruction, identified by its
+/// final per-block SimState-write ordinal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct MaterializedStateStore {
+    pub block: BlockId,
+    pub write_ordinal: usize,
+    pub home: PackedStateHome,
+}
+
+/// One packed-state reload emitted by SSA reconstruction. Its SSA destination
+/// remains stable when dead instructions are compacted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct MaterializedStateReload {
+    pub reload: VReg,
+    pub home: PackedStateHome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct MaterializedStateHomeError {
+    pub rule: &'static str,
+    pub block: Option<BlockId>,
+    pub instruction: Option<usize>,
+    pub values: Vec<VReg>,
+    pub message: String,
+}
+
+impl MaterializedStateHomeError {
+    fn new(
+        rule: &'static str,
+        block: Option<BlockId>,
+        instruction: Option<usize>,
+        values: Vec<VReg>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            rule,
+            block,
+            instruction,
+            values,
+            message: message.into(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct ByteId(usize);
@@ -57,18 +136,18 @@ fn error(
     block: Option<BlockId>,
     instruction: Option<usize>,
     message: impl Into<String>,
-) -> AllocationIrError {
-    AllocationIrError::new(rule, block, instruction, Vec::new(), message)
+) -> MaterializedStateHomeError {
+    MaterializedStateHomeError::new(rule, block, instruction, Vec::new(), message)
 }
 
 fn register_home(
     homes: &mut HashMap<StateHomeId, PackedStateHome>,
     home: PackedStateHome,
     block: BlockId,
-) -> Result<(), AllocationIrError> {
+) -> Result<(), MaterializedStateHomeError> {
     if home.byte_range().is_none() {
         return Err(error(
-            "ALLOCATION_IR.STATE_HOME_RANGE",
+            "STATE_HOME.HOME_RANGE",
             Some(block),
             None,
             "packed-state home byte range overflows i64",
@@ -78,7 +157,7 @@ fn register_home(
         && previous != home
     {
         return Err(error(
-            "ALLOCATION_IR.STATE_HOME_IDENTITY",
+            "STATE_HOME.HOME_IDENTITY",
             Some(block),
             None,
             format!(
@@ -90,7 +169,10 @@ fn register_home(
     Ok(())
 }
 
-fn validate_cfg(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), AllocationIrError> {
+fn validate_cfg(
+    program: &StateHomeProgram,
+    cfg: &NormalizedCfg,
+) -> Result<(), MaterializedStateHomeError> {
     let count = program.blocks.len();
     if cfg.predecessors.len() != count
         || cfg.successors.len() != count
@@ -111,7 +193,7 @@ fn validate_cfg(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), Alloc
             .any(|&block| block >= count)
     {
         return Err(error(
-            "ALLOCATION_IR.STATE_HOME_MODEL",
+            "STATE_HOME.HOME_MODEL",
             program.blocks.first().map(|block| block.id),
             None,
             "normalized CFG does not exactly cover packed-state operations",
@@ -125,14 +207,14 @@ fn affected_bytes(
     byte_index: &BTreeMap<i64, ByteId>,
     block: BlockId,
     position: usize,
-) -> Result<Vec<ByteId>, AllocationIrError> {
+) -> Result<Vec<ByteId>, MaterializedStateHomeError> {
     let writes = memory_effect::writes(instruction);
     if writes.unknown_memory() == Some(UnknownMemory::Direct(BaseReg::SimState)) {
         // Range-StateSSA eligibility rejects this object before allocation.
         // Rejecting the candidate here avoids expanding one unknown write into
         // every tracked state byte.
         return Err(error(
-            "ALLOCATION_IR.STATE_HOME_UNKNOWN_ALIAS",
+            "STATE_HOME.HOME_UNKNOWN_ALIAS",
             Some(block),
             Some(position),
             "unknown direct SimState write prevents a proved packed-state home",
@@ -145,7 +227,7 @@ fn affected_bytes(
     {
         let end = range.end().ok_or_else(|| {
             error(
-                "ALLOCATION_IR.STATE_HOME_RANGE",
+                "STATE_HOME.HOME_RANGE",
                 Some(block),
                 Some(position),
                 "original SimState write range overflows i64",
@@ -156,15 +238,195 @@ fn affected_bytes(
     Ok(bytes.into_iter().collect())
 }
 
-pub(super) fn verify(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), AllocationIrError> {
+/// Verify the allocator-owned packed-state stores and reloads against final
+/// MIR. The temporary view records only ownership tags; it does not recreate
+/// the retired allocation-editing IR.
+pub(super) fn verify_materialized_state_homes(
+    func: &MFunction,
+    cfg: &NormalizedCfg,
+    stores: &[MaterializedStateStore],
+    reloads: &[MaterializedStateReload],
+) -> Result<(), MaterializedStateHomeError> {
+    if stores.is_empty() && reloads.is_empty() {
+        return Ok(());
+    }
+
+    let mut store_homes = BTreeMap::<(BlockId, usize), PackedStateHome>::new();
+    for store in stores {
+        if store_homes
+            .insert((store.block, store.write_ordinal), store.home)
+            .is_some()
+        {
+            return Err(MaterializedStateHomeError::new(
+                "STATE_HOME.MATERIALIZED_STORE_UNIQUE",
+                Some(store.block),
+                None,
+                Vec::new(),
+                format!(
+                    "more than one allocator-owned state store has write ordinal {}",
+                    store.write_ordinal
+                ),
+            ));
+        }
+    }
+    let mut reload_homes = BTreeMap::<VReg, PackedStateHome>::new();
+    for reload in reloads {
+        if reload_homes.insert(reload.reload, reload.home).is_some() {
+            return Err(MaterializedStateHomeError::new(
+                "STATE_HOME.MATERIALIZED_RELOAD_UNIQUE",
+                None,
+                None,
+                vec![reload.reload],
+                "more than one allocator-owned state reload has this destination",
+            ));
+        }
+    }
+
+    let mut found_stores = BTreeSet::<(BlockId, usize)>::new();
+    let mut found_reloads = BTreeSet::<VReg>::new();
+    let mut next_id = 0u32;
+    let mut blocks = Vec::with_capacity(func.blocks.len());
+    for block in &func.blocks {
+        let mut instructions = Vec::with_capacity(block.insts.len());
+        let mut write_ordinal = 0usize;
+        for (instruction, inst) in block.insts.iter().enumerate() {
+            let writes = memory_effect::writes(inst);
+            let affects_state = writes.unknown_memory()
+                == Some(UnknownMemory::Direct(BaseReg::SimState))
+                || writes.ranges().any(|range| range.base == BaseReg::SimState);
+            let mut operation = None;
+            if affects_state {
+                let identity = (block.id, write_ordinal);
+                if let Some(&home) = store_homes.get(&identity) {
+                    if !matches!(
+                        inst,
+                        MInst::Store {
+                            base: BaseReg::SimState,
+                            offset,
+                            size,
+                            ..
+                        } if *offset == home.offset && *size == home.size
+                    ) {
+                        return Err(MaterializedStateHomeError::new(
+                            "STATE_HOME.MATERIALIZED_STORE_SHAPE",
+                            Some(block.id),
+                            Some(instruction),
+                            Vec::new(),
+                            format!("recorded state store does not materialize {home:?}"),
+                        ));
+                    }
+                    found_stores.insert(identity);
+                    operation = Some(SyntheticOperation::StateStore { home });
+                }
+                write_ordinal = write_ordinal.checked_add(1).ok_or_else(|| {
+                    MaterializedStateHomeError::new(
+                        "STATE_HOME.MATERIALIZED_STORE_RANGE",
+                        Some(block.id),
+                        Some(instruction),
+                        Vec::new(),
+                        "per-block SimState write ordinal exceeds usize",
+                    )
+                })?;
+            }
+            if let Some(definition) = inst.def()
+                && let Some(&home) = reload_homes.get(&definition)
+            {
+                if operation.is_some() || !found_reloads.insert(definition) {
+                    return Err(MaterializedStateHomeError::new(
+                        "STATE_HOME.MATERIALIZED_RELOAD_UNIQUE",
+                        Some(block.id),
+                        Some(instruction),
+                        vec![definition],
+                        "materialized state reload does not have one unique MIR definition",
+                    ));
+                }
+                if !matches!(
+                    inst,
+                    MInst::Load {
+                        dst,
+                        base: BaseReg::SimState,
+                        offset,
+                        size,
+                    } if *dst == definition && *offset == home.offset && *size == home.size
+                ) {
+                    return Err(MaterializedStateHomeError::new(
+                        "STATE_HOME.MATERIALIZED_RELOAD_SHAPE",
+                        Some(block.id),
+                        Some(instruction),
+                        vec![definition],
+                        format!("recorded state reload does not materialize {home:?}"),
+                    ));
+                }
+                operation = Some(SyntheticOperation::StateReload { home });
+            }
+
+            let (origin, original) = if let Some(operation) = operation {
+                let id = SyntheticInstructionId(next_id);
+                next_id = next_id.checked_add(1).ok_or_else(|| {
+                    MaterializedStateHomeError::new(
+                        "STATE_HOME.MATERIALIZED_ID_RANGE",
+                        Some(block.id),
+                        Some(instruction),
+                        Vec::new(),
+                        "materialized state-operation identity exceeds u32",
+                    )
+                })?;
+                (
+                    StateHomeInstructionOrigin::Synthetic { id, operation },
+                    None,
+                )
+            } else {
+                (StateHomeInstructionOrigin::Original, Some(inst.clone()))
+            };
+            instructions.push(StateHomeInstruction { origin, original });
+        }
+        blocks.push(StateHomeBlock {
+            id: block.id,
+            instructions,
+        });
+    }
+
+    if found_stores.len() != store_homes.len() {
+        let (&(block, ordinal), _) = store_homes
+            .iter()
+            .find(|(identity, _)| !found_stores.contains(identity))
+            .expect("different set lengths imply a missing store");
+        return Err(MaterializedStateHomeError::new(
+            "STATE_HOME.MATERIALIZED_STORE_IDENTITY",
+            Some(block),
+            None,
+            Vec::new(),
+            format!("final MIR has no SimState write ordinal {ordinal}"),
+        ));
+    }
+    if found_reloads.len() != reload_homes.len() {
+        let (&reload, _) = reload_homes
+            .iter()
+            .find(|(reload, _)| !found_reloads.contains(reload))
+            .expect("different set lengths imply a missing reload");
+        return Err(MaterializedStateHomeError::new(
+            "STATE_HOME.MATERIALIZED_RELOAD_IDENTITY",
+            None,
+            None,
+            vec![reload],
+            "materialized state reload destination has no final MIR definition",
+        ));
+    }
+
+    verify_program(&StateHomeProgram { blocks }, cfg)
+}
+
+fn verify_program(
+    program: &StateHomeProgram,
+    cfg: &NormalizedCfg,
+) -> Result<(), MaterializedStateHomeError> {
     validate_cfg(program, cfg)?;
 
     let mut homes = HashMap::<StateHomeId, PackedStateHome>::new();
     let mut required = BTreeSet::<StateHomeId>::new();
     for block in &program.blocks {
         for instruction in &block.instructions {
-            let AllocationInstructionOrigin::Synthetic { operation, .. } = instruction.origin
-            else {
+            let StateHomeInstructionOrigin::Synthetic { operation, .. } = instruction.origin else {
                 continue;
             };
             match operation {
@@ -175,7 +437,6 @@ pub(super) fn verify(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), 
                     register_home(&mut homes, home, block.id)?;
                     required.insert(home.id);
                 }
-                _ => {}
             }
         }
     }
@@ -197,7 +458,7 @@ pub(super) fn verify(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), 
                     && previous != home.id
                 {
                     return Err(error(
-                        "ALLOCATION_IR.STATE_HOME_ENTRY_ALIAS",
+                        "STATE_HOME.HOME_ENTRY_ALIAS",
                         None,
                         None,
                         format!(
@@ -221,13 +482,13 @@ pub(super) fn verify(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), 
     for (block, row) in program.blocks.iter().enumerate() {
         for (position, instruction) in row.instructions.iter().enumerate() {
             match instruction.origin {
-                AllocationInstructionOrigin::Original { .. } => {
+                StateHomeInstructionOrigin::Original => {
                     let original = instruction.original.as_ref().ok_or_else(|| {
                         error(
-                            "ALLOCATION_IR.STATE_HOME_ORIGINAL",
+                            "STATE_HOME.HOME_ORIGINAL",
                             Some(row.id),
                             Some(position),
-                            "original allocation instruction has no MIR snapshot",
+                            "original state-home instruction has no MIR snapshot",
                         )
                     })?;
                     let bytes = affected_bytes(original, &byte_index, row.id, position)?;
@@ -240,7 +501,7 @@ pub(super) fn verify(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), 
                         });
                     }
                 }
-                AllocationInstructionOrigin::Synthetic {
+                StateHomeInstructionOrigin::Synthetic {
                     operation: SyntheticOperation::StateStore { home },
                     ..
                 } => {
@@ -260,7 +521,7 @@ pub(super) fn verify(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), 
                         });
                     }
                 }
-                AllocationInstructionOrigin::Synthetic {
+                StateHomeInstructionOrigin::Synthetic {
                     id,
                     operation: SyntheticOperation::StateReload { home },
                     ..
@@ -273,7 +534,7 @@ pub(super) fn verify(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), 
                         .collect::<Option<Vec<_>>>()
                         .ok_or_else(|| {
                             error(
-                                "ALLOCATION_IR.STATE_HOME_COVERAGE",
+                                "STATE_HOME.HOME_COVERAGE",
                                 Some(row.id),
                                 Some(position),
                                 "state reload is not fully represented by tracked bytes",
@@ -288,7 +549,6 @@ pub(super) fn verify(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), 
                         reaching: Vec::new(),
                     });
                 }
-                AllocationInstructionOrigin::Synthetic { .. } => {}
             }
         }
     }
@@ -401,7 +661,7 @@ pub(super) fn verify(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), 
     for block in 1..program.blocks.len() {
         let parent = cfg.idom[block].ok_or_else(|| {
             error(
-                "ALLOCATION_IR.STATE_HOME_DOMINANCE",
+                "STATE_HOME.HOME_DOMINANCE",
                 Some(program.blocks[block].id),
                 None,
                 "reachable non-entry block has no immediate dominator",
@@ -409,7 +669,7 @@ pub(super) fn verify(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), 
         })?;
         if parent >= program.blocks.len() {
             return Err(error(
-                "ALLOCATION_IR.STATE_HOME_DOMINANCE",
+                "STATE_HOME.HOME_DOMINANCE",
                 Some(program.blocks[block].id),
                 None,
                 "state-home immediate dominator is outside the CFG",
@@ -483,7 +743,7 @@ pub(super) fn verify(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), 
                     .expect("every tracked byte has an edge version");
                 let MemoryVersionKind::Phi { incoming, .. } = &mut versions[phi.0].kind else {
                     return Err(error(
-                        "ALLOCATION_IR.STATE_HOME_PHI",
+                        "STATE_HOME.HOME_PHI",
                         Some(program.blocks[successor].id),
                         None,
                         "state-home phi index names a non-phi version",
@@ -502,7 +762,7 @@ pub(super) fn verify(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), 
     }
     if visited != program.blocks.len() {
         return Err(error(
-            "ALLOCATION_IR.STATE_HOME_DOMINANCE",
+            "STATE_HOME.HOME_DOMINANCE",
             None,
             None,
             "state-home dominator traversal did not reach every block",
@@ -518,7 +778,7 @@ pub(super) fn verify(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), 
                     .ne(cfg.predecessors[*block].iter().copied())
             {
                 return Err(error(
-                    "ALLOCATION_IR.STATE_HOME_PHI",
+                    "STATE_HOME.HOME_PHI",
                     Some(program.blocks[*block].id),
                     None,
                     "state-home phi does not cover every predecessor exactly once",
@@ -536,7 +796,7 @@ pub(super) fn verify(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), 
                 .any(|version| owners.get(version.0).copied().flatten() != Some(query.home.id))
         {
             return Err(error(
-                "ALLOCATION_IR.STATE_RELOAD_ALL_PATH_HOME",
+                "STATE_HOME.RELOAD_ALL_PATH_HOME",
                 Some(query.block),
                 Some(query.position),
                 format!(
@@ -551,7 +811,7 @@ pub(super) fn verify(program: &AllocationIr, cfg: &NormalizedCfg) -> Result<(), 
 
 fn resolve_owners(
     versions: &[MemoryVersion],
-) -> Result<Vec<Option<StateHomeId>>, AllocationIrError> {
+) -> Result<Vec<Option<StateHomeId>>, MaterializedStateHomeError> {
     let count = versions.len();
     let mut is_phi = vec![false; count];
     let mut forward = vec![Vec::<usize>::new(); count];
@@ -564,7 +824,7 @@ fn resolve_owners(
         for &(_, input) in incoming {
             if versions[input.0].byte != version.byte {
                 return Err(error(
-                    "ALLOCATION_IR.STATE_HOME_PHI",
+                    "STATE_HOME.HOME_PHI",
                     None,
                     None,
                     "state MemorySSA phi crosses physical bytes",
@@ -669,7 +929,7 @@ fn resolve_owners(
                 }
                 1 => {
                     return Err(error(
-                        "ALLOCATION_IR.STATE_HOME_PHI_SCC",
+                        "STATE_HOME.HOME_PHI_SCC",
                         None,
                         None,
                         "condensed state MemorySSA phi graph is cyclic",
@@ -701,7 +961,7 @@ fn resolve_owners(
                 let owner = if let Some(input_component) = component_for[input.0] {
                     component_owners[input_component].ok_or_else(|| {
                         error(
-                            "ALLOCATION_IR.STATE_HOME_PHI_ORDER",
+                            "STATE_HOME.HOME_PHI_ORDER",
                             None,
                             None,
                             "state MemorySSA dependency was not resolved first",
@@ -719,7 +979,7 @@ fn resolve_owners(
         }
         let owner = external.ok_or_else(|| {
             error(
-                "ALLOCATION_IR.STATE_HOME_PHI_SEED",
+                "STATE_HOME.HOME_PHI_SEED",
                 None,
                 None,
                 "state MemorySSA phi SCC has no external version",
@@ -736,92 +996,24 @@ fn resolve_owners(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native::mir::{MBlock, SpillDesc, VRegAllocator};
-    use crate::native::regalloc::{cfg, home_graph, live_interval};
+    use crate::native::mir::{MBlock, OpSize, SpillDesc, VRegAllocator};
 
-    fn function(value_count: u32, blocks: Vec<MBlock>) -> MFunction {
+    fn home() -> PackedStateHome {
+        PackedStateHome {
+            id: StateHomeId(0),
+            offset: 32,
+            size: OpSize::S64,
+            live_on_entry: false,
+        }
+    }
+
+    fn diamond(store_right: bool) -> (MFunction, NormalizedCfg) {
         let mut values = VRegAllocator::new();
-        for _ in 0..value_count {
+        for _ in 0..5 {
             values.alloc();
         }
-        let mut function =
-            MFunction::new(values, vec![SpillDesc::transient(); value_count as usize]);
-        function.blocks = blocks;
-        function
-    }
+        let mut function = MFunction::new(values, vec![SpillDesc::transient(); 5]);
 
-    fn home(id: u32, offset: i32, size: OpSize, live_on_entry: bool) -> PackedStateHome {
-        PackedStateHome {
-            id: StateHomeId(id),
-            offset,
-            size,
-            live_on_entry,
-        }
-    }
-
-    fn straight_line() -> (MFunction, NormalizedCfg, LiveIntervals) {
-        let mut block = MBlock::new(BlockId(0));
-        block.push(MInst::LoadImm {
-            dst: VReg(0),
-            value: 7,
-        });
-        block.push(MInst::Mov {
-            dst: VReg(1),
-            src: VReg(0),
-        });
-        block.push(MInst::Return);
-        let mut function = function(2, vec![block]);
-        let cfg = cfg::normalize(&mut function).unwrap();
-        let intervals = live_interval::analyze(&function, &cfg).unwrap();
-        (function, cfg, intervals)
-    }
-
-    fn insert_store(
-        ir: &mut AllocationIr,
-        intervals: &LiveIntervals,
-        value: VReg,
-        home: PackedStateHome,
-    ) {
-        ir.insert_after_definition(
-            intervals.intervals[value.0 as usize]
-                .as_ref()
-                .unwrap()
-                .definition,
-            SyntheticOperation::StateStore { home },
-            Uses::one(value),
-            false,
-        )
-        .unwrap();
-    }
-
-    fn insert_reload_before_first_use(
-        ir: &mut AllocationIr,
-        intervals: &LiveIntervals,
-        anchor: VReg,
-        home: PackedStateHome,
-        rewrite: bool,
-    ) -> VReg {
-        let use_site = intervals.intervals[anchor.0 as usize]
-            .as_ref()
-            .unwrap()
-            .uses[0];
-        let reload = ir
-            .insert_before_use(
-                use_site,
-                SyntheticOperation::StateReload { home },
-                Uses::none(),
-                true,
-            )
-            .unwrap()
-            .definition
-            .unwrap();
-        if rewrite {
-            ir.rewrite_use(use_site, anchor, reload).unwrap();
-        }
-        reload
-    }
-
-    fn diamond() -> (MFunction, NormalizedCfg, LiveIntervals) {
         let mut entry = MBlock::new(BlockId(0));
         entry.push(MInst::LoadImm {
             dst: VReg(0),
@@ -832,213 +1024,96 @@ mod tests {
             true_bb: BlockId(1),
             false_bb: BlockId(2),
         });
+
         let mut left = MBlock::new(BlockId(1));
         left.push(MInst::LoadImm {
             dst: VReg(1),
             value: 11,
         });
+        left.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 32,
+            src: VReg(1),
+            size: OpSize::S64,
+        });
         left.push(MInst::Jump { target: BlockId(3) });
+
         let mut right = MBlock::new(BlockId(2));
         right.push(MInst::LoadImm {
             dst: VReg(2),
             value: 13,
         });
+        if store_right {
+            right.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 32,
+                src: VReg(2),
+                size: OpSize::S64,
+            });
+        }
         right.push(MInst::Jump { target: BlockId(3) });
+
         let mut merge = MBlock::new(BlockId(3));
-        merge.phis.push(PhiNode {
+        merge.push(MInst::Load {
             dst: VReg(3),
-            sources: vec![(BlockId(1), VReg(1)), (BlockId(2), VReg(2))],
+            base: BaseReg::SimState,
+            offset: 32,
+            size: OpSize::S64,
         });
         merge.push(MInst::Mov {
             dst: VReg(4),
             src: VReg(3),
         });
         merge.push(MInst::Return);
-        let mut function = function(5, vec![entry, left, right, merge]);
-        let cfg = cfg::normalize(&mut function).unwrap();
-        let intervals = live_interval::analyze(&function, &cfg).unwrap();
-        (function, cfg, intervals)
+        function.blocks = vec![entry, left, right, merge];
+        let cfg = super::super::cfg::normalize(&mut function).unwrap();
+        (function, cfg)
     }
 
     #[test]
-    fn state_home_store_reload_materializes_one_full_word_boundary() {
-        let (function, cfg, intervals) = straight_line();
-        let packed = home(0, 24, OpSize::S64, false);
-        let mut ir = AllocationIr::from_mir(&function).unwrap();
-        insert_store(&mut ir, &intervals, VReg(0), packed);
-        let reload = insert_reload_before_first_use(&mut ir, &intervals, VReg(0), packed, true);
-
-        ir.verify_state_homes(&cfg).unwrap();
-        let allocation_intervals = ir.analyze(&cfg).unwrap();
-        assert_eq!(
-            allocation_intervals.intervals[reload.0 as usize]
-                .as_ref()
-                .unwrap()
-                .uses
-                .len(),
-            1
-        );
-
-        let graph = home_graph::build(&function, &cfg).unwrap();
-        let lowered = ir.materialize(&function, &graph, &[]).unwrap();
-        assert!(lowered.blocks[0].insts.iter().any(|instruction| matches!(
-            instruction,
-            MInst::Store {
-                base: BaseReg::SimState,
-                offset: 24,
-                src: VReg(0),
-                size: OpSize::S64,
-            }
-        )));
-        assert!(lowered.blocks[0].insts.iter().any(|instruction| matches!(
-            instruction,
-            MInst::Load {
-                dst,
-                base: BaseReg::SimState,
-                offset: 24,
-                size: OpSize::S64,
-            } if *dst == reload
-        )));
+    fn stores_on_every_arm_reach_the_join_reload() {
+        let (function, cfg) = diamond(true);
+        verify_materialized_state_homes(
+            &function,
+            &cfg,
+            &[
+                MaterializedStateStore {
+                    block: BlockId(1),
+                    write_ordinal: 0,
+                    home: home(),
+                },
+                MaterializedStateStore {
+                    block: BlockId(2),
+                    write_ordinal: 0,
+                    home: home(),
+                },
+            ],
+            &[MaterializedStateReload {
+                reload: VReg(3),
+                home: home(),
+            }],
+        )
+        .unwrap();
     }
 
     #[test]
-    fn same_state_home_stored_on_every_arm_reaches_join_reload() {
-        let (function, cfg, intervals) = diamond();
-        let packed = home(0, 32, OpSize::S64, false);
-        let mut ir = AllocationIr::from_mir(&function).unwrap();
-        insert_store(&mut ir, &intervals, VReg(1), packed);
-        insert_store(&mut ir, &intervals, VReg(2), packed);
-        insert_reload_before_first_use(&mut ir, &intervals, VReg(3), packed, true);
-
-        ir.analyze(&cfg).unwrap();
-        ir.verify_state_homes(&cfg).unwrap();
-    }
-
-    #[test]
-    fn one_arm_state_store_does_not_reach_join_reload() {
-        let (function, cfg, intervals) = diamond();
-        let packed = home(0, 32, OpSize::S64, false);
-        let mut ir = AllocationIr::from_mir(&function).unwrap();
-        insert_store(&mut ir, &intervals, VReg(1), packed);
-        insert_reload_before_first_use(&mut ir, &intervals, VReg(3), packed, true);
-
-        let error = ir.verify_state_homes(&cfg).unwrap_err();
-        assert_eq!(error.rule, "ALLOCATION_IR.STATE_RELOAD_ALL_PATH_HOME");
+    fn one_arm_store_cannot_reach_the_join_reload() {
+        let (function, cfg) = diamond(false);
+        let error = verify_materialized_state_homes(
+            &function,
+            &cfg,
+            &[MaterializedStateStore {
+                block: BlockId(1),
+                write_ordinal: 0,
+                home: home(),
+            }],
+            &[MaterializedStateReload {
+                reload: VReg(3),
+                home: home(),
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(error.rule, "STATE_HOME.RELOAD_ALL_PATH_HOME");
         assert_eq!(error.block, Some(BlockId(3)));
-    }
-
-    fn state_store_overlap(second_offset: i32) -> Result<(), AllocationIrError> {
-        let mut block = MBlock::new(BlockId(0));
-        block.push(MInst::LoadImm {
-            dst: VReg(0),
-            value: 7,
-        });
-        block.push(MInst::LoadImm {
-            dst: VReg(1),
-            value: 9,
-        });
-        block.push(MInst::Mov {
-            dst: VReg(2),
-            src: VReg(0),
-        });
-        block.push(MInst::Return);
-        let mut function = function(3, vec![block]);
-        let cfg = cfg::normalize(&mut function).unwrap();
-        let intervals = live_interval::analyze(&function, &cfg).unwrap();
-        let first = home(0, 32, OpSize::S64, false);
-        let second = home(1, second_offset, OpSize::S32, false);
-        let mut ir = AllocationIr::from_mir(&function).unwrap();
-        insert_store(&mut ir, &intervals, VReg(0), first);
-        insert_store(&mut ir, &intervals, VReg(1), second);
-        insert_reload_before_first_use(&mut ir, &intervals, VReg(0), first, true);
-        ir.verify_state_homes(&cfg)
-    }
-
-    #[test]
-    fn overlapping_state_home_invalidates_previous_home() {
-        let error = state_store_overlap(36).unwrap_err();
-        assert_eq!(error.rule, "ALLOCATION_IR.STATE_RELOAD_ALL_PATH_HOME");
-    }
-
-    #[test]
-    fn nonoverlapping_state_home_preserves_previous_home() {
-        state_store_overlap(40).unwrap();
-    }
-
-    fn original_store_overlap(store_offset: i32) -> Result<(), AllocationIrError> {
-        let mut block = MBlock::new(BlockId(0));
-        block.push(MInst::LoadImm {
-            dst: VReg(0),
-            value: 7,
-        });
-        block.push(MInst::LoadImm {
-            dst: VReg(1),
-            value: 9,
-        });
-        block.push(MInst::Store {
-            base: BaseReg::SimState,
-            offset: store_offset,
-            src: VReg(1),
-            size: OpSize::S32,
-        });
-        block.push(MInst::Mov {
-            dst: VReg(2),
-            src: VReg(0),
-        });
-        block.push(MInst::Return);
-        let mut function = function(3, vec![block]);
-        let cfg = cfg::normalize(&mut function).unwrap();
-        let intervals = live_interval::analyze(&function, &cfg).unwrap();
-        let packed = home(0, 32, OpSize::S64, false);
-        let mut ir = AllocationIr::from_mir(&function).unwrap();
-        insert_store(&mut ir, &intervals, VReg(0), packed);
-        insert_reload_before_first_use(&mut ir, &intervals, VReg(0), packed, true);
-        ir.verify_state_homes(&cfg)
-    }
-
-    #[test]
-    fn original_mir_store_clobbers_only_intersecting_state_bytes() {
-        let error = original_store_overlap(36).unwrap_err();
-        assert_eq!(error.rule, "ALLOCATION_IR.STATE_RELOAD_ALL_PATH_HOME");
-        original_store_overlap(40).unwrap();
-    }
-
-    #[test]
-    fn live_on_entry_home_survives_a_loop_carried_memory_phi() {
-        let mut entry = MBlock::new(BlockId(0));
-        entry.push(MInst::LoadImm {
-            dst: VReg(0),
-            value: 1,
-        });
-        entry.push(MInst::Jump { target: BlockId(1) });
-        let mut header = MBlock::new(BlockId(1));
-        header.push(MInst::Branch {
-            cond: VReg(0),
-            true_bb: BlockId(1),
-            false_bb: BlockId(2),
-        });
-        let mut exit = MBlock::new(BlockId(2));
-        exit.push(MInst::Return);
-        let mut function = function(1, vec![entry, header, exit]);
-        let cfg = cfg::normalize(&mut function).unwrap();
-        let intervals = live_interval::analyze(&function, &cfg).unwrap();
-        let packed = home(0, 48, OpSize::S64, true);
-        let mut ir = AllocationIr::from_mir(&function).unwrap();
-        insert_reload_before_first_use(&mut ir, &intervals, VReg(0), packed, true);
-
-        ir.verify_state_homes(&cfg).unwrap();
-    }
-
-    #[test]
-    fn one_state_home_id_cannot_name_two_physical_words() {
-        let (function, cfg, intervals) = straight_line();
-        let stored = home(0, 24, OpSize::S64, false);
-        let reloaded = home(0, 32, OpSize::S64, false);
-        let mut ir = AllocationIr::from_mir(&function).unwrap();
-        insert_store(&mut ir, &intervals, VReg(0), stored);
-        insert_reload_before_first_use(&mut ir, &intervals, VReg(0), reloaded, true);
-
-        let error = ir.verify_state_homes(&cfg).unwrap_err();
-        assert_eq!(error.rule, "ALLOCATION_IR.STATE_HOME_IDENTITY");
     }
 }

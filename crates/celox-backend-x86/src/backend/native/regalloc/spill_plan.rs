@@ -232,8 +232,8 @@ struct EdgeTranslation {
 ///
 /// Building the two directions in one pass over phi operands avoids rescanning
 /// every phi (and its predecessor list) for every member of W/S. A destination
-/// has exactly one source on an edge. A legal non-CSSA source may feed several
-/// phi destinations, so the forward relation is one-to-many.
+/// has exactly one source on an edge. One source may feed several phi
+/// destinations, so the forward relation is one-to-many.
 #[derive(Debug)]
 struct EdgeTranslations {
     by_edge: HashMap<(usize, usize), EdgeTranslation>,
@@ -3627,7 +3627,7 @@ mod tests {
     }
 
     #[test]
-    fn reused_non_cssa_edge_source_maps_to_every_destination() {
+    fn reused_edge_source_maps_to_every_destination() {
         let mut vregs = VRegAllocator::new();
         let source = vregs.alloc();
         let first = vregs.alloc();

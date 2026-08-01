@@ -19,28 +19,6 @@ fn invalid_input_is_a_structured_error_not_a_panic() {
 }
 
 #[test]
-fn cssa_error_mapping_preserves_structured_context() {
-    let source = VReg(7);
-    let error = super::cssa::CssaError {
-        rule: "CSSA.TEST_RULE",
-        block: Some(BlockId(3)),
-        instruction: Some(4),
-        class: None,
-        values: vec![source],
-        message: "test CSSA failure".into(),
-    };
-
-    let mapped = super::cssa_error("CSSA normalization", error);
-
-    assert_eq!(mapped.phase, "CSSA normalization");
-    assert_eq!(mapped.rule, "CSSA.TEST_RULE");
-    assert_eq!(mapped.block, Some(BlockId(3)));
-    assert_eq!(mapped.instruction, Some(4));
-    assert_eq!(mapped.values, vec![source]);
-    assert_eq!(mapped.message, "test CSSA failure");
-}
-
-#[test]
 fn allocation_boundary_removes_single_use_compare_results() {
     let mut vregs = VRegAllocator::new();
     let lhs = vregs.alloc();

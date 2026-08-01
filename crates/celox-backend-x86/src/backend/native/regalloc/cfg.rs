@@ -28,9 +28,9 @@ pub(super) struct EdgeInsertionPoint {
 
 /// Return the concrete point that executes on exactly one normalized CFG edge.
 /// A single-successor predecessor uses its terminator; a branch edge uses the
-/// entry of its dedicated single-predecessor successor block.  CSSA may place
-/// phi-source copies in that successor, so its edge identity must not depend on
-/// the block remaining syntactically Jump-only.
+/// entry of its dedicated single-predecessor successor block. Edge-local
+/// transfers may be placed in that successor, so its edge identity must not
+/// depend on the block remaining syntactically Jump-only.
 pub(super) fn edge_insertion_point(
     func: &MFunction,
     cfg: &NormalizedCfg,

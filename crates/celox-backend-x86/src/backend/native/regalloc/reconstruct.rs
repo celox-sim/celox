@@ -7,8 +7,8 @@ use crate::native::mir::{
     BaseReg, BlockId, MBlock, MFunction, MInst, OpSize, PhiNode, SpillDesc, SpillKind, VReg,
 };
 
-use super::allocation_ir::{MaterializedStateReload, MaterializedStateStore};
 use super::cfg::NormalizedCfg;
+use super::materialized_state_home::{MaterializedStateReload, MaterializedStateStore};
 use super::next_use::NextUseAnalysis;
 use super::reload::{
     ExpectedMaterializedReload, MemoryPhiFactoring, PointUse, PureStep, ReloadRecipeAnalysis,

@@ -882,7 +882,7 @@ mod tests {
                 }
             )
         }));
-        super::super::allocation_ir::verify_materialized_state_homes(
+        super::super::materialized_state_home::verify_materialized_state_homes(
             &func,
             &cfg,
             &result.state_stores,

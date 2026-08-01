@@ -77,15 +77,6 @@ pub(super) struct StateRecipe {
     observed_bits: StateBitRange,
 }
 
-impl StateRecipe {
-    /// Version-independent physical identity used to group one state home
-    /// across uses. Exact MemorySSA snapshots remain in the use-specific
-    /// recipe and are never discarded for validation.
-    pub(super) fn home_shape_key(&self) -> (StateLoad, i64, i64) {
-        (self.load, self.observed_bits.start, self.observed_bits.end)
-    }
-}
-
 /// One independently versioned physical fragment of a 32/64-bit machine
 /// value.  `value_bit_offset` describes assembly of that machine value; it is
 /// not an arbitrary-width VReg type.
@@ -650,21 +641,6 @@ impl ReloadRecipeAnalysis {
         self.point_recipes.get(&point)
     }
 
-    pub(super) fn resolved_recipe_on_edge(&self, edge: EdgeUse) -> Option<&ResolvedRecipe> {
-        self.edge_recipes.get(&edge)
-    }
-
-    pub(super) fn fragment_recipe_at_point(
-        &self,
-        point: PointUse,
-    ) -> Option<&CompositeStateRecipe> {
-        self.point_fragment_recipes.get(&point)
-    }
-
-    pub(super) fn fragment_recipe_on_edge(&self, edge: EdgeUse) -> Option<&CompositeStateRecipe> {
-        self.edge_fragment_recipes.get(&edge)
-    }
-
     #[cfg(test)]
     pub fn point_recipe_uses_store_home(&self, point: PointUse) -> bool {
         let Some(selected) = self.point_recipes.get(&point) else {
@@ -1175,22 +1151,6 @@ pub(super) fn analyze_with_queries(
     let analysis = analyze_unverified_with_queries(func, cfg, requested_points, false, false)?;
     analysis.verify(func, cfg)?;
     Ok(analysis)
-}
-
-/// Build every ordinary and fragment-backed recipe needed by the replacement
-/// live-range allocator.  The production W/S planner deliberately does not
-/// consume this result; home choice belongs to the bundle allocator.
-pub(super) fn analyze_for_home_graph(
-    func: &MFunction,
-    cfg: &NormalizedCfg,
-) -> Result<ReloadRecipeAnalysis, ReloadRecipeError> {
-    // This builder already checks MemorySSA phi equations and every selected
-    // use against the rename state. Rebuilding the complete all-use analysis
-    // here used to be nested again by HomeGraph verification, multiplying
-    // both memory and work for each concurrently compiled native function.
-    // This diagnostic cannot authorize MIR emission; production integration
-    // must independently re-derive every selected home after reconstruction.
-    analyze_unverified_with_queries(func, cfg, &BTreeSet::new(), true, true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2324,7 +2284,8 @@ fn rename_memory_ssa(
         let block_id = func.blocks[block].id;
         // A register phi that merges values already committed to the same
         // exact SimState expression has the MemorySSA phi for that slot as a
-        // home. Identity copies introduced by CSSA do not change the shape.
+        // home. Identity copies introduced during reconstruction do not
+        // change the shape.
         // Derive this only after every forward predecessor edge has supplied
         // an independently validated recipe.  Missing backedge facts keep a
         // loop phi on its stack fallback; they are never guessed.

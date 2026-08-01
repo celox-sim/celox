@@ -1243,7 +1243,7 @@ mod tests {
     };
 
     #[test]
-    fn pre_cssa_pressure_order_finishes_one_recurrence_before_starting_another() {
+    fn pressure_order_finishes_one_recurrence_before_starting_another() {
         let first_seed = VReg(0);
         let second_seed = VReg(1);
         let first_middle = VReg(2);

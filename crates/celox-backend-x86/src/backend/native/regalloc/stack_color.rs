@@ -11,7 +11,6 @@ use std::fmt;
 
 use crate::native::mir::{BlockId, MFunction, SpillKind, Uses, VReg};
 
-use super::allocation_ir::StackHomeId;
 use super::cfg::NormalizedCfg;
 use super::interval_union::{AllocationBundleId, DynamicIntervalMatrix, IntervalUnionError};
 use super::live_interval::{
@@ -24,7 +23,7 @@ pub(super) struct StackColorError {
     pub rule: &'static str,
     pub block: Option<BlockId>,
     pub instruction: Option<usize>,
-    pub homes: Vec<StackHomeId>,
+    pub homes: Vec<SpillHome>,
     pub values: Vec<VReg>,
     pub message: String,
 }
@@ -34,7 +33,7 @@ impl StackColorError {
         rule: &'static str,
         block: Option<BlockId>,
         instruction: Option<usize>,
-        homes: impl IntoIterator<Item = StackHomeId>,
+        homes: impl IntoIterator<Item = SpillHome>,
         message: impl Into<String>,
     ) -> Self {
         Self {
@@ -200,7 +199,7 @@ fn planned_live_error(error: LiveIntervalError, version_homes: &[SpillHome]) -> 
         .values
         .iter()
         .filter_map(|value| version_homes.get(value.0 as usize))
-        .map(|home| StackHomeId(home.0))
+        .copied()
         .collect();
     StackColorError {
         rule: error.rule,
@@ -217,7 +216,7 @@ fn planned_union_error(error: IntervalUnionError, bundle_homes: &[SpillHome]) ->
         .bundles
         .iter()
         .filter_map(|bundle| bundle_homes.get(bundle.0 as usize))
-        .map(|home| StackHomeId(home.0))
+        .copied()
         .collect();
     StackColorError {
         rule: error.rule,
@@ -317,7 +316,7 @@ fn collect_planned_stack_events(
                 "STACK_COLOR.PLANNED_STORE_BLOCK",
                 None,
                 Some(spill.instruction),
-                [StackHomeId(spill.home.0)],
+                [spill.home],
                 "materialized spill references a block outside the function",
             ));
         };
@@ -326,7 +325,7 @@ fn collect_planned_stack_events(
                 "STACK_COLOR.PLANNED_STORE_POINT",
                 Some(block.id),
                 Some(spill.instruction),
-                [StackHomeId(spill.home.0)],
+                [spill.home],
                 "materialized spill is not before an existing MIR instruction",
             ));
         }
@@ -344,7 +343,7 @@ fn collect_planned_stack_events(
                 "STACK_COLOR.PLANNED_EVENT_RANGE",
                 Some(block.id),
                 Some(spill.instruction),
-                [StackHomeId(spill.home.0)],
+                [spill.home],
                 "production stack-event count exceeds usize",
             )
         })?;
@@ -362,7 +361,7 @@ fn collect_planned_stack_events(
                 "STACK_COLOR.PLANNED_RELOAD_BLOCK",
                 Some(point.block),
                 Some(point.instruction),
-                [StackHomeId(home.0)],
+                [home],
                 "stack reload references a block outside the normalized CFG",
             ));
         };
@@ -371,7 +370,7 @@ fn collect_planned_stack_events(
                 "STACK_COLOR.PLANNED_RELOAD_POINT",
                 Some(point.block),
                 Some(point.instruction),
-                [StackHomeId(home.0)],
+                [home],
                 "stack reload is not before an existing MIR instruction",
             ));
         }
@@ -388,7 +387,7 @@ fn collect_planned_stack_events(
                 "STACK_COLOR.PLANNED_EVENT_RANGE",
                 Some(point.block),
                 Some(point.instruction),
-                [StackHomeId(home.0)],
+                [home],
                 "production stack-event count exceeds usize",
             )
         })?;
@@ -440,7 +439,7 @@ fn collect_planned_stack_events(
                     "STACK_COLOR.PLANNED_EVENT_RANGE",
                     Some(block.id),
                     Some(insertion.instruction),
-                    [StackHomeId(source_home.0)],
+                    [source_home],
                     "production stack-event count exceeds usize",
                 )
             })?;
@@ -468,7 +467,7 @@ fn allocate_planned_version(
             "STACK_COLOR.PLANNED_VERSION_RANGE",
             None,
             None,
-            [StackHomeId(home.0)],
+            [home],
             "production stack MemorySSA exceeds the VReg identifier domain",
         )
     })?);
@@ -637,7 +636,7 @@ fn build_planned_stack_program_from_events(
                             "STACK_COLOR.PLANNED_RELOAD_REACHING_STORE",
                             Some(func.blocks[block].id),
                             Some(event.instruction),
-                            [StackHomeId(event.home.0)],
+                            [event.home],
                             "stack reload has no reaching store in sparse MemorySSA",
                         ));
                     }
@@ -651,7 +650,7 @@ fn build_planned_stack_program_from_events(
                         "STACK_COLOR.PLANNED_PHI_REACHING_STORE",
                         Some(func.blocks[successor].id),
                         None,
-                        [StackHomeId(phi.home.0)],
+                        [phi.home],
                         format!(
                             "stack MemorySSA phi has no reaching store from {}",
                             func.blocks[block].id
@@ -686,7 +685,7 @@ fn build_planned_stack_program_from_events(
                     "STACK_COLOR.PLANNED_PHI_INPUTS",
                     Some(func.blocks[block].id),
                     None,
-                    [StackHomeId(phi.home.0)],
+                    [phi.home],
                     "stack MemorySSA phi does not cover every CFG predecessor exactly once",
                 ));
             }
@@ -760,7 +759,7 @@ fn merge_home_segments(
                 "STACK_COLOR.PLANNED_INTERVAL_COVERAGE",
                 None,
                 None,
-                [StackHomeId(home.0)],
+                [home],
                 format!("stack MemorySSA version v{version} has no exact live interval"),
             )
         })?;
@@ -769,7 +768,7 @@ fn merge_home_segments(
                 "STACK_COLOR.PLANNED_HOME_COVERAGE",
                 Some(interval.definition.block()),
                 None,
-                [StackHomeId(home.0)],
+                [home],
                 "stack MemorySSA version belongs to a non-materialized home",
             ));
         };
@@ -793,7 +792,7 @@ fn merge_home_segments(
                 "STACK_COLOR.PLANNED_HOME_RANGE",
                 None,
                 None,
-                [StackHomeId(home.0)],
+                [home],
                 "materialized stack home has no occupied range",
             ));
         }
@@ -896,7 +895,7 @@ fn color_planned_stack_program(
                         "STACK_COLOR.PLANNED_ASSIGNMENT_COVERAGE",
                         None,
                         None,
-                        [StackHomeId(bundle_homes[bundle].0)],
+                        [bundle_homes[bundle]],
                         "production stack home has no colored frame slot",
                     )
                 })
@@ -933,7 +932,7 @@ fn color_planned_stack_program(
                     "STACK_COLOR.PLANNED_ASSIGNMENT_COVERAGE",
                     None,
                     None,
-                    [StackHomeId(home.0)],
+                    [home],
                     "production stack home has no colored frame slot",
                 )
             })?;
@@ -945,7 +944,7 @@ fn color_planned_stack_program(
                     "STACK_COLOR.PLANNED_FRAME_RANGE",
                     None,
                     None,
-                    [StackHomeId(home.0)],
+                    [home],
                     "colored production stack offset exceeds MIR's signed domain",
                 )
             })?;

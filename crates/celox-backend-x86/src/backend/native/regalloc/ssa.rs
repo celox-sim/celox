@@ -226,7 +226,7 @@ pub(super) fn allocate(
     };
     let cfg = reconstructed_cfg.as_ref().unwrap_or(cfg);
 
-    super::allocation_ir::verify_materialized_state_homes(
+    super::materialized_state_home::verify_materialized_state_homes(
         func,
         cfg,
         &reconstruction.state_stores,

@@ -554,10 +554,54 @@ fn phi_preferences(func: &MFunction, cfg: &NormalizedCfg) -> HashMap<VReg, Vec<V
             }
         }
     }
-    for affinity in super::cssa::loop_backedge_snapshot_affinities(func, cfg) {
-        add_preference(&mut preferences, affinity.source, affinity.destination);
+    for (source, destination) in loop_backedge_snapshot_affinities(func, cfg) {
+        add_preference(&mut preferences, source, destination);
     }
     preferences
+}
+
+/// Recover the soft source/result affinity hidden behind a snapshot copy on a
+/// natural-loop backedge. Both values remain independently checked live
+/// intervals; this influences only color choice.
+fn loop_backedge_snapshot_affinities(func: &MFunction, cfg: &NormalizedCfg) -> Vec<(VReg, VReg)> {
+    let mut exact_copy_source = vec![None; func.vregs.count() as usize];
+    for block in &func.blocks {
+        for inst in &block.insts {
+            let MInst::Mov { dst, src } = inst else {
+                continue;
+            };
+            if let Some(slot) = exact_copy_source.get_mut(dst.0 as usize) {
+                *slot = Some(*src);
+            }
+        }
+    }
+
+    let mut affinities = Vec::new();
+    for (block_index, block) in func.blocks.iter().enumerate() {
+        let natural_loop = cfg
+            .loop_for_header
+            .get(&block_index)
+            .and_then(|&loop_index| cfg.loops.get(loop_index));
+        for phi in &block.phis {
+            for &(predecessor, snapshot) in &phi.sources {
+                let repeated = natural_loop.is_some_and(|natural_loop| {
+                    cfg.block_index
+                        .get(&predecessor)
+                        .is_some_and(|predecessor| natural_loop.blocks.contains(predecessor))
+                });
+                if repeated
+                    && let Some(source) = exact_copy_source
+                        .get(snapshot.0 as usize)
+                        .copied()
+                        .flatten()
+                    && source != phi.dst
+                {
+                    affinities.push((source, phi.dst));
+                }
+            }
+        }
+    }
+    affinities
 }
 
 fn add_preference(preferences: &mut HashMap<VReg, Vec<VReg>>, left: VReg, right: VReg) {
