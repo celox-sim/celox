@@ -40,6 +40,7 @@ crates/celox-napi/wasi-worker-browser.mjs
 # VitePress
 docs/.vitepress/dist
 docs/.vitepress/cache
+docs/.vitepress/.temp
 
 # TypeDoc generated API docs
 docs/api/

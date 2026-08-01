@@ -77,5 +77,5 @@ When storing to a `bit`-type (2-state) variable, the mask is forcibly reset to 0
 
 ## Test Coverage
 
-4-state related tests are located in `tests/four_state.rs`.
-For detailed coverage status and plans for additional tests, see [four_state_test_plan.md](../four_state_test_plan.md).
+Four-state behavior is covered by semantic tests in `crates/celox/tests` and by
+backend cross-checks that compare the native and Cranelift implementations.

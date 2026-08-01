@@ -20,8 +20,13 @@ export default defineConfig({
         nav: [
           { text: "ガイド", link: "/ja/guide/introduction" },
           { text: "API", link: "/api/" },
-          { text: "内部構造", link: "/internals/architecture" },
-          { text: "ベンチマーク", link: "/ja/benchmarks/" },
+          {
+            text: "プロジェクト",
+            items: [
+              { text: "アーキテクチャ", link: "/internals/architecture" },
+              { text: "ベンチマーク", link: "/ja/benchmarks/" },
+            ],
+          },
           {
             text: "Playground",
             link: "https://celox-sim.github.io/celox/playground/",
@@ -34,10 +39,15 @@ export default defineConfig({
         sidebar: {
           "/ja/guide/": [
             {
-              text: "ガイド",
+              text: "はじめに",
               items: [
                 { text: "概要", link: "/ja/guide/introduction" },
                 { text: "はじめる", link: "/ja/guide/getting-started" },
+              ],
+            },
+            {
+              text: "テストベンチ",
+              items: [
                 {
                   text: "テストの書き方",
                   link: "/ja/guide/writing-tests",
@@ -55,14 +65,6 @@ export default defineConfig({
                   link: "/ja/guide/hierarchy",
                 },
                 {
-                  text: "デッドストア除去",
-                  link: "/ja/guide/dead-store-elimination",
-                },
-                {
-                  text: "組み合わせループ",
-                  link: "/ja/guide/combinational-loops",
-                },
-                {
                   text: "VCD 波形出力",
                   link: "/ja/guide/vcd",
                 },
@@ -70,6 +72,11 @@ export default defineConfig({
                   text: "型変換",
                   link: "/ja/guide/type-conversion",
                 },
+              ],
+            },
+            {
+              text: "プロジェクト設定",
+              items: [
                 {
                   text: "Vite プラグイン",
                   link: "/ja/guide/vite-plugin",
@@ -77,6 +84,20 @@ export default defineConfig({
                 {
                   text: "celox.toml",
                   link: "/ja/guide/celox-toml",
+                },
+              ],
+            },
+            {
+              text: "高度な機能",
+              collapsed: true,
+              items: [
+                {
+                  text: "組み合わせループ",
+                  link: "/ja/guide/combinational-loops",
+                },
+                {
+                  text: "デッドストア除去",
+                  link: "/ja/guide/dead-store-elimination",
                 },
                 {
                   text: "最適化チューニング",
@@ -94,8 +115,13 @@ export default defineConfig({
     nav: [
       { text: "Guide", link: "/guide/introduction" },
       { text: "API", link: "/api/" },
-      { text: "Internals", link: "/internals/architecture" },
-      { text: "Benchmarks", link: "/benchmarks/" },
+      {
+        text: "Project",
+        items: [
+          { text: "Architecture", link: "/internals/architecture" },
+          { text: "Benchmarks", link: "/benchmarks/" },
+        ],
+      },
       {
         text: "Playground",
         link: "https://celox-sim.github.io/celox/playground/",
@@ -109,20 +135,36 @@ export default defineConfig({
     sidebar: {
       "/guide/": [
         {
-          text: "Guide",
+          text: "Start Here",
           items: [
             { text: "Introduction", link: "/guide/introduction" },
             { text: "Getting Started", link: "/guide/getting-started" },
+          ],
+        },
+        {
+          text: "Testbenches",
+          items: [
             { text: "Writing Tests", link: "/guide/writing-tests" },
             { text: "4-State Simulation", link: "/guide/four-state" },
             { text: "Parameter Overrides", link: "/guide/parameter-overrides" },
             { text: "Child Instance Access", link: "/guide/hierarchy" },
-            { text: "Dead Store Elimination", link: "/guide/dead-store-elimination" },
-            { text: "Combinational Loops", link: "/guide/combinational-loops" },
             { text: "VCD Waveform Output", link: "/guide/vcd" },
             { text: "Type Conversion", link: "/guide/type-conversion" },
+          ],
+        },
+        {
+          text: "Project Configuration",
+          items: [
             { text: "Vite Plugin", link: "/guide/vite-plugin" },
             { text: "celox.toml", link: "/guide/celox-toml" },
+          ],
+        },
+        {
+          text: "Advanced",
+          collapsed: true,
+          items: [
+            { text: "Combinational Loops", link: "/guide/combinational-loops" },
+            { text: "Dead Store Elimination", link: "/guide/dead-store-elimination" },
             { text: "Optimization Tuning", link: "/guide/optimization-tuning" },
           ],
         },
@@ -139,35 +181,20 @@ export default defineConfig({
           items: [
             { text: "Architecture", link: "/internals/architecture" },
             {
-              text: "Compiler Crate Architecture",
+              text: "Compiler Components",
               link: "/internals/compiler-crate-architecture",
             },
             { text: "IR Reference", link: "/internals/ir-reference" },
             { text: "Optimizations", link: "/internals/optimizations" },
-            { text: "JIT Roadmap", link: "/internals/jit-roadmap" },
-            {
-              text: "Native Throughput Plan",
-              link: "/internals/native-throughput-execution-plan",
-            },
-            {
-              text: "Native Register Allocation",
-              link: "/internals/native-register-allocation",
-            },
-            {
-              text: "Fused State SSA and Placement",
-              link: "/internals/fused-state-ssa-placement",
-            },
             { text: "4-State Simulation", link: "/internals/four-state" },
             {
               text: "Combinational Analysis",
               link: "/internals/combinational-analysis",
             },
             {
-              text: "Cascade Limitations",
+              text: "Runtime Semantics",
               link: "/internals/cascade-limitations",
             },
-            { text: "Status", link: "/internals/status" },
-            { text: "Triage", link: "/internals/triage" },
           ],
         },
       ],
