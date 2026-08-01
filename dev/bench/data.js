@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785606467654,
+  "lastUpdate": 1785611608174,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -146450,6 +146450,57 @@ window.BENCHMARK_DATA = {
             "name": "verilator/testbench_tick_lfsr_w32_x1000000",
             "value": 37341.897,
             "unit": "us"
+          }
+        ]
+      }
+    ],
+    "Heliodor Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+s@gmail.com",
+            "name": "tig",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5e35668f2065f64dd19e06f131ddcab1c229e016",
+          "message": "Merge pull request #385 from celox-sim/agent/extend-heliodor-gate-timeout\n\nfix(ci): extend Heliodor gate timeout",
+          "timestamp": "2026-08-01T18:29:57Z",
+          "tree_id": "b499a215c015839aa9031fe42ffa51c18398a7a2",
+          "url": "https://github.com/celox-sim/celox/commit/5e35668f2065f64dd19e06f131ddcab1c229e016"
+        },
+        "date": 1785611595027,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-jit/heliodor_linux_boot_execution",
+            "value": 87752.193849,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-total/heliodor_linux_boot_execution",
+            "value": 87760.042597,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl/heliodor_linux_boot_execution",
+            "value": 76231.295276,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-compile/heliodor_linux_boot_compilation",
+            "value": 101140.882376,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
+            "value": 94001.34711,
+            "unit": "ms"
           }
         ]
       }
