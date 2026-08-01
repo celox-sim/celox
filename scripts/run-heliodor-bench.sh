@@ -958,8 +958,8 @@ install_veryl() {
 
 list_tests() {
     prepare >/dev/null
-    rg -n '^\s*#\[test\(' "$HELIODOR_DIR/tb" --glob '*.veryl' \
-        | sed -E 's/.*#\[test\(([^)]*)\)\].*/\1/' \
+    find "$HELIODOR_DIR/tb" -type f -name '*.veryl' \
+        -exec sed -nE 's/^[[:space:]]*#\[test\(([^)]*)\)\].*/\1/p' {} + \
         | sort
 }
 
@@ -1044,14 +1044,26 @@ build_timed_veryl_runner() {
 
 test_source_files() {
     local test="$1"
-    local tb_output tb_file source_output relative_tb
-    local -a tb_files=()
-    if ! tb_output="$(rg -l "^\\s*#\\[test\\(${test}\\)\\]" \
-        "$HELIODOR_DIR/tb" --glob '*.veryl')"; then
-        echo "error: could not find #[test($test)] under $HELIODOR_DIR/tb" >&2
+    local tb_output tb_file source_output relative_tb grep_status
+    local -a tb_candidates=() tb_files=()
+    if ! tb_output="$(find "$HELIODOR_DIR/tb" -type f -name '*.veryl' -print)"; then
+        echo "error: could not enumerate test sources under $HELIODOR_DIR/tb" >&2
         return 1
     fi
-    mapfile -t tb_files <<<"$tb_output"
+    if [[ -n "$tb_output" ]]; then
+        mapfile -t tb_candidates <<<"$tb_output"
+    fi
+    for tb_file in "${tb_candidates[@]}"; do
+        if grep -Eq "^[[:space:]]*#\\[test\\(${test}\\)\\]" "$tb_file"; then
+            tb_files+=("$tb_file")
+        else
+            grep_status=$?
+            if ((grep_status != 1)); then
+                echo "error: could not inspect test source $tb_file" >&2
+                return 1
+            fi
+        fi
+    done
     if ((${#tb_files[@]} != 1)) || [[ -z "${tb_files[0]}" ]]; then
         echo "error: expected exactly one #[test($test)] file, found ${#tb_files[@]}" >&2
         return 1
