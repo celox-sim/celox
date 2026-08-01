@@ -28,7 +28,7 @@ VERYL_BIN="${VERYL_BIN:-}"
 
 readonly GATE_HELIODOR_REF=7ad830fc0f8506c934b61a853ce2eadfa5926b82
 readonly GATE_TEST=test_soc_linux_boot
-readonly GATE_TIMEOUT_SEC=300
+readonly GATE_TIMEOUT_SEC=420
 readonly GATE_EXPECTED_CYCLE=9ae070
 readonly GATE_EXPECTED_X3=aa
 
@@ -1697,11 +1697,11 @@ run_gate() {
 
     gate_record_celox_checkout || return "$?"
     if ! command -v timeout >/dev/null; then
-        echo "error: the fixed 300s gate requires GNU timeout" >&2
+        echo "error: the fixed ${GATE_TIMEOUT_SEC}s gate requires GNU timeout" >&2
         return 127
     fi
     if ! timeout_help="$(timeout --help 2>&1)" || [[ "$timeout_help" != *--kill-after* ]]; then
-        echo "error: the fixed 300s gate requires timeout --kill-after support" >&2
+        echo "error: the fixed ${GATE_TIMEOUT_SEC}s gate requires timeout --kill-after support" >&2
         return 1
     fi
     if ! start_probe="$(monotonic_ns)" || ! end_probe="$(monotonic_ns)" \

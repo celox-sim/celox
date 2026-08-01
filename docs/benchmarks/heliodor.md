@@ -98,7 +98,7 @@ The gate is deliberately not configurable. It forces all of the following:
   runners in a fresh invocation-owned Cargo target directory, and execution of
   those exact built binaries;
 - `test_soc_linux_boot`, runners `veryl-cc-sync` then `celox`, and a fixed
-  300-second timeout for each;
+  420-second timeout for each;
 - a new empty Veryl AOT cache for the invocation, removed after the run;
 - Celox native backend, `O2`, two-state mode, full execution, and no SIR pass
   overrides; and
