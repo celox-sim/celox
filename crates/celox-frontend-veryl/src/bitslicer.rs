@@ -1,8 +1,13 @@
-use crate::{HashMap, ir::VarAtom, parser::ParserError, parser::bitaccess::eval_var_select};
+use celox_design::VarAtomBase;
+use fxhash::FxHashMap as HashMap;
 use std::collections::BTreeSet;
 use veryl_analyzer::ir::{
     AssignDestination, AssignStatement, Declaration, Module, Statement, VarId,
 };
+
+use crate::{ParserError, bitaccess::eval_var_select};
+
+type VarAtom = VarAtomBase<VarId>;
 
 pub struct BitSlicer {
     // Set of "boundaries" for each variable (e.g., [0, 8, 16] means ranges 0-7, 8-15)

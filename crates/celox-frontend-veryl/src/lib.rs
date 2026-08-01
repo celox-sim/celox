@@ -4,11 +4,35 @@
 //! public path lookup. Semantic design and backend phases must not depend on
 //! them.
 
+pub mod bitaccess;
+pub mod bitslicer;
+pub mod case;
+mod config;
+pub mod context_width;
+mod error;
+pub mod ff;
+pub mod logic_tree;
+pub mod loop_provenance;
+pub mod module;
+mod module_artifact;
+pub mod registry;
+mod types;
+
+pub use config::BuildConfig;
+pub use error::{LoweringPhase, ParserError, SourceLocation};
+pub use module_artifact::SimModule;
+pub use types::{resolve_dims, resolve_total_width};
+
 use celox_design::{InstanceId, ModuleId, VariableMetadata};
-use fxhash::FxHashMap as HashMap;
+use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::fmt;
 use veryl_analyzer::ir::{Function, Statement, VarId, VarPath};
 use veryl_parser::resource_table::StrId;
+
+pub type RegionedVarAddr = celox_design::RegionedVarAddrBase<VarId>;
+pub type GlueAddr = celox_slt::GlueAddrBase<VarId>;
+pub type GlueBlock = celox_slt::GlueBlockBase<VarId>;
+pub type ModuleInitialMemoryValue = celox_design::InitialStateValue<VarId>;
 
 #[derive(Clone)]
 pub struct VariableInfo {

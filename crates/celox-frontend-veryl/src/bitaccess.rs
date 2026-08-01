@@ -1,5 +1,5 @@
-use crate::BigUint;
-use crate::parser::{ParserError, resolve_dims};
+use celox_design::BitAccess;
+use num_bigint::BigUint;
 use num_traits::{ToPrimitive as _, Zero};
 use veryl_analyzer::ir::{
     AssignDestination, Comptime, Expression, Factor, Module, Op, VarId, VarIndex, VarSelect,
@@ -8,7 +8,7 @@ use veryl_analyzer::ir::{
 use veryl_analyzer::value::Value;
 use veryl_parser::token_range::TokenRange;
 
-use crate::ir::BitAccess;
+use crate::{ParserError, resolve_dims};
 
 /// Extract a compile-time constant value for Celox 4-state encoding.
 ///
@@ -236,7 +236,7 @@ fn collect_dims(module: &Module, var_id: VarId) -> Result<Vec<usize>, ParserErro
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PartSelectGeometry {
+pub enum PartSelectGeometry {
     Colon { lsb: usize, elements: usize },
     PlusColon { elements: usize },
     MinusColon { elements: usize },
@@ -244,7 +244,7 @@ pub(crate) enum PartSelectGeometry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SelectGeometry {
+pub struct SelectGeometry {
     pub dimensions: Vec<usize>,
     pub strides: Vec<usize>,
     pub total_width: usize,
@@ -260,7 +260,7 @@ pub(crate) struct SelectGeometry {
 /// dimension.  `+:`, `-:`, and `step` require a static, nonzero width, while
 /// both bounds of `:` must be static because its result width is otherwise not
 /// representable in the typed IR.
-pub(crate) fn select_geometry(
+pub fn select_geometry(
     module: &Module,
     var_id: VarId,
     index: &VarIndex,

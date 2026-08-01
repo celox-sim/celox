@@ -2,18 +2,19 @@ use super::{Domain, FfParser};
 use crate::context_width::{
     ValueContext, binary_semantics, cast_semantics, expression_signed, resolve_binary_op,
 };
-use crate::ir::{
-    BinaryOp, BitAccess, RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIROffset,
-    SIRTerminator, SIRValue, SPARSE_WORKING_REGION, STABLE_REGION, UnaryOp, VarAtomBase,
-    WORKING_REGION,
-};
-use crate::parser::{
+use crate::{
     LoweringPhase, ParserError,
     bitaccess::{
         celox_value_from_comptime, celox_value_from_comptime_in_context, eval_var_select,
         get_access_width, is_static_access,
     },
     resolve_total_width,
+};
+use celox_design::{
+    BinaryOp, BitAccess, SPARSE_WORKING_REGION, STABLE_REGION, UnaryOp, VarAtomBase, WORKING_REGION,
+};
+use celox_sir::{
+    RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator, SIRValue,
 };
 use num_bigint::BigUint;
 use num_traits::Zero;
@@ -155,7 +156,7 @@ impl<'a> FfParser<'a> {
         let to_u = |e: &Expression| {
             self.get_constant_value(e)
                 .or_else(|| {
-                    crate::parser::bitaccess::eval_constexpr(e)
+                    crate::bitaccess::eval_constexpr(e)
                         .and_then(|v| v.to_u64_digits().first().copied())
                 })
                 .map(|v| v as usize)
@@ -562,9 +563,8 @@ impl<'a> FfParser<'a> {
         // their logical packed width, so combining both here loses essential
         // source-type information.
         let (_, strides, total_width) =
-            crate::parser::bitaccess::get_dimensions_and_strides(self.module, var_id)?;
-        let geometry =
-            crate::parser::bitaccess::select_geometry(self.module, var_id, index, select)?;
+            crate::bitaccess::get_dimensions_and_strides(self.module, var_id)?;
+        let geometry = crate::bitaccess::select_geometry(self.module, var_id, index, select)?;
         let array_dimension_count = self.module.variables[&var_id].r#type.array.iter().count();
         let element_width = if array_dimension_count == 0 {
             total_width
@@ -671,7 +671,7 @@ impl<'a> FfParser<'a> {
             } else {
                 stride
             };
-            if let Some(lsb_val) = crate::parser::bitaccess::eval_constexpr(range_expr)
+            if let Some(lsb_val) = crate::bitaccess::eval_constexpr(range_expr)
                 .map(|v| v.to_u64_digits().first().copied().unwrap_or(0))
             {
                 if is_unpacked {
@@ -2124,7 +2124,7 @@ impl<'a> FfParser<'a> {
 
             // 2. Get replication count (1 if not specified)
             let rep_count = if let Some(rep_expr) = replication {
-                use crate::parser::bitaccess::eval_constexpr;
+                use crate::bitaccess::eval_constexpr;
                 let v = eval_constexpr(rep_expr);
                 v.unwrap().iter_u64_digits().next().unwrap()
             } else {
@@ -2510,7 +2510,7 @@ impl<'a> FfParser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::BuildConfig;
+    use crate::BuildConfig;
     use veryl_analyzer::{
         Analyzer, Context, attribute_table,
         ir::{Component, Declaration, Ir},

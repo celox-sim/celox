@@ -1,5 +1,5 @@
-use crate::ir::RegisterType;
-use crate::parser::{LoweringPhase, ParserError, resolve_total_width};
+use crate::{LoweringPhase, ParserError, resolve_total_width};
+use celox_sir::RegisterType;
 
 use veryl_analyzer::ir::{Module, VarId};
 

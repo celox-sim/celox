@@ -15,11 +15,10 @@ use super::{
     eval_statement_with_recovery, get_width, merge_boundaries, procedural_condition,
     range_store_error,
 };
-use crate::ir::{BinaryOp, BitAccess, UnaryOp, VarAtomBase};
-use crate::logic_tree::range_store::RangeStore;
-use crate::parser::loop_provenance::{LoopRecoveryCandidate, UnrolledLoopCandidate};
-use crate::parser::resolve_total_width;
-use crate::{HashMap, HashSet, ParserError};
+use crate::loop_provenance::{LoopRecoveryCandidate, UnrolledLoopCandidate};
+use crate::{HashMap, HashSet, ParserError, resolve_total_width};
+use celox_design::{BinaryOp, BitAccess, UnaryOp, VarAtomBase};
+use celox_slt::RangeStore;
 
 pub(super) fn eval_statements(
     module: &Module,
@@ -1540,7 +1539,7 @@ fn expanded_outputs_are_count_idioms(
             let (output, _) =
                 combine_parts_with_default(target.id, target.access.lsb, parts, &mut scratch)
                     .ok()?;
-            Some(crate::logic_tree::matches_slt_count_idiom(output, &scratch))
+            Some(celox_slt::matches_slt_count_idiom(output, &scratch))
         })
         .collect::<Option<Vec<_>>>()
         .map(|matches| matches.into_iter().any(|matched| matched))
@@ -1814,14 +1813,11 @@ fn persistent_targets(
             .map(|destinations| {
                 let destination = destinations[position];
                 if destination.id != first[position].id
-                    || !crate::parser::bitaccess::is_static_access(
-                        &destination.index,
-                        &destination.select,
-                    )
+                    || !crate::bitaccess::is_static_access(&destination.index, &destination.select)
                 {
                     return None;
                 }
-                crate::parser::bitaccess::eval_var_select(
+                crate::bitaccess::eval_var_select(
                     module,
                     destination.id,
                     &destination.index,
@@ -2085,7 +2081,7 @@ fn whole_fold_matches_expansion(
     dynamic_updates: &[NodeId],
     targets: &[VarAtomBase<VarId>],
     loop_var: VarId,
-    iterations: &[crate::parser::loop_provenance::UnrolledIteration],
+    iterations: &[crate::loop_provenance::UnrolledIteration],
 ) -> Option<bool> {
     let variables = proof_variable_ids(statements, targets)?;
     let mut proof_arena = SLTNodeArena::new();
@@ -3614,8 +3610,8 @@ mod tests {
     use veryl_parser::resource_table;
 
     use super::*;
-    use crate::logic_tree::comb::parse_comb_with_loop_recovery;
-    use crate::parser::loop_provenance::{LoopProvenance, LoopSourceTable};
+    use crate::logic_tree::parse_comb_with_loop_recovery;
+    use crate::loop_provenance::{LoopProvenance, LoopSourceTable};
 
     #[test]
     fn constant_specialization_distinguishes_signed_division_and_remainder() {
@@ -4690,7 +4686,7 @@ mod tests {
             Some(&BitAccess::new(0, 3))
         );
         assert!(
-            crate::logic_tree::matches_slt_or_scan_group(group, &arena),
+            celox_slt::matches_slt_or_scan_group(group, &arena),
             "the exact recovered Veryl scan must enter the word-scan lowering"
         );
     }

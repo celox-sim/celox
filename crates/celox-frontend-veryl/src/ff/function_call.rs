@@ -1,13 +1,11 @@
 use super::{Domain, FfParser};
 use crate::{
-    HashMap, HashSet,
-    ir::{SIRBuilder, VarAtomBase},
-    parser::{
-        LoweringPhase, ParserError,
-        bitaccess::{build_partial_assign_expr, is_static_access},
-        case::case_arm_condition_expr,
-    },
+    HashMap, HashSet, LoweringPhase, ParserError,
+    bitaccess::{build_partial_assign_expr, is_static_access},
+    case::case_arm_condition_expr,
 };
+use celox_design::VarAtomBase;
+use celox_sir::SIRBuilder;
 use num_traits::ToPrimitive;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, CaseStatement, Comptime, Expression, Factor, Op, Shape, Statement, Type,
@@ -92,7 +90,7 @@ impl<'a> FfParser<'a> {
                     match item {
                         ArrayLiteralItem::Value(inner, repeat) => {
                             let rep_count = if let Some(rep_expr) = repeat {
-                                match crate::parser::bitaccess::eval_constexpr(rep_expr)
+                                match crate::bitaccess::eval_constexpr(rep_expr)
                                     .and_then(|v| v.to_u64())
                                 {
                                     Some(v) => v as usize,

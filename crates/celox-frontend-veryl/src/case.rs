@@ -37,7 +37,7 @@ fn case_pattern_condition(target: &Expression, pattern: &CasePattern) -> Express
     }
 }
 
-pub(crate) fn case_arm_condition_expr(target: &Expression, patterns: &[CasePattern]) -> Expression {
+pub fn case_arm_condition_expr(target: &Expression, patterns: &[CasePattern]) -> Expression {
     let mut iter = patterns.iter();
     let first = iter.next().expect("CaseArm must have at least one pattern");
     iter.fold(case_pattern_condition(target, first), |acc, pattern| {
