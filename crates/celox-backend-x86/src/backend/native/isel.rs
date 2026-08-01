@@ -16312,7 +16312,7 @@ mod tests {
         layout.scratch_base_offset = STATE_SIZE;
 
         let mut direct_unit = unit.clone();
-        crate::optimizer::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
+        celox_sir_opt::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
             &mut direct_unit,
             &[],
         );

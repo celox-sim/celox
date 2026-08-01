@@ -51,11 +51,3 @@ pub mod backend {
 }
 
 pub use backend::native::*;
-
-/// Test-only access to the SIR cleanup used by ISel regression fixtures.
-#[cfg(test)]
-pub mod optimizer {
-    pub mod coalescing {
-        pub use celox_sir_opt::coalescing::pass_eliminate_working_round_trip;
-    }
-}
