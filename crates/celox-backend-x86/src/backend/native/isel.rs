@@ -184,6 +184,90 @@ struct PackedByteAffineComparePlans {
     skip_indices: HashSet<usize>,
 }
 
+#[derive(Debug, Default)]
+struct BlockDynamicLoadCachePlans {
+    addresses: HashSet<RegionedAbsoluteAddr>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BlockDynamicLoadCacheEntry {
+    value: VReg,
+    mask: Option<VReg>,
+}
+
+fn native_plane_access_size(byte_size: usize) -> Option<OpSize> {
+    match byte_size {
+        1 => Some(OpSize::S8),
+        2 => Some(OpSize::S16),
+        4 => Some(OpSize::S32),
+        8 => Some(OpSize::S64),
+        _ => None,
+    }
+}
+
+fn block_dynamic_load_cache_plans(
+    block: &BasicBlock<RegionedAbsoluteAddr>,
+    layout: &MemoryLayout,
+) -> BlockDynamicLoadCachePlans {
+    const MIN_LOADS: usize = 4;
+
+    let mut counts = HashMap::<RegionedAbsoluteAddr, usize>::default();
+    let mut written_ranges = Vec::<(i32, usize)>::new();
+    let physical_range = |address: &RegionedAbsoluteAddr| {
+        let base = layout.regioned_static_byte_and_intra(address, 0)?.0;
+        Some((base, layout.plane_size(&address.absolute_addr())))
+    };
+
+    for instruction in &block.instructions {
+        match instruction {
+            SIRInstruction::Load(_, address, offset, width)
+                if *width <= 64
+                    && matches!(offset, SIROffset::Dynamic(_) | SIROffset::Element { .. }) =>
+            {
+                *counts.entry(*address).or_default() += 1;
+            }
+            SIRInstruction::Store(address, ..) => {
+                if let Some(range) = physical_range(address) {
+                    written_ranges.push(range);
+                }
+            }
+            SIRInstruction::Commit(_, destination, ..) => {
+                if let Some(range) = physical_range(destination) {
+                    written_ranges.push(range);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let addresses = counts
+        .into_iter()
+        .filter_map(|(address, count)| {
+            if count < MIN_LOADS {
+                return None;
+            }
+            let absolute = address.absolute_addr();
+            let byte_size = layout.plane_size(&absolute);
+            native_plane_access_size(byte_size)?;
+            if layout.widths.get(&absolute).copied().unwrap_or(usize::MAX) > 64 {
+                return None;
+            }
+            if layout.unpacked_arrays.contains_key(&absolute) {
+                return None;
+            }
+            let (base, size) = physical_range(&address)?;
+            let end = i64::from(base).checked_add(i64::try_from(size).ok()?)?;
+            let overlaps_write = written_ranges.iter().any(|&(write_base, write_size)| {
+                let write_end =
+                    i64::from(write_base) + i64::try_from(write_size).unwrap_or(i64::MAX);
+                i64::from(base) < write_end && i64::from(write_base) < end
+            });
+            (!overlaps_write).then_some(address)
+        })
+        .collect();
+    BlockDynamicLoadCachePlans { addresses }
+}
+
 #[derive(Debug, Clone)]
 struct PackedBitStorePlan {
     source: RegisterId,
@@ -1338,6 +1422,8 @@ pub fn lower_execution_unit(
         } else {
             PackedByteAffineComparePlans::default()
         };
+        let dynamic_load_cache_plans = block_dynamic_load_cache_plans(sir_block, layout);
+        let mut dynamic_load_cache = HashMap::default();
         let mut lookup_emit_cache = DenseLookupEmitCache::default();
         let mut packed_field_load_cache = PackedFieldLoadCache::default();
         let sir_defs = collect_sir_defs(sir_block);
@@ -1539,6 +1625,19 @@ pub fn lower_execution_unit(
                 func.blocks.push(write_block);
 
                 mblock = MBlock::new(cont_block_id);
+            } else if let SIRInstruction::Load(destination, address, offset, width) = inst
+                && dynamic_load_cache_plans.addresses.contains(address)
+                && matches!(offset, SIROffset::Dynamic(_) | SIROffset::Element { .. })
+            {
+                lower_block_cached_dynamic_load(
+                    &mut ctx,
+                    &mut mblock,
+                    *destination,
+                    *address,
+                    offset,
+                    *width,
+                    &mut dynamic_load_cache,
+                );
             } else {
                 lower_instruction(
                     &mut ctx,
@@ -6325,6 +6424,88 @@ fn emit_dynamic_wide_bitfield_store(
     changed
 }
 
+fn lower_block_cached_dynamic_load(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    destination: RegisterId,
+    address: RegionedAbsoluteAddr,
+    offset: &SIROffset,
+    width: usize,
+    cache: &mut HashMap<RegionedAbsoluteAddr, BlockDynamicLoadCacheEntry>,
+) {
+    let entry = if let Some(&entry) = cache.get(&address) {
+        entry
+    } else {
+        let absolute = address.absolute_addr();
+        let byte_size = ctx.layout.plane_size(&absolute);
+        let size = native_plane_access_size(byte_size)
+            .expect("planned block-local state plane has a native access size");
+        let logical_width = ctx.layout.widths[&absolute];
+        let value = ctx.alloc_vreg(SpillDesc::sim_state(address, 0, logical_width, false));
+        block.push(MInst::Load {
+            dst: value,
+            base: BaseReg::SimState,
+            offset: ctx.byte_offset(&address, 0),
+            size,
+        });
+        ctx.known_bits.insert(value, logical_width);
+        let mask = ctx.is_4state_var(&address).then(|| {
+            let mask = ctx.alloc_vreg(SpillDesc::sim_state(address, 0, logical_width, true));
+            block.push(MInst::Load {
+                dst: mask,
+                base: BaseReg::SimState,
+                offset: ctx.mask_byte_offset(&address, 0),
+                size,
+            });
+            ctx.known_bits.insert(mask, logical_width);
+            mask
+        });
+        let entry = BlockDynamicLoadCacheEntry { value, mask };
+        cache.insert(address, entry);
+        entry
+    };
+    let shift = memory_offset_vreg(ctx, block, &address, offset);
+
+    let destination_vreg = ctx.reg_map.get(destination);
+    let shifted = ctx.alloc_vreg(SpillDesc::transient());
+    block.push(MInst::Shr {
+        dst: shifted,
+        lhs: entry.value,
+        rhs: shift,
+    });
+    if width < 64 {
+        ctx.emit_and_imm(block, destination_vreg, shifted, mask_for_width(width));
+    } else {
+        ctx.emit_mov(block, destination_vreg, shifted);
+    }
+    ctx.known_bits.insert(destination_vreg, width);
+    ctx.reg_addrs.remove(&destination);
+
+    if let Some(mask) = entry.mask {
+        let shifted_mask = ctx.alloc_vreg(SpillDesc::transient());
+        block.push(MInst::Shr {
+            dst: shifted_mask,
+            lhs: mask,
+            rhs: shift,
+        });
+        let result_mask = if width < 64 {
+            let result = ctx.alloc_vreg(SpillDesc::transient());
+            ctx.emit_and_imm(block, result, shifted_mask, mask_for_width(width));
+            result
+        } else {
+            shifted_mask
+        };
+        ctx.set_mask(destination, result_mask);
+    } else if ctx.four_state {
+        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+        block.push(MInst::LoadImm {
+            dst: zero,
+            value: 0,
+        });
+        ctx.set_mask(destination, zero);
+    }
+}
+
 fn lower_instruction(
     ctx: &mut ISelContext,
     block: &mut MBlock,
@@ -6832,7 +7013,6 @@ fn lower_instruction(
                         base_off,
                         ctx.layout.plane_size(&addr.absolute_addr()),
                     );
-
                     // Compute byte offset and intra-byte bit shift
                     let byte_off = if let Some(byte_off) = direct_byte_off {
                         byte_off
@@ -9528,7 +9708,8 @@ fn lower_sir_bool_value(
     Some(lower_bool_value(ctx, block, raw))
 }
 
-/// Lower a machine-word concat whose high part is a repeated one-bit value.
+/// Lower an at-most-machine-word concat whose high part is a repeated one-bit
+/// value.
 ///
 /// HDL sign extension commonly reaches SIR as
 ///
@@ -9538,11 +9719,9 @@ fn lower_sir_bool_value(
 ///
 /// Expanding that literally emits one shift and one OR per repeated bit. A
 /// one-bit value is exactly zero or one in each value/mask plane, so negating
-/// it creates the required all-zero/all-one fill word. Shifting that fill to
-/// the high part and ORing the low value implements the complete concat with
-/// constant work. Keep this rule at the native 64-bit boundary; narrower
-/// results require an additional canonical-width mask and wider values use the
-/// normal chunk lowering.
+/// it creates the required all-zero/all-one fill word. Masking or shifting
+/// that fill into the high part and ORing the low value implements the complete
+/// concat with constant work. Wider values use the normal chunk lowering.
 fn try_lower_repeated_msb_concat(
     ctx: &mut ISelContext,
     block: &mut MBlock,
@@ -9551,7 +9730,8 @@ fn try_lower_repeated_msb_concat(
 ) -> bool {
     const MIN_REPEATED_BITS: usize = 4;
 
-    if ctx.sir_width(&dst) != 64 || args.len() <= MIN_REPEATED_BITS {
+    let result_width = ctx.sir_width(&dst);
+    if result_width > 64 || args.len() <= MIN_REPEATED_BITS {
         return false;
     }
 
@@ -9561,7 +9741,7 @@ fn try_lower_repeated_msb_concat(
     let suffix_width = ctx.sir_width(&suffix);
     if ctx.sir_width(&repeated) != 1
         || repeated_bits < MIN_REPEATED_BITS
-        || repeated_bits + suffix_width != 64
+        || repeated_bits + suffix_width != result_width
         || !args[..repeated_bits]
             .iter()
             .all(|candidate| *candidate == repeated)
@@ -9575,14 +9755,23 @@ fn try_lower_repeated_msb_concat(
         repeated: VReg,
         suffix: VReg,
         suffix_width: usize,
+        result_width: usize,
         destination: Option<VReg>,
     ) -> VReg {
         if repeated == suffix && suffix_width == 1 {
             let result = destination.unwrap_or_else(|| ctx.alloc_vreg(SpillDesc::transient()));
+            let fill = if result_width == 64 {
+                result
+            } else {
+                ctx.alloc_vreg(SpillDesc::transient())
+            };
             block.push(MInst::Neg {
-                dst: result,
+                dst: fill,
                 src: repeated,
             });
+            if result_width != 64 {
+                ctx.emit_and_imm(block, result, fill, mask_for_width(result_width));
+            }
             return result;
         }
 
@@ -9591,12 +9780,20 @@ fn try_lower_repeated_msb_concat(
             dst: fill,
             src: repeated,
         });
-        let high = ctx.alloc_vreg(SpillDesc::transient());
-        block.push(MInst::ShlImm {
-            dst: high,
-            src: fill,
-            imm: suffix_width as u8,
-        });
+        let high = if result_width == 64 {
+            let high = ctx.alloc_vreg(SpillDesc::transient());
+            block.push(MInst::ShlImm {
+                dst: high,
+                src: fill,
+                imm: suffix_width as u8,
+            });
+            high
+        } else {
+            let high = ctx.alloc_vreg(SpillDesc::transient());
+            let high_mask = mask_for_width(result_width) & !mask_for_width(suffix_width);
+            ctx.emit_and_imm(block, high, fill, high_mask);
+            high
+        };
         let result = destination.unwrap_or_else(|| ctx.alloc_vreg(SpillDesc::transient()));
         block.push(MInst::Or {
             dst: result,
@@ -9613,6 +9810,7 @@ fn try_lower_repeated_msb_concat(
         ctx.reg_map.get(repeated),
         ctx.reg_map.get(suffix),
         suffix_width,
+        result_width,
         Some(destination),
     );
     debug_assert_eq!(value, destination);
@@ -9620,7 +9818,15 @@ fn try_lower_repeated_msb_concat(
     if ctx.four_state {
         let repeated_mask = ctx.get_mask(repeated, block);
         let suffix_mask = ctx.get_mask(suffix, block);
-        let result_mask = lower_plane(ctx, block, repeated_mask, suffix_mask, suffix_width, None);
+        let result_mask = lower_plane(
+            ctx,
+            block,
+            repeated_mask,
+            suffix_mask,
+            suffix_width,
+            result_width,
+            None,
+        );
         ctx.set_mask(dst, result_mask);
     }
 
@@ -15056,6 +15262,133 @@ mod tests {
     }
 
     #[test]
+    fn narrow_repeated_msb_concat_uses_constant_work_in_both_planes() {
+        let output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let output = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+        let repeated = RegisterId(0);
+        let low = RegisterId(1);
+        let result = RegisterId(2);
+
+        for four_state in [false, true] {
+            let unit = ExecutionUnit {
+                entry_block_id: SirBlockId(0),
+                blocks: [(
+                    SirBlockId(0),
+                    BasicBlock {
+                        id: SirBlockId(0),
+                        params: vec![],
+                        instructions: vec![
+                            SIRInstruction::Imm(
+                                repeated,
+                                SIRValue::new_four_state(1u8, u8::from(four_state)),
+                            ),
+                            SIRInstruction::Imm(
+                                low,
+                                SIRValue::new_four_state(
+                                    0x5au8,
+                                    if four_state { 0x0fu8 } else { 0u8 },
+                                ),
+                            ),
+                            SIRInstruction::Concat(
+                                result,
+                                std::iter::repeat_n(repeated, 8)
+                                    .chain(std::iter::once(low))
+                                    .collect(),
+                            ),
+                            SIRInstruction::Store(
+                                output,
+                                SIROffset::Static(0),
+                                16,
+                                result,
+                                vec![],
+                                vec![],
+                            ),
+                        ],
+                        terminator: SIRTerminator::Return,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                register_map: [
+                    (repeated, RegisterType::Logic { width: 1 }),
+                    (low, RegisterType::Logic { width: 8 }),
+                    (result, RegisterType::Logic { width: 16 }),
+                ]
+                .into_iter()
+                .collect(),
+            };
+            unit.verify();
+
+            let mut layout = empty_layout();
+            layout.four_state = four_state;
+            layout.offsets.insert(output_abs, 0);
+            layout.widths.insert(output_abs, 16);
+            layout.is_4states.insert(output_abs, four_state);
+            layout.total_size = if four_state { 4 } else { 2 };
+            layout.working_base_offset = layout.total_size;
+            layout.sparse_base_offset = layout.total_size;
+            layout.merged_total_size = layout.total_size;
+            layout.triggered_bits_offset = layout.total_size;
+            layout.scratch_base_offset = layout.total_size;
+
+            let mut function = lower_execution_unit(&unit, &layout, four_state);
+            function.verify();
+            let instructions = function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .collect::<Vec<_>>();
+            let expected_planes = if four_state { 2 } else { 1 };
+            assert_eq!(
+                instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, MInst::Neg { .. }))
+                    .count(),
+                expected_planes
+            );
+            assert_eq!(
+                instructions
+                    .iter()
+                    .filter(|instruction| matches!(
+                        instruction,
+                        MInst::AndImm32 { imm: 0xff00, .. }
+                    ))
+                    .count(),
+                expected_planes
+            );
+            assert_eq!(
+                instructions
+                    .iter()
+                    .filter(|instruction| matches!(instruction, MInst::Or { .. }))
+                    .count(),
+                expected_planes
+            );
+
+            mir_legalize::legalize(&mut function);
+            mir_opt::optimize(&mut function);
+            let allocation = regalloc::run_regalloc(&mut function).unwrap();
+            mir_opt::post_regalloc_peephole(&mut function);
+            function.verify();
+            let emitted = emit::emit(
+                &function,
+                &allocation.assignment,
+                allocation.spill_frame_size,
+            )
+            .unwrap();
+            let jit = JitCode::new(&emitted.code).unwrap();
+            let mut state = vec![0u8; layout.total_size];
+            assert_eq!(unsafe { jit.call(&mut state) }, 0);
+            assert_eq!(u16::from_le_bytes(state[..2].try_into().unwrap()), 0xff5a);
+            if four_state {
+                assert_eq!(u16::from_le_bytes(state[2..4].try_into().unwrap()), 0xff0f);
+            }
+        }
+    }
+
+    #[test]
     fn wide_repeated_msb_chunk_uses_constant_work_in_both_planes() {
         let output_abs = AbsoluteAddr {
             instance_id: InstanceId(0),
@@ -16966,6 +17299,162 @@ mod tests {
     #[test]
     fn dynamic_unaligned_64_bit_load_preserves_crossing_bits() {
         assert_eq!(execute_unaligned_64_bit_load(true), 0xfedc_ba98_8000_0004);
+    }
+
+    #[test]
+    fn repeated_dynamic_loads_share_one_block_local_state_word() {
+        let input_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::default(),
+        };
+        let mut output_var = VarId::default();
+        output_var.0 += 1;
+        let output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: output_var,
+        };
+        let input = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, input_abs);
+        let output = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+        let offsets = [RegisterId(0), RegisterId(1), RegisterId(2), RegisterId(3)];
+        let bits = [RegisterId(4), RegisterId(5), RegisterId(6), RegisterId(7)];
+        let packed = RegisterId(8);
+        let mut instructions = Vec::new();
+        for (index, (&offset, &bit)) in offsets.iter().zip(&bits).enumerate() {
+            instructions.push(SIRInstruction::Imm(offset, SIRValue::new(index as u8)));
+            instructions.push(SIRInstruction::Load(
+                bit,
+                input,
+                SIROffset::Dynamic(offset),
+                1,
+            ));
+        }
+        instructions.push(SIRInstruction::Concat(
+            packed,
+            bits.iter().rev().copied().collect(),
+        ));
+        instructions.push(SIRInstruction::Store(
+            output,
+            SIROffset::Static(0),
+            4,
+            packed,
+            vec![],
+            vec![],
+        ));
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions,
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: offsets
+                .into_iter()
+                .map(|register| {
+                    (
+                        register,
+                        RegisterType::Bit {
+                            width: 5,
+                            signed: false,
+                        },
+                    )
+                })
+                .chain(bits.into_iter().map(|register| {
+                    (
+                        register,
+                        RegisterType::Bit {
+                            width: 1,
+                            signed: false,
+                        },
+                    )
+                }))
+                .chain([(
+                    packed,
+                    RegisterType::Bit {
+                        width: 4,
+                        signed: false,
+                    },
+                )])
+                .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.offsets = [(input_abs, 0), (output_abs, 4)].into_iter().collect();
+        layout.widths = [(input_abs, 32), (output_abs, 4)].into_iter().collect();
+        layout.is_4states = [(input_abs, false), (output_abs, false)]
+            .into_iter()
+            .collect();
+        layout.total_size = 5;
+        layout.working_base_offset = 5;
+        layout.sparse_base_offset = 5;
+        layout.merged_total_size = 5;
+        layout.triggered_bits_offset = 5;
+        layout.scratch_base_offset = 5;
+
+        let plan = block_dynamic_load_cache_plans(&unit.blocks[&SirBlockId(0)], &layout);
+        assert_eq!(plan.addresses, [input].into_iter().collect());
+        let mut function = lower_execution_unit(&unit, &layout, false);
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::Load {
+                        offset: 0,
+                        size: OpSize::S32,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(
+            !function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|instruction| matches!(instruction, MInst::LoadIndexed { .. }))
+        );
+
+        mir_legalize::legalize(&mut function);
+        mir_opt::optimize(&mut function);
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0u8; layout.total_size];
+        state[0] = 0b1010;
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(state[4] & 0xf, 0b1010);
+
+        let mut writing = unit.blocks[&SirBlockId(0)].clone();
+        writing.instructions.push(SIRInstruction::Store(
+            input,
+            SIROffset::Static(0),
+            1,
+            bits[0],
+            vec![],
+            vec![],
+        ));
+        assert!(
+            block_dynamic_load_cache_plans(&writing, &layout)
+                .addresses
+                .is_empty()
+        );
     }
 
     fn get_bits(bytes: &[u8], bit_offset: usize, width: usize) -> u64 {
