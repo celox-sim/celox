@@ -25,11 +25,19 @@ jobs:
     name: Update integration/veryl-head
     runs-on: ubuntu-latest
     steps:
+      - name: Create release app token
+        id: release-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
       - uses: actions/checkout@v7
         with:
           ref: master
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          token: ${{ steps.release-token.outputs.token }}
 
       - uses: ./.github/actions/setup-rust
 

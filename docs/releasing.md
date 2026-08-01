@@ -64,12 +64,21 @@ separate pull request or git worktree.
 
 ## Repository configuration
 
-The release workflow requires a `RELEASE_PLEASE_TOKEN` Actions secret containing
-a fine-grained token or GitHub App token with repository contents and pull request
-write access. The Veryl HEAD and vendored-metadata workflows use the same token
-to make their generated branch pushes start normal CI. Using the default
-`GITHUB_TOKEN` would prevent workflows from running on bot-created pull request
-updates.
+Release automation uses the `celox-release-please` GitHub App, installed for this
+repository with repository contents and pull request write access. Store its
+Client ID as the `RELEASE_APP_CLIENT_ID` Actions variable and its complete PEM
+private key as the `RELEASE_APP_PRIVATE_KEY` Actions secret. Each job mints a
+short-lived, repository-scoped installation token; never store an installation
+token itself because it expires. The Veryl HEAD and vendored-metadata workflows
+use the same mechanism so generated branch pushes start normal CI. Using the
+default `GITHUB_TOKEN` to create or update those branches would prevent their
+follow-up workflows from running.
+
+The App deliberately has no Issues permission, so Release Please does not add
+its normal status labels. The weekly workflow instead requires the exact
+`release-please--branches--master--components--celox` branch from this repository
+and still honors a manually applied `release:hold` label before enabling
+auto-merge.
 
 Configure merge commits to use the pull request title as the merge commit title.
 This preserves the Conventional Commit title consumed by Release Please. Protect

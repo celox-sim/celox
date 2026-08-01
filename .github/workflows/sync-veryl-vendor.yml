@@ -19,6 +19,14 @@ jobs:
       startsWith(github.event.pull_request.head.ref, 'renovate/')
     runs-on: ubuntu-latest
     steps:
+      - name: Create release app token
+        id: release-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
       # Only scripts from the trusted base revision run on the host. The PR
       # checkout is treated as data, and Cargo processes it in a disposable
       # container with no Actions secrets.
@@ -34,7 +42,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           path: target
-          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          token: ${{ steps.release-token.outputs.token }}
 
       - name: Refresh vendored metadata and lockfile
         env:
