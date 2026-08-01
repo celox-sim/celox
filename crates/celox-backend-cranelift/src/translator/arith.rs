@@ -195,14 +195,20 @@ impl SIRTranslator {
 
                 // 1. Write to dst_chunks[dst_chunk_idx]
                 if dst_chunk_idx < num_chunks {
-                    let shifted_v = state.builder.ins().ishl_imm(chunk_val_v, bit_shift as i64);
+                    let shifted_v = state
+                        .builder
+                        .ins()
+                        .ishl_imm_s(chunk_val_v, bit_shift as i64);
                     dst_chunks_v[dst_chunk_idx] = state
                         .builder
                         .ins()
                         .bor(dst_chunks_v[dst_chunk_idx], shifted_v);
 
                     if self.options.four_state {
-                        let shifted_m = state.builder.ins().ishl_imm(chunk_val_m, bit_shift as i64);
+                        let shifted_m = state
+                            .builder
+                            .ins()
+                            .ishl_imm_s(chunk_val_m, bit_shift as i64);
                         dst_chunks_m[dst_chunk_idx] = state
                             .builder
                             .ins()
@@ -216,16 +222,20 @@ impl SIRTranslator {
                     && (bit_shift + arg_chunk_bits > 64)
                 {
                     let shift_down = 64 - bit_shift;
-                    let shifted_down_v =
-                        state.builder.ins().ushr_imm(chunk_val_v, shift_down as i64);
+                    let shifted_down_v = state
+                        .builder
+                        .ins()
+                        .ushr_imm_s(chunk_val_v, shift_down as i64);
                     dst_chunks_v[dst_chunk_idx + 1] = state
                         .builder
                         .ins()
                         .bor(dst_chunks_v[dst_chunk_idx + 1], shifted_down_v);
 
                     if self.options.four_state {
-                        let shifted_down_m =
-                            state.builder.ins().ushr_imm(chunk_val_m, shift_down as i64);
+                        let shifted_down_m = state
+                            .builder
+                            .ins()
+                            .ushr_imm_s(chunk_val_m, shift_down as i64);
                         dst_chunks_m[dst_chunk_idx + 1] = state
                             .builder
                             .ins()
@@ -1196,7 +1206,7 @@ impl SIRTranslator {
                     let phys_bits = common_ty.bits() as usize;
                     if d_width < phys_bits {
                         let mask = ((1u64 << d_width) - 1) as i64;
-                        state.builder.ins().band_imm(notted, mask)
+                        state.builder.ins().band_imm_s(notted, mask)
                     } else {
                         notted
                     }
@@ -1218,7 +1228,7 @@ impl SIRTranslator {
 
                 UnaryOp::Xor => {
                     let popcnt = state.builder.ins().popcnt(r);
-                    state.builder.ins().band_imm(popcnt, 1)
+                    state.builder.ins().band_imm_s(popcnt, 1)
                 }
 
                 UnaryOp::And => {
@@ -1552,8 +1562,8 @@ impl SIRTranslator {
             let mut mask = get_chunk_as_i64(state.builder, &cond_masks, index);
             if index + 1 == cond_n_chunks && !cond_width.is_multiple_of(64) {
                 let logical_mask = ((1u64 << (cond_width % 64)) - 1) as i64;
-                value = state.builder.ins().band_imm(value, logical_mask);
-                mask = state.builder.ins().band_imm(mask, logical_mask);
+                value = state.builder.ins().band_imm_s(value, logical_mask);
+                mask = state.builder.ins().band_imm_s(mask, logical_mask);
             }
             let defined = state.builder.ins().bnot(mask);
             let known_ones = state.builder.ins().band(value, defined);
@@ -1665,12 +1675,15 @@ impl SIRTranslator {
             if !d_width.is_multiple_of(64) {
                 let logical_mask = ((1u64 << (d_width % 64)) - 1) as i64;
                 let last = n_chunks - 1;
-                res_chunks[last] = state.builder.ins().band_imm(res_chunks[last], logical_mask);
+                res_chunks[last] = state
+                    .builder
+                    .ins()
+                    .band_imm_s(res_chunks[last], logical_mask);
                 if self.options.four_state {
                     mask_chunks[last] = state
                         .builder
                         .ins()
-                        .band_imm(mask_chunks[last], logical_mask);
+                        .band_imm_s(mask_chunks[last], logical_mask);
                 }
             }
 
@@ -1732,11 +1745,11 @@ impl SIRTranslator {
                 mask = state
                     .builder
                     .ins()
-                    .band_imm(mask, ((1u64 << valid_bits) - 1) as i64);
+                    .band_imm_s(mask, ((1u64 << valid_bits) - 1) as i64);
             }
             any_x = state.builder.ins().bor(any_x, mask);
         }
-        let has_x = state.builder.ins().icmp_imm(IntCC::NotEqual, any_x, 0);
+        let has_x = state.builder.ins().icmp_imm_s(IntCC::NotEqual, any_x, 0);
 
         let masks = if d_width <= 64 {
             let dst_ty = get_cl_type(d_width);
@@ -1796,8 +1809,8 @@ fn apply_d_width_mask_arith(
     if d_width < (phys_bits as usize) {
         let shift_back_amt = phys_bits - (d_width as i64);
 
-        let tmp = state.builder.ins().ishl_imm(val, shift_back_amt);
-        state.builder.ins().sshr_imm(tmp, shift_back_amt)
+        let tmp = state.builder.ins().ishl_imm_s(val, shift_back_amt);
+        state.builder.ins().sshr_imm_s(tmp, shift_back_amt)
     } else {
         val
     }

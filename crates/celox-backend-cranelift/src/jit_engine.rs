@@ -74,11 +74,13 @@ impl JitEngine {
 
         let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         let module = JITModule::new(builder);
+        let target_config = module.target_config();
         Ok(Self {
             module,
             translator: SIRTranslator {
                 layout,
                 options: options.clone(),
+                target_config,
             },
         })
     }
@@ -158,7 +160,7 @@ impl JitEngine {
             builder.ins().return_(&[result]);
 
             builder.seal_all_blocks();
-            builder.finalize();
+            builder.finalize(self.module.target_config());
         }
 
         let isa = self.module.isa();
@@ -396,7 +398,7 @@ impl JitEngine {
                 let call = builder.ins().call(func_ref, &[mem_ptr]);
                 let result = builder.inst_results(call)[0];
                 // Check for error return (non-zero = error)
-                let ok = builder.ins().icmp_imm(IntCC::Equal, result, 0);
+                let ok = builder.ins().icmp_imm_s(IntCC::Equal, result, 0);
                 let continue_block = builder.create_block();
                 let error_block = builder.create_block();
                 builder
@@ -413,7 +415,7 @@ impl JitEngine {
             builder.ins().return_(&[zero]);
 
             builder.seal_all_blocks();
-            builder.finalize();
+            builder.finalize(self.module.target_config());
         }
 
         let wrapper_func_id = self

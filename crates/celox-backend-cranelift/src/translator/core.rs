@@ -57,7 +57,7 @@ fn preload_trigger_old_values<'a>(
             instance_id: abs.instance_id,
             var_id: abs.var_id,
         });
-        let addr_val = builder.ins().iadd_imm(mem_ptr, base_offset as i64);
+        let addr_val = builder.ins().iadd_imm_s(mem_ptr, base_offset as i64);
         let raw_val = builder.ins().load(cl_type, MemFlags::new(), addr_val, 0);
         let val = if cl_type == types::I64 {
             raw_val
@@ -169,6 +169,7 @@ use cranelift::codegen::ir::StackSlot;
 pub struct SIRTranslator {
     pub layout: MemoryLayout,
     pub options: crate::CompileOptions,
+    pub target_config: cranelift::codegen::isa::TargetFrontendConfig,
 }
 
 /// Temporary state used only during translation
@@ -221,8 +222,8 @@ pub(crate) fn promote_to_physical(
     if src_logical_width < phys_bits as usize {
         if is_signed {
             let shift_amt = phys_bits - (src_logical_width as i64);
-            let tmp = state.builder.ins().ishl_imm(val, shift_amt);
-            state.builder.ins().sshr_imm(tmp, shift_amt)
+            let tmp = state.builder.ins().ishl_imm_s(val, shift_amt);
+            state.builder.ins().sshr_imm_s(tmp, shift_amt)
         } else {
             let mask_val = (1u64 << src_logical_width).wrapping_sub(1);
             let mask = state.builder.ins().iconst(dst_phys_ty, mask_val as i64);
@@ -268,7 +269,7 @@ pub(crate) fn get_chunk_as_i64(builder: &mut FunctionBuilder, chunks: &[Value], 
         // i8~i64 to i64 (assumed to be uextend/ireduce in cast_type)
         cast_type(builder, val, types::I64)
     } else if val_ty == types::I128 && i == 1 {
-        let upper = builder.ins().ushr_imm(val, 64);
+        let upper = builder.ins().ushr_imm_s(val, 64);
         builder.ins().ireduce(types::I64, upper)
     } else {
         builder.ins().iconst(types::I64, 0)
@@ -424,7 +425,7 @@ impl SIRTranslator {
                     enabled_ptr,
                     *site_id as i32,
                 );
-                let enabled = state.builder.ins().icmp_imm(IntCC::NotEqual, enabled, 0);
+                let enabled = state.builder.ins().icmp_imm_s(IntCC::NotEqual, enabled, 0);
                 self.translate_runtime_event_inst(
                     state,
                     event_ptr,
@@ -486,7 +487,7 @@ impl SIRTranslator {
         let slot_base_off = state
             .builder
             .ins()
-            .iadd_imm(slot_off, RUNTIME_EVENT_HEADER_SIZE as i64);
+            .iadd_imm_s(slot_off, RUNTIME_EVENT_HEADER_SIZE as i64);
         let slot_addr = state.builder.ins().iadd(event_ptr, slot_base_off);
 
         let writing = state
@@ -496,7 +497,7 @@ impl SIRTranslator {
         let slot_seq_addr = state
             .builder
             .ins()
-            .iadd_imm(slot_addr, RUNTIME_EVENT_SLOT_SEQ_OFFSET as i64);
+            .iadd_imm_s(slot_addr, RUNTIME_EVENT_SLOT_SEQ_OFFSET as i64);
         // Mark the slot as being written. Runtime-event readers acquire-load
         // sequence words and read payload words only while the sequence is stable.
         state.builder.ins().atomic_rmw(
@@ -560,7 +561,7 @@ impl SIRTranslator {
         let slot_seq_addr = state
             .builder
             .ins()
-            .iadd_imm(slot_addr, RUNTIME_EVENT_SLOT_SEQ_OFFSET as i64);
+            .iadd_imm_s(slot_addr, RUNTIME_EVENT_SLOT_SEQ_OFFSET as i64);
         // Publish the slot after all payload stores. Only the sequence words
         // participate in the acquire/release protocol; payload stores are plain.
         state.builder.ins().atomic_rmw(
@@ -570,7 +571,7 @@ impl SIRTranslator {
             slot_seq_addr,
             seq,
         );
-        let incremented = state.builder.ins().iadd_imm(seq, 1);
+        let incremented = state.builder.ins().iadd_imm_s(seq, 1);
         // Advance the global write sequence after the slot sequence is visible.
         state.builder.ins().atomic_rmw(
             types::I64,
@@ -769,7 +770,7 @@ impl SIRTranslator {
             let r = builder.ins().iconst(types::I64, 0);
             builder.ins().return_(&[r]);
             builder.seal_all_blocks();
-            builder.finalize();
+            builder.finalize(self.target_config);
             return;
         }
 
@@ -777,7 +778,7 @@ impl SIRTranslator {
         self.translate_units_into(units, &mut builder, mem_ptr, None);
 
         builder.seal_all_blocks();
-        builder.finalize();
+        builder.finalize(self.target_config);
     }
 
     /// Translate execution units into the current function, starting from the
@@ -931,7 +932,7 @@ impl SIRTranslator {
             let r = builder.ins().iconst(types::I64, 0);
             builder.ins().return_(&[r]);
             builder.seal_all_blocks();
-            builder.finalize();
+            builder.finalize(self.target_config);
             return;
         }
 
@@ -1108,7 +1109,7 @@ impl SIRTranslator {
         }
 
         builder.seal_all_blocks();
-        builder.finalize();
+        builder.finalize(self.target_config);
     }
 }
 
@@ -1144,13 +1145,13 @@ impl SIRTranslator {
 
             if nc == 1 {
                 let cl_ty = get_cl_type(width);
-                let addr = builder.ins().iadd_imm(
+                let addr = builder.ins().iadd_imm_s(
                     mem_ptr,
                     (scratch_base_offset + slot.scratch_byte_offset) as i64,
                 );
                 let val = builder.ins().load(cl_ty, MemFlags::new(), addr, 0);
                 if self.options.four_state {
-                    let mask_addr = builder.ins().iadd_imm(
+                    let mask_addr = builder.ins().iadd_imm_s(
                         mem_ptr,
                         (scratch_base_offset + slot.scratch_byte_offset + 8) as i64,
                     );
@@ -1170,7 +1171,7 @@ impl SIRTranslator {
                 let mut values = Vec::with_capacity(nc);
                 for i in 0..nc {
                     let off = scratch_base_offset + slot.scratch_byte_offset + i * 8;
-                    let addr = builder.ins().iadd_imm(mem_ptr, off as i64);
+                    let addr = builder.ins().iadd_imm_s(mem_ptr, off as i64);
                     let val = builder.ins().load(types::I64, MemFlags::new(), addr, 0);
                     values.push(val);
                 }
@@ -1178,7 +1179,7 @@ impl SIRTranslator {
                     let mut masks = Vec::with_capacity(nc);
                     for i in 0..nc {
                         let off = scratch_base_offset + slot.scratch_byte_offset + (nc + i) * 8;
-                        let addr = builder.ins().iadd_imm(mem_ptr, off as i64);
+                        let addr = builder.ins().iadd_imm_s(mem_ptr, off as i64);
                         let val = builder.ins().load(types::I64, MemFlags::new(), addr, 0);
                         masks.push(val);
                     }
@@ -1347,7 +1348,7 @@ impl SIRTranslator {
         }
 
         builder.seal_all_blocks();
-        builder.finalize();
+        builder.finalize(self.target_config);
     }
 
     /// Translate a terminator for a spilled chunk. Local targets use normal
@@ -1552,7 +1553,7 @@ impl SIRTranslator {
                 let values = trans_val.load_value_chunks(state.builder);
                 for (i, &val) in values.iter().enumerate() {
                     let off = scratch_base_offset + slot.scratch_byte_offset + i * 8;
-                    let addr = state.builder.ins().iadd_imm(state.mem_ptr, off as i64);
+                    let addr = state.builder.ins().iadd_imm_s(state.mem_ptr, off as i64);
                     let val_i64 = cast_type(state.builder, val, types::I64);
                     state.builder.ins().store(MemFlags::new(), val_i64, addr, 0);
                 }
@@ -1561,7 +1562,7 @@ impl SIRTranslator {
                         let nc = values.len();
                         for (i, &mask) in masks.iter().enumerate() {
                             let off = scratch_base_offset + slot.scratch_byte_offset + (nc + i) * 8;
-                            let addr = state.builder.ins().iadd_imm(state.mem_ptr, off as i64);
+                            let addr = state.builder.ins().iadd_imm_s(state.mem_ptr, off as i64);
                             let mask_i64 = cast_type(state.builder, mask, types::I64);
                             state
                                 .builder
@@ -1582,7 +1583,7 @@ impl SIRTranslator {
                         let values = trans_val.load_value_chunks(state.builder);
                         for (j, &val) in values.iter().enumerate() {
                             let off = scratch_base_offset + scratch_off + j * 8;
-                            let addr = state.builder.ins().iadd_imm(state.mem_ptr, off as i64);
+                            let addr = state.builder.ins().iadd_imm_s(state.mem_ptr, off as i64);
                             let val_i64 = cast_type(state.builder, val, types::I64);
                             state.builder.ins().store(MemFlags::new(), val_i64, addr, 0);
                         }
@@ -1592,7 +1593,7 @@ impl SIRTranslator {
                                 for (j, &mask) in masks.iter().enumerate() {
                                     let off = scratch_base_offset + scratch_off + (nc + j) * 8;
                                     let addr =
-                                        state.builder.ins().iadd_imm(state.mem_ptr, off as i64);
+                                        state.builder.ins().iadd_imm_s(state.mem_ptr, off as i64);
                                     let mask_i64 = cast_type(state.builder, mask, types::I64);
                                     state
                                         .builder

@@ -114,7 +114,7 @@ pub fn emit_wide_logic_andor(
             let chunk = get_chunk_as_i64(b, chunks, i);
             accumulated = b.ins().bor(accumulated, chunk);
         }
-        b.ins().icmp_imm(IntCC::NotEqual, accumulated, 0)
+        b.ins().icmp_imm_s(IntCC::NotEqual, accumulated, 0)
     };
 
     let l_bool = reduce_to_bool(builder, l_chunks);
@@ -197,7 +197,7 @@ pub fn emit_wide_bit_count(
             let valid_bits = logical_width % 64;
             builder
                 .ins()
-                .band_imm(chunk, ((1u64 << valid_bits) - 1) as i64)
+                .band_imm_s(chunk, ((1u64 << valid_bits) - 1) as i64)
         } else {
             chunk
         }
@@ -227,13 +227,13 @@ pub fn emit_wide_bit_count(
                 let logical_count = if valid_bits < 64 {
                     builder
                         .ins()
-                        .iadd_imm(physical_count, -((64 - valid_bits) as i64))
+                        .iadd_imm_s(physical_count, -((64 - valid_bits) as i64))
                 } else {
                     physical_count
                 };
                 let contribution = builder.ins().select(still_zero, logical_count, zero);
                 count = builder.ins().iadd(count, contribution);
-                let chunk_is_zero = builder.ins().icmp_imm(IntCC::Equal, chunk, 0);
+                let chunk_is_zero = builder.ins().icmp_imm_s(IntCC::Equal, chunk, 0);
                 still_zero = builder.ins().band(still_zero, chunk_is_zero);
             }
             count
@@ -248,7 +248,7 @@ pub fn emit_wide_bit_count(
                     64
                 };
                 let chunk = logical_chunk(builder, index);
-                let chunk_is_zero = builder.ins().icmp_imm(IntCC::Equal, chunk, 0);
+                let chunk_is_zero = builder.ins().icmp_imm_s(IntCC::Equal, chunk, 0);
                 let physical_count = builder.ins().ctz(chunk);
                 let valid_bits_value = builder.ins().iconst(types::I64, valid_bits as i64);
                 let logical_count =
@@ -366,11 +366,11 @@ pub(crate) fn emit_wide_shift(
 ) -> Vec<Value> {
     let shift_amt_raw = r_chunks[0];
     let shift_amt_total = cast_type(builder, shift_amt_raw, types::I64);
-    let bit_shift = builder.ins().band_imm(shift_amt_total, 63);
-    let word_offset_val = builder.ins().ushr_imm(shift_amt_total, 6);
+    let bit_shift = builder.ins().band_imm_s(shift_amt_total, 63);
+    let word_offset_val = builder.ins().ushr_imm_s(shift_amt_total, 6);
     let sixty_four = builder.ins().iconst(types::I64, 64);
     let inv_bit_shift = builder.ins().isub(sixty_four, bit_shift);
-    let has_bit_shift = builder.ins().icmp_imm(IntCC::NotEqual, bit_shift, 0);
+    let has_bit_shift = builder.ins().icmp_imm_s(IntCC::NotEqual, bit_shift, 0);
 
     let mut res = Vec::with_capacity(num_chunks);
     for i in 0..num_chunks {
@@ -378,19 +378,23 @@ pub(crate) fn emit_wide_shift(
         let mut nxt_word = builder.ins().iconst(types::I64, 0);
 
         let (idx_cur, idx_nxt) = if matches!(op, BinaryOp::Shr) {
-            let base = builder.ins().iadd_imm(word_offset_val, i as i64);
-            let next = builder.ins().iadd_imm(base, 1);
+            let base = builder.ins().iadd_imm_s(word_offset_val, i as i64);
+            let next = builder.ins().iadd_imm_s(base, 1);
             (base, next)
         } else {
             let base = isub_from_imm(builder, i as i64, word_offset_val);
-            let prev = builder.ins().iadd_imm(base, -1);
+            let prev = builder.ins().iadd_imm_s(base, -1);
             (base, prev)
         };
 
         for (src_i, &src_val) in l_chunks.iter().enumerate() {
             let src_val_i64 = cast_type(builder, src_val, types::I64);
-            let is_cur = builder.ins().icmp_imm(IntCC::Equal, idx_cur, src_i as i64);
-            let is_nxt = builder.ins().icmp_imm(IntCC::Equal, idx_nxt, src_i as i64);
+            let is_cur = builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, idx_cur, src_i as i64);
+            let is_nxt = builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, idx_nxt, src_i as i64);
             cur_word = builder.ins().select(is_cur, src_val_i64, cur_word);
             nxt_word = builder.ins().select(is_nxt, src_val_i64, nxt_word);
         }
@@ -519,18 +523,18 @@ pub(crate) fn emit_wide_sar(
 ) -> Vec<Value> {
     let shift_amt_raw = r_chunks[0];
     let shift_amt_total = cast_type(builder, shift_amt_raw, types::I64);
-    let bit_shift = builder.ins().band_imm(shift_amt_total, 63);
-    let word_offset_val = builder.ins().ushr_imm(shift_amt_total, 6);
+    let bit_shift = builder.ins().band_imm_s(shift_amt_total, 63);
+    let word_offset_val = builder.ins().ushr_imm_s(shift_amt_total, 6);
     let sixty_four = builder.ins().iconst(types::I64, 64);
     let inv_bit_shift = builder.ins().isub(sixty_four, bit_shift);
-    let has_bit_shift = builder.ins().icmp_imm(IntCC::NotEqual, bit_shift, 0);
+    let has_bit_shift = builder.ins().icmp_imm_s(IntCC::NotEqual, bit_shift, 0);
 
     // Calculate sign fill based on the logical MSB of the operand
     let msb_bit_idx = (l_width - 1) % 64;
     let msb_chunk_idx = (l_width - 1) / 64;
     let msb_chunk = get_chunk_as_i64(builder, l_chunks, msb_chunk_idx);
-    let sign_bit = builder.ins().ushr_imm(msb_chunk, msb_bit_idx as i64);
-    let is_negative = builder.ins().band_imm(sign_bit, 1);
+    let sign_bit = builder.ins().ushr_imm_s(msb_chunk, msb_bit_idx as i64);
+    let is_negative = builder.ins().band_imm_s(sign_bit, 1);
     let zero = builder.ins().iconst(types::I64, 0);
     let all_ones = builder.ins().iconst(types::I64, -1);
     let sign_fill = builder.ins().select(is_negative, all_ones, zero);
@@ -540,13 +544,17 @@ pub(crate) fn emit_wide_sar(
         let mut cur_word = sign_fill;
         let mut nxt_word = sign_fill;
 
-        let idx_cur = builder.ins().iadd_imm(word_offset_val, i as i64);
-        let idx_nxt = builder.ins().iadd_imm(idx_cur, 1);
+        let idx_cur = builder.ins().iadd_imm_s(word_offset_val, i as i64);
+        let idx_nxt = builder.ins().iadd_imm_s(idx_cur, 1);
 
         for (src_i, &src_val) in l_chunks.iter().enumerate() {
             let src_val_i64 = cast_type(builder, src_val, types::I64);
-            let is_cur = builder.ins().icmp_imm(IntCC::Equal, idx_cur, src_i as i64);
-            let is_nxt = builder.ins().icmp_imm(IntCC::Equal, idx_nxt, src_i as i64);
+            let is_cur = builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, idx_cur, src_i as i64);
+            let is_nxt = builder
+                .ins()
+                .icmp_imm_s(IntCC::Equal, idx_nxt, src_i as i64);
             cur_word = builder.ins().select(is_cur, src_val_i64, cur_word);
             nxt_word = builder.ins().select(is_nxt, src_val_i64, nxt_word);
         }
@@ -578,7 +586,7 @@ fn load_or_default(
         .ins()
         .icmp(IntCC::UnsignedLessThan, idx, num_chunks_val);
     let safe_idx = builder.ins().select(in_bounds, idx, zero);
-    let byte_off = builder.ins().ishl_imm(safe_idx, 3);
+    let byte_off = builder.ins().ishl_imm_s(safe_idx, 3);
     let addr = builder.ins().iadd(base, byte_off);
     let loaded = builder.ins().load(types::I64, MemFlags::new(), addr, 0);
     builder.ins().select(in_bounds, loaded, default)
@@ -598,22 +606,22 @@ pub fn emit_wide_shift_mem(
 ) {
     let shift_amt_raw = r_chunks[0];
     let shift_amt_total = cast_type(builder, shift_amt_raw, types::I64);
-    let bit_shift = builder.ins().band_imm(shift_amt_total, 63);
-    let word_offset_val = builder.ins().ushr_imm(shift_amt_total, 6);
+    let bit_shift = builder.ins().band_imm_s(shift_amt_total, 63);
+    let word_offset_val = builder.ins().ushr_imm_s(shift_amt_total, 6);
     let sixty_four = builder.ins().iconst(types::I64, 64);
     let inv_bit_shift = builder.ins().isub(sixty_four, bit_shift);
-    let has_bit_shift = builder.ins().icmp_imm(IntCC::NotEqual, bit_shift, 0);
+    let has_bit_shift = builder.ins().icmp_imm_s(IntCC::NotEqual, bit_shift, 0);
     let num_chunks_val = builder.ins().iconst(types::I64, num_chunks as i64);
     let zero = builder.ins().iconst(types::I64, 0);
 
     for i in 0..num_chunks {
         let (idx_cur, idx_nxt) = if matches!(op, BinaryOp::Shr) {
-            let base = builder.ins().iadd_imm(word_offset_val, i as i64);
-            let next = builder.ins().iadd_imm(base, 1);
+            let base = builder.ins().iadd_imm_s(word_offset_val, i as i64);
+            let next = builder.ins().iadd_imm_s(base, 1);
             (base, next)
         } else {
             let base = isub_from_imm(builder, i as i64, word_offset_val);
-            let prev = builder.ins().iadd_imm(base, -1);
+            let prev = builder.ins().iadd_imm_s(base, -1);
             (base, prev)
         };
 
@@ -652,11 +660,11 @@ pub fn emit_wide_sar_mem(
 ) {
     let shift_amt_raw = r_chunks[0];
     let shift_amt_total = cast_type(builder, shift_amt_raw, types::I64);
-    let bit_shift = builder.ins().band_imm(shift_amt_total, 63);
-    let word_offset_val = builder.ins().ushr_imm(shift_amt_total, 6);
+    let bit_shift = builder.ins().band_imm_s(shift_amt_total, 63);
+    let word_offset_val = builder.ins().ushr_imm_s(shift_amt_total, 6);
     let sixty_four = builder.ins().iconst(types::I64, 64);
     let inv_bit_shift = builder.ins().isub(sixty_four, bit_shift);
-    let has_bit_shift = builder.ins().icmp_imm(IntCC::NotEqual, bit_shift, 0);
+    let has_bit_shift = builder.ins().icmp_imm_s(IntCC::NotEqual, bit_shift, 0);
     let num_chunks_val = builder.ins().iconst(types::I64, num_chunks as i64);
 
     // Calculate sign fill based on the logical MSB of the operand
@@ -666,15 +674,15 @@ pub fn emit_wide_sar_mem(
         builder
             .ins()
             .load(types::I64, MemFlags::new(), l_addr, msb_chunk_offset as i32);
-    let sign_bit = builder.ins().ushr_imm(msb_chunk, msb_bit_idx as i64);
-    let is_negative = builder.ins().band_imm(sign_bit, 1);
+    let sign_bit = builder.ins().ushr_imm_s(msb_chunk, msb_bit_idx as i64);
+    let is_negative = builder.ins().band_imm_s(sign_bit, 1);
     let zero = builder.ins().iconst(types::I64, 0);
     let all_ones = builder.ins().iconst(types::I64, -1);
     let sign_fill = builder.ins().select(is_negative, all_ones, zero);
 
     for i in 0..num_chunks {
-        let idx_cur = builder.ins().iadd_imm(word_offset_val, i as i64);
-        let idx_nxt = builder.ins().iadd_imm(idx_cur, 1);
+        let idx_cur = builder.ins().iadd_imm_s(word_offset_val, i as i64);
+        let idx_nxt = builder.ins().iadd_imm_s(idx_cur, 1);
 
         let cur_word = load_or_default(builder, l_addr, idx_cur, num_chunks_val, sign_fill);
         let nxt_word = load_or_default(builder, l_addr, idx_nxt, num_chunks_val, sign_fill);
@@ -718,10 +726,10 @@ fn emit_wide_signed_cmp(
             // positive.
             let (l, r) = if top_bits < 64 {
                 let shift = (64 - top_bits) as i64;
-                let l = builder.ins().ishl_imm(l, shift);
-                let l = builder.ins().sshr_imm(l, shift);
-                let r = builder.ins().ishl_imm(r, shift);
-                let r = builder.ins().sshr_imm(r, shift);
+                let l = builder.ins().ishl_imm_s(l, shift);
+                let l = builder.ins().sshr_imm_s(l, shift);
+                let r = builder.ins().ishl_imm_s(r, shift);
+                let r = builder.ins().sshr_imm_s(r, shift);
                 (l, r)
             } else {
                 (l, r)
@@ -792,7 +800,7 @@ fn emit_wide_divrem(
     for &chunk in &normalized_rhs {
         divisor_or = builder.ins().bor(divisor_or, chunk);
     }
-    let divisor_is_zero = builder.ins().icmp_imm(IntCC::Equal, divisor_or, 0);
+    let divisor_is_zero = builder.ins().icmp_imm_s(IntCC::Equal, divisor_or, 0);
     let total_bits = num_chunks * 64;
 
     let mut q_chunks: Vec<Value> = (0..num_chunks)
@@ -808,9 +816,9 @@ fn emit_wide_divrem(
 
         // remainder <<= 1
         for c in (0..num_chunks).rev() {
-            let shifted = builder.ins().ishl_imm(rem_chunks[c], 1);
+            let shifted = builder.ins().ishl_imm_s(rem_chunks[c], 1);
             if c > 0 {
-                let carry_bit = builder.ins().ushr_imm(rem_chunks[c - 1], 63);
+                let carry_bit = builder.ins().ushr_imm_s(rem_chunks[c - 1], 63);
                 rem_chunks[c] = builder.ins().bor(shifted, carry_bit);
             } else {
                 rem_chunks[c] = shifted;
@@ -819,8 +827,8 @@ fn emit_wide_divrem(
 
         // remainder[0] |= (dividend[chunk_idx] >> bit_idx) & 1
         let dividend_chunk = normalized_lhs[chunk_idx];
-        let extracted = builder.ins().ushr_imm(dividend_chunk, bit_idx as i64);
-        let one_bit = builder.ins().band_imm(extracted, 1);
+        let extracted = builder.ins().ushr_imm_s(dividend_chunk, bit_idx as i64);
+        let one_bit = builder.ins().band_imm_s(extracted, 1);
         rem_chunks[0] = builder.ins().bor(rem_chunks[0], one_bit);
 
         // if remainder >= divisor (multi-chunk unsigned GE)
@@ -909,9 +917,9 @@ fn wide_sign_bit(builder: &mut FunctionBuilder, chunks: &[Value], width: usize) 
     }
     let sign_index = width - 1;
     let chunk = get_chunk_as_i64(builder, chunks, sign_index / 64);
-    let shifted = builder.ins().ushr_imm(chunk, (sign_index % 64) as i64);
-    let bit = builder.ins().band_imm(shifted, 1);
-    builder.ins().icmp_imm(IntCC::NotEqual, bit, 0)
+    let shifted = builder.ins().ushr_imm_s(chunk, (sign_index % 64) as i64);
+    let bit = builder.ins().band_imm_s(shifted, 1);
+    builder.ins().icmp_imm_s(IntCC::NotEqual, bit, 0)
 }
 
 fn sign_extend_wide_chunks(
@@ -1029,7 +1037,7 @@ fn emit_wide_logical_not(
         let r = get_chunk_as_i64(builder, r_chunks, i);
         accumulated = builder.ins().bor(accumulated, r);
     }
-    let is_zero = builder.ins().icmp_imm(IntCC::Equal, accumulated, 0);
+    let is_zero = builder.ins().icmp_imm_s(IntCC::Equal, accumulated, 0);
     let one = builder.ins().iconst(types::I64, 1);
     let zero = builder.ins().iconst(types::I64, 0);
 
@@ -1051,7 +1059,7 @@ fn emit_wide_reduction_or(
         let r = get_chunk_as_i64(builder, r_chunks, i);
         accumulated = builder.ins().bor(accumulated, r);
     }
-    let is_nz = builder.ins().icmp_imm(IntCC::NotEqual, accumulated, 0);
+    let is_nz = builder.ins().icmp_imm_s(IntCC::NotEqual, accumulated, 0);
     let one = builder.ins().iconst(types::I64, 1);
     let zero = builder.ins().iconst(types::I64, 0);
 
@@ -1076,7 +1084,7 @@ fn emit_wide_reduction_xor(
     }
 
     let mut res = Vec::with_capacity(num_chunks);
-    res.push(builder.ins().band_imm(parity, 1));
+    res.push(builder.ins().band_imm_s(parity, 1));
     for _ in 1..num_chunks {
         res.push(builder.ins().iconst(types::I64, 0));
     }
