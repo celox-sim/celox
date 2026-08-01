@@ -422,6 +422,19 @@ impl fmt::Display for InstanceId {
     }
 }
 
+/// Dense source-independent identity of one flattened state object.
+///
+/// Frontends assign this identity during design projection. Source variable
+/// IDs must not cross into SIR optimization, layout, or backend code.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct StateObjectId(pub u32);
+
+impl fmt::Display for StateObjectId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "state{}", self.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AbsoluteAddrBase<V> {
     pub instance_id: InstanceId,
@@ -460,6 +473,9 @@ pub struct RegionedAbsoluteAddrBase<V> {
     pub instance_id: InstanceId,
     pub var_id: V,
 }
+
+pub type StateAddr = AbsoluteAddrBase<StateObjectId>;
+pub type RegionedStateAddr = RegionedAbsoluteAddrBase<StateObjectId>;
 
 impl<V: Copy> RegionedAbsoluteAddrBase<V> {
     pub fn from_absolute_addr(region: u32, addr: AbsoluteAddrBase<V>) -> Self {
@@ -512,6 +528,7 @@ mod tests {
 
         assert_eq!(ModuleId(3).to_string(), "mod3");
         assert_eq!(InstanceId(42).to_string(), "inst42");
+        assert_eq!(StateObjectId(7).to_string(), "state7");
         assert_eq!(address.to_string(), "AbsoluteAddr(inst42, 7)");
     }
 
