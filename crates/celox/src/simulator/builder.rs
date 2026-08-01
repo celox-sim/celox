@@ -670,7 +670,18 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         }
 
         let jit_start = phase_timing.then(crate::timing::now);
-        let backend = JitBackend::new(&laid_out, &options, None)?;
+        let mut trace = crate::debug::CompilationTrace::default();
+        let wants_codegen_trace = options.trace.pre_optimized_clif
+            || options.trace.post_optimized_clif
+            || options.trace.native;
+        let backend = JitBackend::new(
+            &laid_out,
+            &options,
+            wants_codegen_trace.then_some(&mut trace),
+        )?;
+        if options.trace.output_to_stdout {
+            trace.print();
+        }
         if let Some(s) = jit_start {
             eprintln!("[phase-timing] jit_backend: {:?}", s.elapsed());
         }
