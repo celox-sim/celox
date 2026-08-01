@@ -22,8 +22,8 @@ mod types;
 
 pub use config::BuildConfig;
 pub use error::{LoweringPhase, ParserError, SourceLocation};
-pub use hierarchy::{ParseIrResult, parse_ir, parse_ir_with_loop_provenance};
-pub use module_artifact::{RelocationModule, SimModule};
+pub use hierarchy::{ParseIrResult, SymbolicRtl, parse_ir, parse_ir_with_loop_provenance};
+pub use module_artifact::{RelocationModule, ScheduledRtl, SimModule};
 pub use types::{resolve_dims, resolve_total_width};
 
 use celox_design::{InstanceId, ModuleId, VariableMetadata};
@@ -90,6 +90,43 @@ impl fmt::Debug for VerylFrontendLookup {
             .field("instances", &self.instance_module.len())
             .field("modules", &self.module_variables.len())
             .finish_non_exhaustive()
+    }
+}
+
+impl VerylFrontendLookup {
+    pub fn get_path(&self, address: &AbsoluteAddr) -> String {
+        let instance_path = self
+            .instance_ids
+            .iter()
+            .find(|(_, id)| **id == address.instance_id)
+            .map(|(path, _)| path);
+        let module_id = self.instance_module.get(&address.instance_id).unwrap();
+        let module_vars = self.module_variables.get(module_id).unwrap();
+        let variable_path = module_vars
+            .values()
+            .find(|info| info.id == address.var_id)
+            .map(|info| &info.path);
+
+        let mut result = Vec::new();
+        if let Some(instance_path) = instance_path {
+            for part in &instance_path.0 {
+                result.push(format!(
+                    "{}[{}]",
+                    veryl_parser::resource_table::get_str_value(part.0).unwrap(),
+                    part.1
+                ));
+            }
+        }
+        if let Some(variable_path) = variable_path {
+            for part in &variable_path.0 {
+                result.push(
+                    veryl_parser::resource_table::get_str_value(*part)
+                        .unwrap()
+                        .to_string(),
+                );
+            }
+        }
+        result.join(".")
     }
 }
 

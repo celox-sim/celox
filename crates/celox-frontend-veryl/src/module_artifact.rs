@@ -1,17 +1,17 @@
 use std::{collections::BTreeSet, fmt};
 
 use celox_design::{
-    AbsoluteAddrBase, InitialStateValue, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
-    RuntimeErrorInfo, RuntimeEventSite, TriggerSet,
+    AbsoluteAddrBase, ElaboratedDesign, InitialStateValue, RegionedAbsoluteAddrBase,
+    RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, RuntimeSchema, TriggerSet,
 };
-use celox_sir::ExecutionUnit;
+use celox_sir::{ExecutionUnit, SirProgram};
 use celox_slt::{
     CombObserver, FfAccessSummary, GlueBlockBase, LogicPath, NodeId, SLTNodeArena, SymbolicStore,
 };
 use veryl_analyzer::ir::{VarId, VarPath, Variable};
 use veryl_parser::resource_table::StrId;
 
-use crate::HashMap;
+use crate::{HashMap, VerylFrontendLookup, VerylTestbenchSource};
 
 type RegionedVarAddr = RegionedVarAddrBase<VarId>;
 type GlueBlock = GlueBlockBase<VarId>;
@@ -88,6 +88,32 @@ impl fmt::Debug for RelocationModule {
             .field("apply_ff_blocks", &self.apply_ff_blocks)
             .field("comb_blocks", &self.comb_blocks)
             .field("comb_observers", &self.comb_observers)
+            .finish()
+    }
+}
+
+/// Source-independent SIR and design data produced after all SLT nodes have
+/// been scheduled and lowered.
+///
+/// No `NodeId` or SLT arena may cross this boundary. Veryl identities retained
+/// for diagnostics and public path lookup live only in `frontend_lookup`.
+#[derive(Clone)]
+pub struct ScheduledRtl {
+    pub sir: SirProgram<AbsoluteAddr, RegionedAbsoluteAddr>,
+    pub design: ElaboratedDesign<AbsoluteAddr>,
+    pub frontend_lookup: VerylFrontendLookup,
+    pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
+    pub testbench_source: VerylTestbenchSource,
+}
+
+impl fmt::Debug for ScheduledRtl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScheduledRtl")
+            .field("sir", &self.sir)
+            .field("design", &self.design)
+            .field("frontend_lookup", &self.frontend_lookup)
+            .field("runtime_schema", &self.runtime_schema)
+            .field("testbench_source", &self.testbench_source)
             .finish()
     }
 }

@@ -175,10 +175,7 @@ fn scheduler_source_locations(
 }
 
 pub(crate) fn flatten(
-    root_id: &ModuleId,
-    module_ir: &HashMap<ModuleId, &Module>,
-    modules: HashMap<ModuleId, SimModule>,
-    module_names: HashMap<ModuleId, StrId>,
+    symbolic: celox_frontend_veryl::SymbolicRtl<'_>,
     config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -192,7 +189,13 @@ pub(crate) fn flatten(
     four_state: bool,
     trace_opts: &crate::debug::TraceOptions,
     mut trace: Option<&mut crate::debug::CompilationTrace>,
-) -> Result<Program, ParserError> {
+) -> Result<celox_frontend_veryl::ScheduledRtl, ParserError> {
+    let celox_frontend_veryl::SymbolicRtl {
+        modules,
+        module_ir,
+        module_names,
+        root_id,
+    } = symbolic;
     let flatten_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
     macro_rules! timed_sub {
         ($label:expr, $body:expr) => {{
@@ -214,7 +217,7 @@ pub(crate) fn flatten(
     }
 
     let (expanded, instance_modules) =
-        timed_sub!("expand_hierarchy", expand_hierarchy(root_id, &modules));
+        timed_sub!("expand_hierarchy", expand_hierarchy(&root_id, &modules));
     let global_boundaries = timed_sub!(
         "propagate_boundaries",
         propagate_boundaries(&expanded, &instance_modules, &modules)
@@ -399,7 +402,7 @@ pub(crate) fn flatten(
     })?;
 
     let ff_clock_recipes = build_ff_clock_recipes(
-        module_ir,
+        &module_ir,
         &modules,
         &instance_modules,
         &clock_domains,
@@ -472,31 +475,19 @@ pub(crate) fn flatten(
     ) {
         Ok(schedule) => schedule,
         Err(error) => {
-            let (err_vars, err_path_idx) = module_variables(module_ir, config).unwrap_or_default();
-            let program = Program {
-                sir: crate::ir::SirProgram {
-                    eval_apply_ffs: HashMap::default(),
-                    eval_comb_apply_ffs: HashMap::default(),
-                    eval_only_ffs: HashMap::default(),
-                    apply_ffs: HashMap::default(),
-                    eval_comb: Vec::new(),
-                },
-                design: celox_design::ElaboratedDesign::default(),
-                frontend: crate::ir::VerylFrontendLookup {
-                    instance_ids: expanded.clone(),
-                    instance_module: instance_modules.clone(),
-                    module_variables: err_vars,
-                    module_var_path_index: err_path_idx,
-                    module_names: module_names.clone(),
-                },
-                runtime_schema: celox_design::RuntimeSchema::default(),
-                layout_requirements: Default::default(),
-                testbench: None,
+            let (err_vars, err_path_idx) = module_variables(&module_ir, config).unwrap_or_default();
+            let frontend_lookup = crate::ir::VerylFrontendLookup {
+                instance_ids: expanded.clone(),
+                instance_module: instance_modules.clone(),
+                module_variables: err_vars,
+                module_var_path_index: err_path_idx,
+                module_names: module_names.clone(),
             };
-            let source_locations = scheduler_source_locations(&error, module_ir, &instance_modules);
+            let source_locations =
+                scheduler_source_locations(&error, &module_ir, &instance_modules);
             let mut target_arena = SLTNodeArena::new();
             let error = error.map_addr(&global_arena, &mut target_arena, &|addr| {
-                program.get_path(addr)
+                frontend_lookup.get_path(addr)
             })?;
             return Err(if source_locations.is_empty() {
                 ParserError::Scheduler(error)
@@ -626,7 +617,7 @@ pub(crate) fn flatten(
     };
 
     // Extract initial block statements from root module (for native testbenches)
-    let initial_statements = module_ir.get(root_id).and_then(|root_module| {
+    let initial_statements = module_ir.get(&root_id).and_then(|root_module| {
         let mut stmts = Vec::new();
         for decl in &root_module.declarations {
             if let Declaration::Initial(init_decl) = decl {
@@ -636,7 +627,7 @@ pub(crate) fn flatten(
         if stmts.is_empty() { None } else { Some(stmts) }
     });
 
-    let (mod_vars, mod_path_idx) = module_variables(module_ir, config)?;
+    let (mod_vars, mod_path_idx) = module_variables(&module_ir, config)?;
     let initial_memory_values = instance_modules
         .iter()
         .flat_map(|(&instance_id, module_id)| {
@@ -678,11 +669,11 @@ pub(crate) fn flatten(
     let testbench_source = celox_frontend_veryl::VerylTestbenchSource {
         initial_statements,
         functions: module_ir
-            .get(root_id)
+            .get(&root_id)
             .map(|m| m.functions.clone())
             .unwrap_or_default(),
     };
-    let program = Program {
+    let mut scheduled = celox_frontend_veryl::ScheduledRtl {
         sir: crate::ir::SirProgram {
             eval_apply_ffs,
             eval_comb_apply_ffs,
@@ -700,7 +691,7 @@ pub(crate) fn flatten(
             },
             initial_state: initial_memory_values,
         },
-        frontend: crate::ir::VerylFrontendLookup {
+        frontend_lookup: crate::ir::VerylFrontendLookup {
             instance_ids: expanded,
             instance_module: instance_modules,
             module_variables: mod_vars,
@@ -713,15 +704,14 @@ pub(crate) fn flatten(
             comb_observers: runtime_comb_observers,
             testbench_read_roots: Default::default(),
         },
-        layout_requirements: Default::default(),
-        testbench: None,
+        testbench_source,
     };
 
     // --- Trigger Injection ---
     let mut trigger_map: HashMap<AbsoluteAddr, Vec<crate::ir::TriggerIdWithKind>> =
         HashMap::default();
-    for (id, addr) in program.design.events.ordered_events.iter().enumerate() {
-        if let Some(metadata) = program.design.state_objects.get(addr) {
+    for (id, addr) in scheduled.design.events.ordered_events.iter().enumerate() {
+        if let Some(metadata) = scheduled.design.state_objects.get(addr) {
             trigger_map
                 .entry(*addr)
                 .or_default()
@@ -732,12 +722,11 @@ pub(crate) fn flatten(
         }
     }
 
-    let mut program = program;
-    for units in program
+    for units in scheduled
         .sir
         .eval_apply_ffs
         .values_mut()
-        .chain(program.sir.eval_comb_apply_ffs.values_mut())
+        .chain(scheduled.sir.eval_comb_apply_ffs.values_mut())
     {
         for eu in units {
             for bb in eu.blocks.values_mut() {
@@ -745,14 +734,14 @@ pub(crate) fn flatten(
                     match inst {
                         crate::ir::SIRInstruction::Store(addr, _, _, _, triggers, _) => {
                             let abs = addr.absolute_addr();
-                            let canonical = program.design.events.canonical(abs);
+                            let canonical = scheduled.design.events.canonical(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
                                 *triggers = ts.clone();
                             }
                         }
                         crate::ir::SIRInstruction::Commit(_, dst, .., triggers) => {
                             let abs = dst.absolute_addr();
-                            let canonical = program.design.events.canonical(abs);
+                            let canonical = scheduled.design.events.canonical(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
                                 *triggers = ts.clone();
                             }
@@ -763,21 +752,21 @@ pub(crate) fn flatten(
             }
         }
     }
-    for units in program.sir.eval_only_ffs.values_mut() {
+    for units in scheduled.sir.eval_only_ffs.values_mut() {
         for eu in units {
             for bb in eu.blocks.values_mut() {
                 for inst in &mut bb.instructions {
                     match inst {
                         crate::ir::SIRInstruction::Store(addr, _, _, _, triggers, _) => {
                             let abs = addr.absolute_addr();
-                            let canonical = program.design.events.canonical(abs);
+                            let canonical = scheduled.design.events.canonical(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
                                 *triggers = ts.clone();
                             }
                         }
                         crate::ir::SIRInstruction::Commit(_, dst, .., triggers) => {
                             let abs = dst.absolute_addr();
-                            let canonical = program.design.events.canonical(abs);
+                            let canonical = scheduled.design.events.canonical(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
                                 *triggers = ts.clone();
                             }
@@ -788,14 +777,14 @@ pub(crate) fn flatten(
             }
         }
     }
-    for units in program.sir.apply_ffs.values_mut() {
+    for units in scheduled.sir.apply_ffs.values_mut() {
         for eu in units {
             for bb in eu.blocks.values_mut() {
                 for inst in &mut bb.instructions {
                     match inst {
                         crate::ir::SIRInstruction::Store(addr, ..) => {
                             let abs = addr.absolute_addr();
-                            let canonical = program.design.events.canonical(abs);
+                            let canonical = scheduled.design.events.canonical(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
                                 if let crate::ir::SIRInstruction::Store(_, _, _, _, triggers, _) =
                                     inst
@@ -806,7 +795,7 @@ pub(crate) fn flatten(
                         }
                         crate::ir::SIRInstruction::Commit(_, dst, ..) => {
                             let abs = dst.absolute_addr();
-                            let canonical = program.design.events.canonical(abs);
+                            let canonical = scheduled.design.events.canonical(abs);
                             if let Some(ts) = trigger_map.get(&canonical) {
                                 if let crate::ir::SIRInstruction::Commit(.., triggers) = inst {
                                     *triggers = ts.clone();
@@ -819,20 +808,20 @@ pub(crate) fn flatten(
             }
         }
     }
-    for eu in &mut program.sir.eval_comb {
+    for eu in &mut scheduled.sir.eval_comb {
         for bb in eu.blocks.values_mut() {
             for inst in &mut bb.instructions {
                 match inst {
                     crate::ir::SIRInstruction::Store(addr, _, _, _, triggers, _) => {
                         let abs = addr.absolute_addr();
-                        let canonical = program.design.events.canonical(abs);
+                        let canonical = scheduled.design.events.canonical(abs);
                         if let Some(ts) = trigger_map.get(&canonical) {
                             *triggers = ts.clone();
                         }
                     }
                     crate::ir::SIRInstruction::Commit(_, dst, .., triggers) => {
                         let abs = dst.absolute_addr();
-                        let canonical = program.design.events.canonical(abs);
+                        let canonical = scheduled.design.events.canonical(abs);
                         if let Some(ts) = trigger_map.get(&canonical) {
                             *triggers = ts.clone();
                         }
@@ -843,12 +832,7 @@ pub(crate) fn flatten(
         }
     }
 
-    crate::testbench::project_observability(&mut program, &testbench_source);
-    program.testbench = crate::testbench::compile_semantic_testbench(&program, &testbench_source);
-
-    dump_addr_map_if_requested(&program);
-
-    Ok(program)
+    Ok(scheduled)
 }
 
 fn dump_addr_map_if_requested(program: &Program) {
@@ -1630,13 +1614,10 @@ pub fn parse(
     {
         t.analyzer_ir = Some(ir.to_string());
     }
-    let mut program = timed_phase!(
+    let scheduled = timed_phase!(
         "flatten",
         flatten(
-            &result.root_id,
-            &result.module_ir,
-            result.modules,
-            result.module_names,
+            result,
             config,
             ignored_loops,
             true_loops,
@@ -1645,6 +1626,10 @@ pub fn parse(
             trace.as_deref_mut(),
         )
     )?;
+    let (mut program, testbench_source) = Program::from_scheduled(scheduled);
+    crate::testbench::project_observability(&mut program, &testbench_source);
+    program.testbench = crate::testbench::compile_semantic_testbench(&program, &testbench_source);
+    dump_addr_map_if_requested(&program);
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.pre_optimized_sir
     {

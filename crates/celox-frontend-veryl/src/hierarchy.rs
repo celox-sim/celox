@@ -12,18 +12,21 @@ use crate::{
 /// This artifact may retain analyzer references while frontend construction is
 /// in progress. It is consumed before source-independent design and SIR
 /// artifacts leave the frontend boundary.
-pub struct ParseIrResult<'a> {
+pub struct SymbolicRtl<'a> {
     pub modules: HashMap<ModuleId, SimModule>,
     pub module_ir: HashMap<ModuleId, &'a Module>,
     pub module_names: HashMap<ModuleId, StrId>,
     pub root_id: ModuleId,
 }
 
+/// Compatibility name retained while callers migrate to the phase artifact.
+pub type ParseIrResult<'a> = SymbolicRtl<'a>;
+
 pub fn parse_ir<'a>(
     ir: &'a veryl_analyzer::ir::Ir,
     config: &BuildConfig,
     top: &StrId,
-) -> Result<ParseIrResult<'a>, ParserError> {
+) -> Result<SymbolicRtl<'a>, ParserError> {
     parse_ir_with_loop_provenance(ir, &LoopProvenance::default(), config, top)
 }
 
@@ -32,7 +35,7 @@ pub fn parse_ir_with_loop_provenance<'a>(
     loop_provenance: &LoopProvenance,
     config: &BuildConfig,
     top: &StrId,
-) -> Result<ParseIrResult<'a>, ParserError> {
+) -> Result<SymbolicRtl<'a>, ParserError> {
     let mut name_to_ir: HashMap<StrId, &'a Module> = HashMap::default();
     let mut generic_names: HashSet<StrId> = HashSet::default();
     for component in &ir.components {
@@ -149,7 +152,7 @@ pub fn parse_ir_with_loop_provenance<'a>(
         modules.insert(*module_id, sim_module);
     }
 
-    Ok(ParseIrResult {
+    Ok(SymbolicRtl {
         modules,
         module_ir,
         module_names,
