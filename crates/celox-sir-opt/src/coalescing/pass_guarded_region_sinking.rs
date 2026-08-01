@@ -223,12 +223,20 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
         if options.four_state || eu.verify_result().is_err() {
             return;
         }
+        let verify_stage = |eu: &ExecutionUnit<RegionedAbsoluteAddr>, stage: &'static str| {
+            if std::env::var_os("CELOX_SIR_VERIFY_PASSES").is_some()
+                && let Err(error) = eu.verify_result()
+            {
+                panic!("after guarded-region substage {stage}: {error}");
+            }
+        };
 
         // Recover one branch for coupled state outputs before ordinary Mux
         // lowering fragments the producer DAG with internal value diamonds.
         // This is especially important for RTL blocks which assign `result`
         // and `flags` under the same priority if/else chain.
         form_coupled_store_regions(eu);
+        verify_stage(eu, "coupled stores");
 
         // First recover a branch shared by all Muxes with the same predicate
         // in a pure SIR region. This is deliberately planned from the input
@@ -236,6 +244,7 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
         // blocks are not candidates in this run, so termination needs neither
         // an iteration limit nor a function-size budget.
         form_same_predicate_regions(eu);
+        verify_stage(eu, "same-predicate regions");
 
         // A case rewrite can leave a guarded value diamond on the common path
         // while its phi result is consumed in only one selected leaf. Move the
@@ -243,6 +252,7 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
         // such as division retain their original guard. Planning uses one
         // CFG/use snapshot and no path enumeration.
         sink_deferred_value_diamonds(eu);
+        verify_stage(eu, "deferred value diamonds");
 
         // Recompute CFG facts after region formation. The existing edge
         // sinking transform remains independent and can consume either an
@@ -304,9 +314,13 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
             // merging.  This reconstructs a same-block effect region without
             // guessing instruction order or duplicating any pure computation.
             if distribute_prefix_phi_stores(eu) {
+                verify_stage(eu, "prefix phi stores");
                 merge_single_predecessor_jump_blocks(eu);
+                verify_stage(eu, "single-predecessor merge");
                 form_coupled_store_regions(eu);
+                verify_stage(eu, "post-merge coupled stores");
                 sink_deferred_value_regions(eu);
+                verify_stage(eu, "deferred value regions");
             }
         }
 
@@ -314,6 +328,7 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
         // live in the branch head. Split their pure cones at the control edge
         // before ordinary dominator placement.
         split_branch_live_ranges(eu);
+        verify_stage(eu, "branch live-range splitting");
 
         // Place pure values at the nearest common dominator of their uses.
         // Priority recovery often leaves the normal arithmetic in the branch
@@ -321,6 +336,7 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
         // ordinary SSA code sinking on the existing CFG: it adds no branch and
         // moves neither memory reads nor observable effects.
         sink_pure_values_to_use_dominators(eu);
+        verify_stage(eu, "pure-value dominator sinking");
 
         debug_assert_eq!(eu.verify_result(), Ok(()));
     }
@@ -2307,6 +2323,32 @@ fn plan_coupled_store_region(
             &mut masks,
         );
     }
+    // Every store template is emitted in every leaf.  Its dynamic address
+    // operands therefore have to dominate the complete region, even when the
+    // same calculation is also reachable from one leaf's value cone.  Without
+    // this all-leaf mask, that shared calculation could be sunk into only that
+    // leaf and leave the duplicated stores in the other leaves with a
+    // non-dominating operand.
+    for store in &stores {
+        let SIRInstruction::Store(_, offset, _, _, _, _) = &block.instructions[store.index] else {
+            unreachable!("coupled-store plan must refer to a Store")
+        };
+        let dynamic_offsets = offset
+            .dynamic_registers()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        mark_coupled_store_leaf_defs(
+            &dynamic_offsets,
+            0..leaf_values.len(),
+            leaf_values.len(),
+            last_store,
+            local_defs,
+            block,
+            &removable_muxes,
+            &mut masks,
+        );
+    }
     // A condition at level `n` executes on every path which reaches that
     // decision, namely leaves n..=depth.  Include its defining slice in the
     // same path masks as data values so the nearest-common-dominator
@@ -2560,14 +2602,20 @@ fn apply_coupled_store_plan(
                 .map(|(store, value)| store_with_source(store, *value)),
         );
     }
-    let conditions = plan
-        .conditions
-        .iter()
-        .copied()
-        .map(|condition| {
-            normalize_branch_condition(&mut eu.register_map, &mut head, condition, reg_counter)
-        })
-        .collect::<Vec<_>>();
+    let mut conditions = Vec::with_capacity(plan.conditions.len());
+    for (level, condition) in plan.conditions.iter().copied().enumerate() {
+        let instructions = if level == 0 {
+            &mut head
+        } else {
+            &mut decisions[level]
+        };
+        conditions.push(normalize_branch_condition(
+            &mut eu.register_map,
+            instructions,
+            condition,
+            reg_counter,
+        ));
+    }
 
     let depth = conditions.len();
     let decision_ids = std::iter::once(plan.block_id)
@@ -4606,6 +4654,36 @@ mod tests {
             multiplication_block.terminator,
             SIRTerminator::Branch { .. }
         ));
+
+        // Store templates are cloned into every priority leaf.  A dynamic
+        // offset which is also part of a late leaf's value cone must therefore
+        // stay above the region instead of following that value cone.
+        let mut dynamic_offset_eu = before;
+        dynamic_offset_eu
+            .register_map
+            .insert(RegisterId(22), RegisterType::Logic { width: 1 });
+        for instruction in &mut dynamic_offset_eu
+            .blocks
+            .get_mut(&BlockId(0))
+            .unwrap()
+            .instructions
+        {
+            if let SIRInstruction::Store(_, offset, _, _, _, _) = instruction {
+                *offset = SIROffset::Dynamic(RegisterId(10));
+            }
+        }
+        dynamic_offset_eu.verify_result().unwrap();
+        form_coupled_store_regions(&mut dynamic_offset_eu);
+        dynamic_offset_eu.verify_result().unwrap();
+        assert!(
+            dynamic_offset_eu.blocks[&dynamic_offset_eu.entry_block_id]
+                .instructions
+                .iter()
+                .any(|instruction| matches!(
+                    instruction,
+                    SIRInstruction::Binary(RegisterId(10), ..)
+                ))
+        );
     }
 
     #[test]
