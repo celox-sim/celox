@@ -19,6 +19,8 @@ jobs:
   # ── Rust benchmarks (Criterion) ──
   bench-rust:
     runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_BENCH_DEBUG: "0"
     steps:
       - uses: actions/checkout@v7
         with:
