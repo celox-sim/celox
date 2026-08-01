@@ -497,6 +497,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "celox-bench"
+version = "0.0.0"
+dependencies = [
+ "celox",
+ "clap",
+ "libc",
+ "veryl-analyzer",
+ "veryl-metadata",
+ "veryl-parser",
+ "veryl-simulator",
+]
+
+[[package]]
 name = "celox-bench-sv"
 version = "0.0.0"
 dependencies = [

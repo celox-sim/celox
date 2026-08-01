@@ -51,7 +51,18 @@ interface SeriesPoint {
 interface Series {
   key: string;
   benchName: string;
-  runtime: "rust" | "rust-dse" | "native-tb" | "ts" | "verilator" | "unknown";
+  runtime:
+    | "rust"
+    | "rust-dse"
+    | "native-tb"
+    | "ts"
+    | "verilator"
+    | "heliodor-celox-jit"
+    | "heliodor-celox-total"
+    | "heliodor-celox-compile"
+    | "heliodor-veryl"
+    | "heliodor-veryl-compile"
+    | "unknown";
   points: SeriesPoint[];
 }
 
@@ -138,6 +149,12 @@ const overviewTabs: TabDef[] = [
     match: (n) => /linear_sec|countones|std_counter|fifo|onehot/.test(n),
     sections: stdlibSections,
   },
+  {
+    key: "heliodor",
+    label: "Heliodor Linux",
+    match: (n) => n.startsWith("heliodor_linux_boot_"),
+    sections: singleSection,
+  },
 ];
 
 function apiSections(cards: ChartCard[]): TabSection[] {
@@ -182,11 +199,7 @@ const diagnosticTabs: TabDef[] = [
 const tabs = computed(() => (props.mode === "diagnostic" ? diagnosticTabs : overviewTabs));
 
 function classifySeries(benchName: string): string {
-  const orderedTabs = tabs.value.length > 2
-    ? [tabs.value[2], tabs.value[3], tabs.value[1], tabs.value[0]]
-    : [tabs.value[1], tabs.value[0]];
-
-  for (const tab of orderedTabs) {
+  for (const tab of [...tabs.value].reverse()) {
     if (tab.match(benchName)) return tab.key;
   }
   return "hidden";
@@ -201,6 +214,11 @@ const RUNTIME_COLORS: Record<string, string> = {
   ts: "#22c55e",
   verilator: "#f97316",
   unknown: "#9ca3af",
+  "heliodor-celox-jit": "#3b82f6",
+  "heliodor-celox-total": "#a855f7",
+  "heliodor-celox-compile": "#06b6d4",
+  "heliodor-veryl": "#f97316",
+  "heliodor-veryl-compile": "#eab308",
 };
 
 const RUNTIME_LABELS: Record<string, string> = {
@@ -210,6 +228,11 @@ const RUNTIME_LABELS: Record<string, string> = {
   ts: "Celox (ts)",
   verilator: "Verilator",
   unknown: "Unknown",
+  "heliodor-celox-jit": "Celox JIT code",
+  "heliodor-celox-total": "Celox post-compile total",
+  "heliodor-celox-compile": "Celox compile",
+  "heliodor-veryl": "Veryl-CC execution",
+  "heliodor-veryl-compile": "Veryl-CC compile",
 };
 
 // --- State ---
@@ -222,7 +245,10 @@ const activeTab = ref("counter");
 // --- Helpers ---
 
 function stripPrefix(name: string): string {
-  return name.replace(/^(rust-dse|rust|ts|verilator)\//, "");
+  return name.replace(
+    /^(rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-veryl|heliodor-veryl-compile)\//,
+    "",
+  );
 }
 
 /** Normalize variant-specific benchmark names so they merge into the same chart cards */
@@ -246,7 +272,12 @@ function normalizeBenchName(benchName: string): string {
   return benchName;
 }
 
-function runtime(name: string): "rust" | "rust-dse" | "native-tb" | "ts" | "verilator" | "unknown" {
+function runtime(name: string): Series["runtime"] {
+  if (name.startsWith("heliodor-celox-jit/")) return "heliodor-celox-jit";
+  if (name.startsWith("heliodor-celox-total/")) return "heliodor-celox-total";
+  if (name.startsWith("heliodor-celox-compile/")) return "heliodor-celox-compile";
+  if (name.startsWith("heliodor-veryl-compile/")) return "heliodor-veryl-compile";
+  if (name.startsWith("heliodor-veryl/")) return "heliodor-veryl";
   if (name.startsWith("rust-dse/")) return "rust-dse";
   if (name.startsWith("rust/") && stripPrefix(name).startsWith("native_tb_")) return "native-tb";
   if (name.startsWith("rust/")) return "rust";
@@ -292,6 +323,8 @@ function formatChartTitle(benchName: string): string {
   s = s.replace(/_top_n1000/, "");
   // Strip optimize prefix patterns
   s = s.replace(/^optimize_/, "");
+  s = s.replace(/^heliodor_linux_boot_execution$/, "Linux boot execution");
+  s = s.replace(/^heliodor_linux_boot_compilation$/, "Linux boot compilation");
 
   // Replace operation names (longer prefixes first to avoid partial matches)
   s = s.replace(/^native_tb_run/, "Native TB run");
@@ -363,7 +396,9 @@ const allSeries = computed<Series[]>(() => {
 });
 
 function isPrimaryBench(benchName: string): boolean {
-  return PRIMARY_COUNTER_BENCHES.has(benchName) || PRIMARY_STDLIB_BENCHES.has(benchName);
+  return PRIMARY_COUNTER_BENCHES.has(benchName)
+    || PRIMARY_STDLIB_BENCHES.has(benchName)
+    || benchName.startsWith("heliodor_linux_boot_");
 }
 
 // --- Computed: tabs with chart cards ---

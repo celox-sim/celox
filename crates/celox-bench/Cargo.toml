@@ -1,0 +1,21 @@
+[package]
+name                  = "celox-bench"
+version.workspace     = true
+publish               = false
+authors.workspace     = true
+repository.workspace  = true
+license.workspace     = true
+description           = "Macro-benchmark runners for Celox"
+edition.workspace     = true
+
+[dependencies]
+celox           = { path = "../celox" }
+clap            = { workspace = true }
+libc            = { workspace = true }
+veryl-analyzer  = { workspace = true }
+veryl-metadata  = { workspace = true }
+veryl-parser    = { workspace = true }
+veryl-simulator = { workspace = true }
+
+[lints]
+workspace = true

@@ -32,7 +32,7 @@ write_log() {
 pass_log="$TMP/pass.log"
 write_log "$pass_log" \
     'diagnostic before result' \
-    'CELOX_TEST_TIMING test=boot compile_ns=4 execute_ns=5' \
+    'CELOX_TEST_TIMING test=boot compile_ns=4 execute_ns=5 jit_execute_ns=4' \
     'CELOX_TEST_RESULT test=boot status=pass elapsed_ns=11'
 classify_celox_result "$pass_log" boot 0 0 \
     || fail "well-formed pass marker was rejected: $CELOX_RESULT_DIAGNOSTIC"
@@ -40,15 +40,17 @@ assert_eq "$CELOX_SEMANTIC_STATUS" pass "pass semantic status"
 assert_eq "$CELOX_REPORTED_ELAPSED_NS" 11 "pass reported elapsed"
 assert_eq "$CELOX_COMPILE_ELAPSED_NS" 4 "pass compile elapsed"
 assert_eq "$CELOX_EXECUTE_ELAPSED_NS" 5 "pass execute elapsed"
+assert_eq "$CELOX_JIT_EXECUTE_ELAPSED_NS" 4 "pass JIT execute elapsed"
 
 cpu_timed_log="$TMP/cpu-timed.log"
 write_log "$cpu_timed_log" \
-    'CELOX_TEST_TIMING test=boot_cpu compile_ns=6 execute_ns=7 execute_cpu_ns=8' \
+    'CELOX_TEST_TIMING test=boot_cpu compile_ns=6 execute_ns=7 jit_execute_ns=5 execute_cpu_ns=8' \
     'CELOX_TEST_RESULT test=boot_cpu status=pass elapsed_ns=15'
 classify_celox_result "$cpu_timed_log" boot_cpu 0 0 \
     || fail "timing marker with CPU time was rejected: $CELOX_RESULT_DIAGNOSTIC"
 assert_eq "$CELOX_COMPILE_ELAPSED_NS" 6 "CPU-timed compile elapsed"
 assert_eq "$CELOX_EXECUTE_ELAPSED_NS" 7 "CPU-timed execute elapsed"
+assert_eq "$CELOX_JIT_EXECUTE_ELAPSED_NS" 5 "CPU-timed JIT execute elapsed"
 
 timed_veryl_log="$TMP/timed-veryl.log"
 write_log "$timed_veryl_log" \
@@ -80,7 +82,7 @@ assert_eq "$CELOX_SEMANTIC_STATUS" invalid "missing timing semantic status"
 
 compile_log="$TMP/compile.log"
 write_log "$compile_log" \
-    'CELOX_TEST_TIMING test=boot_compile compile_ns=20 execute_ns=0' \
+    'CELOX_TEST_TIMING test=boot_compile compile_ns=20 execute_ns=0 jit_execute_ns=0' \
     'CELOX_TEST_RESULT test=boot_compile status=compile-only elapsed_ns=22'
 classify_celox_result "$compile_log" boot_compile 0 1 \
     || fail "well-formed compile-only marker was rejected: $CELOX_RESULT_DIAGNOSTIC"
@@ -90,7 +92,7 @@ assert_eq "$(full_pass_elapsed_ns "$CELOX_SEMANTIC_STATUS" 0 50)" NA \
 
 fail_log="$TMP/fail.log"
 write_log "$fail_log" \
-    'CELOX_TEST_TIMING test=boot_fail compile_ns=10 execute_ns=20' \
+    'CELOX_TEST_TIMING test=boot_fail compile_ns=10 execute_ns=20 jit_execute_ns=18' \
     'CELOX_TEST_RESULT test=boot_fail status=fail elapsed_ns=33'
 classify_celox_result "$fail_log" boot_fail 1 0 \
     || fail "well-formed fail marker was rejected: $CELOX_RESULT_DIAGNOSTIC"
@@ -167,25 +169,25 @@ ensure_results_schema "$results"
 cmp -s "$TMP/original-v1.tsv" "${results}.v1.bak" \
     || fail "v1 migration backup differs from the original"
 
-expected="$TMP/expected-v3.tsv"
+expected="$TMP/expected-v4.tsv"
 cat >"$expected" <<EOF
-$RESULTS_HEADER_V3
-celox	boot	0	100	$pass_log	pass	0	100	11	4	5
-celox	boot_compile	0	NA	$compile_log	compile-only	0	50	22	20	0
-celox	boot_timeout	124	NA	$missing_log	unreported	124	30	NA	NA	NA
-celox	boot_zero_unreported	0	NA	$missing_log	unreported	0	40	NA	NA	NA
-veryl-cc	boot	0	200	$TMP/veryl-pass.log	pass	0	200	NA	NA	NA
-veryl-cc	boot_fail	1	NA	$TMP/veryl-fail.log	fail	1	25	NA	NA	NA
+$RESULTS_HEADER_V4
+celox	boot	0	100	$pass_log	pass	0	100	11	4	5	4
+celox	boot_compile	0	NA	$compile_log	compile-only	0	50	22	20	0	0
+celox	boot_timeout	124	NA	$missing_log	unreported	124	30	NA	NA	NA	NA
+celox	boot_zero_unreported	0	NA	$missing_log	unreported	0	40	NA	NA	NA	NA
+veryl-cc	boot	0	200	$TMP/veryl-pass.log	pass	0	200	NA	NA	NA	NA
+veryl-cc	boot_fail	1	NA	$TMP/veryl-fail.log	fail	1	25	NA	NA	NA	NA
 EOF
 cmp -s "$expected" "$results" || {
     diff -u "$expected" "$results" >&2 || true
-    fail "migrated v3 results differ from expected"
+    fail "migrated v4 results differ from expected"
 }
 
 cp "$results" "$TMP/before-idempotent.tsv"
 ensure_results_schema "$results"
 cmp -s "$TMP/before-idempotent.tsv" "$results" \
-    || fail "ensuring an existing v3 schema is not idempotent"
+    || fail "ensuring an existing v4 schema is not idempotent"
 
 v2_results="$TMP/v2-results.tsv"
 printf '%s\n%s\n' "$RESULTS_HEADER_V2" \
@@ -193,42 +195,54 @@ printf '%s\n%s\n' "$RESULTS_HEADER_V2" \
     >"$v2_results"
 ensure_results_schema "$v2_results"
 [[ -f "${v2_results}.v2.bak" ]] || fail "v2 migration did not create a backup"
-assert_eq "$(sed -n '1p' "$v2_results")" "$RESULTS_HEADER_V3" "v2 migration header"
+assert_eq "$(sed -n '1p' "$v2_results")" "$RESULTS_HEADER_V4" "v2 migration header"
 assert_eq "$(awk -F '\t' 'NR == 2 { print $10 }' "$v2_results")" 4 \
     "v2 migration recovered compile elapsed"
 assert_eq "$(awk -F '\t' 'NR == 2 { print $11 }' "$v2_results")" 5 \
     "v2 migration recovered execute elapsed"
+assert_eq "$(awk -F '\t' 'NR == 2 { print $12 }' "$v2_results")" 4 \
+    "v2 migration recovered JIT execute elapsed"
+
+v3_results="$TMP/v3-results.tsv"
+printf '%s\n%s\n' "$RESULTS_HEADER_V3" \
+    $'celox\tboot\t0\t100\t'"$pass_log"$'\tpass\t0\t100\t11\t4\t5' \
+    >"$v3_results"
+ensure_results_schema "$v3_results"
+[[ -f "${v3_results}.v3.bak" ]] || fail "v3 migration did not create a backup"
+assert_eq "$(sed -n '1p' "$v3_results")" "$RESULTS_HEADER_V4" "v3 migration header"
+assert_eq "$(awk -F '\t' 'NR == 2 { print $12 }' "$v3_results")" 4 \
+    "v3 migration recovered JIT execute elapsed"
 
 new_results="$TMP/new-results.tsv"
 ensure_results_schema "$new_results"
-assert_eq "$(sed -n '1p' "$new_results")" "$RESULTS_HEADER_V3" "new results header"
+assert_eq "$(sed -n '1p' "$new_results")" "$RESULTS_HEADER_V4" "new results header"
 assert_eq "$(wc -l <"$new_results")" 1 "new results line count"
 
 append_result_row "$new_results" celox boot_compile 0 NA "$compile_log" \
-    compile-only 50 22 20 0 >/dev/null
-assert_eq "$(awk -F '\t' 'NR == 2 { print NF }' "$new_results")" 11 \
-    "appended v3 field count"
+    compile-only 50 22 20 0 0 >/dev/null
+assert_eq "$(awk -F '\t' 'NR == 2 { print NF }' "$new_results")" 12 \
+    "appended v4 field count"
 assert_eq "$(awk -F '\t' 'NR == 2 { print $4 }' "$new_results")" NA \
     "compile-only appended speed elapsed"
 before_invalid_append="$(wc -l <"$new_results")"
 if append_result_row "$new_results" celox impossible 0 1 "$compile_log" \
-    compile-only 1 1 1 0 >/dev/null 2>&1; then
+    compile-only 1 1 1 0 0 >/dev/null 2>&1; then
     fail "append accepted compile-only with a numeric speed elapsed"
 fi
 assert_eq "$(wc -l <"$new_results")" "$before_invalid_append" \
     "invalid append changed the results file"
 
 bad_results="$TMP/bad-results.tsv"
-printf '%s\n%s\n' "$RESULTS_HEADER_V3" $'celox\tboot\t0\t100\tlog' >"$bad_results"
+printf '%s\n%s\n' "$RESULTS_HEADER_V4" $'celox\tboot\t0\t100\tlog' >"$bad_results"
 if ensure_results_schema "$bad_results" 2>/dev/null; then
-    fail "v3 header with a legacy-width row was accepted"
+    fail "v4 header with a legacy-width row was accepted"
 fi
 
 bad_semantics="$TMP/bad-semantics.tsv"
-printf '%s\n%s\n' "$RESULTS_HEADER_V3" \
-    $'celox\tboot\t0\t100\tlog\tcompile-only\t0\t100\t50\t40\t0' >"$bad_semantics"
+printf '%s\n%s\n' "$RESULTS_HEADER_V4" \
+    $'celox\tboot\t0\t100\tlog\tcompile-only\t0\t100\t50\t40\t0\t0' >"$bad_semantics"
 if ensure_results_schema "$bad_semantics" 2>/dev/null; then
-    fail "v3 compile-only row with a numeric speed elapsed was accepted"
+    fail "v4 compile-only row with a numeric speed elapsed was accepted"
 fi
 
 # Exercise run_one without Heliodor or either compiler. These overrides emit
@@ -272,7 +286,7 @@ run_in_heliodor() {
 
 ensure_results_schema "$integration_results/results.tsv"
 HELIODOR_CELOX_COMPILE_ONLY=0
-FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_pass compile_ns=20 execute_ns=30\nCELOX_TEST_RESULT test=integration_pass status=pass elapsed_ns=71'
+FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_pass compile_ns=20 execute_ns=30 jit_execute_ns=25\nCELOX_TEST_RESULT test=integration_pass status=pass elapsed_ns=71'
 run_one celox integration_pass >/dev/null \
     || fail "run_one rejected a fixture full pass"
 assert_eq "$(awk -F '\t' 'NR == 2 { print $6 }' "$integration_results/results.tsv")" pass \
@@ -283,9 +297,11 @@ assert_eq "$(awk -F '\t' 'NR == 2 { print $10 }' "$integration_results/results.t
     "run_one pass compile elapsed"
 assert_eq "$(awk -F '\t' 'NR == 2 { print $11 }' "$integration_results/results.tsv")" 30 \
     "run_one pass execute elapsed"
+assert_eq "$(awk -F '\t' 'NR == 2 { print $12 }' "$integration_results/results.tsv")" 25 \
+    "run_one pass JIT execute elapsed"
 
 HELIODOR_CELOX_COMPILE_ONLY=1
-FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_compile compile_ns=70 execute_ns=0\nCELOX_TEST_RESULT test=integration_compile status=compile-only elapsed_ns=72'
+FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_compile compile_ns=70 execute_ns=0 jit_execute_ns=0\nCELOX_TEST_RESULT test=integration_compile status=compile-only elapsed_ns=72'
 run_one celox integration_compile >/dev/null \
     || fail "run_one rejected a fixture compile-only completion"
 assert_eq "$(awk -F '\t' 'NR == 3 { print $6 }' "$integration_results/results.tsv")" \
@@ -295,7 +311,7 @@ assert_eq "$(awk -F '\t' 'NR == 3 { print $4 }' "$integration_results/results.ts
 
 HELIODOR_CELOX_COMPILE_ONLY=0
 FIXTURE_EXIT_STATUS=1
-FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_fail compile_ns=20 execute_ns=30\nCELOX_TEST_RESULT test=integration_fail status=fail elapsed_ns=73'
+FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_fail compile_ns=20 execute_ns=30 jit_execute_ns=25\nCELOX_TEST_RESULT test=integration_fail status=fail elapsed_ns=73'
 if run_one celox integration_fail >/dev/null 2>&1; then
     fail "run_one returned success for a semantic test failure"
 fi

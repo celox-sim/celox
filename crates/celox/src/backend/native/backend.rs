@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use bit_set::BitSet;
 use num_bigint::BigUint;
@@ -23,6 +24,26 @@ use super::{emit, jit_mem, regalloc};
 
 /// JIT function type: `fn(state: *mut u8) -> i64`
 pub type NativeSimFunc = unsafe extern "sysv64" fn(*mut u8) -> i64;
+
+/// Time spent inside generated native simulator functions.
+///
+/// Timing is opt-in so normal simulation does not pay for host clock reads.
+/// A call may execute many ticks when the native tick loop is enabled.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NativeExecutionTiming {
+    elapsed: Duration,
+    calls: u64,
+}
+
+impl NativeExecutionTiming {
+    pub fn elapsed(self) -> Duration {
+        self.elapsed
+    }
+
+    pub fn calls(self) -> u64 {
+        self.calls
+    }
+}
 
 /// Compiled event handle for native backend.
 /// Holds the function pointer directly — no indirection at call time.
@@ -810,6 +831,7 @@ pub struct NativeBackend {
     memory: Vec<u64>,
     runtime_event_buffer: Arc<RuntimeEventBuffer>,
     comb_capture_enabled: Vec<u8>,
+    execution_timing: Option<NativeExecutionTiming>,
 }
 
 impl NativeBackend {
@@ -860,9 +882,20 @@ impl NativeBackend {
             memory,
             runtime_event_buffer,
             comb_capture_enabled,
+            execution_timing: None,
         };
         backend.install_event_buffers();
         backend
+    }
+
+    /// Start a fresh opt-in measurement of generated native function calls.
+    pub fn start_execution_timing(&mut self) {
+        self.execution_timing = Some(NativeExecutionTiming::default());
+    }
+
+    /// Stop timing and return the accumulated generated-code interval.
+    pub fn finish_execution_timing(&mut self) -> Option<NativeExecutionTiming> {
+        self.execution_timing.take()
     }
 
     fn install_event_buffers(&mut self) {
@@ -977,6 +1010,22 @@ impl NativeBackend {
         }
     }
 
+    fn call_func_timed(&mut self, func: NativeSimFunc) -> Result<(), SimulatorErrorCode> {
+        let Some(_) = self.execution_timing else {
+            return Self::call_func(&mut self.memory, func);
+        };
+        let start = Instant::now();
+        let result = Self::call_func(&mut self.memory, func);
+        let elapsed = start.elapsed();
+        let timing = self
+            .execution_timing
+            .as_mut()
+            .expect("native execution timing was enabled before the call");
+        timing.elapsed = timing.elapsed.saturating_add(elapsed);
+        timing.calls = timing.calls.saturating_add(1);
+        result
+    }
+
     fn call_func_many(
         memory: &mut [u64],
         func: NativeSimFunc,
@@ -999,21 +1048,42 @@ impl NativeBackend {
         };
         (completed, result)
     }
+
+    fn call_func_many_timed(
+        &mut self,
+        func: NativeSimFunc,
+        count: u64,
+    ) -> (u64, Result<(), SimulatorErrorCode>) {
+        if self.execution_timing.is_none() || count == 0 {
+            return Self::call_func_many(&mut self.memory, func, count);
+        }
+        let start = Instant::now();
+        let result = Self::call_func_many(&mut self.memory, func, count);
+        let elapsed = start.elapsed();
+        let timing = self
+            .execution_timing
+            .as_mut()
+            .expect("native execution timing was enabled before the call");
+        timing.elapsed = timing.elapsed.saturating_add(elapsed);
+        timing.calls = timing.calls.saturating_add(1);
+        result
+    }
 }
 
 impl super::super::SimBackend for NativeBackend {
     type Event = NativeEventRef;
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
-        Self::call_func(&mut self.memory, self.compiled.comb_func)
+        let func = self.compiled.comb_func;
+        self.call_func_timed(func)
     }
 
     fn eval_apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
-        Self::call_func(&mut self.memory, event.func)
+        self.call_func_timed(event.func)
     }
 
     fn eval_comb_apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
-        Self::call_func(&mut self.memory, event.comb_apply_func)
+        self.call_func_timed(event.comb_apply_func)
     }
 
     fn eval_comb_apply_ff_many_at(
@@ -1022,20 +1092,20 @@ impl super::super::SimBackend for NativeBackend {
         count: u64,
     ) -> (u64, Result<(), SimulatorErrorCode>) {
         if super::native_tick_loop_enabled() {
-            Self::call_func_many(&mut self.memory, event.comb_apply_func, count)
+            self.call_func_many_timed(event.comb_apply_func, count)
         } else if count == 0 {
             (0, Ok(()))
         } else {
-            (1, Self::call_func(&mut self.memory, event.comb_apply_func))
+            (1, self.call_func_timed(event.comb_apply_func))
         }
     }
 
     fn eval_only_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
-        Self::call_func(&mut self.memory, event.func)
+        self.call_func_timed(event.func)
     }
 
     fn apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
-        Self::call_func(&mut self.memory, event.func)
+        self.call_func_timed(event.func)
     }
 
     fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef {
