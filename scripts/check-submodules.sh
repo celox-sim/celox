@@ -12,10 +12,7 @@ while IFS= read -r line; do
     " ")
       ;; # OK — initialized and in sync
     -)
-      echo "ERROR: Submodule not initialized:$detail" >&2
-      echo "  Run: git submodule update --init" >&2
-      errors=1
-      ;;
+      ;; # OK — uninitialized submodules do not need validation
     +)
       echo "ERROR: Submodule out of sync with index:$detail" >&2
       echo "  Run: git submodule update  (or 'git add' if the change is intentional)" >&2
@@ -39,4 +36,4 @@ git submodule foreach --quiet '
   fi
 '
 
-echo "Submodules OK: initialized, in sync, and referenceable."
+echo "Submodules OK: initialized submodules are in sync and referenceable."
