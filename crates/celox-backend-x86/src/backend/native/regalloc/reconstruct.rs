@@ -273,8 +273,17 @@ pub(super) fn reconstruct(
         };
         let mut reloads_only = true;
         let mut recipe_cache = PreparedRecipeCache::default();
+        let cache_scope_end = edge_home_transfer_end(operations);
         let mut operation_index = 0usize;
         while operation_index < operations.len() {
+            if cache_scope_end == Some(operation_index) {
+                // W/S deliberately completes every reload/store home transfer
+                // before it restores successor residents. A recipe prefix
+                // retained across that boundary is an unplanned live value
+                // during the resident phase, so the two phases have distinct
+                // reconstruction caches.
+                recipe_cache = PreparedRecipeCache::default();
+            }
             let operation = operations[operation_index];
             if let PlannedEdgeOp::Reload {
                 source,
@@ -487,6 +496,29 @@ pub(super) fn reconstruct(
         state_reloads,
         shared_reload_blocks,
     })
+}
+
+fn edge_home_transfer_end(operations: &[PlannedEdgeOp]) -> Option<usize> {
+    let mut index = 0usize;
+    while matches!(operations.get(index), Some(PlannedEdgeOp::Spill { .. })) {
+        index += 1;
+    }
+    let transfer_start = index;
+    while let (
+        Some(PlannedEdgeOp::Reload { destination, .. }),
+        Some(PlannedEdgeOp::Spill {
+            source,
+            destination: spill_destination,
+            ..
+        }),
+    ) = (operations.get(index), operations.get(index + 1))
+    {
+        if source != destination || spill_destination != destination {
+            break;
+        }
+        index += 2;
+    }
+    (index > transfer_start).then_some(index)
 }
 
 fn available_recipe_at_point(
@@ -2105,6 +2137,170 @@ mod tests {
         assert_eq!(second.instructions.len(), 1);
         assert_ne!(first_result, second_result);
         assert_eq!(second.instructions[0].def(), Some(second_result));
+    }
+
+    #[test]
+    fn edge_recipe_cache_does_not_cross_the_home_transfer_phase() {
+        fn fixture(reset_cache: bool) -> MFunction {
+            let mut vregs = VRegAllocator::new();
+            let residents = (0..13).map(|_| vregs.alloc()).collect::<Vec<_>>();
+            let transfer_a = vregs.alloc();
+            let transfer_b = vregs.alloc();
+            let resident_a = vregs.alloc();
+            let resident_b = vregs.alloc();
+            let transient = vregs.alloc();
+            let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); 18]);
+            let mut logical_for_vreg = (0..18).map(LogicalValue).collect::<Vec<_>>();
+            let mut cache = PreparedRecipeCache::default();
+            let recipe = |base, immediate| ResolvedRecipe {
+                base: ResolvedBase::Constant(base),
+                steps: vec![PureStep::CmpImm64 {
+                    immediate,
+                    kind: crate::native::mir::CmpKind::Eq,
+                }],
+            };
+            let (transfer_a_result, transfer_a_recipe) = prepare_recipe(
+                &mut func,
+                &mut logical_for_vreg,
+                LogicalValue(transfer_a.0),
+                recipe(7, 1),
+                &mut cache,
+            )
+            .unwrap();
+            let (transfer_b_result, transfer_b_recipe) = prepare_recipe(
+                &mut func,
+                &mut logical_for_vreg,
+                LogicalValue(transfer_b.0),
+                recipe(8, 1),
+                &mut cache,
+            )
+            .unwrap();
+            if reset_cache {
+                cache = PreparedRecipeCache::default();
+            }
+            let (resident_a_result, resident_a_recipe) = prepare_recipe(
+                &mut func,
+                &mut logical_for_vreg,
+                LogicalValue(resident_a.0),
+                recipe(7, 2),
+                &mut cache,
+            )
+            .unwrap();
+            let (resident_b_result, resident_b_recipe) = prepare_recipe(
+                &mut func,
+                &mut logical_for_vreg,
+                LogicalValue(resident_b.0),
+                recipe(8, 2),
+                &mut cache,
+            )
+            .unwrap();
+
+            let mut block = MBlock::new(BlockId(0));
+            for (index, resident) in residents.iter().copied().enumerate() {
+                block.push(MInst::LoadImm {
+                    dst: resident,
+                    value: index as u64,
+                });
+            }
+            block.insts.extend(transfer_a_recipe.instructions);
+            block.push(MInst::Store {
+                base: BaseReg::StackFrame,
+                offset: 0,
+                src: transfer_a_result,
+                size: OpSize::S64,
+            });
+            block.insts.extend(transfer_b_recipe.instructions);
+            block.push(MInst::Store {
+                base: BaseReg::StackFrame,
+                offset: 8,
+                src: transfer_b_result,
+                size: OpSize::S64,
+            });
+            block.push(MInst::Load {
+                dst: transient,
+                base: BaseReg::StackFrame,
+                offset: 16,
+                size: OpSize::S64,
+            });
+            block.push(MInst::Store {
+                base: BaseReg::StackFrame,
+                offset: 24,
+                src: transient,
+                size: OpSize::S64,
+            });
+            block.insts.extend(resident_a_recipe.instructions);
+            block.insts.extend(resident_b_recipe.instructions);
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 0,
+                src: resident_a_result,
+                size: OpSize::S64,
+            });
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 8,
+                src: resident_b_result,
+                size: OpSize::S64,
+            });
+            for (index, resident) in residents.into_iter().enumerate() {
+                block.push(MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: 16 + index as i32 * 8,
+                    src: resident,
+                    size: OpSize::S64,
+                });
+            }
+            block.push(MInst::Return);
+            func.push_block(block);
+            func.verify();
+            func
+        }
+
+        let overflowing = fixture(false);
+        let analysis = super::super::analysis::analyze(&overflowing);
+        assert!(super::super::pressure::verify(&overflowing, &analysis, 15).is_err());
+
+        let bounded = fixture(true);
+        let analysis = super::super::analysis::analyze(&bounded);
+        super::super::pressure::verify(&bounded, &analysis, 15).unwrap();
+    }
+
+    #[test]
+    fn edge_home_transfer_cache_scope_ends_before_resident_reloads() {
+        let transfer = |source, destination| {
+            [
+                PlannedEdgeOp::Reload {
+                    source,
+                    source_home: SpillHome(source.0),
+                    destination,
+                },
+                PlannedEdgeOp::Spill {
+                    source: destination,
+                    destination,
+                    destination_home: SpillHome(destination.0),
+                },
+            ]
+        };
+        let first = transfer(LogicalValue(1), LogicalValue(2));
+        let second = transfer(LogicalValue(3), LogicalValue(4));
+        let operations = [
+            PlannedEdgeOp::Spill {
+                source: LogicalValue(0),
+                destination: LogicalValue(0),
+                destination_home: SpillHome(0),
+            },
+            first[0],
+            first[1],
+            second[0],
+            second[1],
+            PlannedEdgeOp::Reload {
+                source: LogicalValue(0),
+                source_home: SpillHome(0),
+                destination: LogicalValue(0),
+            },
+        ];
+
+        assert_eq!(edge_home_transfer_end(&operations), Some(5));
     }
 
     #[test]

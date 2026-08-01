@@ -65,6 +65,32 @@ pub(super) enum PlannedEdgeOp {
     },
 }
 
+pub(super) fn edge_reload_uses_transferred_home(
+    operations: &[PlannedEdgeOp],
+    reload_index: usize,
+) -> bool {
+    let Some(PlannedEdgeOp::Reload {
+        source,
+        source_home,
+        destination,
+    }) = operations.get(reload_index).copied()
+    else {
+        return false;
+    };
+    operations[..reload_index].iter().any(|operation| {
+        matches!(
+            operation,
+            PlannedEdgeOp::Spill {
+                source: spill_source,
+                destination: spill_destination,
+                destination_home,
+            } if *spill_source == source
+                && *spill_destination == destination
+                && *destination_home == source_home
+        )
+    })
+}
+
 #[derive(Debug)]
 pub(super) struct SpillPlan {
     pub logical: LogicalValues,
@@ -658,7 +684,13 @@ fn plan_internal(
                         });
                     }
                     scratch_reloads.push(PlannedEdgeOp::Reload {
-                        source: destination,
+                        // The reload is physically read from the successor
+                        // home, but it must split the predecessor logical
+                        // live range.  Using `destination` as both identities
+                        // leaves the original phi source live across every
+                        // home transfer and reconstruction reaches
+                        // NUM_REGS + 1 pressure despite the scratch spill.
+                        source,
                         source_home: destination_home,
                         destination,
                     });
@@ -2795,8 +2827,12 @@ impl SpillPlan {
                     ),
                 ));
             }
-            for &operation in operations {
-                self.verify_edge_operation(operation, Some(predecessor_block.id))?;
+            for (index, &operation) in operations.iter().enumerate() {
+                self.verify_edge_operation(
+                    operation,
+                    Some(predecessor_block.id),
+                    edge_reload_uses_transferred_home(operations, index),
+                )?;
             }
         }
         for &(point, operation) in &self.point_ops {
@@ -2917,6 +2953,7 @@ impl SpillPlan {
         &self,
         operation: PlannedEdgeOp,
         block: Option<BlockId>,
+        transferred_home: bool,
     ) -> Result<(), SpillPlanError> {
         let (source, destination, home, expected_home) = match operation {
             PlannedEdgeOp::Reload {
@@ -2954,7 +2991,7 @@ impl SpillPlan {
                 ));
             }
         }
-        if home != expected_home {
+        if home != expected_home && !transferred_home {
             return Err(SpillPlanError::new(
                 "SPILL_PLAN.HOME_CLASS",
                 block,
@@ -3669,6 +3706,35 @@ mod tests {
             translations.to_predecessor(0, 1, LogicalValue(second.0)),
             LogicalValue(source.0)
         );
+    }
+
+    #[test]
+    fn scratch_reload_splits_the_predecessor_phi_source_identity() {
+        let source = LogicalValue(3);
+        let destination = LogicalValue(9);
+        let destination_home = SpillHome(9);
+        let operations = [
+            PlannedEdgeOp::Spill {
+                source,
+                destination,
+                destination_home,
+            },
+            PlannedEdgeOp::Reload {
+                source,
+                source_home: destination_home,
+                destination,
+            },
+        ];
+
+        assert!(edge_reload_uses_transferred_home(&operations, 1));
+        assert!(matches!(
+            operations[1],
+            PlannedEdgeOp::Reload {
+                source: reload_source,
+                destination: reload_destination,
+                ..
+            } if reload_source == source && reload_destination == destination
+        ));
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub(super) struct PressureError {
     pub capacity: usize,
     pub reason: &'static str,
     pub instruction_text: String,
+    pub values: Vec<VReg>,
 }
 
 impl fmt::Display for PressureError {
@@ -50,6 +51,7 @@ pub(super) fn verify(
             registers,
             "edge",
             "block exit".into(),
+            live_after.iter().copied(),
         )?;
         for (instruction, inst) in block.insts.iter().enumerate().rev() {
             let mut live_before = live_after.clone();
@@ -64,6 +66,7 @@ pub(super) fn verify(
                 registers,
                 "general-register",
                 inst.to_string(),
+                live_before.iter().copied(),
             )?;
 
             let fixed = inst
@@ -86,6 +89,7 @@ pub(super) fn verify(
                     registers - fixed.len(),
                     "fixed-register reservation",
                     inst.to_string(),
+                    live_before.difference(&fixed).copied(),
                 )?;
             }
 
@@ -99,6 +103,7 @@ pub(super) fn verify(
                     registers - clobbered,
                     "clobber reservation",
                     inst.to_string(),
+                    live_before.intersection(&live_after).copied(),
                 )?;
             }
             live_after = live_before;
@@ -114,6 +119,7 @@ fn check(
     capacity: usize,
     reason: &'static str,
     instruction_text: String,
+    values: impl IntoIterator<Item = VReg>,
 ) -> Result<(), PressureError> {
     if pressure <= capacity {
         Ok(())
@@ -125,6 +131,7 @@ fn check(
             capacity,
             reason,
             instruction_text,
+            values: values.into_iter().collect(),
         })
     }
 }
