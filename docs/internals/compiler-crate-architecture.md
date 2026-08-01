@@ -42,8 +42,11 @@ glue contract, and SLT-to-SIR lowerer. The FF lowering callback has an associate
 error type, so the scheduler no longer imports parser errors. `celox-frontend-veryl` owns lowering
 diagnostics, context-width and bit-select semantics, analyzer loop provenance, the Veryl comb arena
 builder, FF construction, module construction, and the resulting per-module symbolic artifact.
-Hierarchy discovery, flattening, relocation to design-owned identities, and final compiler-driver
-orchestration remain in the facade and are the remaining Milestone 4 ownership boundary.
+It also owns Veryl module discovery, per-instance hierarchy flattening/atomization, and the
+frontend-only relocation artifact. Global instance relocation, design assembly, trigger injection,
+and compiler-driver orchestration remain in the facade and are the remaining Milestone 4 ownership
+boundary. The facade's flattening compatibility wrapper owns diagnostic trace collection so the
+frontend crate does not depend on compiler-driver debug types.
 
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making

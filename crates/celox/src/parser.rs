@@ -1,7 +1,6 @@
 use crate::{HashMap, HashSet, flatting};
 
-use crate::parser::module::ModuleParser;
-use veryl_analyzer::ir::{Component, Module, VarId, VarKind, VarPath};
+use veryl_analyzer::ir::{Module, VarId, VarPath};
 use veryl_metadata::{ClockType, ResetType};
 use veryl_parser::resource_table::{self, StrId};
 
@@ -32,6 +31,7 @@ pub(crate) use celox_frontend_veryl::BuildConfig;
 pub(crate) use celox_frontend_veryl::resolve_total_width;
 pub mod ff;
 pub(crate) mod loop_provenance;
+#[cfg(test)]
 pub mod module;
 mod scheduler;
 use crate::ir::{
@@ -47,157 +47,9 @@ use veryl_analyzer::ir::{Declaration, FfDeclaration};
 
 pub use celox_frontend_veryl::{LoweringPhase, ParserError, SourceLocation};
 
-pub struct ParseIrResult<'a> {
-    pub modules: HashMap<ModuleId, SimModule>,
-    pub module_ir: HashMap<ModuleId, &'a Module>,
-    pub module_names: HashMap<ModuleId, StrId>,
-    pub root_id: ModuleId,
-}
-
 #[cfg(test)]
-pub fn parse_ir<'a>(
-    ir: &'a veryl_analyzer::ir::Ir,
-    config: &BuildConfig,
-    top: &StrId,
-) -> Result<ParseIrResult<'a>, ParserError> {
-    parse_ir_with_loop_provenance(ir, &loop_provenance::LoopProvenance::default(), config, top)
-}
-
-fn parse_ir_with_loop_provenance<'a>(
-    ir: &'a veryl_analyzer::ir::Ir,
-    loop_provenance: &loop_provenance::LoopProvenance,
-    config: &BuildConfig,
-    top: &StrId,
-) -> Result<ParseIrResult<'a>, ParserError> {
-    // Pre-step: build name_to_ir and generic_names
-    let mut name_to_ir: HashMap<StrId, &'a Module> = HashMap::default();
-    let mut generic_names: HashSet<StrId> = HashSet::default();
-    for component in &ir.components {
-        match component {
-            Component::Module(module) => {
-                let is_generic = module.variables.values().any(|v| v.r#type.is_unknown());
-                if is_generic {
-                    generic_names.insert(module.name);
-                }
-                name_to_ir.insert(module.name, module);
-            }
-            Component::Interface(_) => {
-                unreachable!("Interface component must be eliminated before simulator parse_ir")
-            }
-            Component::SystemVerilog(sv) => {
-                return Err(ParserError::unsupported(
-                    64,
-                    LoweringPhase::SimulatorParser,
-                    "systemverilog component",
-                    format!("name: \"{}\"", sv.name),
-                    None,
-                ));
-            }
-        }
-    }
-
-    let mut modules: HashMap<ModuleId, SimModule> = HashMap::default();
-    let mut module_ir: HashMap<ModuleId, &'a Module> = HashMap::default();
-    let mut module_names: HashMap<ModuleId, StrId> = HashMap::default();
-    let mut name_to_id: HashMap<StrId, ModuleId> = HashMap::default();
-    let mut next_id: usize = 0;
-
-    // Allocate root
-    let root_id = ModuleId(next_id);
-    next_id += 1;
-    let root_ir = name_to_ir
-        .get(top)
-        .ok_or_else(|| ParserError::TopNotFound {
-            name: resource_table::get_str_value(*top).unwrap_or_default(),
-        })?;
-    if generic_names.contains(top) {
-        return Err(ParserError::GenericTop {
-            name: resource_table::get_str_value(*top).unwrap_or_default(),
-        });
-    }
-    name_to_id.insert(*top, root_id);
-    module_names.insert(root_id, *top);
-    module_ir.insert(root_id, root_ir);
-
-    // Worklist: (my_id, ir_module)
-    let mut worklist: Vec<(ModuleId, &'a Module)> = vec![(root_id, root_ir)];
-    // inst_id sequences per module (for ModuleParser)
-    let mut inst_sequences: HashMap<ModuleId, Vec<ModuleId>> = HashMap::default();
-
-    let mut i = 0;
-    while i < worklist.len() {
-        let (my_id, ir_module) = worklist[i];
-        i += 1;
-
-        let mut inst_ids = Vec::new();
-        for decl in &ir_module.declarations {
-            if let Declaration::Inst(inst_decl) = decl {
-                match &*inst_decl.component {
-                    Component::SystemVerilog(_) => {
-                        // SV modules: allocate a placeholder ModuleId.
-                        // ModuleParser::parse_inst_declaration will return an error.
-                        let child_id = ModuleId(next_id);
-                        next_id += 1;
-                        inst_ids.push(child_id);
-                    }
-                    Component::Module(child_module) => {
-                        let child_name = child_module.name;
-                        let has_params = child_module
-                            .variables
-                            .values()
-                            .any(|v| v.kind == VarKind::Param);
-                        if generic_names.contains(&child_name) || has_params {
-                            // Generic or parametric: each inst gets a unique concrete module
-                            let child_id = ModuleId(next_id);
-                            next_id += 1;
-                            module_names.insert(child_id, child_name);
-                            module_ir.insert(child_id, child_module);
-                            worklist.push((child_id, child_module));
-                            inst_ids.push(child_id);
-                        } else {
-                            // Non-generic, non-parametric: dedup by name
-                            let child_id = if let Some(&existing) = name_to_id.get(&child_name) {
-                                existing
-                            } else {
-                                let id = ModuleId(next_id);
-                                next_id += 1;
-                                name_to_id.insert(child_name, id);
-                                module_names.insert(id, child_name);
-                                module_ir.insert(id, child_module);
-                                worklist.push((id, child_module));
-                                id
-                            };
-                            inst_ids.push(child_id);
-                        }
-                    }
-                    Component::Interface(_) => {
-                        unreachable!("Interface component in inst declaration")
-                    }
-                }
-            }
-        }
-        inst_sequences.insert(my_id, inst_ids);
-    }
-
-    // Parse all discovered modules. veryl-parser's resource table is
-    // process-global, so module parsing must remain serial.
-    for (module_id, ir_module) in &module_ir {
-        let inst_ids = inst_sequences
-            .get(module_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let sim_module =
-            ModuleParser::parse_with_loop_provenance(ir_module, loop_provenance, config, inst_ids)?;
-        modules.insert(*module_id, sim_module);
-    }
-
-    Ok(ParseIrResult {
-        modules,
-        module_ir,
-        module_names,
-        root_id,
-    })
-}
+pub use celox_frontend_veryl::parse_ir;
+use celox_frontend_veryl::parse_ir_with_loop_provenance;
 
 fn create_absolute_addr(
     instance_path: &[(String, usize)],
