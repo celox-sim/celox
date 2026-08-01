@@ -4,13 +4,13 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Module};
 
 use crate::CompileOptions;
-use crate::backend::memory_layout::MemoryLayout;
-use crate::ir::RegionedAbsoluteAddr;
-use crate::optimizer::coalescing::TailCallChunk;
-use crate::optimizer::coalescing::cost_model::{
+use crate::MemoryLayout;
+use crate::RegionedAbsoluteAddr;
+use crate::cost_model::{
     CLIF_INST_THRESHOLD, VREG_VALUE_THRESHOLD, estimate_eu_cost, estimate_eu_value_count,
 };
-use crate::optimizer::coalescing::pass_tail_call_split::MemorySpilledPlan;
+use crate::tail_call_split::MemorySpilledPlan;
+use crate::tail_call_split::TailCallChunk;
 
 use super::SIRTranslator;
 use super::translator::core::get_cl_type;
@@ -180,7 +180,7 @@ impl JitEngine {
 
     pub fn compile_units(
         &mut self,
-        units: &[crate::ir::ExecutionUnit<RegionedAbsoluteAddr>],
+        units: &[crate::ExecutionUnit<RegionedAbsoluteAddr>],
         pre_clif_out: Option<&mut String>,
         post_clif_out: Option<&mut String>,
         native_out: Option<&mut String>,
@@ -217,7 +217,7 @@ impl JitEngine {
 
     fn compile_units_single(
         &mut self,
-        units: &[crate::ir::ExecutionUnit<RegionedAbsoluteAddr>],
+        units: &[crate::ExecutionUnit<RegionedAbsoluteAddr>],
         pre_clif_out: Option<&mut String>,
         post_clif_out: Option<&mut String>,
         native_out: Option<&mut String>,
@@ -266,7 +266,7 @@ impl JitEngine {
     /// Each EU communicates only through shared memory, so no register passing is needed.
     fn compile_units_batched(
         &mut self,
-        units: &[crate::ir::ExecutionUnit<RegionedAbsoluteAddr>],
+        units: &[crate::ExecutionUnit<RegionedAbsoluteAddr>],
         mut pre_clif_out: Option<&mut String>,
         mut post_clif_out: Option<&mut String>,
         mut native_out: Option<&mut String>,

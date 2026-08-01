@@ -5,15 +5,9 @@ use cranelift::prelude::*;
 use cranelift_frontend::{FunctionBuilder, Switch};
 
 use crate::{
-    HashMap,
-    ir::{
-        AbsoluteAddr, BinaryOp, BlockId, RegionedAbsoluteAddr, RegisterId, RegisterType,
-        SIRInstruction,
-    },
-    optimizer::coalescing::TailCallChunk,
-    optimizer::coalescing::pass_tail_call_split::{
-        SpillSlot, SpilledChunk, reverse_postorder_blocks,
-    },
+    AbsoluteAddr, BinaryOp, BlockId, HashMap, RegionedAbsoluteAddr, RegisterId, RegisterType,
+    SIRInstruction,
+    tail_call_split::{SpillSlot, SpilledChunk, TailCallChunk, reverse_postorder_blocks},
 };
 
 use super::MemoryLayout;
@@ -24,7 +18,7 @@ use super::MemoryLayout;
 /// Scans the given blocks for Store/Commit instructions with triggers,
 /// loads their current values from memory, and returns the old-value map.
 fn preload_trigger_old_values<'a>(
-    blocks: impl Iterator<Item = &'a crate::ir::BasicBlock<RegionedAbsoluteAddr>>,
+    blocks: impl Iterator<Item = &'a crate::BasicBlock<RegionedAbsoluteAddr>>,
     builder: &mut FunctionBuilder,
     mem_ptr: Value,
     layout: &MemoryLayout,
@@ -381,7 +375,7 @@ impl SIRTranslator {
                 );
             }
             SIRInstruction::Commit(src_addr, dst_addr, offset, op_width, triggers) => {
-                if src_addr.region == crate::ir::SPARSE_WORKING_REGION {
+                if src_addr.region == crate::SPARSE_WORKING_REGION {
                     self.translate_sparse_commit_inst(state, src_addr, dst_addr, *op_width);
                 } else {
                     self.translate_commit_inst(
@@ -400,7 +394,7 @@ impl SIRTranslator {
                     types::I64,
                     MemFlags::new(),
                     state.mem_ptr,
-                    crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
+                    celox_state_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
                 );
                 self.translate_runtime_event_inst(
                     state, event_ptr, None, *site_id, args, None, None,
@@ -416,14 +410,13 @@ impl SIRTranslator {
                     types::I64,
                     MemFlags::new(),
                     state.mem_ptr,
-                    crate::backend::memory_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
+                    celox_state_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET as i32,
                 );
                 let enabled_ptr = state.builder.ins().load(
                     types::I64,
                     MemFlags::new(),
                     state.mem_ptr,
-                    crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET
-                        as i32,
+                    celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET as i32,
                 );
                 let enabled = state.builder.ins().load(
                     types::I8,
@@ -458,7 +451,7 @@ impl SIRTranslator {
         fatal_error_code: Option<i64>,
         consume_enabled: Option<(Value, u32)>,
     ) {
-        use crate::backend::memory_layout::{
+        use celox_state_layout::{
             RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
             RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
             RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
@@ -766,7 +759,7 @@ impl SIRTranslator {
 
     pub fn translate_units(
         &self,
-        units: &[crate::ir::ExecutionUnit<RegionedAbsoluteAddr>],
+        units: &[crate::ExecutionUnit<RegionedAbsoluteAddr>],
         mut builder: FunctionBuilder,
     ) {
         let master_entry = builder.create_block();
@@ -797,7 +790,7 @@ impl SIRTranslator {
     /// The caller is responsible for calling `seal_all_blocks()` and `finalize()`.
     pub fn translate_units_into(
         &self,
-        units: &[crate::ir::ExecutionUnit<RegionedAbsoluteAddr>],
+        units: &[crate::ExecutionUnit<RegionedAbsoluteAddr>],
         builder: &mut FunctionBuilder,
         mem_ptr: Value,
         continuation: Option<Block>,
@@ -1098,7 +1091,7 @@ impl SIRTranslator {
                 // For the last block of the last EU, use tail-call-aware terminator
                 let use_tail_call = is_last_unit
                     && tail_call_info.is_some()
-                    && matches!(sir_block.terminator, crate::ir::SIRTerminator::Return);
+                    && matches!(sir_block.terminator, crate::SIRTerminator::Return);
 
                 if use_tail_call {
                     let info = tail_call_info.as_ref().unwrap();
@@ -1362,19 +1355,16 @@ impl SIRTranslator {
     fn translate_spilled_terminator(
         &self,
         state: &mut TranslationState,
-        term: &crate::ir::SIRTerminator,
+        term: &crate::SIRTerminator,
         block_map: &HashMap<BlockId, Block>,
         cross_chunk_targets: &HashMap<BlockId, usize>,
-        cross_chunk_edges: &HashMap<
-            BlockId,
-            crate::optimizer::coalescing::pass_tail_call_split::CrossChunkEdge,
-        >,
+        cross_chunk_edges: &HashMap<BlockId, crate::tail_call_split::CrossChunkEdge>,
         chunk_func_refs: &[FuncRef],
         outgoing_spills: &[SpillSlot],
         scratch_base_offset: usize,
     ) {
         match term {
-            crate::ir::SIRTerminator::Jump(target, params) => {
+            crate::SIRTerminator::Jump(target, params) => {
                 if let Some(&chunk_idx) = cross_chunk_targets.get(target) {
                     // Cross-chunk: spill + tail-call
                     self.emit_spill_and_tail_call(
@@ -1391,7 +1381,7 @@ impl SIRTranslator {
                     self.translate_terminator(state, term, block_map, None);
                 }
             }
-            crate::ir::SIRTerminator::Branch {
+            crate::SIRTerminator::Branch {
                 cond,
                 true_block,
                 false_block,
@@ -1491,7 +1481,7 @@ impl SIRTranslator {
                     }
                 }
             }
-            crate::ir::SIRTerminator::Switch {
+            crate::SIRTerminator::Switch {
                 selector,
                 cases,
                 default,
@@ -1535,11 +1525,11 @@ impl SIRTranslator {
                     );
                 }
             }
-            crate::ir::SIRTerminator::Return => {
+            crate::SIRTerminator::Return => {
                 let success = state.builder.ins().iconst(types::I64, 0);
                 state.builder.ins().return_(&[success]);
             }
-            crate::ir::SIRTerminator::Error(code) => {
+            crate::SIRTerminator::Error(code) => {
                 let error = state.builder.ins().iconst(types::I64, *code);
                 state.builder.ins().return_(&[error]);
             }
@@ -1553,9 +1543,7 @@ impl SIRTranslator {
         outgoing_spills: &[SpillSlot],
         scratch_base_offset: usize,
         target_func_ref: FuncRef,
-        cross_chunk_edge: Option<
-            &crate::optimizer::coalescing::pass_tail_call_split::CrossChunkEdge,
-        >,
+        cross_chunk_edge: Option<&crate::tail_call_split::CrossChunkEdge>,
         jump_args: &[RegisterId],
     ) {
         // 1. Store outgoing live registers to scratch

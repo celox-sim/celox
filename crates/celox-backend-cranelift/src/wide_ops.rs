@@ -6,7 +6,7 @@
 use cranelift::{codegen::ir::MemFlagsData as MemFlags, prelude::*};
 use cranelift_frontend::FunctionBuilder;
 
-use crate::ir::{BinaryOp, UnaryOp};
+use crate::{BinaryOp, UnaryOp};
 
 use super::translator::core::{cast_type, get_chunk_as_i64};
 

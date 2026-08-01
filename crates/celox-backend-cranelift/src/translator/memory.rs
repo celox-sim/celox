@@ -5,7 +5,7 @@ use cranelift::{
 
 use super::core::{TransValue, cast_type, get_chunk_as_i64, get_cl_type};
 use super::{SIRTranslator, TranslationState, get_byte_size};
-use crate::ir::{RegionedAbsoluteAddr, RegisterId, SIROffset, STABLE_REGION, TriggerIdWithKind};
+use crate::{RegionedAbsoluteAddr, RegisterId, SIROffset, STABLE_REGION, TriggerIdWithKind};
 
 fn isub_from_imm(state: &mut TranslationState, imm: i64, rhs: Value) -> Value {
     let lhs = state.builder.ins().iconst(types::I64, imm);
@@ -125,7 +125,7 @@ impl SIRTranslator {
         dst_addr: &RegionedAbsoluteAddr,
         _op_width: usize,
     ) {
-        debug_assert_eq!(src_addr.region, crate::ir::SPARSE_WORKING_REGION);
+        debug_assert_eq!(src_addr.region, crate::SPARSE_WORKING_REGION);
         debug_assert_eq!(dst_addr.region, STABLE_REGION);
         let abs = src_addr.absolute_addr();
         let sparse = &self.layout.sparse_layouts[&abs];
@@ -585,7 +585,7 @@ impl SIRTranslator {
         triggers: &[TriggerIdWithKind],
         comb_capture_sites: &[u32],
     ) {
-        if addr.region == crate::ir::SPARSE_WORKING_REGION && *op_width != 0 {
+        if addr.region == crate::SPARSE_WORKING_REGION && *op_width != 0 {
             self.prepare_sparse_store(state, addr, offset, *op_width);
         }
         // width=0: identity Store optimized away by alias; emit triggers only.
@@ -941,7 +941,7 @@ impl SIRTranslator {
             types::I64,
             MemFlags::new(),
             state.mem_ptr,
-            crate::backend::memory_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET as i32,
+            celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET as i32,
         );
         let one = state.builder.ins().iconst(types::I8, 1);
         for &site_id in site_ids {
@@ -1623,23 +1623,23 @@ impl SIRTranslator {
         // 3. For each trigger, generate edge detection logic
         for trigger in triggers {
             let triggered = match trigger.kind {
-                crate::ir::DomainKind::ClockPosedge => {
+                crate::DomainKind::ClockPosedge => {
                     let c1 = state.builder.ins().icmp_imm(IntCC::Equal, old_val, 0);
                     let c2 = state.builder.ins().icmp_imm(IntCC::Equal, new_val, 1);
                     state.builder.ins().band(c1, c2)
                 }
-                crate::ir::DomainKind::ClockNegedge => {
+                crate::DomainKind::ClockNegedge => {
                     let c1 = state.builder.ins().icmp_imm(IntCC::Equal, old_val, 1);
                     let c2 = state.builder.ins().icmp_imm(IntCC::Equal, new_val, 0);
                     state.builder.ins().band(c1, c2)
                 }
-                crate::ir::DomainKind::ResetAsyncHigh => {
+                crate::DomainKind::ResetAsyncHigh => {
                     state.builder.ins().icmp_imm(IntCC::Equal, new_val, 1)
                 }
-                crate::ir::DomainKind::ResetAsyncLow => {
+                crate::DomainKind::ResetAsyncLow => {
                     state.builder.ins().icmp_imm(IntCC::Equal, new_val, 0)
                 }
-                crate::ir::DomainKind::Other => {
+                crate::DomainKind::Other => {
                     state.builder.ins().icmp(IntCC::NotEqual, old_val, new_val)
                 }
             };

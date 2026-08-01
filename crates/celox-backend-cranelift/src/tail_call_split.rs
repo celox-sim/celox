@@ -1,5 +1,5 @@
 use crate::HashMap;
-use crate::ir::*;
+use crate::*;
 
 use crate::cost_model::{
     CLIF_INST_THRESHOLD, VREG_VALUE_THRESHOLD, estimate_clif_cost, estimate_eu_cost,

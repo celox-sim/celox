@@ -22,12 +22,12 @@ impl SIRTranslator {
     pub(super) fn translate_terminator(
         &self,
         state: &mut TranslationState,
-        term: &crate::ir::SIRTerminator,
-        block_map: &HashMap<crate::ir::BlockId, Block>,
+        term: &crate::SIRTerminator,
+        block_map: &HashMap<crate::BlockId, Block>,
         next_unit_entry: Option<Block>,
     ) {
         match term {
-            crate::ir::SIRTerminator::Jump(to, params) => {
+            crate::SIRTerminator::Jump(to, params) => {
                 let target_cl_block = block_map[to];
                 // Collect expected param types before mutably borrowing the builder.
                 let param_types = collect_block_param_types(state, target_cl_block);
@@ -74,7 +74,7 @@ impl SIRTranslator {
                 );
                 state.builder.ins().jump(target_cl_block, &cl_args);
             }
-            crate::ir::SIRTerminator::Branch {
+            crate::SIRTerminator::Branch {
                 cond,
                 true_block,
                 false_block,
@@ -174,7 +174,7 @@ impl SIRTranslator {
                     &cl_f_args,
                 );
             }
-            crate::ir::SIRTerminator::Switch {
+            crate::SIRTerminator::Switch {
                 selector,
                 cases,
                 default,
@@ -192,7 +192,7 @@ impl SIRTranslator {
                 }
                 switch.emit(state.builder, selector, block_map[default]);
             }
-            crate::ir::SIRTerminator::Return => {
+            crate::SIRTerminator::Return => {
                 if let Some(next_block) = next_unit_entry {
                     state.builder.ins().jump(next_block, &[]);
                 } else {
@@ -200,7 +200,7 @@ impl SIRTranslator {
                     state.builder.ins().return_(&[success]);
                 }
             }
-            crate::ir::SIRTerminator::Error(code) => {
+            crate::SIRTerminator::Error(code) => {
                 let error = state.builder.ins().iconst(types::I64, *code);
 
                 state.builder.ins().return_(&[error]);
