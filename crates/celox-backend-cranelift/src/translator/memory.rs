@@ -3,7 +3,7 @@ use cranelift::{
     prelude::*,
 };
 
-use super::core::{TransValue, cast_type, get_chunk_as_i64, get_cl_type};
+use super::core::{TransValue, cast_type, get_chunk_as_i64, get_cl_type, promote_to_physical};
 use super::{SIRTranslator, TranslationState, get_byte_size};
 use crate::{RegionedAbsoluteAddr, RegisterId, SIROffset, STABLE_REGION, TriggerIdWithKind};
 
@@ -46,28 +46,32 @@ fn max_bit_shift(offset: &SIROffset) -> usize {
 }
 
 fn logical_bit_offset(state: &mut TranslationState, offset: &SIROffset) -> Value {
+    fn register_value(state: &mut TranslationState, register: &RegisterId) -> Value {
+        let value = state.regs[register].first_value(state.builder);
+        let width = state.register_map[register].width();
+        // SIR register widths are semantic. Producers may use a wider
+        // Cranelift integer type, so address arithmetic must discard bits
+        // outside the logical value just like every other SIR use does.
+        promote_to_physical(state, value, width, false, types::I64)
+    }
+
     match offset {
         SIROffset::Static(value)
         | SIROffset::PackedElements {
             bit_offset: value, ..
         } => state.builder.ins().iconst(types::I64, *value as i64),
-        SIROffset::Dynamic(reg) => {
-            let value = state.regs[reg].first_value(state.builder);
-            cast_type(state.builder, value, types::I64)
-        }
+        SIROffset::Dynamic(reg) => register_value(state, reg),
         SIROffset::Element {
             index,
             element_width,
             bit_offset,
             dynamic_bit_offset,
         } => {
-            let index = state.regs[index].first_value(state.builder);
-            let index = cast_type(state.builder, index, types::I64);
+            let index = register_value(state, index);
             let scaled = state.builder.ins().imul_imm(index, *element_width as i64);
             let with_static = state.builder.ins().iadd_imm(scaled, *bit_offset as i64);
             if let Some(dynamic) = dynamic_bit_offset {
-                let dynamic = state.regs[dynamic].first_value(state.builder);
-                let dynamic = cast_type(state.builder, dynamic, types::I64);
+                let dynamic = register_value(state, dynamic);
                 state.builder.ins().iadd(with_static, dynamic)
             } else {
                 with_static

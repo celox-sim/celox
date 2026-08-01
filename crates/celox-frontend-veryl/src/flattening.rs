@@ -141,12 +141,11 @@ fn atomize_logic_paths(
                 atom_infos.push((*atom_access, filtered_sources, filtered_source_ids));
             }
 
-            // Preserve coarse propagated boundaries.  Source-range identity
-            // remains the general coalescing rule; source-ID identity is only
-            // used to collapse runs which were split all the way to single
-            // bits.  Treating a 16-bit propagated boundary like those
-            // artificial bit boundaries would undo hierarchy boundary
-            // propagation.
+            // Coalesce adjacent atoms which depend on the same state objects.
+            // The merged expression is projected again below, so its precise
+            // source ranges are recovered rather than inherited from either
+            // atom. Only padded unpacked-element boundaries are physical and
+            // therefore prohibit this coalescing.
             let mut i = 0;
             while i < atom_infos.len() {
                 let group_start = i;
@@ -154,11 +153,23 @@ fn atomize_logic_paths(
                     let current = &atom_infos[i];
                     let next = &atom_infos[i + 1];
                     let exact_sources_match = next.1 == current.1;
-                    let pointwise_single_bits = current.0.lsb == current.0.msb
-                        && next.0.lsb == next.0.msb
-                        && next.2 == current.2;
-                    if !(exact_sources_match || pointwise_single_bits)
-                        || element_width.is_some_and(|width| next.0.lsb.is_multiple_of(width))
+                    let source_objects_match = next.2 == current.2;
+                    let pointwise_single_bits =
+                        current.0.lsb == current.0.msb && next.0.lsb == next.0.msb;
+                    let contiguous_unpacked_elements =
+                        element_width.is_some_and(|width| width.is_multiple_of(8));
+                    // Byte-aligned unpacked elements are physically contiguous
+                    // in every finalized layout, so retaining their semantic
+                    // boundary here only forces later byte-at-a-time RMW. A
+                    // non-byte-aligned element has padding and must remain a
+                    // separate path unless the transfer is explicitly lowered
+                    // as a whole-object copy.
+                    let crosses_strided_element = element_width.is_some_and(|width| {
+                        !width.is_multiple_of(8) && next.0.lsb.is_multiple_of(width)
+                    });
+                    let may_recover_coarse_range = source_objects_match
+                        && (pointwise_single_bits || contiguous_unpacked_elements);
+                    if !(exact_sources_match || may_recover_coarse_range) || crosses_strided_element
                     {
                         break;
                     }
@@ -827,6 +838,53 @@ mod tests {
                 } if *variable == source && *access == expected
             ));
         }
+    }
+
+    #[test]
+    fn atomization_remerges_physically_contiguous_unpacked_elements() {
+        let address = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(0),
+        };
+        let source = AbsoluteAddr {
+            instance_id: InstanceId(1),
+            var_id: VarId::from_raw(1),
+        };
+        let mut arena = SLTNodeArena::new();
+        let expression = arena
+            .alloc(SLTNode::Input {
+                variable: source,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 31),
+            })
+            .unwrap();
+        let path = LogicPath {
+            target: LogicPathTarget::Var(VarAtomBase::new(address, 0, 31)),
+            sources: [VarAtomBase::new(source, 0, 31)].into_iter().collect(),
+            previous_sources: crate::HashSet::default(),
+            address_sources: crate::HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: crate::HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            pre_lower_nodes: Vec::new(),
+            expr: expression,
+        };
+        let element_widths = [(address, 8)].into_iter().collect();
+
+        let atomized = atomize_logic_paths(
+            &vec![path],
+            &HashMap::default(),
+            &element_widths,
+            &mut arena,
+        )
+        .unwrap();
+
+        assert_eq!(atomized.len(), 1);
+        assert_eq!(
+            atomized[0].target.var().unwrap().access,
+            BitAccess::new(0, 31)
+        );
     }
 
     #[test]
