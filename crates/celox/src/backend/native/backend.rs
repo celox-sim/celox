@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use bit_set::BitSet;
 use num_bigint::BigUint;
 
-use crate::ir::{AbsoluteAddr, LaidOutProgram, Program, SignalArrayLayout, SignalRef};
+use crate::ir::{AbsoluteAddr, LaidOutProgram, SignalArrayLayout, SignalRef};
 use crate::{HashMap, SimulatorError, SimulatorOptions};
 
 use super::super::RuntimeEventBuffer;
@@ -318,7 +318,9 @@ struct NativeCompileTask<'a> {
 
 type NativeTaskBindings = HashMap<(&'static str, AbsoluteAddr), usize>;
 
-fn collect_ff_compile_tasks(sir: &Program) -> (Vec<NativeCompileTask<'_>>, NativeTaskBindings) {
+fn collect_ff_compile_tasks(
+    sir: &LaidOutProgram,
+) -> (Vec<NativeCompileTask<'_>>, NativeTaskBindings) {
     let mut tasks = Vec::new();
     let mut task_bindings = HashMap::default();
     collect_ff_compile_tasks_from(
@@ -347,7 +349,7 @@ fn collect_ff_compile_tasks(sir: &Program) -> (Vec<NativeCompileTask<'_>>, Nativ
 }
 
 fn collect_comb_apply_compile_tasks<'a>(
-    sir: &'a Program,
+    sir: &'a LaidOutProgram,
     tasks: &mut Vec<NativeCompileTask<'a>>,
     task_bindings: &mut NativeTaskBindings,
 ) {
@@ -384,7 +386,7 @@ fn collect_comb_apply_compile_tasks<'a>(
 }
 
 fn collect_ff_compile_tasks_from<'a>(
-    sir: &Program,
+    sir: &LaidOutProgram,
     ff_map: &'a HashMap<
         AbsoluteAddr,
         Vec<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
@@ -572,7 +574,7 @@ fn compile_program(
 ) -> Result<(SharedNativeCode, Option<NativeCodegenTrace>), SimulatorError> {
     const MAX_PARALLEL_NATIVE_FUNCTIONS: usize = 4;
 
-    let sir = laid_out.program();
+    let sir = laid_out;
     let layout = laid_out.layout();
     let (compile_tasks, task_bindings) = collect_ff_compile_tasks(sir);
     let next_task = AtomicUsize::new(0);

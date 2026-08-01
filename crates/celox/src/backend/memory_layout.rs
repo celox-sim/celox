@@ -1,6 +1,6 @@
 use crate::HashMap;
 use crate::ir::{
-    AbsoluteAddr, Program, RegisterId, SIRInstruction, SIROffset, STABLE_REGION,
+    AbsoluteAddr, OptimizedSir, RegisterId, SIRInstruction, SIROffset, STABLE_REGION,
     collect_exact_zero_registers,
 };
 #[cfg(target_arch = "x86_64")]
@@ -19,7 +19,7 @@ pub use celox_state_layout::{
 
 pub type MemoryLayout = celox_state_layout::MemoryLayout<AbsoluteAddr>;
 
-impl LayoutSource<AbsoluteAddr> for Program {
+impl LayoutSource<AbsoluteAddr> for OptimizedSir {
     fn layout_input(&self, mode: MemoryLayoutMode) -> LayoutInput<AbsoluteAddr> {
         let unpacked_arrays = if mode == MemoryLayoutMode::ElementStrided {
             collect_strided_array_layouts(self)
@@ -53,7 +53,9 @@ impl LayoutSource<AbsoluteAddr> for Program {
     }
 }
 
-fn declared_strided_array_layouts(program: &Program) -> HashMap<AbsoluteAddr, UnpackedArrayLayout> {
+fn declared_strided_array_layouts(
+    program: &OptimizedSir,
+) -> HashMap<AbsoluteAddr, UnpackedArrayLayout> {
     let mut layouts = HashMap::default();
     for (&address, metadata) in &program.design.state_objects {
         let element_count = metadata.array_dims.iter().copied().product::<usize>();
@@ -122,7 +124,7 @@ fn supports_strided_access(
 }
 
 pub(crate) fn collect_strided_array_layouts(
-    program: &Program,
+    program: &OptimizedSir,
 ) -> HashMap<AbsoluteAddr, UnpackedArrayLayout> {
     let mut candidates = declared_strided_array_layouts(program);
 
@@ -202,7 +204,7 @@ pub(crate) fn collect_strided_array_layouts(
 ///
 /// FF reads cannot share a persistent home without a phase-correct StateSSA
 /// proof that the identity definition precedes the read on every event path.
-fn collect_ff_referenced_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
+fn collect_ff_referenced_addresses(program: &OptimizedSir) -> crate::HashSet<AbsoluteAddr> {
     let mut addrs = crate::HashSet::default();
     // eval_comb_apply_ffs contains the complete comb graph, not just FF
     // state.  The split FF forms are retained as the authoritative inventory;

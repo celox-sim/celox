@@ -6,7 +6,7 @@ pub(crate) use celox_frontend_veryl::BuildConfig;
 pub(crate) mod loop_provenance;
 #[cfg(test)]
 pub mod module;
-use crate::ir::{Program, RegionedAbsoluteAddr, STABLE_REGION};
+use crate::ir::{RegionedAbsoluteAddr, RuntimeProgram, STABLE_REGION, SirProgram, UnoptimizedSir};
 
 pub use celox_frontend_veryl::ParserError;
 
@@ -49,7 +49,7 @@ fn apply_fused_optimization_hints(
     Ok(())
 }
 
-fn dump_addr_map_if_requested(program: &Program) {
+fn dump_addr_map_if_requested(program: &RuntimeProgram) {
     if std::env::var_os("CELOX_ADDR_MAP_DUMP").is_none() {
         return;
     }
@@ -125,47 +125,42 @@ fn normalized_addr_id(raw: &str) -> String {
         .to_string()
 }
 
-fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), ParserError> {
+fn verify_program_sir(
+    sir: &SirProgram,
+    program: &RuntimeProgram,
+    phase: &'static str,
+) -> Result<(), ParserError> {
     program.verify_design_projection().map_err(|detail| {
         ParserError::illegal_context("elaborated design projection", detail, None)
     })?;
-    let units = program
-        .sir
+    let units = sir
         .eval_comb
         .iter()
         .enumerate()
         .map(|(unit, eu)| ("eval_comb", unit, eu))
         .chain(
-            program
-                .sir
-                .eval_apply_ffs
+            sir.eval_apply_ffs
                 .values()
                 .flatten()
                 .enumerate()
                 .map(|(unit, eu)| ("eval_apply_ffs", unit, eu)),
         )
         .chain(
-            program
-                .sir
-                .eval_comb_apply_ffs
+            sir.eval_comb_apply_ffs
                 .values()
                 .flatten()
                 .enumerate()
                 .map(|(unit, eu)| ("eval_comb_apply_ffs", unit, eu)),
         )
         .chain(
-            program
-                .sir
-                .eval_only_ffs
+            sir.eval_only_ffs
                 .values()
                 .flatten()
                 .enumerate()
                 .map(|(unit, eu)| ("eval_only_ffs", unit, eu)),
         )
         .chain(
-            program
-                .sir
-                .apply_ffs
+            sir.apply_ffs
                 .values()
                 .flatten()
                 .enumerate()
@@ -195,7 +190,7 @@ fn verify_program_sir(program: &Program, phase: &'static str) -> Result<(), Pars
 }
 
 pub(crate) fn verify_memory_offset_contract(
-    program: &Program,
+    program: &RuntimeProgram,
     eu: &crate::ir::ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Result<(), crate::ir::verify::SirVerifyError> {
     celox_sir_opt::verify_memory_offset_contract(&program.design, eu)
@@ -356,11 +351,12 @@ pub fn parse(
     apply_fused_optimization_hints(&mut scheduled.scheduled, scheduled.fused_optimization_hints)?;
     scheduled.scheduled.inject_triggers();
     let scheduled = scheduled.scheduled;
-    let (mut program, testbench_source) = Program::from_scheduled(scheduled);
-    crate::testbench_compile::project_observability(&mut program, &testbench_source);
-    program.testbench =
-        crate::testbench_compile::compile_semantic_testbench(&program, &testbench_source);
-    dump_addr_map_if_requested(&program);
+    let (sir, mut runtime, testbench_source) = RuntimeProgram::from_scheduled(scheduled);
+    crate::testbench_compile::project_observability(&mut runtime, &testbench_source);
+    runtime.testbench =
+        crate::testbench_compile::compile_semantic_testbench(&runtime, &testbench_source);
+    dump_addr_map_if_requested(&runtime);
+    let mut program = UnoptimizedSir::new(sir, runtime);
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.pre_optimized_sir
     {
@@ -369,7 +365,7 @@ pub fn parse(
 
     timed_phase!(
         "verify_sir_before_optimize",
-        verify_program_sir(&program, "before optimization")
+        verify_program_sir(&program.sir, &program.runtime, "before optimization")
     )?;
 
     // Always run the SIR pipeline so required canonicalization and explicit
@@ -388,8 +384,10 @@ pub fn parse(
     });
     timed_phase!(
         "verify_sir_after_optimize",
-        verify_program_sir(&program, "after optimization")
+        verify_program_sir(&program.sir, &program.runtime, "after optimization")
     )?;
+
+    let program = program.into_optimized();
 
     if let Some(t) = trace
         && trace_opts.post_optimized_sir
@@ -397,5 +395,5 @@ pub fn parse(
         t.post_optimized_sir = Some(program.clone());
     }
 
-    Ok(crate::ir::OptimizedSir::new(program))
+    Ok(program)
 }

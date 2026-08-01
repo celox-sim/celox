@@ -52,8 +52,8 @@ pub struct CompilationTrace {
         SLTNodeArena<FrontendAbsoluteAddr>,
     )>,
     pub scheduled_units: Option<Vec<celox_sir::ExecutionUnit<FrontendRegionedAbsoluteAddr>>>,
-    pub pre_optimized_sir: Option<crate::ir::Program>,
-    pub post_optimized_sir: Option<crate::ir::Program>,
+    pub pre_optimized_sir: Option<crate::ir::UnoptimizedSir>,
+    pub post_optimized_sir: Option<crate::ir::OptimizedSir>,
     /// SIR after native EU merging, StateSSA promotion, and merged-chain
     /// cleanup, captured from the exact functions passed to instruction
     /// selection.

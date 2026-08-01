@@ -18,7 +18,7 @@ pub(crate) use celox_sir::{
     collect_exact_zero_registers,
 };
 use celox_testbench::TestbenchProgram;
-use std::fmt;
+use std::{fmt, ops::Deref};
 use veryl_analyzer::ir::VarPath;
 
 /// Source-independent identity of one elaborated state object.
@@ -27,7 +27,7 @@ pub type AbsoluteAddr = celox_design::StateAddr;
 pub type RegionedAbsoluteAddr = celox_design::RegionedStateAddr;
 pub type SirProgram = celox_sir::SirProgram<AbsoluteAddr, RegionedAbsoluteAddr>;
 
-/// Error returned by [`Program::get_addr`] when a path-based variable lookup fails.
+/// Error returned by [`RuntimeProgram::get_addr`] when a path-based variable lookup fails.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum AddrLookupError {
     #[error("Instance not found: {path}")]
@@ -44,14 +44,46 @@ pub type InitialMemoryWriteRun = InitialStateWriteRun;
 pub type InitialMemoryData = InitialStateData;
 pub type RuntimeErrorInfo<Addr = AbsoluteAddr> = celox_design::RuntimeErrorInfo<Addr>;
 
+/// Source-independent metadata retained while a compiled design is executing.
+///
+/// Compiler-only SIR and layout requirements are deliberately absent. A
+/// backend can therefore discard the compiler artifact after code generation.
 #[derive(Clone)]
-pub struct Program {
-    pub sir: SirProgram,
+pub struct RuntimeProgram {
     pub design: celox_design::ElaboratedDesign<AbsoluteAddr>,
     pub frontend: VerylFrontendLookup,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
-    pub layout_requirements: celox_state_layout::LayoutRequirements<AbsoluteAddr>,
     pub testbench: Option<TestbenchProgram<AbsoluteAddr>>,
+}
+
+/// Lowered SIR whose backend-independent optimization pipeline has not run.
+#[derive(Clone, Debug)]
+pub struct UnoptimizedSir {
+    pub sir: SirProgram,
+    pub layout_requirements: celox_state_layout::LayoutRequirements<AbsoluteAddr>,
+    pub runtime: RuntimeProgram,
+}
+
+impl UnoptimizedSir {
+    pub(crate) fn new(sir: SirProgram, runtime: RuntimeProgram) -> Self {
+        Self {
+            sir,
+            layout_requirements: Default::default(),
+            runtime,
+        }
+    }
+
+    pub(crate) fn into_optimized(self) -> OptimizedSir {
+        OptimizedSir::new(self.sir, self.runtime, self.layout_requirements)
+    }
+}
+
+impl Deref for UnoptimizedSir {
+    type Target = RuntimeProgram;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
 }
 
 /// A pre-layout compiler artifact whose SIR optimization pipeline has
@@ -62,67 +94,74 @@ pub struct Program {
 /// accidentally entering a backend.
 #[derive(Clone, Debug)]
 pub struct OptimizedSir {
-    program: Program,
+    pub sir: SirProgram,
+    pub layout_requirements: celox_state_layout::LayoutRequirements<AbsoluteAddr>,
+    pub(crate) runtime: RuntimeProgram,
 }
 
 impl OptimizedSir {
-    pub(crate) fn new(program: Program) -> Self {
-        Self { program }
+    pub(crate) fn new(
+        sir: SirProgram,
+        runtime: RuntimeProgram,
+        layout_requirements: celox_state_layout::LayoutRequirements<AbsoluteAddr>,
+    ) -> Self {
+        Self {
+            sir,
+            layout_requirements,
+            runtime,
+        }
     }
 
-    pub fn program(&self) -> &Program {
-        &self.program
-    }
-
-    pub fn into_program(self) -> Program {
-        self.program
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn into_runtime(self) -> RuntimeProgram {
+        self.runtime
     }
 }
 
-impl std::ops::Deref for OptimizedSir {
-    type Target = Program;
+impl Deref for OptimizedSir {
+    type Target = RuntimeProgram;
 
     fn deref(&self) -> &Self::Target {
-        &self.program
+        &self.runtime
     }
 }
 
-/// A [`Program`] whose physical state layout has been finalized.
+/// Optimized SIR whose physical state layout has been finalized.
 ///
-/// Backend code generation accepts this artifact instead of a bare `Program`,
+/// Backend code generation accepts this artifact instead of a bare SIR value,
 /// making it impossible to enter code generation before layout construction.
 #[derive(Clone, Debug)]
 pub struct LaidOutProgram {
-    program: Program,
+    pub sir: SirProgram,
+    pub(crate) runtime: RuntimeProgram,
     layout: crate::backend::MemoryLayout,
 }
 
 impl LaidOutProgram {
-    pub fn program(&self) -> &Program {
-        &self.program
-    }
-
     pub fn layout(&self) -> &crate::backend::MemoryLayout {
         &self.layout
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn program_mut(&mut self) -> &mut Program {
-        &mut self.program
+    pub fn runtime(&self) -> &RuntimeProgram {
+        &self.runtime
     }
 
-    pub fn into_program(self) -> Program {
-        self.program
-    }
-
-    pub fn into_parts(self) -> (Program, crate::backend::MemoryLayout) {
-        (self.program, self.layout)
+    pub fn into_runtime(self) -> RuntimeProgram {
+        self.runtime
     }
 }
 
-impl fmt::Debug for Program {
+impl Deref for LaidOutProgram {
+    type Target = RuntimeProgram;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+impl fmt::Debug for RuntimeProgram {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Program")
+        f.debug_struct("RuntimeProgram")
             .field("num_events", &self.design.events.len())
             .finish_non_exhaustive()
     }
@@ -142,7 +181,7 @@ impl OptimizedSir {
         four_state: bool,
         mode: crate::backend::memory_layout::MemoryLayoutMode,
     ) -> LaidOutProgram {
-        let mut program = self.program;
+        let mut program = self;
         if !program.runtime_schema.comb_observers.is_empty()
             && !program.layout_requirements.is_empty()
         {
@@ -193,12 +232,21 @@ impl OptimizedSir {
             }
         }
         program.layout_requirements.clear();
-
-        LaidOutProgram { program, layout }
+        let OptimizedSir {
+            sir,
+            runtime,
+            layout_requirements,
+        } = program;
+        debug_assert!(layout_requirements.is_empty());
+        LaidOutProgram {
+            sir,
+            runtime,
+            layout,
+        }
     }
 }
 
-impl Program {
+impl RuntimeProgram {
     pub(crate) fn state_address_for_source(
         &self,
         instance_id: InstanceId,
@@ -213,14 +261,13 @@ impl Program {
 
     pub(crate) fn from_scheduled(
         scheduled: celox_frontend_veryl::ScheduledRtl,
-    ) -> (Self, celox_frontend_veryl::VerylTestbenchSource) {
+    ) -> (SirProgram, Self, celox_frontend_veryl::VerylTestbenchSource) {
         (
+            scheduled.sir,
             Self {
-                sir: scheduled.sir,
                 design: scheduled.design,
                 frontend: scheduled.frontend_lookup,
                 runtime_schema: scheduled.runtime_schema,
-                layout_requirements: Default::default(),
                 testbench: None,
             },
             scheduled.testbench_source,
@@ -327,7 +374,9 @@ impl Program {
         }
         Ok(())
     }
+}
 
+impl OptimizedSir {
     /// Collect the set of `AbsoluteAddr` values that are accessed in the working
     /// region (region != STABLE). These are the only variables that need working
     /// region space.

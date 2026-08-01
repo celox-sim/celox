@@ -100,7 +100,7 @@ enum CraneliftEvalCombPlan {
 }
 
 impl CraneliftEvalCombPlan {
-    fn build(sir: &crate::ir::Program, options: &SimulatorOptions) -> Self {
+    fn build(sir: &crate::ir::LaidOutProgram, options: &SimulatorOptions) -> Self {
         if !options.cranelift_options.tail_call_split {
             return Self::Unsplit;
         }
@@ -173,13 +173,13 @@ impl JitBackend {
         Ok(Self::from_shared(shared))
     }
 
-    /// Build the shared JIT code from a Program.
+    /// Build the shared JIT code from finalized SIR and layout.
     fn compile(
         laid_out: &crate::ir::LaidOutProgram,
         options: &SimulatorOptions,
         mut trace: Option<&mut crate::debug::CompilationTrace>,
     ) -> Result<SharedJitCode, crate::SimulatorError> {
-        let sir = laid_out.program();
+        let sir = laid_out;
 
         // Auto-select SinglePass RA for large designs where Backtracking RA's
         // superlinear compile time would dominate. The threshold is half the

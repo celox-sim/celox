@@ -8,7 +8,7 @@ use veryl_parser::Parser;
 use veryl_parser::resource_table;
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::ir::Program;
+use crate::ir::LaidOutProgram;
 use crate::parser::BuildConfig;
 use crate::{ParserError, SimulatorError, SimulatorErrorKind, ir::OptimizedSir, parser};
 
@@ -629,7 +629,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {
             let dse_start = phase_timing.then(crate::timing::now);
-            run_dead_store_elimination(laid_out.program_mut(), &self.live_signals, &self.options);
+            run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
             if let Some(start) = dse_start {
                 eprintln!(
                     "[phase-timing] dead_store_elimination: {:?}",
@@ -676,7 +676,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         }
 
         let mut sim =
-            Simulator::with_backend_and_program(backend, laid_out.into_program(), warnings);
+            Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
@@ -710,7 +710,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             eprintln!("[phase-timing] native_backend: {:?}", start.elapsed());
         }
         let mut sim =
-            Simulator::with_backend_and_program(backend, laid_out.into_program(), warnings);
+            Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
@@ -738,7 +738,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             self.into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
         let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)?;
         let mut sim =
-            Simulator::with_backend_and_program(backend, laid_out.into_program(), warnings);
+            Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
@@ -810,11 +810,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 program.into_laid_out_with_mode(self.options.four_state, layout_mode);
 
             if self.options.dead_store_policy != DeadStorePolicy::Off {
-                run_dead_store_elimination(
-                    laid_out.program_mut(),
-                    &self.live_signals,
-                    &self.options,
-                );
+                run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
             }
 
             #[cfg(target_arch = "x86_64")]
@@ -837,7 +833,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             let backend = JitBackend::new(&laid_out, &self.options, None)?;
 
             let mut sim =
-                Simulator::with_backend_and_program(backend, laid_out.into_program(), warnings);
+                Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.apply_initial_values();
             sim.modify(|_| {}).map_err(SimulatorError::from)?;
             Ok(sim)
@@ -933,7 +929,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
         let mut laid_out = program.into_laid_out_with_mode(self.options.four_state, layout_mode);
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {
-            run_dead_store_elimination(laid_out.program_mut(), &self.live_signals, &self.options);
+            run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
         }
         #[cfg(target_arch = "x86_64")]
         let backend = crate::backend::native::NativeBackend::new(&laid_out, &self.options)?;
@@ -941,7 +937,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
         let backend = crate::backend::JitBackend::new(&laid_out, &self.options, None)?;
 
         let mut sim =
-            Simulator::with_backend_and_program(backend, laid_out.into_program(), warnings);
+            Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
         if let Some(path) = self.vcd_path {
             let descs = sim.build_vcd_descs(self.options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
@@ -957,7 +953,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
 /// Resolve user-specified `(instance_path, var_path)` to `AbsoluteAddr` and run DSE.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_dead_store_elimination(
-    program: &mut Program,
+    program: &mut LaidOutProgram,
     live_signals: &[(Vec<(String, usize)>, Vec<String>)],
     options: &SimulatorOptions,
 ) {

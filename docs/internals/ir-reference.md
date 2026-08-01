@@ -20,48 +20,58 @@ It lowers Veryl analysis results into a register-based instruction sequence that
 
 ## Key Data Structures
 
-### `Program`
+### Phase artifacts
 
-A struct representing the entire simulation. A notable characteristic is that flip-flop evaluation is split into three variants.
+Compilation state is represented by distinct types. There is no general object whose valid fields
+depend on which passes happened to run.
 
 ```rust
-pub struct Program {
+pub struct UnoptimizedSir {
+    pub sir: SirProgram,
+    pub layout_requirements: LayoutRequirements<AbsoluteAddr>,
+    pub runtime: RuntimeProgram,
+}
+
+pub struct OptimizedSir {
+    pub sir: SirProgram,
+    pub layout_requirements: LayoutRequirements<AbsoluteAddr>,
+    runtime: RuntimeProgram,
+}
+
+pub struct LaidOutProgram {
+    pub sir: SirProgram,
+    runtime: RuntimeProgram,
+    layout: MemoryLayout,
+}
+
+pub struct RuntimeProgram {
+    pub design: ElaboratedDesign<AbsoluteAddr>,
+    pub frontend: VerylFrontendLookup,
+    pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
+    pub testbench: Option<TestbenchProgram<AbsoluteAddr>>,
+}
+
+pub struct SirProgram {
     pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    pub eval_comb_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
-    pub eval_comb_plan: Option<EvalCombPlan>,
-    // ... instance maps, clock domains, arena, etc.
-    pub reset_clock_map: HashMap<AbsoluteAddr, AbsoluteAddr>,
-    pub layout_requirements: LayoutRequirements<AbsoluteAddr>,
-    pub layout: Option<MemoryLayout>,
-    pub initial_statements: Option<Vec<Statement>>,
-    pub tb_functions: FxHashMap<VarId, Function>,
 }
 ```
 
+-   **`UnoptimizedSir`**: Internal compiler-driver result before the backend-independent SIR pass pipeline.
+-   **`OptimizedSir`**: The only pre-layout artifact accepted by layout construction.
+-   **`LaidOutProgram`**: Immutable SIR plus finalized physical layout accepted by concrete backends. Layout requirements have been consumed.
+-   **`RuntimeProgram`**: Design, source lookup, runtime schema, and compiled testbench retained after code generation. It cannot contain SIR or layout requirements.
 -   **`eval_apply_ffs`**: Standard synchronous flip-flop evaluation. Used when operating in a single domain.
+-   **`eval_comb_apply_ffs`**: Fused comb/FF evaluation selected by the frontend scheduler.
 -   **`eval_only_ffs`**: Phase that only computes the next state and writes it to the Working region.
 -   **`apply_ffs`**: Phase that commits values from the Working region to the Stable region.
--   **`eval_comb_plan`**: Compilation plan for `eval_comb` when the estimated CLIF instruction count exceeds the safety threshold used to stay below Cranelift's instruction/value limits. See [Tail-Call Splitting](./optimizations.md#214-tail-call-splitting) for details.
--   **`reset_clock_map`**: Maps each reset `AbsoluteAddr` to its associated clock `AbsoluteAddr` (derived from `FfDeclaration`).
 -   **`layout_requirements`**: Semantic physical-layout constraints, including validated candidates mapping non-canonical → canonical state homes. `IdentityStoreBypass` populates these aliases; layout verifies representation compatibility before sharing memory and consumes the requirements when producing `LaidOutProgram`.
--   **`layout`**: Pre-computed `MemoryLayout`. Built after optimization, before backend codegen. Centralizes offset calculation so all backends share the same layout.
--   **`initial_statements`**: Initial block statements from the top-level module (for native testbenches).
--   **`tb_functions`**: Functions defined in the top-level module (for testbench function calls via the bytecode VM).
 
-### `EvalCombPlan`
-
-Describes how `eval_comb` should be compiled when the default single-function approach would exceed Cranelift's instruction index limit.
-
-```rust
-pub enum EvalCombPlan {
-    /// EU-boundary or single-block splitting with live regs passed as tail-call args.
-    TailCallChunks(Vec<TailCallChunk>),
-    /// Multi-block splitting with inter-chunk register values spilled through scratch memory.
-    MemorySpilled(MemorySpilledPlan),
-}
-```
+Cranelift oversized-function plans and x86 MIR/register allocation are backend-private results;
+they are not fields of SIR artifacts.
 
 ### `ExecutionUnit`
 

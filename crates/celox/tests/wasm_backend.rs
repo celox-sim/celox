@@ -1,6 +1,6 @@
-use celox::{BigUint, Program, WasmBackend};
+use celox::{BigUint, RuntimeProgram, WasmBackend};
 
-fn build_wasm(code: &str, top: &str) -> (WasmBackend, Program) {
+fn build_wasm(code: &str, top: &str) -> (WasmBackend, RuntimeProgram) {
     let sim = celox::Simulator::builder(code, top).build_wasm().unwrap();
     let program = sim.program().clone();
     (sim.into_backend(), program)

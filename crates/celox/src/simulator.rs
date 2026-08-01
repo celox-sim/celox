@@ -12,8 +12,8 @@ use crate::{
     IOContext, RuntimeErrorCode,
     backend::{JitBackend, MemoryLayout, SharedJitCode, SimBackend},
     ir::{
-        InitialMemoryData, InitialMemoryWriteRun, InstancePath, Program, RuntimeEventKind,
-        RuntimeEventSite, SignalRef, VariableInfo,
+        InitialMemoryData, InitialMemoryWriteRun, InstancePath, RuntimeEventKind, RuntimeEventSite,
+        RuntimeProgram, SignalRef, VariableInfo,
     },
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -106,7 +106,7 @@ pub struct NamedEvent<B: SimBackend = crate::DefaultBackend> {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
     pub(crate) backend: B,
-    pub(crate) program: Program,
+    pub(crate) program: RuntimeProgram,
     pub(crate) vcd_writer: Option<crate::vcd::VcdWriter>,
     pub(crate) dirty: bool,
     pub(crate) warnings: Vec<veryl_analyzer::AnalyzerError>,
@@ -550,7 +550,7 @@ impl<B: SimBackend> Simulator<B> {
 
     pub fn with_backend_and_program(
         backend: B,
-        program: Program,
+        program: RuntimeProgram,
         warnings: Vec<veryl_analyzer::AnalyzerError>,
     ) -> Self {
         let mut sim = Self {
@@ -790,7 +790,7 @@ impl<B: SimBackend> Simulator<B> {
     }
 
     /// Returns a reference to the compiled SIR program.
-    pub fn program(&self) -> &Program {
+    pub fn program(&self) -> &RuntimeProgram {
         &self.program
     }
 
@@ -1171,7 +1171,7 @@ impl<B: SimBackend> Simulator<B> {
     ///
     /// The returned descriptors are self-contained (no IR references) and can
     /// be cached alongside [`SharedJitCode`] so that VCD works on cache-hit
-    /// paths without the original [`Program`].
+    /// paths without the original [`RuntimeProgram`].
     pub fn build_vcd_descs(&self, four_state_mode: bool) -> Vec<crate::vcd::VcdSignalDesc> {
         let mut descs = Vec::new();
         let mut sorted_instances: Vec<_> = self.program.frontend.instance_module.iter().collect();
@@ -1467,7 +1467,7 @@ impl Simulator<NativeBackend> {
     /// Create a simulator from pre-compiled shared native code.
     pub fn from_shared(shared: Arc<SharedNativeCode>, program: crate::ir::OptimizedSir) -> Self {
         let backend = NativeBackend::from_shared(shared);
-        let mut sim = Self::with_backend_and_program(backend, program.into_program(), vec![]);
+        let mut sim = Self::with_backend_and_program(backend, program.into_runtime(), vec![]);
         sim.apply_initial_values();
         sim
     }

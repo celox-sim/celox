@@ -7,14 +7,14 @@ current `celox` compiler/runtime monolith. It is both the target design and the 
 the status below distinguishes completed ownership boundaries from remaining work.
 
 Migration note: `celox-state-layout` now owns the generic layout algorithm and the compiler driver
-uses a consuming `Program -> OptimizedSir -> LaidOutProgram` transition. Only the optimizer driver
-can construct `OptimizedSir`, and physical layout is no longer available on an unoptimized
-`Program`. The transitional facade artifact wraps the mixed `Program`, whose execution-unit groups
-are now held by `celox-sir::SirProgram` and whose
+uses a consuming `UnoptimizedSir -> OptimizedSir -> LaidOutProgram` transition. Only the optimizer
+driver can construct `OptimizedSir`, and physical layout is unavailable before that transition.
+The former mixed `Program` has been deleted. Its execution-unit groups are held by
+`celox-sir::SirProgram`, while its
 flattened state metadata, event topology, and initial state are held by
 `celox-design::ElaboratedDesign`. Runtime diagnostics are held by
 `celox-design::RuntimeSchema`; its combinational observation recipes retain only persistent-state
-ranges, so the final `Program` no longer owns an SLT arena or observer `NodeId`s. Cranelift
+ranges, so no post-frontend artifact owns an SLT arena or observer `NodeId`s. Cranelift
 oversized-function planning is constructed from final SIR
 at the backend boundary; backend scratch extends only the backend's private layout copy.
 Veryl source identities retained for diagnostics and public path lookup are grouped in
@@ -55,9 +55,11 @@ explicit `celox-frontend-veryl::SymbolicRtl`, which is consumed exactly once by
 schema, frontend lookup, and testbench source, but cannot contain an SLT arena or `NodeId`.
 Diagnostic trace collection is part of that frontend transition rather than a facade flattening
 wrapper. The obsolete facade flattening, logic-tree, scheduler, and FF compatibility modules have
-been removed. The facade now only executes the temporary fused-SIR optimization hints, compiles the
+been removed. The facade now only executes the fused-SIR optimization hints, compiles the
 semantic testbench, invokes the SIR optimizer through a source-independent borrowed view, and
-converts the result into the transitional `Program`. `celox-sir-opt` owns the complete pass
+converts the result into `OptimizedSir`. After backend code generation, `Simulator` retains only
+`RuntimeProgram`; SIR and layout requirements cannot leak into runtime ownership.
+`celox-sir-opt` owns the complete pass
 manager, all backend-independent passes, StateSSA/placement analyses, and the design-metadata
 memory-offset contract. Its normal dependency graph contains no Veryl, frontend, testbench,
 physical layout, or facade crate. Physical-contiguity facts needed by the native merged-chain

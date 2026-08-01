@@ -1,7 +1,7 @@
 use wasm_bindgen::prelude::*;
 
 use celox::wasm_codegen;
-use celox::{LaidOutProgram, MemoryLayout, OptimizeOptions, Program};
+use celox::{LaidOutProgram, MemoryLayout, OptimizeOptions};
 // MemoryLayout imported for SimHandle::layout() return type
 
 /// Initialize panic hook for better error messages in the browser console.
@@ -21,8 +21,8 @@ pub struct SimHandle {
 }
 
 impl SimHandle {
-    fn program(&self) -> &Program {
-        self.program.program()
+    fn program(&self) -> &LaidOutProgram {
+        &self.program
     }
 
     fn layout(&self) -> &MemoryLayout {

@@ -1,7 +1,7 @@
 //! Integration tests: execute native backend output and verify correctness.
 #![cfg(target_arch = "x86_64")]
 
-use celox::{MemoryLayout, MemoryLayoutMode, Program, Simulator, SimulatorBuilder};
+use celox::{MemoryLayout, MemoryLayoutMode, OptimizedSir, Simulator, SimulatorBuilder};
 
 #[cfg(target_arch = "x86_64")]
 fn run_single_block_mir(insts: Vec<celox::native_backend::mir::MInst>, vreg_count: usize) -> u64 {
@@ -38,17 +38,17 @@ fn run_single_block_mir(insts: Vec<celox::native_backend::mir::MInst>, vreg_coun
 fn compile_and_run(
     code: &str,
     top: &str,
-    setup: impl Fn(&mut [u8], &Program, &MemoryLayout),
-) -> (Vec<u8>, Program, MemoryLayout) {
+    setup: impl Fn(&mut [u8], &OptimizedSir, &MemoryLayout),
+) -> (Vec<u8>, OptimizedSir, MemoryLayout) {
     compile_and_run_inner(code, top, setup, false)
 }
 
 fn compile_and_run_inner(
     code: &str,
     top: &str,
-    setup: impl Fn(&mut [u8], &Program, &MemoryLayout),
+    setup: impl Fn(&mut [u8], &OptimizedSir, &MemoryLayout),
     debug: bool,
-) -> (Vec<u8>, Program, MemoryLayout) {
+) -> (Vec<u8>, OptimizedSir, MemoryLayout) {
     let trace = SimulatorBuilder::new(code, top)
         .optimize(true)
         .trace_post_optimized_sir()
@@ -91,13 +91,13 @@ fn compile_and_run_inner(
     (state, sir, layout)
 }
 
-fn write_u32_at(state: &mut [u8], sir: &Program, layout: &MemoryLayout, name: &str, val: u32) {
+fn write_u32_at(state: &mut [u8], sir: &OptimizedSir, layout: &MemoryLayout, name: &str, val: u32) {
     let addr = sir.get_addr(&[], &[name]).unwrap();
     let off = layout.offsets[&addr];
     state[off..off + 4].copy_from_slice(&val.to_le_bytes());
 }
 
-fn read_u32_at(state: &[u8], sir: &Program, layout: &MemoryLayout, name: &str) -> u32 {
+fn read_u32_at(state: &[u8], sir: &OptimizedSir, layout: &MemoryLayout, name: &str) -> u32 {
     let addr = sir.get_addr(&[], &[name]).unwrap();
     let off = layout.offsets[&addr];
     u32::from_le_bytes(state[off..off + 4].try_into().unwrap())

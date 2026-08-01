@@ -343,7 +343,7 @@ fn test_mixed_boundaries() {
     assert!(ranges.contains(&(16, 31)));
 }
 
-fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::Program {
+fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::UnoptimizedSir {
     let metadata = Metadata::create_default("prj").unwrap();
     let parser = Parser::parse(code, &"").unwrap();
     let analyzer = Analyzer::new(&metadata);
@@ -375,7 +375,8 @@ fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::Program {
         None,
     )
     .expect("Failed to flatten");
-    crate::ir::Program::from_scheduled(scheduled.scheduled).0
+    let (sir, runtime, _) = crate::ir::RuntimeProgram::from_scheduled(scheduled.scheduled);
+    crate::ir::UnoptimizedSir::new(sir, runtime)
 }
 
 #[test]
@@ -554,7 +555,7 @@ struct StoreInfo {
 }
 
 fn find_stores_to_var(
-    program: &crate::ir::Program,
+    program: &crate::ir::UnoptimizedSir,
     instance_id: crate::ir::InstanceId,
     var_id: VarId,
 ) -> Vec<StoreInfo> {

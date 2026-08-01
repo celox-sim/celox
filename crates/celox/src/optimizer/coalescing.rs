@@ -1,7 +1,9 @@
 #[cfg(target_arch = "x86_64")]
 use std::sync::Arc;
 
-use crate::ir::{AbsoluteAddr, Program};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::ir::LaidOutProgram;
+use crate::ir::{AbsoluteAddr, OptimizedSir};
 #[cfg(target_arch = "x86_64")]
 use crate::ir::{
     ExecutionUnit, RegionedAbsoluteAddr, SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION,
@@ -18,18 +20,18 @@ pub(crate) use celox_sir_opt::coalescing::{
     eliminate_unobserved_comb_state_stores, promote_eval_apply_working_round_trips,
 };
 
-pub(crate) fn retain_final_identity_aliases(program: &mut Program, four_state: bool) {
-    super::with_optimization_program(program, |unit| {
+pub(crate) fn retain_final_identity_aliases(program: &mut OptimizedSir, four_state: bool) {
+    super::with_optimized_program(program, |unit| {
         celox_sir_opt::coalescing::retain_final_identity_aliases(unit, four_state);
     });
 }
 
 pub(crate) fn remove_final_identity_alias_stores(
-    program: &mut Program,
+    program: &mut OptimizedSir,
     validated_aliases: &crate::HashMap<AbsoluteAddr, AbsoluteAddr>,
     four_state: bool,
 ) {
-    super::with_optimization_program(program, |unit| {
+    super::with_optimized_program(program, |unit| {
         celox_sir_opt::coalescing::remove_final_identity_alias_stores(
             unit,
             validated_aliases,
@@ -40,11 +42,11 @@ pub(crate) fn remove_final_identity_alias_stores(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn optimize_rooted_comb_memory(
-    program: &mut Program,
+    program: &mut LaidOutProgram,
     externally_live: &crate::HashSet<AbsoluteAddr>,
     four_state: bool,
 ) {
-    super::with_optimization_program(program, |unit| {
+    super::with_laid_out_program(program, |unit| {
         celox_sir_opt::coalescing::optimize_rooted_comb_memory(unit, externally_live, four_state);
     });
 }
