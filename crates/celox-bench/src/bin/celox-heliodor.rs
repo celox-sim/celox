@@ -21,7 +21,7 @@ struct Cli {
     test: String,
     #[arg(long = "source-file")]
     source_files: Vec<PathBuf>,
-    #[arg(long, value_enum, default_value = "o2")]
+    #[arg(long, value_enum, ignore_case = true, default_value = "o2")]
     opt_level: OptimizationLevel,
     #[arg(long, value_enum, default_value = "native")]
     backend: Backend,
@@ -68,7 +68,7 @@ enum Backend {
     Cranelift,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum OptimizationLevel {
     O0,
     O1,
@@ -597,4 +597,36 @@ fn load_sources(
         sources.push((content, path));
     }
     Ok((sources, metadata))
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, OptimizationLevel};
+
+    #[test]
+    fn opt_level_is_case_insensitive() {
+        for (value, expected) in [
+            ("O0", OptimizationLevel::O0),
+            ("o0", OptimizationLevel::O0),
+            ("O1", OptimizationLevel::O1),
+            ("o1", OptimizationLevel::O1),
+            ("O2", OptimizationLevel::O2),
+            ("o2", OptimizationLevel::O2),
+        ] {
+            let cli = Cli::try_parse_from([
+                "celox-heliodor",
+                "--project",
+                ".",
+                "--test",
+                "test_soc_linux_boot",
+                "--opt-level",
+                value,
+            ])
+            .unwrap();
+
+            assert_eq!(cli.opt_level, expected);
+        }
+    }
 }
