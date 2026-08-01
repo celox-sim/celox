@@ -189,8 +189,14 @@ fn verify_with_work(
             predecessor: func.blocks[predecessor].id,
             successor: func.blocks[successor].id,
         };
-        for &operation in operations {
-            verify_edge_operation_home(func, plan, operation, location)?;
+        for (index, &operation) in operations.iter().enumerate() {
+            verify_edge_operation_home(
+                func,
+                plan,
+                operation,
+                location,
+                super::spill_plan::edge_reload_uses_transferred_home(operations, index),
+            )?;
             match operation {
                 PlannedEdgeOp::Reload { source_home, .. } => {
                     universe.insert(source_home);
@@ -905,6 +911,7 @@ fn verify_edge_operation_home(
     plan: &SpillPlan,
     operation: PlannedEdgeOp,
     location: HomeLocation,
+    transferred_home: bool,
 ) -> Result<(), HomeVerifyError> {
     let (source, destination, home, expected) = match operation {
         PlannedEdgeOp::Reload {
@@ -937,7 +944,7 @@ fn verify_edge_operation_home(
             message: "edge operation value is outside the original VReg domain".into(),
         });
     }
-    if home != expected {
+    if home != expected && !transferred_home {
         return Err(HomeVerifyError {
             rule: "HOME.CLASS_MISMATCH",
             location: Some(location),

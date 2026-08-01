@@ -266,13 +266,14 @@ pub(super) fn allocate(
     let phase = timing.then(crate::timing::now);
     let reconstructed_analysis = super::analysis::analyze(func);
     if let Err(error) = super::pressure::verify(func, &reconstructed_analysis, register_count) {
+        let message = error.to_string();
         return Err(super::RegallocError::new(
             "reconstructed pressure verification",
             "PRESSURE.EXCEEDS_CAPACITY",
             Some(error.block),
             Some(error.instruction),
-            Vec::new(),
-            error.to_string(),
+            error.values,
+            message,
         ));
     }
     if let Some(start) = phase {
