@@ -187,8 +187,8 @@ pub(crate) fn flatten(
         usize,
     )],
     four_state: bool,
-    trace_opts: &crate::debug::TraceOptions,
-    mut trace: Option<&mut crate::debug::CompilationTrace>,
+    trace_opts: &celox_frontend_veryl::FrontendTraceOptions,
+    mut trace: Option<&mut celox_frontend_veryl::FrontendTrace>,
 ) -> Result<celox_frontend_veryl::ScheduledRtl, ParserError> {
     let celox_frontend_veryl::SymbolicRtl {
         modules,
@@ -1614,6 +1614,8 @@ pub fn parse(
     {
         t.analyzer_ir = Some(ir.to_string());
     }
+    let frontend_trace_options = trace_opts.frontend();
+    let mut frontend_trace = celox_frontend_veryl::FrontendTrace::default();
     let scheduled = timed_phase!(
         "flatten",
         flatten(
@@ -1622,10 +1624,14 @@ pub fn parse(
             ignored_loops,
             true_loops,
             four_state,
-            trace_opts,
-            trace.as_deref_mut(),
+            &frontend_trace_options,
+            trace.is_some().then_some(&mut frontend_trace),
         )
-    )?;
+    );
+    if let Some(trace) = trace.as_deref_mut() {
+        trace.absorb_frontend(frontend_trace);
+    }
+    let scheduled = scheduled?;
     let (mut program, testbench_source) = Program::from_scheduled(scheduled);
     crate::testbench::project_observability(&mut program, &testbench_source);
     program.testbench = crate::testbench::compile_semantic_testbench(&program, &testbench_source);
@@ -2221,8 +2227,8 @@ fn relocate_units(
     global_boundaries: &HashMap<AbsoluteAddr, std::collections::BTreeSet<usize>>,
     unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
-    trace_opts: &crate::debug::TraceOptions,
-    trace: &mut Option<&mut crate::debug::CompilationTrace>,
+    trace_opts: &celox_frontend_veryl::FrontendTraceOptions,
+    trace: &mut Option<&mut celox_frontend_veryl::FrontendTrace>,
 ) -> Result<
     (
         SLTNodeArena<AbsoluteAddr>,

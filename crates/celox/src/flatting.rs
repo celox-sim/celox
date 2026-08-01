@@ -1,6 +1,6 @@
 pub use celox_frontend_veryl::flattening::{collect_inputs, flatten_module};
 
-use crate::{HashMap, debug, ir};
+use crate::{HashMap, ir};
 use std::collections::BTreeSet;
 
 pub fn flatting(
@@ -10,8 +10,8 @@ pub fn flatting(
     global_boundaries: &HashMap<ir::AbsoluteAddr, BTreeSet<usize>>,
     unpacked_element_widths: &HashMap<ir::AbsoluteAddr, usize>,
     arena: &mut crate::logic_tree::SLTNodeArena<ir::AbsoluteAddr>,
-    trace_opts: &debug::TraceOptions,
-    mut trace: Option<&mut debug::CompilationTrace>,
+    trace_opts: &celox_frontend_veryl::FrontendTraceOptions,
+    mut trace: Option<&mut celox_frontend_veryl::FrontendTrace>,
 ) -> Result<ir::RelocationModule, crate::logic_tree::SLTNodeFactsError> {
     let flattened = flatten_module(
         module,

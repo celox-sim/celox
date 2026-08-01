@@ -18,12 +18,14 @@ pub mod loop_provenance;
 pub mod module;
 mod module_artifact;
 pub mod registry;
+mod trace;
 mod types;
 
 pub use config::BuildConfig;
 pub use error::{LoweringPhase, ParserError, SourceLocation};
 pub use hierarchy::{ParseIrResult, SymbolicRtl, parse_ir, parse_ir_with_loop_provenance};
 pub use module_artifact::{RelocationModule, ScheduledRtl, SimModule};
+pub use trace::{FrontendTrace, FrontendTraceOptions};
 pub use types::{resolve_dims, resolve_total_width};
 
 use celox_design::{InstanceId, ModuleId, VariableMetadata};

@@ -167,7 +167,7 @@ fn setup_to_flatting(
         &global_boundaries,
         &HashMap::default(),
         &mut arena,
-        &crate::debug::TraceOptions::default(),
+        &celox_frontend_veryl::FrontendTraceOptions::default(),
         None,
     );
     (r.unwrap(), modules, arena)
@@ -372,7 +372,7 @@ fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::Program {
         &[],
         &[],
         false,
-        &crate::debug::TraceOptions::default(),
+        &celox_frontend_veryl::FrontendTraceOptions::default(),
         None,
     )
     .expect("Failed to flatten");
