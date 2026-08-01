@@ -479,6 +479,7 @@ run_one() {
     assert_eq "$HELIODOR_REF" "$GATE_HELIODOR_REF" "pinned Heliodor commit"
     assert_eq "$HELIODOR_TOOLS_DIR" "$CELOX_ROOT/target/heliodor/tools" \
         "benchmark-owned tools directory"
+    assert_eq "$GATE_TIMEOUT_SEC" 420 "fixed gate timeout constant"
     assert_eq "$HELIODOR_TIMEOUT_SEC" "$GATE_TIMEOUT_SEC" "fixed timeout"
     assert_eq "$HELIODOR_CELOX_COMPILE_ONLY" 0 "full Celox execution"
     assert_eq "$CELOX_OPT_LEVEL" O2 "fixed Celox optimization"

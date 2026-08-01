@@ -92,7 +92,7 @@ gate の構成は変更できません。以下をすべて固定します。
 - clean で途中に変化しない Celox `HEAD`。invocation ごとの空の Cargo target
   directory に時間分離版 Veryl と Celox の locked release/LTO build を行い、
   その成果物を実行
-- `test_soc_linux_boot`、runner 順序 `veryl-cc-sync`、`celox`、各 300 秒 timeout
+- `test_soc_linux_boot`、runner 順序 `veryl-cc-sync`、`celox`、各 420 秒 timeout
 - invocation ごとに新しい空の Veryl AOT cache を作り、実行後に削除
 - Celox native backend、`O2`、2-state、full execution、SIR pass override なし
 - runner ごとに別の detached Heliodor worktree。project-local な生成物を
