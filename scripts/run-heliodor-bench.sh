@@ -1234,13 +1234,13 @@ run_one() {
         celox)
             run_in_heliodor "$timeout_sec" "$log" \
                 "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
-                "${celox_args[@]}" --backend native --opt-level "$CELOX_OPT_LEVEL"
+                "${celox_args[@]}" --backend native --opt-level "${CELOX_OPT_LEVEL,,}"
             process_status="$?"
             ;;
         celox-cranelift)
             run_in_heliodor "$timeout_sec" "$log" \
                 "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
-                "${celox_args[@]}" --backend cranelift --opt-level "$CELOX_OPT_LEVEL"
+                "${celox_args[@]}" --backend cranelift --opt-level "${CELOX_OPT_LEVEL,,}"
             process_status="$?"
             ;;
         veryl-cc-sync)

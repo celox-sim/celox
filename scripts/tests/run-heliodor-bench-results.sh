@@ -258,6 +258,7 @@ HELIODOR_CELOX_COMPILE_TIMEOUT_SEC=""
 FIXTURE_RESULT_LINE=""
 FIXTURE_EXIT_STATUS=0
 FIXTURE_AOT_CACHE_DIR=""
+FIXTURE_RUN_ARGS=()
 
 test_source_files() {
     printf '%s\n' dummy.veryl
@@ -271,6 +272,7 @@ run_in_heliodor() {
     local _timeout="$1"
     local log="$2"
     shift 2
+    FIXTURE_RUN_ARGS=("$@")
     if [[ "${1:-}" == env && "${2:-}" == VERYL_AOT_CACHE_DIR=* ]]; then
         FIXTURE_AOT_CACHE_DIR="${2#VERYL_AOT_CACHE_DIR=}"
         [[ -d "$FIXTURE_AOT_CACHE_DIR" ]] \
@@ -286,9 +288,15 @@ run_in_heliodor() {
 
 ensure_results_schema "$integration_results/results.tsv"
 HELIODOR_CELOX_COMPILE_ONLY=0
+CELOX_OPT_LEVEL=O2
 FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_pass compile_ns=20 execute_ns=30 jit_execute_ns=25\nCELOX_TEST_RESULT test=integration_pass status=pass elapsed_ns=71'
 run_one celox integration_pass >/dev/null \
     || fail "run_one rejected a fixture full pass"
+fixture_arg_count="${#FIXTURE_RUN_ARGS[@]}"
+assert_eq "${FIXTURE_RUN_ARGS[$((fixture_arg_count - 2))]}" --opt-level \
+    "Celox optimization flag"
+assert_eq "${FIXTURE_RUN_ARGS[$((fixture_arg_count - 1))]}" o2 \
+    "normalized Celox optimization level"
 assert_eq "$(awk -F '\t' 'NR == 2 { print $6 }' "$integration_results/results.tsv")" pass \
     "run_one pass semantic status"
 [[ "$(awk -F '\t' 'NR == 2 { print $4 }' "$integration_results/results.tsv")" =~ ^[0-9]+$ ]] \
