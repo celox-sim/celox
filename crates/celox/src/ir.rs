@@ -1,15 +1,15 @@
 use crate::HashMap;
 pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
-    AbsoluteAddrBase, BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue,
+    AbsoluteAddrBase, BinaryOp, DomainKind, InitialStateData, InitialStateValue,
     InitialStateWriteRun, InstanceId, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
     RuntimeEventKind, RuntimeEventSite, RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION,
-    TriggerIdWithKind, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
+    TriggerIdWithKind, UnaryOp, VarAtomBase, WORKING_REGION,
 };
 pub use celox_frontend_veryl::{InstancePath, VariableInfo, VerylFrontendLookup};
 pub(crate) use celox_sir::{
-    BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRBuilder, SIRInstruction,
-    SIROffset, SIRSwitchCase, SIRTerminator, SIRValue, collect_exact_zero_registers, merge_sir_eus,
+    BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
+    SIRSwitchCase, SIRTerminator, SIRValue, collect_exact_zero_registers, merge_sir_eus,
 };
 #[cfg(any(target_arch = "x86_64", test))]
 pub(crate) use celox_sir::{

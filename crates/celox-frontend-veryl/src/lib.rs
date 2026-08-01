@@ -12,6 +12,7 @@ pub mod context_width;
 mod error;
 pub mod ff;
 pub mod flattening;
+mod global_ff;
 pub mod hierarchy;
 pub mod logic_tree;
 pub mod loop_provenance;
@@ -23,6 +24,9 @@ mod types;
 
 pub use config::BuildConfig;
 pub use error::{LoweringPhase, ParserError, SourceLocation};
+pub use global_ff::{
+    FfClockRecipe, FfRuntimeRelocation, SharedClockLowering, build_ff_clock_recipes,
+};
 pub use hierarchy::{ParseIrResult, SymbolicRtl, parse_ir, parse_ir_with_loop_provenance};
 pub use module_artifact::{
     FusedSirOptimizationHints, RelocationModule, ScheduledRtl, ScheduledRtlOutput, SimModule,
