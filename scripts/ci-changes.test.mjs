@@ -51,16 +51,36 @@ test("release and repository metadata do not run product tests", () => {
   );
 });
 
-test("release package versions skip Rust tests and ARM64 builds", () => {
+const releaseFiles = [
+  ".release-please-manifest.json",
+  "CHANGELOG.md",
+  "VERSION",
+  "crates/celox-napi/package.json",
+  "packages/celox/package.json",
+  "packages/vite-plugin/package.json",
+];
+
+test("ordinary package version changes exercise JavaScript and NAPI", () => {
   assert.deepEqual(
-    classifyFiles([
-      ".release-please-manifest.json",
-      "CHANGELOG.md",
-      "VERSION",
-      "crates/celox-napi/package.json",
-      "packages/celox/package.json",
-      "packages/vite-plugin/package.json",
-    ]),
+    classifyFiles(releaseFiles),
+    {
+      ...none,
+      docs: true,
+      javascript: true,
+      napi: true,
+    },
+  );
+});
+
+test("Release Please version updates skip product validation", () => {
+  assert.deepEqual(classifyFiles(releaseFiles, { releasePlease: true }), none);
+});
+
+test("Release Please source changes still exercise affected products", () => {
+  assert.deepEqual(
+    classifyFiles([...releaseFiles, "packages/celox/src/index.ts"], {
+      releasePlease: true,
+    }),
     {
       ...none,
       docs: true,

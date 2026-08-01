@@ -20,6 +20,8 @@ jobs:
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
+    env:
+      RELEASE_PLEASE_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login == 'celox-release-please[bot]' && github.head_ref == 'release-please--branches--master--components--celox' }}
     outputs:
       docs: ${{ steps.classify.outputs.docs }}
       javascript: ${{ steps.classify.outputs.javascript }}
@@ -38,6 +40,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
         run: node scripts/ci-changes.mjs "$BASE_SHA" "$HEAD_SHA"
+
+      - name: Validate release version
+        if: env.RELEASE_PLEASE_PR == 'true'
+        run: node scripts/check-release-version.mjs
 
   docs:
     name: Docs Build

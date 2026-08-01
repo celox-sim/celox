@@ -24,11 +24,20 @@ const NEUTRAL_FILES = new Set([
   "renovate.json",
 ]);
 
+const RELEASE_PLEASE_FILES = new Set([
+  ".release-please-manifest.json",
+  "CHANGELOG.md",
+  "VERSION",
+  "crates/celox-napi/package.json",
+  "packages/celox/package.json",
+  "packages/vite-plugin/package.json",
+]);
+
 function startsWithAny(path, prefixes) {
   return prefixes.some((prefix) => path.startsWith(prefix));
 }
 
-export function classifyFiles(files) {
+export function classifyFiles(files, { releasePlease = false } = {}) {
   const affected = {
     docs: false,
     javascript: false,
@@ -38,9 +47,16 @@ export function classifyFiles(files) {
     scripts: false,
   };
 
-  for (const rawPath of files) {
-    const path = rawPath.replace(/^\.\//, "");
+  const normalizedFiles = files.map((path) => path.replace(/^\.\//, ""));
+  if (
+    releasePlease &&
+    normalizedFiles.length > 0 &&
+    normalizedFiles.every((path) => RELEASE_PLEASE_FILES.has(path))
+  ) {
+    return affected;
+  }
 
+  for (const path of normalizedFiles) {
     if (
       path === ".github/workflows/ci.yml" ||
       startsWithAny(path, [".github/actions/", "scripts/ci-changes."])
@@ -152,5 +168,11 @@ if (
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
   const files = changedFiles(process.argv[2] ?? "", process.argv[3] ?? "");
-  writeOutputs(files === null ? ALL_AFFECTED : classifyFiles(files));
+  writeOutputs(
+    files === null
+      ? ALL_AFFECTED
+      : classifyFiles(files, {
+          releasePlease: process.env.RELEASE_PLEASE_PR === "true",
+        }),
+  );
 }
