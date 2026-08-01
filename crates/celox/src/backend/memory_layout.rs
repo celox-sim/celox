@@ -1,25 +1,25 @@
 use crate::HashMap;
 use crate::ir::{
-    AbsoluteAddr, Program, RegisterId, SIRInstruction, SIROffset, STABLE_REGION,
+    AbsoluteAddr, OptimizedSir, RegisterId, SIRInstruction, SIROffset, STABLE_REGION,
     collect_exact_zero_registers,
 };
-#[cfg(any(target_arch = "x86_64", test))]
-pub use celox_state_layout::SparseWorkingLayout;
-pub use celox_state_layout::{
-    LayoutInput, LayoutRequirements, LayoutSource, MemoryLayoutMode, RUNTIME_EVENT_HEADER_SIZE,
-    RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET, RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET,
-    RUNTIME_EVENT_SLOT_SEQ_OFFSET, RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
-    STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
-    StateObjectLayout, UnpackedArrayLayout, get_byte_size,
-};
 #[cfg(target_arch = "x86_64")]
+pub use celox_state_layout::STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET;
 pub use celox_state_layout::{
-    STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET, STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET,
+    LayoutInput, LayoutRequirements, LayoutSource, MemoryLayoutMode, StateObjectLayout,
+    UnpackedArrayLayout, get_byte_size,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use celox_state_layout::{
+    RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
+    RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
+    RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
+    STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET, STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
 };
 
 pub type MemoryLayout = celox_state_layout::MemoryLayout<AbsoluteAddr>;
 
-impl LayoutSource<AbsoluteAddr> for Program {
+impl LayoutSource<AbsoluteAddr> for OptimizedSir {
     fn layout_input(&self, mode: MemoryLayoutMode) -> LayoutInput<AbsoluteAddr> {
         let unpacked_arrays = if mode == MemoryLayoutMode::ElementStrided {
             collect_strided_array_layouts(self)
@@ -53,7 +53,9 @@ impl LayoutSource<AbsoluteAddr> for Program {
     }
 }
 
-fn declared_strided_array_layouts(program: &Program) -> HashMap<AbsoluteAddr, UnpackedArrayLayout> {
+fn declared_strided_array_layouts(
+    program: &OptimizedSir,
+) -> HashMap<AbsoluteAddr, UnpackedArrayLayout> {
     let mut layouts = HashMap::default();
     for (&address, metadata) in &program.design.state_objects {
         let element_count = metadata.array_dims.iter().copied().product::<usize>();
@@ -122,7 +124,7 @@ fn supports_strided_access(
 }
 
 pub(crate) fn collect_strided_array_layouts(
-    program: &Program,
+    program: &OptimizedSir,
 ) -> HashMap<AbsoluteAddr, UnpackedArrayLayout> {
     let mut candidates = declared_strided_array_layouts(program);
 
@@ -202,7 +204,7 @@ pub(crate) fn collect_strided_array_layouts(
 ///
 /// FF reads cannot share a persistent home without a phase-correct StateSSA
 /// proof that the identity definition precedes the read on every event path.
-fn collect_ff_referenced_addresses(program: &Program) -> crate::HashSet<AbsoluteAddr> {
+fn collect_ff_referenced_addresses(program: &OptimizedSir) -> crate::HashSet<AbsoluteAddr> {
     let mut addrs = crate::HashSet::default();
     // eval_comb_apply_ffs contains the complete comb graph, not just FF
     // state.  The split FF forms are retained as the authoritative inventory;

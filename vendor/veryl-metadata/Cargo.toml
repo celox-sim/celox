@@ -93,9 +93,6 @@ version = "0.20.2"
 [dependencies.veryl-path]
 version = "0.20.2"
 
-[dependencies.veryl-std]
-version = "0.20.2"
-
 [dependencies.walkdir]
 version = "2.5.0"
 
@@ -121,6 +118,9 @@ optional = true
 [target.'cfg(not(target_family = "wasm"))'.dependencies.miette]
 version = "7.6"
 features = ["fancy"]
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies.veryl-std]
+version = "0.20.2"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies.which]
 version = "8.0"

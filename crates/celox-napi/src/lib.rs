@@ -430,6 +430,7 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
                 regalloc_algorithm,
                 enable_alias_analysis: o.enable_alias_analysis.unwrap_or(true),
                 enable_verifier: o.enable_verifier.unwrap_or(true),
+                tail_call_split: true,
             };
             Ok(ParsedOptions {
                 common,
@@ -757,7 +758,7 @@ fn build_cache_key(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn runtime_errors_by_name(program: &celox::Program) -> HashMap<i64, (String, Vec<String>)> {
+fn runtime_errors_by_name(program: &celox::RuntimeProgram) -> HashMap<i64, (String, Vec<String>)> {
     program
         .runtime_schema
         .runtime_errors
@@ -884,7 +885,7 @@ impl NativeSimulatorHandle {
             None
         };
 
-        // Extract JitBackend from Simulator (drops Program which is no longer needed)
+        // Extract JitBackend from Simulator (drops runtime metadata which is no longer needed)
         let backend = sim.into_backend();
 
         Ok(Self {
@@ -1412,8 +1413,7 @@ impl NativeSimulationHandle {
 #[cfg(target_arch = "wasm32")]
 #[napi]
 pub struct NativeSimulatorHandle {
-    program: celox::Program,
-    layout: celox::MemoryLayout,
+    program: celox::LaidOutProgram,
     four_state: bool,
     layout_json: String,
     events_json: String,
@@ -1476,21 +1476,17 @@ impl NativeSimulatorHandle {
         .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
         let laid_out = program.into_laid_out(opts.four_state);
-        let program = laid_out.program();
         let layout = laid_out.layout();
 
-        let layout_json = Self::build_layout_json(&program, layout, opts.four_state);
-        let events_json = Self::build_events_json(&program);
+        let layout_json = Self::build_layout_json(&laid_out, layout, opts.four_state);
+        let events_json = Self::build_events_json(&laid_out);
         let hierarchy_json = "{}".to_string(); // Hierarchy not available on wasm32
         let warnings_json = format_warnings_json(&warnings);
 
         let stable_size = layout.total_size as u32;
         let total_size = layout.merged_total_size as u32;
-        let (program, layout) = laid_out.into_parts();
-
         Ok(Self {
-            program,
-            layout,
+            program: laid_out,
             four_state: opts.four_state,
             layout_json,
             events_json,
@@ -1543,21 +1539,17 @@ impl NativeSimulatorHandle {
         .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
         let laid_out = program.into_laid_out(opts.four_state);
-        let program = laid_out.program();
         let layout = laid_out.layout();
 
-        let layout_json = Self::build_layout_json(&program, layout, opts.four_state);
-        let events_json = Self::build_events_json(&program);
+        let layout_json = Self::build_layout_json(&laid_out, layout, opts.four_state);
+        let events_json = Self::build_events_json(&laid_out);
         let hierarchy_json = "{}".to_string();
         let warnings_json = format_warnings_json(&warnings);
 
         let stable_size = layout.total_size as u32;
         let total_size = layout.merged_total_size as u32;
-        let (program, layout) = laid_out.into_parts();
-
         Ok(Self {
-            program,
-            layout,
+            program: laid_out,
             four_state: opts.four_state,
             layout_json,
             events_json,
@@ -1609,7 +1601,7 @@ impl NativeSimulatorHandle {
     pub fn comb_wasm_bytes(&self) -> Vec<u8> {
         let wasm = celox::wasm_codegen::compile_units(
             &self.program.sir.eval_comb,
-            &self.layout,
+            self.program.layout(),
             self.four_state,
             false,
         );
@@ -1624,8 +1616,12 @@ impl NativeSimulatorHandle {
         for (addr, units) in &self.program.sir.eval_apply_ffs {
             let event_path = self.program.get_path(addr);
             if event_path == event_name {
-                let wasm =
-                    celox::wasm_codegen::compile_units(units, &self.layout, self.four_state, false);
+                let wasm = celox::wasm_codegen::compile_units(
+                    units,
+                    self.program.layout(),
+                    self.four_state,
+                    false,
+                );
                 return Ok(wasm.bytes);
             }
         }
@@ -1650,10 +1646,10 @@ impl NativeSimulatorHandle {
 
 #[cfg(target_arch = "wasm32")]
 impl NativeSimulatorHandle {
-    /// Build signal layout JSON from the Program and MemoryLayout.
+    /// Build signal layout JSON from finalized SIR and MemoryLayout.
     /// Mirrors the layout format from celox-wasm.
     fn build_layout_json(
-        program: &celox::Program,
+        program: &celox::LaidOutProgram,
         layout: &celox::MemoryLayout,
         four_state: bool,
     ) -> String {
@@ -1661,54 +1657,42 @@ impl NativeSimulatorHandle {
 
         let mut layout_map: BTreeMap<String, serde_json::Value> = BTreeMap::new();
 
-        for (instance_id, module_id) in &program.frontend.instance_module {
-            let variables = &program.frontend.module_variables[module_id];
-            let path_index = &program.frontend.module_var_path_index[module_id];
-
-            for info in variables.values() {
-                if path_index.get(&info.path) == Some(&None) {
-                    continue;
-                }
-                let name = info
-                    .path
-                    .0
-                    .iter()
-                    .map(|s| {
-                        veryl_parser::resource_table::get_str_value(*s)
-                            .unwrap()
-                            .to_string()
-                    })
-                    .collect::<Vec<_>>()
-                    .join(".");
-
-                let addr = celox::AbsoluteAddr {
-                    instance_id: *instance_id,
-                    var_id: info.id,
-                };
-
-                if let Some(&offset) = layout.offsets.get(&addr) {
-                    let width = layout.widths.get(&addr).copied().unwrap_or(0);
-                    let byte_size = celox::get_byte_size(width);
-                    layout_map.insert(
-                        name,
-                        serde_json::json!({
-                            "offset": offset,
-                            "width": width,
-                            "byte_size": byte_size,
-                            "is_4state": four_state && info.is_4state,
-                            "direction": layout::direction_str(info.var_kind),
-                            "type_kind": layout::type_kind_str(info.type_kind),
-                        }),
-                    );
-                }
+        for addr in program.design.state_objects.keys() {
+            let Some(source) = program.frontend.source_address(addr) else {
+                continue;
+            };
+            let module_id = program.frontend.instance_module[&source.instance_id];
+            let variables = &program.frontend.module_variables[&module_id];
+            let Some(info) = variables.get(&source.var_id) else {
+                continue;
+            };
+            if program.frontend.module_var_path_index[&module_id].get(&info.path) == Some(&None) {
+                continue;
             }
+            let Some(&offset) = layout.offsets.get(addr) else {
+                continue;
+            };
+            let name = program.get_path(addr);
+            let width = layout.widths.get(addr).copied().unwrap_or(0);
+            let byte_size = celox::get_byte_size(width);
+            layout_map.insert(
+                name,
+                serde_json::json!({
+                    "offset": offset,
+                    "width": width,
+                    "byte_size": byte_size,
+                    "is_4state": four_state && info.is_4state,
+                    "direction": layout::direction_str(info.var_kind),
+                    "type_kind": layout::type_kind_str(info.type_kind),
+                }),
+            );
         }
 
         serde_json::to_string(&layout_map).unwrap_or_else(|_| "{}".to_string())
     }
 
-    /// Build events JSON from the Program.
-    fn build_events_json(program: &celox::Program) -> String {
+    /// Build events JSON from finalized SIR.
+    fn build_events_json(program: &celox::LaidOutProgram) -> String {
         use std::collections::BTreeMap;
 
         let mut events: BTreeMap<String, usize> = BTreeMap::new();

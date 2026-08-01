@@ -3,7 +3,7 @@ source: crates/celox/tests/flip_flop.rs
 expression: output
 ---
 === Evaluation Flip-Flops (eval_apply_ffs) ===
-Trigger Group: clk (AbsoluteAddr(inst0, var1))
+Trigger Group: clk (AbsoluteAddr(inst0, state1))
   Execution Unit 0:
     Entry Block: 0
     Registers:
@@ -85,7 +85,7 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
     b3:
       Commit(src=cnt (region=1), dst=cnt (region=0), offset=0, bits=320)
       Return
-Trigger Group: rst (AbsoluteAddr(inst0, var2))
+Trigger Group: rst (AbsoluteAddr(inst0, state2))
   Execution Unit 0:
     Entry Block: 0
     Registers:
@@ -169,7 +169,7 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       Return
 
 === Evaluation Flip-Flops (eval_only_ffs) ===
-Trigger Group: clk (AbsoluteAddr(inst0, var1))
+Trigger Group: clk (AbsoluteAddr(inst0, state1))
   Execution Unit 0:
     Entry Block: 0
     Registers:
@@ -250,7 +250,7 @@ Trigger Group: clk (AbsoluteAddr(inst0, var1))
       Jump(b3)
     b3:
       Return
-Trigger Group: rst (AbsoluteAddr(inst0, var2))
+Trigger Group: rst (AbsoluteAddr(inst0, state2))
   Execution Unit 0:
     Entry Block: 0
     Registers:
@@ -333,14 +333,14 @@ Trigger Group: rst (AbsoluteAddr(inst0, var2))
       Return
 
 === Application Flip-Flops (apply_ffs) ===
-Trigger Group: clk (AbsoluteAddr(inst0, var1))
+Trigger Group: clk (AbsoluteAddr(inst0, state1))
   Execution Unit 0:
     Entry Block: 0
     Registers:
     b0:
       Commit(src=cnt (region=1), dst=cnt (region=0), offset=0, bits=320)
       Return
-Trigger Group: rst (AbsoluteAddr(inst0, var2))
+Trigger Group: rst (AbsoluteAddr(inst0, state2))
   Execution Unit 0:
     Entry Block: 0
     Registers:

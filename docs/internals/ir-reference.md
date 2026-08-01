@@ -1,7 +1,8 @@
 # SIR Intermediate Representation Reference
 
-SIR (Simulator Intermediate Representation) is the execution IR for Celox.
-It lowers Veryl analysis results into a register-based instruction sequence that serves as input to the compilation backends (native x86-64 or Cranelift JIT).
+SIR (Simulator Intermediate Representation) is Celox's source- and target-independent execution
+IR. The frontend consumes Veryl-owned symbolic structures before producing SIR; native x86-64,
+Cranelift, and Wasm backends all consume the same laid-out representation.
 
 ## Overview
 
@@ -13,55 +14,69 @@ It lowers Veryl analysis results into a register-based instruction sequence that
 
 | Type | Purpose | Stage |
 | :--- | :--- | :--- |
-| `VarId` | Module-local variable ID | Within `SimModule` |
-| `AbsoluteAddr` | Global variable (`InstanceId` + `VarId`) | After flattening |
-| `RegionedAbsoluteAddr` | Address with memory region (Stable/Working) qualifier | Execution/optimization |
-| `SignalRef` | Physical memory address handle for execution | Execution (fast access) |
+| `VarId` | Veryl module-local variable ID | Frontend `SimModule` only |
+| `AbsoluteAddrBase<VarId>` | Flattened frontend address before source identities are discarded | Frontend scheduling only |
+| `StateAddr` (`AbsoluteAddr` facade alias) | Dense source-independent state-object ID | Design, SIR, optimization, runtime schema |
+| `RegionedStateAddr` (`RegionedAbsoluteAddr` alias) | `StateAddr` qualified by Stable/Working/SparseWorking storage role | SIR and layout |
+| `SignalRef` | Cached physical layout handle | Runtime access |
 
 ## Key Data Structures
 
-### `Program`
+### Phase artifacts
 
-A struct representing the entire simulation. A notable characteristic is that flip-flop evaluation is split into three variants.
+Frontend and compiler state are represented by distinct types. `SymbolicRtl` may contain SLT
+arenas and Veryl analyzer references; `schedule_symbolic_rtl` consumes it and returns
+`ScheduledRtl`, after which no `NodeId` or SLT arena is legal. The facade then uses the following
+source-independent artifacts. There is no general object whose valid fields depend on which
+passes happened to run.
 
 ```rust
-pub struct Program {
+pub struct UnoptimizedSir {
+    pub sir: SirProgram,
+    pub layout_requirements: LayoutRequirements<AbsoluteAddr>,
+    pub runtime: RuntimeProgram,
+}
+
+pub struct OptimizedSir {
+    pub sir: SirProgram,
+    pub layout_requirements: LayoutRequirements<AbsoluteAddr>,
+    runtime: RuntimeProgram,
+}
+
+pub struct LaidOutProgram {
+    pub sir: SirProgram,
+    runtime: RuntimeProgram,
+    layout: MemoryLayout,
+}
+
+pub struct RuntimeProgram {
+    pub design: ElaboratedDesign<AbsoluteAddr>,
+    pub frontend: VerylFrontendLookup,
+    pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
+    pub testbench: Option<TestbenchProgram<AbsoluteAddr>>,
+}
+
+pub struct SirProgram {
+    pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
     pub eval_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
+    pub eval_comb_apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub eval_only_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     pub apply_ffs: HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-    pub eval_comb: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
-    pub eval_comb_plan: Option<EvalCombPlan>,
-    // ... instance maps, clock domains, arena, etc.
-    pub reset_clock_map: HashMap<AbsoluteAddr, AbsoluteAddr>,
-    pub layout_requirements: LayoutRequirements<AbsoluteAddr>,
-    pub layout: Option<MemoryLayout>,
-    pub initial_statements: Option<Vec<Statement>>,
-    pub tb_functions: FxHashMap<VarId, Function>,
 }
 ```
 
+-   **`UnoptimizedSir`**: Internal compiler-driver result before the backend-independent SIR pass pipeline.
+-   **`OptimizedSir`**: The only pre-layout artifact accepted by layout construction.
+-   **`LaidOutProgram`**: Immutable SIR plus finalized physical layout accepted by concrete backends. Layout requirements have been consumed.
+-   **`RuntimeProgram`**: Design, source lookup, runtime schema, and compiled testbench retained after code generation. It cannot contain SIR or layout requirements.
 -   **`eval_apply_ffs`**: Standard synchronous flip-flop evaluation. Used when operating in a single domain.
+-   **`eval_comb_apply_ffs`**: Fused comb/FF evaluation selected by the frontend scheduler.
 -   **`eval_only_ffs`**: Phase that only computes the next state and writes it to the Working region.
 -   **`apply_ffs`**: Phase that commits values from the Working region to the Stable region.
--   **`eval_comb_plan`**: Compilation plan for `eval_comb` when the estimated CLIF instruction count exceeds the safety threshold used to stay below Cranelift's instruction/value limits. See [Tail-Call Splitting](./optimizations.md#214-tail-call-splitting) for details.
--   **`reset_clock_map`**: Maps each reset `AbsoluteAddr` to its associated clock `AbsoluteAddr` (derived from `FfDeclaration`).
 -   **`layout_requirements`**: Semantic physical-layout constraints, including validated candidates mapping non-canonical → canonical state homes. `IdentityStoreBypass` populates these aliases; layout verifies representation compatibility before sharing memory and consumes the requirements when producing `LaidOutProgram`.
--   **`layout`**: Pre-computed `MemoryLayout`. Built after optimization, before backend codegen. Centralizes offset calculation so all backends share the same layout.
--   **`initial_statements`**: Initial block statements from the top-level module (for native testbenches).
--   **`tb_functions`**: Functions defined in the top-level module (for testbench function calls via the bytecode VM).
 
-### `EvalCombPlan`
-
-Describes how `eval_comb` should be compiled when the default single-function approach would exceed Cranelift's instruction index limit.
-
-```rust
-pub enum EvalCombPlan {
-    /// EU-boundary or single-block splitting with live regs passed as tail-call args.
-    TailCallChunks(Vec<TailCallChunk>),
-    /// Multi-block splitting with inter-chunk register values spilled through scratch memory.
-    MemorySpilled(MemorySpilledPlan),
-}
-```
+Cranelift oversized-function plans and x86 MIR/register allocation are backend-private results;
+they are not fields of SIR artifacts.
 
 ### `ExecutionUnit`
 
@@ -119,7 +134,7 @@ MIR sits between SIR and x86-64 machine code in the native backend pipeline. It 
 | Category | Instructions |
 | :--- | :--- |
 | Data movement | `Mov`, `LoadImm` |
-| Memory access | `Load`, `Store`, `LoadIndexed`, `StoreIndexed` |
+| Memory access | `Load`, `Store`, indexed and bounded-indexed forms, direct RMW forms, `MemCopy`, sparse commits |
 | ALU (register) | `Add`, `Sub`, `Mul`, `UMulHi`, `And`, `Or`, `Xor`, `Shr`, `Shl`, `Sar` |
 | ALU (immediate) | `AndImm`, `OrImm`, `ShrImm`, `ShlImm`, `SarImm`, `AddImm`, `SubImm` |
 | Comparison | `Cmp { kind }`, `CmpImm { kind }` |
@@ -137,6 +152,8 @@ pub enum SpillKind {
     /// Value lives in simulation state at a known location.
     /// Reload = load from [sim_base + byte_offset] (+ optional shift/mask).
     SimState { addr: RegionedAbsoluteAddr, bit_offset: usize, width_bits: usize },
+    /// Backend-created alias of an exact simulation-state reload home.
+    SimStateAlias { addr: RegionedAbsoluteAddr, bit_offset: usize, width_bits: usize },
     /// Intermediate value with no home in simulation state. Spill to a stack slot.
     Stack,
     /// Constant that can be cheaply rematerialized (mov imm).
@@ -149,5 +166,14 @@ pub struct SpillDesc {
     pub reload_cost: u8,
     /// Estimated cost to spill. 0 if the value is already in memory.
     pub spill_cost: u8,
+    /// Per-definition provenance for reconstructing a value from a state write.
+    state_insert: Option<StateInsertDesc>,
+    /// Deferred exact 8/16/32/64-bit packed-state home selected by allocation.
+    deferred_state_home: Option<PackedStateHome>,
 }
 ```
+
+`VReg` itself has no HDL bit width. MIR operations carry the target-relevant 32/64-bit machine
+semantics, while `StateInsertDesc` and `PackedStateHome` describe proven relations to physical
+state fragments. After reconstruction, sparse MemorySSA verification checks that every selected
+state reload observes the exact materialized state-home version on every CFG path.

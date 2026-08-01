@@ -35,6 +35,88 @@ pub struct SirProgram<EventAddr, StateAddr> {
     pub apply_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
 }
 
+impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
+    /// Consume the program while replacing frontend address identities.
+    ///
+    /// This is the explicit projection used when a frontend-owned symbolic
+    /// address space becomes the source-independent design address space.
+    pub fn into_map_addr<NewEventAddr, NewStateAddr>(
+        self,
+        mut map_event: impl FnMut(EventAddr) -> NewEventAddr,
+        mut map_state: impl FnMut(StateAddr) -> NewStateAddr,
+    ) -> SirProgram<NewEventAddr, NewStateAddr>
+    where
+        NewEventAddr: Eq + std::hash::Hash,
+    {
+        fn map_unit<A, B>(
+            unit: ExecutionUnit<A>,
+            map: &mut impl FnMut(A) -> B,
+        ) -> ExecutionUnit<B> {
+            ExecutionUnit {
+                entry_block_id: unit.entry_block_id,
+                blocks: unit
+                    .blocks
+                    .into_iter()
+                    .map(|(id, block)| {
+                        (
+                            id,
+                            BasicBlock {
+                                id: block.id,
+                                params: block.params,
+                                instructions: block
+                                    .instructions
+                                    .into_iter()
+                                    .map(|instruction| instruction.into_map_addr(&mut *map))
+                                    .collect(),
+                                terminator: block.terminator,
+                            },
+                        )
+                    })
+                    .collect(),
+                register_map: unit.register_map,
+            }
+        }
+
+        fn map_groups<E, NE, A, B>(
+            groups: HashMap<E, Vec<ExecutionUnit<A>>>,
+            map_event: &mut impl FnMut(E) -> NE,
+            map_state: &mut impl FnMut(A) -> B,
+        ) -> HashMap<NE, Vec<ExecutionUnit<B>>>
+        where
+            NE: Eq + std::hash::Hash,
+        {
+            groups
+                .into_iter()
+                .map(|(event, units)| {
+                    (
+                        map_event(event),
+                        units
+                            .into_iter()
+                            .map(|unit| map_unit(unit, &mut *map_state))
+                            .collect(),
+                    )
+                })
+                .collect()
+        }
+
+        SirProgram {
+            eval_comb: self
+                .eval_comb
+                .into_iter()
+                .map(|unit| map_unit(unit, &mut map_state))
+                .collect(),
+            eval_apply_ffs: map_groups(self.eval_apply_ffs, &mut map_event, &mut map_state),
+            eval_comb_apply_ffs: map_groups(
+                self.eval_comb_apply_ffs,
+                &mut map_event,
+                &mut map_state,
+            ),
+            eval_only_ffs: map_groups(self.eval_only_ffs, &mut map_event, &mut map_state),
+            apply_ffs: map_groups(self.apply_ffs, &mut map_event, &mut map_state),
+        }
+    }
+}
+
 /// Block identifier
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlockId(pub usize);
@@ -770,4 +852,54 @@ pub fn collect_exact_zero_registers<A>(
         .into_iter()
         .filter_map(|(register, zero)| zero.then_some(register))
         .collect()
+}
+
+#[cfg(test)]
+mod program_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn program_projection_maps_event_keys_and_every_state_operand() {
+        let block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Load(RegisterId(0), 10u32, SIROffset::Static(0), 8),
+                SIRInstruction::Commit(11u32, 12u32, SIROffset::Static(0), 8, Vec::new()),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(BlockId(0), block)].into_iter().collect(),
+            register_map: [(
+                RegisterId(0),
+                RegisterType::Bit {
+                    width: 8,
+                    signed: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let program = SirProgram {
+            eval_comb: vec![unit.clone()],
+            eval_apply_ffs: [(1u32, vec![unit])].into_iter().collect(),
+            eval_comb_apply_ffs: HashMap::default(),
+            eval_only_ffs: HashMap::default(),
+            apply_ffs: HashMap::default(),
+        };
+
+        let mapped = program.into_map_addr(|event| event + 100, |state| state + 1000);
+        assert!(mapped.eval_apply_ffs.contains_key(&101));
+        assert!(matches!(
+            mapped.eval_comb[0].blocks[&BlockId(0)]
+                .instructions
+                .as_slice(),
+            [
+                SIRInstruction::Load(_, 1010, _, _),
+                SIRInstruction::Commit(1011, 1012, _, _, _)
+            ]
+        ));
+    }
 }

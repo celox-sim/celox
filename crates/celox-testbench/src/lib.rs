@@ -6,6 +6,11 @@
 
 use num_bigint::BigUint;
 
+mod format;
+mod vm;
+pub use format::{DisplayFormatArg, format_display_arg};
+pub use vm::{CompiledExpr, TestbenchValue};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StateLocation<A> {
     pub address: A,
@@ -256,6 +261,37 @@ impl<L> ExprBytecode<L> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BindError<A> {
     pub address: A,
+}
+
+pub struct ExecutableArgument {
+    pub expr: CompiledExpr,
+    pub width: usize,
+    pub signed: bool,
+    pub is_string: bool,
+}
+
+pub type ExecutableAssertMessage = AssertMessage<ExecutableArgument>;
+pub type ExecutableClockCount = ClockCount<CompiledExpr>;
+pub type ExecutableLoopBound = LoopBound<CompiledExpr>;
+pub type ExecutableStatement<Event, Signal> =
+    TestbenchStatement<Event, Signal, CompiledExpr, ExecutableArgument>;
+
+pub struct ExecutableTestbench<Event, Signal> {
+    statements: Vec<ExecutableStatement<Event, Signal>>,
+}
+
+impl<Event, Signal> ExecutableTestbench<Event, Signal> {
+    pub fn new(statements: Vec<ExecutableStatement<Event, Signal>>) -> Self {
+        Self { statements }
+    }
+
+    pub fn statements(&self) -> &[ExecutableStatement<Event, Signal>] {
+        &self.statements
+    }
+
+    pub fn into_statements(self) -> Vec<ExecutableStatement<Event, Signal>> {
+        self.statements
+    }
 }
 
 impl<A> ExprBytecode<StateLocation<A>> {

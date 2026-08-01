@@ -1,10 +1,10 @@
 use crate::HashMap;
 /// Module for outputting SIR and SLT from Veryl source code
-use crate::cfg_order::dominance_order;
 use crate::ir::{
-    ExecutionUnit, ModuleId, Program, RegionedAbsoluteAddr, RegisterId, SIRInstruction,
-    SIRTerminator, SimModule,
+    ExecutionUnit, ModuleId, RegionedAbsoluteAddr, RegisterId, RuntimeProgram, SIRInstruction,
+    SIRTerminator, SimModule, SirProgram,
 };
+use celox_analysis::cfg_order::dominance_order;
 
 use crate::debug::CompilationTrace;
 use veryl_parser::resource_table;
@@ -12,12 +12,16 @@ use veryl_parser::resource_table;
 impl CompilationTrace {
     /// Format pre-optimized SIR to string representation
     pub fn format_pre_optimized_sir(&self) -> Option<String> {
-        self.pre_optimized_sir.as_ref().map(format_program)
+        self.pre_optimized_sir
+            .as_ref()
+            .map(|program| format_program(&program.sir, &program.runtime))
     }
 
     /// Format post-optimized SIR to string representation
     pub fn format_post_optimized_sir(&self) -> Option<String> {
-        self.post_optimized_sir.as_ref().map(format_program)
+        self.post_optimized_sir
+            .as_ref()
+            .map(|program| format_program(&program.sir, &program.runtime))
     }
 
     /// Format the optimized, merged SIR actually consumed by native ISel.
@@ -70,12 +74,12 @@ impl CompilationTrace {
     }
 }
 
-/// Format Program to string representation
-pub fn format_program(program: &Program) -> String {
+/// Format SIR using its runtime source map.
+pub fn format_program(sir: &SirProgram, program: &RuntimeProgram) -> String {
     let mut output = String::new();
 
     output.push_str("=== Evaluation Flip-Flops (eval_apply_ffs) ===\n");
-    for (addr, execution_units) in &program.sir.eval_apply_ffs {
+    for (addr, execution_units) in &sir.eval_apply_ffs {
         output.push_str(&format!(
             "Trigger Group: {} ({})\n",
             program.get_path(addr),
@@ -112,7 +116,7 @@ pub fn format_program(program: &Program) -> String {
     }
 
     output.push_str("\n=== Evaluation Flip-Flops (eval_only_ffs) ===\n");
-    for (addr, execution_units) in &program.sir.eval_only_ffs {
+    for (addr, execution_units) in &sir.eval_only_ffs {
         output.push_str(&format!(
             "Trigger Group: {} ({})\n",
             program.get_path(addr),
@@ -149,7 +153,7 @@ pub fn format_program(program: &Program) -> String {
     }
 
     output.push_str("\n=== Application Flip-Flops (apply_ffs) ===\n");
-    for (addr, execution_units) in &program.sir.apply_ffs {
+    for (addr, execution_units) in &sir.apply_ffs {
         output.push_str(&format!(
             "Trigger Group: {} ({})\n",
             program.get_path(addr),
@@ -186,7 +190,7 @@ pub fn format_program(program: &Program) -> String {
     }
 
     output.push_str("\n=== Evaluation Combinational Logic (eval_comb) ===\n");
-    for (idx, eu) in program.sir.eval_comb.iter().enumerate() {
+    for (idx, eu) in sir.eval_comb.iter().enumerate() {
         output.push_str(&format!("Execution Unit {}:\n", idx));
         output.push_str(&format!("  Entry Block: {}\n", eu.entry_block_id.0));
         output.push_str("  Registers:\n");
@@ -254,7 +258,7 @@ fn sir_dominance_order<A>(eu: &ExecutionUnit<A>) -> Vec<crate::ir::BlockId> {
     )
 }
 
-fn format_regioned_addr(addr: &RegionedAbsoluteAddr, program: &Program) -> String {
+fn format_regioned_addr(addr: &RegionedAbsoluteAddr, program: &RuntimeProgram) -> String {
     format!(
         "{} (region={})",
         program.get_path(&addr.absolute_addr()),
@@ -262,7 +266,10 @@ fn format_regioned_addr(addr: &RegionedAbsoluteAddr, program: &Program) -> Strin
     )
 }
 
-fn format_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr>, program: &Program) -> String {
+fn format_instruction(
+    inst: &SIRInstruction<RegionedAbsoluteAddr>,
+    program: &RuntimeProgram,
+) -> String {
     match inst {
         SIRInstruction::Imm(rd, value) => format!("r{} = {}", rd.0, value),
         SIRInstruction::Binary(rd, rs1, op, rs2) => {

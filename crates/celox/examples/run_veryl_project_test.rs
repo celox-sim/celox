@@ -74,13 +74,13 @@ fn run() -> Result<(), Box<dyn Error>> {
     );
 
     let total_start = Instant::now();
-    let optimize_options = OptimizeOptions::new(opts.opt_level)
-        .with_max_native_memory_width(opts.native_memory_width)
-        .with_x86_slp(opts.x86_slp);
+    let optimize_options =
+        OptimizeOptions::new(opts.opt_level).with_max_native_memory_width(opts.native_memory_width);
     let mut builder = Simulator::from_sources(source_refs, &opts.test)
         .with_metadata(metadata)
         .opt_level(opts.opt_level)
         .optimize_options(optimize_options)
+        .x86_slp(opts.x86_slp)
         .four_state(opts.four_state);
     for block in &opts.native_profile_blocks {
         builder = builder.trace_native_profile_block(&block.function, block.block, block.samples);

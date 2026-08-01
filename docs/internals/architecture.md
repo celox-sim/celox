@@ -12,23 +12,43 @@ This simulator is designed with the goal of **maximizing verification efficiency
 
 ## Compilation Pipeline
 
-The transformation from Veryl source code to execution consists of the following three major phases.
+Compilation crosses explicit ownership boundaries rather than mutating one phase-dependent
+`Program` object:
 
-1.  **Frontend (Parser/Analyzer)**:
-    -   Parses Veryl source and generates the analyzer IR.
-    -   `parser::parse_ir` takes this as input and converts each module into a `SimModule` (a struct containing SLT (logic expressions) and SIR (instruction sequences)).
+```text
+Veryl analyzer IR
+  → SymbolicRtl / SimModule              (celox-frontend-veryl)
+  → ScheduledRtl + optimization hints   (celox-frontend-veryl + celox-slt)
+  → UnoptimizedSir
+  → OptimizedSir                         (celox-sir-opt)
+  → LaidOutProgram                       (celox-state-layout)
+  → target code                          (x86, Cranelift, or Wasm backend)
+  → RuntimeProgram                       (celox-runtime)
+```
 
-2.  **Middle-end (Flattening/Scheduling/Optimization)**:
-    -   **Flattening**: Flattens the instance hierarchy and converts module-local `VarId`s into global `AbsoluteAddr`s. Port connections are converted into `LogicPath`s.
-    -   **Atomization**: Splits `LogicPath`s at bit boundaries (atoms) to analyze dependencies at bit-level precision.
-    -   **Scheduling**: Topologically sorts the split atoms to determine the execution order of combinational logic. Detects SCCs via Tarjan's algorithm and handles cycles with static unrolling or dynamic convergence loops.
-    -   **SIR Optimization**: Applies per-pass optimization (store-load forwarding, commit sinking, dead store elimination, instruction scheduling, etc.) controlled by `OptimizeOptions`.
+1.  **Frontend and symbolic lowering**:
+    -   Veryl analyzer modules become module-local `SimModule`s containing SLT symbolic state,
+        combinational paths, FF summaries, and already-lowered phase-specific SIR where required.
+    -   `SymbolicRtl` owns this frontend-only hierarchy. `schedule_symbolic_rtl` atomizes and
+        flattens it, schedules comb and fused comb/FF work, assigns source-independent
+        `StateAddr`s, and consumes every SLT arena before returning `ScheduledRtl`.
+    -   Veryl identities retained for diagnostics and path lookup live in
+        `VerylFrontendLookup`; downstream optimization never recovers semantic identity from it.
 
-3.  **Backend (Code Generation)**:
-    -   **Memory Layout**: Determines memory offsets for all variables and places them on a single memory buffer with Stable, Working, Triggered-bits, and Scratch regions. The optimizer wraps verified SIR in `OptimizedSir`; layout finalization consumes that artifact and produces `LaidOutProgram`. Every backend accepts only the laid-out artifact and therefore shares the same immutable layout.
-    -   **Code Generation**: Compiles SIR into executable machine code via one of the available backends.
-    -   **Runtime**: Manages compiled function pointers as event handles and executes the simulation.
-    -   **Testbench VM** (optional): A stack-based bytecode VM that executes Veryl `initial` blocks and testbench functions. Opcodes include `ConstU64`, `ConstWide`, `LoadU64`, `LoadWide`, `BinOp`, `UnaryOp`, `Ternary`, `LoadIndexed`, `LoadBitSelect`, `StoreU64`, supporting both narrow (≤64-bit) and wide signals.
+2.  **Backend-independent optimization and layout**:
+    -   `UnoptimizedSir` contains `SirProgram`, runtime metadata, and semantic layout
+        requirements. `celox-sir-opt` is the only owner of the pass pipeline and produces
+        `OptimizedSir`.
+    -   Layout finalization validates alias requirements, assigns Stable, Working,
+        SparseWorking, Triggered, and Scratch storage, and consumes `OptimizedSir` to produce
+        `LaidOutProgram`. A backend cannot be entered before this transition.
+
+3.  **Target code generation and runtime**:
+    -   The x86, Cranelift, and Wasm crates consume the same immutable laid-out SIR. Their MIR,
+        split plans, register assignments, and emitted-code state remain backend-private.
+    -   After code generation, only `RuntimeProgram` is retained. It contains the elaborated
+        design, source lookup, runtime schema, and compiled source-independent testbench bytecode;
+        it cannot contain SIR or layout requirements.
 
 ## Backends
 
@@ -43,7 +63,7 @@ SIR (bit-level)
   → ISel (Instruction Selection)
     → MIR (word-level SSA with VRegs)
       → mir_opt (MIR optimization passes)
-        → regalloc (Braun & Hack MIN algorithm)
+        → regalloc (integrated scheduling, W/S planning, SSA reconstruction and coloring)
           → emit (x86-64 machine code via iced-x86)
 ```
 
@@ -51,7 +71,12 @@ Key features of the native backend:
 
 -   **MIR**: A word-level SSA IR with virtual registers (`VReg`). Instructions operate on 64-bit values; bit-level access information is preserved in `SpillDesc` side-tables for cost-aware spill decisions.
 -   **MIR Optimization**: Constant folding, copy propagation, algebraic simplification, GVN, DCE, if-conversion (Branch → Select/cmov), CFG simplification, PEXT fusion for XOR chains, and more. An adaptive pipeline runs the full pass set iteratively for high-pressure functions (VRegs > 40) and a lightweight variant for small functions.
--   **Register Allocator**: A verified SSA pipeline based on Braun & Hack's extended MIN spill planning. It normalizes CSSA, reconstructs split live ranges with iterated dominance frontiers, materializes machine constraints as late full-live permutations, and colors chordal SSA live ranges in dominance order without an explicit interference graph. Spill homes support SimState, Stack, and immediate rematerialization.
+-   **Register Allocator**: A verified, non-iterative SSA pipeline. A dependency-ready walk jointly
+    chooses instruction order and W/S residency, with point-specific MemorySSA reload recipes and
+    explicit phi-edge transfers. Reconstruction inserts only the selected stack, persistent-state,
+    or rematerialized homes; stack slots are colored from exact CFG-sparse stack-home liveness.
+    Machine constraints are materialized as late permutations, then strict-SSA values are colored
+    in dominance order. Final MIR independently verifies every materialized state-home version.
 -   **EU Merge**: Multiple execution units are merged into a single function with shared prologue/epilogue and `jmp`-linked boundaries, reducing call overhead.
 -   **Cmp+Branch Fusion**: When a comparison result only feeds a branch, the `setcc`+`movzx`+`test` sequence is replaced by a direct `cmp`+`jcc`.
 
@@ -84,7 +109,7 @@ The simulator employs a **multi-region model on a single memory buffer**.
 -   **Triggered-bits region**: One bit per event, used for cascade/gated clock trigger detection. After a `Store` instruction, the backend compares old and new values and sets the corresponding trigger bit if changed.
 -   **Scratch region**: Used by the tail-call splitting pass for inter-chunk register value spilling.
 -   **SignalRef**: A handle that caches offsets and metadata, enabling direct memory access without going through a `HashMap`.
--   **Layout Requirements**: The `IdentityStoreBypass` optimization detects variables that are identity copies (Store→Load roundtrips) and records non-canonical → canonical state-home aliases in `Program::layout_requirements`. Physical layout validates compatible representations before sharing memory, then consumes the requirements when producing `LaidOutProgram`.
+-   **Layout Requirements**: The `IdentityStoreBypass` optimization detects variables that are identity copies (Store→Load roundtrips) and records non-canonical → canonical state-home aliases in `OptimizedSir::layout_requirements`. Physical layout validates compatible representations before sharing memory, then consumes the requirements when producing `LaidOutProgram`.
 
 For 4-state variables, each variable occupies `2 × ceil(width/8)` bytes (value + mask pair).
 

@@ -19,9 +19,6 @@ pub struct SymbolicRtl<'a> {
     pub root_id: ModuleId,
 }
 
-/// Compatibility name retained while callers migrate to the phase artifact.
-pub type ParseIrResult<'a> = SymbolicRtl<'a>;
-
 pub fn parse_ir<'a>(
     ir: &'a veryl_analyzer::ir::Ir,
     config: &BuildConfig,

@@ -7,12 +7,10 @@ use veryl_metadata::{ClockType, Metadata, ResetType};
 use veryl_parser::Parser;
 use veryl_parser::resource_table;
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::ir::LaidOutProgram;
 use crate::parser::BuildConfig;
-use crate::{
-    ParserError, SimulatorError, SimulatorErrorKind,
-    ir::{OptimizedSir, Program},
-    parser,
-};
+use crate::{ParserError, SimulatorError, SimulatorErrorKind, ir::OptimizedSir, parser};
 
 fn analyze(
     sources: &[(&str, &Path)],
@@ -231,7 +229,9 @@ pub struct SimulatorOptions {
     /// Per-pass SIRT optimizer flags.
     pub optimize_options: crate::optimizer::OptimizeOptions,
     /// Fine-grained Cranelift backend options.
-    pub cranelift_options: crate::optimizer::CraneliftOptions,
+    pub cranelift_options: crate::backend::CraneliftOptions,
+    #[cfg(target_arch = "x86_64")]
+    pub x86_options: crate::backend::X86BackendOptions,
     pub trace: crate::debug::TraceOptions,
     /// When true, JIT-compiled functions emit trigger detection code for
     /// edge-based event discovery. Only needed by [`crate::Simulation`].
@@ -244,11 +244,15 @@ pub struct SimulatorOptions {
 impl Default for SimulatorOptions {
     fn default() -> Self {
         let opt = crate::optimizer::OptimizeOptions::default();
-        let cranelift = opt.opt_level().default_cranelift_options();
+        let cranelift = crate::backend::CraneliftOptions::for_speed_optimization(
+            opt.opt_level() != crate::optimizer::OptLevel::O0,
+        );
         Self {
             four_state: false,
             optimize_options: opt,
             cranelift_options: cranelift,
+            #[cfg(target_arch = "x86_64")]
+            x86_options: crate::backend::X86BackendOptions::default(),
             trace: Default::default(),
             emit_triggers: false,
             dead_store_policy: DeadStorePolicy::Off,
@@ -338,7 +342,9 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     /// Cranelift options, and DSE policy. Per-pass overrides can be applied after.
     pub fn opt_level(mut self, level: crate::optimizer::OptLevel) -> Self {
         self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level);
-        self.options.cranelift_options = level.default_cranelift_options();
+        self.options.cranelift_options = crate::backend::CraneliftOptions::for_speed_optimization(
+            level != crate::optimizer::OptLevel::O0,
+        );
         self.options.dead_store_policy = match level {
             crate::optimizer::OptLevel::O2 => DeadStorePolicy::PreserveTopPorts,
             _ => DeadStorePolicy::Off,
@@ -348,12 +354,18 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
 
     /// Enable a specific SIR pass, overriding the OptLevel default.
     pub fn enable_pass(mut self, pass: crate::optimizer::SirPass) -> Self {
+        if pass == crate::optimizer::SirPass::TailCallSplit {
+            self.options.cranelift_options.tail_call_split = true;
+        }
         self.options.optimize_options = self.options.optimize_options.enable(pass);
         self
     }
 
     /// Disable a specific SIR pass, overriding the OptLevel default.
     pub fn disable_pass(mut self, pass: crate::optimizer::SirPass) -> Self {
+        if pass == crate::optimizer::SirPass::TailCallSplit {
+            self.options.cranelift_options.tail_call_split = false;
+        }
         self.options.optimize_options = self.options.optimize_options.disable(pass);
         self
     }
@@ -371,18 +383,26 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
 
     /// Set per-pass optimizer flags directly.
     pub fn optimize_options(mut self, options: crate::optimizer::OptimizeOptions) -> Self {
+        self.options.cranelift_options.tail_call_split =
+            options.is_enabled(crate::optimizer::SirPass::TailCallSplit);
         self.options.optimize_options = options;
         self
     }
 
+    #[cfg(target_arch = "x86_64")]
+    pub fn x86_slp(mut self, enable: bool) -> Self {
+        self.options.x86_options.slp = enable;
+        self
+    }
+
     /// Set fine-grained Cranelift backend options.
-    pub fn cranelift_options(mut self, options: crate::optimizer::CraneliftOptions) -> Self {
+    pub fn cranelift_options(mut self, options: crate::backend::CraneliftOptions) -> Self {
         self.options.cranelift_options = options;
         self
     }
 
     /// Set the register allocator algorithm.
-    pub fn regalloc_algorithm(mut self, algo: crate::optimizer::RegallocAlgorithm) -> Self {
+    pub fn regalloc_algorithm(mut self, algo: crate::backend::RegallocAlgorithm) -> Self {
         self.options.cranelift_options.regalloc_algorithm = algo;
         self
     }
@@ -609,7 +629,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {
             let dse_start = phase_timing.then(crate::timing::now);
-            run_dead_store_elimination(laid_out.program_mut(), &self.live_signals, &self.options);
+            run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
             if let Some(start) = dse_start {
                 eprintln!(
                     "[phase-timing] dead_store_elimination: {:?}",
@@ -650,13 +670,24 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         }
 
         let jit_start = phase_timing.then(crate::timing::now);
-        let backend = JitBackend::new(&laid_out, &options, None)?;
+        let mut trace = crate::debug::CompilationTrace::default();
+        let wants_codegen_trace = options.trace.pre_optimized_clif
+            || options.trace.post_optimized_clif
+            || options.trace.native;
+        let backend = JitBackend::new(
+            &laid_out,
+            &options,
+            wants_codegen_trace.then_some(&mut trace),
+        )?;
+        if options.trace.output_to_stdout {
+            trace.print();
+        }
         if let Some(s) = jit_start {
             eprintln!("[phase-timing] jit_backend: {:?}", s.elapsed());
         }
 
         let mut sim =
-            Simulator::with_backend_and_program(backend, laid_out.into_program(), warnings);
+            Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
@@ -690,7 +721,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             eprintln!("[phase-timing] native_backend: {:?}", start.elapsed());
         }
         let mut sim =
-            Simulator::with_backend_and_program(backend, laid_out.into_program(), warnings);
+            Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
@@ -718,7 +749,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             self.into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
         let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)?;
         let mut sim =
-            Simulator::with_backend_and_program(backend, laid_out.into_program(), warnings);
+            Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
@@ -757,7 +788,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         })?;
         Ok(crate::testbench::run_testbench_detailed(
             &mut sim,
-            &testbench.stmts,
+            testbench.statements(),
         ))
     }
 
@@ -790,11 +821,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 program.into_laid_out_with_mode(self.options.four_state, layout_mode);
 
             if self.options.dead_store_policy != DeadStorePolicy::Off {
-                run_dead_store_elimination(
-                    laid_out.program_mut(),
-                    &self.live_signals,
-                    &self.options,
-                );
+                run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
             }
 
             #[cfg(target_arch = "x86_64")]
@@ -817,7 +844,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             let backend = JitBackend::new(&laid_out, &self.options, None)?;
 
             let mut sim =
-                Simulator::with_backend_and_program(backend, laid_out.into_program(), warnings);
+                Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.apply_initial_values();
             sim.modify(|_| {}).map_err(SimulatorError::from)?;
             Ok(sim)
@@ -834,6 +861,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_test_with_sim<B: crate::backend::SimBackend>(
     mut sim: Simulator<B>,
 ) -> Result<crate::testbench::TestResult, SimulatorError> {
@@ -844,7 +872,7 @@ fn run_test_with_sim<B: crate::backend::SimBackend>(
             "no initial block found — this module is not a native testbench".into(),
         ))
     })?;
-    let result = crate::testbench::run_testbench(&mut sim, &testbench.stmts);
+    let result = crate::testbench::run_testbench(&mut sim, testbench.statements());
     if let Some(start) = testbench_start {
         eprintln!("[phase-timing] testbench: {:?}", start.elapsed());
     }
@@ -912,7 +940,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
         let mut laid_out = program.into_laid_out_with_mode(self.options.four_state, layout_mode);
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {
-            run_dead_store_elimination(laid_out.program_mut(), &self.live_signals, &self.options);
+            run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
         }
         #[cfg(target_arch = "x86_64")]
         let backend = crate::backend::native::NativeBackend::new(&laid_out, &self.options)?;
@@ -920,7 +948,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
         let backend = crate::backend::JitBackend::new(&laid_out, &self.options, None)?;
 
         let mut sim =
-            Simulator::with_backend_and_program(backend, laid_out.into_program(), warnings);
+            Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
         if let Some(path) = self.vcd_path {
             let descs = sim.build_vcd_descs(self.options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
@@ -936,12 +964,12 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
 /// Resolve user-specified `(instance_path, var_path)` to `AbsoluteAddr` and run DSE.
 #[cfg(not(target_arch = "wasm32"))]
 fn run_dead_store_elimination(
-    program: &mut Program,
+    program: &mut LaidOutProgram,
     live_signals: &[(Vec<(String, usize)>, Vec<String>)],
     options: &SimulatorOptions,
 ) {
     use crate::HashSet;
-    use crate::ir::{AbsoluteAddr, InstancePath};
+    use crate::ir::InstancePath;
     let mut externally_live = HashSet::default();
 
     // Native testbench expressions bypass SIR and read simulator memory
@@ -965,10 +993,11 @@ fn run_dead_store_elimination(
                 if let Some(top_vars) = program.frontend.module_variables.get(&top_module_id) {
                     for info in top_vars.values() {
                         if info.var_kind.is_port() {
-                            externally_live.insert(AbsoluteAddr {
-                                instance_id: top_instance_id,
-                                var_id: info.id,
-                            });
+                            if let Some(address) =
+                                program.state_address_for_source(top_instance_id, info.id)
+                            {
+                                externally_live.insert(address);
+                            }
                         }
                     }
                 }
@@ -982,10 +1011,11 @@ fn run_dead_store_elimination(
             if let Some(vars) = program.frontend.module_variables.get(&module_id) {
                 for info in vars.values() {
                     if info.var_kind.is_port() {
-                        externally_live.insert(AbsoluteAddr {
-                            instance_id,
-                            var_id: info.id,
-                        });
+                        if let Some(address) =
+                            program.state_address_for_source(instance_id, info.id)
+                        {
+                            externally_live.insert(address);
+                        }
                     }
                 }
             }

@@ -1,0 +1,196 @@
+use celox_design::StateAddr as AbsoluteAddr;
+use celox_testbench::{
+    AssertMessage as GenericAssertMessage, ClockCount as GenericClockCount, CompiledExpr,
+    ExecutableArgument, ExecutableAssertMessage, ExecutableClockCount, ExecutableLoopBound,
+    ExecutableStatement, ExecutableTestbench, ExprBytecode, LoopBound as GenericLoopBound,
+    SemanticArgument, SemanticStatement, StateLocation, TestbenchProgram,
+    TestbenchStatement as GenericTestbenchStatement,
+};
+
+use crate::{SignalRef, backend::SimBackend};
+
+fn bind_expr<B: SimBackend>(
+    backend: &B,
+    expr: ExprBytecode<StateLocation<AbsoluteAddr>>,
+) -> Option<CompiledExpr> {
+    let layout = backend.layout();
+    let bytecode = expr
+        .bind_with(|address| layout.offsets.get(address).copied())
+        .ok()?;
+    Some(CompiledExpr::new(bytecode))
+}
+
+fn bind_assert_arg<B: SimBackend>(
+    backend: &B,
+    arg: SemanticArgument<AbsoluteAddr>,
+) -> Option<ExecutableArgument> {
+    Some(ExecutableArgument {
+        expr: bind_expr(backend, arg.expr)?,
+        width: arg.width,
+        signed: arg.signed,
+        is_string: arg.is_string,
+    })
+}
+
+fn bind_assert_message<B: SimBackend>(
+    backend: &B,
+    message: GenericAssertMessage<SemanticArgument<AbsoluteAddr>>,
+) -> Option<ExecutableAssertMessage> {
+    match message {
+        GenericAssertMessage::Formatted { template, args } => {
+            let args = args
+                .into_iter()
+                .map(|arg| bind_assert_arg(backend, arg))
+                .collect::<Option<Vec<_>>>()?;
+            Some(GenericAssertMessage::Formatted { template, args })
+        }
+        GenericAssertMessage::DynamicArgs(args) => {
+            let args = args
+                .into_iter()
+                .map(|arg| bind_assert_arg(backend, arg))
+                .collect::<Option<Vec<_>>>()?;
+            Some(GenericAssertMessage::DynamicArgs(args))
+        }
+    }
+}
+
+fn bind_clock_count<B: SimBackend>(
+    backend: &B,
+    count: GenericClockCount<ExprBytecode<StateLocation<AbsoluteAddr>>>,
+) -> Option<ExecutableClockCount> {
+    match count {
+        GenericClockCount::Static(count) => Some(GenericClockCount::Static(count)),
+        GenericClockCount::Dynamic(expr) => {
+            Some(GenericClockCount::Dynamic(bind_expr(backend, expr)?))
+        }
+    }
+}
+
+fn bind_loop_bound<B: SimBackend>(
+    backend: &B,
+    bound: GenericLoopBound<ExprBytecode<StateLocation<AbsoluteAddr>>>,
+) -> Option<ExecutableLoopBound> {
+    match bound {
+        GenericLoopBound::Static(bound) => Some(GenericLoopBound::Static(bound)),
+        GenericLoopBound::Dynamic {
+            expr,
+            width,
+            signed,
+        } => Some(GenericLoopBound::Dynamic {
+            expr: bind_expr(backend, expr)?,
+            width,
+            signed,
+        }),
+    }
+}
+
+fn bind_statement<B: SimBackend>(
+    backend: &B,
+    statement: SemanticStatement<AbsoluteAddr>,
+) -> Option<ExecutableStatement<B::Event, SignalRef>> {
+    match statement {
+        GenericTestbenchStatement::ClockNext { clock_event, count } => {
+            Some(GenericTestbenchStatement::ClockNext {
+                clock_event: backend.resolve_event_opt(&clock_event)?,
+                count: bind_clock_count(backend, count)?,
+            })
+        }
+        GenericTestbenchStatement::ResetAssert {
+            reset_signal,
+            clock_event,
+            duration,
+            assert_value,
+            deassert_value,
+        } => Some(GenericTestbenchStatement::ResetAssert {
+            reset_signal: backend.resolve_signal(&reset_signal.address),
+            clock_event: backend.resolve_event_opt(&clock_event)?,
+            duration,
+            assert_value,
+            deassert_value,
+        }),
+        GenericTestbenchStatement::Assert {
+            expr,
+            site_id,
+            continue_on_fail,
+            message,
+            location,
+        } => Some(GenericTestbenchStatement::Assert {
+            expr: bind_expr(backend, expr)?,
+            site_id,
+            continue_on_fail,
+            message: match message {
+                Some(message) => Some(bind_assert_message(backend, message)?),
+                None => None,
+            },
+            location,
+        }),
+        GenericTestbenchStatement::Display { message, newline } => {
+            Some(GenericTestbenchStatement::Display {
+                message: match message {
+                    Some(message) => Some(bind_assert_message(backend, message)?),
+                    None => None,
+                },
+                newline,
+            })
+        }
+        GenericTestbenchStatement::If {
+            expr,
+            then_block,
+            else_block,
+        } => Some(GenericTestbenchStatement::If {
+            expr: bind_expr(backend, expr)?,
+            then_block: then_block
+                .into_iter()
+                .map(|statement| bind_statement(backend, statement))
+                .collect::<Option<Vec<_>>>()?,
+            else_block: else_block
+                .into_iter()
+                .map(|statement| bind_statement(backend, statement))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        GenericTestbenchStatement::For {
+            loop_var,
+            start,
+            end,
+            inclusive,
+            step,
+            step_op,
+            reverse,
+            body,
+        } => Some(GenericTestbenchStatement::For {
+            loop_var: loop_var.map(|(signal, width, signed)| {
+                (backend.resolve_signal(&signal.address), width, signed)
+            }),
+            start: bind_loop_bound(backend, start)?,
+            end: bind_loop_bound(backend, end)?,
+            inclusive,
+            step,
+            step_op,
+            reverse,
+            body: body
+                .into_iter()
+                .map(|statement| bind_statement(backend, statement))
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        GenericTestbenchStatement::Assign { dst, expr } => {
+            Some(GenericTestbenchStatement::Assign {
+                dst: backend.resolve_signal(&dst.address),
+                expr: bind_expr(backend, expr)?,
+            })
+        }
+        GenericTestbenchStatement::Break => Some(GenericTestbenchStatement::Break),
+        GenericTestbenchStatement::Finish => Some(GenericTestbenchStatement::Finish),
+    }
+}
+
+pub fn bind_testbench_program<B: SimBackend>(
+    backend: &B,
+    program: TestbenchProgram<AbsoluteAddr>,
+) -> Option<ExecutableTestbench<B::Event, SignalRef>> {
+    let statements = program
+        .into_statements()
+        .into_iter()
+        .map(|statement| bind_statement(backend, statement))
+        .collect::<Option<Vec<_>>>()?;
+    Some(ExecutableTestbench::new(statements))
+}

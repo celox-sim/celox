@@ -1,31 +1,33 @@
 use crate::HashMap;
 pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
-    AbsoluteAddrBase, BinaryOp, DomainKind, InitialStateData, InitialStateWriteRun, InstanceId,
-    ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeEventKind, RuntimeEventSite,
-    RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION, TriggerIdWithKind, UnaryOp, VarAtomBase,
-    WORKING_REGION,
+    AbsoluteAddrBase, InstanceId, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
+    RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION,
+};
+#[cfg(test)]
+pub(crate) use celox_design::{BinaryOp, UnaryOp};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use celox_design::{
+    InitialStateData, InitialStateWriteRun, RuntimeEventKind, RuntimeEventSite,
 };
 pub use celox_frontend_veryl::{InstancePath, VariableInfo, VerylFrontendLookup};
+#[cfg(test)]
+pub(crate) use celox_sir::{BasicBlock, SIRValue, inline_single_predecessor_jumps};
 pub(crate) use celox_sir::{
-    BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset,
-    SIRSwitchCase, SIRTerminator, SIRValue, collect_exact_zero_registers, merge_sir_eus,
-};
-#[cfg(any(target_arch = "x86_64", test))]
-pub(crate) use celox_sir::{
-    SirMergeProvenance, inline_single_predecessor_jumps, merge_sir_eu_refs_with_provenance,
+    BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction, SIROffset, SIRTerminator,
+    collect_exact_zero_registers,
 };
 use celox_testbench::TestbenchProgram;
-use std::fmt;
-use veryl_analyzer::ir::{VarId, VarPath};
+use std::{fmt, ops::Deref};
+use veryl_analyzer::ir::VarPath;
 
-/// Concrete address type using the Veryl analyzer's `VarId` during frontend migration.
-pub type AbsoluteAddr = AbsoluteAddrBase<VarId>;
-/// Concrete regioned address using the Veryl analyzer's `VarId`.
-pub type RegionedAbsoluteAddr = RegionedAbsoluteAddrBase<VarId>;
+/// Source-independent identity of one elaborated state object.
+pub type AbsoluteAddr = celox_design::StateAddr;
+/// Source-independent state identity qualified by its storage region.
+pub type RegionedAbsoluteAddr = celox_design::RegionedStateAddr;
 pub type SirProgram = celox_sir::SirProgram<AbsoluteAddr, RegionedAbsoluteAddr>;
 
-/// Error returned by [`Program::get_addr`] when a path-based variable lookup fails.
+/// Error returned by [`RuntimeProgram::get_addr`] when a path-based variable lookup fails.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum AddrLookupError {
     #[error("Instance not found: {path}")]
@@ -36,18 +38,52 @@ pub enum AddrLookupError {
     AmbiguousPath { path: String },
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub type InitialMemoryWriteRun = InitialStateWriteRun;
+#[cfg(not(target_arch = "wasm32"))]
 pub type InitialMemoryData = InitialStateData;
 pub type RuntimeErrorInfo<Addr = AbsoluteAddr> = celox_design::RuntimeErrorInfo<Addr>;
 
+/// Source-independent metadata retained while a compiled design is executing.
+///
+/// Compiler-only SIR and layout requirements are deliberately absent. A
+/// backend can therefore discard the compiler artifact after code generation.
 #[derive(Clone)]
-pub struct Program {
-    pub sir: SirProgram,
+pub struct RuntimeProgram {
     pub design: celox_design::ElaboratedDesign<AbsoluteAddr>,
     pub frontend: VerylFrontendLookup,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
-    pub layout_requirements: celox_state_layout::LayoutRequirements<AbsoluteAddr>,
     pub testbench: Option<TestbenchProgram<AbsoluteAddr>>,
+}
+
+/// Lowered SIR whose backend-independent optimization pipeline has not run.
+#[derive(Clone, Debug)]
+pub struct UnoptimizedSir {
+    pub sir: SirProgram,
+    pub layout_requirements: celox_state_layout::LayoutRequirements<AbsoluteAddr>,
+    pub runtime: RuntimeProgram,
+}
+
+impl UnoptimizedSir {
+    pub(crate) fn new(sir: SirProgram, runtime: RuntimeProgram) -> Self {
+        Self {
+            sir,
+            layout_requirements: Default::default(),
+            runtime,
+        }
+    }
+
+    pub(crate) fn into_optimized(self) -> OptimizedSir {
+        OptimizedSir::new(self.sir, self.runtime, self.layout_requirements)
+    }
+}
+
+impl Deref for UnoptimizedSir {
+    type Target = RuntimeProgram;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
 }
 
 /// A pre-layout compiler artifact whose SIR optimization pipeline has
@@ -58,66 +94,74 @@ pub struct Program {
 /// accidentally entering a backend.
 #[derive(Clone, Debug)]
 pub struct OptimizedSir {
-    program: Program,
+    pub sir: SirProgram,
+    pub layout_requirements: celox_state_layout::LayoutRequirements<AbsoluteAddr>,
+    pub(crate) runtime: RuntimeProgram,
 }
 
 impl OptimizedSir {
-    pub(crate) fn new(program: Program) -> Self {
-        Self { program }
+    pub(crate) fn new(
+        sir: SirProgram,
+        runtime: RuntimeProgram,
+        layout_requirements: celox_state_layout::LayoutRequirements<AbsoluteAddr>,
+    ) -> Self {
+        Self {
+            sir,
+            layout_requirements,
+            runtime,
+        }
     }
 
-    pub fn program(&self) -> &Program {
-        &self.program
-    }
-
-    pub fn into_program(self) -> Program {
-        self.program
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn into_runtime(self) -> RuntimeProgram {
+        self.runtime
     }
 }
 
-impl std::ops::Deref for OptimizedSir {
-    type Target = Program;
+impl Deref for OptimizedSir {
+    type Target = RuntimeProgram;
 
     fn deref(&self) -> &Self::Target {
-        &self.program
+        &self.runtime
     }
 }
 
-/// A [`Program`] whose physical state layout has been finalized.
+/// Optimized SIR whose physical state layout has been finalized.
 ///
-/// Backend code generation accepts this artifact instead of a bare `Program`,
+/// Backend code generation accepts this artifact instead of a bare SIR value,
 /// making it impossible to enter code generation before layout construction.
 #[derive(Clone, Debug)]
 pub struct LaidOutProgram {
-    program: Program,
+    pub sir: SirProgram,
+    pub(crate) runtime: RuntimeProgram,
     layout: crate::backend::MemoryLayout,
 }
 
 impl LaidOutProgram {
-    pub fn program(&self) -> &Program {
-        &self.program
-    }
-
     pub fn layout(&self) -> &crate::backend::MemoryLayout {
         &self.layout
     }
 
-    pub(crate) fn program_mut(&mut self) -> &mut Program {
-        &mut self.program
+    pub fn runtime(&self) -> &RuntimeProgram {
+        &self.runtime
     }
 
-    pub fn into_program(self) -> Program {
-        self.program
-    }
-
-    pub fn into_parts(self) -> (Program, crate::backend::MemoryLayout) {
-        (self.program, self.layout)
+    pub fn into_runtime(self) -> RuntimeProgram {
+        self.runtime
     }
 }
 
-impl fmt::Debug for Program {
+impl Deref for LaidOutProgram {
+    type Target = RuntimeProgram;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+impl fmt::Debug for RuntimeProgram {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Program")
+        f.debug_struct("RuntimeProgram")
             .field("num_events", &self.design.events.len())
             .finish_non_exhaustive()
     }
@@ -137,7 +181,7 @@ impl OptimizedSir {
         four_state: bool,
         mode: crate::backend::memory_layout::MemoryLayoutMode,
     ) -> LaidOutProgram {
-        let mut program = self.program;
+        let mut program = self;
         if !program.runtime_schema.comb_observers.is_empty()
             && !program.layout_requirements.is_empty()
         {
@@ -188,22 +232,42 @@ impl OptimizedSir {
             }
         }
         program.layout_requirements.clear();
-
-        LaidOutProgram { program, layout }
+        let OptimizedSir {
+            sir,
+            runtime,
+            layout_requirements,
+        } = program;
+        debug_assert!(layout_requirements.is_empty());
+        LaidOutProgram {
+            sir,
+            runtime,
+            layout,
+        }
     }
 }
 
-impl Program {
+impl RuntimeProgram {
+    pub(crate) fn state_address_for_source(
+        &self,
+        instance_id: InstanceId,
+        var_id: veryl_analyzer::ir::VarId,
+    ) -> Option<AbsoluteAddr> {
+        self.frontend
+            .state_address(&celox_frontend_veryl::AbsoluteAddr {
+                instance_id,
+                var_id,
+            })
+    }
+
     pub(crate) fn from_scheduled(
         scheduled: celox_frontend_veryl::ScheduledRtl,
-    ) -> (Self, celox_frontend_veryl::VerylTestbenchSource) {
+    ) -> (SirProgram, Self, celox_frontend_veryl::VerylTestbenchSource) {
         (
+            scheduled.sir,
             Self {
-                sir: scheduled.sir,
                 design: scheduled.design,
                 frontend: scheduled.frontend_lookup,
                 runtime_schema: scheduled.runtime_schema,
-                layout_requirements: Default::default(),
                 testbench: None,
             },
             scheduled.testbench_source,
@@ -246,20 +310,26 @@ impl Program {
                 path: path_str.clone(),
             })?;
         let var_id = entry.ok_or_else(|| AddrLookupError::AmbiguousPath { path: path_str })?;
-        Ok(AbsoluteAddr {
+        let source_addr = celox_frontend_veryl::AbsoluteAddr {
             instance_id,
             var_id,
-        })
+        };
+        self.frontend
+            .state_address(&source_addr)
+            .ok_or_else(|| AddrLookupError::VariableNotFound {
+                path: var_path.join("."),
+            })
     }
 
     pub fn get_path(&self, addr: &AbsoluteAddr) -> String {
-        self.frontend.get_path(addr)
+        self.frontend.get_state_path(addr)
     }
 
     pub fn get_variable_info(&self, addr: &AbsoluteAddr) -> Option<&VariableInfo> {
-        let module_id = self.frontend.instance_module.get(&addr.instance_id)?;
+        let source = self.frontend.source_address(addr)?;
+        let module_id = self.frontend.instance_module.get(&source.instance_id)?;
         let module_vars = self.frontend.module_variables.get(module_id)?;
-        module_vars.get(&addr.var_id)
+        module_vars.get(&source.var_id)
     }
 
     pub fn num_events(&self) -> usize {
@@ -285,9 +355,12 @@ impl Program {
 
         for (&instance_id, module_id) in &self.frontend.instance_module {
             for info in self.frontend.module_variables[module_id].values() {
-                let address = AbsoluteAddr {
+                let source_address = celox_frontend_veryl::AbsoluteAddr {
                     instance_id,
                     var_id: info.id,
+                };
+                let Some(address) = self.frontend.state_address(&source_address) else {
+                    return Err(format!("missing state projection for {source_address}"));
                 };
                 let Some(metadata) = self.design.state_objects.get(&address) else {
                     return Err(format!("missing flattened state object {address}"));
@@ -301,7 +374,9 @@ impl Program {
         }
         Ok(())
     }
+}
 
+impl OptimizedSir {
     /// Collect the set of `AbsoluteAddr` values that are accessed in the working
     /// region (region != STABLE). These are the only variables that need working
     /// region space.
@@ -402,30 +477,15 @@ fn comb_capture_enable_needs_unaliased_old_value(
     false
 }
 
-pub(crate) mod cfg {
-    pub(crate) use celox_sir::cfg::*;
-}
 pub(crate) mod verify {
     pub(crate) use celox_sir::verify::*;
 }
 pub use celox_slt::{GlueAddrBase, GlueBlockBase};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SignalArrayLayout {
-    pub element_width: usize,
-    pub element_count: usize,
-    pub element_stride: usize,
-    pub plane_size: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SignalRef {
-    pub offset: usize,
-    pub width: usize,
-    pub is_4state: bool,
-    pub array_layout: Option<SignalArrayLayout>,
-}
 pub use celox_frontend_veryl::SimModule;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use celox_runtime::SignalArrayLayout;
+pub use celox_runtime::SignalRef;
 
 #[cfg(test)]
 mod tests {
@@ -480,22 +540,24 @@ mod tests {
     fn test_absoluteaddr_display() {
         let addr = AbsoluteAddr {
             instance_id: InstanceId(0),
-            var_id: VarId::default(),
+            var_id: celox_design::StateObjectId(0),
         };
         let display = format!("{}", addr);
         assert!(display.contains("AbsoluteAddr"));
         assert!(display.contains("inst0"));
-        assert!(display.contains("var0"));
+        assert!(display.contains("state0"));
     }
 
     #[test]
     fn test_glueaddr_display() {
-        let parent_addr = celox_frontend_veryl::GlueAddr::Parent(VarId::default());
+        let parent_addr =
+            celox_frontend_veryl::GlueAddr::Parent(veryl_analyzer::ir::VarId::default());
         let parent_display = format!("{}", parent_addr);
         assert!(parent_display.contains("GlueAddr::Parent"));
         assert!(parent_display.contains("var0"));
 
-        let child_addr = celox_frontend_veryl::GlueAddr::Child(VarId::default());
+        let child_addr =
+            celox_frontend_veryl::GlueAddr::Child(veryl_analyzer::ir::VarId::default());
         let child_display = format!("{}", child_addr);
         assert!(child_display.contains("GlueAddr::Child"));
         assert!(child_display.contains("var0"));

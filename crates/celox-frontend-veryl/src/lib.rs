@@ -20,6 +20,7 @@ pub mod loop_provenance;
 pub mod module;
 mod module_artifact;
 pub mod registry;
+mod testbench;
 mod trace;
 mod types;
 
@@ -29,14 +30,15 @@ pub use error::{LoweringPhase, ParserError, SourceLocation};
 pub use global_ff::{
     FfClockRecipe, FfRuntimeRelocation, SharedClockLowering, build_ff_clock_recipes,
 };
-pub use hierarchy::{ParseIrResult, SymbolicRtl, parse_ir, parse_ir_with_loop_provenance};
+pub use hierarchy::{SymbolicRtl, parse_ir, parse_ir_with_loop_provenance};
 pub use module_artifact::{
     FusedSirOptimizationHints, RelocationModule, ScheduledRtl, ScheduledRtlOutput, SimModule,
 };
+pub use testbench::{collect_testbench_observability, compile_semantic_testbench};
 pub use trace::{FrontendTrace, FrontendTraceOptions};
 pub use types::{resolve_dims, resolve_total_width};
 
-use celox_design::{InstanceId, ModuleId, VariableMetadata};
+use celox_design::{InstanceId, ModuleId, StateAddr, VariableMetadata};
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::fmt;
 use veryl_analyzer::ir::{Function, Statement, VarId, VarPath};
@@ -92,6 +94,10 @@ pub struct VerylFrontendLookup {
     /// path that is ambiguous within the module.
     pub module_var_path_index: HashMap<ModuleId, HashMap<VarPath, Option<VarId>>>,
     pub module_names: HashMap<ModuleId, StrId>,
+    /// Bidirectional boundary map between frontend source identities and the
+    /// dense source-independent state identities consumed by later phases.
+    pub source_to_state: HashMap<AbsoluteAddr, StateAddr>,
+    pub state_to_source: HashMap<StateAddr, AbsoluteAddr>,
 }
 
 impl fmt::Debug for VerylFrontendLookup {
@@ -99,11 +105,39 @@ impl fmt::Debug for VerylFrontendLookup {
         f.debug_struct("VerylFrontendLookup")
             .field("instances", &self.instance_module.len())
             .field("modules", &self.module_variables.len())
+            .field("projected_state_objects", &self.source_to_state.len())
             .finish_non_exhaustive()
     }
 }
 
 impl VerylFrontendLookup {
+    pub fn root_instance_and_module(&self) -> Option<(InstanceId, ModuleId)> {
+        let instance_id = *self.instance_ids.get(&InstancePath(Vec::new()))?;
+        let module_id = *self.instance_module.get(&instance_id)?;
+        Some((instance_id, module_id))
+    }
+
+    pub fn root_variable(&self, var_id: VarId) -> Option<(StateAddr, &VariableInfo)> {
+        let (instance_id, module_id) = self.root_instance_and_module()?;
+        let info = self.module_variables.get(&module_id)?.get(&var_id)?;
+        let address = self.state_address(&AbsoluteAddr {
+            instance_id,
+            var_id,
+        })?;
+        Some((address, info))
+    }
+
+    pub fn root_named_variable(&self, name: StrId) -> Option<(StateAddr, &VariableInfo)> {
+        let (_, module_id) = self.root_instance_and_module()?;
+        let var_id = self
+            .module_var_path_index
+            .get(&module_id)?
+            .get(&VarPath(vec![name]))
+            .copied()
+            .flatten()?;
+        self.root_variable(var_id)
+    }
+
     pub fn get_path(&self, address: &AbsoluteAddr) -> String {
         let instance_path = self
             .instance_ids
@@ -137,6 +171,21 @@ impl VerylFrontendLookup {
             }
         }
         result.join(".")
+    }
+
+    pub fn get_state_path(&self, address: &StateAddr) -> String {
+        self.state_to_source
+            .get(address)
+            .map(|source| self.get_path(source))
+            .unwrap_or_else(|| address.to_string())
+    }
+
+    pub fn source_address(&self, address: &StateAddr) -> Option<AbsoluteAddr> {
+        self.state_to_source.get(address).copied()
+    }
+
+    pub fn state_address(&self, address: &AbsoluteAddr) -> Option<StateAddr> {
+        self.source_to_state.get(address).copied()
     }
 }
 
@@ -175,6 +224,8 @@ mod tests {
         assert!(lookup.module_variables.is_empty());
         assert!(lookup.module_var_path_index.is_empty());
         assert!(lookup.module_names.is_empty());
+        assert!(lookup.source_to_state.is_empty());
+        assert!(lookup.state_to_source.is_empty());
     }
 
     #[test]

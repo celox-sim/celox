@@ -1,10 +1,10 @@
 use crate::{
     RuntimeErrorCode, Simulator,
     backend::{EventHandle, MemoryLayout, SimBackend},
-    ir::{DomainKind, SignalRef},
-    scheduler::{Scheduler, SimEvent},
+    ir::SignalRef,
     simulator::{InstanceHierarchy, NamedEvent, NamedSignal},
 };
+use celox_runtime::{EventInfo, SimulationExecutor, SimulationState};
 
 /// A timed simulation wrapper around the core logic engine.
 ///
@@ -14,47 +14,47 @@ use crate::{
 /// is equivalent to `Simulation<JitBackend>` for backward compatibility.
 pub struct Simulation<B: SimBackend = crate::DefaultBackend> {
     pub(crate) simulator: Simulator<B>,
-    pub(crate) scheduler: Scheduler<B>,
-    pub(crate) last_clock_values: bit_set::BitSet,
-    pub(crate) topo_signals: Vec<(SignalRef, usize, usize)>, // (signal, id, canonical_id)
-    pub(crate) domain_kinds: Vec<Option<DomainKind>>,
-    pub(crate) event_info: Vec<EventInfo<B>>,
-    pub(crate) signal_to_id: crate::HashMap<SignalRef, usize>,
-}
-
-pub(crate) struct EventInfo<B: SimBackend = crate::DefaultBackend> {
-    pub(crate) canonical_id: usize,
-    pub(crate) is_cascaded: bool,
-    pub(crate) eval_ff_event: Option<B::Event>,
-    pub(crate) eval_only_event: Option<B::Event>,
-    pub(crate) apply_event: Option<B::Event>,
-}
-
-impl<B: SimBackend> Clone for EventInfo<B> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<B: SimBackend> Copy for EventInfo<B> {}
-
-impl<B: SimBackend> std::fmt::Debug for EventInfo<B> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EventInfo")
-            .field("canonical_id", &self.canonical_id)
-            .field("is_cascaded", &self.is_cascaded)
-            .field("eval_ff_event", &self.eval_ff_event)
-            .field("eval_only_event", &self.eval_only_event)
-            .field("apply_event", &self.apply_event)
-            .finish()
-    }
+    pub(crate) state: SimulationState<B>,
 }
 
 impl<B: SimBackend> std::fmt::Debug for Simulation<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Simulation")
-            .field("time", &self.scheduler.time)
+            .field("time", &self.state.time())
             .finish()
+    }
+}
+
+impl<B: SimBackend> SimulationExecutor for Simulator<B> {
+    type Backend = B;
+
+    fn backend(&self) -> &B {
+        &self.backend
+    }
+
+    fn backend_mut(&mut self) -> &mut B {
+        &mut self.backend
+    }
+
+    fn eval_comb(&mut self) -> Result<(), RuntimeErrorCode> {
+        self.eval_comb_checked()
+    }
+
+    fn eval_apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+        self.eval_apply_ff_at_checked(event)
+    }
+
+    fn eval_only_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+        self.eval_only_ff_at_checked(event)
+    }
+
+    fn apply_ff_at(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
+        self.apply_ff_at_checked(event)
+    }
+
+    fn finish_timed_step(&mut self, timestamp: u64) {
+        self.dirty = false;
+        self.dump(timestamp);
     }
 }
 
@@ -111,16 +111,6 @@ impl<B: SimBackend> Simulation<B> {
             }
         }
 
-        let mut last_clock_values = bit_set::BitSet::with_capacity(num_events);
-        for (signal, id, _) in topo_signals.iter().copied() {
-            if id != usize::MAX {
-                let val: u8 = simulator.backend.get_as(signal);
-                if val != 0 {
-                    last_clock_values.insert(id);
-                }
-            }
-        }
-
         let mut event_info = vec![
             EventInfo {
                 canonical_id: usize::MAX,
@@ -157,22 +147,10 @@ impl<B: SimBackend> Simulation<B> {
             }
         }
 
-        let mut signal_to_id = crate::HashMap::default();
-        for (signal, id, _) in &topo_signals {
-            if *id != usize::MAX {
-                signal_to_id.insert(*signal, *id);
-            }
-        }
+        let state =
+            SimulationState::new(&simulator.backend, topo_signals, domain_kinds, event_info);
 
-        Self {
-            simulator,
-            scheduler: Scheduler::new(),
-            last_clock_values,
-            topo_signals,
-            domain_kinds,
-            event_info,
-            signal_to_id,
-        }
+        Self { simulator, state }
     }
 
     /// Returns analyzer warnings emitted during compilation.
@@ -209,18 +187,7 @@ impl<B: SimBackend> Simulation<B> {
         let signal = self.simulator.signal(port);
         let addr = self.simulator.program.get_addr(&[], &[port]).unwrap();
         if let Some(ev) = self.simulator.backend.resolve_event_opt(&addr) {
-            let ev_id = ev.id();
-            if ev_id >= self.scheduler.clocks.len() {
-                self.scheduler.clocks.resize(ev_id + 1, None);
-            }
-            self.scheduler.clocks[ev_id] = Some(crate::scheduler::ClockDef { period });
-            // Start all clocks with rising edge at t = initial_delay
-            self.scheduler.push(SimEvent {
-                time: initial_delay,
-                event_ref: ev,
-                signal,
-                next_val: 1,
-            });
+            self.state.add_clock(ev, signal, period, initial_delay);
         }
     }
 
@@ -231,12 +198,7 @@ impl<B: SimBackend> Simulation<B> {
         let addr = self.simulator.program.get_addr(&[], &[port]).unwrap();
         let ev_opt = self.simulator.backend.resolve_event_opt(&addr);
         if let Some(ev) = ev_opt {
-            self.scheduler.push(SimEvent {
-                time,
-                event_ref: ev,
-                signal,
-                next_val: value as u8,
-            });
+            self.state.schedule(ev, signal, time, value as u8);
         } else {
             return Err(RuntimeErrorCode::NotAnEvent(port.to_string()));
         }
@@ -247,201 +209,30 @@ impl<B: SimBackend> Simulation<B> {
     /// Advance time to the next scheduled event and process all events at that time.
     /// Returns the new simulation time, or None if no events are scheduled.
     pub fn step(&mut self) -> Result<Option<u64>, RuntimeErrorCode> {
-        let (current_time, events_to_process) = match self.scheduler.pop_all_at_next_time() {
-            Some(res) => res,
-            None => return Ok(None),
-        };
-
-        self.scheduler.time = current_time;
-
-        // Apply external events to the Stable region
-        let num_events = self.simulator.backend.num_events();
-        for ev in &events_to_process {
-            self.simulator.backend.set(ev.signal, ev.next_val);
-        }
-
-        // Phase 1: Trigger Discovery Loop (Multi-phase)
-        let mut triggered_domains = bit_set::BitSet::with_capacity(num_events);
-        let mut discovered_in_this_step = bit_set::BitSet::with_capacity(num_events);
-
-        // Initial stabilization for external triggers
-        self.simulator.backend.clear_triggered_bits();
-
-        // Mark external triggers
-        for ev in &events_to_process {
-            if let Some(&id) = self.signal_to_id.get(&ev.signal) {
-                let last_val_is_nonzero = self.last_clock_values.contains(id);
-                let current_val = ev.next_val;
-                let triggered = match self.domain_kinds[id] {
-                    Some(DomainKind::ClockPosedge) | Some(DomainKind::ResetAsyncHigh) => {
-                        !last_val_is_nonzero && current_val != 0
-                    }
-                    Some(DomainKind::ClockNegedge) | Some(DomainKind::ResetAsyncLow) => {
-                        last_val_is_nonzero && current_val == 0
-                    }
-                    _ => !last_val_is_nonzero && current_val != 0,
-                };
-                if triggered {
-                    self.simulator.backend.mark_triggered_bit(id);
-                }
-            }
-        }
-
-        self.simulator.eval_comb_checked()?;
-
-        let mut comb_already_done = false;
-        loop {
-            let mut any_new_outer_loop_trigger = false;
-            let mut newly_triggered = Vec::new();
-
-            // Inner loop: Evaluate FFs. Sequential cascades (FF -> FF) trigger within this loop.
-            // All FFs evaluated here read from the STABLE region simultaneously.
-            loop {
-                let mut any_new_seq = false;
-
-                // Read detected triggers from JIT memory
-                let marked_bits = self.simulator.backend.get_triggered_bits();
-                self.simulator.backend.clear_triggered_bits();
-
-                // Optimization: If this is the *first* iteration of the outer loop,
-                // and exactly ONE trigger fired (from external events), we check
-                // if it's statically known to cascade. If it NEVER triggers another
-                // clock, we can safely evaluate and commit this FF domain in one shot.
-                let mut can_use_eval_apply =
-                    triggered_domains.is_empty() && marked_bits.count() == 1;
-
-                if can_use_eval_apply {
-                    // Peek at the single triggered ID
-                    let single_id = marked_bits.iter().next().unwrap();
-                    let info = self.event_info[single_id];
-                    // Check if this clock domain is an internal cascading target
-                    if info.is_cascaded {
-                        can_use_eval_apply = false;
-                    }
-
-                    if can_use_eval_apply {
-                        if let Some(ev) = info.eval_ff_event {
-                            discovered_in_this_step.insert(single_id);
-                            triggered_domains.insert(info.canonical_id);
-                            any_new_outer_loop_trigger = true;
-
-                            self.simulator.eval_apply_ff_at_checked(ev)?;
-                            self.simulator.eval_comb_checked()?;
-                            comb_already_done = true;
-                            break;
-                        }
-                    }
-                }
-
-                for id in marked_bits.iter() {
-                    if discovered_in_this_step.contains(id) {
-                        continue;
-                    }
-                    discovered_in_this_step.insert(id);
-
-                    let info = self.event_info[id];
-                    if !triggered_domains.contains(info.canonical_id) {
-                        triggered_domains.insert(info.canonical_id);
-                        any_new_seq = true;
-                        newly_triggered.push(info.canonical_id);
-
-                        if let Some(ev) = info.eval_only_event {
-                            self.simulator.eval_only_ff_at_checked(ev)?;
-                        } else if let Some(ev) = info.eval_ff_event {
-                            // If this domain wasn't split into eval/apply, we can safely use the
-                            // unified eval_apply_ff_at since no cascade optimizations applied to it.
-                            self.simulator.eval_apply_ff_at_checked(ev)?;
-                        } else {
-                            unreachable!(
-                                "FF trigger discovered but no corresponding execution unit found for domain"
-                            );
-                        }
-                    }
-                }
-
-                if !any_new_seq {
-                    break;
-                }
-            }
-
-            if newly_triggered.is_empty() && !any_new_outer_loop_trigger {
-                break;
-            }
-
-            // Phase 2: Commit (Apply) newly triggered FFs immediately to stable region
-            for id in &newly_triggered {
-                let info = self.event_info[*id];
-                if let Some(ev) = info.apply_event {
-                    self.simulator.apply_ff_at_checked(ev)?;
-                }
-            }
-
-            // Phase 3: Evaluate combinational logic on stable region to propagate FF outputs.
-            // Skip if it was already done in the single-trigger fast path above.
-            if comb_already_done {
-                comb_already_done = false;
-            } else {
-                self.simulator.eval_comb_checked()?;
-            }
-
-            if !any_new_outer_loop_trigger && newly_triggered.is_empty() {
-                break;
-            }
-        }
-
-        // Update last values for the next step based on FINAL values
-        for (signal, id, _) in &self.topo_signals {
-            if *id != usize::MAX {
-                let val: u8 = self.simulator.backend.get_as(*signal);
-                if val != 0 {
-                    self.last_clock_values.insert(*id);
-                } else {
-                    self.last_clock_values.remove(*id);
-                }
-            }
-        }
-
-        // Reschedule clocks
-        for ev in &events_to_process {
-            let ev_id = ev.event_ref.id();
-            if let Some(Some(def)) = self.scheduler.clocks.get(ev_id) {
-                let half_period = def.period / 2;
-                self.scheduler.push(SimEvent {
-                    time: current_time + half_period,
-                    event_ref: ev.event_ref,
-                    signal: ev.signal,
-                    next_val: 1 - ev.next_val,
-                });
-            }
-        }
-
-        self.simulator.dirty = false;
-        self.dump(current_time);
-
-        Ok(Some(current_time))
+        self.state.step(&mut self.simulator)
     }
 
     /// Advance time and run until `end_time` (inclusive).
     pub fn run_until(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
-        while let Some(next_time) = self.scheduler.next_event_time() {
+        while let Some(next_time) = self.state.next_event_time() {
             if next_time > end_time {
                 break;
             }
             self.step()?;
         }
-        self.scheduler.time = end_time;
+        self.state.set_time(end_time);
         self.dump(end_time);
         Ok(())
     }
 
     /// Returns the current simulation time.
     pub fn time(&self) -> u64 {
-        self.scheduler.time
+        self.state.time()
     }
 
     /// Returns the time of the next scheduled event, if any.
     pub fn next_event_time(&self) -> Option<u64> {
-        self.scheduler.next_event_time()
+        self.state.next_event_time()
     }
 
     /// Directly execute combinational logic evaluation.
@@ -499,17 +290,7 @@ impl<B: SimBackend> Simulation<B> {
         let addr = self.simulator.backend.id_to_addr_slice()[event_id as usize];
         let signal = self.simulator.backend.resolve_signal(&addr);
         if let Some(ev) = self.simulator.backend.resolve_event_opt(&addr) {
-            let ev_id = ev.id();
-            if ev_id >= self.scheduler.clocks.len() {
-                self.scheduler.clocks.resize(ev_id + 1, None);
-            }
-            self.scheduler.clocks[ev_id] = Some(crate::scheduler::ClockDef { period });
-            self.scheduler.push(SimEvent {
-                time: initial_delay,
-                event_ref: ev,
-                signal,
-                next_val: 1,
-            });
+            self.state.add_clock(ev, signal, period, initial_delay);
         }
     }
 
@@ -524,12 +305,7 @@ impl<B: SimBackend> Simulation<B> {
         let signal = self.simulator.backend.resolve_signal(&addr);
         let ev_opt = self.simulator.backend.resolve_event_opt(&addr);
         if let Some(ev) = ev_opt {
-            self.scheduler.push(SimEvent {
-                time,
-                event_ref: ev,
-                signal,
-                next_val: value as u8,
-            });
+            self.state.schedule(ev, signal, time, value as u8);
             Ok(())
         } else {
             Err(RuntimeErrorCode::NotAnEvent(format!(

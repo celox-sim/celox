@@ -1,23 +1,20 @@
 mod backend;
-mod cfg_order;
-mod context_width;
 mod debug;
-#[cfg(not(target_arch = "wasm32"))]
-mod display_format;
 mod ir;
 mod optimizer;
 mod parser;
 pub(crate) mod portable;
 #[cfg(not(target_arch = "wasm32"))]
-mod scheduler;
-#[cfg(not(target_arch = "wasm32"))]
 mod simulation;
 mod simulator;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod testbench;
+mod testbench_compile;
 pub(crate) mod timing;
 #[cfg(not(target_arch = "wasm32"))]
-mod vcd;
+mod vcd {
+    pub use celox_runtime::{VcdSignalDesc, VcdWriter};
+}
 #[cfg(not(target_arch = "wasm32"))]
 pub use vcd::{VcdSignalDesc, VcdWriter};
 
@@ -52,6 +49,7 @@ pub use backend::{EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMod
 #[cfg(not(target_arch = "wasm32"))]
 pub use backend::{JitBackend, SimBackend};
 pub use celox_design::{ElaboratedDesign, EventTopology, RuntimeSchema};
+#[cfg(not(target_arch = "wasm32"))]
 pub use celox_macros::veryl_test;
 #[cfg(not(target_arch = "wasm32"))]
 pub use debug::CompilationTraceResult;
@@ -60,7 +58,8 @@ pub(crate) use fxhash::FxHashMap as HashMap;
 pub(crate) use fxhash::FxHashSet as HashSet;
 pub use ir::{
     AbsoluteAddr, AddrLookupError, InstancePath, LaidOutProgram, OptimizedSir, PortTypeKind,
-    Program, RuntimeErrorInfo, SignalRef, SirProgram, VariableInfo, VerylFrontendLookup,
+    RuntimeErrorInfo, RuntimeProgram, SignalRef, SirProgram, UnoptimizedSir, VariableInfo,
+    VerylFrontendLookup,
 };
 #[cfg(target_arch = "x86_64")]
 pub mod native_backend {
@@ -77,17 +76,17 @@ pub use backend::native::{NativeBackend, SharedNativeCode};
 pub type DefaultBackend = NativeBackend;
 #[cfg(all(not(target_arch = "wasm32"), not(target_arch = "x86_64")))]
 pub type DefaultBackend = backend::JitBackend;
+#[cfg(not(target_arch = "wasm32"))]
+pub use backend::CraneliftOptLevel;
+#[cfg(not(target_arch = "wasm32"))]
+pub use backend::CraneliftOptions;
+#[cfg(not(target_arch = "wasm32"))]
+pub use backend::RegallocAlgorithm;
 pub use celox_frontend_veryl::{LoweringPhase, ParserError};
 pub use celox_slt::scheduler::SchedulerError;
 pub use num_bigint::BigUint;
-#[cfg(not(target_arch = "wasm32"))]
-pub use optimizer::CraneliftOptLevel;
-#[cfg(not(target_arch = "wasm32"))]
-pub use optimizer::CraneliftOptions;
 pub use optimizer::OptLevel;
 pub use optimizer::OptimizeOptions;
-#[cfg(not(target_arch = "wasm32"))]
-pub use optimizer::RegallocAlgorithm;
 pub use optimizer::SirPass;
 #[cfg(not(target_arch = "wasm32"))]
 pub use simulation::Simulation;

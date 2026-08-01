@@ -120,8 +120,11 @@ fn atomize_logic_paths(
 
             // Compute per-atom source sets (with bit ranges), then coalesce
             // consecutive atoms whose source sets are identical into wider paths.
-            let mut atom_infos: Vec<(BitAccess, crate::HashSet<VarAtomBase<AbsoluteAddr>>)> =
-                Vec::new();
+            let mut atom_infos: Vec<(
+                BitAccess,
+                crate::HashSet<VarAtomBase<AbsoluteAddr>>,
+                crate::HashSet<AbsoluteAddr>,
+            )> = Vec::new();
             for atom_access in &atoms {
                 let relative_atom_access = BitAccess::new(
                     atom_access.lsb - target_var.access.lsb,
@@ -134,19 +137,42 @@ fn atomize_logic_paths(
                     .into_iter()
                     .filter(|input_atom| original_source_ids.contains(&input_atom.id))
                     .collect();
-                atom_infos.push((*atom_access, filtered_sources));
+                let filtered_source_ids = filtered_sources.iter().map(|source| source.id).collect();
+                atom_infos.push((*atom_access, filtered_sources, filtered_source_ids));
             }
 
-            // Group consecutive atoms with the same source variable ID set.
+            // Coalesce adjacent atoms which depend on the same state objects.
+            // The merged expression is projected again below, so its precise
+            // source ranges are recovered rather than inherited from either
+            // atom. Only padded unpacked-element boundaries are physical and
+            // therefore prohibit this coalescing.
             let mut i = 0;
             while i < atom_infos.len() {
                 let group_start = i;
-                let group_source_ids = &atom_infos[i].1;
-                while i + 1 < atom_infos.len()
-                    && atom_infos[i + 1].1 == *group_source_ids
-                    && element_width
-                        .is_none_or(|width| !atom_infos[i + 1].0.lsb.is_multiple_of(width))
-                {
+                while i + 1 < atom_infos.len() {
+                    let current = &atom_infos[i];
+                    let next = &atom_infos[i + 1];
+                    let exact_sources_match = next.1 == current.1;
+                    let source_objects_match = next.2 == current.2;
+                    let pointwise_single_bits =
+                        current.0.lsb == current.0.msb && next.0.lsb == next.0.msb;
+                    let contiguous_unpacked_elements =
+                        element_width.is_some_and(|width| width.is_multiple_of(8));
+                    // Byte-aligned unpacked elements are physically contiguous
+                    // in every finalized layout, so retaining their semantic
+                    // boundary here only forces later byte-at-a-time RMW. A
+                    // non-byte-aligned element has padding and must remain a
+                    // separate path unless the transfer is explicitly lowered
+                    // as a whole-object copy.
+                    let crosses_strided_element = element_width.is_some_and(|width| {
+                        !width.is_multiple_of(8) && next.0.lsb.is_multiple_of(width)
+                    });
+                    let may_recover_coarse_range = source_objects_match
+                        && (pointwise_single_bits || contiguous_unpacked_elements);
+                    if !(exact_sources_match || may_recover_coarse_range) || crosses_strided_element
+                    {
+                        break;
+                    }
                     i += 1;
                 }
                 let group_end = i;
@@ -815,6 +841,53 @@ mod tests {
     }
 
     #[test]
+    fn atomization_remerges_physically_contiguous_unpacked_elements() {
+        let address = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(0),
+        };
+        let source = AbsoluteAddr {
+            instance_id: InstanceId(1),
+            var_id: VarId::from_raw(1),
+        };
+        let mut arena = SLTNodeArena::new();
+        let expression = arena
+            .alloc(SLTNode::Input {
+                variable: source,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 31),
+            })
+            .unwrap();
+        let path = LogicPath {
+            target: LogicPathTarget::Var(VarAtomBase::new(address, 0, 31)),
+            sources: [VarAtomBase::new(source, 0, 31)].into_iter().collect(),
+            previous_sources: crate::HashSet::default(),
+            address_sources: crate::HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: crate::HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            pre_lower_nodes: Vec::new(),
+            expr: expression,
+        };
+        let element_widths = [(address, 8)].into_iter().collect();
+
+        let atomized = atomize_logic_paths(
+            &vec![path],
+            &HashMap::default(),
+            &element_widths,
+            &mut arena,
+        )
+        .unwrap();
+
+        assert_eq!(atomized.len(), 1);
+        assert_eq!(
+            atomized[0].target.var().unwrap().access,
+            BitAccess::new(0, 31)
+        );
+    }
+
+    #[test]
     fn collect_inputs_preserves_slice_window_through_bitwise_mux() {
         let mut arena = SLTNodeArena::<u32>::new();
         let input = |arena: &mut SLTNodeArena<u32>, variable, msb| {
@@ -855,6 +928,73 @@ mod tests {
         assert!(inputs.contains(&VarAtomBase::new(3, 0, 0)));
         assert!(!inputs.contains(&VarAtomBase::new(1, 0, 15)));
         assert!(!inputs.contains(&VarAtomBase::new(2, 0, 15)));
+    }
+
+    #[test]
+    fn atomization_coalesces_adjacent_pointwise_ranges_with_the_same_sources() {
+        let target = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(0),
+        };
+        let lhs_addr = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(1),
+        };
+        let rhs_addr = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(2),
+        };
+        let mut arena = SLTNodeArena::new();
+        let mut input = |variable| {
+            arena
+                .alloc(SLTNode::Input {
+                    variable,
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, 15),
+                })
+                .unwrap()
+        };
+        let lhs = input(lhs_addr);
+        let rhs = input(rhs_addr);
+        let expression = arena
+            .alloc(SLTNode::Binary(lhs, BinaryOp::Or, rhs))
+            .unwrap();
+        let path = LogicPath {
+            target: LogicPathTarget::Var(VarAtomBase::new(target, 0, 15)),
+            sources: [
+                VarAtomBase::new(lhs_addr, 0, 15),
+                VarAtomBase::new(rhs_addr, 0, 15),
+            ]
+            .into_iter()
+            .collect(),
+            previous_sources: crate::HashSet::default(),
+            address_sources: crate::HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: crate::HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            pre_lower_nodes: Vec::new(),
+            expr: expression,
+        };
+        let boundaries = [(target, (1..16).collect())].into_iter().collect();
+
+        let atomized =
+            atomize_logic_paths(&vec![path], &boundaries, &HashMap::default(), &mut arena).unwrap();
+
+        assert_eq!(atomized.len(), 1);
+        assert_eq!(
+            atomized[0].target.var().unwrap().access,
+            BitAccess::new(0, 15)
+        );
+        assert_eq!(
+            atomized[0].sources,
+            [
+                VarAtomBase::new(lhs_addr, 0, 15),
+                VarAtomBase::new(rhs_addr, 0, 15),
+            ]
+            .into_iter()
+            .collect()
+        );
     }
 
     #[test]

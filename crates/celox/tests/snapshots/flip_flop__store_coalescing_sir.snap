@@ -3,7 +3,7 @@ source: crates/celox/tests/flip_flop.rs
 expression: output
 ---
 === Evaluation Flip-Flops (eval_apply_ffs) ===
-Trigger Group: clk (AbsoluteAddr(inst0, var0))
+Trigger Group: clk (AbsoluteAddr(inst0, state0))
   Execution Unit 0:
     Entry Block: 0
     Registers:

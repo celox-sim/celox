@@ -1,39 +1,28 @@
-#[cfg(not(target_arch = "wasm32"))]
-mod jit_engine;
 pub(crate) mod memory_layout;
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod native;
 #[cfg(not(target_arch = "wasm32"))]
 mod runtime;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) mod runtime_event_buffer;
-pub mod traits;
-#[cfg(not(target_arch = "wasm32"))]
-mod translator;
-#[allow(dead_code, unused_variables, unused_imports)]
-pub mod wasm_codegen;
+pub use celox_backend_wasm as wasm_codegen;
+pub use celox_runtime::backend as traits;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod wasm_runtime;
 #[cfg(not(target_arch = "wasm32"))]
-mod wide_ops;
-
+pub(crate) use celox_backend_cranelift::JitEngine;
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use jit_engine::JitEngine;
+pub use celox_backend_cranelift::{CraneliftOptLevel, CraneliftOptions, RegallocAlgorithm};
+#[cfg(target_arch = "x86_64")]
+pub use celox_backend_x86::X86BackendOptions;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use celox_runtime::RuntimeEventBuffer;
+#[cfg(not(target_arch = "wasm32"))]
+pub use celox_runtime::SimulatorErrorCode;
 pub use memory_layout::{LayoutRequirements, MemoryLayout, MemoryLayoutMode, get_byte_size};
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::SharedJitCode;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::{EventRef, JitBackend};
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use runtime_event_buffer::RuntimeEventBuffer;
 #[cfg(target_arch = "wasm32")]
 pub use traits::EventHandle;
-pub use traits::SimulatorErrorCode;
 #[cfg(not(target_arch = "wasm32"))]
 pub use traits::{EventHandle, SimBackend};
-#[cfg(not(target_arch = "wasm32"))]
-pub(super) use translator::SIRTranslator;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use translator::core::MEM_SHIFT_THRESHOLD;
-#[cfg(target_arch = "wasm32")]
-pub(crate) const MEM_SHIFT_THRESHOLD: usize = 4;

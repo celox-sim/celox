@@ -157,7 +157,7 @@ impl WasmBackend {
         options: &SimulatorOptions,
     ) -> Result<Self, crate::SimulatorError> {
         let engine = Engine::default();
-        let sir = laid_out.program();
+        let sir = laid_out;
         let layout = laid_out.layout().clone();
 
         // Compile eval_comb
