@@ -120,8 +120,11 @@ fn atomize_logic_paths(
 
             // Compute per-atom source sets (with bit ranges), then coalesce
             // consecutive atoms whose source sets are identical into wider paths.
-            let mut atom_infos: Vec<(BitAccess, crate::HashSet<VarAtomBase<AbsoluteAddr>>)> =
-                Vec::new();
+            let mut atom_infos: Vec<(
+                BitAccess,
+                crate::HashSet<VarAtomBase<AbsoluteAddr>>,
+                crate::HashSet<AbsoluteAddr>,
+            )> = Vec::new();
             for atom_access in &atoms {
                 let relative_atom_access = BitAccess::new(
                     atom_access.lsb - target_var.access.lsb,
@@ -134,16 +137,17 @@ fn atomize_logic_paths(
                     .into_iter()
                     .filter(|input_atom| original_source_ids.contains(&input_atom.id))
                     .collect();
-                atom_infos.push((*atom_access, filtered_sources));
+                let filtered_source_ids = filtered_sources.iter().map(|source| source.id).collect();
+                atom_infos.push((*atom_access, filtered_sources, filtered_source_ids));
             }
 
             // Group consecutive atoms with the same source variable ID set.
             let mut i = 0;
             while i < atom_infos.len() {
                 let group_start = i;
-                let group_source_ids = &atom_infos[i].1;
+                let group_source_ids = &atom_infos[i].2;
                 while i + 1 < atom_infos.len()
-                    && atom_infos[i + 1].1 == *group_source_ids
+                    && atom_infos[i + 1].2 == *group_source_ids
                     && element_width
                         .is_none_or(|width| !atom_infos[i + 1].0.lsb.is_multiple_of(width))
                 {
@@ -855,6 +859,73 @@ mod tests {
         assert!(inputs.contains(&VarAtomBase::new(3, 0, 0)));
         assert!(!inputs.contains(&VarAtomBase::new(1, 0, 15)));
         assert!(!inputs.contains(&VarAtomBase::new(2, 0, 15)));
+    }
+
+    #[test]
+    fn atomization_coalesces_adjacent_pointwise_ranges_with_the_same_sources() {
+        let target = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(0),
+        };
+        let lhs_addr = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(1),
+        };
+        let rhs_addr = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: VarId::from_raw(2),
+        };
+        let mut arena = SLTNodeArena::new();
+        let mut input = |variable| {
+            arena
+                .alloc(SLTNode::Input {
+                    variable,
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(0, 15),
+                })
+                .unwrap()
+        };
+        let lhs = input(lhs_addr);
+        let rhs = input(rhs_addr);
+        let expression = arena
+            .alloc(SLTNode::Binary(lhs, BinaryOp::Or, rhs))
+            .unwrap();
+        let path = LogicPath {
+            target: LogicPathTarget::Var(VarAtomBase::new(target, 0, 15)),
+            sources: [
+                VarAtomBase::new(lhs_addr, 0, 15),
+                VarAtomBase::new(rhs_addr, 0, 15),
+            ]
+            .into_iter()
+            .collect(),
+            previous_sources: crate::HashSet::default(),
+            address_sources: crate::HashSet::default(),
+            local_inputs: Vec::new(),
+            order_before: crate::HashSet::default(),
+            comb_capture_enable_sites: Vec::new(),
+            pre_lower_nodes: Vec::new(),
+            expr: expression,
+        };
+        let boundaries = [(target, (1..16).collect())].into_iter().collect();
+
+        let atomized =
+            atomize_logic_paths(&vec![path], &boundaries, &HashMap::default(), &mut arena).unwrap();
+
+        assert_eq!(atomized.len(), 1);
+        assert_eq!(
+            atomized[0].target.var().unwrap().access,
+            BitAccess::new(0, 15)
+        );
+        assert_eq!(
+            atomized[0].sources,
+            [
+                VarAtomBase::new(lhs_addr, 0, 15),
+                VarAtomBase::new(rhs_addr, 0, 15),
+            ]
+            .into_iter()
+            .collect()
+        );
     }
 
     #[test]
