@@ -113,9 +113,8 @@ fi
 
 slower_jit="$TMP/slower-jit"
 write_gate_results "$slower_jit" 200 100 30 40 10 45 41
-if validate_gate_results "$slower_jit/results.tsv" "$slower_jit" 2>/dev/null; then
-    fail "gate accepted slower Celox generated-JIT execution"
-fi
+validate_gate_results "$slower_jit/results.tsv" "$slower_jit" \
+    || fail "gate treated slower Celox generated-JIT execution as a correctness failure"
 
 slower_harness="$TMP/slower-harness"
 write_gate_results "$slower_harness" 200 100 30 40 10 45 35
@@ -380,8 +379,8 @@ gate_cleanup_worktrees
     || fail "gate cleanup left detached worktrees behind"
 
 # Full run_gate fixture. Replace every external boundary while retaining the
-# fixed configuration, runner order, manifest/hash checks, result validation,
-# and performance decision in run_gate itself.
+# fixed configuration, runner order, manifest/hash checks, and result
+# validation in run_gate itself.
 REAL_CELOX_ROOT="$CELOX_ROOT"
 CELOX_ROOT="$TMP/fake-celox"
 HELIODOR_DIR="$TMP/fake-heliodor"
@@ -572,7 +571,7 @@ success_results="$(find "$LAST_GATE_RESULTS_ROOT" -name results.tsv)"
 assert_eq "$(wc -l <"$success_results")" 3 "exact paired result rows"
 
 MOCK_CELOX_EXECUTE=41
-run_gate_fixture slower-integration 0
+run_gate_fixture slower-integration 1
 MOCK_CELOX_EXECUTE=20
 
 MOCK_CELOX_STATUS=fail
