@@ -1204,10 +1204,10 @@ impl<B: SimBackend> Simulator<B> {
                     .collect::<Vec<_>>()
                     .join(".");
 
-                let addr = crate::ir::AbsoluteAddr {
-                    instance_id: *instance_id,
-                    var_id: info.id,
-                };
+                let addr = self
+                    .program
+                    .state_address_for_source(*instance_id, info.id)
+                    .expect("frontend state projection is complete");
                 let signal = self.backend.resolve_signal(&addr);
 
                 descs.push(crate::vcd::VcdSignalDesc {
@@ -1280,10 +1280,10 @@ impl<B: SimBackend> Simulator<B> {
                 })
                 .collect::<Vec<_>>()
                 .join(".");
-            let addr = crate::ir::AbsoluteAddr {
-                instance_id,
-                var_id: info.id,
-            };
+            let addr = self
+                .program
+                .state_address_for_source(instance_id, info.id)
+                .expect("frontend state projection is complete");
             let signal = self.backend.resolve_signal(&addr);
 
             // Resolve associated clock for reset signals

@@ -1223,14 +1223,10 @@ fn trace_concat_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn var_id(index: usize) -> VarId {
-        let mut id = VarId::default();
-        for _ in 0..index {
-            id.inc();
-        }
-        id
+        VarId(index as u32)
     }
 
     fn address(index: usize) -> RegionedAbsoluteAddr {

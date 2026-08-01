@@ -2768,7 +2768,7 @@ fn vectorize_concats(
 mod tests {
     use super::*;
     use crate::ir::{BasicBlock, BlockId, InstanceId, SIRTerminator, STABLE_REGION};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn test_addr() -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {
@@ -4248,7 +4248,7 @@ mod tests {
     fn packed_bit_store_sink_stops_at_an_intervening_load() {
         let address = test_addr();
         let other = RegionedAbsoluteAddr {
-            var_id: veryl_analyzer::ir::VarId::from_raw(1),
+            var_id: celox_design::StateObjectId::from_raw(1),
             ..address
         };
         let bit = RegisterType::Bit {

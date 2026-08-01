@@ -1289,12 +1289,8 @@ mod tests {
     use super::*;
     use num_bigint::BigUint;
 
-    fn make_var_id(n: usize) -> veryl_analyzer::ir::VarId {
-        let mut id = veryl_analyzer::ir::VarId::default();
-        for _ in 0..n {
-            id.inc();
-        }
-        id
+    fn make_var_id(n: usize) -> celox_design::StateObjectId {
+        celox_design::StateObjectId(n as u32)
     }
 
     fn make_test_addr(region: u32, inst_id: usize, var_id_val: usize) -> RegionedAbsoluteAddr {

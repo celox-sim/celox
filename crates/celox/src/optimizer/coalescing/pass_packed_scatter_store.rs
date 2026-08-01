@@ -1402,7 +1402,7 @@ fn fits_width(value: &BigUint, width: usize) -> bool {
 mod tests {
     use super::*;
     use crate::ir::{InstanceId, STABLE_REGION};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     const LANE_WIDTH: usize = 6;
     const LANE_COUNT: usize = 31;

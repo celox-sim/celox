@@ -771,7 +771,7 @@ fn prune_dead_pure_instructions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
 mod tests {
     use super::*;
     use crate::ir::{InstanceId, STABLE_REGION};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn addr() -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {

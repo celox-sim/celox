@@ -1387,7 +1387,7 @@ mod tests {
     use crate::ir::{
         BasicBlock, InstanceId, RegisterId, RegisterType, SIROffset, SIRTerminator, STABLE_REGION,
     };
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn address(region: u32, variable: u32) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {

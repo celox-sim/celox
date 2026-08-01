@@ -4079,7 +4079,7 @@ fn instruction_has_effect(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
 mod tests {
     use super::*;
     use crate::ir::{DomainKind, InstanceId, SIRValue, TriggerIdWithKind};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn address(id: usize) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {

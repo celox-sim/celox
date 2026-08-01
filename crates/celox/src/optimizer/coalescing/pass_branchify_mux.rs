@@ -6630,8 +6630,8 @@ fn terminator_uses(term: &SIRTerminator) -> Vec<RegisterId> {
 mod tests {
     use super::*;
     use crate::ir::{InstanceId, RegisterType, SIRValue};
+    use celox_design::StateObjectId as VarId;
     use num_bigint::BigUint;
-    use veryl_analyzer::ir::VarId;
 
     fn addr(id: usize) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {

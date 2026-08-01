@@ -2231,7 +2231,7 @@ fn trim_dead_register_types(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
 mod tests {
     use super::*;
     use crate::ir::InstanceId;
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn bit(width: usize) -> RegisterType {
         RegisterType::Bit {

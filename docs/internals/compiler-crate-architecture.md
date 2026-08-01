@@ -19,7 +19,12 @@ oversized-function planning is constructed from final SIR
 at the backend boundary; backend scratch extends only the backend's private layout copy.
 Veryl source identities retained for diagnostics and public path lookup are grouped in
 `celox-frontend-veryl::VerylFrontendLookup`; optimizer and backend code no longer inspect that
-artifact. The unused semantic-process provenance formerly copied from `LogicPath` through the
+artifact to recover semantic state identity. `schedule_symbolic_rtl` assigns dense
+`StateObjectId`s exactly once and projects SIR, design metadata, event topology, runtime schema,
+and fused-optimization hints before returning `ScheduledRtl`. The facade, layout, optimizer, and
+backends therefore use `StateAddr`; the bidirectional source map remains a diagnostics and public
+path-lookup side table. WASM layout export enumerates finalized design objects and layout entries
+instead of reconstructing addresses from Veryl variables. The unused semantic-process provenance formerly copied from `LogicPath` through the
 scheduler into `Program` has been removed instead of being assigned to a target crate. Moving the
 optimizer-to-layout state-alias contract is now represented by
 `celox-state-layout::LayoutRequirements` and is cleared after physical layout is finalized. Tests

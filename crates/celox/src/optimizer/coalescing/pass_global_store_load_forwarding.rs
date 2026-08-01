@@ -1131,7 +1131,7 @@ fn sink_phi_writebacks_to_predecessors(
 mod tests {
     use super::*;
     use crate::ir::{BasicBlock, InstanceId};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn bit(width: usize) -> RegisterType {
         RegisterType::Bit {

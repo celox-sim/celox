@@ -5767,8 +5767,8 @@ fn emit_trigger_detection(
 
 #[cfg(test)]
 mod bit_count_tests {
+    use celox_design::StateObjectId as VarId;
     use num_bigint::BigUint;
-    use veryl_analyzer::ir::VarId;
     use wasmtime::{Engine, Linker, Memory, Module as WasmtimeModule, Store};
 
     use super::*;

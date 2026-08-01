@@ -851,8 +851,8 @@ pub(crate) fn optimize_commit_sinking(eu: &mut ExecutionUnit<RegionedAbsoluteAdd
 #[cfg(test)]
 mod tests {
     use super::*;
+    use celox_design::StateObjectId as VarId;
     use num_bigint::BigUint;
-    use veryl_analyzer::ir::VarId;
 
     fn addr(region: u32) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {

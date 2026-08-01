@@ -946,8 +946,8 @@ fn apply_aliases(
 mod tests {
     use super::*;
     use crate::ir::InstanceId;
+    use celox_design::StateObjectId as VarId;
     use num_bigint::BigUint;
-    use veryl_analyzer::ir::VarId;
 
     fn bit(width: usize) -> RegisterType {
         RegisterType::Bit {

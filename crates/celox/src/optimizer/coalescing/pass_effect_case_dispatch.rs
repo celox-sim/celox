@@ -356,7 +356,7 @@ fn allocate_register_like(
 mod tests {
     use super::*;
     use crate::ir::{AbsoluteAddr, InstanceId, STABLE_REGION};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn bit(width: usize) -> RegisterType {
         RegisterType::Bit {

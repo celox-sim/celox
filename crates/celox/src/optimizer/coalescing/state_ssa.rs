@@ -1249,7 +1249,7 @@ impl StateSsa {
 mod tests {
     use super::*;
     use crate::ir::cfg::SirCfg;
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn bit(width: usize) -> RegisterType {
         RegisterType::Bit {

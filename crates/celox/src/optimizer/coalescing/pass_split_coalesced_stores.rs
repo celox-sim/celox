@@ -236,12 +236,8 @@ fn inst_def(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> Option<RegisterId> {
 mod tests {
     use super::*;
 
-    fn make_var_id(n: u32) -> veryl_analyzer::ir::VarId {
-        let mut id = veryl_analyzer::ir::VarId::default();
-        for _ in 0..n {
-            id.inc();
-        }
-        id
+    fn make_var_id(n: u32) -> celox_design::StateObjectId {
+        celox_design::StateObjectId(n)
     }
 
     fn make_addr() -> RegionedAbsoluteAddr {

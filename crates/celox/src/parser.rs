@@ -6,7 +6,7 @@ pub(crate) use celox_frontend_veryl::BuildConfig;
 pub(crate) mod loop_provenance;
 #[cfg(test)]
 pub mod module;
-use crate::ir::{AbsoluteAddr, Program, RegionedAbsoluteAddr, STABLE_REGION};
+use crate::ir::{Program, RegionedAbsoluteAddr, STABLE_REGION};
 
 pub use celox_frontend_veryl::ParserError;
 
@@ -83,9 +83,8 @@ fn dump_addr_map_if_requested(program: &Program) {
             .get(&module_id)
             .and_then(|name| resource_table::get_str_value(*name))
             .unwrap_or_default();
-        let addr = AbsoluteAddr {
-            instance_id,
-            var_id,
+        let Some(addr) = program.state_address_for_source(instance_id, var_id) else {
+            continue;
         };
         eprintln!(
             "[addr-map] inst={} var={} module={} path={} width={} array_dims={:?} 4state={} kind={:?} var_kind={}",

@@ -17,12 +17,12 @@ pub(crate) use celox_sir::{
 };
 use celox_testbench::TestbenchProgram;
 use std::fmt;
-use veryl_analyzer::ir::{VarId, VarPath};
+use veryl_analyzer::ir::VarPath;
 
-/// Concrete address type using the Veryl analyzer's `VarId` during frontend migration.
-pub type AbsoluteAddr = AbsoluteAddrBase<VarId>;
-/// Concrete regioned address using the Veryl analyzer's `VarId`.
-pub type RegionedAbsoluteAddr = RegionedAbsoluteAddrBase<VarId>;
+/// Source-independent identity of one elaborated state object.
+pub type AbsoluteAddr = celox_design::StateAddr;
+/// Source-independent state identity qualified by its storage region.
+pub type RegionedAbsoluteAddr = celox_design::RegionedStateAddr;
 pub type SirProgram = celox_sir::SirProgram<AbsoluteAddr, RegionedAbsoluteAddr>;
 
 /// Error returned by [`Program::get_addr`] when a path-based variable lookup fails.
@@ -194,6 +194,18 @@ impl OptimizedSir {
 }
 
 impl Program {
+    pub(crate) fn state_address_for_source(
+        &self,
+        instance_id: InstanceId,
+        var_id: veryl_analyzer::ir::VarId,
+    ) -> Option<AbsoluteAddr> {
+        self.frontend
+            .state_address(&celox_frontend_veryl::AbsoluteAddr {
+                instance_id,
+                var_id,
+            })
+    }
+
     pub(crate) fn from_scheduled(
         scheduled: celox_frontend_veryl::ScheduledRtl,
     ) -> (Self, celox_frontend_veryl::VerylTestbenchSource) {
@@ -246,20 +258,26 @@ impl Program {
                 path: path_str.clone(),
             })?;
         let var_id = entry.ok_or_else(|| AddrLookupError::AmbiguousPath { path: path_str })?;
-        Ok(AbsoluteAddr {
+        let source_addr = celox_frontend_veryl::AbsoluteAddr {
             instance_id,
             var_id,
-        })
+        };
+        self.frontend
+            .state_address(&source_addr)
+            .ok_or_else(|| AddrLookupError::VariableNotFound {
+                path: var_path.join("."),
+            })
     }
 
     pub fn get_path(&self, addr: &AbsoluteAddr) -> String {
-        self.frontend.get_path(addr)
+        self.frontend.get_state_path(addr)
     }
 
     pub fn get_variable_info(&self, addr: &AbsoluteAddr) -> Option<&VariableInfo> {
-        let module_id = self.frontend.instance_module.get(&addr.instance_id)?;
+        let source = self.frontend.source_address(addr)?;
+        let module_id = self.frontend.instance_module.get(&source.instance_id)?;
         let module_vars = self.frontend.module_variables.get(module_id)?;
-        module_vars.get(&addr.var_id)
+        module_vars.get(&source.var_id)
     }
 
     pub fn num_events(&self) -> usize {
@@ -285,9 +303,12 @@ impl Program {
 
         for (&instance_id, module_id) in &self.frontend.instance_module {
             for info in self.frontend.module_variables[module_id].values() {
-                let address = AbsoluteAddr {
+                let source_address = celox_frontend_veryl::AbsoluteAddr {
                     instance_id,
                     var_id: info.id,
+                };
+                let Some(address) = self.frontend.state_address(&source_address) else {
+                    return Err(format!("missing state projection for {source_address}"));
                 };
                 let Some(metadata) = self.design.state_objects.get(&address) else {
                     return Err(format!("missing flattened state object {address}"));
@@ -480,22 +501,24 @@ mod tests {
     fn test_absoluteaddr_display() {
         let addr = AbsoluteAddr {
             instance_id: InstanceId(0),
-            var_id: VarId::default(),
+            var_id: celox_design::StateObjectId(0),
         };
         let display = format!("{}", addr);
         assert!(display.contains("AbsoluteAddr"));
         assert!(display.contains("inst0"));
-        assert!(display.contains("var0"));
+        assert!(display.contains("state0"));
     }
 
     #[test]
     fn test_glueaddr_display() {
-        let parent_addr = celox_frontend_veryl::GlueAddr::Parent(VarId::default());
+        let parent_addr =
+            celox_frontend_veryl::GlueAddr::Parent(veryl_analyzer::ir::VarId::default());
         let parent_display = format!("{}", parent_addr);
         assert!(parent_display.contains("GlueAddr::Parent"));
         assert!(parent_display.contains("var0"));
 
-        let child_addr = celox_frontend_veryl::GlueAddr::Child(VarId::default());
+        let child_addr =
+            celox_frontend_veryl::GlueAddr::Child(veryl_analyzer::ir::VarId::default());
         let child_display = format!("{}", child_addr);
         assert!(child_display.contains("GlueAddr::Child"));
         assert!(child_display.contains("var0"));

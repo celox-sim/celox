@@ -236,7 +236,7 @@ fn eliminate_candidates(
 mod tests {
     use super::*;
     use crate::ir::{InstanceId, RegisterType};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn address(instance: usize) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {

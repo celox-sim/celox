@@ -36,7 +36,7 @@ pub use module_artifact::{
 pub use trace::{FrontendTrace, FrontendTraceOptions};
 pub use types::{resolve_dims, resolve_total_width};
 
-use celox_design::{InstanceId, ModuleId, VariableMetadata};
+use celox_design::{InstanceId, ModuleId, StateAddr, VariableMetadata};
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::fmt;
 use veryl_analyzer::ir::{Function, Statement, VarId, VarPath};
@@ -92,6 +92,10 @@ pub struct VerylFrontendLookup {
     /// path that is ambiguous within the module.
     pub module_var_path_index: HashMap<ModuleId, HashMap<VarPath, Option<VarId>>>,
     pub module_names: HashMap<ModuleId, StrId>,
+    /// Bidirectional boundary map between frontend source identities and the
+    /// dense source-independent state identities consumed by later phases.
+    pub source_to_state: HashMap<AbsoluteAddr, StateAddr>,
+    pub state_to_source: HashMap<StateAddr, AbsoluteAddr>,
 }
 
 impl fmt::Debug for VerylFrontendLookup {
@@ -99,6 +103,7 @@ impl fmt::Debug for VerylFrontendLookup {
         f.debug_struct("VerylFrontendLookup")
             .field("instances", &self.instance_module.len())
             .field("modules", &self.module_variables.len())
+            .field("projected_state_objects", &self.source_to_state.len())
             .finish_non_exhaustive()
     }
 }
@@ -138,6 +143,21 @@ impl VerylFrontendLookup {
         }
         result.join(".")
     }
+
+    pub fn get_state_path(&self, address: &StateAddr) -> String {
+        self.state_to_source
+            .get(address)
+            .map(|source| self.get_path(source))
+            .unwrap_or_else(|| address.to_string())
+    }
+
+    pub fn source_address(&self, address: &StateAddr) -> Option<AbsoluteAddr> {
+        self.state_to_source.get(address).copied()
+    }
+
+    pub fn state_address(&self, address: &AbsoluteAddr) -> Option<StateAddr> {
+        self.source_to_state.get(address).copied()
+    }
 }
 
 /// Veryl-owned source input for frontend testbench lowering.
@@ -175,6 +195,8 @@ mod tests {
         assert!(lookup.module_variables.is_empty());
         assert!(lookup.module_var_path_index.is_empty());
         assert!(lookup.module_names.is_empty());
+        assert!(lookup.source_to_state.is_empty());
+        assert!(lookup.state_to_source.is_empty());
     }
 
     #[test]

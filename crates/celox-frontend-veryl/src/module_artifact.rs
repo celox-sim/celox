@@ -2,8 +2,8 @@ use std::{collections::BTreeSet, fmt};
 
 use celox_design::{
     AbsoluteAddrBase, ElaboratedDesign, InitialStateValue, RegionedAbsoluteAddrBase,
-    RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, RuntimeSchema, TriggerSet,
-    VarAtomBase,
+    RegionedStateAddr, RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, RuntimeSchema,
+    StateAddr, TriggerSet, VarAtomBase,
 };
 use celox_sir::{ExecutionUnit, SIRInstruction, SirProgram};
 use celox_slt::{
@@ -100,10 +100,10 @@ impl fmt::Debug for RelocationModule {
 /// for diagnostics and public path lookup live only in `frontend_lookup`.
 #[derive(Clone)]
 pub struct ScheduledRtl {
-    pub sir: SirProgram<AbsoluteAddr, RegionedAbsoluteAddr>,
-    pub design: ElaboratedDesign<AbsoluteAddr>,
+    pub sir: SirProgram<StateAddr, RegionedStateAddr>,
+    pub design: ElaboratedDesign<StateAddr>,
     pub frontend_lookup: VerylFrontendLookup,
-    pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
+    pub runtime_schema: RuntimeSchema<StateAddr>,
     pub testbench_source: VerylTestbenchSource,
 }
 
@@ -171,7 +171,7 @@ impl ScheduledRtl {
 /// action provenance. These hints are kept beside, not inside, `SirProgram`.
 #[derive(Clone, Debug, Default)]
 pub struct FusedSirOptimizationHints {
-    pub direct_ff_writes: HashMap<AbsoluteAddr, Vec<VarAtomBase<RegionedAbsoluteAddr>>>,
+    pub direct_ff_writes: HashMap<StateAddr, Vec<VarAtomBase<RegionedStateAddr>>>,
 }
 
 #[derive(Clone, Debug)]

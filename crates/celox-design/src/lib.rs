@@ -426,8 +426,16 @@ impl fmt::Display for InstanceId {
 ///
 /// Frontends assign this identity during design projection. Source variable
 /// IDs must not cross into SIR optimization, layout, or backend code.
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub struct StateObjectId(pub u32);
+
+impl StateObjectId {
+    pub const fn from_raw(value: u32) -> Self {
+        Self(value)
+    }
+}
 
 impl fmt::Display for StateObjectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

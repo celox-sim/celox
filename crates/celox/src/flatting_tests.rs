@@ -1,6 +1,7 @@
 use crate::HashMap;
-use crate::ir::{AbsoluteAddr, InstanceId, InstancePath, ModuleId};
+use crate::ir::{InstanceId, InstancePath, ModuleId};
 use crate::parser::module::ModuleParser;
+use celox_frontend_veryl::AbsoluteAddr as FrontendAbsoluteAddr;
 use celox_slt::SLTNodeArena;
 use veryl_analyzer::{
     Analyzer, Context,
@@ -15,7 +16,7 @@ fn setup_to_flatting(
 ) -> (
     celox_frontend_veryl::RelocationModule,
     HashMap<ModuleId, crate::ir::SimModule>,
-    SLTNodeArena<crate::ir::AbsoluteAddr>,
+    SLTNodeArena<FrontendAbsoluteAddr>,
 ) {
     let metadata = Metadata::create_default("prj").unwrap();
     let parser = Parser::parse(code, &"").unwrap();
@@ -96,7 +97,7 @@ fn setup_to_flatting(
 
     // 1. Local boundaries of Top
     for (var_id, boundaries) in &sim_module.comb_boundaries {
-        let addr = AbsoluteAddr {
+        let addr = FrontendAbsoluteAddr {
             instance_id,
             var_id: *var_id,
         };
@@ -115,7 +116,7 @@ fn setup_to_flatting(
                 let target_glue_addr = logic_path.target.var().unwrap().id;
                 let target_addr = if let celox_frontend_veryl::GlueAddr::Child(v) = target_glue_addr
                 {
-                    AbsoluteAddr {
+                    FrontendAbsoluteAddr {
                         instance_id: child_id,
                         var_id: v,
                     }
@@ -126,7 +127,7 @@ fn setup_to_flatting(
                 for source in &logic_path.sources {
                     // source.id is GlueAddr::Parent usually
                     if let celox_frontend_veryl::GlueAddr::Parent(parent_var) = source.id {
-                        let parent_addr = AbsoluteAddr {
+                        let parent_addr = FrontendAbsoluteAddr {
                             instance_id,
                             var_id: parent_var,
                         };
@@ -159,7 +160,7 @@ fn setup_to_flatting(
     }
 
     // Call flatting
-    let mut arena = SLTNodeArena::<AbsoluteAddr>::new();
+    let mut arena = SLTNodeArena::<FrontendAbsoluteAddr>::new();
     let r = celox_frontend_veryl::flattening::flatten_module(
         sim_module,
         &path,
@@ -557,12 +558,15 @@ fn find_stores_to_var(
     instance_id: crate::ir::InstanceId,
     var_id: VarId,
 ) -> Vec<StoreInfo> {
+    let expected = program
+        .state_address_for_source(instance_id, var_id)
+        .expect("frontend state projection is complete");
     let mut stores = Vec::new();
     for unit in &program.sir.eval_comb {
         for block in unit.blocks.values() {
             for inst in &block.instructions {
                 if let crate::ir::SIRInstruction::Store(addr, _, bits, _, _, _) = inst {
-                    if addr.instance_id == instance_id && addr.var_id == var_id {
+                    if addr.absolute_addr() == expected {
                         stores.push(StoreInfo { bits: *bits });
                     }
                 }

@@ -403,7 +403,7 @@ fn record_uses(
 mod tests {
     use super::*;
     use crate::ir::{InstanceId, STABLE_REGION};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn test_addr() -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {

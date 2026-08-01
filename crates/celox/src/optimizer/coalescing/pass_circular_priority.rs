@@ -3704,8 +3704,8 @@ fn apply_last_payload_scan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use celox_design::StateObjectId as VarId;
     use num_traits::ToPrimitive;
-    use veryl_analyzer::ir::VarId;
 
     const LANES: usize = 4;
 

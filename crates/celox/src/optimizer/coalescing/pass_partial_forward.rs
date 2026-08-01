@@ -259,7 +259,7 @@ fn alloc_reg(
 mod tests {
     use super::*;
     use crate::ir::{AbsoluteAddr, InstanceId, STABLE_REGION};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn address() -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr::from_absolute_addr(

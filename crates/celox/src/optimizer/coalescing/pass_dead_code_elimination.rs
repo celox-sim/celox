@@ -22,7 +22,7 @@ mod tests {
         AbsoluteAddr, BasicBlock, BlockId, InstanceId, RegisterId, RegisterType, SIRInstruction,
         SIROffset, SIRTerminator, SIRValue, STABLE_REGION,
     };
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     #[test]
     fn removes_only_definitions_not_reachable_from_effects() {

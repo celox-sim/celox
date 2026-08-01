@@ -723,56 +723,6 @@ impl<A> SIRInstruction<A> {
     }
 }
 
-#[cfg(test)]
-mod program_mapping_tests {
-    use super::*;
-
-    #[test]
-    fn program_projection_maps_event_keys_and_every_state_operand() {
-        let block = BasicBlock {
-            id: BlockId(0),
-            params: Vec::new(),
-            instructions: vec![
-                SIRInstruction::Load(RegisterId(0), 10u32, SIROffset::Static(0), 8),
-                SIRInstruction::Commit(11u32, 12u32, SIROffset::Static(0), 8, Vec::new()),
-            ],
-            terminator: SIRTerminator::Return,
-        };
-        let unit = ExecutionUnit {
-            entry_block_id: BlockId(0),
-            blocks: [(BlockId(0), block)].into_iter().collect(),
-            register_map: [(
-                RegisterId(0),
-                RegisterType::Bit {
-                    width: 8,
-                    signed: false,
-                },
-            )]
-            .into_iter()
-            .collect(),
-        };
-        let program = SirProgram {
-            eval_comb: vec![unit.clone()],
-            eval_apply_ffs: [(1u32, vec![unit])].into_iter().collect(),
-            eval_comb_apply_ffs: HashMap::default(),
-            eval_only_ffs: HashMap::default(),
-            apply_ffs: HashMap::default(),
-        };
-
-        let mapped = program.into_map_addr(|event| event + 100, |state| state + 1000);
-        assert!(mapped.eval_apply_ffs.contains_key(&101));
-        assert!(matches!(
-            mapped.eval_comb[0].blocks[&BlockId(0)]
-                .instructions
-                .as_slice(),
-            [
-                SIRInstruction::Load(_, 1010, _, _),
-                SIRInstruction::Commit(1011, 1012, _, _, _)
-            ]
-        ));
-    }
-}
-
 fn visit_exact_zero_dependencies<A>(
     instruction: &SIRInstruction<A>,
     mut visit: impl FnMut(RegisterId),
@@ -902,4 +852,54 @@ pub fn collect_exact_zero_registers<A>(
         .into_iter()
         .filter_map(|(register, zero)| zero.then_some(register))
         .collect()
+}
+
+#[cfg(test)]
+mod program_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn program_projection_maps_event_keys_and_every_state_operand() {
+        let block = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![
+                SIRInstruction::Load(RegisterId(0), 10u32, SIROffset::Static(0), 8),
+                SIRInstruction::Commit(11u32, 12u32, SIROffset::Static(0), 8, Vec::new()),
+            ],
+            terminator: SIRTerminator::Return,
+        };
+        let unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks: [(BlockId(0), block)].into_iter().collect(),
+            register_map: [(
+                RegisterId(0),
+                RegisterType::Bit {
+                    width: 8,
+                    signed: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let program = SirProgram {
+            eval_comb: vec![unit.clone()],
+            eval_apply_ffs: [(1u32, vec![unit])].into_iter().collect(),
+            eval_comb_apply_ffs: HashMap::default(),
+            eval_only_ffs: HashMap::default(),
+            apply_ffs: HashMap::default(),
+        };
+
+        let mapped = program.into_map_addr(|event| event + 100, |state| state + 1000);
+        assert!(mapped.eval_apply_ffs.contains_key(&101));
+        assert!(matches!(
+            mapped.eval_comb[0].blocks[&BlockId(0)]
+                .instructions
+                .as_slice(),
+            [
+                SIRInstruction::Load(_, 1010, _, _),
+                SIRInstruction::Commit(1011, 1012, _, _, _)
+            ]
+        ));
+    }
 }

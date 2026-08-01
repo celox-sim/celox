@@ -569,10 +569,7 @@ fn initial_read_addresses(
     reads
         .into_iter()
         .filter(|id| root_variables.contains_key(id))
-        .map(|var_id| AbsoluteAddr {
-            instance_id: root_instance_id,
-            var_id,
-        })
+        .filter_map(|var_id| program.state_address_for_source(root_instance_id, var_id))
         .collect()
 }
 
@@ -2168,10 +2165,10 @@ impl ExprCompiler<'_> {
 
     fn state_location(&self, var_id: VarId, byte_offset: usize) -> StateLocation<AbsoluteAddr> {
         StateLocation {
-            address: AbsoluteAddr {
-                instance_id: self.root_instance_id,
-                var_id,
-            },
+            address: self
+                .program
+                .state_address_for_source(self.root_instance_id, var_id)
+                .expect("frontend state projection is complete"),
             byte_offset,
         }
     }
@@ -2231,10 +2228,7 @@ impl ExprCompiler<'_> {
         let vars = p.frontend.module_variables.get(&self.root_module_id)?;
         let info = vars.get(var_id)?;
         Some(SemanticSignal {
-            address: AbsoluteAddr {
-                instance_id: self.root_instance_id,
-                var_id: *var_id,
-            },
+            address: p.state_address_for_source(self.root_instance_id, *var_id)?,
             width: info.width,
         })
     }
@@ -2600,10 +2594,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         let mid = p.frontend.instance_module.get(rid)?;
         let vars = p.frontend.module_variables.get(mid)?;
         let info = vars.get(var_id)?;
-        let addr = AbsoluteAddr {
-            instance_id: *rid,
-            var_id: *var_id,
-        };
+        let addr = p.state_address_for_source(*rid, *var_id)?;
         Some((
             SemanticSignal {
                 address: addr,

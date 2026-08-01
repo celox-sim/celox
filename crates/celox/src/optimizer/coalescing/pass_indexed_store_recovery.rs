@@ -1096,7 +1096,7 @@ fn fits_width(value: &BigUint, width: usize) -> bool {
 mod tests {
     use super::*;
     use crate::ir::{InstanceId, STABLE_REGION, WORKING_REGION};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     const SELECTOR_WIDTH: usize = 3;
     const ELEMENT_WIDTH: usize = 64;

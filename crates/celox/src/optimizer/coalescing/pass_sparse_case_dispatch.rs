@@ -1890,7 +1890,7 @@ fn terminator_uses(term: &SIRTerminator) -> Vec<RegisterId> {
 mod tests {
     use super::*;
     use crate::ir::{InstanceId, SIRValue};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     struct FixtureBuilder {
         next_register: usize,

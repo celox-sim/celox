@@ -113,43 +113,33 @@ impl SimHandle {
 
         let mut layout_map: BTreeMap<String, serde_json::Value> = BTreeMap::new();
 
-        for (instance_id, module_id) in &self.program().frontend.instance_module {
-            let variables = &self.program().frontend.module_variables[module_id];
-            let path_index = &self.program().frontend.module_var_path_index[module_id];
+        for addr in self.program().design.state_objects.keys() {
+            let Some(source) = self.program().frontend.source_address(addr) else {
+                continue;
+            };
+            let module_id = self.program().frontend.instance_module[&source.instance_id];
+            let variables = &self.program().frontend.module_variables[&module_id];
+            let Some(info) = variables.get(&source.var_id) else {
+                continue;
+            };
+            if self.program().frontend.module_var_path_index[&module_id].get(&info.path)
+                == Some(&None)
+            {
+                continue;
+            }
 
-            for info in variables.values() {
-                if path_index.get(&info.path) == Some(&None) {
-                    continue;
-                }
-                let name = info
-                    .path
-                    .0
-                    .iter()
-                    .map(|s| {
-                        veryl_parser::resource_table::get_str_value(*s)
-                            .unwrap()
-                            .to_string()
-                    })
-                    .collect::<Vec<_>>()
-                    .join(".");
-
-                let addr = celox::AbsoluteAddr {
-                    instance_id: *instance_id,
-                    var_id: info.id,
-                };
-
-                if let Some(&offset) = self.layout().offsets.get(&addr) {
-                    let width = self.layout().widths.get(&addr).copied().unwrap_or(0);
-                    let byte_size = celox::get_byte_size(width);
-                    layout_map.insert(
-                        name,
-                        serde_json::json!({
-                            "offset": offset,
-                            "width": width,
-                            "byteSize": byte_size,
-                        }),
-                    );
-                }
+            if let Some(&offset) = self.layout().offsets.get(addr) {
+                let name = self.program().get_path(addr);
+                let width = self.layout().widths.get(addr).copied().unwrap_or(0);
+                let byte_size = celox::get_byte_size(width);
+                layout_map.insert(
+                    name,
+                    serde_json::json!({
+                        "offset": offset,
+                        "width": width,
+                        "byteSize": byte_size,
+                    }),
+                );
             }
         }
 

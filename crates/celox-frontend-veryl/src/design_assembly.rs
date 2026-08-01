@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use celox_design::{
     DomainKind, ElaboratedDesign, EventTopology, InitialStateValue, InstanceId, ModuleId,
-    PortTypeKind, RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite,
-    RuntimeSchema, STABLE_REGION, VarAtomBase, VariableMetadata,
+    PortTypeKind, RegionedStateAddr, RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventKind,
+    RuntimeEventSite, RuntimeSchema, STABLE_REGION, StateAddr, StateObjectId, VarAtomBase,
+    VariableMetadata,
 };
 use celox_sir::{BasicBlock, ExecutionUnit, SIRInstruction, SIRTerminator, SirProgram};
 use celox_slt::{
@@ -521,6 +522,8 @@ pub fn schedule_symbolic_rtl(
                 module_variables: err_vars,
                 module_var_path_index: err_path_idx,
                 module_names: module_names.clone(),
+                source_to_state: HashMap::default(),
+                state_to_source: HashMap::default(),
             };
             let source_locations =
                 scheduler_source_locations(&error, &module_ir, &instance_modules);
@@ -656,7 +659,7 @@ pub fn schedule_symbolic_rtl(
     });
 
     let (mod_vars, mod_path_idx) = module_variables(&module_ir, config)?;
-    let initial_memory_values = instance_modules
+    let initial_memory_values: Vec<InitialStateValue<AbsoluteAddr>> = instance_modules
         .iter()
         .flat_map(|(&instance_id, module_id)| {
             modules[module_id]
@@ -671,7 +674,7 @@ pub fn schedule_symbolic_rtl(
                 })
         })
         .collect();
-    let state_objects = instance_modules
+    let state_objects: HashMap<AbsoluteAddr, VariableMetadata> = instance_modules
         .iter()
         .flat_map(|(&instance_id, module_id)| {
             mod_vars[module_id].values().map(move |info| {
@@ -685,7 +688,7 @@ pub fn schedule_symbolic_rtl(
             })
         })
         .collect();
-    let runtime_comb_observers = comb_observers
+    let runtime_comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>> = comb_observers
         .iter()
         .map(|observer| RuntimeCombObserver {
             site_id: observer.site_id,
@@ -701,23 +704,113 @@ pub fn schedule_symbolic_rtl(
             .map(|m| m.functions.clone())
             .unwrap_or_default(),
     };
+    let source_sir = SirProgram {
+        eval_apply_ffs,
+        eval_comb_apply_ffs,
+        eval_only_ffs,
+        apply_ffs,
+        eval_comb,
+    };
+    let mut source_addresses = state_objects.keys().copied().collect::<Vec<_>>();
+    source_addresses.sort_unstable();
+    let mut source_to_state = HashMap::default();
+    let mut state_to_source = HashMap::default();
+    for (index, source) in source_addresses.into_iter().enumerate() {
+        let object = StateObjectId(u32::try_from(index).map_err(|_| {
+            ParserError::illegal_context(
+                "design state projection",
+                "flattened state object count exceeds u32",
+                None,
+            )
+        })?);
+        let state = StateAddr {
+            instance_id: source.instance_id,
+            var_id: object,
+        };
+        source_to_state.insert(source, state);
+        state_to_source.insert(state, source);
+    }
+    let project = |source: AbsoluteAddr| source_to_state[&source];
+    let project_regioned = |source: RegionedAbsoluteAddr| RegionedStateAddr {
+        region: source.region,
+        instance_id: source.instance_id,
+        var_id: source_to_state[&source.absolute_addr()].var_id,
+    };
+
+    let sir = source_sir.into_map_addr(project, project_regioned);
+    let state_objects = state_objects
+        .into_iter()
+        .map(|(address, metadata)| (project(address), metadata))
+        .collect();
+    let initial_state = initial_memory_values
+        .into_iter()
+        .map(|initial| InitialStateValue {
+            address: project(initial.address),
+            data: initial.data,
+        })
+        .collect();
+    let events = EventTopology {
+        aliases: clock_domains
+            .into_iter()
+            .map(|(alias, canonical)| (project(alias), project(canonical)))
+            .collect(),
+        ordered_events: topological_clocks.into_iter().map(project).collect(),
+        cascaded_events: cascaded_clocks.into_iter().map(project).collect(),
+        reset_clocks: reset_clock_map
+            .into_iter()
+            .map(|(reset, clock)| (project(reset), project(clock)))
+            .collect(),
+    };
+    let runtime_errors = runtime_errors
+        .into_iter()
+        .map(|(code, info)| {
+            (
+                code,
+                RuntimeErrorInfo {
+                    message: info.message,
+                    signals: info.signals.into_iter().map(project).collect(),
+                },
+            )
+        })
+        .collect();
+    let comb_observers = runtime_comb_observers
+        .into_iter()
+        .map(|observer| RuntimeCombObserver {
+            site_id: observer.site_id,
+            activation_group: observer.activation_group,
+            sensitivity: observer
+                .sensitivity
+                .into_iter()
+                .map(|atom| VarAtomBase {
+                    id: project(atom.id),
+                    access: atom.access,
+                })
+                .collect(),
+            written_inputs: observer.written_inputs.into_iter().map(project).collect(),
+        })
+        .collect();
+    let direct_ff_writes = fused_direct_ff_writes
+        .into_iter()
+        .map(|(event, writes)| {
+            (
+                project(event),
+                writes
+                    .into_iter()
+                    .map(|atom| VarAtomBase {
+                        id: project_regioned(atom.id),
+                        access: atom.access,
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+
     let scheduled = ScheduledRtl {
-        sir: SirProgram {
-            eval_apply_ffs,
-            eval_comb_apply_ffs,
-            eval_only_ffs,
-            apply_ffs,
-            eval_comb,
-        },
+        sir,
         design: ElaboratedDesign {
             state_objects,
-            events: EventTopology {
-                aliases: clock_domains,
-                ordered_events: topological_clocks,
-                cascaded_events: cascaded_clocks,
-                reset_clocks: reset_clock_map,
-            },
-            initial_state: initial_memory_values,
+            events,
+            initial_state,
         },
         frontend_lookup: VerylFrontendLookup {
             instance_ids: expanded,
@@ -725,11 +818,13 @@ pub fn schedule_symbolic_rtl(
             module_variables: mod_vars,
             module_var_path_index: mod_path_idx,
             module_names,
+            source_to_state,
+            state_to_source,
         },
         runtime_schema: RuntimeSchema {
             runtime_errors,
             runtime_event_sites,
-            comb_observers: runtime_comb_observers,
+            comb_observers,
             testbench_read_roots: Default::default(),
         },
         testbench_source,
@@ -737,9 +832,7 @@ pub fn schedule_symbolic_rtl(
 
     Ok(ScheduledRtlOutput {
         scheduled,
-        fused_optimization_hints: FusedSirOptimizationHints {
-            direct_ff_writes: fused_direct_ff_writes,
-        },
+        fused_optimization_hints: FusedSirOptimizationHints { direct_ff_writes },
     })
 }
 

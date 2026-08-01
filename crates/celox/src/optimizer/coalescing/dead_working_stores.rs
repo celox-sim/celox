@@ -316,7 +316,7 @@ pub(super) fn eliminate_dead_working_stores(eu: &mut ExecutionUnit<RegionedAbsol
 mod tests {
     use super::*;
     use crate::ir::{InstanceId, RegisterType};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn address(region: u32, instance: usize) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {

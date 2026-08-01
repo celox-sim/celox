@@ -310,7 +310,7 @@ fn fold_slices_of_concat(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
 mod tests {
     use super::*;
     use crate::ir::{BasicBlock, BlockId, InstanceId, SIRTerminator, STABLE_REGION};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn test_addr() -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {

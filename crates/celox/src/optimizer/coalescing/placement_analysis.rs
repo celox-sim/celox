@@ -1077,7 +1077,7 @@ mod tests {
     use crate::ir::{
         BasicBlock, BinaryOp, InstanceId, RegisterType, SIRValue, STABLE_REGION, UnaryOp,
     };
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn bit(width: usize) -> RegisterType {
         RegisterType::Bit {

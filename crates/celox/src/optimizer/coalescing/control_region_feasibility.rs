@@ -2382,7 +2382,7 @@ fn exact_case_guard(
 mod tests {
     use super::*;
     use crate::ir::{AbsoluteAddr, BasicBlock, InstanceId, RegisterType, SIROffset, STABLE_REGION};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn bit(width: usize) -> RegisterType {
         RegisterType::Bit {

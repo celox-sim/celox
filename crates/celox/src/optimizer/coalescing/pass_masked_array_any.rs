@@ -831,8 +831,8 @@ fn apply_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use celox_design::StateObjectId as VarId;
     use num_traits::ToPrimitive;
-    use veryl_analyzer::ir::VarId;
 
     const LANES: usize = 8;
     const ELEMENT_WIDTH: usize = 12;

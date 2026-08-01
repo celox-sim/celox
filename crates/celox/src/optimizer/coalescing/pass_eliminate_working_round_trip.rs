@@ -281,7 +281,7 @@ pub(crate) fn eliminate_working_round_trip(
 mod tests {
     use super::*;
     use crate::HashMap;
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn addr(region: u32) -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {

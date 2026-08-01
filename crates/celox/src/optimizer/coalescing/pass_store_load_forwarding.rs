@@ -534,7 +534,7 @@ fn dead_code_eliminate(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
 mod tests {
     use super::*;
     use crate::ir::{InstanceId, STABLE_REGION};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn address() -> RegionedAbsoluteAddr {
         RegionedAbsoluteAddr {

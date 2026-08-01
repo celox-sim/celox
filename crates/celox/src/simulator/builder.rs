@@ -941,7 +941,7 @@ fn run_dead_store_elimination(
     options: &SimulatorOptions,
 ) {
     use crate::HashSet;
-    use crate::ir::{AbsoluteAddr, InstancePath};
+    use crate::ir::InstancePath;
     let mut externally_live = HashSet::default();
 
     // Native testbench expressions bypass SIR and read simulator memory
@@ -965,10 +965,11 @@ fn run_dead_store_elimination(
                 if let Some(top_vars) = program.frontend.module_variables.get(&top_module_id) {
                     for info in top_vars.values() {
                         if info.var_kind.is_port() {
-                            externally_live.insert(AbsoluteAddr {
-                                instance_id: top_instance_id,
-                                var_id: info.id,
-                            });
+                            if let Some(address) =
+                                program.state_address_for_source(top_instance_id, info.id)
+                            {
+                                externally_live.insert(address);
+                            }
                         }
                     }
                 }
@@ -982,10 +983,11 @@ fn run_dead_store_elimination(
             if let Some(vars) = program.frontend.module_variables.get(&module_id) {
                 for info in vars.values() {
                     if info.var_kind.is_port() {
-                        externally_live.insert(AbsoluteAddr {
-                            instance_id,
-                            var_id: info.id,
-                        });
+                        if let Some(address) =
+                            program.state_address_for_source(instance_id, info.id)
+                        {
+                            externally_live.insert(address);
+                        }
                     }
                 }
             }

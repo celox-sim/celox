@@ -3512,7 +3512,7 @@ mod tests {
         MBlock, MemoryAliasRange, PhiNode, SpillDesc, VRegAllocator,
     };
     use crate::ir::{InstanceId, RegionedAbsoluteAddr, STABLE_REGION};
-    use veryl_analyzer::ir::VarId;
+    use celox_design::StateObjectId as VarId;
 
     fn function_with_values(count: usize) -> (MFunction, Vec<VReg>) {
         let mut vregs = VRegAllocator::new();

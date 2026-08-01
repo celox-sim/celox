@@ -14346,8 +14346,8 @@ mod tests {
     use super::*;
     use crate::backend::native::{emit, jit_mem::JitCode, mir_legalize, mir_opt, regalloc};
     use crate::ir::{AbsoluteAddr, BasicBlock, BlockId as SirBlockId, InstanceId, SIRValue};
+    use celox_design::StateObjectId as VarId;
     use num_bigint::BigUint;
-    use veryl_analyzer::ir::VarId;
 
     fn empty_layout() -> MemoryLayout {
         MemoryLayout {
@@ -14391,7 +14391,7 @@ mod tests {
             var_id: VarId::default(),
         };
         let mut output_var = VarId::default();
-        output_var.inc();
+        output_var.0 += 1;
         let output_abs = AbsoluteAddr {
             instance_id: InstanceId(0),
             var_id: output_var,
@@ -14734,7 +14734,7 @@ mod tests {
             var_id: VarId::default(),
         };
         let mut rhs_var = VarId::default();
-        rhs_var.inc();
+        rhs_var.0 += 1;
         let rhs_abs = AbsoluteAddr {
             instance_id: InstanceId(0),
             var_id: rhs_var,
@@ -15196,7 +15196,7 @@ mod tests {
             var_id: VarId::default(),
         };
         let mut array_var = VarId::default();
-        array_var.inc();
+        array_var.0 += 1;
         let array_abs = AbsoluteAddr {
             instance_id: InstanceId(0),
             var_id: array_var,
@@ -15335,13 +15335,13 @@ mod tests {
             var_id: VarId::default(),
         };
         let mut array_var = VarId::default();
-        array_var.inc();
+        array_var.0 += 1;
         let array_abs = AbsoluteAddr {
             instance_id: InstanceId(0),
             var_id: array_var,
         };
         let mut output_var = array_var;
-        output_var.inc();
+        output_var.0 += 1;
         let output_abs = AbsoluteAddr {
             instance_id: InstanceId(0),
             var_id: output_var,
@@ -15593,7 +15593,7 @@ mod tests {
             var_id: VarId::default(),
         };
         let mut output_var = VarId::default();
-        output_var.inc();
+        output_var.0 += 1;
         let output_abs = AbsoluteAddr {
             instance_id: InstanceId(0),
             var_id: output_var,
@@ -16534,9 +16534,9 @@ mod tests {
     fn static_commit_converts_between_strided_and_packed_array_storage() {
         let source_var = VarId::default();
         let mut packed_var = source_var;
-        packed_var.inc();
+        packed_var.0 += 1;
         let mut destination_var = packed_var;
-        destination_var.inc();
+        destination_var.0 += 1;
         let address = |var_id| AbsoluteAddr {
             instance_id: InstanceId(0),
             var_id,
@@ -16847,7 +16847,7 @@ mod tests {
     fn execute_unaligned_64_bit_load(dynamic: bool) -> u64 {
         let input_var = VarId::default();
         let mut output_var = input_var;
-        output_var.inc();
+        output_var.0 += 1;
         let input_abs = AbsoluteAddr {
             instance_id: InstanceId(0),
             var_id: input_var,
@@ -17445,7 +17445,7 @@ mod tests {
     fn narrowed_wide_binary_store_does_not_write_source_width() {
         let source_var = VarId::default();
         let mut destination_var = source_var;
-        destination_var.inc();
+        destination_var.0 += 1;
         let source_abs = AbsoluteAddr {
             instance_id: InstanceId(0),
             var_id: source_var,
@@ -18175,9 +18175,9 @@ mod tests {
 
         let input_var = VarId::default();
         let mut first_output_var = input_var;
-        first_output_var.inc();
+        first_output_var.0 += 1;
         let mut second_output_var = first_output_var;
-        second_output_var.inc();
+        second_output_var.0 += 1;
         let input_abs = AbsoluteAddr {
             instance_id: InstanceId(0),
             var_id: input_var,
@@ -18401,7 +18401,7 @@ mod tests {
 
         let input_var = VarId::default();
         let mut output_var = input_var;
-        output_var.inc();
+        output_var.0 += 1;
         let input_abs = AbsoluteAddr {
             instance_id: InstanceId(0),
             var_id: input_var,
