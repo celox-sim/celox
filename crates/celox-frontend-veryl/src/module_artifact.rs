@@ -5,7 +5,7 @@ use celox_design::{
     RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, RuntimeSchema, TriggerSet,
     VarAtomBase,
 };
-use celox_sir::{ExecutionUnit, SirProgram};
+use celox_sir::{ExecutionUnit, SIRInstruction, SirProgram};
 use celox_slt::{
     CombObserver, FfAccessSummary, GlueBlockBase, LogicPath, NodeId, SLTNodeArena, SymbolicStore,
 };
@@ -116,6 +116,54 @@ impl fmt::Debug for ScheduledRtl {
             .field("runtime_schema", &self.runtime_schema)
             .field("testbench_source", &self.testbench_source)
             .finish()
+    }
+}
+
+impl ScheduledRtl {
+    /// Attach runtime event IDs after fused SIR pre-optimization has removed
+    /// disposable state publications.
+    pub fn inject_triggers(&mut self) {
+        let mut trigger_map = HashMap::default();
+        for (id, address) in self.design.events.ordered_events.iter().enumerate() {
+            if let Some(metadata) = self.design.state_objects.get(address) {
+                trigger_map.entry(*address).or_insert_with(Vec::new).push(
+                    celox_design::TriggerIdWithKind {
+                        kind: metadata.kind,
+                        id,
+                    },
+                );
+            }
+        }
+
+        let events = &self.design.events;
+        for unit in self
+            .sir
+            .eval_apply_ffs
+            .values_mut()
+            .flatten()
+            .chain(self.sir.eval_comb_apply_ffs.values_mut().flatten())
+            .chain(self.sir.eval_only_ffs.values_mut().flatten())
+            .chain(self.sir.apply_ffs.values_mut().flatten())
+            .chain(self.sir.eval_comb.iter_mut())
+        {
+            for block in unit.blocks.values_mut() {
+                for instruction in &mut block.instructions {
+                    let (address, triggers) = match instruction {
+                        SIRInstruction::Store(address, _, _, _, triggers, _) => {
+                            (address.absolute_addr(), triggers)
+                        }
+                        SIRInstruction::Commit(_, address, .., triggers) => {
+                            (address.absolute_addr(), triggers)
+                        }
+                        _ => continue,
+                    };
+                    let canonical = events.canonical(address);
+                    if let Some(event_triggers) = trigger_map.get(&canonical) {
+                        *triggers = event_triggers.clone();
+                    }
+                }
+            }
+        }
     }
 }
 

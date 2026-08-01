@@ -739,52 +739,6 @@ fn apply_fused_optimization_hints(
     Ok(())
 }
 
-fn inject_triggers(scheduled: &mut celox_frontend_veryl::ScheduledRtl) {
-    let mut trigger_map: HashMap<AbsoluteAddr, Vec<crate::ir::TriggerIdWithKind>> =
-        HashMap::default();
-    for (id, address) in scheduled.design.events.ordered_events.iter().enumerate() {
-        if let Some(metadata) = scheduled.design.state_objects.get(address) {
-            trigger_map
-                .entry(*address)
-                .or_default()
-                .push(crate::ir::TriggerIdWithKind {
-                    kind: metadata.kind,
-                    id,
-                });
-        }
-    }
-
-    let events = &scheduled.design.events;
-    for unit in scheduled
-        .sir
-        .eval_apply_ffs
-        .values_mut()
-        .flatten()
-        .chain(scheduled.sir.eval_comb_apply_ffs.values_mut().flatten())
-        .chain(scheduled.sir.eval_only_ffs.values_mut().flatten())
-        .chain(scheduled.sir.apply_ffs.values_mut().flatten())
-        .chain(scheduled.sir.eval_comb.iter_mut())
-    {
-        for block in unit.blocks.values_mut() {
-            for instruction in &mut block.instructions {
-                let (address, triggers) = match instruction {
-                    crate::ir::SIRInstruction::Store(address, _, _, _, triggers, _) => {
-                        (address.absolute_addr(), triggers)
-                    }
-                    crate::ir::SIRInstruction::Commit(_, address, .., triggers) => {
-                        (address.absolute_addr(), triggers)
-                    }
-                    _ => continue,
-                };
-                let canonical = events.canonical(address);
-                if let Some(event_triggers) = trigger_map.get(&canonical) {
-                    *triggers = event_triggers.clone();
-                }
-            }
-        }
-    }
-}
-
 fn dump_addr_map_if_requested(program: &Program) {
     if std::env::var_os("CELOX_ADDR_MAP_DUMP").is_none() {
         return;
@@ -1583,7 +1537,7 @@ pub fn parse(
     }
     let mut scheduled = scheduled?;
     apply_fused_optimization_hints(&mut scheduled.scheduled, scheduled.fused_optimization_hints)?;
-    inject_triggers(&mut scheduled.scheduled);
+    scheduled.scheduled.inject_triggers();
     let scheduled = scheduled.scheduled;
     let (mut program, testbench_source) = Program::from_scheduled(scheduled);
     crate::testbench::project_observability(&mut program, &testbench_source);
