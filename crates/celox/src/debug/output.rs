@@ -1,10 +1,10 @@
 use crate::HashMap;
 /// Module for outputting SIR and SLT from Veryl source code
-use crate::cfg_order::dominance_order;
 use crate::ir::{
     ExecutionUnit, ModuleId, RegionedAbsoluteAddr, RegisterId, RuntimeProgram, SIRInstruction,
     SIRTerminator, SimModule, SirProgram,
 };
+use celox_analysis::cfg_order::dominance_order;
 
 use crate::debug::CompilationTrace;
 use veryl_parser::resource_table;

@@ -1428,13 +1428,14 @@ impl fmt::Display for MFunction {
             .enumerate()
             .map(|(index, block)| (block.id, index))
             .collect::<HashMap<_, _>>();
-        let order = crate::cfg_order::dominance_order(0usize, 0..self.blocks.len(), |index| {
-            self.blocks[index]
-                .successors()
-                .into_iter()
-                .filter_map(|id| block_indices.get(&id).copied())
-                .collect()
-        });
+        let order =
+            celox_analysis::cfg_order::dominance_order(0usize, 0..self.blocks.len(), |index| {
+                self.blocks[index]
+                    .successors()
+                    .into_iter()
+                    .filter_map(|id| block_indices.get(&id).copied())
+                    .collect()
+            });
         for index in order {
             let block = &self.blocks[index];
             writeln!(f, "{}:", block.id)?;

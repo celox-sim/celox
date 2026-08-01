@@ -1,5 +1,4 @@
 mod backend;
-mod cfg_order;
 mod debug;
 mod ir;
 mod optimizer;

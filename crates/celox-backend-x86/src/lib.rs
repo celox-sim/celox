@@ -32,10 +32,6 @@ pub mod ir {
     pub type SirProgram = celox_sir::SirProgram<AbsoluteAddr, RegionedAbsoluteAddr>;
 }
 
-pub mod cfg_order {
-    pub use celox_analysis::cfg_order::dominance_order;
-}
-
 pub mod timing {
     pub fn now() -> std::time::Instant {
         std::time::Instant::now()
