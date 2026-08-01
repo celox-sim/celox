@@ -95,6 +95,13 @@ pub enum MetadataError {
     #[diagnostic(code(MetadataError::MissingVersion), help(""))]
     #[error("Version field is required in Veryl.toml to publish")]
     MissingVersion,
+
+    #[diagnostic(code(MetadataError::UnsupportedTarget), help(""))]
+    #[error("{operation} is not supported on {target}")]
+    UnsupportedTarget {
+        operation: &'static str,
+        target: &'static str,
+    },
 }
 
 impl MetadataError {

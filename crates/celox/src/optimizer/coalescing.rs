@@ -38,6 +38,7 @@ pub(crate) fn remove_final_identity_alias_stores(
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn optimize_rooted_comb_memory(
     program: &mut Program,
     externally_live: &crate::HashSet<AbsoluteAddr>,

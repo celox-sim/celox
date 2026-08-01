@@ -7,12 +7,10 @@ use veryl_metadata::{ClockType, Metadata, ResetType};
 use veryl_parser::Parser;
 use veryl_parser::resource_table;
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::ir::Program;
 use crate::parser::BuildConfig;
-use crate::{
-    ParserError, SimulatorError, SimulatorErrorKind,
-    ir::{OptimizedSir, Program},
-    parser,
-};
+use crate::{ParserError, SimulatorError, SimulatorErrorKind, ir::OptimizedSir, parser};
 
 fn analyze(
     sources: &[(&str, &Path)],
@@ -856,6 +854,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_test_with_sim<B: crate::backend::SimBackend>(
     mut sim: Simulator<B>,
 ) -> Result<crate::testbench::TestResult, SimulatorError> {

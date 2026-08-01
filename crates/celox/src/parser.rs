@@ -357,8 +357,9 @@ pub fn parse(
     scheduled.scheduled.inject_triggers();
     let scheduled = scheduled.scheduled;
     let (mut program, testbench_source) = Program::from_scheduled(scheduled);
-    crate::testbench::project_observability(&mut program, &testbench_source);
-    program.testbench = crate::testbench::compile_semantic_testbench(&program, &testbench_source);
+    crate::testbench_compile::project_observability(&mut program, &testbench_source);
+    program.testbench =
+        crate::testbench_compile::compile_semantic_testbench(&program, &testbench_source);
     dump_addr_map_if_requested(&program);
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.pre_optimized_sir

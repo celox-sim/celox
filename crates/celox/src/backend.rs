@@ -15,6 +15,7 @@ pub use celox_backend_cranelift::{CraneliftOptLevel, CraneliftOptions, RegallocA
 pub use celox_backend_x86::X86BackendOptions;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use celox_runtime::RuntimeEventBuffer;
+#[cfg(not(target_arch = "wasm32"))]
 pub use celox_runtime::SimulatorErrorCode;
 pub use memory_layout::{LayoutRequirements, MemoryLayout, MemoryLayoutMode, get_byte_size};
 #[cfg(not(target_arch = "wasm32"))]

@@ -1,12 +1,15 @@
 use crate::HashMap;
 pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
-    AbsoluteAddrBase, InitialStateData, InitialStateWriteRun, InstanceId, ModuleId,
-    RegionedAbsoluteAddrBase, RegionedVarAddrBase, RuntimeEventKind, RuntimeEventSite,
+    AbsoluteAddrBase, InstanceId, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
     RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION,
 };
 #[cfg(test)]
 pub(crate) use celox_design::{BinaryOp, UnaryOp};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use celox_design::{
+    InitialStateData, InitialStateWriteRun, RuntimeEventKind, RuntimeEventSite,
+};
 pub use celox_frontend_veryl::{InstancePath, VariableInfo, VerylFrontendLookup};
 #[cfg(test)]
 pub(crate) use celox_sir::{BasicBlock, SIRValue, inline_single_predecessor_jumps};
@@ -35,7 +38,9 @@ pub enum AddrLookupError {
     AmbiguousPath { path: String },
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub type InitialMemoryWriteRun = InitialStateWriteRun;
+#[cfg(not(target_arch = "wasm32"))]
 pub type InitialMemoryData = InitialStateData;
 pub type RuntimeErrorInfo<Addr = AbsoluteAddr> = celox_design::RuntimeErrorInfo<Addr>;
 
@@ -101,6 +106,7 @@ impl LaidOutProgram {
         &self.layout
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn program_mut(&mut self) -> &mut Program {
         &mut self.program
     }

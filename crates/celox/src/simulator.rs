@@ -16,6 +16,7 @@ use crate::{
         RuntimeEventSite, SignalRef, VariableInfo,
     },
 };
+#[cfg(not(target_arch = "wasm32"))]
 use celox_testbench::{DisplayFormatArg, format_display_arg};
 #[cfg(not(target_arch = "wasm32"))]
 use num_bigint::BigUint;

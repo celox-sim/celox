@@ -10,6 +10,7 @@ mod simulation;
 mod simulator;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod testbench;
+mod testbench_compile;
 pub(crate) mod timing;
 #[cfg(not(target_arch = "wasm32"))]
 mod vcd {
@@ -49,6 +50,7 @@ pub use backend::{EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMod
 #[cfg(not(target_arch = "wasm32"))]
 pub use backend::{JitBackend, SimBackend};
 pub use celox_design::{ElaboratedDesign, EventTopology, RuntimeSchema};
+#[cfg(not(target_arch = "wasm32"))]
 pub use celox_macros::veryl_test;
 #[cfg(not(target_arch = "wasm32"))]
 pub use debug::CompilationTraceResult;

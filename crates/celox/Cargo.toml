@@ -13,7 +13,6 @@ veryl-analyzer        = { workspace = true }
 veryl-metadata        = { workspace = true }
 veryl-parser          = { workspace = true }
 veryl-path            = { workspace = true }
-celox-macros          = { path = "../celox-macros" }
 celox-analysis        = { path = "../celox-analysis" }
 celox-backend-wasm    = { path = "../celox-backend-wasm" }
 celox-design          = { path = "../celox-design" }
@@ -36,6 +35,7 @@ bit-set               = { workspace = true }
 itertools             = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+celox-macros          = { path = "../celox-macros" }
 celox-backend-cranelift = { path = "../celox-backend-cranelift" }
 chrono                = "0.4"
 libc                  = { workspace = true }

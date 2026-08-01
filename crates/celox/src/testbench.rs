@@ -11,15 +11,13 @@ use crate::backend::memory_layout::{
     RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
 };
 use crate::backend::traits::SimBackend;
-use crate::ir::{AbsoluteAddr, Program, SignalRef};
+use crate::ir::SignalRef;
 use crate::simulator::{RuntimeEvent, RuntimeFormatContext, Simulator};
-use celox_frontend_veryl::VerylTestbenchSource;
 pub use celox_testbench::SourceLocation;
 use celox_testbench::{
     DisplayFormatArg, ExecutableArgument, ExecutableAssertMessage, ExecutableClockCount,
     ExecutableLoopBound, ExecutableStatement, ExecutableTestbench, TestbenchOperator as Op,
-    TestbenchProgram, TestbenchStatement as GenericTestbenchStatement, TestbenchValue as TbValue,
-    format_display_arg,
+    TestbenchStatement as GenericTestbenchStatement, TestbenchValue as TbValue, format_display_arg,
 };
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
@@ -73,20 +71,6 @@ pub type LoopBound = ExecutableLoopBound;
 pub(crate) type TestbenchStatement<B> = ExecutableStatement<<B as SimBackend>::Event, SignalRef>;
 
 pub(crate) type CompiledAssertArg = ExecutableArgument;
-
-pub(crate) fn project_observability(program: &mut Program, source: &VerylTestbenchSource) {
-    let (sites, read_variables) = celox_frontend_veryl::collect_testbench_observability(source);
-    program.runtime_schema.runtime_event_sites.extend(sites);
-    program.runtime_schema.testbench_read_roots = read_variables
-        .into_iter()
-        .filter_map(|var_id| {
-            program
-                .frontend
-                .root_variable(var_id)
-                .map(|(address, _)| address)
-        })
-        .collect();
-}
 
 fn format_assert_arg(arg: &CompiledAssertArg, memory: *mut u8, spec: Option<char>) -> String {
     let value = arg.expr.eval_value(memory);
@@ -713,17 +697,6 @@ fn run_testbench_limited<B: SimBackend>(
         ticks: ctx.current_time,
         tick_limit_reached: ctx.tick_limit_reached,
     }
-}
-
-pub(crate) fn compile_semantic_testbench(
-    program: &Program,
-    source: &VerylTestbenchSource,
-) -> Option<TestbenchProgram<AbsoluteAddr>> {
-    celox_frontend_veryl::compile_semantic_testbench(
-        &program.frontend,
-        source,
-        program.runtime_schema.runtime_event_sites.len(),
-    )
 }
 
 /// Compile the root module's initial block into an executable native testbench.

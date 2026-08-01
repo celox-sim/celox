@@ -420,8 +420,16 @@ impl Metadata {
 
         if include_dependencies {
             if !self.build.exclude_std {
-                veryl_std::expand()?;
-                ret.append(&mut veryl_std::paths(&base_dst)?);
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    veryl_std::expand()?;
+                    ret.append(&mut veryl_std::paths(&base_dst)?);
+                }
+                #[cfg(target_family = "wasm")]
+                return Err(MetadataError::UnsupportedTarget {
+                    operation: "expanding veryl-std dependencies",
+                    target: "WebAssembly",
+                });
             }
 
             self.update_lockfile()?;
