@@ -1,0 +1,66 @@
+name: Veryl HEAD Integration
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "vendor/veryl-metadata/**"
+      - "scripts/use-veryl-head.mjs"
+      - ".github/workflows/veryl-head.yml"
+  schedule:
+    - cron: "17 1 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: veryl-head-integration
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    name: Update integration/veryl-head
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release app token
+        id: release-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - uses: actions/checkout@v7
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ steps.release-token.outputs.token }}
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Pin Veryl dependencies to upstream HEAD
+        shell: bash
+        run: |
+          veryl_revision="$(git ls-remote https://github.com/veryl-lang/veryl.git refs/heads/master | cut -f1)"
+          if [[ ! "$veryl_revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Could not resolve veryl-lang/veryl master" >&2
+            exit 1
+          fi
+          node scripts/use-veryl-head.mjs "$veryl_revision"
+          # Updating one changed Veryl root resolves the complete shared git
+          # dependency graph without also refreshing unrelated unlocked crates.
+          cargo update -p veryl-analyzer
+          echo "VERYL_REVISION=$veryl_revision" >> "$GITHUB_ENV"
+
+      - name: Update generated integration branch
+        shell: bash
+        run: |
+          git config user.name "celox-release-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C integration/veryl-head
+          git add Cargo.toml Cargo.lock
+          git commit -m "ci(veryl): test Veryl HEAD ${VERYL_REVISION:0:12}"
+          git push --force-with-lease origin HEAD:integration/veryl-head

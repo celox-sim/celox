@@ -24,3 +24,26 @@ Ask for direction only when a missing choice would materially change the result,
 or when the next action needs additional authority, is destructive, or affects
 systems outside the requested scope. Autonomy does not permit broadening the task,
 bypassing safety checks, or committing, pushing, or publishing unless requested.
+
+## Pull request titles
+
+Pull request titles must use Conventional Commits because release automation uses
+the title of each merged pull request to calculate the next version and changelog.
+Use this format:
+
+```text
+<type>(optional-scope)[!]: <description>
+```
+
+Allowed types are `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`,
+`refactor`, `revert`, and `test`. Scopes must be lowercase. Add `!` immediately
+before the colon for a breaking public API or compatibility change. Examples:
+
+```text
+fix(parser): preserve enum member widths
+feat(api)!: remove legacy simulator options
+```
+
+Before opening or updating a pull request, choose a compliant title. Do not use
+prefixes such as `[codex]`, sentence-style titles without a type, or merge-message
+titles such as `Merge pull request #123`.

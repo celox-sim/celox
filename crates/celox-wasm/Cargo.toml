@@ -1,6 +1,7 @@
 [package]
 name = "celox-wasm"
 version.workspace = true
+publish = false
 edition.workspace = true
 description = "WebAssembly bindings for the Celox HDL simulator"
 license.workspace = true

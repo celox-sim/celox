@@ -13,12 +13,14 @@ env:
 
 concurrency:
   group: bench
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   # ── Rust benchmarks (Criterion) ──
   bench-rust:
     runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_BENCH_DEBUG: "0"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -28,7 +30,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run Rust benchmarks
-        run: cargo bench --locked -p celox --bench simulation --bench overhead -- --output-format bencher | tee rust-output.txt
+        shell: bash
+        run: set -o pipefail && cargo bench --locked -p celox --bench simulation --bench overhead -- --output-format bencher | tee rust-output.txt
 
       - uses: actions/upload-artifact@v7
         with:
