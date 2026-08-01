@@ -1,0 +1,82 @@
+name: Sync Veryl Vendor
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    paths:
+      - Cargo.toml
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Refresh veryl-metadata
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.pull_request.user.login == 'renovate' ||
+      github.event.pull_request.user.login == 'renovate[bot]') &&
+      startsWith(github.event.pull_request.head.ref, 'renovate/')
+    runs-on: ubuntu-latest
+    steps:
+      # Only scripts from the trusted base revision run on the host. The PR
+      # checkout is treated as data, and Cargo processes it in a disposable
+      # container with no Actions secrets.
+      - name: Check out trusted automation
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: automation
+          persist-credentials: false
+
+      - name: Check out Renovate branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: target
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      - name: Refresh vendored metadata and lockfile
+        env:
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          version="$(node automation/scripts/veryl-vendor.mjs version target/Cargo.toml)"
+          archive="$RUNNER_TEMP/veryl-metadata.crate"
+          source_root="$RUNNER_TEMP/veryl-metadata-source"
+          lock_root="$(mktemp -d "$RUNNER_TEMP/veryl-lock.XXXXXX")"
+
+          curl -fsSL "https://crates.io/api/v1/crates/veryl-metadata/$version/download" -o "$archive"
+          mkdir -p "$source_root"
+          tar -xzf "$archive" -C "$source_root"
+          test -f "$source_root/veryl-metadata-$version/Cargo.toml"
+
+          rm -rf target/vendor/veryl-metadata
+          cp -R "$source_root/veryl-metadata-$version" target/vendor/veryl-metadata
+          node automation/scripts/veryl-vendor.mjs patch target/vendor/veryl-metadata/Cargo.toml
+          node automation/scripts/veryl-vendor.mjs check target
+
+          tar -C target --exclude=.git -cf - . | tar -C "$lock_root" -xf -
+          docker run --rm \
+            -v "$lock_root:/workspace" \
+            -w /workspace \
+            rust:1.97.1 \
+            cargo update -p veryl-metadata --precise "$version"
+          docker run --rm \
+            -v "$lock_root:/workspace" \
+            -w /workspace \
+            rust:1.97.1 \
+            cargo metadata --locked --format-version 1 --no-deps >/dev/null
+          cp "$lock_root/Cargo.lock" target/Cargo.lock
+          node automation/scripts/veryl-vendor.mjs check target
+
+          cd target
+          if git diff --quiet -- Cargo.lock vendor/veryl-metadata; then
+            echo "Vendored veryl-metadata is already synchronized."
+            exit 0
+          fi
+
+          git config user.name "celox-release-bot"
+          git config user.email "celox-release-bot@users.noreply.github.com"
+          git add Cargo.lock vendor/veryl-metadata
+          git commit -m "fix(veryl): sync vendored metadata $version"
+          git push origin "HEAD:$HEAD_BRANCH"

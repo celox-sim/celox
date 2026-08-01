@@ -1,6 +1,6 @@
 {
   "name": "@celox-sim/celox",
-  "version": "0.1.0",
+  "version": "0.1.34",
   "description": "TypeScript runtime for Celox HDL simulation",
   "type": "module",
   "main": "./dist/index.js",
