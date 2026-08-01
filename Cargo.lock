@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "celox-slt"
-version = "0.18.0"
+version = "0.0.0"
 dependencies = [
  "celox-analysis",
  "celox-design",
@@ -555,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "celox-testbench"
-version = "0.18.0"
+version = "0.0.0"
 dependencies = [
  "num-bigint",
 ]
