@@ -88,6 +88,14 @@ The facade retains compiler orchestration, runtime-event presentation, default b
 and public API re-exports. Runtime's normal dependency graph contains design, layout, and
 testbench contracts but no frontend, SLT, SIR optimizer, or concrete backend.
 
+Milestone 8 cleanup is in progress. Obsolete facade, SIR optimizer, Cranelift, Wasm, and x86
+compatibility namespaces have been removed. The x86 allocator no longer carries the unused
+allocation-editing IR, HomeGraph, CSSA normalizer, stable-slot incremental liveness engine, or
+parallel diagnostic allocator; production keeps one W/S planning and SSA reconstruction path,
+plus the independent final-MIR state-home verifier and exact sparse stack-slot coloring it uses.
+The remaining acceptance work is the supported-target workspace gate and the final release/LTO
+Heliodor generated-code and execution comparison.
+
 The baseline is the compiler pipeline on `perf/native-simulation-throughput` after PR #322. The
 split must preserve RTL semantics, generated-code quality, and the public `celox` API while making
 phase ownership explicit.
