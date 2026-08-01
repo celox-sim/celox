@@ -175,10 +175,7 @@ fn scheduler_source_locations(
 }
 
 pub(crate) fn flatten(
-    root_id: &ModuleId,
-    module_ir: &HashMap<ModuleId, &Module>,
-    modules: HashMap<ModuleId, SimModule>,
-    module_names: HashMap<ModuleId, StrId>,
+    symbolic: celox_frontend_veryl::SymbolicRtl<'_>,
     config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -193,6 +190,12 @@ pub(crate) fn flatten(
     trace_opts: &crate::debug::TraceOptions,
     mut trace: Option<&mut crate::debug::CompilationTrace>,
 ) -> Result<celox_frontend_veryl::ScheduledRtl, ParserError> {
+    let celox_frontend_veryl::SymbolicRtl {
+        modules,
+        module_ir,
+        module_names,
+        root_id,
+    } = symbolic;
     let flatten_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
     macro_rules! timed_sub {
         ($label:expr, $body:expr) => {{
@@ -214,7 +217,7 @@ pub(crate) fn flatten(
     }
 
     let (expanded, instance_modules) =
-        timed_sub!("expand_hierarchy", expand_hierarchy(root_id, &modules));
+        timed_sub!("expand_hierarchy", expand_hierarchy(&root_id, &modules));
     let global_boundaries = timed_sub!(
         "propagate_boundaries",
         propagate_boundaries(&expanded, &instance_modules, &modules)
@@ -399,7 +402,7 @@ pub(crate) fn flatten(
     })?;
 
     let ff_clock_recipes = build_ff_clock_recipes(
-        module_ir,
+        &module_ir,
         &modules,
         &instance_modules,
         &clock_domains,
@@ -472,7 +475,7 @@ pub(crate) fn flatten(
     ) {
         Ok(schedule) => schedule,
         Err(error) => {
-            let (err_vars, err_path_idx) = module_variables(module_ir, config).unwrap_or_default();
+            let (err_vars, err_path_idx) = module_variables(&module_ir, config).unwrap_or_default();
             let frontend_lookup = crate::ir::VerylFrontendLookup {
                 instance_ids: expanded.clone(),
                 instance_module: instance_modules.clone(),
@@ -480,7 +483,8 @@ pub(crate) fn flatten(
                 module_var_path_index: err_path_idx,
                 module_names: module_names.clone(),
             };
-            let source_locations = scheduler_source_locations(&error, module_ir, &instance_modules);
+            let source_locations =
+                scheduler_source_locations(&error, &module_ir, &instance_modules);
             let mut target_arena = SLTNodeArena::new();
             let error = error.map_addr(&global_arena, &mut target_arena, &|addr| {
                 frontend_lookup.get_path(addr)
@@ -613,7 +617,7 @@ pub(crate) fn flatten(
     };
 
     // Extract initial block statements from root module (for native testbenches)
-    let initial_statements = module_ir.get(root_id).and_then(|root_module| {
+    let initial_statements = module_ir.get(&root_id).and_then(|root_module| {
         let mut stmts = Vec::new();
         for decl in &root_module.declarations {
             if let Declaration::Initial(init_decl) = decl {
@@ -623,7 +627,7 @@ pub(crate) fn flatten(
         if stmts.is_empty() { None } else { Some(stmts) }
     });
 
-    let (mod_vars, mod_path_idx) = module_variables(module_ir, config)?;
+    let (mod_vars, mod_path_idx) = module_variables(&module_ir, config)?;
     let initial_memory_values = instance_modules
         .iter()
         .flat_map(|(&instance_id, module_id)| {
@@ -665,7 +669,7 @@ pub(crate) fn flatten(
     let testbench_source = celox_frontend_veryl::VerylTestbenchSource {
         initial_statements,
         functions: module_ir
-            .get(root_id)
+            .get(&root_id)
             .map(|m| m.functions.clone())
             .unwrap_or_default(),
     };
@@ -1613,10 +1617,7 @@ pub fn parse(
     let scheduled = timed_phase!(
         "flatten",
         flatten(
-            &result.root_id,
-            &result.module_ir,
-            result.modules,
-            result.module_names,
+            result,
             config,
             ignored_loops,
             true_loops,

@@ -367,10 +367,7 @@ fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::Program {
     let build_config = crate::parser::BuildConfig::default();
     let result = crate::parser::parse_ir(&ir, &build_config, &top_id).expect("Failed to parse IR");
     let scheduled = crate::parser::flatten(
-        &result.root_id,
-        &result.module_ir,
-        result.modules,
-        result.module_names,
+        result,
         &build_config,
         &[],
         &[],
