@@ -870,7 +870,9 @@ fn test_ff_runtime_reverse_step_matches_emitted_sv_order(sim) {
 }
 
 fn test_ff_runtime_reverse_min_i32_end_wraps_before_range_check(sim) {
-    // The upstream Veryl simulator currently skips this wrapped reverse range.
+    // veryl-simulator 0.20.2's non-JIT interpreter evaluates `end - 1` as i64
+    // without truncating it to the signed 32-bit loop-counter width. It therefore
+    // gets -2147483649 instead of wrapping to i32::MAX and skips the loop body.
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
