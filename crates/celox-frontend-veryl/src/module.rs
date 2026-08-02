@@ -773,6 +773,7 @@ fn build_parent_effect_glue(
                         local_inputs: Vec::new(),
                         order_before: HashSet::default(),
                         comb_capture_enable_sites: Vec::new(),
+                        comb_capture_enable_always: false,
                         pre_lower_nodes: Vec::new(),
                     },
                 ));
@@ -1230,6 +1231,7 @@ impl<'a> ModuleParser<'a> {
                 local_inputs: Vec::new(),
                 order_before: HashSet::default(),
                 comb_capture_enable_sites: Vec::new(),
+                comb_capture_enable_always: false,
                 pre_lower_nodes: Vec::new(),
             };
 
@@ -1447,6 +1449,7 @@ impl<'a> ModuleParser<'a> {
                     local_inputs: Vec::new(),
                     order_before: HashSet::default(),
                     comb_capture_enable_sites: Vec::new(),
+                    comb_capture_enable_always: false,
                     pre_lower_nodes: Vec::new(),
                     expr,
                 };
@@ -1509,6 +1512,7 @@ impl<'a> ModuleParser<'a> {
             for (_, path) in &mut output_ports[output_port_start..] {
                 path.comb_capture_enable_sites
                     .extend(output_effect_site_ids.iter().copied());
+                path.comb_capture_enable_always = !output_effect_site_ids.is_empty();
             }
             let mut remaining_written_accesses = destination_written_accesses.clone();
             subtract_composed_accesses(&mut remaining_written_accesses, &composed_output_accesses);

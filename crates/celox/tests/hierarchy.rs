@@ -559,6 +559,61 @@ assign mem_o = mem;
 
     }
 
+    fn test_instance_output_index_effect_triggers_when_two_state_parent_is_unchanged(sim) {
+        @omit_veryl;
+        @ignore_on(wasm);
+        @setup { let code = r#"
+module Child (mode: input logic<2>, o: output logic) {
+always_comb {
+case mode {
+2'd0: o = 1'b0;
+2'd1: o = 1'bx;
+default: o = 1'bz;
+}
+}
+}
+module Top (
+mode: input logic<2>,
+index: input logic,
+mem_o: output bit<2>
+) {
+function observe_index (x: input logic) -> logic {
+$display("index=%0d", x);
+return x;
+}
+var mem: bit<2>;
+inst child: Child (
+mode,
+o: mem[observe_index(index)]
+);
+assign mem_o = mem;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let mode = sim.signal("mode");
+    let index = sim.signal("index");
+    let mem_o = sim.signal("mem_o");
+    sim.modify(|io| {
+        io.set(mode, 0u8);
+        io.set(index, 0u8);
+    }).unwrap();
+    sim.drain_runtime_events();
+
+    assert_eq!(sim.get_as::<u8>(mem_o), 0);
+    sim.modify(|io| io.set(mode, 1u8)).unwrap();
+    let x_parent_value = sim.get_as::<u8>(mem_o);
+    sim.drain_runtime_events();
+    sim.modify(|io| io.set(mode, 2u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(mem_o), x_parent_value);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "index=0".to_string(),
+        }],
+    );
+
+    }
+
     fn test_unconnected_child_output_needs_no_parent_glue(sim) {
         @setup { let code = r#"
 module Child (

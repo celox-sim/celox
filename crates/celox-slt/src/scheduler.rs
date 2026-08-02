@@ -895,18 +895,19 @@ fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Cop
             };
             let width = 1 + target.access.msb - target.access.lsb;
             let offset = static_access_offset(&target.id, target.access, unpacked_element_widths);
-            let old_reg = if path.comb_capture_enable_sites.is_empty() {
-                None
-            } else {
-                let old_reg = builder.alloc_bit(width, false);
-                builder.emit(SIRInstruction::Load(
-                    old_reg,
-                    target.id,
-                    offset.clone(),
-                    width,
-                ));
-                Some(old_reg)
-            };
+            let old_reg =
+                if path.comb_capture_enable_sites.is_empty() || path.comb_capture_enable_always {
+                    None
+                } else {
+                    let old_reg = builder.alloc_bit(width, false);
+                    builder.emit(SIRInstruction::Load(
+                        old_reg,
+                        target.id,
+                        offset.clone(),
+                        width,
+                    ));
+                    Some(old_reg)
+                };
             builder.emit(SIRInstruction::Store(
                 target.id,
                 offset,
@@ -915,10 +916,22 @@ fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Cop
                 Vec::new(),
                 Vec::new(),
             ));
-            if let Some(old) = old_reg {
+            if !path.comb_capture_enable_sites.is_empty() {
+                let (old, new) = if path.comb_capture_enable_always {
+                    let old = builder.alloc_bit(1, false);
+                    let new = builder.alloc_bit(1, false);
+                    builder.emit(SIRInstruction::Imm(old, SIRValue::new(0u8)));
+                    builder.emit(SIRInstruction::Imm(new, SIRValue::new(1u8)));
+                    (old, new)
+                } else {
+                    (
+                        old_reg.expect("changed capture enable loads the old value"),
+                        result_reg,
+                    )
+                };
                 builder.emit(SIRInstruction::CombCaptureEnableIfChanged {
                     old,
-                    new: result_reg,
+                    new,
                     sites: path.comb_capture_enable_sites.clone(),
                 });
             }
@@ -3550,9 +3563,18 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                         Vec::new(),
                     ));
                     if !path.comb_capture_enable_sites.is_empty() {
+                        let (old, new) = if path.comb_capture_enable_always {
+                            let old = builder.alloc_bit(1, false);
+                            let new = builder.alloc_bit(1, false);
+                            builder.emit(SIRInstruction::Imm(old, SIRValue::new(0u8)));
+                            builder.emit(SIRInstruction::Imm(new, SIRValue::new(1u8)));
+                            (old, new)
+                        } else {
+                            (old_val_reg, new_val_reg)
+                        };
                         builder.emit(SIRInstruction::CombCaptureEnableIfChanged {
-                            old: old_val_reg,
-                            new: new_val_reg,
+                            old,
+                            new,
                             sites: path.comb_capture_enable_sites.clone(),
                         });
                     }
@@ -3860,6 +3882,7 @@ mod tests {
             local_inputs: Vec::new(),
             order_before: crate::HashSet::default(),
             comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
             pre_lower_nodes: Vec::new(),
             expr,
         }
@@ -3909,6 +3932,7 @@ mod tests {
                 local_inputs: Vec::new(),
                 order_before: crate::HashSet::default(),
                 comb_capture_enable_sites: Vec::new(),
+                comb_capture_enable_always: false,
                 pre_lower_nodes: Vec::new(),
                 expr,
             });
@@ -4057,6 +4081,7 @@ mod tests {
                 local_inputs: Vec::new(),
                 order_before: crate::HashSet::default(),
                 comb_capture_enable_sites: Vec::new(),
+                comb_capture_enable_always: false,
                 pre_lower_nodes: Vec::new(),
                 expr,
             });
@@ -4320,6 +4345,7 @@ mod tests {
             local_inputs: Vec::new(),
             order_before: crate::HashSet::default(),
             comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
             pre_lower_nodes: Vec::new(),
             expr: group,
         }
@@ -4801,6 +4827,7 @@ mod tests {
             local_inputs: Vec::new(),
             order_before: crate::HashSet::default(),
             comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
             pre_lower_nodes: Vec::new(),
             expr,
         };

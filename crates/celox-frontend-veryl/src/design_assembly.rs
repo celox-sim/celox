@@ -1715,6 +1715,7 @@ fn build_comb_observer_capture_paths(
                 local_inputs: observer.local_inputs.clone(),
                 order_before: order_before.clone(),
                 comb_capture_enable_sites: Vec::new(),
+                comb_capture_enable_always: false,
                 pre_lower_nodes: Vec::new(),
                 expr: loop_runner,
             });
@@ -1746,6 +1747,7 @@ fn build_comb_observer_capture_paths(
                     local_inputs: observer.local_inputs.clone(),
                     order_before: trigger_order_before,
                     comb_capture_enable_sites: Vec::new(),
+                    comb_capture_enable_always: false,
                     pre_lower_nodes: Vec::new(),
                     expr: loop_runner,
                 });
@@ -1826,6 +1828,7 @@ fn build_comb_observer_capture_paths(
             local_inputs: observer.local_inputs.clone(),
             order_before,
             comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
             pre_lower_nodes: Vec::new(),
             expr,
         });
@@ -1883,6 +1886,7 @@ fn build_comb_observer_capture_paths(
                     local_inputs: member.local_inputs.clone(),
                     order_before: trigger_order_before.clone(),
                     comb_capture_enable_sites: Vec::new(),
+                    comb_capture_enable_always: false,
                     pre_lower_nodes: Vec::new(),
                     expr: member_expr,
                 });

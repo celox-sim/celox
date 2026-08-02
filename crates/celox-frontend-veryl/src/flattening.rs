@@ -233,6 +233,7 @@ fn atomize_logic_paths(
                     local_inputs: path.local_inputs.clone(),
                     order_before: path.order_before.clone(),
                     comb_capture_enable_sites: path.comb_capture_enable_sites.clone(),
+                    comb_capture_enable_always: path.comb_capture_enable_always,
                     pre_lower_nodes: path.pre_lower_nodes.clone(),
                     expr: merged_expr,
                 });
@@ -877,6 +878,7 @@ module Top (
             local_inputs: Vec::new(),
             order_before: crate::HashSet::default(),
             comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
             pre_lower_nodes: Vec::new(),
             expr: expression,
         };
@@ -943,6 +945,7 @@ module Top (
             local_inputs: Vec::new(),
             order_before: crate::HashSet::default(),
             comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
             pre_lower_nodes: Vec::new(),
             expr: expression,
         };
@@ -1049,6 +1052,7 @@ module Top (
             local_inputs: Vec::new(),
             order_before: crate::HashSet::default(),
             comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
             pre_lower_nodes: Vec::new(),
             expr: expression,
         };
