@@ -399,7 +399,20 @@ fn collect_function_call_effects(
     // writebacks without evaluating a destination effect twice.
     for (arg_id, destinations) in super::ordered_function_outputs(function, &function_body, call)? {
         let mut destination_store = actual_store.clone();
+        let destination_width = checked_destination_width(
+            module,
+            destinations,
+            "function output destination",
+            destinations.first().map(|destination| &destination.token),
+        )?;
+        let (output_expr, output_sources, output_is_2state) =
+            super::function_output_value(module, arg_id, call, &final_local_store, arena)?;
+        let output_signed = expr::is_signed(module, output_expr, arena);
+        let output_expr =
+            coerce_node_width(arena, output_expr, Some(destination_width), output_signed)?;
+        let mut current_offset = 0;
         for destination in destinations.iter().rev() {
+            let mut collection_store = destination_store.clone();
             for expression in destination
                 .index
                 .0
@@ -415,12 +428,44 @@ fn collect_function_call_effects(
             {
                 collect_and_advance_expression(
                     module,
-                    &mut destination_store,
+                    &mut collection_store,
                     expression,
                     arena,
                     collector,
                 )?;
             }
+
+            let part_width = crate::bitaccess::get_access_width(
+                module,
+                destination.id,
+                &destination.index,
+                &destination.select,
+            )?;
+            let (slice_access, next_offset) = checked_assignment_slice(
+                current_offset,
+                part_width,
+                destination_width,
+                destination,
+            )?;
+            let destination_expr = if destinations.len() == 1 {
+                output_expr
+            } else {
+                arena.alloc(SLTNode::Slice {
+                    expr: output_expr,
+                    access: slice_access,
+                })?
+            };
+            (destination_store, _) = super::apply_assignment_destination(
+                module,
+                destination_store,
+                BoundaryMap::default(),
+                destination,
+                destination_expr,
+                output_sources.clone(),
+                output_is_2state,
+                arena,
+            )?;
+            current_offset = next_offset;
         }
         (actual_store, _) = super::apply_function_output(
             module,

@@ -903,6 +903,48 @@ fn test_comb_void_function_call_in_expression_is_illegal_context() {
 }
 
 #[test]
+fn test_instance_input_rejects_function_output_call() {
+    let code = r#"
+        module Child (
+            i: input logic,
+            o: output logic,
+        ) {
+            assign o = i;
+        }
+
+        module Top (
+            a: input logic,
+            o: output logic,
+        ) {
+            function write_seen (
+                x: input logic,
+                seen: output logic,
+            ) -> logic {
+                seen = x;
+                return x;
+            }
+
+            var seen: logic;
+            inst child: Child (
+                i: write_seen(a, seen),
+                o,
+            );
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("output calls in read-only instance connections must be rejected");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 60);
+            assert_eq!(*feature, "function call with output arguments");
+        }
+        kind => panic!("expected unsupported output call diagnostic, got {kind:?}"),
+    }
+}
+
+#[test]
 fn test_ff_void_function_call_in_expression_is_illegal_context() {
     let code = r#"
         module Top (clk: input clock, q: output logic) {

@@ -4296,6 +4296,36 @@ module Top (trigger: input logic, out: output logic<2>) {
     }]);
 }
 
+fn test_comb_function_output_concat_observes_prior_destination_write(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (trigger: input logic, out: output logic<2>) {
+    function observe (x: input logic) -> logic {
+        $display("function_concat_seen=%0d", x);
+        return x;
+    }
+    function poke (dst: output logic<2>) {
+        dst = 2'b11;
+    }
+    var data: logic<2>;
+    var tmp: logic;
+    always_comb {
+        data = 2'b00;
+        tmp = trigger;
+        poke({data[observe(tmp)], tmp});
+        out = data;
+    }
+}
+"#, "Top");
+
+    let out = sim.signal("out");
+    assert_eq!(sim.get_as::<u8>(out), 2);
+    assert_eq!(sim.drain_runtime_events(), vec![celox::RuntimeEvent::Display {
+        message: "function_concat_seen=1".to_string(),
+    }]);
+}
+
 }
 
 #[test]

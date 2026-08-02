@@ -2656,6 +2656,27 @@ pub(super) fn apply_function_output(
     final_local_store: &SymbolicStore<VarId>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    let (output_expr, output_sources, output_is_2state) =
+        function_output_value(module, arg_id, call, final_local_store, arena)?;
+    assign_node_to_dsts(
+        module,
+        store,
+        boundaries,
+        dsts,
+        output_expr,
+        output_sources,
+        output_is_2state,
+        arena,
+    )
+}
+
+pub(super) fn function_output_value(
+    module: &Module,
+    arg_id: VarId,
+    call: &veryl_analyzer::ir::FunctionCall,
+    final_local_store: &SymbolicStore<VarId>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(NodeId, HashSet<VarAtomBase<VarId>>, bool), ParserError> {
     let formal = module.variables.get(&arg_id).ok_or_else(|| {
         ParserError::illegal_context(
             "function output value",
@@ -2683,16 +2704,7 @@ pub(super) fn apply_function_output(
         range_store_error("function output value", error, Some(&call.comptime.token))
     })?;
     let (output_expr, output_sources) = combine_parts_with_default(arg_id, 0, parts, arena)?;
-    assign_node_to_dsts(
-        module,
-        store,
-        boundaries,
-        dsts,
-        output_expr,
-        output_sources,
-        formal.r#type.is_2state(),
-        arena,
-    )
+    Ok((output_expr, output_sources, formal.r#type.is_2state()))
 }
 
 struct DynamicSelectOffset {
