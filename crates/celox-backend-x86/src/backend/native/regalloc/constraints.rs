@@ -101,6 +101,15 @@ impl ConstraintModel {
                 error.to_string(),
             )
         })?;
+        celox_backend_common::regalloc::analyze_live_intervals(&facts).map_err(|error| {
+            ConstraintError::new(
+                "CONSTRAINT.LIVE_INTERVALS",
+                error.block.map(|block| func.blocks[block].id),
+                error.instruction,
+                error.values,
+                error.message,
+            )
+        })?;
         let instructions = facts
             .blocks
             .iter()

@@ -5,12 +5,12 @@
 //! legacy bridge, but that result is independently checked here against the
 //! AArch64 MIR and register file before emission.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fmt;
 
 use celox_backend_common::regalloc::{
     BlockAllocationFacts, FunctionAllocationFacts, InstructionAllocationFacts, PhiAllocationFacts,
-    PhiSource, analyze_next_uses,
+    PhiSource, analyze_live_intervals,
 };
 
 use crate::Arm64Reg;
@@ -167,7 +167,7 @@ pub(crate) fn build_facts(function: &MFunction) -> Result<AllocationFacts, Targe
 
 pub(crate) fn verify_allocated(function: &AllocatedFunction) -> Result<(), TargetRegallocError> {
     let facts = build_facts(&function.function)?;
-    let next_use = analyze_next_uses(&facts)
+    let intervals = analyze_live_intervals(&facts)
         .map_err(|error| TargetRegallocError::InvalidFacts(error.to_string()))?;
 
     for block in &function.function.blocks {
@@ -191,48 +191,46 @@ pub(crate) fn verify_allocated(function: &AllocatedFunction) -> Result<(), Targe
             }
         }
     }
-    for (block_index, block) in function.function.blocks.iter().enumerate() {
-        let mut live = next_use.exit_distances[block_index]
-            .keys()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        verify_live_registers(function, block.id, block.insts.len(), live.iter().copied())?;
-        for (instruction_index, instruction) in block.insts.iter().enumerate().rev() {
-            if let Some(definition) = instruction.def() {
-                live.remove(&definition);
-            }
-            live.extend(instruction.uses());
-            verify_live_registers(function, block.id, instruction_index, live.iter().copied())?;
-        }
-    }
-    Ok(())
+    verify_interval_registers(function, &intervals)
 }
 
-fn verify_live_registers(
+fn verify_interval_registers(
     function: &AllocatedFunction,
-    block: BlockId,
-    instruction: usize,
-    live: impl IntoIterator<Item = VReg>,
+    intervals: &celox_backend_common::regalloc::LiveIntervals<VReg>,
 ) -> Result<(), TargetRegallocError> {
-    let mut occupants = HashMap::<Arm64Reg, VReg>::new();
-    for value in live {
+    let mut segments = Vec::new();
+    for (&value, interval) in intervals.iter() {
         let Some(register) = function.assignment.get(&value) else {
-            // A phi edge may be materialized directly from stack or an
-            // immediate and therefore have no resident register at the block
-            // boundary. Instruction operands were checked separately above.
+            // Legacy edge values may reside in a stack home or immediate.
             continue;
         };
-        if let Some(left) = occupants.insert(register, value)
+        segments.extend(
+            interval
+                .segments
+                .iter()
+                .map(|segment| (segment.block, register, segment.start, segment.end, value)),
+        );
+    }
+    segments.sort_unstable_by_key(|&(block, register, start, end, value)| {
+        (block, register, start, end, value)
+    });
+    let mut previous = None;
+    for (block, register, start, end, value) in segments {
+        if let Some((left_block, left_register, _, left_end, left)) = previous
+            && left_block == block
+            && left_register == register
+            && start < left_end
             && left != value
         {
             return Err(TargetRegallocError::RegisterConflict {
-                block,
-                instruction,
+                block: function.function.blocks[block].id,
+                instruction: usize::try_from(start / 3).unwrap_or(usize::MAX),
                 left,
                 right: value,
                 register,
             });
         }
+        previous = Some((block, register, start, end, value));
     }
     Ok(())
 }
@@ -306,7 +304,7 @@ mod tests {
         assert_eq!(facts.blocks[3].phis[0].destination, VReg(3));
         assert_eq!(facts.blocks[3].phis[0].sources[0].predecessor, 1);
         assert_eq!(facts.blocks[3].phis[0].sources[1].predecessor, 2);
-        analyze_next_uses(&facts).unwrap();
+        analyze_live_intervals(&facts).unwrap();
     }
 
     #[test]

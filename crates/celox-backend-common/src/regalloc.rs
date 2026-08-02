@@ -7,6 +7,12 @@ use std::hash::Hash;
 
 use fxhash::{FxHashMap, FxHashSet};
 
+mod live_interval;
+
+pub use live_interval::{
+    LiveInterval, LiveIntervalError, LiveIntervals, LiveSegment, analyze_live_intervals,
+};
+
 /// A physical register that can be stored in a compact register set.
 pub trait MachineRegister: Copy + Eq + Hash + Ord + fmt::Debug {
     /// Stable target-defined register number in the range `0..64`.
