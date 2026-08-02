@@ -5052,6 +5052,16 @@ impl SLTToSIRLowerer {
         }
     }
 
+    fn truncate_usize_to_width(value: usize, width: usize) -> usize {
+        if width >= usize::BITS as usize {
+            value
+        } else if width == 0 {
+            0
+        } else {
+            value & ((1usize << width) - 1)
+        }
+    }
+
     fn bigint_payload(value: &BigInt, width: usize) -> BigUint {
         let modulus = BigInt::from(1u8) << width;
         let mut wrapped = value % &modulus;
@@ -5919,7 +5929,11 @@ impl SLTToSIRLowerer {
             let current_step =
                 self.cast_reg_width_ext(builder, body_counter, step_width, loop_signed);
             let step_reg = builder.alloc_bit(step_width, loop_signed);
-            builder.emit(SIRInstruction::Imm(step_reg, SIRValue::new(step as u64)));
+            let step_value = Self::truncate_usize_to_width(step, step_width);
+            builder.emit(SIRInstruction::Imm(
+                step_reg,
+                SIRValue::new(step_value as u64),
+            ));
             let next_step = builder.alloc_bit(step_width, loop_signed);
             let op = match step_op {
                 SLTStepOp::Add => BinaryOp::Add,

@@ -466,11 +466,17 @@ fn test_ff_runtime_for_bitwise_steps(sim) {
                 q_or = 0;
                 for i in 3..=or_end step |= 6 {
                     q_or = i as 8;
+                    if i == or_end {
+                        break;
+                    }
                 }
 
                 q_xor = 0;
                 for i in 3..=xor_end step ^= 6 {
                     q_xor = i as 8;
+                    if i == xor_end {
+                        break;
+                    }
                 }
             }
         }
@@ -493,7 +499,8 @@ fn test_ff_runtime_for_bitwise_steps(sim) {
 }
 
 fn test_ff_signed_xor_step_uses_loop_counter_width(sim) {
-    // The Veryl reference simulator also evaluates this update at the widened bound width.
+    // The Veryl simulator currently converts the signed dynamic start bound to an
+    // unsigned runtime counter and executes zero iterations.
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
@@ -506,6 +513,9 @@ fn test_ff_signed_xor_step_uses_loop_counter_width(sim) {
                 q = 0;
                 for i in wide_start..=wide_end step ^= 2147483648 {
                     q = i;
+                    if i == 2147483640 {
+                        break;
+                    }
                 }
             }
         }
@@ -523,6 +533,106 @@ fn test_ff_signed_xor_step_uses_loop_counter_width(sim) {
     .unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 0x7fff_fff8u32.into());
+}
+
+fn test_ff_i32_bitwise_steps_discard_bits_above_the_counter_width(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            or_end: input signed logic<128>,
+            xor_end: input signed logic<128>,
+            q_or: output signed logic<32>,
+            q_xor: output signed logic<32>
+        ) {
+            always_ff (clk) {
+                q_or = 0;
+                for i in 3..=or_end step |= 4294967302 {
+                    q_or = i;
+                    if i == 7 {
+                        break;
+                    }
+                }
+
+                q_xor = 0;
+                for i in 3..=xor_end step ^= 4294967302 {
+                    q_xor = i;
+                    if i == 5 {
+                        break;
+                    }
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let or_end = sim.signal("or_end");
+    let xor_end = sim.signal("xor_end");
+    let q_or = sim.signal("q_or");
+    let q_xor = sim.signal("q_xor");
+
+    sim.modify(|io| {
+        io.set_wide(or_end, BigUint::from(7u8));
+        io.set_wide(xor_end, BigUint::from(5u8));
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_or), 7u32.into());
+    assert_eq!(sim.get(q_xor), 5u32.into());
+}
+
+fn test_ff_i32_xor_step_with_only_high_bits_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            end_bound: input logic<32>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in 3..end_bound step ^= 4294967296 {
+                    q = i;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let end_bound = sim.signal("end_bound");
+
+    sim.modify(|io| io.set(end_bound, 4u32)).unwrap();
+    assert_eq!(
+        sim.tick(clk).unwrap_err().to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
+    );
+}
+
+fn test_ff_i32_or_step_with_only_existing_low_bits_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            end_bound: input logic<32>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in 3..end_bound step |= 4294967299 {
+                    q = i;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let end_bound = sim.signal("end_bound");
+
+    sim.modify(|io| io.set(end_bound, 4u32)).unwrap();
+    assert_eq!(
+        sim.tick(clk).unwrap_err().to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
+    );
 }
 
 fn test_ff_runtime_for_break(sim) {

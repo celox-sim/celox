@@ -37,7 +37,7 @@ enum LoopBoundStatus {
 #[cfg(test)]
 mod loop_bound_status_tests {
     use super::{FfParser, LoopBoundStatus};
-    use veryl_analyzer::ir::ForBound;
+    use veryl_analyzer::ir::{ForBound, Op};
 
     #[test]
     fn allows_exclusive_upper_sentinel() {
@@ -53,6 +53,36 @@ mod loop_bound_status_tests {
             FfParser::loop_bound_status(&ForBound::Const(257), 8, false),
             Some(LoopBoundStatus::OutOfRange)
         );
+    }
+
+    #[test]
+    fn bitwise_stall_checks_use_the_i32_loop_counter_width() {
+        let Some(above_i32) = 1usize.checked_shl(32) else {
+            return;
+        };
+
+        for (op, step, start, expected) in [
+            (Op::BitXor, above_i32, Some(0), true),
+            (Op::BitXor, above_i32 | 1, Some(0), false),
+            (Op::BitOr, above_i32, Some(3), true),
+            (Op::BitOr, above_i32 | 3, Some(3), true),
+            (Op::BitOr, above_i32 | 4, Some(3), false),
+            (Op::BitOr, above_i32 | 3, Some(above_i32 | 3), true),
+        ] {
+            assert_eq!(
+                FfParser::step_can_stall(false, Some(op), step, start, 32),
+                expected,
+                "op={op:?}, step={step:#x}, start={start:?}",
+            );
+        }
+
+        assert!(!FfParser::step_can_stall(
+            false,
+            Some(Op::BitXor),
+            above_i32,
+            Some(0),
+            33,
+        ));
     }
 }
 
@@ -1063,6 +1093,16 @@ impl<'a> FfParser<'a> {
         }
     }
 
+    fn truncate_usize_to_width(value: usize, width: usize) -> usize {
+        if width >= usize::BITS as usize {
+            value
+        } else if width == 0 {
+            0
+        } else {
+            value & ((1usize << width) - 1)
+        }
+    }
+
     fn emit_loop_value_fits<A>(
         ir_builder: &mut SIRBuilder<A>,
         value_reg: RegisterId,
@@ -1294,13 +1334,14 @@ impl<'a> FfParser<'a> {
         let range_message = format!(
             "For loop value exceeds loop variable range in always_ff (loop variable `{loop_var_name}`)"
         );
+        let loop_width = base_loop_width.max(1);
 
         let const_empty = Self::const_range_is_empty(reverse, start_const, end_const, inclusive);
         let const_singleton =
             Self::const_range_is_singleton(reverse, start_const, end_const, inclusive);
         if start_const.is_some()
             && end_const.is_some()
-            && Self::step_can_stall(reverse, stepped_op, step, start_const)
+            && Self::step_can_stall(reverse, stepped_op, step, start_const, loop_width)
             && !const_empty
             && !const_singleton
         {
@@ -1311,7 +1352,6 @@ impl<'a> FfParser<'a> {
             ));
         }
 
-        let loop_width = base_loop_width.max(1);
         let start_bound_width = self
             .loop_bound_width(start_bound, loop_signed)
             .unwrap_or(loop_width);
@@ -1799,7 +1839,11 @@ impl<'a> FfParser<'a> {
             let current_step =
                 self.cast_reg_width_ext(ir_builder, body_counter, step_width, loop_signed);
             let step_reg = ir_builder.alloc_bit(step_width, loop_signed);
-            ir_builder.emit(SIRInstruction::Imm(step_reg, SIRValue::new(step as u64)));
+            let step_value = Self::truncate_usize_to_width(step, step_width);
+            ir_builder.emit(SIRInstruction::Imm(
+                step_reg,
+                SIRValue::new(step_value as u64),
+            ));
             let next_step = ir_builder.alloc_bit(step_width, loop_signed);
             let op = match stepped_op {
                 Some(Op::Mul) => BinaryOp::Mul,
@@ -2190,15 +2234,19 @@ impl<'a> FfParser<'a> {
         stepped_op: Option<Op>,
         step: usize,
         start_const: Option<usize>,
+        loop_width: usize,
     ) -> bool {
         if reverse {
             return step == 0;
         }
+        let bitwise_step = Self::truncate_usize_to_width(step, loop_width);
         match stepped_op {
             Some(Op::Mul) => step == 0 || step == 1 || start_const == Some(0),
             Some(Op::LogicShiftL | Op::ArithShiftL) => step == 0 || start_const == Some(0),
-            Some(Op::BitOr) => start_const.is_some_and(|start| (start | step) == start),
-            Some(Op::BitXor) => step == 0,
+            Some(Op::BitOr) => start_const
+                .map(|start| Self::truncate_usize_to_width(start, loop_width))
+                .is_some_and(|start| (start | bitwise_step) == start),
+            Some(Op::BitXor) => bitwise_step == 0,
             Some(Op::Add) | None => step == 0,
             Some(_) => false,
         }
