@@ -490,6 +490,146 @@ fn test_ff_materialized_formal_slice_uses_expression_context(sim) {
     );
 }
 
+fn test_ff_runtime_event_reads_updated_formal_slice(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function observed (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                $display("slice=%0d", written[3:0]);
+                return x;
+            }
+
+            always_ff (clk) {
+                q = observed(d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 0x1eu8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 0x1fu8.into());
+    assert_eq!(sim.get(q), 0x1eu8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "slice=15".to_string(),
+        }],
+    );
+}
+
+fn test_ff_case_assignment_is_visible_to_later_runtime_event(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            choose: input logic,
+            d: input logic<8>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function observed (
+                choose: input logic,
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                case choose {
+                    1'b1: written = x + 8'd1;
+                    default: written = x + 8'd2;
+                }
+                $display("case=%0d", written);
+                return x;
+            }
+
+            always_ff (clk) {
+                q = observed(choose, d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let choose = sim.signal("choose");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+
+    sim.modify(|io| {
+        io.set(choose, 1u8);
+        io.set(d, 10u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 11u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "case=11".to_string(),
+        }],
+    );
+
+    sim.modify(|io| {
+        io.set(choose, 0u8);
+        io.set(d, 20u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 22u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "case=22".to_string(),
+        }],
+    );
+}
+
+fn test_ff_statement_function_with_output_emits_runtime_effect(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, d: input logic<8>, effect: output logic<8>) {
+            function observed (
+                x: input logic<8>,
+                written: output logic<8>
+            ) {
+                $display("statement=%0d", x);
+                written = x + 8'd1;
+            }
+
+            always_ff (clk) {
+                observed(d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+
+    sim.modify(|io| io.set(d, 12u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 13u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "statement=12".to_string(),
+        }],
+    );
+}
+
 fn test_ff_runtime_events_format_verilog_radices(sim) {
     @omit_veryl;
     @ignore_on(wasm);

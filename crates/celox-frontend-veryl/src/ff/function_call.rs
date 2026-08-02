@@ -392,6 +392,127 @@ impl<'a> FfParser<'a> {
         Ok((call, state))
     }
 
+    fn apply_statements_to_function_state(
+        &self,
+        statements: &[Statement],
+        initial: &HashMap<VarId, Expression>,
+    ) -> Result<HashMap<VarId, Expression>, ParserError> {
+        let mut state = initial.clone();
+        for statement in statements {
+            state = self.apply_statement_to_function_state(statement, &state)?;
+        }
+        Ok(state)
+    }
+
+    fn apply_statement_to_function_state(
+        &self,
+        statement: &Statement,
+        state: &HashMap<VarId, Expression>,
+    ) -> Result<HashMap<VarId, Expression>, ParserError> {
+        match statement {
+            Statement::Assign(assign) => {
+                if assign.dst.len() != 1 {
+                    return Err(ParserError::unsupported(
+                        43,
+                        LoweringPhase::FfLowering,
+                        "function body assignment shape",
+                        format!("{statement}"),
+                        Some(&assign.token),
+                    ));
+                }
+                let dst = &assign.dst[0];
+                let rhs = Self::substitute_function_expr(&assign.expr, state);
+                let mut next = state.clone();
+                let is_whole_var =
+                    dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
+                if is_whole_var {
+                    next.insert(dst.id, rhs);
+                } else if is_static_access(&dst.index, &dst.select) {
+                    let old_value = Self::state_value_expr(dst.id, state);
+                    next.insert(
+                        dst.id,
+                        build_partial_assign_expr(self.module, dst, rhs, old_value)?,
+                    );
+                } else {
+                    return Err(ParserError::unsupported(
+                        66,
+                        LoweringPhase::FfLowering,
+                        "dynamic assignment before runtime effect in function body",
+                        format!("{statement}"),
+                        Some(&assign.token),
+                    ));
+                }
+                Ok(next)
+            }
+            Statement::If(statement) => {
+                let condition = Self::substitute_function_expr(&statement.cond, state);
+                let then_state =
+                    self.apply_statements_to_function_state(&statement.true_side, state)?;
+                let else_state =
+                    self.apply_statements_to_function_state(&statement.false_side, state)?;
+                Ok(Self::merge_expression_states(
+                    &condition,
+                    state,
+                    &then_state,
+                    &else_state,
+                ))
+            }
+            Statement::Case(statement) => self.apply_case_to_function_state(statement, 0, state),
+            Statement::FunctionCall(call) => self.apply_function_call_to_state(call, state),
+            Statement::SystemFunctionCall(call) => {
+                let (_, next) = self.prepare_system_function_call(call, state)?;
+                Ok(next)
+            }
+            Statement::Null => Ok(state.clone()),
+            Statement::For(statement) => Err(ParserError::unsupported(
+                66,
+                LoweringPhase::FfLowering,
+                "for loop before runtime effect in function body",
+                "for loop".to_string(),
+                Some(&statement.token),
+            )),
+            Statement::IfReset(statement) => Err(ParserError::unsupported(
+                66,
+                LoweringPhase::FfLowering,
+                "if_reset before runtime effect in function body",
+                format!("{statement}"),
+                Some(&statement.token),
+            )),
+            Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
+                Err(ParserError::unsupported(
+                    66,
+                    LoweringPhase::FfLowering,
+                    "statement before runtime effect in function body",
+                    format!("{statement}"),
+                    None,
+                ))
+            }
+        }
+    }
+
+    fn apply_case_to_function_state(
+        &self,
+        statement: &CaseStatement,
+        arm_index: usize,
+        state: &HashMap<VarId, Expression>,
+    ) -> Result<HashMap<VarId, Expression>, ParserError> {
+        let Some(arm) = statement.arms.get(arm_index) else {
+            return self.apply_statements_to_function_state(&statement.default, state);
+        };
+        let condition = Self::substitute_function_expr(
+            &case_arm_condition_expr(&statement.case_target, &arm.patterns),
+            state,
+        );
+        let then_state = self.apply_statements_to_function_state(&arm.body, state)?;
+        let else_state = self.apply_case_to_function_state(statement, arm_index + 1, state)?;
+        Ok(Self::merge_expression_states(
+            &condition,
+            state,
+            &then_state,
+            &else_state,
+        ))
+    }
+
     fn emit_function_runtime_effects<A>(
         &mut self,
         statements: &[Statement],
@@ -415,60 +536,44 @@ impl<'a> FfParser<'a> {
                             Some(&assign.token),
                         ));
                     }
-                    if assign.dst.len() != 1 {
-                        return Err(ParserError::unsupported(
-                            43,
-                            LoweringPhase::FfLowering,
-                            "function body assignment shape",
-                            format!("{statement}"),
-                            Some(&assign.token),
-                        ));
-                    }
-                    let dst = &assign.dst[0];
-                    let rhs = Self::substitute_function_expr(&assign.expr, &state);
-                    let is_whole_var =
-                        dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
-                    if is_whole_var {
-                        state.insert(dst.id, rhs);
-                    } else if is_static_access(&dst.index, &dst.select) {
-                        let old_value = state.get(&dst.id).cloned().unwrap_or_else(|| {
-                            Expression::Term(Box::new(Factor::Variable(
-                                dst.id,
-                                VarIndex::default(),
-                                VarSelect::default(),
-                                dst.comptime.clone(),
-                            )))
-                        });
-                        state.insert(
-                            dst.id,
-                            build_partial_assign_expr(self.module, dst, rhs, old_value)?,
-                        );
-                    } else {
-                        return Err(ParserError::unsupported(
-                            66,
-                            LoweringPhase::FfLowering,
-                            "dynamic assignment before runtime effect in function body",
-                            format!("{statement}"),
-                            Some(&assign.token),
-                        ));
-                    }
+                    state = self.apply_statement_to_function_state(statement, &state)?;
                 }
                 Statement::SystemFunctionCall(call) => {
                     let (call, next_state) = self.prepare_system_function_call(call, &state)?;
                     state = next_state;
-                    self.parse_system_task_statement(
+                    // Keep the current symbolic state available while parsing
+                    // selected/indexed formals in event arguments. Whole-value
+                    // substitution alone cannot apply an access to a rewritten
+                    // expression such as `written[3:0]`.
+                    self.function_arg_stack.push(state.clone());
+                    let result = self.parse_system_task_statement(
                         &call, targets, domain, convert, sources, ir_builder,
-                    )?;
+                    );
+                    self.function_arg_stack.pop();
+                    result?;
                 }
                 Statement::Null => {}
                 Statement::If(statement) => {
-                    return Err(ParserError::unsupported(
-                        66,
-                        LoweringPhase::FfLowering,
-                        "control flow around runtime effect in function body",
-                        format!("{statement}"),
-                        Some(&statement.token),
-                    ));
+                    let mut visiting = HashSet::default();
+                    let body_has_runtime_task = self
+                        .statements_have_runtime_task(&statement.true_side, &mut visiting)
+                        || self.statements_have_runtime_task(&statement.false_side, &mut visiting);
+                    if body_has_runtime_task {
+                        return Err(ParserError::unsupported(
+                            66,
+                            LoweringPhase::FfLowering,
+                            "control flow around runtime effect in function body",
+                            format!("{statement}"),
+                            Some(&statement.token),
+                        ));
+                    }
+                    let condition = Self::substitute_function_expr(&statement.cond, &state);
+                    let then_state =
+                        self.apply_statements_to_function_state(&statement.true_side, &state)?;
+                    let else_state =
+                        self.apply_statements_to_function_state(&statement.false_side, &state)?;
+                    state =
+                        Self::merge_expression_states(&condition, &state, &then_state, &else_state);
                 }
                 Statement::Case(statement) => {
                     let mut visiting = HashSet::default();
@@ -486,6 +591,7 @@ impl<'a> FfParser<'a> {
                             Some(&statement.token),
                         ));
                     }
+                    state = self.apply_case_to_function_state(statement, 0, &state)?;
                 }
                 Statement::For(statement) => {
                     return Err(ParserError::unsupported(
@@ -1561,9 +1667,10 @@ impl<'a> FfParser<'a> {
 
         self.validate_function_call_bindings(call, &function_body)?;
 
-        if call.outputs.is_empty() {
-            // No side effect through output arguments: statement-form function call
-            // has no effect in FF lowering.
+        let has_runtime_effect =
+            self.statements_have_runtime_effect(&function_body.statements, &mut HashSet::default());
+        if call.outputs.is_empty() && !has_runtime_effect {
+            // A pure statement-form function call has no observable result.
             return Ok(());
         }
 
@@ -1575,32 +1682,63 @@ impl<'a> FfParser<'a> {
                 bindings.insert(*arg_id, arg_expr.clone());
             }
         }
-
-        for (arg_path, dsts) in &call.outputs {
-            let Some(arg_id) = function_body.arg_map.get(arg_path) else {
-                return Err(ParserError::unsupported(
-                    61,
-                    LoweringPhase::FfLowering,
-                    "function call missing argument",
-                    format!("{call}"),
-                    Some(&call.comptime.token),
-                ));
-            };
-
-            let expr = self.extract_function_target_expr(&function_body, *arg_id, &bindings)?;
-            self.function_arg_stack.push(bindings.clone());
-            self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None)?;
-            self.function_arg_stack.pop();
-
-            let rhs_reg = self
-                .stack
-                .pop_back()
-                .expect("Function output expression evaluation failed");
-            self.emit_multi_dst_assign(
-                rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
-            )?;
+        let materialized = self.materialize_function_inputs(
+            call,
+            &function_body,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+        )?;
+        let mut symbolic_bindings = bindings.clone();
+        for arg_id in materialized.keys() {
+            symbolic_bindings.remove(arg_id);
         }
 
-        Ok(())
+        self.function_arg_stack.push(bindings);
+        self.function_arg_value_stack.push(materialized);
+        let result = (|| {
+            if has_runtime_effect {
+                self.emit_function_runtime_effects(
+                    &function_body.statements,
+                    &symbolic_bindings,
+                    targets,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
+                )?;
+            }
+
+            for (arg_path, dsts) in &call.outputs {
+                let Some(arg_id) = function_body.arg_map.get(arg_path) else {
+                    return Err(ParserError::unsupported(
+                        61,
+                        LoweringPhase::FfLowering,
+                        "function call missing argument",
+                        format!("{call}"),
+                        Some(&call.comptime.token),
+                    ));
+                };
+
+                let expr =
+                    self.extract_function_target_expr(&function_body, *arg_id, &symbolic_bindings)?;
+                self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None)?;
+
+                let rhs_reg = self
+                    .stack
+                    .pop_back()
+                    .expect("Function output expression evaluation failed");
+                self.emit_multi_dst_assign(
+                    rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
+                )?;
+            }
+
+            Ok(())
+        })();
+        self.function_arg_value_stack.pop();
+        self.function_arg_stack.pop();
+        result
     }
 }
