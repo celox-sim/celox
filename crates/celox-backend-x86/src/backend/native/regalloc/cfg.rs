@@ -93,7 +93,11 @@ pub(super) struct CfgError {
 }
 
 impl CfgError {
-    fn new(rule: &'static str, block: Option<BlockId>, message: impl Into<String>) -> Self {
+    pub(super) fn new(
+        rule: &'static str,
+        block: Option<BlockId>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             rule,
             block,
@@ -393,8 +397,7 @@ pub(super) fn normalize(func: &mut MFunction) -> Result<NormalizedCfg, CfgError>
         ));
     }
     split_critical_edges(func)?;
-    super::reorder_blocks_rpo(func)
-        .map_err(|message| CfgError::new("CFG.RPO_BIJECTION", None, message))?;
+    super::reorder_blocks_rpo(func)?;
     let (block_index, _, successors) = graph(func);
     let analysis = analyze_shared_graph(successors)?;
     let dominance_frontier = analysis

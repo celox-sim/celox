@@ -1,7 +1,6 @@
 #![allow(clippy::disallowed_macros)] // CLI errors intentionally use stderr
 
 use std::{
-    error::Error,
     fs,
     path::PathBuf,
     time::{Duration, Instant},
@@ -29,6 +28,29 @@ struct Options {
     source_files: Vec<PathBuf>,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum VerylHeliodorError {
+    #[error(transparent)]
+    Metadata(#[from] veryl_metadata::MetadataError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Parser(#[from] veryl_parser::ParserError),
+    #[error(transparent)]
+    Simulator(#[from] veryl_simulator::SimulatorError),
+    #[error("{stage}: {errors:?}")]
+    Analyzer {
+        stage: &'static str,
+        errors: Vec<AnalyzerError>,
+    },
+    #[error("top module not found: {module}")]
+    TopModuleNotFound { module: String },
+    #[error("no initial block found: {module}")]
+    MissingInitialBlock { module: String },
+    #[error("{message}")]
+    TestFailed { message: String },
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("error: {error}");
@@ -36,7 +58,7 @@ fn main() {
     }
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
+fn run() -> Result<(), VerylHeliodorError> {
     let options = Options::parse();
     let metadata_path = Metadata::search_from(&options.project)?;
     let mut metadata = Metadata::load(&metadata_path)?;
@@ -86,8 +108,11 @@ fn run() -> Result<(), Box<dyn Error>> {
         Analyzer::analyze_post_pass2(&analyzer_ir),
     )?;
 
-    let top = resource_table::get_str_id(options.test.clone())
-        .ok_or_else(|| format!("top module not found: {}", options.test))?;
+    let top = resource_table::get_str_id(options.test.clone()).ok_or_else(|| {
+        VerylHeliodorError::TopModuleNotFound {
+            module: options.test.clone(),
+        }
+    })?;
     let config = Config {
         use_jit: true,
         aot_c: true,
@@ -107,7 +132,9 @@ fn run() -> Result<(), Box<dyn Error>> {
         .ir
         .event_statements
         .get(&Event::Initial)
-        .ok_or_else(|| format!("no initial block found: {module_name}"))?;
+        .ok_or_else(|| VerylHeliodorError::MissingInitialBlock {
+            module: module_name.clone(),
+        })?;
     let testbench = convert_initial_to_testbench(initial_stmts, &event_map, &clock_periods, 3);
     let compile_elapsed = compile_start.elapsed();
 
@@ -151,7 +178,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 options.test,
                 elapsed.as_nanos()
             );
-            Err(message.into())
+            Err(VerylHeliodorError::TestFailed { message })
         }
     }
 }
@@ -176,7 +203,10 @@ fn process_cpu_time() -> Option<Duration> {
     None
 }
 
-fn ensure_no_errors(stage: &str, diagnostics: Vec<AnalyzerError>) -> Result<(), Box<dyn Error>> {
+fn ensure_no_errors(
+    stage: &'static str,
+    diagnostics: Vec<AnalyzerError>,
+) -> Result<(), VerylHeliodorError> {
     let errors = diagnostics
         .into_iter()
         .filter(AnalyzerError::is_error)
@@ -184,6 +214,6 @@ fn ensure_no_errors(stage: &str, diagnostics: Vec<AnalyzerError>) -> Result<(), 
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(format!("{stage}: {errors:?}").into())
+        Err(VerylHeliodorError::Analyzer { stage, errors })
     }
 }

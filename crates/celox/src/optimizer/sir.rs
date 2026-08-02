@@ -58,7 +58,7 @@ pub(crate) fn optimize_native_merged_chain(
     four_state: bool,
     recover_merged_effect_regions: bool,
     diagnostics: &crate::optimizer::SirDiagnostics,
-) -> Result<(), (&'static str, celox_sir::verify::SirVerifyError)> {
+) -> Result<(), celox_sir_opt::OptimizationError> {
     let element_widths = Arc::new(
         layout
             .unpacked_arrays

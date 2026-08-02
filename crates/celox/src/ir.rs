@@ -38,6 +38,22 @@ pub enum AddrLookupError {
     AmbiguousPath { path: String },
 }
 
+/// Internal consistency failure while comparing frontend state lookup data
+/// with the source-independent elaborated design.
+#[derive(Debug, Clone, thiserror::Error)]
+pub(crate) enum DesignProjectionError {
+    #[error("state object count differs: design={design} frontend={frontend}")]
+    StateObjectCount { design: usize, frontend: usize },
+    #[error("missing state projection for {source_address}")]
+    MissingStateProjection {
+        source_address: celox_frontend_veryl::AbsoluteAddr,
+    },
+    #[error("missing flattened state object {address}")]
+    MissingStateObject { address: AbsoluteAddr },
+    #[error("metadata differs for flattened state object {address}")]
+    MetadataMismatch { address: AbsoluteAddr },
+}
+
 #[cfg(feature = "host-runtime")]
 pub type InitialMemoryWriteRun = InitialStateWriteRun;
 #[cfg(feature = "host-runtime")]
@@ -339,7 +355,7 @@ impl RuntimeProgram {
     /// Verify the temporary migration projection from frontend lookup tables
     /// into the source-independent elaborated design. This can be removed once
     /// the frontend tables are consumed rather than retained beside `design`.
-    pub(crate) fn verify_design_projection(&self) -> Result<(), String> {
+    pub(crate) fn verify_design_projection(&self) -> Result<(), DesignProjectionError> {
         let expected_count = self
             .frontend
             .instance_module
@@ -347,10 +363,10 @@ impl RuntimeProgram {
             .map(|module_id| self.frontend.module_variables[module_id].len())
             .sum::<usize>();
         if self.design.state_objects.len() != expected_count {
-            return Err(format!(
-                "state object count differs: design={} frontend={expected_count}",
-                self.design.state_objects.len()
-            ));
+            return Err(DesignProjectionError::StateObjectCount {
+                design: self.design.state_objects.len(),
+                frontend: expected_count,
+            });
         }
 
         for (&instance_id, module_id) in &self.frontend.instance_module {
@@ -360,15 +376,13 @@ impl RuntimeProgram {
                     var_id: info.id,
                 };
                 let Some(address) = self.frontend.state_address(&source_address) else {
-                    return Err(format!("missing state projection for {source_address}"));
+                    return Err(DesignProjectionError::MissingStateProjection { source_address });
                 };
                 let Some(metadata) = self.design.state_objects.get(&address) else {
-                    return Err(format!("missing flattened state object {address}"));
+                    return Err(DesignProjectionError::MissingStateObject { address });
                 };
                 if metadata != &info.metadata {
-                    return Err(format!(
-                        "metadata differs for flattened state object {address}"
-                    ));
+                    return Err(DesignProjectionError::MetadataMismatch { address });
                 }
             }
         }
