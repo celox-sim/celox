@@ -1325,13 +1325,14 @@ impl<'a> ModuleParser<'a> {
             // "Current offset starts at 0" and "dst in dsts.iter().rev()".
             for dst in output.dst.iter().rev() {
                 for address in dst.index.0.iter().chain(dst.select.0.iter()) {
-                    collect_and_advance_expression(
+                    let address_sources = collect_and_advance_expression(
                         self.module,
                         &mut output_effect_store,
                         address,
                         &mut self.arena,
                         &mut output_effects,
                     )?;
+                    output_effects.sensitivity.extend(address_sources);
                     collect_written_expression(
                         self.module,
                         address,

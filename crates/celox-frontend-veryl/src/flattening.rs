@@ -792,12 +792,20 @@ mod tests {
     fn distinct_comb_collectors_do_not_intern_event_captures_together() {
         let (sim_modules, _, _) = setup(
             r#"
-module Top (x: input logic<8>) {
-    always_comb {
-        $display("first=%0d", x);
+module Top (
+    x: input logic<8>,
+    a: output logic<8>,
+    b: output logic<8>,
+) {
+    function show (value: input logic<8>) -> logic<8> {
+        $display("value=%0d", value);
+        return value;
     }
     always_comb {
-        $display("second=%0d", x);
+        a = show(x);
+    }
+    always_comb {
+        b = show(x);
     }
 }
 "#,

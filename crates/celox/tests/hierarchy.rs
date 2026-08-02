@@ -361,6 +361,50 @@ assign tmp_o = tmp;
 
     }
 
+    fn test_instance_output_index_runtime_effect_tracks_plain_sibling_source(sim) {
+        @omit_veryl;
+        @ignore_on(wasm);
+        @setup { let code = r#"
+module Child (i: input logic, o: output logic) {
+assign o = i;
+}
+module Top (
+d: input logic,
+offset: input logic,
+mem_o: output logic<2>
+) {
+function emit (x: input logic) -> logic {
+$display("d=%0d", x);
+return 1'b0;
+}
+var mem: logic<2>;
+inst child: Child (
+i: 1'b1,
+o: mem[emit(d) + offset]
+);
+assign mem_o = mem;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let offset = sim.signal("offset");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(offset, 1u8)).unwrap();
+    sim.drain_runtime_events();
+
+    // Both destinations already contain the driven value, so no generated
+    // parent write changes. The ordinary address source must still activate
+    // the runtime effect when the selected location changes.
+    sim.modify(|io| io.set(offset, 0u8)).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "d=0".to_string(),
+        }],
+    );
+
+    }
+
     fn test_instance_output_dynamic_index_composes_aliasing_writeback(sim) {
         // veryl-simulator does not write the dynamic connection index call's
         // output actual back to the parent array.

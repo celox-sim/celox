@@ -164,6 +164,49 @@ module Top (
     );
 }
 
+fn test_comb_callee_observer_snapshots_formal_before_later_actual_writeback(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    d: input logic<8>,
+    q_output: output logic<8>,
+) {
+    function inner (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    function outer (
+        first: input logic<8>,
+        second: input logic<8>,
+    ) -> logic {
+        $display("first=%0d second=%0d", first, second);
+        return 1'b0;
+    }
+
+    var unused: logic;
+    always_comb {
+        unused = outer(q_output, inner(d, q_output));
+    }
+}
+"#, "Top");
+
+    let d = sim.signal("d");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(d, 10u8)).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "first=1 second=12".to_string(),
+        }],
+    );
+}
+
 fn test_comb_callee_observer_sees_actual_output_writeback_in_module_state(sim) {
     @omit_veryl;
     @ignore_on(wasm);

@@ -43,6 +43,43 @@ pub(crate) struct CombEffectCollector {
     active_guard: Option<NodeId>,
     active_guard_sources: HashSet<VarAtomBase<VarId>>,
     loop_effects: Option<Vec<SLTForEffect>>,
+    capture_namespace: Option<u32>,
+    next_capture_id: u32,
+}
+
+impl CombEffectCollector {
+    fn initialize_capture_namespace(
+        &mut self,
+        token: &veryl_parser::token_range::TokenRange,
+    ) -> Result<(), ParserError> {
+        if self.capture_namespace.is_some() {
+            return Ok(());
+        }
+        self.capture_namespace = Some(u32::try_from(token.beg.id.0).map_err(|_| {
+            ParserError::illegal_context(
+                "combinational observer capture",
+                "source token identity exceeds the capture-key range",
+                Some(token),
+            )
+        })?);
+        Ok(())
+    }
+
+    fn next_capture_key(
+        &mut self,
+        token: &veryl_parser::token_range::TokenRange,
+    ) -> Result<u64, ParserError> {
+        self.initialize_capture_namespace(token)?;
+        let capture_id = self.next_capture_id;
+        self.next_capture_id = capture_id.checked_add(1).ok_or_else(|| {
+            ParserError::illegal_context(
+                "combinational observer capture",
+                "capture count exceeds the capture-key range",
+                Some(token),
+            )
+        })?;
+        Ok((u64::from(self.capture_namespace.unwrap()) << 32) | u64::from(capture_id))
+    }
 }
 
 fn static_string_expr(expr: &Expression) -> Option<String> {
@@ -132,15 +169,6 @@ fn collect_system_function_effect(
         _ => unreachable!("non-event system functions return before event collection"),
     };
     let (site_id, value_args) = register_comb_runtime_event_site(collector, kind, args);
-    // Collector-local site IDs restart at zero. The source token keeps
-    // otherwise identical captures from different declarations distinct.
-    let capture_site_key = u32::try_from(call.comptime.token.beg.id.0).map_err(|_| {
-        ParserError::illegal_context(
-            "combinational observer capture",
-            "source token identity exceeds the capture-key range",
-            Some(&call.comptime.token),
-        )
-    })?;
     // Event operands are evaluated left to right.  Keep the environment from
     // the start of the event so writes performed by later operands cannot
     // retroactively rebind inputs in an earlier operand or in the assertion
@@ -163,14 +191,7 @@ fn collect_system_function_effect(
     } else {
         None
     };
-    for (arg_index, arg) in value_args.iter().enumerate() {
-        let arg_index = u32::try_from(arg_index).map_err(|_| {
-            ParserError::illegal_context(
-                "combinational observer capture",
-                "event argument count exceeds the capture-key range",
-                Some(&call.comptime.token),
-            )
-        })?;
+    for arg in value_args {
         collect_expression_effects(module, store, &arg.0, arena, collector)?;
         let ((node, sources), arg_boundaries) =
             eval_expression_effectful(module, store, &arg.0, arena, None)?;
@@ -180,7 +201,7 @@ fn collect_system_function_effect(
         collect_expression_position_inputs(module, &arg.0, &mut position_inputs)?;
         observer_args.push(arena.alloc(SLTNode::Capture {
             expr: node,
-            key: (u64::from(capture_site_key) << 32) | u64::from(arg_index),
+            key: collector.next_capture_key(&call.comptime.token)?,
         })?);
     }
     observed_inputs.extend(collector.active_guard_sources.iter().copied());
@@ -202,11 +223,11 @@ fn collect_system_function_effect(
         }
         (RuntimeEventKind::Display, _, Some(_)) => unreachable!("display has no explicit guard"),
     }
-    .map(|node| {
-        arena.alloc(SLTNode::Capture {
+    .map(|node| -> Result<NodeId, ParserError> {
+        Ok(arena.alloc(SLTNode::Capture {
             expr: node,
-            key: (u64::from(capture_site_key) << 32) | u64::from(u32::MAX),
-        })
+            key: collector.next_capture_key(&call.comptime.token)?,
+        })?)
     })
     .transpose()?;
     let loop_effect = collector
@@ -354,6 +375,10 @@ fn collect_function_call_effects(
     arena: &mut SLTNodeArena<VarId>,
     collector: &mut CombEffectCollector,
 ) -> Result<(), ParserError> {
+    // The outermost evaluated call site names this collector's capture
+    // namespace. Runtime tasks in a reusable callee otherwise carry the same
+    // callee-body token in every caller.
+    collector.initialize_capture_namespace(&call.comptime.token)?;
     let Some(function) = module.functions.get(&call.id) else {
         return Err(ParserError::unsupported(
             62,
@@ -380,7 +405,14 @@ fn collect_function_call_effects(
 
     let mut actual_store = store.clone();
     let mut formal_bindings = Vec::new();
-    for (arg_id, arg_expr) in super::ordered_function_inputs(function, &function_body, call)? {
+    let ordered_inputs = super::ordered_function_inputs(function, &function_body, call)?;
+    let mut later_input_writes = vec![HashMap::default(); ordered_inputs.len()];
+    let mut accumulated_writes = HashMap::default();
+    for (index, (_, expression)) in ordered_inputs.iter().enumerate().rev() {
+        later_input_writes[index] = accumulated_writes.clone();
+        super::collect_written_expression(module, expression, &mut accumulated_writes)?;
+    }
+    for (input_index, (arg_id, arg_expr)) in ordered_inputs.into_iter().enumerate() {
         collect_expression_effects(module, &actual_store, arg_expr, arena, collector)?;
         let mut actual_inputs = HashSet::default();
         collect_expression_position_inputs(module, arg_expr, &mut actual_inputs)?;
@@ -397,6 +429,19 @@ fn collect_function_call_effects(
         )?;
         let arg_node = if formal.r#type.is_2state() && !arg_expr.comptime().r#type.is_2state() {
             arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, arg_node))?
+        } else {
+            arg_node
+        };
+        let needs_snapshot = arg_sources.iter().any(|source| {
+            later_input_writes[input_index]
+                .get(&source.id)
+                .is_some_and(|writes| writes.iter().any(|write| write.overlaps(&source.access)))
+        });
+        let arg_node = if needs_snapshot {
+            arena.alloc(SLTNode::Capture {
+                expr: arg_node,
+                key: collector.next_capture_key(&call.comptime.token)?,
+            })?
         } else {
             arg_node
         };
@@ -461,13 +506,6 @@ fn collect_function_call_effects(
                 .0
                 .iter()
                 .chain(destination.select.0.iter())
-                .chain(
-                    destination
-                        .select
-                        .1
-                        .iter()
-                        .map(|(_, expression)| expression),
-                )
             {
                 collect_and_advance_expression(
                     module,
@@ -846,10 +884,10 @@ pub(crate) fn collect_and_advance_expression(
     expression: &Expression,
     arena: &mut SLTNodeArena<VarId>,
     collector: &mut CombEffectCollector,
-) -> Result<(), ParserError> {
+) -> Result<HashSet<VarAtomBase<VarId>>, ParserError> {
     collect_expression_effects(module, store, expression, arena, collector)?;
-    let _ = eval_expression_effectful(module, store, expression, arena, None)?;
-    Ok(())
+    let ((_, sources), _) = eval_expression_effectful(module, store, expression, arena, None)?;
+    Ok(sources)
 }
 
 fn collect_assignment_effects(

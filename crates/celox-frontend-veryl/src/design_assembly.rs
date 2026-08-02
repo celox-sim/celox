@@ -2007,6 +2007,9 @@ fn observer_pre_lower_nodes(
         nodes.push(guard);
     }
     nodes.extend(observer.args.iter().copied());
+    nodes.extend(observer.local_inputs.iter().filter_map(|(_, node)| {
+        matches!(arena.get(*node), celox_slt::SLTNode::Capture { .. }).then_some(*node)
+    }));
     nodes
         .into_iter()
         .filter(|node| {
@@ -2014,13 +2017,98 @@ fn observer_pre_lower_nodes(
             crate::flattening::collect_inputs(*node, arena, &mut inputs);
             // A capture independent of local bindings can be materialized at
             // its statement position. Bound captures still need the event's
-            // environment, while constants need no early snapshot.
+            // environment, unless they contain an earlier formal snapshot.
+            // Constants need no early materialization.
             !inputs.is_empty()
-                && inputs
-                    .iter()
-                    .all(|input| !local_input_ids.contains(&input.id))
+                && (capture_contains_nested_snapshot(*node, arena)
+                    || inputs
+                        .iter()
+                        .all(|input| !local_input_ids.contains(&input.id)))
         })
         .collect()
+}
+
+fn capture_contains_nested_snapshot(node: NodeId, arena: &SLTNodeArena<AbsoluteAddr>) -> bool {
+    let celox_slt::SLTNode::Capture { expr, .. } = arena.get(node) else {
+        return false;
+    };
+    let mut work = vec![*expr];
+    let mut visited = HashSet::default();
+    while let Some(node) = work.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        match arena.get(node) {
+            celox_slt::SLTNode::Capture { .. } => return true,
+            celox_slt::SLTNode::Input { index, .. } => {
+                work.extend(index.iter().map(|entry| entry.node));
+            }
+            celox_slt::SLTNode::Constant(..) => {}
+            celox_slt::SLTNode::Binary(lhs, _, rhs) => {
+                work.push(*lhs);
+                work.push(*rhs);
+            }
+            celox_slt::SLTNode::Unary(_, inner) => work.push(*inner),
+            celox_slt::SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                work.push(*cond);
+                work.push(*then_expr);
+                work.push(*else_expr);
+            }
+            celox_slt::SLTNode::Concat(parts) => {
+                work.extend(parts.iter().map(|(part, _)| *part));
+            }
+            celox_slt::SLTNode::Slice { expr, .. } => work.push(*expr),
+            celox_slt::SLTNode::ForFold {
+                start,
+                end,
+                result,
+                initials,
+                updates,
+                effects,
+                continue_cond,
+                ..
+            } => {
+                if let celox_slt::SLTLoopBound::Expr(node) = start {
+                    work.push(*node);
+                }
+                if let celox_slt::SLTLoopBound::Expr(node) = end {
+                    work.push(*node);
+                }
+                if let celox_slt::SLTForFoldResult::Transient { initial, update } = result {
+                    work.push(*initial);
+                    work.push(*update);
+                }
+                work.extend(initials.iter().map(|state| state.expr));
+                work.extend(updates.iter().map(|state| state.expr));
+                for effect in effects {
+                    match effect {
+                        celox_slt::SLTForEffect::Event { guard, args, .. } => {
+                            work.extend(*guard);
+                            work.extend(args.iter().copied());
+                        }
+                        celox_slt::SLTForEffect::Runner(runner) => work.push(*runner),
+                    }
+                }
+                work.push(*continue_cond);
+            }
+            celox_slt::SLTNode::ForFoldGroup {
+                entry_guard,
+                states,
+                ..
+            } => {
+                work.push(*entry_guard);
+                for state in states {
+                    work.push(state.initial);
+                    work.push(state.update);
+                }
+            }
+        }
+    }
+    false
 }
 
 fn annotate_comb_capture_enable_sites(
