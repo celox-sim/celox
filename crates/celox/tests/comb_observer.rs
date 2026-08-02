@@ -129,6 +129,58 @@ module Top (
     );
 }
 
+fn test_comb_condition_runtime_effect_respects_short_circuit(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    and_enable: input logic,
+    or_enable: input logic,
+    d: input logic<8>,
+    and_result: output logic,
+    or_result: output logic,
+) {
+    function predicate (x: input logic<8>) -> logic {
+        $display("rhs=%0d", x);
+        return 1'b1;
+    }
+
+    always_comb {
+        and_result = and_enable && predicate(d);
+        or_result = or_enable || predicate(d + 8'd1);
+    }
+}
+"#, "Top");
+
+    let and_enable = sim.signal("and_enable");
+    let or_enable = sim.signal("or_enable");
+    let d = sim.signal("d");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(and_enable, 0u8);
+        io.set(or_enable, 1u8);
+        io.set(d, 10u8);
+    }).unwrap();
+    assert!(sim.drain_runtime_events().is_empty());
+
+    sim.modify(|io| {
+        io.set(and_enable, 1u8);
+        io.set(or_enable, 0u8);
+    }).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "rhs=10".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "rhs=11".to_string(),
+            },
+        ],
+    );
+}
+
 fn test_comb_runtime_effect_inside_case_target_is_collected(sim) {
     @omit_veryl;
     @ignore_on(wasm);

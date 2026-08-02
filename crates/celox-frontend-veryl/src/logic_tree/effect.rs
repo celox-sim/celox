@@ -547,6 +547,23 @@ fn collect_expression_effects(
         Expression::Unary(_, inner, _) => {
             collect_expression_effects(module, store, inner, arena, collector)
         }
+        Expression::Binary(lhs, op, rhs, _) if matches!(op, Op::LogicAnd | Op::LogicOr) => {
+            collect_expression_effects(module, store, lhs, arena, collector)?;
+            let mut rhs_store = store.clone();
+            let ((lhs_node, lhs_sources), _) =
+                eval_expression_effectful(module, &mut rhs_store, lhs, arena, None)?;
+            let execute_rhs =
+                expr::short_circuit_rhs_guard(arena, lhs_node, matches!(op, Op::LogicAnd))?;
+            with_collector_guard(
+                collector,
+                arena,
+                execute_rhs,
+                lhs_sources,
+                |collector, arena| {
+                    collect_expression_effects(module, &rhs_store, rhs, arena, collector)
+                },
+            )
+        }
         Expression::Binary(lhs, _, rhs, _) => {
             collect_expression_effects(module, store, lhs, arena, collector)?;
             collect_expression_effects(module, store, rhs, arena, collector)

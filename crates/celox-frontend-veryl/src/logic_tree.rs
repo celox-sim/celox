@@ -2453,20 +2453,8 @@ fn eval_statement_form_function_call(
 
     let mut evaluated_inputs = Vec::with_capacity(call.inputs.len());
 
-    for (arg_path, arg_id) in &function_body.arg_map {
-        let Some(arg_expr) = call.inputs.get(arg_path) else {
-            if call.outputs.contains_key(arg_path) {
-                continue;
-            }
-            return Err(invalid_function_call_argument_error(
-                function,
-                arg_path,
-                "formal argument has neither an input expression nor an output destination",
-                call,
-            ));
-        };
-
-        let formal = module.variables.get(arg_id).ok_or_else(|| {
+    for (arg_id, arg_expr) in ordered_function_inputs(function, &function_body, call)? {
+        let formal = module.variables.get(&arg_id).ok_or_else(|| {
             ParserError::illegal_context(
                 "function input argument",
                 "formal variable is absent from the semantic module",
@@ -2482,7 +2470,18 @@ fn eval_statement_form_function_call(
             arg_node
         };
         boundaries = merge_boundaries(boundaries, arg_bounds);
-        evaluated_inputs.push((*arg_id, arg_node, arg_sources, arg_width));
+        evaluated_inputs.push((arg_id, arg_node, arg_sources, arg_width));
+    }
+
+    for arg_path in function_body.arg_map.keys() {
+        if !call.inputs.contains_key(arg_path) && !call.outputs.contains_key(arg_path) {
+            return Err(invalid_function_call_argument_error(
+                function,
+                arg_path,
+                "formal argument has neither an input expression nor an output destination",
+                call,
+            ));
+        }
     }
 
     let mut local_store = store.clone();

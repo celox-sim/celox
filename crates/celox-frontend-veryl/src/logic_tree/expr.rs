@@ -2180,7 +2180,7 @@ pub(super) fn eval_case_target_effectful(
     Ok((EvaluatedCaseTarget { node, sources }, boundaries))
 }
 
-fn short_circuit_rhs_guard(
+pub(super) fn short_circuit_rhs_guard(
     arena: &mut SLTNodeArena<VarId>,
     lhs: NodeId,
     is_and: bool,

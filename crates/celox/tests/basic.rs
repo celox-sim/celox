@@ -1129,6 +1129,45 @@ module Top (
     assert_eq!(sim.get(q_output), 11u32.into());
     }
 
+    fn test_statement_call_inputs_follow_output_writeback_order(sim) {
+        @setup { let code = r#"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+    tmp: output logic<8>,
+) {
+    function inner (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    function outer (
+        first: input logic<8>,
+        second: input logic<8>,
+        result: output logic<8>,
+    ) {
+        result = first + second;
+    }
+
+    always_comb {
+        tmp = 8'd0;
+        outer(inner(d, tmp), tmp, q);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+    let tmp = sim.signal("tmp");
+
+    sim.modify(|io| io.set(d, 10u8)).unwrap();
+    assert_eq!(sim.get(q), 23u32.into());
+    assert_eq!(sim.get(tmp), 11u32.into());
+    }
+
     fn test_comb_effectful_case_after_dynamic_break_stays_inactive(sim) {
         // Veryl simulator 0.20.2 drops the case-target output writeback when
         // the case contains only a default arm with break.
