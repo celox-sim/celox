@@ -14,22 +14,24 @@ pub fn optimize_merged_chain(
     four_state: bool,
     recover_merged_effect_regions: bool,
     diagnostics: &crate::SirDiagnostics,
-) -> Result<(), (&'static str, crate::ir::verify::SirVerifyError)> {
+) -> Result<(), crate::OptimizationError> {
     let mut changed = false;
-    if crate::ir::inline_single_predecessor_jumps(eu)
-        .map_err(|error| ("during native jump inlining", error))?
-    {
+    if crate::ir::inline_single_predecessor_jumps(eu).map_err(|error| {
+        crate::OptimizationError::verification("during native jump inlining", error)
+    })? {
         changed = true;
     }
-    eu.verify_result()
-        .map_err(|error| ("after native jump inlining", error))?;
+    eu.verify_result().map_err(|error| {
+        crate::OptimizationError::verification("after native jump inlining", error)
+    })?;
     OptimizeBlocksPass {
         skip_final_schedule: false,
         element_widths: Arc::clone(&element_widths),
     }
     .run(eu, &PassOptions::default());
-    eu.verify_result()
-        .map_err(|error| ("after native block optimization", error))?;
+    eu.verify_result().map_err(|error| {
+        crate::OptimizationError::verification("after native block optimization", error)
+    })?;
     // The native function is assembled after the ordinary per-EU pipeline.
     // Merging exposes constants and control-flow facts across the old EU
     // boundaries, and OptimizeBlocks can expose more of them while rewriting
@@ -43,8 +45,12 @@ pub fn optimize_merged_chain(
             ..PassOptions::default()
         },
     );
-    eu.verify_result()
-        .map_err(|error| ("after native merged-chain CFG simplification", error))?;
+    eu.verify_result().map_err(|error| {
+        crate::OptimizationError::verification(
+            "after native merged-chain CFG simplification",
+            error,
+        )
+    })?;
     if recover_merged_effect_regions && !four_state {
         pass_guarded_region_sinking::recover_merged_effect_regions(eu, four_state);
         pass_guarded_region_sinking::eliminate_dead_control_regions(eu);
@@ -56,8 +62,12 @@ pub fn optimize_merged_chain(
             },
         );
         pass_vectorize_concat::remove_dead_definitions(eu);
-        eu.verify_result()
-            .map_err(|error| ("after native merged effect-region recovery", error))?;
+        eu.verify_result().map_err(|error| {
+            crate::OptimizationError::verification(
+                "after native merged effect-region recovery",
+                error,
+            )
+        })?;
         changed = true;
     }
     if !four_state {
@@ -73,16 +83,24 @@ pub fn optimize_merged_chain(
             // Concat back into scalar shifts in ISel.
             VectorizeConcatPass::default().run(eu, &PassOptions::default());
             GvnPass.run(eu, &PassOptions::default());
-            eu.verify_result()
-                .map_err(|error| ("after native packed conditional-store recovery", error))?;
+            eu.verify_result().map_err(|error| {
+                crate::OptimizationError::verification(
+                    "after native packed conditional-store recovery",
+                    error,
+                )
+            })?;
         }
     }
     if !four_state && pass_vectorize_concat::expose_packed_bit_store_sinks(eu) {
         changed = true;
         VectorizeConcatPass::default().run(eu, &PassOptions::default());
         GvnPass.run(eu, &PassOptions::default());
-        eu.verify_result()
-            .map_err(|error| ("after native packed bit-store vectorization", error))?;
+        eu.verify_result().map_err(|error| {
+            crate::OptimizationError::verification(
+                "after native packed bit-store vectorization",
+                error,
+            )
+        })?;
     }
     let recovered_bit_maps = if four_state {
         0
@@ -99,8 +117,9 @@ pub fn optimize_merged_chain(
         .run(eu, &PassOptions::default());
         VectorizeConcatPass::default().run(eu, &PassOptions::default());
         GvnPass.run(eu, &PassOptions::default());
-        eu.verify_result()
-            .map_err(|error| ("after native fixed bit-map recovery", error))?;
+        eu.verify_result().map_err(|error| {
+            crate::OptimizationError::verification("after native fixed bit-map recovery", error)
+        })?;
     }
     if !four_state
         && diagnostics.effect_case_dispatch
@@ -134,14 +153,16 @@ pub fn optimize_merged_chain(
             dead_control_ns as f64 / 1_000_000.0,
             cfg_cleanup_ns as f64 / 1_000_000.0,
         );
-        eu.verify_result()
-            .map_err(|error| ("after native effect-case dispatch", error))?;
+        eu.verify_result().map_err(|error| {
+            crate::OptimizationError::verification("after native effect-case dispatch", error)
+        })?;
     }
     if !four_state && pass_pack_concat_phi::pack_concat_phis(eu) != 0 {
         changed = true;
         GvnPass.run(eu, &PassOptions::default());
-        eu.verify_result()
-            .map_err(|error| ("after native packed phi forwarding", error))?;
+        eu.verify_result().map_err(|error| {
+            crate::OptimizationError::verification("after native packed phi forwarding", error)
+        })?;
     }
     if !four_state {
         // Fusion and the native-only packed/control rewrites above can create
@@ -151,13 +172,15 @@ pub fn optimize_merged_chain(
         // head and kept live across the edge.
         pass_guarded_region_sinking::sink_pure_values_with_predicate_repair(eu);
         changed = true;
-        eu.verify_result()
-            .map_err(|error| ("after native final pure-value placement", error))?;
+        eu.verify_result().map_err(|error| {
+            crate::OptimizationError::verification("after native final pure-value placement", error)
+        })?;
     }
     if changed {
         pass_vectorize_concat::remove_dead_definitions(eu);
-        eu.verify_result()
-            .map_err(|error| ("after native merged-chain DCE", error))?;
+        eu.verify_result().map_err(|error| {
+            crate::OptimizationError::verification("after native merged-chain DCE", error)
+        })?;
     }
     Ok(())
 }

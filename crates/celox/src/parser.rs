@@ -135,8 +135,8 @@ fn verify_program_sir(
     program: &RuntimeProgram,
     phase: &'static str,
 ) -> Result<(), ParserError> {
-    program.verify_design_projection().map_err(|detail| {
-        ParserError::illegal_context("elaborated design projection", detail, None)
+    program.verify_design_projection().map_err(|error| {
+        ParserError::illegal_context("elaborated design projection", error.to_string(), None)
     })?;
     let units = sir
         .eval_comb

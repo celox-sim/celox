@@ -1,12 +1,11 @@
 use std::{
-    error::Error,
     fs::File,
     io::{BufWriter, Write},
 };
 
 use celox::SimulatorBuilder;
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> std::io::Result<()> {
     // Create output file (generated in the current directory)
     let file = File::create("simulation_dump.log")?;
     let mut writer = BufWriter::new(file);

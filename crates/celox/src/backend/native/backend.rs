@@ -218,9 +218,9 @@ fn prepare_merged_sir(
         label == "eval_comb_apply_ff",
         diagnostics,
     )
-    .map_err(|(phase, source)| {
-        codegen_err(CodegenError::SirVerification {
-            phase: phase.to_string(),
+    .map_err(|source| {
+        codegen_err(CodegenError::Optimization {
+            context: "native merged-chain optimization",
             source,
         })
     })?;

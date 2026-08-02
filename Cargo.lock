@@ -507,6 +507,7 @@ dependencies = [
  "celox",
  "clap",
  "libc",
+ "thiserror 2.0.19",
  "veryl-analyzer",
  "veryl-metadata",
  "veryl-parser",
