@@ -22,6 +22,7 @@ Simulator IR (SIR) and backend-independent optimization
 physical state layout
     │
     ├──► native x86-64 code
+    ├──► native AArch64 code
     ├──► Cranelift JIT code
     └──► WebAssembly
              │
@@ -84,6 +85,14 @@ The default x86-64 backend lowers SIR to a private machine IR, performs
 machine-level optimization and register allocation, and emits executable code.
 Its instruction selection, allocation data, and executable-memory management are
 not part of the shared compiler model.
+
+### Native AArch64
+
+The AArch64 backend owns its register policy, ABI lowering, and executable code
+emission. Its machine IR and machine-level optimizations are intentionally
+separate from x86. Both native backends may export opcode-free control-flow,
+use/def, and register-constraint facts to shared allocation algorithms; those
+facts are not a common machine IR.
 
 ### Cranelift
 

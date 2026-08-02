@@ -6,7 +6,8 @@
 //! lowering and spill support are added.
 
 use celox_backend_common::regalloc::{
-    Allocation, LinearScanError, LiveRange, MachineRegister, allocate_linear_scan,
+    Allocation, BlockAllocationFacts, FunctionAllocationFacts, InstructionAllocationFacts,
+    LinearScanError, LiveRange, MachineRegister, allocate_linear_scan,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -84,6 +85,32 @@ impl Function {
     pub fn builder() -> FunctionBuilder {
         FunctionBuilder::default()
     }
+
+    /// Project target-owned AArch64 MIR into opcode-free allocator facts.
+    ///
+    /// Keeping this adapter on the target side lets the allocator evolve
+    /// without teaching it the AArch64 instruction enum.
+    fn allocation_facts(&self) -> FunctionAllocationFacts<VReg, Arm64Reg> {
+        let instructions = self
+            .instructions
+            .iter()
+            .copied()
+            .map(|instruction| InstructionAllocationFacts {
+                uses: instruction.uses().into_iter().flatten().collect(),
+                defs: instruction.def().into_iter().collect(),
+                is_copy: false,
+                ..InstructionAllocationFacts::default()
+            })
+            .collect();
+        FunctionAllocationFacts {
+            entry: 0,
+            blocks: vec![BlockAllocationFacts {
+                successors: Vec::new(),
+                phis: Vec::new(),
+                instructions,
+            }],
+        }
+    }
 }
 
 /// Builder which assigns every definition a fresh SSA identity.
@@ -137,6 +164,7 @@ impl FunctionBuilder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileError {
     InvalidMir(String),
+    InvalidAllocationFacts(String),
     Regalloc(LinearScanError<VReg>),
 }
 
@@ -144,6 +172,9 @@ impl fmt::Display for CompileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidMir(message) => write!(formatter, "invalid ARM64 MIR: {message}"),
+            Self::InvalidAllocationFacts(message) => {
+                write!(formatter, "invalid ARM64 allocation facts: {message}")
+            }
             Self::Regalloc(error) => write!(formatter, "ARM64 register allocation failed: {error}"),
         }
     }
@@ -177,7 +208,11 @@ impl CompiledFunction {
 /// Verify, allocate, and emit one bootstrap AArch64 function.
 pub fn compile(function: &Function) -> Result<CompiledFunction, CompileError> {
     verify(function)?;
-    let ranges = live_ranges(function)?;
+    let facts = function.allocation_facts();
+    facts
+        .verify()
+        .map_err(|error| CompileError::InvalidAllocationFacts(error.to_string()))?;
+    let ranges = live_ranges(&facts)?;
     let allocation = allocate_linear_scan(&ranges, &ALLOCATABLE_REGS)?;
     let code = emit(function, &allocation);
     Ok(CompiledFunction { code, allocation })
@@ -238,9 +273,12 @@ fn verify(function: &Function) -> Result<(), CompileError> {
     Ok(())
 }
 
-fn live_ranges(function: &Function) -> Result<Vec<LiveRange<VReg>>, CompileError> {
+fn live_ranges(
+    facts: &FunctionAllocationFacts<VReg, Arm64Reg>,
+) -> Result<Vec<LiveRange<VReg>>, CompileError> {
+    let instructions = &facts.blocks[0].instructions;
     let mut ranges = HashMap::<VReg, LiveRange<VReg>>::new();
-    for (index, instruction) in function.instructions.iter().copied().enumerate() {
+    for (index, instruction) in instructions.iter().enumerate() {
         let index = u32::try_from(index)
             .map_err(|_| CompileError::InvalidMir("too many instructions".into()))?;
         let use_point = index
@@ -249,13 +287,13 @@ fn live_ranges(function: &Function) -> Result<Vec<LiveRange<VReg>>, CompileError
         let def_point = use_point
             .checked_add(1)
             .ok_or_else(|| CompileError::InvalidMir("program point overflow".into()))?;
-        for used in instruction.uses().into_iter().flatten() {
+        for &used in &instruction.uses {
             let range = ranges.get_mut(&used).ok_or_else(|| {
                 CompileError::InvalidMir(format!("missing live range for {used:?}"))
             })?;
             range.end = use_point;
         }
-        if let Some(dst) = instruction.def() {
+        for &dst in &instruction.defs {
             ranges.insert(
                 dst,
                 LiveRange {

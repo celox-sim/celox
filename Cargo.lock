@@ -464,6 +464,9 @@ dependencies = [
 [[package]]
 name = "celox-backend-common"
 version = "0.0.0"
+dependencies = [
+ "fxhash",
+]
 
 [[package]]
 name = "celox-backend-cranelift"

@@ -40,10 +40,38 @@ not depend on the facade. `celox-backend-x86` and `celox-backend-arm64` depend o
 `celox-backend-common` for allocation machinery; that crate is a compile-time
 library, not another pipeline artifact.
 
-`celox-backend-arm64` is currently a bootstrap backend. It verifies AAPCS64
-calling-convention handling, allocation, and executable instruction emission for
-a small integer MIR, but does not yet lower a complete `LaidOutProgram` or plug
-into the facade's backend selection.
+`celox-backend-arm64` is wired into native backend selection and emits complete
+scalar simulation kernels. Its production path temporarily uses the established
+x86-owned scalar lowering and allocation pipeline as a compatibility bridge.
+The migration target is separate x86 and AArch64 MIR pipelines which export only
+opcode-free allocation facts to `celox-backend-common`.
+
+## Native MIR and allocation boundary
+
+Native backends do not share an instruction enum. Each target owns instruction
+selection, machine optimization, legalization, register classes, ABI rules,
+spill/reload construction, and post-allocation rewriting:
+
+```text
+                         x86 instruction selection -> X86 MIR -> x86 passes
+LaidOutProgram -> SIR --<                                           |
+                         A64 instruction selection -> A64 MIR -> A64 passes
+                                                                     |
+                                      opcode-free allocation facts <-+
+                                                                     |
+                                      shared allocation algorithms
+```
+
+Immediately before a reusable allocation analysis, a backend projects its MIR
+into normalized facts: CFG successors, phi edges, virtual-register uses and
+definitions, fixed operands, clobbers, and copy hints. Shared code must consume
+these facts instead of matching target opcodes. Target drivers remain responsible
+for turning allocation decisions into legal machine instructions.
+
+Optimizations which are genuinely independent of machine instruction shape
+belong in `celox-sir-opt`. DCE or CFG algorithms may be shared over allocation
+facts when their required semantics are fully represented, but common MIR
+opcodes must not be introduced merely to reuse a pass.
 
 The facade's default `host-runtime` feature owns host execution, Cranelift,
 Wasmtime, the x86 backend, and the test macro. WebAssembly bindings disable that

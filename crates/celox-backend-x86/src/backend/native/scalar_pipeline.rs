@@ -1,8 +1,10 @@
-//! Scalar native middle-end shared temporarily by machine-code emitters.
+//! Transitional scalar pipeline implemented by the x86 backend.
 //!
-//! This module exposes the target-independent portion of the established x86
-//! pipeline while it is migrated into `celox-backend-common`. New targets can
-//! consume verified, allocated scalar MIR without duplicating SIR lowering.
+//! AArch64 temporarily consumes this allocated x86 MIR while its complete
+//! target-owned instruction selection and allocation driver are brought up.
+//! This is a compatibility bridge, not a shared-MIR architecture: reusable
+//! allocation algorithms move to `celox-backend-common` behind opcode-free
+//! facts, while target MIR and machine optimizations remain in each backend.
 
 use std::fmt;
 
@@ -77,9 +79,9 @@ impl PreparedScalarFunction {
     }
 }
 
-/// Lower, optimize, allocate, and destroy SSA for architecture-neutral scalar
-/// MIR. Target-specific SIMD selection and final emission are intentionally
-/// excluded.
+/// Lower, optimize, allocate, and destroy SSA through the transitional scalar
+/// x86 pipeline. Target-specific SIMD selection and final emission are
+/// intentionally excluded.
 pub fn prepare_scalar_eu(
     sir_eu: &crate::ExecutionUnit<crate::RegionedAbsoluteAddr>,
     layout: &crate::MemoryLayout,
