@@ -445,6 +445,78 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
+    fn prepare_effectful_runtime_event_args<A>(
+        &mut self,
+        args: &[SystemFunctionInput],
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<Vec<Option<RegisterId>>, ParserError> {
+        let value_args = if args
+            .first()
+            .and_then(|arg| Self::static_string_expr(&arg.0))
+            .is_some()
+        {
+            &args[1..]
+        } else {
+            args
+        };
+        value_args
+            .iter()
+            .map(|arg| {
+                if expression::expression_has_side_effect(&arg.0)
+                    || self.expression_has_runtime_effect(&arg.0)
+                {
+                    self.parse_expression(
+                        &arg.0, targets, domain, convert, sources, ir_builder, None,
+                    )?;
+                    Ok(Some(self.stack.pop_back().unwrap()))
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect()
+    }
+
+    fn emit_runtime_event_with_prepared_args<A>(
+        &mut self,
+        site_id: u32,
+        args: &[SystemFunctionInput],
+        prepared: Vec<Option<RegisterId>>,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        let value_args = if args
+            .first()
+            .and_then(|arg| Self::static_string_expr(&arg.0))
+            .is_some()
+        {
+            &args[1..]
+        } else {
+            args
+        };
+        debug_assert_eq!(value_args.len(), prepared.len());
+        let mut regs = Vec::with_capacity(value_args.len());
+        for (arg, prepared) in value_args.iter().zip(prepared) {
+            if let Some(reg) = prepared {
+                regs.push(reg);
+            } else {
+                self.parse_expression(&arg.0, targets, domain, convert, sources, ir_builder, None)?;
+                regs.push(self.stack.pop_back().unwrap());
+            }
+        }
+        ir_builder.emit(SIRInstruction::RuntimeEvent {
+            site_id,
+            args: regs,
+        });
+        Ok(())
+    }
+
     fn parse_system_task_statement<A>(
         &mut self,
         call: &SystemFunctionCall,
@@ -475,14 +547,28 @@ impl<'a> FfParser<'a> {
                     AssertKind::Continue => RuntimeEventKind::AssertContinue,
                 };
                 let site_id = self.register_runtime_event_site(event_kind, args);
+                // Assertion message arguments are observationally eager: any
+                // caller-visible effect must happen even when the assertion
+                // passes. Keep pure arguments in the failure block so the
+                // common passing path remains lazy.
+                let prepared_args = self.prepare_effectful_runtime_event_args(
+                    args, targets, domain, convert, sources, ir_builder,
+                )?;
                 ir_builder.seal_block(SIRTerminator::Branch {
                     cond: cond_reg,
                     true_block: (pass_bb, vec![]),
                     false_block: (fail_bb, vec![]),
                 });
                 ir_builder.switch_to_block(fail_bb);
-                self.emit_runtime_event(
-                    site_id, args, targets, domain, convert, sources, ir_builder,
+                self.emit_runtime_event_with_prepared_args(
+                    site_id,
+                    args,
+                    prepared_args,
+                    targets,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
                 )?;
                 match kind {
                     AssertKind::Fatal => {

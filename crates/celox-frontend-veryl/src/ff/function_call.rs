@@ -8,12 +8,311 @@ use celox_design::VarAtomBase;
 use celox_sir::SIRBuilder;
 use num_traits::ToPrimitive;
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, CaseStatement, Comptime, Expression, Factor, Op, Shape, Statement, Type,
-    TypeKind, ValueVariant, VarId, VarIndex, VarSelect,
+    ArrayLiteralItem, CaseStatement, Comptime, Expression, Factor, Op, Shape, Statement,
+    SystemFunctionCall, SystemFunctionKind, Type, TypeKind, ValueVariant, VarId, VarIndex,
+    VarSelect,
 };
 use veryl_parser::token_range::TokenRange;
 
 impl<'a> FfParser<'a> {
+    pub(super) fn expression_has_runtime_effect(&self, expr: &Expression) -> bool {
+        self.expression_has_runtime_effect_inner(expr, &mut HashSet::default())
+    }
+
+    fn expression_has_runtime_effect_inner(
+        &self,
+        expr: &Expression,
+        visiting: &mut HashSet<VarId>,
+    ) -> bool {
+        match expr {
+            Expression::Term(factor) => match factor.as_ref() {
+                Factor::Variable(_, index, select, _) => {
+                    index
+                        .0
+                        .iter()
+                        .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
+                        || select
+                            .0
+                            .iter()
+                            .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
+                        || select.1.as_ref().is_some_and(|(_, expr)| {
+                            self.expression_has_runtime_effect_inner(expr, visiting)
+                        })
+                }
+                Factor::FunctionCall(call) => {
+                    call.inputs
+                        .values()
+                        .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
+                        || self.function_call_has_runtime_effect(call, visiting)
+                }
+                Factor::SystemFunctionCall(call) => match &call.kind {
+                    veryl_analyzer::ir::SystemFunctionKind::Bits(input)
+                    | veryl_analyzer::ir::SystemFunctionKind::Size(input)
+                    | veryl_analyzer::ir::SystemFunctionKind::Clog2(input)
+                    | veryl_analyzer::ir::SystemFunctionKind::Onehot(input)
+                    | veryl_analyzer::ir::SystemFunctionKind::Signed(input)
+                    | veryl_analyzer::ir::SystemFunctionKind::Unsigned(input) => {
+                        self.expression_has_runtime_effect_inner(&input.0, visiting)
+                    }
+                    _ => true,
+                },
+                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+            },
+            Expression::Binary(lhs, _, rhs, _) => {
+                self.expression_has_runtime_effect_inner(lhs, visiting)
+                    || self.expression_has_runtime_effect_inner(rhs, visiting)
+            }
+            Expression::Unary(_, inner, _) => {
+                self.expression_has_runtime_effect_inner(inner, visiting)
+            }
+            Expression::Ternary(cond, then_expr, else_expr, _) => {
+                self.expression_has_runtime_effect_inner(cond, visiting)
+                    || self.expression_has_runtime_effect_inner(then_expr, visiting)
+                    || self.expression_has_runtime_effect_inner(else_expr, visiting)
+            }
+            Expression::Concatenation(items, _) => items.iter().any(|(expr, repeat)| {
+                self.expression_has_runtime_effect_inner(expr, visiting)
+                    || repeat.as_ref().is_some_and(|repeat| {
+                        self.expression_has_runtime_effect_inner(repeat, visiting)
+                    })
+            }),
+            Expression::ArrayLiteral(items, _) => items.iter().any(|item| match item {
+                ArrayLiteralItem::Value(expr, repeat) => {
+                    self.expression_has_runtime_effect_inner(expr, visiting)
+                        || repeat.as_ref().is_some_and(|repeat| {
+                            self.expression_has_runtime_effect_inner(repeat, visiting)
+                        })
+                }
+                ArrayLiteralItem::Defaul(expr) => {
+                    self.expression_has_runtime_effect_inner(expr, visiting)
+                }
+            }),
+            Expression::StructConstructor(_, fields, _) => fields
+                .iter()
+                .any(|(_, expr)| self.expression_has_runtime_effect_inner(expr, visiting)),
+        }
+    }
+
+    fn function_call_has_runtime_effect(
+        &self,
+        call: &veryl_analyzer::ir::FunctionCall,
+        visiting: &mut HashSet<VarId>,
+    ) -> bool {
+        if !visiting.insert(call.id) {
+            return false;
+        }
+        let result = self
+            .module
+            .functions
+            .get(&call.id)
+            .and_then(|function| {
+                if let Some(index) = &call.index {
+                    function.get_function(index)
+                } else {
+                    function.get_function(&[])
+                }
+            })
+            .is_some_and(|body| self.statements_have_runtime_effect(&body.statements, visiting));
+        visiting.remove(&call.id);
+        result
+    }
+
+    fn statements_have_runtime_effect(
+        &self,
+        statements: &[Statement],
+        visiting: &mut HashSet<VarId>,
+    ) -> bool {
+        statements.iter().any(|statement| match statement {
+            Statement::SystemFunctionCall(_) => true,
+            Statement::Assign(assign) => {
+                self.expression_has_runtime_effect_inner(&assign.expr, visiting)
+            }
+            Statement::If(statement) => {
+                self.expression_has_runtime_effect_inner(&statement.cond, visiting)
+                    || self.statements_have_runtime_effect(&statement.true_side, visiting)
+                    || self.statements_have_runtime_effect(&statement.false_side, visiting)
+            }
+            Statement::Case(statement) => {
+                self.expression_has_runtime_effect_inner(&statement.case_target, visiting)
+                    || statement
+                        .arms
+                        .iter()
+                        .any(|arm| self.statements_have_runtime_effect(&arm.body, visiting))
+                    || self.statements_have_runtime_effect(&statement.default, visiting)
+            }
+            Statement::For(statement) => {
+                self.statements_have_runtime_effect(&statement.body, visiting)
+            }
+            Statement::FunctionCall(call) => self.function_call_has_runtime_effect(call, visiting),
+            Statement::IfReset(statement) => {
+                self.statements_have_runtime_effect(&statement.true_side, visiting)
+                    || self.statements_have_runtime_effect(&statement.false_side, visiting)
+            }
+            Statement::TbMethodCall(_)
+            | Statement::Break
+            | Statement::Unsupported(_)
+            | Statement::Null => false,
+        })
+    }
+
+    fn substitute_system_function_call(
+        call: &SystemFunctionCall,
+        state: &HashMap<VarId, Expression>,
+    ) -> SystemFunctionCall {
+        let mut call = call.clone();
+        let substitute_input = |input: &mut veryl_analyzer::ir::SystemFunctionInput| {
+            input.0 = Self::substitute_function_expr(&input.0, state);
+        };
+        match &mut call.kind {
+            SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
+                args.iter_mut().for_each(substitute_input);
+            }
+            SystemFunctionKind::Assert { cond, args, .. } => {
+                substitute_input(cond);
+                args.iter_mut().for_each(substitute_input);
+            }
+            SystemFunctionKind::Readmemh(_, _)
+            | SystemFunctionKind::Finish
+            | SystemFunctionKind::Bits(_)
+            | SystemFunctionKind::Size(_)
+            | SystemFunctionKind::Clog2(_)
+            | SystemFunctionKind::Onehot(_)
+            | SystemFunctionKind::Signed(_)
+            | SystemFunctionKind::Unsigned(_) => {}
+        }
+        call
+    }
+
+    fn emit_function_runtime_effects<A>(
+        &mut self,
+        statements: &[Statement],
+        bindings: &HashMap<VarId, Expression>,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        let mut state = bindings.clone();
+        for statement in statements {
+            match statement {
+                Statement::Assign(assign) => {
+                    if self.expression_has_runtime_effect(&assign.expr) {
+                        return Err(ParserError::unsupported(
+                            66,
+                            LoweringPhase::FfLowering,
+                            "effectful expression in function body",
+                            format!("{statement}"),
+                            Some(&assign.token),
+                        ));
+                    }
+                    if assign.dst.len() != 1 {
+                        return Err(ParserError::unsupported(
+                            43,
+                            LoweringPhase::FfLowering,
+                            "function body assignment shape",
+                            format!("{statement}"),
+                            Some(&assign.token),
+                        ));
+                    }
+                    let dst = &assign.dst[0];
+                    let rhs = Self::substitute_function_expr(&assign.expr, &state);
+                    let is_whole_var =
+                        dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
+                    if is_whole_var {
+                        state.insert(dst.id, rhs);
+                    } else if is_static_access(&dst.index, &dst.select) {
+                        let old_value = state.get(&dst.id).cloned().unwrap_or_else(|| {
+                            Expression::Term(Box::new(Factor::Variable(
+                                dst.id,
+                                VarIndex::default(),
+                                VarSelect::default(),
+                                dst.comptime.clone(),
+                            )))
+                        });
+                        state.insert(
+                            dst.id,
+                            build_partial_assign_expr(self.module, dst, rhs, old_value)?,
+                        );
+                    } else {
+                        return Err(ParserError::unsupported(
+                            66,
+                            LoweringPhase::FfLowering,
+                            "dynamic assignment before runtime effect in function body",
+                            format!("{statement}"),
+                            Some(&assign.token),
+                        ));
+                    }
+                }
+                Statement::SystemFunctionCall(call) => {
+                    let call = Self::substitute_system_function_call(call, &state);
+                    self.parse_system_task_statement(
+                        &call, targets, domain, convert, sources, ir_builder,
+                    )?;
+                }
+                Statement::Null => {}
+                Statement::If(statement) => {
+                    return Err(ParserError::unsupported(
+                        66,
+                        LoweringPhase::FfLowering,
+                        "control flow around runtime effect in function body",
+                        format!("{statement}"),
+                        Some(&statement.token),
+                    ));
+                }
+                Statement::Case(statement) => {
+                    return Err(ParserError::unsupported(
+                        66,
+                        LoweringPhase::FfLowering,
+                        "control flow around runtime effect in function body",
+                        format!("{statement}"),
+                        Some(&statement.token),
+                    ));
+                }
+                Statement::For(statement) => {
+                    return Err(ParserError::unsupported(
+                        66,
+                        LoweringPhase::FfLowering,
+                        "control flow around runtime effect in function body",
+                        "for loop".to_string(),
+                        Some(&statement.token),
+                    ));
+                }
+                Statement::FunctionCall(call) => {
+                    if self.function_call_has_runtime_effect(call, &mut HashSet::default()) {
+                        return Err(ParserError::unsupported(
+                            66,
+                            LoweringPhase::FfLowering,
+                            "nested runtime effect in function body",
+                            format!("{statement}"),
+                            Some(&call.comptime.token),
+                        ));
+                    }
+                    state = self.apply_function_call_to_state(call, &state)?;
+                }
+                Statement::IfReset(statement) => {
+                    return Err(ParserError::unsupported(
+                        66,
+                        LoweringPhase::FfLowering,
+                        "control flow around runtime effect in function body",
+                        format!("{statement}"),
+                        Some(&statement.token),
+                    ));
+                }
+                Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
+                    return Err(ParserError::unsupported(
+                        66,
+                        LoweringPhase::FfLowering,
+                        "runtime effect in function body",
+                        format!("{statement}"),
+                        None,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn normalize_function_control_condition(condition: Expression) -> Expression {
         let token = TokenRange::default();
         let already_one_bit = condition.comptime().r#type.total_width() == Some(1)
@@ -477,13 +776,7 @@ impl<'a> FfParser<'a> {
                     format!("{stmt}"),
                     Some(&ir.token),
                 )),
-                Statement::SystemFunctionCall(sc) => Err(ParserError::unsupported(
-                    66,
-                    LoweringPhase::FfLowering,
-                    "function body control flow",
-                    format!("{stmt}"),
-                    Some(&sc.comptime.token),
-                )),
+                Statement::SystemFunctionCall(_) => Ok(state.clone()),
                 Statement::FunctionCall(call) => parser.apply_function_call_to_state(call, state),
                 Statement::For(f) => Err(ParserError::unsupported(
                     43,
@@ -659,13 +952,9 @@ impl<'a> FfParser<'a> {
                     format!("{stmt}"),
                     Some(&ir.token),
                 )),
-                Statement::SystemFunctionCall(sc) => Err(ParserError::unsupported(
-                    66,
-                    LoweringPhase::FfLowering,
-                    "function body control flow",
-                    format!("{stmt}"),
-                    Some(&sc.comptime.token),
-                )),
+                Statement::SystemFunctionCall(_) => {
+                    resolve_return_expr(parser, rest, ret_id, defs, substitute)
+                }
                 Statement::FunctionCall(call) => {
                     let next_defs = parser.apply_function_call_to_state(call, defs)?;
                     resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
@@ -802,6 +1091,18 @@ impl<'a> FfParser<'a> {
             if let Some(arg_expr) = call.inputs.get(arg_path) {
                 bindings.insert(*arg_id, arg_expr.clone());
             }
+        }
+
+        if self.statements_have_runtime_effect(&function_body.statements, &mut HashSet::default()) {
+            self.emit_function_runtime_effects(
+                &function_body.statements,
+                &bindings,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+            )?;
         }
 
         for (arg_path, dsts) in &call.outputs {

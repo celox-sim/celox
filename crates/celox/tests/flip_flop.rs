@@ -121,6 +121,102 @@ fn test_ff_runtime_display_and_assert_continue(sim) {
     );
 }
 
+fn test_ff_assert_message_output_argument_is_eager(sim) {
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            ok: input logic,
+            d: input logic<8>,
+            effect: output logic<8>
+        ) {
+            function message_value (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x + 8'd2;
+            }
+
+            always_ff (clk) {
+                $assert_continue(ok, "value=%0d", message_value(d, effect));
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let ok = sim.signal("ok");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+
+    sim.modify(|io| {
+        io.set(ok, 1u8);
+        io.set(d, 10u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 11u8.into());
+
+    sim.modify(|io| {
+        io.set(ok, 0u8);
+        io.set(d, 20u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 21u8.into());
+}
+
+fn test_ff_assert_message_runtime_effect_is_eager(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, ok: input logic, d: input logic<8>) {
+            function message_value (x: input logic<8>) -> logic<8> {
+                $display("inside=%0d", x);
+                return x + 8'd2;
+            }
+
+            always_ff (clk) {
+                $assert_continue(ok, "value=%0d", message_value(d));
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let ok = sim.signal("ok");
+    let d = sim.signal("d");
+
+    sim.modify(|io| {
+        io.set(ok, 1u8);
+        io.set(d, 10u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "inside=10".to_string(),
+        }],
+    );
+
+    sim.modify(|io| {
+        io.set(ok, 0u8);
+        io.set(d, 20u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "inside=20".to_string(),
+            },
+            celox::RuntimeEvent::AssertContinue {
+                message: "value=22".to_string(),
+            },
+        ],
+    );
+}
+
 fn test_ff_runtime_events_format_verilog_radices(sim) {
     @omit_veryl;
     @ignore_on(wasm);
@@ -2142,6 +2238,34 @@ fn test_ff_function_call_bit_select_on_nonvariable_one_bit_formal(sim) {
 }
 
 // Tests that use setup_and_trace/snapshot/Simulation::builder stay as regular #[test]
+
+#[test]
+fn test_ff_assert_pure_message_argument_stays_in_failure_block() {
+    let code = r#"
+        module Top (clk: input clock, ok: input logic, d: input logic<8>) {
+            always_ff (clk) {
+                $assert_continue(ok, "value=%0d", d * 8'd13);
+            }
+        }
+    "#;
+    let result = SimulatorBuilder::new(code, "Top")
+        .optimize(false)
+        .trace_pre_optimized_sir()
+        .build_with_trace();
+    let sir = result.trace.format_pre_optimized_sir().unwrap();
+    let branch = sir
+        .find("Branch(")
+        .unwrap_or_else(|| panic!("assertion branch in FF SIR:\n{sir}"));
+    let multiply = sir.find(" Mul ").expect("pure message argument in FF SIR");
+    let event = sir
+        .find("RuntimeEvent(")
+        .expect("assertion runtime event in FF SIR");
+
+    assert!(
+        branch < multiply && multiply < event,
+        "pure message argument should be evaluated only after entering the failure block:\n{sir}",
+    );
+}
 
 #[test]
 fn test_ff_runtime_for_wide_dynamic_bound_is_still_allowed() {

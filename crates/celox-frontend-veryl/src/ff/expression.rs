@@ -26,7 +26,7 @@ use veryl_analyzer::ir::{
 };
 use veryl_analyzer::symbol::Affiliation;
 
-fn expression_has_side_effect(expr: &Expression) -> bool {
+pub(super) fn expression_has_side_effect(expr: &Expression) -> bool {
     let input_has_side_effect =
         |input: &veryl_analyzer::ir::SystemFunctionInput| expression_has_side_effect(&input.0);
     match expr {
