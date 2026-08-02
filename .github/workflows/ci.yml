@@ -126,6 +126,8 @@ jobs:
           submodules: recursive
 
       - uses: ./.github/actions/setup-rust
+        with:
+          targets: wasm32-wasip1-threads
 
       - uses: Swatinem/rust-cache@v2
 
@@ -143,6 +145,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Check NAPI peer compatibility
+        run: pnpm peers check
+
       - name: Build NAPI (debug)
         run: pnpm run build:napi
 
@@ -154,6 +159,15 @@ jobs:
             crates/celox-napi/celox.linux-x64-gnu.node
             crates/celox-napi/index.js
             crates/celox-napi/index.d.ts
+
+      - name: Install WASI SDK
+        run: |
+          curl -fsSL https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz | tar xz -C /opt
+          echo "WASI_SDK_PATH=/opt/wasi-sdk-25.0-x86_64-linux" >> "$GITHUB_ENV"
+          echo "CC_wasm32_wasip1_threads=/opt/wasi-sdk-25.0-x86_64-linux/bin/clang" >> "$GITHUB_ENV"
+
+      - name: Build NAPI WASM compatibility target
+        run: pnpm --filter @celox-sim/celox-napi exec napi build --platform --target wasm32-wasip1-threads --manifest-path ../../Cargo.toml -p celox-napi
 
   napi-windows:
     name: NAPI Build (Windows)

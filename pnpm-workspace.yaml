@@ -15,5 +15,5 @@ minimumReleaseAge: 10080
 minimumReleaseAgeExclude:
   # Renovate security update: vite@6.4.2
   - vite@6.4.2
-  # Keep the JS CLI in sync with napi-rs 3.12 used by the Rust workspace.
+  # napi 3.12 requires emnapi 2 support from this CLI release.
   - "@napi-rs/cli@3.8.2"
