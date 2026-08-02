@@ -59,14 +59,12 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
             }
         }
         ConstExpr::Binary { left, op, right } => {
-            if matches!(op, BinaryOp::EqCase | BinaryOp::NeCase)
-                && let Some(equal) = eval_literal_case_equality(left, right)
+            if matches!(
+                op,
+                BinaryOp::EqCase | BinaryOp::NeCase | BinaryOp::EqWildcard | BinaryOp::NeWildcard
+            ) && let Some(result) = eval_literal_four_state_equality(left, *op, right)
             {
-                return Some(if matches!(op, BinaryOp::EqCase) {
-                    equal as i128
-                } else {
-                    (!equal) as i128
-                });
+                return Some(result as i128);
             }
             let left = eval_const_expr(left, constants)?;
             let right = eval_const_expr(right, constants)?;
@@ -109,22 +107,90 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
     }
 }
 
-fn eval_literal_case_equality(left: &ConstExpr, right: &ConstExpr) -> Option<bool> {
+fn eval_literal_four_state_equality(
+    left: &ConstExpr,
+    op: BinaryOp,
+    right: &ConstExpr,
+) -> Option<bool> {
     let ConstExpr::Literal(left) = left else {
         return None;
     };
     let ConstExpr::Literal(right) = right else {
         return None;
     };
-    let mut left = parse_integral_literal(left)?;
-    let mut right = parse_integral_literal(right)?;
+    let left_fill = unbased_fill_literal(left);
+    let right_fill = unbased_fill_literal(right);
+    let (mut left, mut right) = match (left_fill, right_fill) {
+        (Some(left_fill), Some(right_fill)) => (
+            integral_fill_literal(left_fill, 1)?,
+            integral_fill_literal(right_fill, 1)?,
+        ),
+        (Some(fill), None) => {
+            let right = parse_integral_literal(right)?;
+            (integral_fill_literal(fill, right.width)?, right)
+        }
+        (None, Some(fill)) => {
+            let left = parse_integral_literal(left)?;
+            let right = integral_fill_literal(fill, left.width)?;
+            (left, right)
+        }
+        (None, None) => (
+            parse_integral_literal(left)?,
+            parse_integral_literal(right)?,
+        ),
+    };
     let width = left.width.max(right.width);
     let signed = left.signed && right.signed;
     let left_extension = signed_extension(&left, signed);
     let right_extension = signed_extension(&right, signed);
     left = resize_integral_literal(left, width, signed, left_extension);
     right = resize_integral_literal(right, width, signed, right_extension);
-    Some(left.value == right.value && left.mask == right.mask)
+    let equal = match op {
+        BinaryOp::EqCase | BinaryOp::NeCase => left.value == right.value && left.mask == right.mask,
+        BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
+            let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+            let compare_mask = &width_mask ^ &right.mask;
+            let lhs_definite = &width_mask ^ &left.mask;
+            let definite_compare = &compare_mask & lhs_definite;
+            let mismatch = (&left.value ^ &right.value) & definite_compare;
+            if mismatch != BigUint::default() {
+                false
+            } else if (&left.mask & compare_mask) != BigUint::default() {
+                return None;
+            } else {
+                true
+            }
+        }
+        _ => return None,
+    };
+    Some(if matches!(op, BinaryOp::NeCase | BinaryOp::NeWildcard) {
+        !equal
+    } else {
+        equal
+    })
+}
+
+fn unbased_fill_literal(value: &str) -> Option<char> {
+    let normalized = value.trim().to_ascii_lowercase();
+    let mut chars = normalized.chars();
+    (chars.next()? == '\'' && chars.clone().count() == 1).then_some(chars.next()?)
+}
+
+fn integral_fill_literal(fill: char, width: usize) -> Option<IntegralLiteral> {
+    let all_ones = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+    let (value, mask) = match fill {
+        '0' => (BigUint::default(), BigUint::default()),
+        '1' => (all_ones, BigUint::default()),
+        'x' => (all_ones.clone(), all_ones),
+        'z' | '?' => (BigUint::default(), all_ones),
+        _ => return None,
+    };
+    Some(IntegralLiteral {
+        width,
+        signed: false,
+        value,
+        mask,
+    })
 }
 
 fn signed_extension(literal: &IntegralLiteral, signed: bool) -> (bool, bool) {
@@ -449,5 +515,45 @@ mod literal_tests {
 
         assert_eq!(eval_const_expr(&eq, &HashMap::new()), Some(1));
         assert_eq!(eval_const_expr(&ne, &HashMap::new()), Some(1));
+    }
+
+    #[test]
+    fn context_sizes_fills_in_constant_case_equality() {
+        let eq = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Literal("8'hff".to_string())),
+            op: BinaryOp::EqCase,
+            right: Box::new(ConstExpr::Literal("'1".to_string())),
+        };
+        let ne = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Literal("4'bxxxx".to_string())),
+            op: BinaryOp::NeCase,
+            right: Box::new(ConstExpr::Literal("'x".to_string())),
+        };
+
+        assert_eq!(eval_const_expr(&eq, &HashMap::new()), Some(1));
+        assert_eq!(eval_const_expr(&ne, &HashMap::new()), Some(0));
+    }
+
+    #[test]
+    fn evaluates_masked_literals_in_constant_wildcard_equality() {
+        let eq = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Literal("2'b10".to_string())),
+            op: BinaryOp::EqWildcard,
+            right: Box::new(ConstExpr::Literal("2'b1x".to_string())),
+        };
+        let ne = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Literal("2'b00".to_string())),
+            op: BinaryOp::NeWildcard,
+            right: Box::new(ConstExpr::Literal("2'b1z".to_string())),
+        };
+        let indeterminate = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Literal("2'bx0".to_string())),
+            op: BinaryOp::EqWildcard,
+            right: Box::new(ConstExpr::Literal("2'b10".to_string())),
+        };
+
+        assert_eq!(eval_const_expr(&eq, &HashMap::new()), Some(1));
+        assert_eq!(eval_const_expr(&ne, &HashMap::new()), Some(1));
+        assert_eq!(eval_const_expr(&indeterminate, &HashMap::new()), None);
     }
 }

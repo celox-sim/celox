@@ -978,13 +978,17 @@ sv_backends! {
             output logic [7:0] q_parameter_x_fill,
             output logic [7:0] q_parameter_z_fill,
             output logic [7:0] q_function_integer,
-            output logic q_const_case_equality
+            output logic q_const_case_equality,
+            output logic q_const_case_fill,
+            output logic q_const_wildcard_equality
         );
             localparam logic [1:0] X_LABEL = 2'b1x;
             localparam EXPR_LABEL = 2'b11 + 2'b00;
             localparam logic [3:0] X_FILL = 'x;
             localparam logic [3:0] Z_FILL = 'z;
             localparam MATCH_X = 1'bx === 1'bx;
+            localparam MATCH_FILL = 8'hff === '1;
+            localparam MATCH_WILDCARD = 2'b10 ==? 2'b1x;
 
             function automatic logic [1:0] decode(input logic [1:0] value);
                 return value;
@@ -1043,6 +1047,8 @@ sv_backends! {
                     default: q_function_integer <= 0;
                 endcase
                 q_const_case_equality <= MATCH_X;
+                q_const_case_fill <= MATCH_FILL;
+                q_const_wildcard_equality <= MATCH_WILDCARD;
             end
         endmodule
     "#;
@@ -1080,6 +1086,11 @@ sv_backends! {
     );
     assert_eq!(sim.get(sim.signal("q_function_integer")), 0xe9u8.into());
     assert_eq!(sim.get(sim.signal("q_const_case_equality")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("q_const_case_fill")), 1u8.into());
+    assert_eq!(
+        sim.get(sim.signal("q_const_wildcard_equality")),
+        1u8.into(),
+    );
 
     sim.modify(|io| {
         io.set_four_state(mode, BigUint::from(0b11u8), BigUint::from(0b01u8));
@@ -1103,6 +1114,11 @@ sv_backends! {
     );
     assert_eq!(sim.get(sim.signal("q_function_integer")), 0xe9u8.into());
     assert_eq!(sim.get(sim.signal("q_const_case_equality")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("q_const_case_fill")), 1u8.into());
+    assert_eq!(
+        sim.get(sim.signal("q_const_wildcard_equality")),
+        1u8.into(),
+    );
     }
 
     fn simulates_systemverilog_repeat_concat(sim) {
