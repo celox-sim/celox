@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785663888837,
+  "lastUpdate": 1785665358470,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -148568,6 +148568,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
             "value": 122666.712446,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+s@gmail.com",
+            "name": "tig",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ace486325d935f00cf6a27da7a85cdf43aeaa1d5",
+          "message": "Merge pull request #400 from celox-sim/agent/native-four-state-constant-fold\n\nfix(native): preserve four-state constant masks",
+          "timestamp": "2026-08-02T18:42:37+09:00",
+          "tree_id": "eb73c40211442197c4e97182b58e6136c32df768",
+          "url": "https://github.com/celox-sim/celox/commit/ace486325d935f00cf6a27da7a85cdf43aeaa1d5"
+        },
+        "date": 1785665344837,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-jit/heliodor_linux_boot_execution",
+            "value": 110870.183648,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-total/heliodor_linux_boot_execution",
+            "value": 110892.646194,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl/heliodor_linux_boot_execution",
+            "value": 165611.193859,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-compile/heliodor_linux_boot_compilation",
+            "value": 116090.240591,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
+            "value": 124255.361244,
             "unit": "ms"
           }
         ]
