@@ -976,6 +976,63 @@ fn test_ff_array_literal_non_constant_repeat_is_illegal_context() {
 }
 
 #[test]
+fn test_ff_function_argument_array_literal_non_constant_repeat_is_rejected_by_shape_validation() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            n: input logic<2>,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>[2]) -> logic<8> {
+                return x[1];
+            }
+            always_ff (clk) {
+                out_q = f('{8'h11 repeat n});
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("non-constant repeat must be rejected");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 43);
+            assert_eq!(*feature, "function call argument shape");
+        }
+        other => panic!("expected function argument shape error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_ff_function_argument_array_literal_multiple_default_is_rejected_by_shape_validation() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>[2]) -> logic<8> {
+                return x[1];
+            }
+            always_ff (clk) {
+                out_q = f('{default: 8'h11, default: 8'h22});
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("multiple defaults must be rejected");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 43);
+            assert_eq!(*feature, "function call argument shape");
+        }
+        other => panic!("expected function argument shape error, got: {other:?}"),
+    }
+}
+
+#[test]
 fn test_ff_array_literal_width_overflow_is_illegal_context() {
     let code = r#"
         module Top (
