@@ -277,6 +277,7 @@ pub struct FfParser<'a> {
     loop_exit_blocks: Vec<BlockId>,
     reset: Option<FfReset>,
     function_arg_stack: Vec<HashMap<VarId, Expression>>,
+    function_arg_value_stack: Vec<HashMap<VarId, RegisterId>>,
     runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     runtime_event_sites: Vec<RuntimeEventSite>,
     next_runtime_error_code: i64,
@@ -314,6 +315,7 @@ impl<'a> FfParser<'a> {
             loop_exit_blocks: Vec::new(),
             reset: None,
             function_arg_stack: Vec::new(),
+            function_arg_value_stack: Vec::new(),
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
             next_runtime_error_code: 2000,
@@ -463,19 +465,22 @@ impl<'a> FfParser<'a> {
         } else {
             args
         };
+        let has_effectful_arg = value_args.iter().any(|arg| {
+            expression::expression_has_side_effect(&arg.0)
+                || self.expression_has_runtime_effect(&arg.0)
+        });
+        if !has_effectful_arg {
+            return Ok(vec![None; value_args.len()]);
+        }
+
+        // Once any argument is effectful, evaluate the complete argument list
+        // left-to-right. Deferring a pure read past a later effectful argument
+        // could otherwise change the value captured for a failing assertion.
         value_args
             .iter()
             .map(|arg| {
-                if expression::expression_has_side_effect(&arg.0)
-                    || self.expression_has_runtime_effect(&arg.0)
-                {
-                    self.parse_expression(
-                        &arg.0, targets, domain, convert, sources, ir_builder, None,
-                    )?;
-                    Ok(Some(self.stack.pop_back().unwrap()))
-                } else {
-                    Ok(None)
-                }
+                self.parse_expression(&arg.0, targets, domain, convert, sources, ir_builder, None)?;
+                Ok(Some(self.stack.pop_back().unwrap()))
             })
             .collect()
     }

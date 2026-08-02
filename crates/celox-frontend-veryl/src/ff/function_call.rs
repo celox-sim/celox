@@ -3,9 +3,10 @@ use crate::{
     HashMap, HashSet, LoweringPhase, ParserError,
     bitaccess::{build_partial_assign_expr, is_static_access},
     case::case_arm_condition_expr,
+    resolve_total_width,
 };
 use celox_design::VarAtomBase;
-use celox_sir::SIRBuilder;
+use celox_sir::{RegisterId, SIRBuilder};
 use num_traits::ToPrimitive;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, CaseStatement, Comptime, Expression, Factor, Op, Shape, Statement,
@@ -572,6 +573,68 @@ impl<'a> FfParser<'a> {
             .find_map(|bindings| bindings.get(&var_id))
     }
 
+    pub(super) fn get_bound_function_arg_value(&self, var_id: VarId) -> Option<&RegisterId> {
+        self.function_arg_value_stack
+            .iter()
+            .rev()
+            .find_map(|bindings| bindings.get(&var_id))
+    }
+
+    fn materialize_effectful_function_inputs<A>(
+        &mut self,
+        call: &veryl_analyzer::ir::FunctionCall,
+        function_body: &veryl_analyzer::ir::FunctionBody,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<HashMap<VarId, RegisterId>, ParserError> {
+        let mut values = HashMap::default();
+        for (arg_path, arg_id) in &function_body.arg_map {
+            let Some(actual) = call.inputs.get(arg_path) else {
+                continue;
+            };
+            if !super::expression::expression_has_side_effect(actual)
+                && !self.expression_has_runtime_effect(actual)
+            {
+                continue;
+            }
+
+            let formal = &self.module.variables[arg_id];
+            if !formal.r#type.array.is_empty() {
+                return Err(ParserError::unsupported(
+                    43,
+                    LoweringPhase::FfLowering,
+                    "effectful unpacked function argument",
+                    format!("{actual}"),
+                    Some(&call.comptime.token),
+                ));
+            }
+            let formal_width = resolve_total_width(self.module, formal)?;
+            self.parse_expression(
+                actual,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+                Some(formal_width),
+            )?;
+            let actual_reg = self.stack.pop_back().unwrap();
+            let formal_reg = self.coerce_register_to_formal(
+                ir_builder,
+                actual_reg,
+                formal_width,
+                actual.comptime().r#type.signed,
+                formal.r#type.signed,
+                formal.r#type.is_2state(),
+            );
+            values.insert(*arg_id, formal_reg);
+        }
+        Ok(values)
+    }
+
     pub(super) fn substitute_function_expr(
         expr: &Expression,
         defs: &HashMap<VarId, Expression>,
@@ -1092,60 +1155,75 @@ impl<'a> FfParser<'a> {
                 bindings.insert(*arg_id, arg_expr.clone());
             }
         }
-
-        if self.statements_have_runtime_effect(&function_body.statements, &mut HashSet::default()) {
-            self.emit_function_runtime_effects(
-                &function_body.statements,
-                &bindings,
-                targets,
-                domain,
-                convert,
-                sources,
-                ir_builder,
-            )?;
+        let materialized = self.materialize_effectful_function_inputs(
+            call,
+            &function_body,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+        )?;
+        let mut symbolic_bindings = bindings.clone();
+        for arg_id in materialized.keys() {
+            symbolic_bindings.remove(arg_id);
         }
 
-        for (arg_path, dsts) in &call.outputs {
-            let Some(arg_id) = function_body.arg_map.get(arg_path) else {
-                return Err(ParserError::unsupported(
-                    61,
-                    LoweringPhase::FfLowering,
-                    "function call missing argument",
+        self.function_arg_stack.push(bindings);
+        self.function_arg_value_stack.push(materialized);
+        let result = (|| {
+            if self
+                .statements_have_runtime_effect(&function_body.statements, &mut HashSet::default())
+            {
+                self.emit_function_runtime_effects(
+                    &function_body.statements,
+                    &symbolic_bindings,
+                    targets,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
+                )?;
+            }
+
+            for (arg_path, dsts) in &call.outputs {
+                let Some(arg_id) = function_body.arg_map.get(arg_path) else {
+                    return Err(ParserError::unsupported(
+                        61,
+                        LoweringPhase::FfLowering,
+                        "function call missing argument",
+                        format!("{call}"),
+                        Some(&call.comptime.token),
+                    ));
+                };
+
+                let expr =
+                    self.extract_function_target_expr(&function_body, *arg_id, &symbolic_bindings)?;
+                self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None)?;
+
+                let rhs_reg = self
+                    .stack
+                    .pop_back()
+                    .expect("Function output expression evaluation failed");
+                self.emit_multi_dst_assign(
+                    rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
+                )?;
+            }
+
+            let Some(ret_id) = function_body.ret else {
+                return Err(ParserError::illegal_context(
+                    "void function call in expression",
                     format!("{call}"),
                     Some(&call.comptime.token),
                 ));
             };
-
-            let expr = self.extract_function_target_expr(&function_body, *arg_id, &bindings)?;
-            self.function_arg_stack.push(bindings.clone());
-            self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None)?;
-            self.function_arg_stack.pop();
-
-            let rhs_reg = self
-                .stack
-                .pop_back()
-                .expect("Function output expression evaluation failed");
-            self.emit_multi_dst_assign(
-                rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
-            )?;
-        }
-
-        let Some(ret_id) = function_body.ret else {
-            return Err(ParserError::illegal_context(
-                "void function call in expression",
-                format!("{call}"),
-                Some(&call.comptime.token),
-            ));
-        };
-
-        let ret_expr = self.extract_function_return_expr(&function_body, ret_id)?;
-
-        self.function_arg_stack.push(bindings);
-        let result = self.parse_expression(
-            &ret_expr, targets, domain, convert, sources, ir_builder, None,
-        );
+            let ret_expr = self.extract_function_return_expr(&function_body, ret_id)?;
+            self.parse_expression(
+                &ret_expr, targets, domain, convert, sources, ir_builder, None,
+            )
+        })();
+        self.function_arg_value_stack.pop();
         self.function_arg_stack.pop();
-
         result
     }
 

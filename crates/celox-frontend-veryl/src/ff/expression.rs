@@ -346,7 +346,7 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
-    fn coerce_register_to_formal<A>(
+    pub(super) fn coerce_register_to_formal<A>(
         &self,
         ir_builder: &mut SIRBuilder<A>,
         reg: RegisterId,
@@ -1537,6 +1537,60 @@ impl<'a> FfParser<'a> {
                         }
                     }
                 }
+                if let Some(bound_reg) = self.get_bound_function_arg_value(*var_id) {
+                    let bound_reg = *bound_reg;
+                    if var_index.0.is_empty() && var_select.0.is_empty() && var_select.1.is_none() {
+                        self.stack.push_back(bound_reg);
+                        if let Some(context) = context {
+                            let adjusted = self.cast_reg_width_ext(
+                                ir_builder,
+                                bound_reg,
+                                context.width,
+                                context.signed,
+                            );
+                            self.stack.pop_back();
+                            self.stack.push_back(adjusted);
+                        }
+                        return Ok(());
+                    }
+
+                    let width = get_access_width(self.module, *var_id, var_index, var_select)?;
+                    let selected = match self.emit_offset_calc(
+                        *var_id, var_index, var_select, domain, convert, sources, ir_builder,
+                    )? {
+                        SIROffset::Static(lsb)
+                        | SIROffset::PackedElements {
+                            bit_offset: lsb, ..
+                        } => self.emit_register_slice(
+                            bound_reg,
+                            BitAccess::new(lsb, lsb + width - 1),
+                            ir_builder,
+                        ),
+                        SIROffset::Dynamic(offset) => {
+                            self.emit_register_dynamic_slice(bound_reg, offset, width, ir_builder)
+                        }
+                        SIROffset::Element {
+                            index,
+                            element_width,
+                            bit_offset,
+                            dynamic_bit_offset,
+                        } => {
+                            let mut logical = Some(scale_offset(index, element_width, ir_builder));
+                            add_offset_constant(&mut logical, bit_offset as u64, ir_builder);
+                            if let Some(dynamic_bit_offset) = dynamic_bit_offset {
+                                add_offset_term(&mut logical, dynamic_bit_offset, ir_builder);
+                            }
+                            self.emit_register_dynamic_slice(
+                                bound_reg,
+                                logical.expect("scaled element index is present"),
+                                width,
+                                ir_builder,
+                            )
+                        }
+                    };
+                    self.stack.push_back(selected);
+                    return Ok(());
+                }
                 if let Some(bound_expr) = self.get_bound_function_arg_expr(*var_id) {
                     let bound_expr = bound_expr.clone();
                     if var_index.0.is_empty() && var_select.0.is_empty() && var_select.1.is_none() {
@@ -1961,7 +2015,11 @@ impl<'a> FfParser<'a> {
         )?;
         let cond_reg = self.stack.pop_back().unwrap();
 
-        if !expression_has_side_effect(then) && !expression_has_side_effect(els) {
+        if !expression_has_side_effect(then)
+            && !expression_has_side_effect(els)
+            && !self.expression_has_runtime_effect(then)
+            && !self.expression_has_runtime_effect(els)
+        {
             self.parse_expression_in_context(
                 then,
                 targets,

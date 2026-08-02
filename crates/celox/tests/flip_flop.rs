@@ -217,6 +217,118 @@ fn test_ff_assert_message_runtime_effect_is_eager(sim) {
     );
 }
 
+fn test_ff_ternary_runtime_effect_only_evaluates_selected_arm(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, choose: input logic, q: output logic<8>) {
+            function observed_value (x: input logic<8>) -> logic<8> {
+                $display("arm=%0d", x);
+                return x;
+            }
+
+            always_ff (clk) {
+                q = if choose ? observed_value(8'd1) : observed_value(8'd2);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let choose = sim.signal("choose");
+
+    sim.modify(|io| io.set(choose, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "arm=1".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(choose, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "arm=2".to_string(),
+        }],
+    );
+}
+
+fn test_ff_effectful_function_input_is_evaluated_once(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
+            function inner (x: input logic<8>) -> logic<8> {
+                $display("inner=%0d", x);
+                return x;
+            }
+
+            function outer (x: input logic<8>) -> logic<8> {
+                $display("outer=%0d", x);
+                return x;
+            }
+
+            always_ff (clk) {
+                q = outer(inner(d));
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 7u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 7u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "inner=7".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "outer=7".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_ff_assert_message_args_preserve_left_to_right_snapshots(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, effect: output logic<8>) {
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x + 8'd1;
+            }
+
+            always_ff (clk) {
+                $assert_continue(1'b0, "%0d %0d", effect, update(effect, effect));
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let effect = sim.signal("effect");
+
+    sim.modify(|io| io.set(effect, 5u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 6u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::AssertContinue {
+            message: "5 6".to_string(),
+        }],
+    );
+}
+
 fn test_ff_runtime_events_format_verilog_radices(sim) {
     @omit_veryl;
     @ignore_on(wasm);
@@ -2264,6 +2376,67 @@ fn test_ff_assert_pure_message_argument_stays_in_failure_block() {
     assert!(
         branch < multiply && multiply < event,
         "pure message argument should be evaluated only after entering the failure block:\n{sir}",
+    );
+}
+
+#[test]
+fn test_ff_assert_effectful_args_snapshot_earlier_pure_values_before_branch() {
+    let code = r#"
+        module Top (clk: input clock, effect: output logic<8>) {
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x + 8'd1;
+            }
+
+            always_ff (clk) {
+                $assert_continue(1'b0, "%0d %0d", effect, update(effect, effect));
+            }
+        }
+    "#;
+    let result = SimulatorBuilder::new(code, "Top")
+        .optimize(false)
+        .trace_pre_optimized_sir()
+        .build_with_trace();
+    let program = result.trace.pre_optimized_sir.unwrap();
+    let unit = program
+        .sir
+        .eval_apply_ffs
+        .values()
+        .flatten()
+        .next()
+        .expect("FF execution unit");
+    let first_event_arg = unit
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .find_map(|instruction| match instruction {
+            celox_sir::SIRInstruction::RuntimeEvent { args, .. } => args.first().copied(),
+            _ => None,
+        })
+        .expect("assertion event argument");
+    let defining_block = unit
+        .blocks
+        .iter()
+        .find_map(|(block_id, block)| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| {
+                    matches!(
+                        instruction,
+                        celox_sir::SIRInstruction::Load(dst, ..) if *dst == first_event_arg
+                    )
+                })
+                .then_some(*block_id)
+        })
+        .expect("first assertion argument definition");
+
+    assert_eq!(
+        defining_block, unit.entry_block_id,
+        "an earlier pure argument must be snapshotted before branching when a later argument is effectful",
     );
 }
 
