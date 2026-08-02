@@ -389,6 +389,11 @@ fn build_dynamic_output_glue(
     // after truncation/sign-extension is complete may the value be embedded in
     // the full variable; otherwise high RHS bits can corrupt adjacent fields.
     let rhs = coerce_node_width(glue_arena, rhs, Some(access_width), rhs_signed)?;
+    let rhs = if variable.r#type.is_2state() && !preview_rhs_is_2state {
+        glue_arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, rhs))?
+    } else {
+        rhs
+    };
     let rhs = if access_width < variable_width {
         let padding_width = variable_width - access_width;
         let padding = glue_arena.alloc(SLTNode::Constant(
@@ -533,13 +538,6 @@ fn collect_parent_output_address_sources(
                             .0
                             .iter()
                             .chain(destination.select.0.iter())
-                            .chain(
-                                destination
-                                    .select
-                                    .1
-                                    .iter()
-                                    .map(|(_, expression)| expression),
-                            )
                         {
                             collect_parent_address_expression_sources(
                                 module,
@@ -555,12 +553,7 @@ fn collect_parent_output_address_sources(
                 Ok(())
             }
             Factor::Variable(_, index, select, _) => {
-                for address in index
-                    .0
-                    .iter()
-                    .chain(select.0.iter())
-                    .chain(select.1.iter().map(|(_, expression)| expression))
-                {
+                for address in index.0.iter().chain(select.0.iter()) {
                     collect_parent_output_address_sources(module, store, address, arena, out)?;
                 }
                 Ok(())
@@ -597,6 +590,9 @@ fn collect_parent_output_address_sources(
         },
         Expression::Unary(_, inner, _) => {
             collect_parent_output_address_sources(module, store, inner, arena, out)
+        }
+        Expression::Binary(lhs, veryl_analyzer::ir::Op::Pow, _, _) => {
+            collect_parent_output_address_sources(module, store, lhs, arena, out)
         }
         Expression::Binary(lhs, _, rhs, _) => {
             collect_parent_output_address_sources(module, store, lhs, arena, out)?;
@@ -2532,12 +2528,117 @@ fn resolve_readmem_path_with_fallback(
 #[cfg(test)]
 mod tests {
     use num_bigint::{BigInt, BigUint};
-    use veryl_analyzer::ir::VarId;
+    use veryl_analyzer::{
+        Analyzer, Context, attribute_table,
+        ir::{Component, Declaration, Expression, Factor, Ir, Op, Statement, VarId},
+        symbol_table,
+    };
+    use veryl_metadata::Metadata;
+    use veryl_parser::Parser;
 
-    use super::{collect_glue_sources, resolve_readmem_path_with_fallback};
-    use crate::GlueAddr;
+    use super::{
+        collect_glue_sources, collect_parent_output_address_sources,
+        resolve_readmem_path_with_fallback,
+    };
+    use crate::{GlueAddr, HashMap};
     use celox_design::{BinaryOp, BitAccess, VarAtomBase};
     use celox_slt::{SLTForFoldGroupState, SLTNode, SLTNodeArena};
+
+    fn parse_top_module(code: &str) -> veryl_analyzer::ir::Module {
+        symbol_table::clear();
+        attribute_table::clear();
+
+        let metadata = Metadata::create_default("prj").unwrap();
+        let parser = Parser::parse(code, &"").unwrap();
+        let analyzer = Analyzer::new(&metadata);
+        let mut context = Context::default();
+        let mut ir = Ir::default();
+        assert!(analyzer.analyze_pass1("prj", &parser.veryl).is_empty());
+        assert!(Analyzer::analyze_post_pass1().is_empty());
+        assert!(
+            analyzer
+                .analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir))
+                .is_empty()
+        );
+        assert!(Analyzer::analyze_post_pass2(&ir).is_empty());
+
+        let top = veryl_parser::resource_table::insert_str("Top");
+        ir.components
+            .into_iter()
+            .find_map(|component| match component {
+                Component::Module(module) if module.name == top => Some(module),
+                _ => None,
+            })
+            .expect("Top module not found")
+    }
+
+    #[test]
+    fn output_address_sources_skip_power_exponent() {
+        let mut module = parse_top_module(
+            r#"
+module Top (
+    base: input logic<2>,
+    idx: input logic,
+    q: output logic<4>,
+    data: output logic<2>,
+) {
+    function exponent (x: input logic, y: output logic) -> logic {
+        y = x;
+        return 1'b1;
+    }
+    always_comb {
+        q = exponent(idx, data[idx]);
+        q = base ** 2;
+    }
+}
+"#,
+        );
+        let comb = module
+            .declarations
+            .iter_mut()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .expect("No always_comb found in Top");
+        let Statement::Assign(seed) = &comb.statements[0] else {
+            panic!("expected seed assignment");
+        };
+        let seed = seed.expr.clone();
+        let Expression::Term(seed_factor) = &seed else {
+            panic!("expected function call expression");
+        };
+        let Factor::FunctionCall(call) = seed_factor.as_ref() else {
+            panic!("expected function call expression");
+        };
+        let data_id = call
+            .outputs
+            .values()
+            .flatten()
+            .next()
+            .expect("missing output actual")
+            .id;
+        let Statement::Assign(pow_assign) = &mut comb.statements[1] else {
+            panic!("expected power assignment");
+        };
+        let Expression::Binary(_, Op::Pow, exponent, _) = &mut pow_assign.expr else {
+            panic!("expected power expression");
+        };
+        **exponent = seed;
+        let expression = pow_assign.expr.clone();
+
+        let mut arena = SLTNodeArena::new();
+        let mut sources = HashMap::default();
+        collect_parent_output_address_sources(
+            &module,
+            &Default::default(),
+            &expression,
+            &mut arena,
+            &mut sources,
+        )
+        .unwrap();
+        assert!(!sources.contains_key(&data_id));
+    }
 
     #[test]
     fn readmem_path_falls_back_to_project_root() {

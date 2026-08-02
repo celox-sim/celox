@@ -38,7 +38,7 @@ use veryl_analyzer::ir::{
     Module, Op, Statement, SystemFunctionCall, SystemFunctionInput, SystemFunctionKind, VarId,
     VarIndex, VarPath, VarSelect,
 };
-use veryl_analyzer::value::{Value, byte_value_to_string};
+use veryl_analyzer::value::{MaskCache, Value, byte_value_to_string};
 use veryl_parser::resource_table;
 use veryl_parser::token_range::TokenRange;
 
@@ -1553,6 +1553,41 @@ fn inclusive_of(range: &ForRange) -> bool {
     }
 }
 
+fn constant_case_pattern_matches(target: &Expression, pattern: &CasePattern) -> bool {
+    fn compare(op: Op, lhs: &Value, rhs: &Value) -> bool {
+        let signed = lhs.signed() && rhs.signed();
+        op.eval_value_binary(lhs, rhs, 1, signed, &mut MaskCache::default())
+            .to_u64()
+            == Some(1)
+    }
+
+    if !target.comptime().is_const {
+        return false;
+    }
+    let Ok(target) = target.comptime().get_value() else {
+        return false;
+    };
+    match pattern {
+        CasePattern::Eq(expression) => {
+            expression.comptime().is_const
+                && expression
+                    .comptime()
+                    .get_value()
+                    .is_ok_and(|pattern| compare(Op::EqWildcard, target, pattern))
+        }
+        CasePattern::Range { lo, hi, inclusive } => {
+            if !lo.comptime().is_const || !hi.comptime().is_const {
+                return false;
+            }
+            let (Ok(lo), Ok(hi)) = (lo.comptime().get_value(), hi.comptime().get_value()) else {
+                return false;
+            };
+            compare(Op::LessEq, lo, target)
+                && compare(if *inclusive { Op::LessEq } else { Op::Less }, target, hi)
+        }
+    }
+}
+
 fn collect_written_accesses(
     module: &Module,
     statements: &[Statement],
@@ -1573,7 +1608,9 @@ fn collect_written_accesses(
             }
             Statement::Case(case_stmt) => {
                 collect_written_expression(module, &case_stmt.case_target, out)?;
+                let mut known_match = false;
                 for arm in &case_stmt.arms {
+                    let mut arm_known_match = false;
                     for pattern in &arm.patterns {
                         match pattern {
                             CasePattern::Eq(expression) => {
@@ -1584,10 +1621,20 @@ fn collect_written_accesses(
                                 collect_written_expression(module, hi, out)?;
                             }
                         }
+                        if constant_case_pattern_matches(&case_stmt.case_target, pattern) {
+                            arm_known_match = true;
+                            break;
+                        }
                     }
                     collect_written_accesses(module, &arm.body, out)?;
+                    if arm_known_match {
+                        known_match = true;
+                        break;
+                    }
                 }
-                collect_written_accesses(module, &case_stmt.default, out)?;
+                if !known_match {
+                    collect_written_accesses(module, &case_stmt.default, out)?;
+                }
             }
             Statement::For(for_stmt) => {
                 let (start, end) = match &for_stmt.range {
@@ -3624,6 +3671,57 @@ mod tests {
 
         let q_output = var_id_of(&module, &["q_output"]);
         assert_eq!(written[&q_output], vec![BitAccess::new(0, 7)]);
+    }
+
+    #[test]
+    fn test_collect_written_accesses_stops_after_known_case_match() {
+        let code = r#"
+            module Top (
+                d: input logic,
+                q: output logic,
+                unreachable_output: output logic,
+            ) {
+                function write_pattern (
+                    x: input logic,
+                    y: output logic,
+                ) -> logic {
+                    y = x;
+                    return x;
+                }
+
+                always_comb {
+                    q = write_pattern(d, unreachable_output);
+                    case 1'b0 {
+                        1'b0: q = d;
+                        1'b1: q = 1'b0;
+                        default: q = 1'b1;
+                    }
+                }
+            }
+        "#;
+        let mut module = parse_top_module(code);
+        let comb_decl = module
+            .declarations
+            .iter_mut()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .expect("No always_comb found in Top");
+        let Statement::Assign(seed) = &comb_decl.statements[0] else {
+            panic!("expected seed assignment");
+        };
+        let seed = seed.expr.clone();
+        let Statement::Case(case_stmt) = &mut comb_decl.statements[1] else {
+            panic!("expected case statement");
+        };
+        case_stmt.arms[1].patterns[0] = CasePattern::Eq(Box::new(seed));
+        let case_stmt = Statement::Case(case_stmt.clone());
+        let mut written = HashMap::default();
+        collect_written_accesses(&module, &[case_stmt], &mut written).unwrap();
+
+        let unreachable_output = var_id_of(&module, &["unreachable_output"]);
+        assert!(!written.contains_key(&unreachable_output));
     }
 
     #[test]

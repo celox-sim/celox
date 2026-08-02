@@ -460,7 +460,7 @@ fn collect_function_call_effects(
         collect_function_body_effects(
             module,
             local_store,
-            &function_body.statements,
+            &function_body,
             ret_id,
             arena,
             collector,
@@ -1133,11 +1133,12 @@ fn collect_factor_effects(
 fn collect_function_body_effects(
     module: &Module,
     local_store: SymbolicStore<VarId>,
-    statements: &[Statement],
+    body: &FunctionBody,
     ret_id: VarId,
     arena: &mut SLTNodeArena<VarId>,
     collector: &mut CombEffectCollector,
 ) -> Result<SymbolicStore<VarId>, ParserError> {
+    let initial_local_store = local_store.clone();
     fn collect_statements(
         module: &Module,
         mut state: FunctionControlState,
@@ -1970,12 +1971,22 @@ fn collect_function_body_effects(
             live_expr: bool_node(arena, true)?,
             live_sources: HashSet::default(),
         },
-        statements,
+        &body.statements,
         ret_id,
         arena,
         collector,
     )?;
-    Ok(final_state.store)
+    if body.statements.iter().any(super::statement_contains_break) {
+        // The ordinary observer collector deliberately treats `break` as a
+        // control-only statement. Re-evaluate the body with the function
+        // evaluator's break-aware loop state before exposing output-formal
+        // previews to later actual destinations.
+        let (_, _, break_aware_store) =
+            eval_function_body_return(module, &initial_local_store, body, ret_id, arena)?;
+        Ok(break_aware_store)
+    } else {
+        Ok(final_state.store)
+    }
 }
 
 fn collect_expression_position_inputs(

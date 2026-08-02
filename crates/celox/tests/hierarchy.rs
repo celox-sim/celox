@@ -719,6 +719,28 @@ assign out = mem;
 
     }
 
+    fn test_dynamic_output_port_converts_four_state_child_to_two_state_parent(sim) {
+        @omit_veryl;
+        @setup { let code = r#"
+module Child (y: output logic) {
+assign y = 1'bx;
+}
+module Top (idx: input logic, out: output bit<2>) {
+var mem: bit<2>;
+inst child: Child (y: mem[idx]);
+assign out = mem;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let idx = sim.signal("idx");
+    let out = sim.signal("out");
+
+    assert_eq!(sim.get_as::<u8>(out), 0);
+    sim.modify(|io| io.set(idx, 1u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 0);
+
+    }
+
     fn test_dynamic_minus_colon_output_port_rmw(sim) {
         @omit_veryl;
         @setup { let code = r#"

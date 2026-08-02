@@ -4398,6 +4398,59 @@ module Top (
     assert_eq!(sim.get_as::<u8>(case_out), 29);
 }
 
+fn test_comb_function_output_preview_honors_loop_break(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    value: input logic<8>,
+    first_out: output logic<8>,
+    slots_out: output logic<2>,
+    ret_out: output logic,
+) {
+    function observe (x: input logic<8>) -> logic {
+        $display("preview=%0d", x);
+        return 1'b0;
+    }
+    function run (
+        x: input logic<8>,
+        first: output logic<8>,
+        second: output logic,
+    ) -> logic {
+        first = x;
+        for i in 0..4 {
+            if i == 2 { break; }
+            first = first + 8'd1;
+        }
+        second = 1'b1;
+        return 1'b0;
+    }
+    var first: logic<8>;
+    var slots: logic<2>;
+    always_comb {
+        ret_out = run(value, first, slots[observe(first)]);
+    }
+    assign first_out = first;
+    assign slots_out = slots;
+}
+"#, "Top");
+
+    let value = sim.signal("value");
+    let first_out = sim.signal("first_out");
+    let slots_out = sim.signal("slots_out");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(value, 10u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(first_out), 12);
+    assert_eq!(sim.get_as::<u8>(slots_out), 1);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "preview=12".to_string(),
+        }],
+    );
+}
+
 fn test_comb_return_aware_function_loop_collects_bound_effects(sim) {
     @omit_veryl;
     @ignore_on(wasm);
