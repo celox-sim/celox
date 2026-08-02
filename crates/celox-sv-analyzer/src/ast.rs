@@ -97,7 +97,8 @@ impl Module {
         let const_env = const_env_from_parameters(&parameters);
         let parameter_literals = parameter_literal_env(&parameters, &const_env);
         let packed_dimensions = packed_dimensions_from_ports_and_signals(&ports, &signals);
-        let functions = functions_from_module_node(node.clone(), syntax_tree, &packed_dimensions);
+        let functions =
+            functions_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions);
         let comb_processes = comb_processes_from_module_node(
             node.clone(),
             syntax_tree,
@@ -667,6 +668,8 @@ struct Function {
     name: String,
     params: Vec<String>,
     body: Expr,
+    return_width: Option<usize>,
+    return_signed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -682,6 +685,11 @@ pub enum Expr {
     RepeatConcat {
         count: ConstExpr,
         parts: Vec<Expr>,
+    },
+    Resize {
+        expr: Box<Expr>,
+        width: usize,
+        signed: bool,
     },
     Unary {
         op: UnaryOp,
@@ -1247,44 +1255,133 @@ fn parameter_literal_env(
     parameters: &[Parameter],
     const_env: &HashMap<String, i128>,
 ) -> HashMap<String, String> {
-    parameters
-        .iter()
-        .filter_map(|parameter| {
-            let literal = if let Some(value) = const_env.get(parameter.name()).copied() {
-                if let Some(width) = parameter.declared_width.filter(|width| *width <= 128) {
-                    let mask = if width == 128 {
-                        u128::MAX
-                    } else {
-                        (1u128 << width) - 1
-                    };
-                    let bits = (value as u128) & mask;
-                    let signing = if parameter.declared_signed.unwrap_or(false) {
-                        "s"
-                    } else {
-                        ""
-                    };
-                    format!("{width}'{signing}d{bits}")
-                } else if value.is_negative() {
-                    let width = (128 - (!value as u128).leading_zeros() as usize + 1).max(32);
-                    let mask = if width == 128 {
-                        u128::MAX
-                    } else {
-                        (1u128 << width) - 1
-                    };
-                    format!("{width}'sd{}", (value as u128) & mask)
-                } else if let Some(ConstExpr::Literal(literal)) = parameter.value() {
-                    literal.clone()
+    let mut literals = HashMap::new();
+    let mut parameter_types = HashMap::new();
+    for parameter in parameters {
+        let inferred_type = parameter
+            .value()
+            .and_then(|value| infer_const_expr_type(value, &parameter_types));
+        let width = parameter
+            .declared_width
+            .or(inferred_type.map(|r#type| r#type.width));
+        let signed = parameter
+            .declared_signed
+            .or(inferred_type.map(|r#type| r#type.signed))
+            .unwrap_or(false);
+        if let Some(width) = width {
+            parameter_types.insert(parameter.name().to_string(), ExprType { width, signed });
+        }
+
+        let literal = if let Some(value) = const_env.get(parameter.name()).copied() {
+            if let Some(width) = width.filter(|width| *width <= 128) {
+                let mask = if width == 128 {
+                    u128::MAX
                 } else {
-                    value.to_string()
-                }
+                    (1u128 << width) - 1
+                };
+                let bits = (value as u128) & mask;
+                let signing = if signed { "s" } else { "" };
+                format!("{width}'{signing}d{bits}")
+            } else if value.is_negative() {
+                let width = (128 - (!value as u128).leading_zeros() as usize + 1).max(32);
+                let mask = if width == 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << width) - 1
+                };
+                format!("{width}'sd{}", (value as u128) & mask)
             } else if let Some(ConstExpr::Literal(literal)) = parameter.value() {
                 literal.clone()
             } else {
-                return None;
-            };
-            Some((parameter.name().to_string(), literal))
-        })
-        .collect()
+                value.to_string()
+            }
+        } else if let Some(ConstExpr::Literal(literal)) = parameter.value() {
+            literal.clone()
+        } else {
+            continue;
+        };
+        literals.insert(parameter.name().to_string(), literal);
+    }
+    literals
+}
+
+#[derive(Clone, Copy)]
+struct ExprType {
+    width: usize,
+    signed: bool,
+}
+
+fn infer_const_expr_type(
+    expr: &ConstExpr,
+    parameter_types: &HashMap<String, ExprType>,
+) -> Option<ExprType> {
+    match expr {
+        ConstExpr::Literal(literal) => {
+            let literal = typecheck::parse_integral_literal(literal)?;
+            Some(ExprType {
+                width: literal.width,
+                signed: literal.signed,
+            })
+        }
+        ConstExpr::Ident(name) => parameter_types.get(name).copied(),
+        ConstExpr::Select { .. } => Some(ExprType {
+            width: 1,
+            signed: false,
+        }),
+        ConstExpr::Function { .. } => None,
+        ConstExpr::Unary { op, expr } => {
+            let operand = infer_const_expr_type(expr, parameter_types)?;
+            if matches!(
+                op,
+                UnaryOp::LogicNot | UnaryOp::RedAnd | UnaryOp::RedOr | UnaryOp::RedXor
+            ) {
+                Some(ExprType {
+                    width: 1,
+                    signed: false,
+                })
+            } else {
+                Some(operand)
+            }
+        }
+        ConstExpr::Binary { left, op, right } => {
+            let left = infer_const_expr_type(left, parameter_types)?;
+            let right = infer_const_expr_type(right, parameter_types)?;
+            match op {
+                BinaryOp::LogicAnd
+                | BinaryOp::LogicOr
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::EqCase
+                | BinaryOp::NeCase
+                | BinaryOp::EqWildcard
+                | BinaryOp::NeWildcard
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => Some(ExprType {
+                    width: 1,
+                    signed: false,
+                }),
+                BinaryOp::Shl | BinaryOp::Shr => Some(left),
+                _ => Some(ExprType {
+                    width: left.width.max(right.width),
+                    signed: left.signed && right.signed,
+                }),
+            }
+        }
+        ConstExpr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            let then_type = infer_const_expr_type(then_expr, parameter_types)?;
+            let else_type = infer_const_expr_type(else_expr, parameter_types)?;
+            Some(ExprType {
+                width: then_type.width.max(else_type.width),
+                signed: then_type.signed && else_type.signed,
+            })
+        }
+    }
 }
 
 fn packed_dimensions_from_ports_and_signals(
@@ -1672,9 +1769,11 @@ fn identifier_text(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String
 fn functions_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> HashMap<String, Function> {
     let mut functions = HashMap::new();
+    let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
     for item in module_non_port_items(node) {
         let Some(declaration) = package_or_generate_declaration_from_non_port_item(item) else {
             continue;
@@ -1684,9 +1783,13 @@ fn functions_from_module_node(
         else {
             continue;
         };
-        if let Some(function) =
-            function_from_declaration(declaration, syntax_tree, packed_dimensions)
-        {
+        if let Some(function) = function_from_declaration(
+            declaration,
+            syntax_tree,
+            const_env,
+            &type_aliases,
+            packed_dimensions,
+        ) {
             functions.insert(function.name.clone(), function);
         }
     }
@@ -1696,6 +1799,8 @@ fn functions_from_module_node(
 fn function_from_declaration(
     declaration: &sv_parser::FunctionDeclaration,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Option<Function> {
     match &declaration.nodes.2 {
@@ -1709,19 +1814,65 @@ fn function_from_declaration(
                 .as_ref()
                 .map(|ports| tf_port_names(ports, syntax_tree))
                 .unwrap_or_default();
-            let body = function_body_expr(&body.nodes.6, syntax_tree, packed_dimensions)?;
-            Some(Function { name, params, body })
+            let expr = function_body_expr(&body.nodes.6, syntax_tree, packed_dimensions)?;
+            let return_type = function_return_type(
+                RefNode::FunctionDataTypeOrImplicit(&body.nodes.0),
+                syntax_tree,
+                const_env,
+                type_aliases,
+            );
+            Some(Function {
+                name,
+                params,
+                body: expr,
+                return_width: return_type.map(|r#type| r#type.width),
+                return_signed: return_type.is_some_and(|r#type| r#type.signed),
+            })
         }
         sv_parser::FunctionBodyDeclaration::WithoutPort(body) => {
             let name = identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), syntax_tree)?;
-            let body = function_body_expr(&body.nodes.5, syntax_tree, packed_dimensions)?;
+            let expr = function_body_expr(&body.nodes.5, syntax_tree, packed_dimensions)?;
+            let return_type = function_return_type(
+                RefNode::FunctionDataTypeOrImplicit(&body.nodes.0),
+                syntax_tree,
+                const_env,
+                type_aliases,
+            );
             Some(Function {
                 name,
                 params: Vec::new(),
-                body,
+                body: expr,
+                return_width: return_type.map(|r#type| r#type.width),
+                return_signed: return_type.is_some_and(|r#type| r#type.signed),
             })
         }
     }
+}
+
+fn function_return_type(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<ExprType> {
+    let alias = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases);
+    if alias.is_some() || unwrap_node!(node.clone(), TypeIdentifier).is_some() {
+        return None;
+    }
+    let ranges = packed_ranges_from_ref_node(node.clone(), syntax_tree);
+    let width = if ranges.is_empty() {
+        1
+    } else {
+        ranges.iter().try_fold(1usize, |acc, range| {
+            let left = eval_ast_const_expr(range.left(), const_env)?;
+            let right = eval_ast_const_expr(range.right(), const_env)?;
+            acc.checked_mul(left.abs_diff(right) as usize + 1)
+        })?
+    };
+    Some(ExprType {
+        width,
+        signed: is_signed_from_ref_node(node).unwrap_or(false),
+    })
 }
 
 fn tf_port_names(list: &sv_parser::TfPortList, syntax_tree: &SyntaxTree) -> Vec<String> {
@@ -2513,6 +2664,19 @@ fn substitute_expr_constants_with_parameter_literals(
                 })
                 .collect(),
         },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                *expr,
+                const_env,
+                parameter_literals,
+            )),
+            width,
+            signed,
+        },
         Expr::Unary { op, expr } => Expr::Unary {
             op,
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
@@ -2581,7 +2745,7 @@ fn expand_process_calls(
         process
             .assignments
             .into_iter()
-            .map(|assignment| expand_assignment_calls(assignment, functions))
+            .map(|assignment| expand_assignment_calls(assignment, functions, false))
             .collect(),
     )
 }
@@ -2600,13 +2764,13 @@ fn expand_ff_process_calls(
             .map(|assignment| {
                 let condition = assignment.condition.map(|condition| {
                     substitute_expr_constants_with_parameter_literals(
-                        expand_expr_calls(condition, functions, 0),
+                        expand_expr_calls(condition, functions, 0, true),
                         const_env,
                         parameter_literals,
                     )
                 });
                 let assignment = substitute_assignment_constants_with_parameter_literals(
-                    expand_assignment_calls(assignment.assignment, functions),
+                    expand_assignment_calls(assignment.assignment, functions, true),
                     const_env,
                     parameter_literals,
                 );
@@ -2619,14 +2783,20 @@ fn expand_ff_process_calls(
 fn expand_assignment_calls(
     assignment: Assignment,
     functions: &HashMap<String, Function>,
+    apply_return_type: bool,
 ) -> Assignment {
     Assignment::new(
         assignment.lhs,
-        expand_expr_calls(assignment.rhs, functions, 0),
+        expand_expr_calls(assignment.rhs, functions, 0, apply_return_type),
     )
 }
 
-fn expand_expr_calls(expr: Expr, functions: &HashMap<String, Function>, depth: usize) -> Expr {
+fn expand_expr_calls(
+    expr: Expr,
+    functions: &HashMap<String, Function>,
+    depth: usize,
+    apply_return_type: bool,
+) -> Expr {
     if depth > 32 {
         return expr;
     }
@@ -2634,45 +2804,94 @@ fn expand_expr_calls(expr: Expr, functions: &HashMap<String, Function>, depth: u
         Expr::Ident(name) => Expr::Ident(name),
         Expr::Literal(value) => Expr::Literal(value),
         Expr::Select { expr, msb, lsb } => Expr::Select {
-            expr: Box::new(expand_expr_calls(*expr, functions, depth)),
+            expr: Box::new(expand_expr_calls(
+                *expr,
+                functions,
+                depth,
+                apply_return_type,
+            )),
             msb,
             lsb,
         },
         Expr::Concat(parts) => Expr::Concat(
             parts
                 .into_iter()
-                .map(|part| expand_expr_calls(part, functions, depth))
+                .map(|part| expand_expr_calls(part, functions, depth, apply_return_type))
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
             count,
             parts: parts
                 .into_iter()
-                .map(|part| expand_expr_calls(part, functions, depth))
+                .map(|part| expand_expr_calls(part, functions, depth, apply_return_type))
                 .collect(),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(expand_expr_calls(
+                *expr,
+                functions,
+                depth,
+                apply_return_type,
+            )),
+            width,
+            signed,
         },
         Expr::Unary { op, expr } => Expr::Unary {
             op,
-            expr: Box::new(expand_expr_calls(*expr, functions, depth)),
+            expr: Box::new(expand_expr_calls(
+                *expr,
+                functions,
+                depth,
+                apply_return_type,
+            )),
         },
         Expr::Binary { left, op, right } => Expr::Binary {
-            left: Box::new(expand_expr_calls(*left, functions, depth)),
+            left: Box::new(expand_expr_calls(
+                *left,
+                functions,
+                depth,
+                apply_return_type,
+            )),
             op,
-            right: Box::new(expand_expr_calls(*right, functions, depth)),
+            right: Box::new(expand_expr_calls(
+                *right,
+                functions,
+                depth,
+                apply_return_type,
+            )),
         },
         Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => Expr::Mux {
-            condition: Box::new(expand_expr_calls(*condition, functions, depth)),
-            then_expr: Box::new(expand_expr_calls(*then_expr, functions, depth)),
-            else_expr: Box::new(expand_expr_calls(*else_expr, functions, depth)),
+            condition: Box::new(expand_expr_calls(
+                *condition,
+                functions,
+                depth,
+                apply_return_type,
+            )),
+            then_expr: Box::new(expand_expr_calls(
+                *then_expr,
+                functions,
+                depth,
+                apply_return_type,
+            )),
+            else_expr: Box::new(expand_expr_calls(
+                *else_expr,
+                functions,
+                depth,
+                apply_return_type,
+            )),
         },
         Expr::Call { name, args } => {
             let args = args
                 .into_iter()
-                .map(|arg| expand_expr_calls(arg, functions, depth))
+                .map(|arg| expand_expr_calls(arg, functions, depth, apply_return_type))
                 .collect::<Vec<_>>();
             let Some(function) = functions.get(&name) else {
                 return Expr::Call { name, args };
@@ -2687,7 +2906,16 @@ fn expand_expr_calls(expr: Expr, functions: &HashMap<String, Function>, depth: u
                 .zip(args)
                 .collect::<HashMap<_, _>>();
             let body = substitute_expr_idents(function.body.clone(), &env);
-            expand_expr_calls(body, functions, depth + 1)
+            let expanded = expand_expr_calls(body, functions, depth + 1, apply_return_type);
+            if apply_return_type && let Some(width) = function.return_width {
+                Expr::Resize {
+                    expr: Box::new(expanded),
+                    width,
+                    signed: function.return_signed,
+                }
+            } else {
+                expanded
+            }
         }
     }
 }
@@ -2713,6 +2941,15 @@ fn substitute_expr_idents(expr: Expr, env: &HashMap<String, Expr>) -> Expr {
                 .into_iter()
                 .map(|part| substitute_expr_idents(part, env))
                 .collect(),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(substitute_expr_idents(*expr, env)),
+            width,
+            signed,
         },
         Expr::Unary { op, expr } => Expr::Unary {
             op,
@@ -4076,6 +4313,7 @@ fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
         Expr::Select { .. }
         | Expr::Concat(_)
         | Expr::RepeatConcat { .. }
+        | Expr::Resize { .. }
         | Expr::Mux { .. }
         | Expr::Call { .. } => None,
     }

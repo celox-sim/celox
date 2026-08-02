@@ -396,6 +396,7 @@ mod tests {
         match expr {
             ir::Expr::Ident(_) | ir::Expr::Literal(_) => false,
             ir::Expr::Select { expr, .. } => expr_contains_call(expr),
+            ir::Expr::Resize { expr, .. } => expr_contains_call(expr),
             ir::Expr::Concat(parts) | ir::Expr::RepeatConcat { parts, .. } => {
                 parts.iter().any(expr_contains_call)
             }

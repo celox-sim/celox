@@ -924,6 +924,16 @@ fn lower_glue_parent_expr(
                 source_ids,
             ))
         }
+        sv::ir::Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => {
+            let (inner, sources, source_ids) =
+                lower_glue_parent_expr(expr, variables, name_to_id, constants, arena)?;
+            let resized = coerce_node_width(arena, inner, Some(*width), *signed).ok()?;
+            Some((resized, sources, source_ids))
+        }
         sv::ir::Expr::Literal(literal) => {
             let literal = sv::typecheck::parse_integral_literal(literal)?;
             Some((
@@ -1252,6 +1262,15 @@ fn lower_expr(
                     .ok()?,
                 sources,
             ))
+        }
+        sv::ir::Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => {
+            let (inner, sources) = lower_expr(expr, variables, name_to_id, constants, arena)?;
+            let resized = coerce_node_width(arena, inner, Some(*width), *signed).ok()?;
+            Some((resized, sources))
         }
         sv::ir::Expr::Binary { left, op, right } => {
             let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
@@ -1688,6 +1707,7 @@ fn sv_expr_is_signed(
         sv::ir::Expr::Literal(literal) => {
             sv::typecheck::parse_integral_literal(literal).is_some_and(|literal| literal.signed)
         }
+        sv::ir::Expr::Resize { signed, .. } => *signed,
         sv::ir::Expr::Select { .. }
         | sv::ir::Expr::Concat(_)
         | sv::ir::Expr::RepeatConcat { .. }
@@ -1878,6 +1898,14 @@ fn lower_expr_to_sir(
             let reg = builder.alloc_logic(width);
             builder.emit(SIRInstruction::Slice(reg, inner, low, width));
             Some(reg)
+        }
+        sv::ir::Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => {
+            let inner = lower_expr_to_sir(builder, expr, variables, name_to_id, constants)?;
+            resize_sir_register(builder, inner, *width, *signed)
         }
         sv::ir::Expr::Unary { op, expr } => {
             let inner = lower_expr_to_sir(builder, expr, variables, name_to_id, constants)?;

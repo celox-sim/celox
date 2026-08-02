@@ -960,12 +960,17 @@ sv_backends! {
         module Top(
             input logic clk,
             input logic [1:0] mode,
+            input logic signed [1:0] signed_mode,
             input logic [7:0] d,
             output logic [7:0] q_unrelated,
             output logic [7:0] q_function,
-            output logic [7:0] q_parameter_xz
+            output logic [7:0] q_parameter_xz,
+            output logic [7:0] q_parameter_expr,
+            output logic [7:0] q_function_width,
+            output logic [7:0] q_function_signed
         );
             localparam logic [1:0] X_LABEL = 2'b1x;
+            localparam EXPR_LABEL = 2'b11 + 2'b00;
 
             function automatic logic [1:0] decode(input logic [1:0] value);
                 return value;
@@ -973,6 +978,14 @@ sv_backends! {
 
             function automatic logic [7:0] passthrough(input logic [7:0] value);
                 return value;
+            endfunction
+
+            function automatic logic [1:0] truncate(input logic value);
+                return 4;
+            endfunction
+
+            function automatic logic signed decode_signed(input logic value);
+                return 1'b1;
             endfunction
 
             always_ff @(posedge clk) begin
@@ -985,6 +998,18 @@ sv_backends! {
                     X_LABEL: q_parameter_xz <= 8'ha5;
                     default: q_parameter_xz <= 0;
                 endcase
+                case (signed_mode)
+                    EXPR_LABEL: q_parameter_expr <= 8'ha6;
+                    default: q_parameter_expr <= 0;
+                endcase
+                case (truncate(mode[0]))
+                    2'b00: q_function_width <= 8'hb6;
+                    default: q_function_width <= 0;
+                endcase
+                case (signed_mode)
+                    decode_signed(mode[0]): q_function_signed <= 8'hc7;
+                    default: q_function_signed <= 0;
+                endcase
             end
         endmodule
     "#;
@@ -996,16 +1021,21 @@ sv_backends! {
 
     let clk = sim.event("clk");
     let mode = sim.signal("mode");
+    let signed_mode = sim.signal("signed_mode");
     let d = sim.signal("d");
 
     sim.modify(|io| {
         io.set(mode, 1u8);
+        io.set(signed_mode, 3u8);
         io.set(d, 0x3cu8);
     }).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(sim.signal("q_unrelated")), 0x3cu8.into());
     assert_eq!(sim.get(sim.signal("q_function")), 0x3cu8.into());
     assert_eq!(sim.get(sim.signal("q_parameter_xz")), 0u8.into());
+    assert_eq!(sim.get(sim.signal("q_parameter_expr")), 0xa6u8.into());
+    assert_eq!(sim.get(sim.signal("q_function_width")), 0xb6u8.into());
+    assert_eq!(sim.get(sim.signal("q_function_signed")), 0xc7u8.into());
 
     sim.modify(|io| {
         io.set_four_state(mode, BigUint::from(0b11u8), BigUint::from(0b01u8));
@@ -1015,6 +1045,9 @@ sv_backends! {
     assert_eq!(sim.get(sim.signal("q_unrelated")), 0x5au8.into());
     assert_eq!(sim.get(sim.signal("q_function")), 0u8.into());
     assert_eq!(sim.get(sim.signal("q_parameter_xz")), 0xa5u8.into());
+    assert_eq!(sim.get(sim.signal("q_parameter_expr")), 0xa6u8.into());
+    assert_eq!(sim.get(sim.signal("q_function_width")), 0xb6u8.into());
+    assert_eq!(sim.get(sim.signal("q_function_signed")), 0xc7u8.into());
     }
 
     fn simulates_systemverilog_repeat_concat(sim) {

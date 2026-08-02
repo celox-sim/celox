@@ -633,6 +633,11 @@ pub enum Expr {
         count: ConstExpr,
         parts: Vec<Expr>,
     },
+    Resize {
+        expr: Box<Expr>,
+        width: usize,
+        signed: bool,
+    },
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,
@@ -786,6 +791,15 @@ impl From<ast::Expr> for Expr {
             ast::Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
                 count: count.into(),
                 parts: parts.into_iter().map(Into::into).collect(),
+            },
+            ast::Expr::Resize {
+                expr,
+                width,
+                signed,
+            } => Expr::Resize {
+                expr: Box::new((*expr).into()),
+                width,
+                signed,
             },
             ast::Expr::Unary { op, expr } => Expr::Unary {
                 op: op.into(),
