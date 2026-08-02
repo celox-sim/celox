@@ -20,8 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Resources created with GITHUB_TOKEN do not start follow-up workflows.
-      # Mint a short-lived installation token so release PR checks and the
-      # manifest-triggered publisher run normally.
+      # Use an installation token so release PR checks and release-triggered
+      # publisher workflows run normally. Workflows permission also allows a
+      # failed release to be retried after master advances across workflow edits.
       - name: Create release app token
         id: release-token
         uses: actions/create-github-app-token@v3
@@ -29,16 +30,58 @@ jobs:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
+          permission-issues: write
           permission-pull-requests: write
+          permission-workflows: write
 
-      - uses: googleapis/release-please-action@v5
+      - name: Create release or update release pull request
+        uses: googleapis/release-please-action@v5
         with:
           token: ${{ steps.release-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-          # The release app intentionally has no Issues permission. The weekly
-          # queue locates the deterministic Release Please branch instead.
-          skip-labeling: true
+
+      - name: Check out the processed commit
+        if: github.event_name == 'push'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          ref: ${{ github.sha }}
+          token: ${{ steps.release-token.outputs.token }}
+
+      - name: Queue package publication for this release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+        shell: bash
+        run: |
+          release_tag="v$(tr -d '\r\n' < VERSION)"
+          tag_sha="$(git rev-list -n 1 "$release_tag" 2>/dev/null || true)"
+
+          if [ "$tag_sha" != "$GITHUB_SHA" ]; then
+            echo "No release tag points at this workflow commit; publication is not needed."
+            exit 0
+          fi
+
+          published_tag="$(
+            gh release view "$release_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json tagName,isDraft,isPrerelease \
+              --jq 'select(.isDraft == false and .isPrerelease == false) | .tagName'
+          )"
+          if [ "$published_tag" != "$release_tag" ]; then
+            echo "Published GitHub Release $release_tag was not found." >&2
+            exit 1
+          fi
+
+          jq -n \
+            --arg tag "$release_tag" \
+            '{event_type: "napi-release", client_payload: {tag: $tag}}' \
+            | gh api \
+                --method POST \
+                "repos/$GITHUB_REPOSITORY/dispatches" \
+                --input -
 
   queue-release:
     name: Queue weekly release
