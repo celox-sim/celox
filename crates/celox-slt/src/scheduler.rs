@@ -208,6 +208,7 @@ fn node_reads_only_covered_ranges<Addr: Clone + Eq + Hash>(
             SLTNode::ForFold {
                 start,
                 end,
+                result,
                 initials,
                 updates,
                 effects,
@@ -219,6 +220,10 @@ fn node_reads_only_covered_ranges<Addr: Clone + Eq + Hash>(
                 }
                 if let crate::SLTLoopBound::Expr(node) = end {
                     work.push(*node);
+                }
+                if let crate::SLTForFoldResult::Transient { initial, update } = result {
+                    work.push(*initial);
+                    work.push(*update);
                 }
                 work.extend(initials.iter().map(|state| state.expr));
                 work.extend(updates.iter().map(|state| state.expr));
@@ -307,6 +312,7 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
             loop_var,
             start,
             end,
+            result,
             initials,
             updates,
             effects,
@@ -325,6 +331,10 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
                 crate::SLTLoopBound::Expr(node) => {
                     set.extend(collect_node_input_deps(*node, arena, memo, inverse_memo));
                 }
+            }
+            if let crate::SLTForFoldResult::Transient { initial, update } = result {
+                set.extend(collect_node_input_deps(*initial, arena, memo, inverse_memo));
+                set.extend(collect_node_input_deps(*update, arena, memo, inverse_memo));
             }
             for init in initials {
                 set.extend(collect_node_input_deps(
@@ -1158,6 +1168,7 @@ fn push_scheduler_node_children<Addr: Clone + Eq + Hash>(
         SLTNode::ForFold {
             start,
             end,
+            result,
             initials,
             updates,
             effects,
@@ -1169,6 +1180,10 @@ fn push_scheduler_node_children<Addr: Clone + Eq + Hash>(
             }
             if let crate::SLTLoopBound::Expr(node) = end {
                 work.push(*node);
+            }
+            if let crate::SLTForFoldResult::Transient { initial, update } = result {
+                work.push(*initial);
+                work.push(*update);
             }
             work.extend(initials.iter().map(|state| state.expr));
             work.extend(updates.iter().map(|state| state.expr));

@@ -1407,6 +1407,7 @@ fn collect_glue_sources_with_window(
             loop_var,
             start,
             end,
+            result,
             initials,
             updates,
             effects,
@@ -1418,6 +1419,10 @@ fn collect_glue_sources_with_window(
             }
             if let SLTLoopBound::Expr(node) = end {
                 collect_glue_sources_with_window(*node, None, arena, set);
+            }
+            if let celox_slt::SLTForFoldResult::Transient { initial, update } = result {
+                collect_glue_sources_with_window(*initial, None, arena, set);
+                collect_glue_sources_with_window(*update, None, arena, set);
             }
             for init in initials {
                 collect_glue_sources_with_window(init.expr, None, arena, set);

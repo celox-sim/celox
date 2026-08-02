@@ -3158,7 +3158,14 @@ impl SLTToSIRLowerer {
             } => {
                 self.get_bound_signed(*then_expr, arena) && self.get_bound_signed(*else_expr, arena)
             }
-            SLTNode::ForFold { loop_signed, .. } => *loop_signed,
+            SLTNode::ForFold {
+                loop_signed,
+                result,
+                ..
+            } => match result {
+                crate::SLTForFoldResult::State(_) => *loop_signed,
+                crate::SLTForFoldResult::Transient { .. } => false,
+            },
             // The grouped result has concat layout and is therefore unsigned,
             // independently of the loop counter's signedness.
             SLTNode::ForFoldGroup { .. } => false,
@@ -3925,6 +3932,7 @@ impl SLTToSIRLowerer {
             SLTNode::ForFold {
                 start,
                 end,
+                result,
                 initials,
                 updates,
                 effects,
@@ -3937,6 +3945,10 @@ impl SLTToSIRLowerer {
                 }
                 if let SLTLoopBound::Expr(node) = end {
                     children.push(*node);
+                }
+                if let crate::SLTForFoldResult::Transient { initial, update } = result {
+                    children.push(*initial);
+                    children.push(*update);
                 }
                 children.extend(initials.iter().map(|update| update.expr));
                 children.extend(updates.iter().map(|update| update.expr));
@@ -5524,7 +5536,7 @@ impl SLTToSIRLowerer {
         step: usize,
         step_op: SLTStepOp,
         reverse: bool,
-        result: &VarAtomBase<A>,
+        result: &crate::SLTForFoldResult<A>,
         initials: &[crate::SLTForUpdate<A>],
         updates: &[crate::SLTForUpdate<A>],
         effects: &[crate::SLTForEffect],
@@ -5577,7 +5589,7 @@ impl SLTToSIRLowerer {
 
         let init_counter = if reverse { end_reg } else { start_reg };
 
-        let initial_states: Vec<RegisterId> = initials
+        let mut initial_states: Vec<RegisterId> = initials
             .iter()
             .zip(updates.iter())
             .map(|(init, update)| {
@@ -5586,30 +5598,50 @@ impl SLTToSIRLowerer {
                 self.cast_reg_width(builder, reg, width)
             })
             .collect();
+        if let crate::SLTForFoldResult::Transient { initial, update } = result {
+            let reg = self.lower_inner(builder, *initial, arena, cache, None, true);
+            initial_states.push(self.cast_reg_width(builder, reg, self.get_width(*update, arena)));
+        }
+
+        let transient_width = match result {
+            crate::SLTForFoldResult::State(_) => None,
+            crate::SLTForFoldResult::Transient { update, .. } => {
+                Some(self.get_width(*update, arena))
+            }
+        };
 
         let header_counter = builder.alloc_bit(compare_width, loop_signed);
-        let header_states: Vec<_> = updates
+        let mut header_states: Vec<_> = updates
             .iter()
             .map(|update| {
                 let width = update.target.access.msb - update.target.access.lsb + 1;
                 builder.alloc_logic(width)
             })
             .collect();
+        if let Some(width) = transient_width {
+            header_states.push(builder.alloc_logic(width));
+        }
         let body_counter = builder.alloc_bit(compare_width, loop_signed);
-        let body_states: Vec<_> = updates
+        let mut body_states: Vec<_> = updates
             .iter()
             .map(|update| {
                 let width = update.target.access.msb - update.target.access.lsb + 1;
                 builder.alloc_logic(width)
             })
             .collect();
-        let exit_states: Vec<_> = updates
+        if let Some(width) = transient_width {
+            body_states.push(builder.alloc_logic(width));
+        }
+        let mut exit_states: Vec<_> = updates
             .iter()
             .map(|update| {
                 let width = update.target.access.msb - update.target.access.lsb + 1;
                 builder.alloc_logic(width)
             })
             .collect();
+        if let Some(width) = transient_width {
+            exit_states.push(builder.alloc_logic(width));
+        }
 
         let header_params = std::iter::once(header_counter)
             .chain(header_states.iter().copied())
@@ -5797,7 +5829,7 @@ impl SLTToSIRLowerer {
         };
         let mut local_cache = crate::HashMap::default();
         self.lower_for_effects(builder, arena, &mut local_cache, &env, effects);
-        let next_states: Vec<_> = updates
+        let mut next_states: Vec<_> = updates
             .iter()
             .map(|update| {
                 let reg = self.lower_inner(
@@ -5812,6 +5844,11 @@ impl SLTToSIRLowerer {
                 self.cast_reg_width(builder, reg, width)
             })
             .collect();
+        if let crate::SLTForFoldResult::Transient { update, .. } = result {
+            let reg =
+                self.lower_inner(builder, *update, arena, &mut local_cache, Some(&env), false);
+            next_states.push(self.cast_reg_width(builder, reg, self.get_width(*update, arena)));
+        }
 
         let continue_reg = self.lower_inner(
             builder,
@@ -6021,10 +6058,13 @@ impl SLTToSIRLowerer {
         }
 
         builder.switch_to_block(exit_block);
-        let result_idx = updates
-            .iter()
-            .position(|update| update.target == *result)
-            .expect("ForFold result target must be present in updates");
+        let result_idx = match result {
+            crate::SLTForFoldResult::State(result) => updates
+                .iter()
+                .position(|update| update.target == *result)
+                .expect("ForFold result target must be present in updates"),
+            crate::SLTForFoldResult::Transient { .. } => updates.len(),
+        };
         exit_states[result_idx]
     }
 
@@ -8751,7 +8791,7 @@ mod tests {
                 step: 1,
                 step_op: SLTStepOp::Add,
                 reverse: false,
-                result: target,
+                result: crate::SLTForFoldResult::State(target),
                 initials: vec![crate::SLTForUpdate {
                     target,
                     expr: initial,

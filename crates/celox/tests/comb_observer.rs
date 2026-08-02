@@ -1558,6 +1558,150 @@ module Top (
     );
 }
 
+fn test_outputless_statement_call_after_conditional_return_stays_inactive(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    stop: input logic,
+    out: output logic<8>,
+) {
+    function notify (
+        x: input logic<8>,
+    ) {
+        $display("notify=%0d", x);
+    }
+
+    function touch (
+        x: input logic<8>,
+    ) {
+        if x == 8'hff {
+            $display("touch");
+        }
+    }
+
+    function pass (
+        x: input logic<8>,
+        stop_early: input logic,
+    ) -> logic<8> {
+        var tmp: logic<8>;
+        if stop_early {
+            return x;
+        }
+        tmp = x;
+        touch(tmp);
+        notify(tmp);
+        return tmp;
+    }
+
+    always_comb {
+        out = pass(a, stop);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let stop = sim.signal("stop");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(a, 5u8);
+        io.set(stop, 1u8);
+    }).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 5);
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+
+    sim.modify(|io| io.set(stop, 0u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 5);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "notify=5".to_string(),
+        }],
+    );
+}
+
+fn test_outputless_statement_call_after_loop_return_stays_inactive(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    stop: input logic,
+    count: input logic<2>,
+    out: output logic<8>,
+) {
+    function notify (
+        x: input logic<8>,
+    ) {
+        $display("notify=%0d", x);
+    }
+
+    function pass (
+        x: input logic<8>,
+        stop_early: input logic,
+        count: input logic<2>,
+    ) -> logic<8> {
+        for i in 0..count {
+            if stop_early && i == 1 {
+                return x + i;
+            }
+            notify(x + i);
+        }
+        notify(x);
+        return x;
+    }
+
+    always_comb {
+        out = pass(a, stop, count);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let stop = sim.signal("stop");
+    let count = sim.signal("count");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(a, 7u8);
+        io.set(stop, 1u8);
+        io.set(count, 3u8);
+    }).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 8);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "notify=7".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(stop, 0u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 7);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "notify=7".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "notify=8".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "notify=9".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "notify=7".to_string(),
+            },
+        ],
+    );
+}
+
 fn test_comb_display_inside_expression_function_call(sim) {
     @omit_veryl;
     @ignore_on(wasm);

@@ -5,8 +5,8 @@ mod state;
 
 pub(crate) mod node {
     pub use celox_slt::{
-        NodeId, SLTForEffect, SLTForFoldGroupState, SLTForUpdate, SLTIndex, SLTIndexKind,
-        SLTLoopBound, SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTStepOp,
+        NodeId, SLTForEffect, SLTForFoldGroupState, SLTForFoldResult, SLTForUpdate, SLTIndex,
+        SLTIndexKind, SLTLoopBound, SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTStepOp,
     };
 }
 
@@ -52,8 +52,8 @@ type ActiveGuard = (NodeId, HashSet<VarAtomBase<VarId>>);
 
 pub use node::SLTNodeArenaEditError;
 pub use node::{
-    NodeId, SLTForEffect, SLTForFoldGroupState, SLTForUpdate, SLTIndex, SLTIndexKind, SLTLoopBound,
-    SLTNode, SLTNodeArena, SLTStepOp,
+    NodeId, SLTForEffect, SLTForFoldGroupState, SLTForFoldResult, SLTForUpdate, SLTIndex,
+    SLTIndexKind, SLTLoopBound, SLTNode, SLTNodeArena, SLTStepOp,
 };
 pub use node_facts::{SLTNodeFacts, SLTNodeFactsError};
 
@@ -341,6 +341,7 @@ fn collect_comb_path_stats(
         SLTNode::ForFold {
             start,
             end,
+            result,
             initials,
             updates,
             effects,
@@ -353,6 +354,10 @@ fn collect_comb_path_stats(
             }
             if let SLTLoopBound::Expr(node) = end {
                 collect_comb_path_stats(*node, arena, visited, stats);
+            }
+            if let SLTForFoldResult::Transient { initial, update } = result {
+                collect_comb_path_stats(*initial, arena, visited, stats);
+                collect_comb_path_stats(*update, arena, visited, stats);
             }
             for init in initials {
                 collect_comb_path_stats(init.expr, arena, visited, stats);
@@ -1600,7 +1605,7 @@ fn eval_for_with_effects(
             step,
             step_op,
             reverse,
-            result,
+            result: SLTForFoldResult::State(result),
             initials: initial_updates.clone(),
             updates: folded_updates.clone(),
             effects: effects.to_vec(),
@@ -1653,7 +1658,7 @@ fn eval_for_with_effects(
             step,
             step_op,
             reverse,
-            result: target,
+            result: SLTForFoldResult::State(target),
             initials: initial_updates.clone(),
             updates: folded_updates.clone(),
             effects: Vec::new(),

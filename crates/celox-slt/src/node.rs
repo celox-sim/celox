@@ -568,6 +568,32 @@ pub struct SLTForUpdate<A: Hash + Eq + Clone> {
     pub expr: NodeId,
 }
 
+/// Selects the value returned by a legacy dynamic loop fold.
+///
+/// Most folds return one of their variable-backed states. Control-flow
+/// lowering can instead carry a transient value which has no semantic HDL
+/// variable and therefore must not be represented by a fabricated bit range.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "A: Serialize + std::hash::Hash + Eq + Clone",
+    deserialize = "A: Deserialize<'de> + std::hash::Hash + Eq + Clone"
+))]
+pub enum SLTForFoldResult<A: Hash + Eq + Clone> {
+    State(VarAtomBase<A>),
+    Transient { initial: NodeId, update: NodeId },
+}
+
+impl<A: fmt::Display + Hash + Eq + Clone> fmt::Display for SLTForFoldResult<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::State(state) => state.fmt(f),
+            Self::Transient { initial, update } => {
+                write!(f, "transient(n{} -> n{})", initial.0, update.0)
+            }
+        }
+    }
+}
+
 /// One loop-carried state in a grouped fixed-trip-count fold.
 ///
 /// `initial` is evaluated before entering the loop and `update` is evaluated
@@ -628,7 +654,7 @@ pub enum SLTNode<A: Hash + Eq + Clone> {
         step: usize,
         step_op: SLTStepOp,
         reverse: bool,
-        result: VarAtomBase<A>,
+        result: SLTForFoldResult<A>,
         initials: Vec<SLTForUpdate<A>>,
         updates: Vec<SLTForUpdate<A>>,
         effects: Vec<SLTForEffect>,
@@ -688,7 +714,7 @@ enum SLTNodeSerde<A: Hash + Eq + Clone> {
         step: usize,
         step_op: SLTStepOp,
         reverse: bool,
-        result: VarAtomBase<A>,
+        result: SLTForFoldResult<A>,
         initials: Vec<SLTForUpdate<A>>,
         updates: Vec<SLTForUpdate<A>>,
         effects: Vec<SLTForEffect>,
@@ -1084,6 +1110,30 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                         })
                     })
                     .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
+                let mapped_result =
+                    match result {
+                        SLTForFoldResult::State(result) => SLTForFoldResult::State(
+                            VarAtomBase::new(f(&result.id), result.access.lsb, result.access.msb),
+                        ),
+                        SLTForFoldResult::Transient { initial, update } => {
+                            SLTForFoldResult::Transient {
+                                initial: arena.get(*initial).map_addr(
+                                    *initial,
+                                    arena,
+                                    target_arena,
+                                    cache,
+                                    f,
+                                )?,
+                                update: arena.get(*update).map_addr(
+                                    *update,
+                                    arena,
+                                    target_arena,
+                                    cache,
+                                    f,
+                                )?,
+                            }
+                        }
+                    };
                 SLTNode::ForFold {
                     loop_var: f(loop_var),
                     loop_width: *loop_width,
@@ -1094,7 +1144,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                     step: *step,
                     step_op: *step_op,
                     reverse: *reverse,
-                    result: VarAtomBase::new(f(&result.id), result.access.lsb, result.access.msb),
+                    result: mapped_result,
                     initials: mapped_initials,
                     updates: mapped_updates,
                     effects: mapped_effects,
@@ -1404,8 +1454,8 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
 #[cfg(test)]
 mod tests {
     use super::{
-        NodeId, SLTForEffect, SLTForFoldGroupState, SLTIndex, SLTLoopBound, SLTNode, SLTNodeArena,
-        SLTNodeArenaEditError, SLTNodeArenaWire, SLTStepOp,
+        NodeId, SLTForEffect, SLTForFoldGroupState, SLTForFoldResult, SLTIndex, SLTLoopBound,
+        SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTNodeArenaWire, SLTStepOp,
     };
     use crate::{SLTNodeFacts, get_width};
     use celox_design::{BinaryOp, BitAccess, UnaryOp, VarAtomBase};
@@ -1748,7 +1798,7 @@ mod tests {
                 step: 1,
                 step_op: SLTStepOp::Add,
                 reverse: false,
-                result: VarAtomBase::new(2, 0, 7),
+                result: SLTForFoldResult::State(VarAtomBase::new(2, 0, 7)),
                 initials: Vec::new(),
                 updates: Vec::new(),
                 effects: vec![SLTForEffect {
@@ -1772,7 +1822,7 @@ mod tests {
                 step: 1,
                 step_op: SLTStepOp::Add,
                 reverse: false,
-                result: VarAtomBase::new(2, 0, 7),
+                result: SLTForFoldResult::State(VarAtomBase::new(2, 0, 7)),
                 initials: Vec::new(),
                 updates: Vec::new(),
                 effects: vec![SLTForEffect {

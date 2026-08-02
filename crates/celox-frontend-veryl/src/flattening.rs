@@ -420,6 +420,7 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
                 loop_var,
                 start,
                 end,
+                result,
                 initials,
                 updates,
                 effects,
@@ -431,6 +432,10 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
                 }
                 if let celox_slt::SLTLoopBound::Expr(node) = end {
                     collect_inputs_with_window(*node, None, arena, set, visited);
+                }
+                if let celox_slt::SLTForFoldResult::Transient { initial, update } = result {
+                    collect_inputs_with_window(*initial, None, arena, set, visited);
+                    collect_inputs_with_window(*update, None, arena, set, visited);
                 }
                 for init in initials {
                     collect_inputs_with_window(init.expr, None, arena, set, visited);
