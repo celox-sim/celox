@@ -3515,6 +3515,7 @@ pub(super) fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarI
             UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
             inner,
         ) => is_signed(module, *inner, arena),
+        SLTNode::Capture { expr, .. } => is_signed(module, *expr, arena),
         SLTNode::Mux {
             then_expr,
             else_expr,

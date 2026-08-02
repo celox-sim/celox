@@ -449,7 +449,9 @@ fn collect_comb_path_stats(
             collect_comb_path_stats(*lhs, arena, visited, stats);
             collect_comb_path_stats(*rhs, arena, visited, stats);
         }
-        SLTNode::Unary(_, inner) => collect_comb_path_stats(*inner, arena, visited, stats),
+        SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => {
+            collect_comb_path_stats(*inner, arena, visited, stats)
+        }
         SLTNode::Mux {
             cond,
             then_expr,
@@ -1655,9 +1657,6 @@ pub(super) fn collect_written_expression(
                 for expression in index.0.iter().chain(select.0.iter()) {
                     collect_written_expression(module, expression, out)?;
                 }
-                if let Some((_, expression)) = &select.1 {
-                    collect_written_expression(module, expression, out)?;
-                }
                 Ok(())
             }
             Factor::SystemFunctionCall(call) => {
@@ -1668,6 +1667,9 @@ pub(super) fn collect_written_expression(
         Expression::Unary(_, inner, _) => collect_written_expression(module, inner, out),
         Expression::Binary(lhs, op, rhs, _) => {
             collect_written_expression(module, lhs, out)?;
+            if matches!(op, Op::Pow) {
+                return Ok(());
+            }
             let lhs_value = eval_fully_known_constexpr(lhs);
             let skips_rhs = match op {
                 Op::LogicAnd => lhs_value
@@ -1696,22 +1698,16 @@ pub(super) fn collect_written_expression(
             collect_written_expression(module, else_expr, out)
         }
         Expression::Concatenation(parts, _) => {
-            for (part, repeat) in parts {
+            for (part, _) in parts {
                 collect_written_expression(module, part, out)?;
-                if let Some(repeat) = repeat {
-                    collect_written_expression(module, repeat, out)?;
-                }
             }
             Ok(())
         }
         Expression::ArrayLiteral(items, _) => {
             for item in items {
                 match item {
-                    ArrayLiteralItem::Value(expression, repeat) => {
+                    ArrayLiteralItem::Value(expression, _) => {
                         collect_written_expression(module, expression, out)?;
-                        if let Some(repeat) = repeat {
-                            collect_written_expression(module, repeat, out)?;
-                        }
                     }
                     ArrayLiteralItem::Defaul(expression) => {
                         collect_written_expression(module, expression, out)?;
@@ -1768,9 +1764,6 @@ fn collect_written_destination(
     dst: &veryl_analyzer::ir::AssignDestination,
 ) -> Result<(), ParserError> {
     for expression in dst.index.0.iter().chain(dst.select.0.iter()) {
-        collect_written_expression(module, expression, out)?;
-    }
-    if let Some((_, expression)) = &dst.select.1 {
         collect_written_expression(module, expression, out)?;
     }
     let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
@@ -3684,6 +3677,190 @@ mod tests {
 
         let q_output = var_id_of(&module, &["q_output"]);
         assert!(!written.contains_key(&q_output));
+    }
+
+    #[test]
+    fn test_collect_written_accesses_excludes_repeat_and_pow_constexpr_operands() {
+        let code = r#"
+            module Top (
+                d: input logic<8>,
+                q_repeat: output logic<16>,
+                q_pow: output logic<8>,
+                repeat_output: output logic<8>,
+                pow_output: output logic<8>,
+                sink_repeat: output logic<8>,
+                sink_pow: output logic<8>,
+            ) {
+                function constant_with_output (
+                    x: input logic<8>,
+                    y: output logic<8>,
+                ) -> logic<8> {
+                    y = x;
+                    return x;
+                }
+
+                always_comb {
+                    q_repeat = {d repeat 2};
+                    q_pow = d ** 2;
+                    sink_repeat = constant_with_output(d, repeat_output);
+                    sink_pow = constant_with_output(d, pow_output);
+                }
+            }
+        "#;
+        let mut module = parse_top_module(code);
+        let q_repeat = var_id_of(&module, &["q_repeat"]);
+        let q_pow = var_id_of(&module, &["q_pow"]);
+        let sink_repeat = var_id_of(&module, &["sink_repeat"]);
+        let sink_pow = var_id_of(&module, &["sink_pow"]);
+        let comb_decl = module
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .expect("No always_comb found in Top");
+        let assignment_expression = |id| {
+            comb_decl
+                .statements
+                .iter()
+                .find_map(|statement| match statement {
+                    Statement::Assign(assign)
+                        if assign.dst.iter().any(|destination| destination.id == id) =>
+                    {
+                        Some(assign.expr.clone())
+                    }
+                    _ => None,
+                })
+                .expect("assignment expression should exist")
+        };
+        let repeat_operand = assignment_expression(sink_repeat);
+        let pow_operand = assignment_expression(sink_pow);
+
+        let comb_decl = module
+            .declarations
+            .iter_mut()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .expect("No always_comb found in Top");
+        for statement in &mut comb_decl.statements {
+            let Statement::Assign(assign) = statement else {
+                continue;
+            };
+            if assign
+                .dst
+                .iter()
+                .any(|destination| destination.id == q_repeat)
+            {
+                let Expression::Concatenation(parts, _) = &mut assign.expr else {
+                    panic!("q_repeat should be a concatenation");
+                };
+                parts[0].1 = Some(repeat_operand.clone());
+            } else if assign.dst.iter().any(|destination| destination.id == q_pow) {
+                let Expression::Binary(_, Op::Pow, rhs, _) = &mut assign.expr else {
+                    panic!("q_pow should be a power expression");
+                };
+                **rhs = pow_operand.clone();
+            }
+        }
+
+        let target_expressions = comb_decl
+            .statements
+            .iter()
+            .filter_map(|statement| match statement {
+                Statement::Assign(assign)
+                    if assign.dst.iter().any(
+                        |destination| matches!(destination.id, id if id == q_repeat || id == q_pow),
+                    ) =>
+                {
+                    Some(assign.expr.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut written = HashMap::default();
+        for expression in &target_expressions {
+            collect_written_expression(&module, expression, &mut written).unwrap();
+        }
+
+        assert!(!written.contains_key(&var_id_of(&module, &["repeat_output"])));
+        assert!(!written.contains_key(&var_id_of(&module, &["pow_output"])));
+    }
+
+    #[test]
+    fn test_destination_analysis_excludes_static_part_select_range_operand() {
+        let code = r#"
+            module Top (
+                d: input logic<2>,
+                anchor: input logic<3>,
+                data: output logic<8>,
+                range_output: output logic<3>,
+                sink: output logic<3>,
+            ) {
+                function range_with_output (
+                    x: input logic<3>,
+                    y: output logic<3>,
+                ) -> logic<3> {
+                    y = x;
+                    return x;
+                }
+
+                always_comb {
+                    data[anchor +: 2] = d;
+                    sink = range_with_output(anchor, range_output);
+                }
+            }
+        "#;
+        let module = parse_top_module(code);
+        let data = var_id_of(&module, &["data"]);
+        let sink = var_id_of(&module, &["sink"]);
+        let range_output = var_id_of(&module, &["range_output"]);
+        let comb_decl = module
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .expect("No always_comb found in Top");
+        let range_operand = comb_decl
+            .statements
+            .iter()
+            .find_map(|statement| match statement {
+                Statement::Assign(assign)
+                    if assign.dst.iter().any(|destination| destination.id == sink) =>
+                {
+                    Some(assign.expr.clone())
+                }
+                _ => None,
+            })
+            .expect("range operand source should exist");
+        let mut destination = comb_decl
+            .statements
+            .iter()
+            .find_map(|statement| match statement {
+                Statement::Assign(assign)
+                    if assign.dst.iter().any(|destination| destination.id == data) =>
+                {
+                    assign.dst.first().cloned()
+                }
+                _ => None,
+            })
+            .expect("part-select destination should exist");
+        destination.select.1.as_mut().unwrap().1 = range_operand;
+
+        assert!(!effect::destination_contains_runtime_effect(
+            &module,
+            &destination
+        ));
+        let mut written = HashMap::default();
+        // The analyzer rejects this synthetic non-constant range before normal
+        // lowering.  Even on that error path, its unevaluated output actual
+        // must not leak into the process write set.
+        assert!(collect_written_destination(&module, &mut written, &destination).is_err());
+        assert!(!written.contains_key(&range_output));
     }
 
     #[test]

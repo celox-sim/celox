@@ -200,6 +200,7 @@ where
             child_width(*rhs)?,
         )),
         SLTNode::Unary(op, inner) => Ok(node_rules::unary_width(*op, child_width(*inner)?)),
+        SLTNode::Capture { expr, .. } => child_width(*expr),
         SLTNode::Mux {
             cond,
             then_expr,
@@ -443,6 +444,7 @@ where
                 .map_err(|error| rule_error(node_id, error))
         }
         SLTNode::Unary(op, inner) => Ok(node_rules::unary_width(*op, child_width(*inner)?)),
+        SLTNode::Capture { expr, .. } => child_width(*expr),
         SLTNode::Mux {
             then_expr,
             else_expr,
@@ -829,6 +831,7 @@ where
             visit(*rhs)?;
         }
         SLTNode::Unary(_, inner) => visit(*inner)?,
+        SLTNode::Capture { expr, .. } => visit(*expr)?,
         SLTNode::Mux {
             cond,
             then_expr,

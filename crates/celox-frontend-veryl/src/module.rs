@@ -2204,6 +2204,9 @@ fn collect_glue_sources_with_window(
         SLTNode::Unary(_, inner) => {
             collect_glue_sources_with_window(*inner, None, arena, set);
         }
+        SLTNode::Capture { expr, .. } => {
+            collect_glue_sources_with_window(*expr, window, arena, set);
+        }
         SLTNode::Mux {
             cond,
             then_expr,

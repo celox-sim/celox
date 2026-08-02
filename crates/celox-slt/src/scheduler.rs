@@ -193,7 +193,7 @@ fn node_reads_only_covered_ranges<Addr: Clone + Eq + Hash>(
                 work.push(*lhs);
                 work.push(*rhs);
             }
-            SLTNode::Unary(_, inner) => work.push(*inner),
+            SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => work.push(*inner),
             SLTNode::Mux {
                 cond,
                 then_expr,
@@ -292,6 +292,9 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
         }
         crate::SLTNode::Unary(_, inner) => {
             collect_node_input_deps(*inner, arena, memo, inverse_memo)
+        }
+        crate::SLTNode::Capture { expr, .. } => {
+            collect_node_input_deps(*expr, arena, memo, inverse_memo)
         }
         crate::SLTNode::Mux {
             cond,
@@ -816,6 +819,9 @@ fn lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
     arena: &SLTNodeArena<Addr>,
     lower_cache: &mut HashMap<NodeId, RegisterId>,
 ) -> RegisterId {
+    if path.local_inputs.is_empty() {
+        return lowerer.lower(builder, node, arena, lower_cache);
+    }
     let mut env_inputs = HashMap::default();
     for (addr, local_node) in &path.local_inputs {
         let reg = lowerer.lower(builder, *local_node, arena, lower_cache);
@@ -996,7 +1002,9 @@ fn invalidate_logic_path_target<Addr: Clone + Eq + Ord + Hash + Debug + Copy + D
     };
     if let Some(to_remove) = inverse_dep_memo.get(&target.id) {
         for node in to_remove {
-            lower_cache.remove(node);
+            if !path.pre_lower_nodes.contains(node) {
+                lower_cache.remove(node);
+            }
         }
     }
 }
@@ -1165,7 +1173,7 @@ fn push_scheduler_node_children<Addr: Clone + Eq + Hash>(
             work.push(*lhs);
             work.push(*rhs);
         }
-        SLTNode::Unary(_, inner) => work.push(*inner),
+        SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => work.push(*inner),
         SLTNode::Mux {
             cond,
             then_expr,
@@ -1361,6 +1369,7 @@ fn normalize_index_expr<Addr: Clone + Eq + Hash + Copy>(
             *op,
             Box::new(normalize_index_expr(*inner, loop_var, arena, memo)?),
         )),
+        SLTNode::Capture { expr, .. } => normalize_index_expr(*expr, loop_var, arena, memo),
         SLTNode::Mux {
             cond,
             then_expr,
@@ -2387,9 +2396,9 @@ fn collect_pure_scheduled_nodes<A: Clone + Eq + Hash>(
             collect_pure_scheduled_nodes(*lhs, arena, nodes)
                 && collect_pure_scheduled_nodes(*rhs, arena, nodes)
         }
-        SLTNode::Unary(_, inner) | SLTNode::Slice { expr: inner, .. } => {
-            collect_pure_scheduled_nodes(*inner, arena, nodes)
-        }
+        SLTNode::Unary(_, inner)
+        | SLTNode::Capture { expr: inner, .. }
+        | SLTNode::Slice { expr: inner, .. } => collect_pure_scheduled_nodes(*inner, arena, nodes),
         SLTNode::Mux {
             cond,
             then_expr,
@@ -2520,7 +2529,9 @@ fn condition_reads_target<A: Clone + Eq + Hash>(
             }
             SLTNode::Constant(..) => {}
             SLTNode::Binary(lhs, _, rhs) => work.extend([*lhs, *rhs]),
-            SLTNode::Unary(_, inner) | SLTNode::Slice { expr: inner, .. } => work.push(*inner),
+            SLTNode::Unary(_, inner)
+            | SLTNode::Capture { expr: inner, .. }
+            | SLTNode::Slice { expr: inner, .. } => work.push(*inner),
             SLTNode::Mux {
                 cond,
                 then_expr,

@@ -405,6 +405,10 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
                     .flatten();
                 collect_inputs_with_window(*inner, inner_window, arena, set, visited);
             }
+            SLTNode::Capture { expr, .. } => {
+                let inner_window = dependency_window(window, *expr, arena);
+                collect_inputs_with_window(*expr, inner_window, arena, set, visited);
+            }
             SLTNode::Mux {
                 cond,
                 then_expr,

@@ -132,6 +132,12 @@ fn collect_system_function_effect(
         _ => unreachable!("non-event system functions return before event collection"),
     };
     let (site_id, value_args) = register_comb_runtime_event_site(collector, kind, args);
+    // Event operands are evaluated left to right.  Keep the environment from
+    // the start of the event so writes performed by later operands cannot
+    // retroactively rebind inputs in an earlier operand or in the assertion
+    // condition.  Reads after an operand write are already substituted by
+    // `eval_expression_effectful` as that operand is lowered.
+    let observer_store = store.clone();
     let mut boundaries = BoundaryMap::default();
     let mut observer_args = Vec::new();
     let mut observed_inputs = HashSet::default();
@@ -148,7 +154,7 @@ fn collect_system_function_effect(
     } else {
         None
     };
-    for arg in value_args {
+    for (arg_index, arg) in value_args.iter().enumerate() {
         collect_expression_effects(module, store, &arg.0, arena, collector)?;
         let ((node, sources), arg_boundaries) =
             eval_expression_effectful(module, store, &arg.0, arena, None)?;
@@ -156,7 +162,10 @@ fn collect_system_function_effect(
         observed_inputs.extend(sources.iter().copied());
         collector.sensitivity.extend(sources);
         collect_expression_position_inputs(module, &arg.0, &mut position_inputs)?;
-        observer_args.push(node);
+        observer_args.push(arena.alloc(SLTNode::Capture {
+            expr: node,
+            key: (u64::from(site_id) << 32) | arg_index as u64,
+        })?);
     }
     observed_inputs.extend(collector.active_guard_sources.iter().copied());
     let guard = match (kind, collector.active_guard, explicit_guard) {
@@ -176,7 +185,14 @@ fn collect_system_function_effect(
             Some(active)
         }
         (RuntimeEventKind::Display, _, Some(_)) => unreachable!("display has no explicit guard"),
-    };
+    }
+    .map(|node| {
+        arena.alloc(SLTNode::Capture {
+            expr: node,
+            key: (u64::from(site_id) << 32) | u64::from(u32::MAX),
+        })
+    })
+    .transpose()?;
     let loop_effect = collector
         .loop_effects
         .as_ref()
@@ -204,7 +220,7 @@ fn collect_system_function_effect(
         })
         .collect();
     let mut local_inputs = Vec::new();
-    for (id, range_store) in store.iter() {
+    for (id, range_store) in observer_store.iter() {
         if !observed_ids.contains(id) {
             continue;
         }
@@ -253,7 +269,6 @@ fn collect_system_function_effect(
         let (node, _) = combine_parts_with_default(*id, 0, parts, arena)?;
         local_inputs.push((*id, node));
     }
-
     collector.observers.push(CombObserver {
         site_id,
         activation_group: 0,
@@ -554,7 +569,7 @@ fn statement_contains_runtime_effect(module: &Module, stmt: &Statement) -> bool 
     }
 }
 
-fn destination_contains_runtime_effect(
+pub(super) fn destination_contains_runtime_effect(
     module: &Module,
     destination: &veryl_analyzer::ir::AssignDestination,
 ) -> bool {
@@ -563,13 +578,6 @@ fn destination_contains_runtime_effect(
         .0
         .iter()
         .chain(destination.select.0.iter())
-        .chain(
-            destination
-                .select
-                .1
-                .iter()
-                .map(|(_, expression)| expression),
-        )
         .any(|expression| expression_contains_runtime_effect(module, expression))
 }
 
@@ -632,7 +640,6 @@ pub(crate) fn expression_contains_runtime_effect(module: &Module, expression: &E
                 .0
                 .iter()
                 .chain(select.0.iter())
-                .chain(select.1.iter().map(|(_, expression)| expression))
                 .any(|expression| expression_contains_runtime_effect(module, expression)),
             Factor::SystemFunctionCall(call) => match &call.kind {
                 SystemFunctionKind::Clog2(input)
@@ -652,6 +659,7 @@ pub(crate) fn expression_contains_runtime_effect(module: &Module, expression: &E
             Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
         },
         Expression::Unary(_, inner, _) => expression_contains_runtime_effect(module, inner),
+        Expression::Binary(lhs, Op::Pow, _, _) => expression_contains_runtime_effect(module, lhs),
         Expression::Binary(lhs, _, rhs, _) => {
             expression_contains_runtime_effect(module, lhs)
                 || expression_contains_runtime_effect(module, rhs)
@@ -706,6 +714,9 @@ pub(crate) fn collect_expression_effects(
                     collect_expression_effects(module, &rhs_store, rhs, arena, collector)
                 },
             )
+        }
+        Expression::Binary(lhs, Op::Pow, _, _) => {
+            collect_expression_effects(module, store, lhs, arena, collector)
         }
         Expression::Binary(lhs, _, rhs, _) => {
             collect_expression_effects(module, store, lhs, arena, collector)?;
@@ -1051,15 +1062,6 @@ fn collect_factor_effects(
         Factor::Variable(_, index, select, _) => {
             let mut position_store = store.clone();
             for expr in index.0.iter().chain(select.0.iter()) {
-                collect_and_advance_expression(
-                    module,
-                    &mut position_store,
-                    expr,
-                    arena,
-                    collector,
-                )?;
-            }
-            if let Some((_, expr)) = &select.1 {
                 collect_and_advance_expression(
                     module,
                     &mut position_store,
@@ -1942,6 +1944,9 @@ fn collect_expression_position_inputs(
 ) -> Result<(), ParserError> {
     match expr {
         Expression::Term(factor) => collect_factor_position_inputs(module, factor, out),
+        Expression::Binary(lhs, Op::Pow, _, _) => {
+            collect_expression_position_inputs(module, lhs, out)
+        }
         Expression::Binary(lhs, _, rhs, _) => {
             collect_expression_position_inputs(module, lhs, out)?;
             collect_expression_position_inputs(module, rhs, out)
@@ -1992,9 +1997,6 @@ fn collect_factor_position_inputs(
                 out.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
             }
             for expr in index.0.iter().chain(select.0.iter()) {
-                collect_expression_position_inputs(module, expr, out)?;
-            }
-            if let Some((_, expr)) = &select.1 {
                 collect_expression_position_inputs(module, expr, out)?;
             }
             Ok(())

@@ -2011,7 +2011,7 @@ fn slt_reaches_input_id(
                 pending.push(*lhs);
                 pending.push(*rhs);
             }
-            SLTNode::Unary(_, inner) => pending.push(*inner),
+            SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => pending.push(*inner),
             SLTNode::Mux {
                 cond,
                 then_expr,
@@ -2055,7 +2055,7 @@ fn collect_slt_input_sources(
                 pending.push(*lhs);
                 pending.push(*rhs);
             }
-            SLTNode::Unary(_, inner) => pending.push(*inner),
+            SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => pending.push(*inner),
             SLTNode::Mux {
                 cond,
                 then_expr,
@@ -2285,7 +2285,7 @@ fn specialize_slt_node(
                 pending.push(lhs);
                 pending.push(rhs);
             }
-            SLTNode::Unary(_, inner) => pending.push(inner),
+            SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => pending.push(inner),
             SLTNode::Mux {
                 cond,
                 then_expr,
@@ -2450,6 +2450,12 @@ fn specialize_slt_node(
                     arena.alloc(SLTNode::Unary(op, inner)).ok()?
                 }
             }
+            SLTNode::Capture { expr, key } => arena
+                .alloc(SLTNode::Capture {
+                    expr: *cache.get(&expr)?,
+                    key,
+                })
+                .ok()?,
             SLTNode::Mux {
                 cond,
                 then_expr,
@@ -2910,6 +2916,7 @@ fn proof_node_signed(node: NodeId, arena: &SLTNodeArena<VarId>) -> bool {
             UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
             inner,
         ) => proof_node_signed(*inner, arena),
+        SLTNode::Capture { expr, .. } => proof_node_signed(*expr, arena),
         SLTNode::Mux {
             then_expr,
             else_expr,
@@ -3585,7 +3592,9 @@ fn collect_template_inputs(
             collect_template_inputs(*lhs, arena, visited, inputs)
                 && collect_template_inputs(*rhs, arena, visited, inputs)
         }
-        SLTNode::Unary(_, inner) => collect_template_inputs(*inner, arena, visited, inputs),
+        SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => {
+            collect_template_inputs(*inner, arena, visited, inputs)
+        }
         SLTNode::Mux {
             cond,
             then_expr,
@@ -5267,7 +5276,7 @@ mod tests {
                 update_has_dynamic_loop_index(*lhs, loop_var, arena, visited)
                     || update_has_dynamic_loop_index(*rhs, loop_var, arena, visited)
             }
-            SLTNode::Unary(_, inner) => {
+            SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => {
                 update_has_dynamic_loop_index(*inner, loop_var, arena, visited)
             }
             SLTNode::Mux {
@@ -5332,7 +5341,7 @@ mod tests {
                 collect_narrow_dynamic_input_widths(*lhs, loop_var, arena, visited, widths);
                 collect_narrow_dynamic_input_widths(*rhs, loop_var, arena, visited, widths);
             }
-            SLTNode::Unary(_, inner) => {
+            SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => {
                 collect_narrow_dynamic_input_widths(*inner, loop_var, arena, visited, widths)
             }
             SLTNode::Mux {
