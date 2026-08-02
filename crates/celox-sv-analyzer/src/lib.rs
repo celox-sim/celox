@@ -176,6 +176,33 @@ mod tests {
     }
 
     #[test]
+    fn rejects_dynamic_labels_in_always_ff_case() {
+        let error = analyze_source(
+            r#"
+                module Top(
+                    input logic clk,
+                    input logic [1:0] selector,
+                    input logic [1:0] dynamic_label,
+                    output logic q
+                );
+                    always_ff @(posedge clk) begin
+                        case (selector)
+                            dynamic_label: q <= 1'b1;
+                            default: q <= 1'b0;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("ff_case_dynamic_label.sv"),
+        )
+        .expect_err("dynamic labels require exact four-state case equality support");
+
+        assert!(
+            matches!(error, AnalyzerError::Unsupported(message) if message.contains("non-constant labels"))
+        );
+    }
+
+    #[test]
     fn inlines_simple_function_call() {
         let ir = analyze_source(
             r#"

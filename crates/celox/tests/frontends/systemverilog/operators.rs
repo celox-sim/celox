@@ -556,6 +556,7 @@ sv_backends! {
             input logic clk,
             input logic rst,
             input logic [1:0] mode,
+            input logic signed [1:0] signed_mode,
             input logic [7:0] d0,
             input logic [7:0] d1,
             input logic [7:0] d2,
@@ -563,8 +564,14 @@ sv_backends! {
             output logic [7:0] q_hold,
             output logic [7:0] q_case_one,
             output logic [7:0] q_before_case,
-            output logic [7:0] q_after_case
+            output logic [7:0] q_after_case,
+            output logic [7:0] q_fill,
+            output logic [7:0] q_parameter,
+            output logic [7:0] q_rhs_width,
+            output logic [7:0] q_overlap
         );
+            localparam logic [1:0] P = 2'b11;
+
             always_ff @(posedge clk, negedge rst) begin
                 if (!rst) begin
                     q <= 8'h00;
@@ -572,6 +579,10 @@ sv_backends! {
                     q_case_one <= 8'h00;
                     q_before_case <= 8'h00;
                     q_after_case <= 8'h00;
+                    q_fill <= 8'h00;
+                    q_parameter <= 8'h00;
+                    q_rhs_width <= 8'h00;
+                    q_overlap <= 8'h00;
                 end else begin
                     case (mode)
                         0: begin
@@ -601,6 +612,27 @@ sv_backends! {
                         default: q_after_case <= d1;
                     endcase
                     q_after_case <= d2;
+
+                    case (d0)
+                        '1: q_fill <= 8'ha5;
+                        default: q_fill <= 8'h00;
+                    endcase
+
+                    case (signed_mode)
+                        P: q_parameter <= 8'h66;
+                        default: q_parameter <= 8'h00;
+                    endcase
+
+                    case (mode)
+                        0: q_rhs_width <= 0;
+                        default: q_rhs_width <= 1'b1;
+                    endcase
+
+                    q_overlap[0] <= 1'b1;
+                    case (mode)
+                        1: q_overlap <= 0;
+                        default: ;
+                    endcase
                 end
             end
         endmodule
@@ -612,6 +644,7 @@ sv_backends! {
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let mode = sim.signal("mode");
+    let signed_mode = sim.signal("signed_mode");
     let d0 = sim.signal("d0");
     let d1 = sim.signal("d1");
     let d2 = sim.signal("d2");
@@ -620,10 +653,15 @@ sv_backends! {
     let q_case_one = sim.signal("q_case_one");
     let q_before_case = sim.signal("q_before_case");
     let q_after_case = sim.signal("q_after_case");
+    let q_fill = sim.signal("q_fill");
+    let q_parameter = sim.signal("q_parameter");
+    let q_rhs_width = sim.signal("q_rhs_width");
+    let q_overlap = sim.signal("q_overlap");
 
     sim.modify(|io| {
         io.set(rst, 0u8);
         io.set(mode, 0u8);
+        io.set(signed_mode, 3u8);
         io.set(d0, 0x11u8);
         io.set(d1, 0x22u8);
         io.set(d2, 0x33u8);
@@ -634,6 +672,10 @@ sv_backends! {
     assert_eq!(sim.get(q_case_one), 0u8.into());
     assert_eq!(sim.get(q_before_case), 0u8.into());
     assert_eq!(sim.get(q_after_case), 0u8.into());
+    assert_eq!(sim.get(q_fill), 0u8.into());
+    assert_eq!(sim.get(q_parameter), 0u8.into());
+    assert_eq!(sim.get(q_rhs_width), 0u8.into());
+    assert_eq!(sim.get(q_overlap), 0u8.into());
 
     sim.modify(|io| io.set(rst, 1u8)).unwrap();
     sim.tick(clk).unwrap();
@@ -642,6 +684,16 @@ sv_backends! {
     assert_eq!(sim.get(q_case_one), 0x33u8.into());
     assert_eq!(sim.get(q_before_case), 0x11u8.into());
     assert_eq!(sim.get(q_after_case), 0x33u8.into());
+    assert_eq!(sim.get(q_fill), 0u8.into());
+    assert_eq!(sim.get(q_parameter), 0x66u8.into());
+    assert_eq!(sim.get(q_rhs_width), 0u8.into());
+    assert_eq!(sim.get(q_overlap), 1u8.into());
+
+    sim.modify(|io| io.set(mode, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0x22u8.into());
+    assert_eq!(sim.get(q_overlap), 0u8.into());
+    assert_eq!(sim.get(q_rhs_width), 1u8.into());
 
     sim.modify(|io| io.set(mode, 2u8)).unwrap();
     sim.tick(clk).unwrap();
@@ -650,6 +702,10 @@ sv_backends! {
     assert_eq!(sim.get(q_case_one), 0x33u8.into());
     assert_eq!(sim.get(q_before_case), 0x55u8.into());
     assert_eq!(sim.get(q_after_case), 0x33u8.into());
+    assert_eq!(sim.get(q_fill), 0u8.into());
+    assert_eq!(sim.get(q_parameter), 0x66u8.into());
+    assert_eq!(sim.get(q_rhs_width), 1u8.into());
+    assert_eq!(sim.get(q_overlap), 1u8.into());
 
     sim.modify(|io| io.set(mode, 3u8)).unwrap();
     sim.tick(clk).unwrap();
@@ -658,6 +714,10 @@ sv_backends! {
     assert_eq!(sim.get(q_case_one), 0x33u8.into());
     assert_eq!(sim.get(q_before_case), 0x55u8.into());
     assert_eq!(sim.get(q_after_case), 0x33u8.into());
+    assert_eq!(sim.get(q_fill), 0u8.into());
+    assert_eq!(sim.get(q_parameter), 0x66u8.into());
+    assert_eq!(sim.get(q_rhs_width), 1u8.into());
+    assert_eq!(sim.get(q_overlap), 1u8.into());
 
     sim.modify(|io| {
         io.set_four_state(mode, BigUint::from(0u8), BigUint::from(0b11u8));
@@ -669,6 +729,14 @@ sv_backends! {
     assert_eq!(sim.get(q_case_one), 0x44u8.into());
     assert_eq!(sim.get(q_before_case), 0x55u8.into());
     assert_eq!(sim.get(q_after_case), 0x44u8.into());
+    assert_eq!(sim.get(q_fill), 0u8.into());
+    assert_eq!(sim.get(q_parameter), 0x66u8.into());
+    assert_eq!(sim.get(q_rhs_width), 1u8.into());
+    assert_eq!(sim.get(q_overlap), 1u8.into());
+
+    sim.modify(|io| io.set(d0, 0xffu8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_fill), 0xa5u8.into());
     }
 
     fn simulates_systemverilog_repeat_concat(sim) {

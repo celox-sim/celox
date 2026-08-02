@@ -95,6 +95,7 @@ impl Module {
         let signals = signals_from_module_node(node.clone(), syntax_tree)?;
         let instances = instances_from_module_node(node.clone(), syntax_tree)?;
         let const_env = const_env_from_parameters(&parameters);
+        let parameter_literals = parameter_literal_env(&parameters, &const_env);
         let packed_dimensions = packed_dimensions_from_ports_and_signals(&ports, &signals);
         let functions = functions_from_module_node(node.clone(), syntax_tree, &packed_dimensions);
         let comb_processes = comb_processes_from_module_node(
@@ -111,6 +112,7 @@ impl Module {
             node.clone(),
             syntax_tree,
             &const_env,
+            &parameter_literals,
             &packed_dimensions,
         )?;
         let assignments = comb_processes
@@ -175,11 +177,23 @@ fn apply_parameter_overrides(parameters: &mut [Parameter], overrides: &HashMap<S
 pub struct Parameter {
     name: String,
     value: Option<ConstExpr>,
+    declared_width: Option<usize>,
+    declared_signed: Option<bool>,
 }
 
 impl Parameter {
-    fn new(name: String, value: Option<ConstExpr>) -> Self {
-        Self { name, value }
+    fn new(
+        name: String,
+        value: Option<ConstExpr>,
+        declared_width: Option<usize>,
+        declared_signed: Option<bool>,
+    ) -> Self {
+        Self {
+            name,
+            value,
+            declared_width,
+            declared_signed,
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -794,7 +808,7 @@ fn parameters_from_module_node(
             .2
             .as_ref()
             .and_then(|(_, expr)| const_expr_from_constant_param(expr, syntax_tree));
-        parameters.push(Parameter::new(name, value));
+        parameters.push(Parameter::new(name, value, None, None));
     }
 
     Ok(parameters)
@@ -1148,6 +1162,8 @@ fn parameters_from_ref_node(
     parameters: &mut Vec<Parameter>,
 ) -> Result<(), AnalyzerError> {
     let parameter_width = parameter_declared_width(node.clone(), syntax_tree, parameters);
+    let parameter_signed =
+        parameter_width.map(|_| is_signed_from_ref_node(node.clone()).unwrap_or(false));
     for child in node {
         if let RefNode::ParamAssignment(param) = child {
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
@@ -1157,7 +1173,12 @@ fn parameters_from_ref_node(
                 .as_ref()
                 .and_then(|(_, expr)| const_expr_from_constant_param(expr, syntax_tree));
             value = normalize_unbased_unsized_parameter_value(value, parameter_width);
-            parameters.push(Parameter::new(name, value));
+            parameters.push(Parameter::new(
+                name,
+                value,
+                parameter_width,
+                parameter_signed,
+            ));
         }
     }
     Ok(())
@@ -1213,6 +1234,38 @@ fn const_env_from_parameters(parameters: &[Parameter]) -> HashMap<String, i128> 
         env.insert(parameter_marker(parameter.name()), value);
     }
     env
+}
+
+fn parameter_literal_env(
+    parameters: &[Parameter],
+    const_env: &HashMap<String, i128>,
+) -> HashMap<String, String> {
+    parameters
+        .iter()
+        .filter_map(|parameter| {
+            let value = *const_env.get(parameter.name())?;
+            let literal =
+                if let Some(width) = parameter.declared_width.filter(|width| *width <= 128) {
+                    let mask = if width == 128 {
+                        u128::MAX
+                    } else {
+                        (1u128 << width) - 1
+                    };
+                    let bits = (value as u128) & mask;
+                    let signing = if parameter.declared_signed.unwrap_or(false) {
+                        "s"
+                    } else {
+                        ""
+                    };
+                    format!("{width}'{signing}d{bits}")
+                } else if let Some(ConstExpr::Literal(literal)) = parameter.value() {
+                    literal.clone()
+                } else {
+                    value.to_string()
+                };
+            Some((parameter.name().to_string(), literal))
+        })
+        .collect()
 }
 
 fn packed_dimensions_from_ports_and_signals(
@@ -1926,6 +1979,33 @@ fn expr_contains_unknown_literal(expr: &Expr) -> bool {
     }
 }
 
+fn expr_is_static_case_label(expr: &Expr, const_env: &HashMap<String, i128>) -> bool {
+    match expr {
+        Expr::Literal(_) => true,
+        Expr::Ident(name) => const_env.contains_key(name),
+        Expr::Select { expr, .. } | Expr::Unary { expr, .. } => {
+            expr_is_static_case_label(expr, const_env)
+        }
+        Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => parts
+            .iter()
+            .all(|part| expr_is_static_case_label(part, const_env)),
+        Expr::Binary { left, right, .. } => {
+            expr_is_static_case_label(left, const_env)
+                && expr_is_static_case_label(right, const_env)
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_is_static_case_label(condition, const_env)
+                && expr_is_static_case_label(then_expr, const_env)
+                && expr_is_static_case_label(else_expr, const_env)
+        }
+        Expr::Call { .. } => false,
+    }
+}
+
 fn comb_processes_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
@@ -2388,9 +2468,21 @@ fn substitute_assignment_constants(
     assignment: Assignment,
     const_env: &HashMap<String, i128>,
 ) -> Assignment {
+    substitute_assignment_constants_with_parameter_literals(assignment, const_env, &HashMap::new())
+}
+
+fn substitute_assignment_constants_with_parameter_literals(
+    assignment: Assignment,
+    const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, String>,
+) -> Assignment {
     Assignment::new(
         substitute_lvalue_constants(assignment.lhs, const_env),
-        substitute_expr_constants(assignment.rhs, const_env),
+        substitute_expr_constants_with_parameter_literals(
+            assignment.rhs,
+            const_env,
+            parameter_literals,
+        ),
     )
 }
 
@@ -2405,55 +2497,110 @@ fn substitute_lvalue_constants(lvalue: LValue, const_env: &HashMap<String, i128>
     }
 }
 
-fn substitute_expr_constants(expr: Expr, const_env: &HashMap<String, i128>) -> Expr {
+fn substitute_expr_constants_with_parameter_literals(
+    expr: Expr,
+    const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, String>,
+) -> Expr {
     match expr {
-        Expr::Ident(name) => const_env
+        Expr::Ident(name) => parameter_literals
             .get(&name)
-            .filter(|_| !const_env.contains_key(&parameter_marker(&name)))
-            .map(|value| Expr::Literal(value.to_string()))
+            .map(|literal| Expr::Literal(literal.clone()))
+            .or_else(|| {
+                const_env
+                    .get(&name)
+                    .filter(|_| !const_env.contains_key(&parameter_marker(&name)))
+                    .map(|value| Expr::Literal(value.to_string()))
+            })
             .unwrap_or(Expr::Ident(name)),
         Expr::Literal(value) => Expr::Literal(value),
         Expr::Select { expr, msb, lsb } => Expr::Select {
-            expr: Box::new(substitute_expr_constants(*expr, const_env)),
+            expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                *expr,
+                const_env,
+                parameter_literals,
+            )),
             msb: substitute_const_expr_constants(msb, const_env),
             lsb: substitute_const_expr_constants(lsb, const_env),
         },
         Expr::Concat(parts) => Expr::Concat(
             parts
                 .into_iter()
-                .map(|part| substitute_expr_constants(part, const_env))
+                .map(|part| {
+                    substitute_expr_constants_with_parameter_literals(
+                        part,
+                        const_env,
+                        parameter_literals,
+                    )
+                })
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
             count: substitute_const_expr_constants(count, const_env),
             parts: parts
                 .into_iter()
-                .map(|part| substitute_expr_constants(part, const_env))
+                .map(|part| {
+                    substitute_expr_constants_with_parameter_literals(
+                        part,
+                        const_env,
+                        parameter_literals,
+                    )
+                })
                 .collect(),
         },
         Expr::Unary { op, expr } => Expr::Unary {
             op,
-            expr: Box::new(substitute_expr_constants(*expr, const_env)),
+            expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                *expr,
+                const_env,
+                parameter_literals,
+            )),
         },
         Expr::Binary { left, op, right } => Expr::Binary {
-            left: Box::new(substitute_expr_constants(*left, const_env)),
+            left: Box::new(substitute_expr_constants_with_parameter_literals(
+                *left,
+                const_env,
+                parameter_literals,
+            )),
             op,
-            right: Box::new(substitute_expr_constants(*right, const_env)),
+            right: Box::new(substitute_expr_constants_with_parameter_literals(
+                *right,
+                const_env,
+                parameter_literals,
+            )),
         },
         Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => Expr::Mux {
-            condition: Box::new(substitute_expr_constants(*condition, const_env)),
-            then_expr: Box::new(substitute_expr_constants(*then_expr, const_env)),
-            else_expr: Box::new(substitute_expr_constants(*else_expr, const_env)),
+            condition: Box::new(substitute_expr_constants_with_parameter_literals(
+                *condition,
+                const_env,
+                parameter_literals,
+            )),
+            then_expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                *then_expr,
+                const_env,
+                parameter_literals,
+            )),
+            else_expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                *else_expr,
+                const_env,
+                parameter_literals,
+            )),
         },
         Expr::Call { name, args } => Expr::Call {
             name,
             args: args
                 .into_iter()
-                .map(|arg| substitute_expr_constants(arg, const_env))
+                .map(|arg| {
+                    substitute_expr_constants_with_parameter_literals(
+                        arg,
+                        const_env,
+                        parameter_literals,
+                    )
+                })
                 .collect(),
         },
     }
@@ -2706,6 +2853,7 @@ fn ff_processes_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, String>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Result<Vec<FfProcess>, AnalyzerError> {
     let mut processes = Vec::new();
@@ -2714,6 +2862,7 @@ fn ff_processes_from_module_node(
             item,
             syntax_tree,
             const_env,
+            parameter_literals,
             packed_dimensions,
             &mut processes,
         )?;
@@ -2725,6 +2874,7 @@ fn ff_processes_from_non_port_module_item(
     item: &sv_parser::NonPortModuleItem,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, String>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
 ) -> Result<(), AnalyzerError> {
@@ -2735,6 +2885,7 @@ fn ff_processes_from_non_port_module_item(
                     item,
                     syntax_tree,
                     const_env,
+                    parameter_literals,
                     packed_dimensions,
                     processes,
                 )?;
@@ -2745,6 +2896,7 @@ fn ff_processes_from_non_port_module_item(
                 item,
                 syntax_tree,
                 const_env,
+                parameter_literals,
                 packed_dimensions,
                 processes,
             )?;
@@ -2758,6 +2910,7 @@ fn ff_processes_from_generate_item(
     item: &sv_parser::GenerateItem,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, String>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
 ) -> Result<(), AnalyzerError> {
@@ -2766,6 +2919,7 @@ fn ff_processes_from_generate_item(
             item,
             syntax_tree,
             const_env,
+            parameter_literals,
             packed_dimensions,
             processes,
         )?;
@@ -2777,6 +2931,7 @@ fn ff_processes_from_module_or_generate_item(
     item: &sv_parser::ModuleOrGenerateItem,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, String>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
 ) -> Result<(), AnalyzerError> {
@@ -2785,6 +2940,7 @@ fn ff_processes_from_module_or_generate_item(
             &item.nodes.1,
             syntax_tree,
             const_env,
+            parameter_literals,
             packed_dimensions,
             processes,
         )?;
@@ -2796,14 +2952,19 @@ fn ff_processes_from_module_common_item(
     item: &sv_parser::ModuleCommonItem,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, String>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
 ) -> Result<(), AnalyzerError> {
     match item {
         sv_parser::ModuleCommonItem::AlwaysConstruct(always) => {
-            if let Some(process) =
-                ff_process_from_always_construct(always, syntax_tree, const_env, packed_dimensions)?
-            {
+            if let Some(process) = ff_process_from_always_construct(
+                always,
+                syntax_tree,
+                const_env,
+                parameter_literals,
+                packed_dimensions,
+            )? {
                 processes.push(process);
             }
         }
@@ -2830,6 +2991,7 @@ fn ff_processes_from_module_common_item(
                     block,
                     syntax_tree,
                     const_env,
+                    parameter_literals,
                     packed_dimensions,
                     processes,
                 )?;
@@ -2844,6 +3006,7 @@ fn ff_processes_from_generate_block(
     block: &sv_parser::GenerateBlock,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, String>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
 ) -> Result<(), AnalyzerError> {
@@ -2853,6 +3016,7 @@ fn ff_processes_from_generate_block(
                 item,
                 syntax_tree,
                 const_env,
+                parameter_literals,
                 packed_dimensions,
                 processes,
             )?;
@@ -2863,6 +3027,7 @@ fn ff_processes_from_generate_block(
                     item,
                     syntax_tree,
                     const_env,
+                    parameter_literals,
                     packed_dimensions,
                     processes,
                 )?;
@@ -2876,6 +3041,7 @@ fn ff_process_from_always_construct(
     always: &sv_parser::AlwaysConstruct,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, String>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Result<Option<FfProcess>, AnalyzerError> {
     if !matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_)) {
@@ -2889,6 +3055,7 @@ fn ff_process_from_always_construct(
         body,
         None,
         syntax_tree,
+        const_env,
         packed_dimensions,
         &mut assignments,
     )?;
@@ -2896,10 +3063,18 @@ fn ff_process_from_always_construct(
         .into_iter()
         .map(|assignment| {
             ConditionalAssignment::new(
-                assignment
-                    .condition
-                    .map(|condition| substitute_expr_constants(condition, const_env)),
-                substitute_assignment_constants(assignment.assignment, const_env),
+                assignment.condition.map(|condition| {
+                    substitute_expr_constants_with_parameter_literals(
+                        condition,
+                        const_env,
+                        parameter_literals,
+                    )
+                }),
+                substitute_assignment_constants_with_parameter_literals(
+                    assignment.assignment,
+                    const_env,
+                    parameter_literals,
+                ),
             )
         })
         .collect::<Vec<_>>();
@@ -2970,6 +3145,7 @@ fn conditional_assignments_from_statement_or_null(
     stmt: &sv_parser::StatementOrNull,
     condition: Option<Expr>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     assignments: &mut Vec<ConditionalAssignment>,
 ) -> Result<(), AnalyzerError> {
@@ -2978,6 +3154,7 @@ fn conditional_assignments_from_statement_or_null(
             stmt,
             condition,
             syntax_tree,
+            const_env,
             packed_dimensions,
             assignments,
         )?;
@@ -2989,6 +3166,7 @@ fn conditional_assignments_from_statement(
     stmt: &sv_parser::Statement,
     condition: Option<Expr>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     assignments: &mut Vec<ConditionalAssignment>,
 ) -> Result<(), AnalyzerError> {
@@ -3014,6 +3192,7 @@ fn conditional_assignments_from_statement(
                     stmt,
                     condition.clone(),
                     syntax_tree,
+                    const_env,
                     packed_dimensions,
                     assignments,
                 )?;
@@ -3024,6 +3203,7 @@ fn conditional_assignments_from_statement(
                 stmt,
                 condition,
                 syntax_tree,
+                const_env,
                 packed_dimensions,
                 assignments,
             )?;
@@ -3033,6 +3213,7 @@ fn conditional_assignments_from_statement(
                 stmt,
                 condition,
                 syntax_tree,
+                const_env,
                 packed_dimensions,
                 assignments,
             )?;
@@ -3046,6 +3227,7 @@ fn conditional_assignments_from_conditional_statement(
     stmt: &sv_parser::ConditionalStatement,
     parent_condition: Option<Expr>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     assignments: &mut Vec<ConditionalAssignment>,
 ) -> Result<(), AnalyzerError> {
@@ -3060,6 +3242,7 @@ fn conditional_assignments_from_conditional_statement(
         &stmt.nodes.3,
         then_condition,
         syntax_tree,
+        const_env,
         packed_dimensions,
         assignments,
     )?;
@@ -3081,6 +3264,7 @@ fn conditional_assignments_from_conditional_statement(
             branch,
             condition,
             syntax_tree,
+            const_env,
             packed_dimensions,
             assignments,
         )?;
@@ -3096,6 +3280,7 @@ fn conditional_assignments_from_conditional_statement(
             branch,
             condition,
             syntax_tree,
+            const_env,
             packed_dimensions,
             assignments,
         )?;
@@ -3107,6 +3292,7 @@ fn conditional_assignments_from_case_statement(
     stmt: &sv_parser::CaseStatement,
     parent_condition: Option<Expr>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     assignments: &mut Vec<ConditionalAssignment>,
 ) -> Result<(), AnalyzerError> {
@@ -3143,6 +3329,11 @@ fn conditional_assignments_from_case_statement(
                             "X/Z labels in always_ff case statements".to_string(),
                         ));
                     }
+                    if !expr_is_static_case_label(&expr, const_env) {
+                        return Err(AnalyzerError::Unsupported(
+                            "non-constant labels in always_ff case statements".to_string(),
+                        ));
+                    }
                     conditions.push(case_item_condition(case_expr.clone(), expr));
                 }
                 if let Some(condition) = conditions.into_iter().reduce(|left, right| Expr::Binary {
@@ -3168,6 +3359,7 @@ fn conditional_assignments_from_case_statement(
             branch,
             condition,
             syntax_tree,
+            const_env,
             packed_dimensions,
             assignments,
         )?;
@@ -3183,6 +3375,7 @@ fn conditional_assignments_from_case_statement(
             branch,
             condition,
             syntax_tree,
+            const_env,
             packed_dimensions,
             assignments,
         )?;
