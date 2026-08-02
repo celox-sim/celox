@@ -2195,7 +2195,7 @@ pub(super) fn short_circuit_rhs_guard(
     Ok(arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, shortcut))?)
 }
 
-fn eval_case_comparison(
+pub(super) fn eval_case_comparison(
     module: &Module,
     store: &mut ExpressionStore<'_>,
     target_expr: &Expression,

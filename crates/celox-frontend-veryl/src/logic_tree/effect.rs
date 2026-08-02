@@ -98,6 +98,26 @@ fn collect_system_function_effect(
     arena: &mut SLTNodeArena<VarId>,
     collector: &mut CombEffectCollector,
 ) -> Result<BoundaryMap<VarId>, ParserError> {
+    match &call.kind {
+        SystemFunctionKind::Clog2(input)
+        | SystemFunctionKind::Onehot(input)
+        | SystemFunctionKind::Signed(input)
+        | SystemFunctionKind::Unsigned(input) => {
+            collect_expression_effects(module, store, &input.0, arena, collector)?;
+            let ((_, sources), boundaries) =
+                eval_expression_effectful(module, store, &input.0, arena, None)?;
+            collector.sensitivity.extend(sources);
+            return Ok(boundaries);
+        }
+        SystemFunctionKind::Bits(_)
+        | SystemFunctionKind::Size(_)
+        | SystemFunctionKind::Readmemh(_, _)
+        | SystemFunctionKind::Finish => return Ok(BoundaryMap::default()),
+        SystemFunctionKind::Display(_)
+        | SystemFunctionKind::Write(_)
+        | SystemFunctionKind::Assert { .. } => {}
+    }
+
     let (kind, cond, args) = match &call.kind {
         SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
             (RuntimeEventKind::Display, None, args.as_slice())
@@ -109,15 +129,7 @@ fn collect_system_function_effect(
             };
             (event_kind, Some(&cond.0), args.as_slice())
         }
-        _ => {
-            return Err(ParserError::unsupported(
-                66,
-                LoweringPhase::CombLowering,
-                "system function call",
-                format!("{call}"),
-                Some(&call.comptime.token),
-            ));
-        }
+        _ => unreachable!("non-event system functions return before event collection"),
     };
     let (site_id, value_args) = register_comb_runtime_event_site(collector, kind, args);
     let mut boundaries = BoundaryMap::default();
@@ -395,13 +407,28 @@ pub(super) fn statements_contain_runtime_effect(module: &Module, statements: &[S
 
 fn statement_contains_runtime_effect(module: &Module, stmt: &Statement) -> bool {
     match stmt {
-        Statement::Assign(assign) => expression_contains_runtime_effect(module, &assign.expr),
-        Statement::SystemFunctionCall(call) => matches!(
-            call.kind,
+        Statement::Assign(assign) => {
+            expression_contains_runtime_effect(module, &assign.expr)
+                || assign
+                    .dst
+                    .iter()
+                    .any(|destination| destination_contains_runtime_effect(module, destination))
+        }
+        Statement::SystemFunctionCall(call) => match &call.kind {
             SystemFunctionKind::Display(_)
-                | SystemFunctionKind::Write(_)
-                | SystemFunctionKind::Assert { .. }
-        ),
+            | SystemFunctionKind::Write(_)
+            | SystemFunctionKind::Assert { .. } => true,
+            SystemFunctionKind::Clog2(input)
+            | SystemFunctionKind::Onehot(input)
+            | SystemFunctionKind::Signed(input)
+            | SystemFunctionKind::Unsigned(input) => {
+                expression_contains_runtime_effect(module, &input.0)
+            }
+            SystemFunctionKind::Bits(_)
+            | SystemFunctionKind::Size(_)
+            | SystemFunctionKind::Readmemh(_, _)
+            | SystemFunctionKind::Finish => false,
+        },
         Statement::If(if_stmt) => {
             expression_contains_runtime_effect(module, &if_stmt.cond)
                 || statements_contain_runtime_effect(module, &if_stmt.true_side)
@@ -441,6 +468,25 @@ fn statement_contains_runtime_effect(module: &Module, stmt: &Statement) -> bool 
         | Statement::Unsupported(_)
         | Statement::Null => false,
     }
+}
+
+fn destination_contains_runtime_effect(
+    module: &Module,
+    destination: &veryl_analyzer::ir::AssignDestination,
+) -> bool {
+    destination
+        .index
+        .0
+        .iter()
+        .chain(destination.select.0.iter())
+        .chain(
+            destination
+                .select
+                .1
+                .iter()
+                .map(|(_, expression)| expression),
+        )
+        .any(|expression| expression_contains_runtime_effect(module, expression))
 }
 
 fn case_pattern_contains_runtime_effect(module: &Module, pattern: &CasePattern) -> bool {
@@ -490,15 +536,19 @@ fn expression_contains_runtime_effect(module: &Module, expression: &Expression) 
                 .chain(select.1.iter().map(|(_, expression)| expression))
                 .any(|expression| expression_contains_runtime_effect(module, expression)),
             Factor::SystemFunctionCall(call) => match &call.kind {
-                SystemFunctionKind::Bits(input)
-                | SystemFunctionKind::Size(input)
-                | SystemFunctionKind::Clog2(input)
+                SystemFunctionKind::Clog2(input)
                 | SystemFunctionKind::Onehot(input)
                 | SystemFunctionKind::Signed(input)
                 | SystemFunctionKind::Unsigned(input) => {
                     expression_contains_runtime_effect(module, &input.0)
                 }
-                _ => false,
+                SystemFunctionKind::Bits(_)
+                | SystemFunctionKind::Size(_)
+                | SystemFunctionKind::Display(_)
+                | SystemFunctionKind::Write(_)
+                | SystemFunctionKind::Assert { .. }
+                | SystemFunctionKind::Readmemh(_, _)
+                | SystemFunctionKind::Finish => false,
             },
             Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
         },
@@ -613,23 +663,175 @@ fn collect_expression_effects(
     }
 }
 
+fn collect_assignment_effects(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    assign: &AssignStatement,
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<(), ParserError> {
+    collect_expression_effects(module, store, &assign.expr, arena, collector)?;
+
+    // eval_assign evaluates the RHS before resolving dynamic destinations.
+    // Mirror that order in a collector-local store so observers in an index
+    // see RHS output writes and later destination expressions see earlier ones.
+    let mut destination_store = store.clone();
+    let _ = eval_assignment_rhs_effectful(module, &mut destination_store, assign, arena)?;
+    for destination in assign.dst.iter().rev() {
+        for expression in destination
+            .index
+            .0
+            .iter()
+            .chain(destination.select.0.iter())
+            .chain(
+                destination
+                    .select
+                    .1
+                    .iter()
+                    .map(|(_, expression)| expression),
+            )
+        {
+            collect_expression_effects(module, &destination_store, expression, arena, collector)?;
+            let _ =
+                eval_expression_effectful(module, &mut destination_store, expression, arena, None)?;
+        }
+    }
+    Ok(())
+}
+
 fn collect_case_pattern_effects(
     module: &Module,
     store: &SymbolicStore<VarId>,
+    target_expr: &Expression,
+    target: &expr::EvaluatedCaseTarget,
     patterns: &[CasePattern],
     arena: &mut SLTNodeArena<VarId>,
     collector: &mut CombEffectCollector,
 ) -> Result<(), ParserError> {
-    for pattern in patterns {
+    fn collect_pattern(
+        module: &Module,
+        store: &SymbolicStore<VarId>,
+        target_expr: &Expression,
+        target: &expr::EvaluatedCaseTarget,
+        pattern: &CasePattern,
+        arena: &mut SLTNodeArena<VarId>,
+        collector: &mut CombEffectCollector,
+    ) -> Result<(), ParserError> {
         match pattern {
             CasePattern::Eq(expression) => {
-                collect_expression_effects(module, store, expression, arena, collector)?;
+                collect_expression_effects(module, store, expression, arena, collector)
             }
             CasePattern::Range { lo, hi, .. } => {
                 collect_expression_effects(module, store, lo, arena, collector)?;
-                collect_expression_effects(module, store, hi, arena, collector)?;
+                let mut hi_store = store.clone();
+                let ((lo_matches, lo_sources), _) = {
+                    let mut expression_store = expr::ExpressionStore::Effectful(&mut hi_store);
+                    expr::eval_case_comparison(
+                        module,
+                        &mut expression_store,
+                        target_expr,
+                        target,
+                        lo,
+                        false,
+                        Op::LessEq,
+                        arena,
+                    )?
+                };
+                let execute_hi = expr::short_circuit_rhs_guard(arena, lo_matches, true)?;
+                with_collector_guard(
+                    collector,
+                    arena,
+                    execute_hi,
+                    lo_sources,
+                    |collector, arena| {
+                        collect_expression_effects(module, &hi_store, hi, arena, collector)
+                    },
+                )
             }
         }
+    }
+
+    let mut pattern_store = store.clone();
+    let mut matched: Option<(NodeId, HashSet<VarAtomBase<VarId>>)> = None;
+    for pattern in patterns {
+        let execute_pattern = matched
+            .as_ref()
+            .map(|(condition, _)| expr::short_circuit_rhs_guard(arena, *condition, false))
+            .transpose()?;
+        if let Some(execute_pattern) = execute_pattern {
+            let guard_sources = matched
+                .as_ref()
+                .map(|(_, sources)| sources.clone())
+                .unwrap_or_default();
+            with_collector_guard(
+                collector,
+                arena,
+                execute_pattern,
+                guard_sources,
+                |collector, arena| {
+                    collect_pattern(
+                        module,
+                        &pattern_store,
+                        target_expr,
+                        target,
+                        pattern,
+                        arena,
+                        collector,
+                    )
+                },
+            )?;
+        } else {
+            collect_pattern(
+                module,
+                &pattern_store,
+                target_expr,
+                target,
+                pattern,
+                arena,
+                collector,
+            )?;
+        }
+
+        let base_store = pattern_store.clone();
+        let mut evaluated_store = base_store.clone();
+        let ((pattern_condition, pattern_sources), _) = eval_case_arm_condition_effectful(
+            module,
+            &mut evaluated_store,
+            target_expr,
+            target,
+            std::slice::from_ref(pattern),
+            arena,
+        )?;
+        pattern_store = if let Some(execute_pattern) = execute_pattern {
+            let condition_sources = matched
+                .as_ref()
+                .map(|(_, sources)| sources)
+                .cloned()
+                .unwrap_or_default();
+            merge_symbolic_stores(
+                module,
+                &evaluated_store,
+                &base_store,
+                execute_pattern,
+                &condition_sources,
+                arena,
+            )?
+        } else {
+            evaluated_store
+        };
+        matched = Some(if let Some((condition, mut sources)) = matched {
+            sources.extend(pattern_sources);
+            (
+                arena.alloc(SLTNode::Binary(
+                    condition,
+                    BinaryOp::LogicOr,
+                    pattern_condition,
+                ))?,
+                sources,
+            )
+        } else {
+            (pattern_condition, pattern_sources)
+        });
     }
     Ok(())
 }
@@ -711,7 +913,15 @@ fn collect_function_body_effects(
         let live = state.live_expr;
         let live_sources = state.live_sources.clone();
         with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
-            collect_case_pattern_effects(module, &store, &arm.patterns, arena, collector)
+            collect_case_pattern_effects(
+                module,
+                &store,
+                &case_stmt.case_target,
+                target,
+                &arm.patterns,
+                arena,
+                collector,
+            )
         })?;
 
         let mut next_store = state.store.clone();
@@ -1175,7 +1385,7 @@ fn collect_function_body_effects(
                 let live = state.live_expr;
                 let live_sources = state.live_sources.clone();
                 with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
-                    collect_expression_effects(module, &store, &assign.expr, arena, collector)
+                    collect_assignment_effects(module, &store, assign, arena, collector)
                 })?;
                 let (store, boundaries) =
                     eval_assign(module, state.store, state.boundaries, assign, arena)?;
@@ -1520,7 +1730,7 @@ pub(super) fn collect_comb_effects_statements(
     for stmt in statements {
         match stmt {
             Statement::Assign(assign) => {
-                collect_expression_effects(module, &store, &assign.expr, arena, collector)?;
+                collect_assignment_effects(module, &store, assign, arena, collector)?;
                 let (next_store, _) =
                     eval_assign(module, store, BoundaryMap::default(), assign, arena)?;
                 store = next_store;
@@ -1634,7 +1844,15 @@ fn collect_comb_effects_case(
             );
         };
 
-        collect_case_pattern_effects(module, &store, &arm.patterns, arena, collector)?;
+        collect_case_pattern_effects(
+            module,
+            &store,
+            &case_stmt.case_target,
+            target,
+            &arm.patterns,
+            arena,
+            collector,
+        )?;
         let ((cond_node, sources), _) = eval_case_arm_condition_effectful(
             module,
             &mut store,
@@ -1682,14 +1900,7 @@ fn collect_comb_effects_case(
 
         collector.active_guard = saved_guard;
         collector.active_guard_sources = saved_guard_sources;
-        merge_symbolic_stores(
-            module,
-            &side_store,
-            &else_store,
-            bool_node(arena, true)?,
-            &HashSet::default(),
-            arena,
-        )
+        merge_symbolic_stores(module, &side_store, &else_store, cond_node, &sources, arena)
     }
 
     collect_expression_effects(module, &store, &case_stmt.case_target, arena, collector)?;

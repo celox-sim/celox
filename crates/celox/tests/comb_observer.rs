@@ -226,6 +226,118 @@ module Top (
     );
 }
 
+fn test_comb_runtime_effect_inside_assignment_destination_is_collected(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    sel: input logic<2>,
+    data: output logic<4>,
+    tmp: output logic<8>,
+) {
+    function index (
+        x: input logic<2>,
+        y: output logic<8>,
+    ) -> logic<2> {
+        $display("index=%0d", x);
+        y = 8'd10 + x;
+        return x;
+    }
+
+    always_comb {
+        data = 4'd0;
+        tmp = 8'd0;
+        data[index(sel, tmp)] = 1'b1;
+    }
+}
+"#, "Top");
+
+    let sel = sim.signal("sel");
+    let data = sim.signal("data");
+    let tmp = sim.signal("tmp");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(sel, 2u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(data), 4);
+    assert_eq!(sim.get_as::<u8>(tmp), 12);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "index=2".to_string(),
+        }],
+    );
+}
+
+fn test_comb_runtime_effect_inside_value_system_statement_is_collected(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    d: input logic<8>,
+    tmp: output logic<8>,
+) {
+    function effectful (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        $display("wrapped=%0d", x);
+        y = x + 8'd1;
+        return x;
+    }
+
+    always_comb {
+        tmp = 8'd0;
+        $unsigned(effectful(d, tmp));
+    }
+}
+"#, "Top");
+
+    let d = sim.signal("d");
+    let tmp = sim.signal("tmp");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(d, 10u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(tmp), 11);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "wrapped=10".to_string(),
+        }],
+    );
+}
+
+fn test_comb_observer_after_case_uses_selected_arm_store(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    sel: input logic<2>,
+    value: output logic<8>,
+) {
+    always_comb {
+        case sel {
+            2'd0: value = 8'd10;
+            2'd1: value = 8'd11;
+            default: value = 8'd12;
+        }
+        $display("case=%0d", value);
+    }
+}
+"#, "Top");
+
+    let sel = sim.signal("sel");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(sel, 1u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(sim.signal("value")), 11);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "case=11".to_string(),
+        }],
+    );
+}
+
 fn test_comb_runtime_effect_inside_loop_bound_is_collected(sim) {
     @omit_veryl;
     @ignore_on(wasm);

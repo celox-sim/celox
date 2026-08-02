@@ -2169,6 +2169,45 @@ fn update_assignment_range(
     Ok(())
 }
 
+fn eval_assignment_rhs_effectful(
+    module: &Module,
+    store: &mut SymbolicStore<VarId>,
+    stmt: &AssignStatement,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let rhs_expected_width = checked_destination_width(
+        module,
+        &stmt.dst,
+        "assignment destination",
+        Some(&stmt.expr.token_range()),
+    )?;
+    if let Expression::ArrayLiteral(items, _) = &stmt.expr {
+        let ((node, sources), bounds) = eval_array_literal_expression_effectful(
+            module,
+            store,
+            items,
+            Some(rhs_expected_width),
+            arena,
+        )?;
+        if get_width(node, arena) == 0 {
+            return Err(ParserError::illegal_context(
+                "assignment expression",
+                "a zero-width array literal cannot be assigned",
+                Some(&stmt.expr.token_range()),
+            ));
+        }
+        Ok((
+            (
+                coerce_node_width(arena, node, Some(rhs_expected_width), false)?,
+                sources,
+            ),
+            bounds,
+        ))
+    } else {
+        eval_assignment_expression_effectful(module, store, &stmt.expr, arena, rhs_expected_width)
+    }
+}
+
 fn eval_assign(
     module: &Module,
     mut store: SymbolicStore<VarId>,
@@ -2184,37 +2223,7 @@ fn eval_assign(
         Some(&stmt.expr.token_range()),
     )?;
     let ((rhs_expr, rhs_sources), rhs_bounds) =
-        if let Expression::ArrayLiteral(items, _) = &stmt.expr {
-            let ((node, sources), bounds) = eval_array_literal_expression_effectful(
-                module,
-                &mut store,
-                items,
-                Some(rhs_expected_width),
-                arena,
-            )?;
-            if get_width(node, arena) == 0 {
-                return Err(ParserError::illegal_context(
-                    "assignment expression",
-                    "a zero-width array literal cannot be assigned",
-                    Some(&stmt.expr.token_range()),
-                ));
-            }
-            (
-                (
-                    coerce_node_width(arena, node, Some(rhs_expected_width), false)?,
-                    sources,
-                ),
-                bounds,
-            )
-        } else {
-            eval_assignment_expression_effectful(
-                module,
-                &mut store,
-                &stmt.expr,
-                arena,
-                rhs_expected_width,
-            )?
-        };
+        eval_assignment_rhs_effectful(module, &mut store, stmt, arena)?;
     let mut boundaries = merge_boundaries(boundaries, rhs_bounds);
 
     if stmt.dst.len() == 1 {
