@@ -2482,6 +2482,18 @@ impl<'a> FfParser<'a> {
         context: Option<ValueContext>,
     ) -> Result<(), ParserError> {
         let context_width = context.map(|context| context.width);
+        if let Some(bound_reg) = self
+            .get_bound_function_expression_value(expr.token_range())
+            .copied()
+        {
+            let result = if let Some(context) = context {
+                self.cast_reg_width_ext(ir_builder, bound_reg, context.width, context.signed)
+            } else {
+                bound_reg
+            };
+            self.stack.push_back(result);
+            return Ok(());
+        }
         // Short-circuit: compile-time constant compound expression → emit constant value.
         // Unlike the SLT path (comb.rs), the SIR path requires the register width to
         // match context_width because emit_multi_dst_assign assumes rhs_width >= part_width.

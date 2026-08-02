@@ -26,6 +26,7 @@ use veryl_analyzer::ir::{
 use veryl_analyzer::symbol::Affiliation;
 use veryl_analyzer::value::Value;
 use veryl_analyzer::value::byte_value_to_string;
+use veryl_parser::token_range::TokenRange;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LoopBoundStatus {
@@ -278,6 +279,7 @@ pub struct FfParser<'a> {
     reset: Option<FfReset>,
     function_arg_stack: Vec<HashMap<VarId, Expression>>,
     function_arg_value_stack: Vec<HashMap<VarId, RegisterId>>,
+    function_expression_value_stack: Vec<HashMap<TokenRange, RegisterId>>,
     runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     runtime_event_sites: Vec<RuntimeEventSite>,
     next_runtime_error_code: i64,
@@ -316,6 +318,7 @@ impl<'a> FfParser<'a> {
             reset: None,
             function_arg_stack: Vec::new(),
             function_arg_value_stack: Vec::new(),
+            function_expression_value_stack: Vec::new(),
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
             next_runtime_error_code: 2000,

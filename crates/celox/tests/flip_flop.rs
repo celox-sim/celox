@@ -630,6 +630,215 @@ fn test_ff_statement_function_with_output_emits_runtime_effect(sim) {
     );
 }
 
+fn test_ff_effectful_if_predicate_is_evaluated_once(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function observed_predicate (x: input logic<8>) -> logic {
+                $display("predicate=%0d", x);
+                return x[0];
+            }
+
+            function outer (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                if observed_predicate(x) {
+                }
+                written = x;
+                return x;
+            }
+
+            always_ff (clk) {
+                q = outer(d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 7u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 7u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "predicate=7".to_string(),
+        }],
+    );
+}
+
+fn test_ff_nested_output_is_captured_through_signed_cast(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x + 8'd2;
+            }
+
+            function observed (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                $display("cast=%0d", $signed(update(x, written)));
+                return x;
+            }
+
+            always_ff (clk) {
+                q = observed(d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 7u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 8u8.into());
+    assert_eq!(sim.get(q), 7u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "cast=9".to_string(),
+        }],
+    );
+}
+
+fn test_ff_effectful_function_inputs_follow_declaration_order(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
+            function observed (
+                tag: input logic<8>,
+                x: input logic<8>
+            ) -> logic<8> {
+                $display("arg=%0d", tag);
+                return x;
+            }
+
+            function outer (
+                arg1: input logic<8>,
+                arg2: input logic<8>,
+                arg3: input logic<8>,
+                arg4: input logic<8>,
+                arg5: input logic<8>,
+                arg6: input logic<8>,
+                arg7: input logic<8>,
+                arg8: input logic<8>
+            ) -> logic<8> {
+                return arg1 + arg2 + arg3 + arg4 + arg5 + arg6 + arg7 + arg8;
+            }
+
+            always_ff (clk) {
+                q = outer(
+                    observed(8'd1, d),
+                    observed(8'd2, d),
+                    observed(8'd3, d),
+                    observed(8'd4, d),
+                    observed(8'd5, d),
+                    observed(8'd6, d),
+                    observed(8'd7, d),
+                    observed(8'd8, d)
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 3u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 24u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "arg=1".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "arg=2".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "arg=3".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "arg=4".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "arg=5".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "arg=6".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "arg=7".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "arg=8".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_ff_rewritten_runtime_event_argument_preserves_signedness(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input signed logic<8>,
+            q: output signed logic<8>
+        ) {
+            function observed (x: input signed logic<8>) -> signed logic<8> {
+                $display("signed=%0d", -x);
+                return x;
+            }
+
+            always_ff (clk) {
+                q = observed(d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "signed=-1".to_string(),
+        }],
+    );
+}
+
 fn test_ff_runtime_events_format_verilog_radices(sim) {
     @omit_veryl;
     @ignore_on(wasm);

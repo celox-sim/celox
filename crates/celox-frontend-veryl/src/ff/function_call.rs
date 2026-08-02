@@ -275,7 +275,6 @@ impl<'a> FfParser<'a> {
         expr: &Expression,
         state: &mut HashMap<VarId, Expression>,
     ) -> Result<Expression, ParserError> {
-        let unknown = || Box::new(Comptime::create_unknown(TokenRange::default()));
         Ok(match expr {
             Expression::Term(factor) => match factor.as_ref() {
                 Factor::Variable(_, _, _, _) => Self::substitute_function_expr(expr, state),
@@ -295,17 +294,17 @@ impl<'a> FfParser<'a> {
                 }
                 Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => expr.clone(),
             },
-            Expression::Binary(lhs, op, rhs, _) => {
+            Expression::Binary(lhs, op, rhs, comptime) => {
                 let lhs = self.capture_nested_function_outputs(lhs, state)?;
                 let rhs = self.capture_nested_function_outputs(rhs, state)?;
-                Expression::Binary(Box::new(lhs), *op, Box::new(rhs), unknown())
+                Expression::Binary(Box::new(lhs), *op, Box::new(rhs), comptime.clone())
             }
-            Expression::Unary(op, inner, _) => Expression::Unary(
+            Expression::Unary(op, inner, comptime) => Expression::Unary(
                 *op,
                 Box::new(self.capture_nested_function_outputs(inner, state)?),
-                unknown(),
+                comptime.clone(),
             ),
-            Expression::Ternary(condition, then_expr, else_expr, _) => {
+            Expression::Ternary(condition, then_expr, else_expr, comptime) => {
                 let condition = self.capture_nested_function_outputs(condition, state)?;
                 let base = state.clone();
                 let mut then_state = base.clone();
@@ -317,10 +316,10 @@ impl<'a> FfParser<'a> {
                     Box::new(condition),
                     Box::new(then_expr),
                     Box::new(else_expr),
-                    unknown(),
+                    comptime.clone(),
                 )
             }
-            Expression::Concatenation(parts, _) => {
+            Expression::Concatenation(parts, comptime) => {
                 let mut rewritten = Vec::with_capacity(parts.len());
                 for (expr, repeat) in parts {
                     let expr = self.capture_nested_function_outputs(expr, state)?;
@@ -330,9 +329,9 @@ impl<'a> FfParser<'a> {
                         .transpose()?;
                     rewritten.push((expr, repeat));
                 }
-                Expression::Concatenation(rewritten, unknown())
+                Expression::Concatenation(rewritten, comptime.clone())
             }
-            Expression::ArrayLiteral(items, _) => {
+            Expression::ArrayLiteral(items, comptime) => {
                 let mut rewritten = Vec::with_capacity(items.len());
                 for item in items {
                     rewritten.push(match item {
@@ -349,14 +348,14 @@ impl<'a> FfParser<'a> {
                         )),
                     });
                 }
-                Expression::ArrayLiteral(rewritten, unknown())
+                Expression::ArrayLiteral(rewritten, comptime.clone())
             }
-            Expression::StructConstructor(ty, fields, _) => {
+            Expression::StructConstructor(ty, fields, comptime) => {
                 let mut rewritten = Vec::with_capacity(fields.len());
                 for (name, expr) in fields {
                     rewritten.push((*name, self.capture_nested_function_outputs(expr, state)?));
                 }
-                Expression::StructConstructor(ty.clone(), rewritten, unknown())
+                Expression::StructConstructor(ty.clone(), rewritten, comptime.clone())
             }
         })
     }
@@ -380,14 +379,15 @@ impl<'a> FfParser<'a> {
                     input.0 = self.capture_nested_function_outputs(&input.0, &mut state)?;
                 }
             }
-            SystemFunctionKind::Readmemh(_, _)
-            | SystemFunctionKind::Finish
-            | SystemFunctionKind::Bits(_)
-            | SystemFunctionKind::Size(_)
-            | SystemFunctionKind::Clog2(_)
-            | SystemFunctionKind::Onehot(_)
-            | SystemFunctionKind::Signed(_)
-            | SystemFunctionKind::Unsigned(_) => {}
+            SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => {}
+            SystemFunctionKind::Bits(input)
+            | SystemFunctionKind::Size(input)
+            | SystemFunctionKind::Clog2(input)
+            | SystemFunctionKind::Onehot(input)
+            | SystemFunctionKind::Signed(input)
+            | SystemFunctionKind::Unsigned(input) => {
+                input.0 = self.capture_nested_function_outputs(&input.0, &mut state)?;
+            }
         }
         Ok((call, state))
     }
@@ -567,7 +567,27 @@ impl<'a> FfParser<'a> {
                             Some(&statement.token),
                         ));
                     }
-                    let condition = Self::substitute_function_expr(&statement.cond, &state);
+                    let condition = if self.expression_has_runtime_effect(&statement.cond) {
+                        let condition =
+                            self.capture_nested_function_outputs(&statement.cond, &mut state)?;
+                        self.function_arg_stack.push(state.clone());
+                        let result = self.parse_expression(
+                            &condition, targets, domain, convert, sources, ir_builder, None,
+                        );
+                        self.function_arg_stack.pop();
+                        result?;
+                        let condition_reg = self
+                            .stack
+                            .pop_back()
+                            .expect("Function control predicate evaluation failed");
+                        self.function_expression_value_stack
+                            .last_mut()
+                            .expect("Function expression value scope is active")
+                            .insert(condition.token_range(), condition_reg);
+                        condition
+                    } else {
+                        Self::substitute_function_expr(&statement.cond, &state)
+                    };
                     let then_state =
                         self.apply_statements_to_function_state(&statement.true_side, &state)?;
                     let else_state =
@@ -903,6 +923,16 @@ impl<'a> FfParser<'a> {
             .find_map(|bindings| bindings.get(&var_id))
     }
 
+    pub(super) fn get_bound_function_expression_value(
+        &self,
+        token: TokenRange,
+    ) -> Option<&RegisterId> {
+        self.function_expression_value_stack
+            .iter()
+            .rev()
+            .find_map(|bindings| bindings.get(&token))
+    }
+
     fn expression_references_any(expr: &Expression, candidates: &HashSet<VarId>) -> bool {
         let input_references = |input: &veryl_analyzer::ir::SystemFunctionInput| {
             Self::expression_references_any(&input.0, candidates)
@@ -979,6 +1009,7 @@ impl<'a> FfParser<'a> {
         &mut self,
         call: &veryl_analyzer::ir::FunctionCall,
         function_body: &veryl_analyzer::ir::FunctionBody,
+        ordered_arg_paths: &[veryl_analyzer::ir::VarPath],
         targets: &mut Vec<VarAtomBase<A>>,
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
@@ -991,7 +1022,10 @@ impl<'a> FfParser<'a> {
             .values()
             .flat_map(|destinations| destinations.iter().map(|dst| dst.id))
             .collect();
-        for (arg_path, arg_id) in &function_body.arg_map {
+        for arg_path in ordered_arg_paths {
+            let Some(arg_id) = function_body.arg_map.get(arg_path) else {
+                continue;
+            };
             let Some(actual) = call.inputs.get(arg_path) else {
                 continue;
             };
@@ -1073,18 +1107,18 @@ impl<'a> FfParser<'a> {
                 }
                 _ => expr.clone(),
             },
-            Expression::Binary(lhs, op, rhs, _) => Expression::Binary(
+            Expression::Binary(lhs, op, rhs, comptime) => Expression::Binary(
                 Box::new(Self::substitute_function_expr_inner(lhs, defs, expanding)),
                 *op,
                 Box::new(Self::substitute_function_expr_inner(rhs, defs, expanding)),
-                Box::new(Comptime::create_unknown(TokenRange::default())),
+                comptime.clone(),
             ),
-            Expression::Unary(op, inner, _) => Expression::Unary(
+            Expression::Unary(op, inner, comptime) => Expression::Unary(
                 *op,
                 Box::new(Self::substitute_function_expr_inner(inner, defs, expanding)),
-                Box::new(Comptime::create_unknown(TokenRange::default())),
+                comptime.clone(),
             ),
-            Expression::Ternary(cond, then_expr, else_expr, _) => Expression::Ternary(
+            Expression::Ternary(cond, then_expr, else_expr, comptime) => Expression::Ternary(
                 Box::new(Self::substitute_function_expr_inner(cond, defs, expanding)),
                 Box::new(Self::substitute_function_expr_inner(
                     then_expr, defs, expanding,
@@ -1092,9 +1126,9 @@ impl<'a> FfParser<'a> {
                 Box::new(Self::substitute_function_expr_inner(
                     else_expr, defs, expanding,
                 )),
-                Box::new(Comptime::create_unknown(TokenRange::default())),
+                comptime.clone(),
             ),
-            Expression::Concatenation(parts, _) => Expression::Concatenation(
+            Expression::Concatenation(parts, comptime) => Expression::Concatenation(
                 parts
                     .iter()
                     .map(|(x, rep)| {
@@ -1105,9 +1139,9 @@ impl<'a> FfParser<'a> {
                         )
                     })
                     .collect(),
-                Box::new(Comptime::create_unknown(TokenRange::default())),
+                comptime.clone(),
             ),
-            Expression::ArrayLiteral(items, _) => Expression::ArrayLiteral(
+            Expression::ArrayLiteral(items, comptime) => Expression::ArrayLiteral(
                 items
                     .iter()
                     .map(|item| match item {
@@ -1122,9 +1156,9 @@ impl<'a> FfParser<'a> {
                         )),
                     })
                     .collect(),
-                Box::new(Comptime::create_unknown(TokenRange::default())),
+                comptime.clone(),
             ),
-            Expression::StructConstructor(ty, fields, _) => Expression::StructConstructor(
+            Expression::StructConstructor(ty, fields, comptime) => Expression::StructConstructor(
                 ty.clone(),
                 fields
                     .iter()
@@ -1135,7 +1169,7 @@ impl<'a> FfParser<'a> {
                         )
                     })
                     .collect(),
-                Box::new(Comptime::create_unknown(TokenRange::default())),
+                comptime.clone(),
             ),
         }
     }
@@ -1551,6 +1585,11 @@ impl<'a> FfParser<'a> {
                 Some(&call.comptime.token),
             ));
         };
+        let ordered_arg_paths: Vec<_> = function
+            .args
+            .iter()
+            .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path.clone()))
+            .collect();
 
         self.validate_function_call_bindings(call, &function_body)?;
 
@@ -1563,6 +1602,7 @@ impl<'a> FfParser<'a> {
         let materialized = self.materialize_function_inputs(
             call,
             &function_body,
+            &ordered_arg_paths,
             targets,
             domain,
             convert,
@@ -1576,6 +1616,8 @@ impl<'a> FfParser<'a> {
 
         self.function_arg_stack.push(bindings);
         self.function_arg_value_stack.push(materialized);
+        self.function_expression_value_stack
+            .push(HashMap::default());
         let result = (|| {
             if self
                 .statements_have_runtime_effect(&function_body.statements, &mut HashSet::default())
@@ -1627,6 +1669,7 @@ impl<'a> FfParser<'a> {
                 &ret_expr, targets, domain, convert, sources, ir_builder, None,
             )
         })();
+        self.function_expression_value_stack.pop();
         self.function_arg_value_stack.pop();
         self.function_arg_stack.pop();
         result
@@ -1664,6 +1707,11 @@ impl<'a> FfParser<'a> {
                 Some(&call.comptime.token),
             ));
         };
+        let ordered_arg_paths: Vec<_> = function
+            .args
+            .iter()
+            .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path.clone()))
+            .collect();
 
         self.validate_function_call_bindings(call, &function_body)?;
 
@@ -1685,6 +1733,7 @@ impl<'a> FfParser<'a> {
         let materialized = self.materialize_function_inputs(
             call,
             &function_body,
+            &ordered_arg_paths,
             targets,
             domain,
             convert,
@@ -1698,6 +1747,8 @@ impl<'a> FfParser<'a> {
 
         self.function_arg_stack.push(bindings);
         self.function_arg_value_stack.push(materialized);
+        self.function_expression_value_stack
+            .push(HashMap::default());
         let result = (|| {
             if has_runtime_effect {
                 self.emit_function_runtime_effects(
@@ -1737,6 +1788,7 @@ impl<'a> FfParser<'a> {
 
             Ok(())
         })();
+        self.function_expression_value_stack.pop();
         self.function_arg_value_stack.pop();
         self.function_arg_stack.pop();
         result
