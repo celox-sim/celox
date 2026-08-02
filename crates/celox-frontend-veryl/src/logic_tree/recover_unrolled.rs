@@ -3907,7 +3907,7 @@ mod tests {
             .expect("always_comb must exist");
         let mut arena = SLTNodeArena::new();
         let (paths, _, _, _, _) =
-            parse_comb_with_loop_recovery(module, declaration, &mut arena, candidates)
+            parse_comb_with_loop_recovery(module, declaration, &mut arena, candidates, 0)
                 .expect("comb lowering must succeed");
         (paths, arena)
     }

@@ -43,33 +43,22 @@ pub(crate) struct CombEffectCollector {
     active_guard: Option<NodeId>,
     active_guard_sources: HashSet<VarAtomBase<VarId>>,
     loop_effects: Option<Vec<SLTForEffect>>,
-    capture_namespace: Option<u32>,
+    capture_namespace: u32,
     next_capture_id: u32,
 }
 
 impl CombEffectCollector {
-    fn initialize_capture_namespace(
-        &mut self,
-        token: &veryl_parser::token_range::TokenRange,
-    ) -> Result<(), ParserError> {
-        if self.capture_namespace.is_some() {
-            return Ok(());
+    pub(crate) fn with_capture_namespace(capture_namespace: u32) -> Self {
+        Self {
+            capture_namespace,
+            ..Self::default()
         }
-        self.capture_namespace = Some(u32::try_from(token.beg.id.0).map_err(|_| {
-            ParserError::illegal_context(
-                "combinational observer capture",
-                "source token identity exceeds the capture-key range",
-                Some(token),
-            )
-        })?);
-        Ok(())
     }
 
     fn next_capture_key(
         &mut self,
         token: &veryl_parser::token_range::TokenRange,
     ) -> Result<u64, ParserError> {
-        self.initialize_capture_namespace(token)?;
         let capture_id = self.next_capture_id;
         self.next_capture_id = capture_id.checked_add(1).ok_or_else(|| {
             ParserError::illegal_context(
@@ -78,7 +67,7 @@ impl CombEffectCollector {
                 Some(token),
             )
         })?;
-        Ok((u64::from(self.capture_namespace.unwrap()) << 32) | u64::from(capture_id))
+        Ok((u64::from(self.capture_namespace) << 32) | u64::from(capture_id))
     }
 }
 
@@ -94,19 +83,17 @@ fn register_comb_runtime_event_site<'a>(
     collector: &mut CombEffectCollector,
     kind: RuntimeEventKind,
     args: &'a [SystemFunctionInput],
-) -> (u32, &'a [SystemFunctionInput]) {
-    let (template, value_args) = if args
-        .first()
-        .and_then(|arg| static_string_expr(&arg.0))
-        .is_some()
-    {
-        (
-            args.first().and_then(|arg| static_string_expr(&arg.0)),
-            &args[1..],
-        )
-    } else {
-        (None, args)
-    };
+) -> (
+    u32,
+    Option<&'a SystemFunctionInput>,
+    &'a [SystemFunctionInput],
+) {
+    let (template, template_arg, value_args) =
+        if let Some(template) = args.first().and_then(|arg| static_string_expr(&arg.0)) {
+            (Some(template), args.first(), &args[1..])
+        } else {
+            (None, None, args)
+        };
     let site = RuntimeEventSite {
         kind,
         template,
@@ -125,7 +112,7 @@ fn register_comb_runtime_event_site<'a>(
     };
     let id = collector.sites.len() as u32;
     collector.sites.push(site);
-    (id, value_args)
+    (id, template_arg, value_args)
 }
 
 fn collect_system_function_effect(
@@ -168,7 +155,8 @@ fn collect_system_function_effect(
         }
         _ => unreachable!("non-event system functions return before event collection"),
     };
-    let (site_id, value_args) = register_comb_runtime_event_site(collector, kind, args);
+    let (site_id, template_arg, value_args) =
+        register_comb_runtime_event_site(collector, kind, args);
     // Event operands are evaluated left to right.  Keep the environment from
     // the start of the event so writes performed by later operands cannot
     // retroactively rebind inputs in an earlier operand or in the assertion
@@ -191,6 +179,16 @@ fn collect_system_function_effect(
     } else {
         None
     };
+    // A statically known format is omitted from the emitted runtime-event
+    // operands, but its expression still executes before the value operands.
+    // Preserve nested effects and output writeback from that evaluation.
+    if let Some(template_arg) = template_arg {
+        collect_expression_effects(module, store, &template_arg.0, arena, collector)?;
+        let ((_, sources), template_boundaries) =
+            eval_expression_effectful(module, store, &template_arg.0, arena, None)?;
+        boundaries = merge_boundaries(boundaries, template_boundaries);
+        collector.sensitivity.extend(sources);
+    }
     for arg in value_args {
         collect_expression_effects(module, store, &arg.0, arena, collector)?;
         let ((node, sources), arg_boundaries) =
@@ -375,10 +373,6 @@ fn collect_function_call_effects(
     arena: &mut SLTNodeArena<VarId>,
     collector: &mut CombEffectCollector,
 ) -> Result<(), ParserError> {
-    // The outermost evaluated call site names this collector's capture
-    // namespace. Runtime tasks in a reusable callee otherwise carry the same
-    // callee-body token in every caller.
-    collector.initialize_capture_namespace(&call.comptime.token)?;
     let Some(function) = module.functions.get(&call.id) else {
         return Err(ParserError::unsupported(
             62,
@@ -920,13 +914,6 @@ fn collect_assignment_effects(
             .0
             .iter()
             .chain(destination.select.0.iter())
-            .chain(
-                destination
-                    .select
-                    .1
-                    .iter()
-                    .map(|(_, expression)| expression),
-            )
         {
             collect_and_advance_expression(
                 module,

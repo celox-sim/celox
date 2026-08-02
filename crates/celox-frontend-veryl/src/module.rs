@@ -997,19 +997,20 @@ impl<'a> ModuleParser<'a> {
         decl: &veryl_analyzer::ir::CombDeclaration,
     ) -> Result<(), ParserError> {
         let arena_start = self.arena.len();
+        let site_offset = self.comb_runtime_event_sites.len() as u32;
         let (paths, store, boundaries, mut observers, sites) = parse_comb_with_loop_recovery(
             self.module,
             decl,
             &mut self.arena,
             &self.loop_candidates,
+            site_offset,
         )?;
-        let site_offset = self.comb_runtime_event_sites.len();
         for observer in &mut observers {
-            observer.site_id += site_offset as u32;
-            observer.activation_group = site_offset as u32;
+            observer.site_id += site_offset;
+            observer.activation_group = site_offset;
         }
         let arena_end = self.arena.len();
-        remap_for_effect_site_ids(&mut self.arena, arena_start..arena_end, site_offset as u32)?;
+        remap_for_effect_site_ids(&mut self.arena, arena_start..arena_end, site_offset)?;
         self.store.extend(store);
         self.comb_blocks.extend(paths);
         self.comb_observers.extend(observers);
@@ -1159,7 +1160,9 @@ impl<'a> ModuleParser<'a> {
 
             if expression_contains_runtime_effect(self.module, &input.expr) {
                 let arena_start = self.arena.len();
-                let mut effects = CombEffectCollector::default();
+                let mut effects = CombEffectCollector::with_capture_namespace(
+                    self.comb_runtime_event_sites.len() as u32,
+                );
                 let mut effect_store = SymbolicStore::default();
                 for (&id, variable) in &self.module.variables {
                     effect_store.insert(
@@ -1311,7 +1314,9 @@ impl<'a> ModuleParser<'a> {
             let mut destination_address_sources = HashMap::default();
             let mut composed_output_accesses = Vec::new();
             let output_effect_arena_start = self.arena.len();
-            let mut output_effects = CombEffectCollector::default();
+            let mut output_effects = CombEffectCollector::with_capture_namespace(
+                self.comb_runtime_event_sites.len() as u32,
+            );
             let mut output_effect_store = SymbolicStore::default();
             for (&id, variable) in &self.module.variables {
                 output_effect_store.insert(

@@ -208,7 +208,7 @@ fn parse_comb(
     ),
     ParserError,
 > {
-    parse_comb_with_loop_recovery(module, decl, arena, &[])
+    parse_comb_with_loop_recovery(module, decl, arena, &[], 0)
 }
 
 pub fn parse_comb_with_loop_recovery(
@@ -216,6 +216,7 @@ pub fn parse_comb_with_loop_recovery(
     decl: &CombDeclaration,
     arena: &mut SLTNodeArena<VarId>,
     loop_candidates: &[LoopRecoveryCandidate],
+    capture_namespace: u32,
 ) -> Result<
     (
         Vec<LogicPath<VarId>>,
@@ -257,7 +258,7 @@ pub fn parse_comb_with_loop_recovery(
         loop_candidates,
         None,
     )?;
-    let mut effects = CombEffectCollector::default();
+    let mut effects = CombEffectCollector::with_capture_namespace(capture_namespace);
     if let Some(effect_initial_store) = effect_initial_store {
         collect_comb_effects_statements(
             module,
@@ -3803,6 +3804,7 @@ mod tests {
                     x: input logic<3>,
                     y: output logic<3>,
                 ) -> logic<3> {
+                    $display("range=%0d", x);
                     y = x;
                     return x;
                 }
@@ -3810,6 +3812,7 @@ mod tests {
                 always_comb {
                     data[anchor +: 2] = d;
                     sink = range_with_output(anchor, range_output);
+                    $display("outer");
                 }
             }
         "#;
@@ -3825,7 +3828,7 @@ mod tests {
                 _ => None,
             })
             .expect("No always_comb found in Top");
-        let range_operand = comb_decl
+        let mut range_operand = comb_decl
             .statements
             .iter()
             .find_map(|statement| match statement {
@@ -3849,6 +3852,20 @@ mod tests {
                 _ => None,
             })
             .expect("part-select destination should exist");
+        let static_range_value = destination
+            .select
+            .1
+            .as_ref()
+            .expect("part-select range should exist")
+            .1
+            .comptime()
+            .value
+            .clone();
+        // Output-bearing calls are non-constant in source Veryl today. Keep
+        // the call structure but model an IR producer retaining its known
+        // static width so the collector behavior is covered directly.
+        range_operand.comptime_mut().value = static_range_value;
+        range_operand.comptime_mut().is_const = true;
         destination.select.1.as_mut().unwrap().1 = range_operand;
 
         assert!(!effect::destination_contains_runtime_effect(
@@ -3856,11 +3873,98 @@ mod tests {
             &destination
         ));
         let mut written = HashMap::default();
-        // The analyzer rejects this synthetic non-constant range before normal
-        // lowering.  Even on that error path, its unevaluated output actual
-        // must not leak into the process write set.
-        assert!(collect_written_destination(&module, &mut written, &destination).is_err());
+        collect_written_destination(&module, &mut written, &destination).unwrap();
         assert!(!written.contains_key(&range_output));
+
+        let mut synthetic_comb = comb_decl.clone();
+        let data_assignment = synthetic_comb
+            .statements
+            .iter_mut()
+            .find_map(|statement| match statement {
+                Statement::Assign(assign) if assign.dst.iter().any(|entry| entry.id == data) => {
+                    Some(assign)
+                }
+                _ => None,
+            })
+            .expect("data assignment should exist");
+        data_assignment.dst[0] = destination;
+        let mut arena = SLTNodeArena::new();
+        let (_, _, _, _, sites) = super::parse_comb(&module, &synthetic_comb, &mut arena).unwrap();
+        assert_eq!(
+            sites.len(),
+            2,
+            "the static range call must not duplicate the legitimate callee and outer events"
+        );
+    }
+
+    #[test]
+    fn test_static_event_template_effects_precede_value_argument_capture() {
+        let code = r#"
+            module Top (tmp_o: output logic<8>) {
+                function make_format (y: output logic<8>) -> string {
+                    $display("format evaluated");
+                    y = 8'd11;
+                    return "value=%0d";
+                }
+
+                var tmp: logic<8>;
+                always_comb {
+                    tmp = 8'd0;
+                    $display(make_format(tmp), tmp);
+                    $display("value=%0d", tmp);
+                }
+                assign tmp_o = tmp;
+            }
+        "#;
+        let mut module = parse_top_module(code);
+        let comb = module
+            .declarations
+            .iter_mut()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .expect("No always_comb found in Top");
+        let [
+            Statement::Assign(_),
+            Statement::SystemFunctionCall(first),
+            Statement::SystemFunctionCall(second),
+        ] = comb.statements.as_mut_slice()
+        else {
+            panic!("expected initialization followed by two display statements");
+        };
+        let SystemFunctionKind::Display(second_args) = &second.kind else {
+            panic!("expected second display");
+        };
+        let template_value = second_args[0].0.comptime().value.clone();
+        let SystemFunctionKind::Display(first_args) = &mut first.kind else {
+            panic!("expected first display");
+        };
+        // Output-bearing functions are currently marked non-constant by the
+        // analyzer. Model an IR producer that retains its known string value
+        // so this collector-level ordering remains covered.
+        first_args[0].0.comptime_mut().value = template_value;
+        let comb = comb.clone();
+
+        let mut arena = SLTNodeArena::new();
+        let (_, _, _, observers, sites) = super::parse_comb(&module, &comb, &mut arena).unwrap();
+        assert_eq!(
+            sites.len(),
+            3,
+            "template traversal must collect its nested event"
+        );
+        let outer = observers
+            .iter()
+            .find(|observer| observer.site_id == 0)
+            .expect("missing outer display observer");
+        let SLTNode::Capture { expr, .. } = arena.get(outer.args[0]) else {
+            panic!("outer value argument must be captured");
+        };
+        let SLTNode::Constant(value, unknown, 8, _) = arena.get(*expr) else {
+            panic!("template output must be visible to the following value argument");
+        };
+        assert_eq!(value, &num_bigint::BigUint::from(11u8));
+        assert_eq!(unknown, &num_bigint::BigUint::from(0u8));
     }
 
     #[test]
