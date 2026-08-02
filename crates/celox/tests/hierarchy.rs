@@ -267,6 +267,50 @@ assign seen_o = seen;
 
     }
 
+    fn test_instance_output_dynamic_index_function_output_writeback(sim) {
+        // veryl-simulator does not write the dynamic connection index call's
+        // output actual back to the parent variable.
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Child (
+i: input logic,
+o: output logic
+) {
+assign o = i;
+}
+module Top (
+sel: input logic,
+mem_o: output logic<2>,
+tmp_o: output logic
+) {
+function choose_index (
+x: input logic,
+tmp: output logic
+) -> logic {
+tmp = x;
+return x;
+}
+var mem: logic<2>;
+var tmp: logic;
+inst child: Child (
+i: 1'b1,
+o: mem[choose_index(sel, tmp)]
+);
+assign mem_o = mem;
+assign tmp_o = tmp;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let sel = sim.signal("sel");
+    let mem_o = sim.signal("mem_o");
+    let tmp_o = sim.signal("tmp_o");
+
+    sim.modify(|io| io.set(sel, 1u8)).unwrap();
+    assert_eq!(sim.get(mem_o), 2u8.into());
+    assert_eq!(sim.get(tmp_o), 1u8.into());
+
+    }
+
     fn test_unconnected_child_output_needs_no_parent_glue(sim) {
         @setup { let code = r#"
 module Child (

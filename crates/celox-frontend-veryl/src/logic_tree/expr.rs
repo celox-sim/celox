@@ -2163,7 +2163,7 @@ pub fn eval_expression(
     eval_expression_in_context(module, &mut store, expr, arena, context)
 }
 
-pub(super) fn eval_expression_effectful(
+pub(crate) fn eval_expression_effectful(
     module: &Module,
     store: &mut SymbolicStore<VarId>,
     expr: &Expression,

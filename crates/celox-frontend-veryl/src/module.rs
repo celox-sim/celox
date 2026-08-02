@@ -59,7 +59,7 @@ pub struct ModuleParser<'a> {
 
 fn build_dynamic_output_glue(
     module: &Module,
-    parent_store: &SymbolicStore<VarId>,
+    parent_store: &mut SymbolicStore<VarId>,
     parent_arena: &mut SLTNodeArena<VarId>,
     glue_arena: &mut SLTNodeArena<GlueAddr>,
     dst: &AssignDestination,
@@ -91,8 +91,13 @@ fn build_dynamic_output_glue(
     let dim_limit = geometry.dimension_count;
 
     for (dimension, index_expr) in index_exprs[..dim_limit].iter().enumerate() {
-        let ((index, _), _) =
-            eval_expression(module, parent_store, index_expr, parent_arena, None)?;
+        let ((index, _), _) = crate::logic_tree::eval_expression_effectful(
+            module,
+            parent_store,
+            index_expr,
+            parent_arena,
+            None,
+        )?;
         let mut cache = HashMap::default();
         let mapped = parent_arena.get(index).map_addr(
             index,
@@ -161,8 +166,13 @@ fn build_dynamic_output_glue(
             PartSelectGeometry::PlusColon { .. }
             | PartSelectGeometry::MinusColon { .. }
             | PartSelectGeometry::Step { .. } => {
-                let ((anchor, _), _) =
-                    eval_expression(module, parent_store, anchor_expr, parent_arena, None)?;
+                let ((anchor, _), _) = crate::logic_tree::eval_expression_effectful(
+                    module,
+                    parent_store,
+                    anchor_expr,
+                    parent_arena,
+                    None,
+                )?;
                 let mut cache = HashMap::default();
                 let anchor = parent_arena.get(anchor).map_addr(
                     anchor,
@@ -1025,11 +1035,34 @@ impl<'a> ModuleParser<'a> {
 
             // LHS: output.dst (AssignDestination).
             let mut current_offset = 0usize;
+            let mut destination_store = parent_store.clone();
+            let mut destination_written_accesses = HashMap::default();
+            let mut destination_address_sources = HashMap::default();
             // Iterate destinations from LSB (last in list for multi-dst assign usually? No wait)
             // `emit_multi_dst_assign` iterates `dsts.iter().rev()`.
             // So we strictly follow `emit_multi_dst_assign` logic.
             // "Current offset starts at 0" and "dst in dsts.iter().rev()".
             for dst in output.dst.iter().rev() {
+                for address in dst
+                    .index
+                    .0
+                    .iter()
+                    .chain(dst.select.0.iter())
+                    .chain(dst.select.1.iter().map(|(_, expression)| expression))
+                {
+                    collect_written_expression(
+                        self.module,
+                        address,
+                        &mut destination_written_accesses,
+                    )?;
+                    collect_parent_output_address_sources(
+                        self.module,
+                        &destination_store,
+                        address,
+                        &mut self.arena,
+                        &mut destination_address_sources,
+                    )?;
+                }
                 let prefix_access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
                 let part_width = get_access_width(self.module, dst.id, &dst.index, &dst.select)?;
 
@@ -1081,7 +1114,7 @@ impl<'a> ModuleParser<'a> {
                     } else {
                         build_dynamic_output_glue(
                             self.module,
-                            &parent_store,
+                            &mut destination_store,
                             &mut self.arena,
                             &mut glue_arena,
                             dst,
@@ -1110,6 +1143,14 @@ impl<'a> ModuleParser<'a> {
 
                 current_offset = slice_end;
             }
+            output_ports.extend(build_parent_effect_glue(
+                &parent_store,
+                &destination_store,
+                &destination_written_accesses,
+                &destination_address_sources,
+                &self.arena,
+                &mut glue_arena,
+            )?);
             if current_offset != width {
                 return Err(ParserError::illegal_context(
                     "output port destination",

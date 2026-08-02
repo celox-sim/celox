@@ -48,13 +48,12 @@ pub(crate) use effect::{
 };
 use effect::{collect_comb_effects_statements, statements_contain_runtime_effect};
 pub use expr::coerce_node_width;
-pub(crate) use expr::eval_assignment_expression_effectful;
 use expr::{
     eval_array_literal_expression_effectful, eval_case_arm_condition_effectful,
-    eval_case_target_effectful, eval_expression_effectful, eval_function_body_return,
-    merge_boundaries,
+    eval_case_target_effectful, eval_function_body_return, merge_boundaries,
 };
 pub use expr::{eval_assignment_expression, eval_expression, get_width};
+pub(crate) use expr::{eval_assignment_expression_effectful, eval_expression_effectful};
 use state::{FunctionControlState, LoopControlState};
 
 type ActiveGuard = (NodeId, HashSet<VarAtomBase<VarId>>);
