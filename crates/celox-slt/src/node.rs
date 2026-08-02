@@ -918,7 +918,10 @@ impl<A: Hash + Eq + Clone> From<SLTNodeSerde<A>> for SLTNode<A> {
     }
 }
 impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
-    /// Maps the address type A to B recursively throughout the tree.
+    /// Maps the address type A to B throughout the reachable graph.
+    ///
+    /// The traversal is explicitly postorder so deeply nested expressions do
+    /// not consume the host thread's call stack.
     pub fn map_addr<B, F>(
         &self,
         id: NodeId,
@@ -936,310 +939,266 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
             return Ok(*mapped_id);
         }
 
-        let new_node = match self {
-            // Leaf: Transform address A to B
-            SLTNode::Input {
-                variable: addr,
-                signed,
-                index,
-                access,
-            } => {
-                let mapped_index = index
-                    .iter()
-                    .map(|idx| {
-                        Ok(SLTIndex {
-                            node: arena.get(idx.node).map_addr(
-                                idx.node,
-                                arena,
-                                target_arena,
-                                cache,
-                                f,
-                            )?,
+        let mut work = vec![(id, false)];
+        while let Some((current, expanded)) = work.pop() {
+            if cache.contains_key(&current) {
+                continue;
+            }
+
+            let node = arena.get(current);
+            if !expanded {
+                work.push((current, true));
+                let mut children = Vec::new();
+                match node {
+                    SLTNode::Input { index, .. } => {
+                        children.extend(index.iter().map(|index| index.node));
+                    }
+                    SLTNode::Constant(..) => {}
+                    SLTNode::Binary(lhs, _, rhs) => children.extend([*lhs, *rhs]),
+                    SLTNode::Unary(_, inner) => children.push(*inner),
+                    SLTNode::Mux {
+                        cond,
+                        then_expr,
+                        else_expr,
+                    } => children.extend([*cond, *then_expr, *else_expr]),
+                    SLTNode::ForFold {
+                        start,
+                        end,
+                        result,
+                        initials,
+                        updates,
+                        effects,
+                        continue_cond,
+                        ..
+                    } => {
+                        // Keep the same child order as the former recursive
+                        // implementation so mapped NodeIds remain stable.
+                        children.extend(initials.iter().map(|update| update.expr));
+                        children.extend(updates.iter().map(|update| update.expr));
+                        for effect in effects {
+                            children.extend(effect.guard);
+                            children.extend(effect.args.iter().copied());
+                        }
+                        if let SLTForFoldResult::Transient { initial, update } = result {
+                            children.extend([*initial, *update]);
+                        }
+                        if let SLTLoopBound::Expr(node) = start {
+                            children.push(*node);
+                        }
+                        if let SLTLoopBound::Expr(node) = end {
+                            children.push(*node);
+                        }
+                        children.push(*continue_cond);
+                    }
+                    SLTNode::ForFoldGroup {
+                        entry_guard,
+                        states,
+                        ..
+                    } => {
+                        for state in states {
+                            children.extend([state.initial, state.update]);
+                        }
+                        children.push(*entry_guard);
+                    }
+                    SLTNode::Concat(parts) => {
+                        children.extend(parts.iter().map(|(node, _)| *node));
+                    }
+                    SLTNode::Slice { expr, .. } => children.push(*expr),
+                }
+                work.extend(children.into_iter().rev().map(|child| (child, false)));
+                continue;
+            }
+
+            let mapped = |child: NodeId| {
+                *cache
+                    .get(&child)
+                    .expect("postorder address mapping must visit children before parents")
+            };
+            let new_node = match node {
+                // Leaf: Transform address A to B
+                SLTNode::Input {
+                    variable: addr,
+                    signed,
+                    index,
+                    access,
+                } => {
+                    let mapped_index = index
+                        .iter()
+                        .map(|idx| SLTIndex {
+                            node: mapped(idx.node),
                             stride: idx.stride,
                             kind: idx.kind,
                         })
-                    })
-                    .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
-                SLTNode::Input {
-                    variable: f(addr),
-                    signed: *signed,
-                    index: mapped_index,
-                    access: *access,
-                }
-            }
-
-            // Leaf: Constants remain unchanged
-            SLTNode::Constant(val, mask, width, signed) => {
-                SLTNode::Constant(val.clone(), mask.clone(), *width, *signed)
-            }
-
-            // Recursive cases
-            SLTNode::Binary(lhs, op, rhs) => {
-                let l = arena
-                    .get(*lhs)
-                    .map_addr(*lhs, arena, target_arena, cache, f)?;
-                let r = arena
-                    .get(*rhs)
-                    .map_addr(*rhs, arena, target_arena, cache, f)?;
-                SLTNode::Binary(l, *op, r)
-            }
-
-            SLTNode::Unary(op, inner) => {
-                let i = arena
-                    .get(*inner)
-                    .map_addr(*inner, arena, target_arena, cache, f)?;
-                SLTNode::Unary(*op, i)
-            }
-
-            SLTNode::Mux {
-                cond,
-                then_expr,
-                else_expr,
-            } => {
-                let c = arena
-                    .get(*cond)
-                    .map_addr(*cond, arena, target_arena, cache, f)?;
-                let t =
-                    arena
-                        .get(*then_expr)
-                        .map_addr(*then_expr, arena, target_arena, cache, f)?;
-                let e =
-                    arena
-                        .get(*else_expr)
-                        .map_addr(*else_expr, arena, target_arena, cache, f)?;
-                SLTNode::Mux {
-                    cond: c,
-                    then_expr: t,
-                    else_expr: e,
-                }
-            }
-
-            SLTNode::ForFold {
-                loop_var,
-                loop_width,
-                loop_signed,
-                start,
-                end,
-                inclusive,
-                step,
-                step_op,
-                reverse,
-                result,
-                initials,
-                updates,
-                effects,
-                continue_cond,
-            } => {
-                let map_bound = |bound: &SLTLoopBound,
-                                 cache: &mut HashMap<NodeId, NodeId>,
-                                 target_arena: &mut SLTNodeArena<B>|
-                 -> Result<SLTLoopBound, SLTNodeFactsError> {
-                    match bound {
-                        SLTLoopBound::Const(v) => Ok(SLTLoopBound::Const(*v)),
-                        SLTLoopBound::Expr(node) => Ok(SLTLoopBound::Expr(
-                            arena
-                                .get(*node)
-                                .map_addr(*node, arena, target_arena, cache, f)?,
-                        )),
+                        .collect();
+                    SLTNode::Input {
+                        variable: f(addr),
+                        signed: *signed,
+                        index: mapped_index,
+                        access: *access,
                     }
-                };
-                let mapped_initials = initials
-                    .iter()
-                    .map(|update| {
-                        Ok(SLTForUpdate {
+                }
+
+                // Leaf: Constants remain unchanged
+                SLTNode::Constant(val, mask, width, signed) => {
+                    SLTNode::Constant(val.clone(), mask.clone(), *width, *signed)
+                }
+
+                // Recursive cases
+                SLTNode::Binary(lhs, op, rhs) => SLTNode::Binary(mapped(*lhs), *op, mapped(*rhs)),
+
+                SLTNode::Unary(op, inner) => SLTNode::Unary(*op, mapped(*inner)),
+
+                SLTNode::Mux {
+                    cond,
+                    then_expr,
+                    else_expr,
+                } => SLTNode::Mux {
+                    cond: mapped(*cond),
+                    then_expr: mapped(*then_expr),
+                    else_expr: mapped(*else_expr),
+                },
+
+                SLTNode::ForFold {
+                    loop_var,
+                    loop_width,
+                    loop_signed,
+                    start,
+                    end,
+                    inclusive,
+                    step,
+                    step_op,
+                    reverse,
+                    result,
+                    initials,
+                    updates,
+                    effects,
+                    continue_cond,
+                } => {
+                    let map_bound = |bound: &SLTLoopBound| -> SLTLoopBound {
+                        match bound {
+                            SLTLoopBound::Const(v) => SLTLoopBound::Const(*v),
+                            SLTLoopBound::Expr(node) => SLTLoopBound::Expr(mapped(*node)),
+                        }
+                    };
+                    let mapped_initials = initials
+                        .iter()
+                        .map(|update| SLTForUpdate {
                             target: VarAtomBase::new(
                                 f(&update.target.id),
                                 update.target.access.lsb,
                                 update.target.access.msb,
                             ),
-                            expr: arena.get(update.expr).map_addr(
-                                update.expr,
-                                arena,
-                                target_arena,
-                                cache,
-                                f,
-                            )?,
+                            expr: mapped(update.expr),
                         })
-                    })
-                    .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
-                let mapped_updates = updates
-                    .iter()
-                    .map(|update| {
-                        Ok(SLTForUpdate {
+                        .collect();
+                    let mapped_updates = updates
+                        .iter()
+                        .map(|update| SLTForUpdate {
                             target: VarAtomBase::new(
                                 f(&update.target.id),
                                 update.target.access.lsb,
                                 update.target.access.msb,
                             ),
-                            expr: arena.get(update.expr).map_addr(
-                                update.expr,
-                                arena,
-                                target_arena,
-                                cache,
-                                f,
-                            )?,
+                            expr: mapped(update.expr),
                         })
-                    })
-                    .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
-                let mapped_effects = effects
-                    .iter()
-                    .map(|effect| {
-                        let guard = effect
-                            .guard
-                            .map(|guard| {
-                                arena
-                                    .get(guard)
-                                    .map_addr(guard, arena, target_arena, cache, f)
-                            })
-                            .transpose()?;
-                        let args = effect
-                            .args
-                            .iter()
-                            .map(|arg| {
-                                arena
-                                    .get(*arg)
-                                    .map_addr(*arg, arena, target_arena, cache, f)
-                            })
-                            .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
-                        Ok(SLTForEffect {
-                            site_id: effect.site_id,
-                            guard,
-                            emit_on_true: effect.emit_on_true,
-                            args,
-                            fatal_error_code: effect.fatal_error_code,
+                        .collect();
+                    let mapped_effects = effects
+                        .iter()
+                        .map(|effect| {
+                            let guard = effect.guard.map(mapped);
+                            let args = effect.args.iter().map(|arg| mapped(*arg)).collect();
+                            SLTForEffect {
+                                site_id: effect.site_id,
+                                guard,
+                                emit_on_true: effect.emit_on_true,
+                                args,
+                                fatal_error_code: effect.fatal_error_code,
+                            }
                         })
-                    })
-                    .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
-                let mapped_result =
-                    match result {
+                        .collect();
+                    let mapped_result = match result {
                         SLTForFoldResult::State(result) => SLTForFoldResult::State(
                             VarAtomBase::new(f(&result.id), result.access.lsb, result.access.msb),
                         ),
                         SLTForFoldResult::Transient { initial, update } => {
                             SLTForFoldResult::Transient {
-                                initial: arena.get(*initial).map_addr(
-                                    *initial,
-                                    arena,
-                                    target_arena,
-                                    cache,
-                                    f,
-                                )?,
-                                update: arena.get(*update).map_addr(
-                                    *update,
-                                    arena,
-                                    target_arena,
-                                    cache,
-                                    f,
-                                )?,
+                                initial: mapped(*initial),
+                                update: mapped(*update),
                             }
                         }
                     };
-                SLTNode::ForFold {
-                    loop_var: f(loop_var),
-                    loop_width: *loop_width,
-                    loop_signed: *loop_signed,
-                    start: map_bound(start, cache, target_arena)?,
-                    end: map_bound(end, cache, target_arena)?,
-                    inclusive: *inclusive,
-                    step: *step,
-                    step_op: *step_op,
-                    reverse: *reverse,
-                    result: mapped_result,
-                    initials: mapped_initials,
-                    updates: mapped_updates,
-                    effects: mapped_effects,
-                    continue_cond: arena.get(*continue_cond).map_addr(
-                        *continue_cond,
-                        arena,
-                        target_arena,
-                        cache,
-                        f,
-                    )?,
+                    SLTNode::ForFold {
+                        loop_var: f(loop_var),
+                        loop_width: *loop_width,
+                        loop_signed: *loop_signed,
+                        start: map_bound(start),
+                        end: map_bound(end),
+                        inclusive: *inclusive,
+                        step: *step,
+                        step_op: *step_op,
+                        reverse: *reverse,
+                        result: mapped_result,
+                        initials: mapped_initials,
+                        updates: mapped_updates,
+                        effects: mapped_effects,
+                        continue_cond: mapped(*continue_cond),
+                    }
                 }
-            }
 
-            SLTNode::ForFoldGroup {
-                loop_var,
-                loop_width,
-                loop_signed,
-                start,
-                step,
-                trip_count,
-                entry_guard,
-                states,
-            } => {
-                let mapped_states = states
-                    .iter()
-                    .map(|state| {
-                        Ok(SLTForFoldGroupState {
+                SLTNode::ForFoldGroup {
+                    loop_var,
+                    loop_width,
+                    loop_signed,
+                    start,
+                    step,
+                    trip_count,
+                    entry_guard,
+                    states,
+                } => {
+                    let mapped_states = states
+                        .iter()
+                        .map(|state| SLTForFoldGroupState {
                             target: VarAtomBase::new(
                                 f(&state.target.id),
                                 state.target.access.lsb,
                                 state.target.access.msb,
                             ),
-                            initial: arena.get(state.initial).map_addr(
-                                state.initial,
-                                arena,
-                                target_arena,
-                                cache,
-                                f,
-                            )?,
-                            update: arena.get(state.update).map_addr(
-                                state.update,
-                                arena,
-                                target_arena,
-                                cache,
-                                f,
-                            )?,
+                            initial: mapped(state.initial),
+                            update: mapped(state.update),
                         })
-                    })
-                    .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
-                SLTNode::ForFoldGroup {
-                    loop_var: f(loop_var),
-                    loop_width: *loop_width,
-                    loop_signed: *loop_signed,
-                    start: start.clone(),
-                    step: step.clone(),
-                    trip_count: *trip_count,
-                    entry_guard: arena.get(*entry_guard).map_addr(
-                        *entry_guard,
-                        arena,
-                        target_arena,
-                        cache,
-                        f,
-                    )?,
-                    states: mapped_states,
+                        .collect();
+                    SLTNode::ForFoldGroup {
+                        loop_var: f(loop_var),
+                        loop_width: *loop_width,
+                        loop_signed: *loop_signed,
+                        start: start.clone(),
+                        step: step.clone(),
+                        trip_count: *trip_count,
+                        entry_guard: mapped(*entry_guard),
+                        states: mapped_states,
+                    }
                 }
-            }
 
-            SLTNode::Concat(parts) => {
-                let mapped_parts = parts
-                    .iter()
-                    .map(|(node, width)| {
-                        Ok((
-                            arena
-                                .get(*node)
-                                .map_addr(*node, arena, target_arena, cache, f)?,
-                            *width,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>, SLTNodeFactsError>>()?;
-                SLTNode::Concat(mapped_parts)
-            }
+                SLTNode::Concat(parts) => {
+                    let mapped_parts = parts
+                        .iter()
+                        .map(|(node, width)| (mapped(*node), *width))
+                        .collect();
+                    SLTNode::Concat(mapped_parts)
+                }
 
-            SLTNode::Slice { expr, access } => {
-                let e = arena
-                    .get(*expr)
-                    .map_addr(*expr, arena, target_arena, cache, f)?;
-                SLTNode::Slice {
-                    expr: e,
+                SLTNode::Slice { expr, access } => SLTNode::Slice {
+                    expr: mapped(*expr),
                     access: *access,
-                }
-            }
-        };
-        let new_id = target_arena.alloc(new_node)?;
-        cache.insert(id, new_id);
-        Ok(new_id)
+                },
+            };
+            let new_id = target_arena.alloc(new_node)?;
+            cache.insert(current, new_id);
+        }
+
+        Ok(*cache
+            .get(&id)
+            .expect("root must be mapped after postorder traversal"))
     }
 }
 
@@ -1610,6 +1569,45 @@ mod tests {
                 .width(mapped_group),
             Some(12)
         );
+    }
+
+    #[test]
+    fn map_addr_handles_deep_expression_without_using_the_call_stack() {
+        const DEPTH: usize = 10_000;
+
+        let mut arena = SLTNodeArena::<u32>::new();
+        let mut root = arena
+            .alloc(SLTNode::Input {
+                variable: 42,
+                signed: false,
+                index: Vec::new(),
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        for _ in 0..DEPTH {
+            root = arena.alloc(SLTNode::Unary(UnaryOp::Ident, root)).unwrap();
+        }
+
+        let mut mapped_arena = SLTNodeArena::<u64>::new();
+        let mut cache = crate::HashMap::default();
+        let mut mapped = arena
+            .get(root)
+            .map_addr(root, &arena, &mut mapped_arena, &mut cache, &|address| {
+                u64::from(*address) + 1
+            })
+            .unwrap();
+
+        assert_eq!(cache.len(), DEPTH + 1);
+        for _ in 0..DEPTH {
+            let SLTNode::Unary(UnaryOp::Ident, inner) = mapped_arena.get(mapped) else {
+                panic!("mapped expression must preserve every unary node");
+            };
+            mapped = *inner;
+        }
+        let SLTNode::Input { variable, .. } = mapped_arena.get(mapped) else {
+            panic!("mapped expression must end in its input");
+        };
+        assert_eq!(*variable, 43);
     }
 
     #[test]
