@@ -1990,7 +1990,7 @@ fn test_ff_function_call_preserves_unsigned_formal_signedness_for_nonvariable_ac
 }
 
 fn test_ff_function_call_nonvariable_argument_uses_formal_shape_for_indexing(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2022,7 +2022,7 @@ fn test_ff_function_call_nonvariable_argument_uses_formal_shape_for_indexing(sim
 }
 
 fn test_ff_function_call_array_literal_element_uses_element_width(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2045,7 +2045,7 @@ fn test_ff_function_call_array_literal_element_uses_element_width(sim) {
 }
 
 fn test_ff_function_call_array_literal_default_fill_matches_formal_shape(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2068,7 +2068,7 @@ fn test_ff_function_call_array_literal_default_fill_matches_formal_shape(sim) {
 }
 
 fn test_ff_function_call_multidim_array_literal_default_fill_matches_formal_shape(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2091,7 +2091,7 @@ fn test_ff_function_call_multidim_array_literal_default_fill_matches_formal_shap
 }
 
 fn test_ff_function_call_multidim_array_literal_indexing_preserves_element_order(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,

@@ -432,7 +432,7 @@ impl<'a> FfParser<'a> {
         }
 
         let Some(selected_expr) =
-            self.select_array_literal_element(items, &resolved_indices, &array_dims)?
+            self.select_array_literal_element(items, &resolved_indices, &array_dims)
         else {
             return Ok(false);
         };
@@ -465,12 +465,14 @@ impl<'a> FfParser<'a> {
         items: &'b [ArrayLiteralItem],
         indices: &[usize],
         dims: &[usize],
-    ) -> Result<Option<&'b Expression>, ParserError> {
+    ) -> Option<&'b Expression> {
+        // Function argument shape validation has already rejected unresolved
+        // repeats and duplicate defaults, including in nested literals.
         let Some((&target_idx, rest_indices)) = indices.split_first() else {
-            return Ok(None);
+            return None;
         };
         let Some((_dim, rest_dims)) = dims.split_first() else {
-            return Ok(None);
+            return None;
         };
 
         let mut pos = 0usize;
@@ -480,42 +482,35 @@ impl<'a> FfParser<'a> {
             match item {
                 ArrayLiteralItem::Value(expr, repeat) => {
                     let rep_count = if let Some(rep_expr) = repeat {
-                        self.get_constant_value(rep_expr).ok_or_else(|| {
-                            ParserError::unsupported(
-                                68,
-                                LoweringPhase::FfLowering,
-                                "array literal non-constant repeat",
-                                format!("{:?}", rep_expr),
-                                Some(&rep_expr.token_range()),
-                            )
-                        })? as usize
+                        let Some(rep_count) = self.get_constant_value(rep_expr) else {
+                            unreachable!(
+                                "array literal repeat must be constant after function argument shape validation"
+                            );
+                        };
+                        rep_count as usize
                     } else {
                         1
                     };
 
                     if target_idx < pos + rep_count {
                         if rest_dims.is_empty() {
-                            return Ok(Some(expr));
+                            return Some(expr);
                         }
                         return match expr.as_ref() {
                             Expression::ArrayLiteral(nested, _) => {
                                 self.select_array_literal_element(nested, rest_indices, rest_dims)
                             }
-                            _ if expr.comptime().r#type.array.is_empty() => Ok(Some(expr)),
-                            _ => Ok(None),
+                            _ if expr.comptime().r#type.array.is_empty() => Some(expr),
+                            _ => None,
                         };
                     }
                     pos += rep_count;
                 }
                 ArrayLiteralItem::Defaul(expr) => {
                     if default_expr.is_some() {
-                        return Err(ParserError::unsupported(
-                            68,
-                            LoweringPhase::FfLowering,
-                            "array literal multiple default",
-                            format!("{:?}", items),
-                            Some(&expr.token_range()),
-                        ));
+                        unreachable!(
+                            "array literal must have at most one default after function argument shape validation"
+                        );
                     }
                     default_expr = Some(expr);
                 }
@@ -523,17 +518,17 @@ impl<'a> FfParser<'a> {
         }
 
         let Some(default_expr) = default_expr else {
-            return Ok(None);
+            return None;
         };
         if rest_dims.is_empty() {
-            return Ok(Some(default_expr));
+            return Some(default_expr);
         }
         match default_expr {
             Expression::ArrayLiteral(nested, _) => {
                 self.select_array_literal_element(nested, rest_indices, rest_dims)
             }
-            _ if default_expr.comptime().r#type.array.is_empty() => Ok(Some(default_expr)),
-            _ => Ok(None),
+            _ if default_expr.comptime().r#type.array.is_empty() => Some(default_expr),
+            _ => None,
         }
     }
 
