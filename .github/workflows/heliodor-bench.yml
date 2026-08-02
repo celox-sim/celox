@@ -66,7 +66,7 @@ jobs:
             echo
             echo "[/proc/stat]"
             cat /proc/stat
-          } > heliodor-host.txt
+          } > "$RUNNER_TEMP/heliodor-host.txt"
 
       - name: Run fixed Heliodor correctness and measurement gate
         id: gate
@@ -103,7 +103,8 @@ jobs:
             echo
             echo "[/proc/stat]"
             cat /proc/stat
-          } >> heliodor-host.txt
+          } >> "$RUNNER_TEMP/heliodor-host.txt"
+          cp "$RUNNER_TEMP/heliodor-host.txt" heliodor-host.txt
 
       - name: Convert dashboard metrics
         run: |
