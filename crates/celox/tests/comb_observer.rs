@@ -160,6 +160,59 @@ module Top (
     );
 }
 
+fn test_comb_output_destination_observer_uses_return_aware_loop_value(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    d: input logic,
+    tmp_o: output logic,
+) {
+    function observe_index (x: input logic) -> logic {
+        $display("index=%0d", x);
+        return x;
+    }
+
+    function produce (
+        x: input logic,
+        y: output logic<2>,
+    ) -> logic {
+        y = 2'b01;
+        for i in 0..2 {
+            if i == 0 {
+                return x;
+            }
+            y = 2'b10;
+        }
+        return x;
+    }
+
+    var mem: logic<2>;
+    var tmp: logic;
+    var unused: logic;
+    always_comb {
+        mem = 2'b00;
+        tmp = 1'b0;
+        unused = produce(d, {mem[observe_index(tmp)], tmp});
+        tmp_o = tmp;
+    }
+}
+"#, "Top");
+
+    let d = sim.signal("d");
+    let tmp_o = sim.signal("tmp_o");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(d, 1u8)).unwrap();
+    assert_eq!(sim.get(tmp_o), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "index=1".to_string(),
+        }],
+    );
+}
+
 fn test_comb_runtime_effect_inside_if_condition_is_collected(sim) {
     @omit_veryl;
     @ignore_on(wasm);

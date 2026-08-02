@@ -397,6 +397,82 @@ assign mem_o = mem;
 
     }
 
+    fn test_instance_output_concat_advances_each_destination(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Child (i: input logic<2>, o: output logic<2>) {
+assign o = i;
+}
+module Top (
+value: input logic<2>,
+mem_o: output logic<2>,
+tmp_o: output logic
+) {
+var mem: logic<2>;
+var tmp: logic;
+inst child: Child (
+i: value,
+o: {mem[tmp], tmp}
+);
+assign mem_o = mem;
+assign tmp_o = tmp;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let value = sim.signal("value");
+    let mem_o = sim.signal("mem_o");
+    let tmp_o = sim.signal("tmp_o");
+
+    sim.modify(|io| io.set(value, 3u8)).unwrap();
+    assert_eq!(sim.get(tmp_o), 1u8.into());
+    assert_eq!(sim.get(mem_o), 2u8.into());
+
+    }
+
+    fn test_instance_output_index_runtime_effect_triggers_on_child_change(sim) {
+        @omit_veryl;
+        @ignore_on(wasm);
+        @setup { let code = r#"
+module Child (i: input logic, o: output logic) {
+assign o = i;
+}
+module Top (
+data: input logic,
+sel: input logic,
+mem_o: output logic<2>
+) {
+function observe_index (x: input logic) -> logic {
+$display("index=%0d", x);
+return x;
+}
+var mem: logic<2>;
+inst child: Child (
+i: data,
+o: mem[observe_index(sel)]
+);
+assign mem_o = mem;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let data = sim.signal("data");
+    let sel = sim.signal("sel");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(data, 0u8);
+        io.set(sel, 1u8);
+    }).unwrap();
+    sim.drain_runtime_events();
+    sim.modify(|io| io.set(data, 1u8)).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "index=1".to_string(),
+        }],
+    );
+
+    }
+
     fn test_unconnected_child_output_needs_no_parent_glue(sim) {
         @setup { let code = r#"
 module Child (

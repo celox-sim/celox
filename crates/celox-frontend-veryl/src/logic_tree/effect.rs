@@ -1480,6 +1480,7 @@ fn collect_function_body_effects(
             iter_store.insert(id, loop_store);
         }
         iter_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
+        let iter_store_before = iter_store.clone();
 
         let observer_start = collector.observers.len();
         let saved_loop_effects = collector.loop_effects.take();
@@ -1508,11 +1509,10 @@ fn collect_function_body_effects(
         let loop_effects = collector.loop_effects.take().unwrap_or_default();
         collector.loop_effects = saved_loop_effects;
 
-        // Effect arguments after the loop only consume this store while the
-        // function remains live. On that path no return was taken, so the
-        // ordinary loop fold and the function-aware fold have identical data
-        // state; the separate transient result below carries the control state.
-        let (result_store, boundaries) = eval_for(
+        // Use the ordinary loop fold only as a geometry and initial-state
+        // template. Its data updates are replaced below with the return-aware
+        // iteration state collected for function execution.
+        let (mut result_store, boundaries) = eval_for(
             module,
             state.store.clone(),
             state.boundaries.clone(),
@@ -1560,6 +1560,65 @@ fn collect_function_body_effects(
             BinaryOp::And,
             iter_state.live_expr,
         ))?;
+        let return_aware_updates =
+            super::extract_store_updates(&iter_store_before, &iter_state.store, arena)?
+                .into_iter()
+                .map(|(target, expr, _)| SLTForUpdate { target, expr })
+                .collect::<Vec<_>>();
+        let return_aware_updates = if return_aware_updates.is_empty() {
+            updates.clone()
+        } else {
+            return_aware_updates
+        };
+
+        // The ordinary fold is useful as a geometry/template builder, but its
+        // body keeps evaluating after a function return. Replace every data
+        // result with the return-aware iteration updates collected above so
+        // output-formal previews match ordinary function evaluation.
+        for range_store in result_store.values_mut() {
+            for (value, _, _) in range_store.ranges.values_mut() {
+                let Some((node, _)) = value else {
+                    continue;
+                };
+                let SLTNode::ForFold {
+                    loop_var: node_loop_var,
+                    loop_width: node_loop_width,
+                    loop_signed: node_loop_signed,
+                    start: node_start,
+                    end: node_end,
+                    inclusive: node_inclusive,
+                    step: node_step,
+                    step_op: node_step_op,
+                    reverse: node_reverse,
+                    result: node_result,
+                    initials: node_initials,
+                    effects: node_effects,
+                    ..
+                } = arena.get(*node).clone()
+                else {
+                    continue;
+                };
+                if node_loop_var != for_stmt.var_id {
+                    continue;
+                }
+                *node = arena.alloc(SLTNode::ForFold {
+                    loop_var: node_loop_var,
+                    loop_width: node_loop_width,
+                    loop_signed: node_loop_signed,
+                    start: node_start,
+                    end: node_end,
+                    inclusive: node_inclusive,
+                    step: node_step,
+                    step_op: node_step_op,
+                    reverse: node_reverse,
+                    result: node_result,
+                    initials: node_initials,
+                    updates: return_aware_updates.clone(),
+                    effects: node_effects,
+                    continue_cond: effective_continue,
+                })?;
+            }
+        }
 
         if !loop_effects.is_empty() {
             let runner = arena.alloc(SLTNode::ForFold {
@@ -1574,7 +1633,7 @@ fn collect_function_body_effects(
                 reverse,
                 result: result.clone(),
                 initials: initials.clone(),
-                updates: updates.clone(),
+                updates: return_aware_updates.clone(),
                 effects: loop_effects,
                 continue_cond: effective_continue,
             })?;
@@ -1601,7 +1660,7 @@ fn collect_function_body_effects(
                 update: iter_state.live_expr,
             },
             initials,
-            updates,
+            updates: return_aware_updates,
             effects: Vec::new(),
             continue_cond: effective_continue,
         })?;
