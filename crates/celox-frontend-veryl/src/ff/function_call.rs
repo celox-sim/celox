@@ -6,7 +6,9 @@ use crate::{
     resolve_total_width,
 };
 use celox_design::VarAtomBase;
-use celox_sir::{RegisterId, SIRBuilder};
+use celox_sir::{
+    RegisterId, RegisterType, SIRBuilder, SIRInstruction, SIRTerminator, SIRValue, UnaryOp,
+};
 use num_traits::ToPrimitive;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, CasePattern, CaseStatement, Comptime, Expression, Factor, Op, Shape,
@@ -14,6 +16,13 @@ use veryl_analyzer::ir::{
     VarIndex, VarSelect,
 };
 use veryl_parser::token_range::TokenRange;
+
+#[derive(Clone)]
+enum FunctionPathCondition {
+    Always,
+    Never,
+    Conditional(Box<Expression>),
+}
 
 impl<'a> FfParser<'a> {
     pub(super) fn expression_has_runtime_effect(&self, expr: &Expression) -> bool {
@@ -185,45 +194,6 @@ impl<'a> FfParser<'a> {
             && assign.dst[0].index.0.is_empty()
             && assign.dst[0].select.0.is_empty()
             && assign.dst[0].select.1.is_none()
-    }
-
-    fn statements_contain_function_return(statements: &[Statement], ret_id: Option<VarId>) -> bool {
-        statements.iter().any(|statement| {
-            Self::statement_is_function_return(statement, ret_id)
-                || match statement {
-                    Statement::If(statement) => {
-                        Self::statements_contain_function_return(&statement.true_side, ret_id)
-                            || Self::statements_contain_function_return(
-                                &statement.false_side,
-                                ret_id,
-                            )
-                    }
-                    Statement::Case(statement) => {
-                        statement
-                            .arms
-                            .iter()
-                            .any(|arm| Self::statements_contain_function_return(&arm.body, ret_id))
-                            || Self::statements_contain_function_return(&statement.default, ret_id)
-                    }
-                    Statement::For(statement) => {
-                        Self::statements_contain_function_return(&statement.body, ret_id)
-                    }
-                    Statement::IfReset(statement) => {
-                        Self::statements_contain_function_return(&statement.true_side, ret_id)
-                            || Self::statements_contain_function_return(
-                                &statement.false_side,
-                                ret_id,
-                            )
-                    }
-                    Statement::Assign(_)
-                    | Statement::FunctionCall(_)
-                    | Statement::SystemFunctionCall(_)
-                    | Statement::TbMethodCall(_)
-                    | Statement::Break
-                    | Statement::Unsupported(_)
-                    | Statement::Null => false,
-                }
-        })
     }
 
     fn state_value_expr(id: VarId, state: &HashMap<VarId, Expression>) -> Expression {
@@ -538,26 +508,189 @@ impl<'a> FfParser<'a> {
         ))
     }
 
+    fn function_path_and(
+        path: FunctionPathCondition,
+        condition: Expression,
+    ) -> FunctionPathCondition {
+        let condition = Self::normalize_function_control_condition(condition);
+        match path {
+            FunctionPathCondition::Always => {
+                FunctionPathCondition::Conditional(Box::new(condition))
+            }
+            FunctionPathCondition::Never => FunctionPathCondition::Never,
+            FunctionPathCondition::Conditional(path) => {
+                FunctionPathCondition::Conditional(Box::new(Expression::Binary(
+                    path,
+                    Op::LogicAnd,
+                    Box::new(condition),
+                    Box::new(Comptime::create_unknown(TokenRange::default())),
+                )))
+            }
+        }
+    }
+
+    fn function_path_and_not(
+        path: FunctionPathCondition,
+        condition: Expression,
+    ) -> FunctionPathCondition {
+        let condition = Expression::Unary(
+            Op::LogicNot,
+            Box::new(Self::normalize_function_control_condition(condition)),
+            Box::new(Comptime::create_unknown(TokenRange::default())),
+        );
+        Self::function_path_and(path, condition)
+    }
+
+    fn function_path_or(
+        lhs: FunctionPathCondition,
+        rhs: FunctionPathCondition,
+    ) -> FunctionPathCondition {
+        match (lhs, rhs) {
+            (FunctionPathCondition::Always, _) | (_, FunctionPathCondition::Always) => {
+                FunctionPathCondition::Always
+            }
+            (FunctionPathCondition::Never, rhs) => rhs,
+            (lhs, FunctionPathCondition::Never) => lhs,
+            (FunctionPathCondition::Conditional(lhs), FunctionPathCondition::Conditional(rhs)) => {
+                FunctionPathCondition::Conditional(Box::new(Expression::Binary(
+                    lhs,
+                    Op::LogicOr,
+                    rhs,
+                    Box::new(Comptime::create_unknown(TokenRange::default())),
+                )))
+            }
+        }
+    }
+
+    fn parse_function_path_condition<A>(
+        &mut self,
+        condition: &Expression,
+        state: &HashMap<VarId, Expression>,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<RegisterId, ParserError> {
+        self.function_arg_stack.push(state.clone());
+        let result = self.parse_expression(
+            condition, targets, domain, convert, sources, ir_builder, None,
+        );
+        self.function_arg_stack.pop();
+        result?;
+        let condition = self
+            .stack
+            .pop_back()
+            .expect("Function path condition evaluation failed");
+        Ok(self.lower_procedural_condition(condition, ir_builder))
+    }
+
+    fn coerce_register_to_type<A>(
+        &self,
+        reg: RegisterId,
+        ty: &RegisterType,
+        signed: bool,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> RegisterId {
+        match ty {
+            RegisterType::Bit {
+                width,
+                signed: result_signed,
+            } => self.coerce_register_to_formal(
+                ir_builder,
+                reg,
+                *width,
+                signed,
+                *result_signed,
+                true,
+            ),
+            RegisterType::Logic { width } => {
+                let widened = self.cast_reg_width_ext(ir_builder, reg, *width, signed);
+                if matches!(ir_builder.register(&widened), RegisterType::Logic { .. }) {
+                    widened
+                } else {
+                    let logic = ir_builder.alloc_logic(*width);
+                    ir_builder.emit(SIRInstruction::Unary(logic, UnaryOp::Ident, widened));
+                    logic
+                }
+            }
+        }
+    }
+
     fn materialize_function_runtime_expression<A>(
         &mut self,
         expr: &Expression,
         state: &mut HashMap<VarId, Expression>,
+        active: &FunctionPathCondition,
         targets: &mut Vec<VarAtomBase<A>>,
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<Expression, ParserError> {
+        let guard_state = state.clone();
         let expr = self.capture_nested_function_outputs(expr, state)?;
-        self.function_arg_stack.push(state.clone());
-        let result =
-            self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None);
-        self.function_arg_stack.pop();
-        result?;
-        let value = self
-            .stack
-            .pop_back()
-            .expect("Function runtime expression evaluation failed");
+        let value = match active {
+            FunctionPathCondition::Never => return Ok(expr),
+            FunctionPathCondition::Always => {
+                self.function_arg_stack.push(state.clone());
+                let result = self
+                    .parse_expression(&expr, targets, domain, convert, sources, ir_builder, None);
+                self.function_arg_stack.pop();
+                result?;
+                self.stack
+                    .pop_back()
+                    .expect("Function runtime expression evaluation failed")
+            }
+            FunctionPathCondition::Conditional(condition) => {
+                let condition = self.parse_function_path_condition(
+                    condition,
+                    &guard_state,
+                    targets,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
+                )?;
+                let width = self.get_expression_width(&expr);
+                let signed = expr.comptime().expr_context.signed;
+                let result = if expr.comptime().r#type.is_2state() {
+                    ir_builder.alloc_bit(width, signed)
+                } else {
+                    ir_builder.alloc_logic(width)
+                };
+                let result_type = ir_builder.register(&result).clone();
+                let effect_block = ir_builder.new_block();
+                let skip_block = ir_builder.new_block();
+                let merge_block = ir_builder.new_block_with(vec![result]);
+                ir_builder.seal_block(SIRTerminator::Branch {
+                    cond: condition,
+                    true_block: (effect_block, vec![]),
+                    false_block: (skip_block, vec![]),
+                });
+
+                ir_builder.switch_to_block(effect_block);
+                self.function_arg_stack.push(state.clone());
+                let parse_result = self
+                    .parse_expression(&expr, targets, domain, convert, sources, ir_builder, None);
+                self.function_arg_stack.pop();
+                parse_result?;
+                let effect_value = self
+                    .stack
+                    .pop_back()
+                    .expect("Guarded function runtime expression evaluation failed");
+                let effect_value =
+                    self.coerce_register_to_type(effect_value, &result_type, signed, ir_builder);
+                ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![effect_value]));
+
+                ir_builder.switch_to_block(skip_block);
+                let dummy = ir_builder.alloc_reg(result_type);
+                ir_builder.emit(SIRInstruction::Imm(dummy, SIRValue::new(0u8)));
+                ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![dummy]));
+                ir_builder.switch_to_block(merge_block);
+                result
+            }
+        };
         self.function_expression_value_stack
             .last_mut()
             .expect("Function expression value scope is active")
@@ -565,81 +698,109 @@ impl<'a> FfParser<'a> {
         Ok(expr)
     }
 
-    fn emit_function_runtime_effects<A>(
+    fn emit_function_system_task<A>(
         &mut self,
-        statements: &[Statement],
-        ret_id: Option<VarId>,
-        bindings: &HashMap<VarId, Expression>,
+        call: &SystemFunctionCall,
+        state: &mut HashMap<VarId, Expression>,
+        active: &FunctionPathCondition,
         targets: &mut Vec<VarAtomBase<A>>,
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
+        if matches!(active, FunctionPathCondition::Never) {
+            return Ok(());
+        }
+        let guard_state = state.clone();
+        let (call, next_state, arg_states) = self.prepare_system_function_call(call, state)?;
+        *state = next_state;
+        let merge_block = if let FunctionPathCondition::Conditional(condition) = active {
+            let condition = self.parse_function_path_condition(
+                condition,
+                &guard_state,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+            )?;
+            let effect_block = ir_builder.new_block();
+            let merge_block = ir_builder.new_block();
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: condition,
+                true_block: (effect_block, vec![]),
+                false_block: (merge_block, vec![]),
+            });
+            ir_builder.switch_to_block(effect_block);
+            Some(merge_block)
+        } else {
+            None
+        };
+
+        self.function_event_arg_state_stack.push(arg_states);
+        let result =
+            self.parse_system_task_statement(&call, targets, domain, convert, sources, ir_builder);
+        self.function_event_arg_state_stack.pop();
+        result?;
+
+        if let Some(merge_block) = merge_block {
+            ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![]));
+            ir_builder.switch_to_block(merge_block);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_function_runtime_effects_in_path<A>(
+        &mut self,
+        statements: &[Statement],
+        ret_id: Option<VarId>,
+        bindings: &HashMap<VarId, Expression>,
+        mut active: FunctionPathCondition,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(HashMap<VarId, Expression>, FunctionPathCondition), ParserError> {
         let mut state = bindings.clone();
-        let mut conditional_return_seen = false;
         for statement in statements {
-            if Self::statement_is_function_return(statement, ret_id) {
+            if matches!(active, FunctionPathCondition::Never) {
                 break;
             }
-            if conditional_return_seen
-                && self.statements_have_runtime_effect(
-                    std::slice::from_ref(statement),
-                    &mut HashSet::default(),
-                )
-            {
-                return Err(ParserError::unsupported(
-                    66,
-                    LoweringPhase::FfLowering,
-                    "runtime effect after conditional function return",
-                    format!("{statement}"),
-                    None,
-                ));
-            }
+            let is_return = Self::statement_is_function_return(statement, ret_id);
             match statement {
                 Statement::Assign(assign) => {
                     if self.expression_has_runtime_effect(&assign.expr) {
-                        return Err(ParserError::unsupported(
-                            66,
-                            LoweringPhase::FfLowering,
-                            "effectful expression in function body",
-                            format!("{statement}"),
-                            Some(&assign.token),
-                        ));
+                        self.materialize_function_runtime_expression(
+                            &assign.expr,
+                            &mut state,
+                            &active,
+                            targets,
+                            domain,
+                            convert,
+                            sources,
+                            ir_builder,
+                        )?;
                     }
                     state = self.apply_statement_to_function_state(statement, &state)?;
+                    if is_return {
+                        active = FunctionPathCondition::Never;
+                    }
                 }
                 Statement::SystemFunctionCall(call) => {
-                    let (call, next_state, arg_states) =
-                        self.prepare_system_function_call(call, &state)?;
-                    state = next_state;
-                    self.function_event_arg_state_stack.push(arg_states);
-                    let result = self.parse_system_task_statement(
-                        &call, targets, domain, convert, sources, ir_builder,
-                    );
-                    self.function_event_arg_state_stack.pop();
-                    result?;
+                    self.emit_function_system_task(
+                        call, &mut state, &active, targets, domain, convert, sources, ir_builder,
+                    )?;
                 }
                 Statement::Null => {}
                 Statement::If(statement) => {
-                    let mut visiting = HashSet::default();
-                    let body_has_runtime_effect = self
-                        .statements_have_runtime_effect(&statement.true_side, &mut visiting)
-                        || self
-                            .statements_have_runtime_effect(&statement.false_side, &mut visiting);
-                    if body_has_runtime_effect {
-                        return Err(ParserError::unsupported(
-                            66,
-                            LoweringPhase::FfLowering,
-                            "control flow around runtime effect in function body",
-                            format!("{statement}"),
-                            Some(&statement.token),
-                        ));
-                    }
                     let condition = if self.expression_has_runtime_effect(&statement.cond) {
                         self.materialize_function_runtime_expression(
                             &statement.cond,
                             &mut state,
+                            &active,
                             targets,
                             domain,
                             convert,
@@ -649,39 +810,42 @@ impl<'a> FfParser<'a> {
                     } else {
                         Self::substitute_function_expr(&statement.cond, &state)
                     };
-                    let then_state =
-                        self.apply_statements_to_function_state(&statement.true_side, &state)?;
-                    let else_state =
-                        self.apply_statements_to_function_state(&statement.false_side, &state)?;
+                    let base = state.clone();
+                    let true_active = Self::function_path_and(active.clone(), condition.clone());
+                    let false_active =
+                        Self::function_path_and_not(active.clone(), condition.clone());
+                    let (then_state, then_active) = self.emit_function_runtime_effects_in_path(
+                        &statement.true_side,
+                        ret_id,
+                        &base,
+                        true_active,
+                        targets,
+                        domain,
+                        convert,
+                        sources,
+                        ir_builder,
+                    )?;
+                    let (else_state, else_active) = self.emit_function_runtime_effects_in_path(
+                        &statement.false_side,
+                        ret_id,
+                        &base,
+                        false_active,
+                        targets,
+                        domain,
+                        convert,
+                        sources,
+                        ir_builder,
+                    )?;
                     state =
-                        Self::merge_expression_states(&condition, &state, &then_state, &else_state);
-                    conditional_return_seen |=
-                        Self::statements_contain_function_return(&statement.true_side, ret_id)
-                            || Self::statements_contain_function_return(
-                                &statement.false_side,
-                                ret_id,
-                            );
+                        Self::merge_expression_states(&condition, &base, &then_state, &else_state);
+                    active = Self::function_path_or(then_active, else_active);
                 }
                 Statement::Case(statement) => {
-                    let mut visiting = HashSet::default();
-                    let body_has_runtime_effect = statement
-                        .arms
-                        .iter()
-                        .any(|arm| self.statements_have_runtime_effect(&arm.body, &mut visiting))
-                        || self.statements_have_runtime_effect(&statement.default, &mut visiting);
-                    if body_has_runtime_effect {
-                        return Err(ParserError::unsupported(
-                            66,
-                            LoweringPhase::FfLowering,
-                            "control flow around runtime effect in function body",
-                            format!("{statement}"),
-                            Some(&statement.token),
-                        ));
-                    }
                     if self.expression_has_runtime_effect(&statement.case_target) {
                         self.materialize_function_runtime_expression(
                             &statement.case_target,
                             &mut state,
+                            &active,
                             targets,
                             domain,
                             convert,
@@ -695,8 +859,8 @@ impl<'a> FfParser<'a> {
                                 CasePattern::Eq(expr) => {
                                     if self.expression_has_runtime_effect(expr) {
                                         self.materialize_function_runtime_expression(
-                                            expr, &mut state, targets, domain, convert, sources,
-                                            ir_builder,
+                                            expr, &mut state, &active, targets, domain, convert,
+                                            sources, ir_builder,
                                         )?;
                                     }
                                 }
@@ -704,8 +868,8 @@ impl<'a> FfParser<'a> {
                                     for expr in [lo, hi] {
                                         if self.expression_has_runtime_effect(expr) {
                                             self.materialize_function_runtime_expression(
-                                                expr, &mut state, targets, domain, convert,
-                                                sources, ir_builder,
+                                                expr, &mut state, &active, targets, domain,
+                                                convert, sources, ir_builder,
                                             )?;
                                         }
                                     }
@@ -713,12 +877,36 @@ impl<'a> FfParser<'a> {
                             }
                         }
                     }
-                    state = self.apply_case_to_function_state(statement, 0, &state)?;
-                    conditional_return_seen |= statement
-                        .arms
-                        .iter()
-                        .any(|arm| Self::statements_contain_function_return(&arm.body, ret_id))
-                        || Self::statements_contain_function_return(&statement.default, ret_id);
+                    let base = state.clone();
+                    let mut remaining = active.clone();
+                    let mut live_paths = FunctionPathCondition::Never;
+                    for arm in &statement.arms {
+                        let condition = Self::substitute_function_expr(
+                            &case_arm_condition_expr(&statement.case_target, &arm.patterns),
+                            &base,
+                        );
+                        let arm_active =
+                            Self::function_path_and(remaining.clone(), condition.clone());
+                        let (_, arm_live) = self.emit_function_runtime_effects_in_path(
+                            &arm.body, ret_id, &base, arm_active, targets, domain, convert,
+                            sources, ir_builder,
+                        )?;
+                        live_paths = Self::function_path_or(live_paths, arm_live);
+                        remaining = Self::function_path_and_not(remaining, condition);
+                    }
+                    let (_, default_live) = self.emit_function_runtime_effects_in_path(
+                        &statement.default,
+                        ret_id,
+                        &base,
+                        remaining,
+                        targets,
+                        domain,
+                        convert,
+                        sources,
+                        ir_builder,
+                    )?;
+                    active = Self::function_path_or(live_paths, default_live);
+                    state = self.apply_case_to_function_state(statement, 0, &base)?;
                 }
                 Statement::For(statement) => {
                     return Err(ParserError::unsupported(
@@ -730,13 +918,7 @@ impl<'a> FfParser<'a> {
                     ));
                 }
                 Statement::FunctionCall(call) => {
-                    let input_has_runtime_effect = call
-                        .inputs
-                        .values()
-                        .any(|expr| self.expression_has_runtime_effect(expr));
-                    if input_has_runtime_effect
-                        || self.function_call_has_runtime_effect(call, &mut HashSet::default())
-                    {
+                    if self.function_call_has_runtime_effect(call, &mut HashSet::default()) {
                         return Err(ParserError::unsupported(
                             66,
                             LoweringPhase::FfLowering,
@@ -744,6 +926,32 @@ impl<'a> FfParser<'a> {
                             format!("{statement}"),
                             Some(&call.comptime.token),
                         ));
+                    }
+                    let Some(function) = self.module.functions.get(&call.id) else {
+                        return Err(ParserError::unsupported(
+                            43,
+                            LoweringPhase::FfLowering,
+                            "function call",
+                            format!("unknown function id: {:?}", call.id),
+                            Some(&call.comptime.token),
+                        ));
+                    };
+                    let ordered_inputs: Vec<_> = function
+                        .args
+                        .iter()
+                        .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path))
+                        .filter_map(|path| call.inputs.get(path).cloned())
+                        .collect();
+                    let last_effectful = ordered_inputs
+                        .iter()
+                        .rposition(|expr| self.expression_has_runtime_effect(expr));
+                    if let Some(last_effectful) = last_effectful {
+                        for expr in &ordered_inputs[..=last_effectful] {
+                            self.materialize_function_runtime_expression(
+                                expr, &mut state, &active, targets, domain, convert, sources,
+                                ir_builder,
+                            )?;
+                        }
                     }
                     state = self.apply_function_call_to_state(call, &state)?;
                 }
@@ -767,6 +975,31 @@ impl<'a> FfParser<'a> {
                 }
             }
         }
+        Ok((state, active))
+    }
+
+    fn emit_function_runtime_effects<A>(
+        &mut self,
+        statements: &[Statement],
+        ret_id: Option<VarId>,
+        bindings: &HashMap<VarId, Expression>,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        self.emit_function_runtime_effects_in_path(
+            statements,
+            ret_id,
+            bindings,
+            FunctionPathCondition::Always,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+        )?;
         Ok(())
     }
 

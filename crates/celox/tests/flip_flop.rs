@@ -450,6 +450,157 @@ fn test_ff_statement_function_materializes_effectful_case_controls(sim) {
     );
 }
 
+fn test_ff_effectful_assignment_executes_only_on_selected_if_path(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            enable: input logic,
+            d: input logic<8>,
+            q: output logic<8>
+        ) {
+            function observed (x: input logic<8>) -> logic<8> {
+                $display("assigned=%0d", x);
+                return x + 8'd2;
+            }
+
+            function outer (
+                enable: input logic,
+                x: input logic<8>
+            ) -> logic<8> {
+                var selected: logic<8>;
+                selected = x + 8'd1;
+                if enable {
+                    selected = observed(x);
+                }
+                return selected;
+            }
+
+            always_ff (clk) {
+                q = outer(enable, d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let enable = sim.signal("enable");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(enable, 0u8);
+        io.set(d, 5u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 6u8.into());
+    assert!(sim.drain_runtime_events().is_empty());
+
+    sim.modify(|io| {
+        io.set(enable, 1u8);
+        io.set(d, 6u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 8u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "assigned=6".to_string(),
+        }],
+    );
+}
+
+fn test_ff_runtime_effect_after_conditional_return_uses_live_path(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            skip: input logic,
+            d: input logic<8>,
+            q: output logic<8>
+        ) {
+            function observed (
+                skip: input logic,
+                x: input logic<8>
+            ) -> logic<8> {
+                if skip {
+                    return x;
+                }
+                $display("live=%0d", x);
+                return x;
+            }
+
+            always_ff (clk) {
+                q = observed(skip, d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let skip = sim.signal("skip");
+    let d = sim.signal("d");
+
+    sim.modify(|io| {
+        io.set(skip, 1u8);
+        io.set(d, 7u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert!(sim.drain_runtime_events().is_empty());
+
+    sim.modify(|io| {
+        io.set(skip, 0u8);
+        io.set(d, 8u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "live=8".to_string(),
+        }],
+    );
+}
+
+fn test_ff_statement_call_evaluates_effectful_inputs(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, d: input logic<8>) {
+            function observed (x: input logic<8>) -> logic<8> {
+                $display("input=%0d", x);
+                return x;
+            }
+
+            function consume (x: input logic<8>) {
+            }
+
+            function outer (x: input logic<8>) {
+                consume(observed(x));
+            }
+
+            always_ff (clk) {
+                outer(d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+
+    sim.modify(|io| io.set(d, 9u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "input=9".to_string(),
+        }],
+    );
+}
+
 fn test_ff_nested_runtime_event_output_updates_outer_function_state(sim) {
     @omit_veryl;
     @ignore_on(wasm);
