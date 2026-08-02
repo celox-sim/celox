@@ -320,7 +320,6 @@ fn emit_function(
             emit_store(&mut ops, 30, SCRATCH0, OpSize::S64);
         }
     }
-
     for block in &function.blocks {
         let label = block_labels[&block.id];
         block_offsets.push((block.id, ops.offset().0 as u64));
@@ -1812,8 +1811,11 @@ fn emit_edge_copies(
             }
             ParallelCopyOperation::SaveTemporary(destination) => {
                 read_copy_destination(ops, destination, spill_base, SCRATCH1)?;
+                // Address materialization uses x17 for the offset. Preserve
+                // the value being saved before computing the temporary slot.
+                dynasm!(ops ; .arch aarch64 ; mov x30, x17);
                 emit_address(ops, STATE_REG, temporary_offset as i64);
-                emit_store(ops, SCRATCH1, SCRATCH0, OpSize::S64);
+                emit_store(ops, 30, SCRATCH0, OpSize::S64);
             }
             ParallelCopyOperation::RestoreTemporary(destination) => {
                 emit_address(ops, STATE_REG, temporary_offset as i64);
@@ -1878,6 +1880,15 @@ fn write_copy_destination(
             dynasm!(ops ; .arch aarch64 ; mov X(register), X(source));
         }
         ParallelCopyDestination::Stack(offset) => {
+            let source = if source == SCRATCH1 {
+                // emit_address reserves x17 for large/immediate offsets.
+                // Stack-to-stack and temporary restores arrive in x17, so
+                // retain their payload in the other fixed scratch register.
+                dynasm!(ops ; .arch aarch64 ; mov x30, x17);
+                30
+            } else {
+                source
+            };
             emit_address(ops, STATE_REG, spill_base as i64 + i64::from(offset));
             emit_store(ops, source, SCRATCH0, OpSize::S64);
         }
@@ -1899,7 +1910,11 @@ pub fn disassemble(code: &[u8], base_addr: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_arch = "aarch64")]
+    use celox_backend_x86::native::mir::PhiNode;
     use celox_backend_x86::native::mir::{MBlock, SpillDesc, VRegAllocator};
+    #[cfg(target_arch = "aarch64")]
+    use celox_backend_x86::native::regalloc::assignment::EdgeLocation;
 
     fn state_update() -> (MFunction, AssignmentMap) {
         let mut vregs = VRegAllocator::new();
@@ -2225,6 +2240,123 @@ mod tests {
         let mut state = [0_u8; 24];
         assert_eq!(unsafe { code.call(&mut state) }, 0);
         assert_eq!(u64::from_le_bytes(state[16..].try_into().unwrap()), 8);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn executes_stack_parallel_copy_cycle_without_clobbering_payloads() {
+        let mut vregs = VRegAllocator::new();
+        let first = vregs.alloc();
+        let second = vregs.alloc();
+        let immediate = vregs.alloc();
+        let dst_first = vregs.alloc();
+        let dst_second = vregs.alloc();
+        let dst_copy = vregs.alloc();
+        let dst_immediate = vregs.alloc();
+        let out_first = vregs.alloc();
+        let out_second = vregs.alloc();
+        let out_copy = vregs.alloc();
+        let out_immediate = vregs.alloc();
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 11]);
+
+        let mut predecessor = MBlock::new(BlockId(0));
+        predecessor.push(MInst::LoadImm {
+            dst: first,
+            value: 33,
+        });
+        predecessor.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 0,
+            src: first,
+            size: OpSize::S64,
+        });
+        predecessor.push(MInst::LoadImm {
+            dst: second,
+            value: 44,
+        });
+        predecessor.push(MInst::Store {
+            base: BaseReg::StackFrame,
+            offset: 8,
+            src: second,
+            size: OpSize::S64,
+        });
+        predecessor.push(MInst::LoadImm {
+            dst: immediate,
+            value: 55,
+        });
+        predecessor.push(MInst::Jump { target: BlockId(1) });
+
+        let mut successor = MBlock::new(BlockId(1));
+        successor.phis = vec![
+            PhiNode {
+                dst: dst_first,
+                sources: vec![(BlockId(0), second)],
+            },
+            PhiNode {
+                dst: dst_second,
+                sources: vec![(BlockId(0), first)],
+            },
+            PhiNode {
+                dst: dst_copy,
+                sources: vec![(BlockId(0), first)],
+            },
+            PhiNode {
+                dst: dst_immediate,
+                sources: vec![(BlockId(0), immediate)],
+            },
+        ];
+        for (stack_offset, state_offset, output) in [
+            (0, 0, out_first),
+            (8, 8, out_second),
+            (16, 16, out_copy),
+            (24, 24, out_immediate),
+        ] {
+            successor.push(MInst::Load {
+                dst: output,
+                base: BaseReg::StackFrame,
+                offset: stack_offset,
+                size: OpSize::S64,
+            });
+            successor.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: state_offset,
+                src: output,
+                size: OpSize::S64,
+            });
+        }
+        successor.push(MInst::Return);
+        function.push_block(predecessor);
+        function.push_block(successor);
+
+        let mut assignment = AssignmentMap::default();
+        for (value, register) in [
+            (first, PhysReg::RAX),
+            (second, PhysReg::RDX),
+            (immediate, PhysReg::RSI),
+            (out_first, PhysReg::RAX),
+            (out_second, PhysReg::RAX),
+            (out_copy, PhysReg::RAX),
+            (out_immediate, PhysReg::RAX),
+        ] {
+            assignment.set(value, register);
+        }
+        assignment.set_edge_location(BlockId(0), first, EdgeLocation::Stack(0));
+        assignment.set_edge_location(BlockId(0), second, EdgeLocation::Stack(8));
+        assignment.set_edge_location(BlockId(0), immediate, EdgeLocation::Immediate(77));
+        assignment.set_edge_spill_slot(dst_first, 0);
+        assignment.set_edge_spill_slot(dst_second, 8);
+        assignment.set_edge_spill_slot(dst_copy, 16);
+        assignment.set_edge_spill_slot(dst_immediate, 24);
+
+        let emitted = emit(&function, &assignment, 32).unwrap();
+        let code = crate::jit_mem::JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0_u8; 32];
+        assert_eq!(unsafe { code.call(&mut state) }, 0);
+        let actual = state
+            .chunks_exact(8)
+            .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, [44, 33, 33, 77]);
     }
 
     #[cfg(target_arch = "aarch64")]
