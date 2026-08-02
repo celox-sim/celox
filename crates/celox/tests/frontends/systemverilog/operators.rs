@@ -101,11 +101,15 @@ sv_backends! {
             input logic [127:0] wide_b,
             output logic eq_case,
             output logic ne_case,
+            output logic eq_case_unsized,
+            output logic eq_wildcard_unsized,
             output logic wide_eq_case,
             output logic wide_ne_case
         );
             assign eq_case = a === b;
             assign ne_case = a !== b;
+            assign eq_case_unsized = a === 0;
+            assign eq_wildcard_unsized = a ==? 0;
             assign wide_eq_case = wide_a === wide_b;
             assign wide_ne_case = wide_a !== wide_b;
         endmodule
@@ -135,6 +139,8 @@ sv_backends! {
         sim.get_four_state(sim.signal("ne_case")),
         (BigUint::from(0u8), BigUint::from(0u8))
     );
+    assert_eq!(sim.get(sim.signal("eq_case_unsized")), 0u8.into());
+    assert_eq!(sim.get(sim.signal("eq_wildcard_unsized")), 0u8.into());
     assert_eq!(
         sim.get_four_state(sim.signal("wide_eq_case")),
         (BigUint::from(1u8), BigUint::from(0u8))
@@ -164,6 +170,10 @@ sv_backends! {
         sim.get_four_state(sim.signal("wide_ne_case")),
         (BigUint::from(1u8), BigUint::from(0u8))
     );
+
+    sim.modify(|io| io.set(a, 0u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("eq_case_unsized")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("eq_wildcard_unsized")), 1u8.into());
     }
 
     fn simulates_systemverilog_unary_operators(sim) {
@@ -873,6 +883,57 @@ sv_backends! {
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q_exact), 0xb2u8.into());
     assert_eq!(sim.get(q_dynamic), 0xd4u8.into());
+    }
+
+    fn simulates_systemverilog_always_ff_case_context_values(sim) {
+        @setup {
+    let sv = r#"
+        module Top(
+            input logic clk,
+            input logic mode,
+            input logic signed [1:0] signed_mode,
+            output logic [7:0] q_negative,
+            output logic [7:0] q_scalar_signed,
+            output logic [63:0] q_fill
+        );
+            localparam NEGATIVE = -1;
+            localparam logic signed SCALAR_SIGNED = 1'b1;
+
+            always_ff @(posedge clk) begin
+                case (signed_mode)
+                    NEGATIVE: q_negative <= NEGATIVE;
+                    default: q_negative <= 0;
+                endcase
+                case (signed_mode)
+                    SCALAR_SIGNED: q_scalar_signed <= 8'ha5;
+                    default: q_scalar_signed <= 0;
+                endcase
+                case (mode)
+                    0: q_fill <= '1;
+                    default: q_fill <= '0;
+                endcase
+            end
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(sv, Path::new("ff_case_context_values.sv"))],
+            "Top",
+        );
+
+    let clk = sim.event("clk");
+    let mode = sim.signal("mode");
+    let signed_mode = sim.signal("signed_mode");
+
+    sim.modify(|io| {
+        io.set(mode, 0u8);
+        io.set(signed_mode, 3u8);
+    }).unwrap();
+    sim.tick(clk).unwrap();
+
+    assert_eq!(sim.get(sim.signal("q_negative")), 0xffu8.into());
+    assert_eq!(sim.get(sim.signal("q_scalar_signed")), 0xa5u8.into());
+    assert_eq!(sim.get(sim.signal("q_fill")), u64::MAX.into());
     }
 
     fn simulates_systemverilog_repeat_concat(sim) {

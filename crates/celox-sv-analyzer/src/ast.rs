@@ -1191,9 +1191,9 @@ fn parameter_declared_width(
     syntax_tree: &SyntaxTree,
     parameters: &[Parameter],
 ) -> Option<usize> {
-    let ranges = packed_ranges_from_ref_node(node, syntax_tree);
+    let ranges = packed_ranges_from_ref_node(node.clone(), syntax_tree);
     if ranges.is_empty() {
-        return None;
+        return unwrap_node!(node, IntegerVectorType).is_some().then_some(1);
     }
     let env = const_env_from_parameters(parameters);
     ranges.iter().try_fold(1usize, |acc, range| {
@@ -1260,6 +1260,14 @@ fn parameter_literal_env(
                         ""
                     };
                     format!("{width}'{signing}d{bits}")
+                } else if value.is_negative() {
+                    let width = (128 - (!value as u128).leading_zeros() as usize + 1).max(32);
+                    let mask = if width == 128 {
+                        u128::MAX
+                    } else {
+                        (1u128 << width) - 1
+                    };
+                    format!("{width}'sd{}", (value as u128) & mask)
                 } else if let Some(ConstExpr::Literal(literal)) = parameter.value() {
                     literal.clone()
                 } else {

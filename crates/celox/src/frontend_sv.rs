@@ -951,14 +951,29 @@ fn lower_glue_parent_expr(
             ))
         }
         sv::ir::Expr::Binary { left, op, right } => {
-            let (left, mut sources, mut source_ids) =
+            let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
+                && sv_expr_is_signed(right, variables, name_to_id);
+            let (mut left, mut sources, mut source_ids) =
                 lower_glue_parent_expr(left, variables, name_to_id, constants, arena)?;
-            let (right, right_sources, right_source_ids) =
+            let (mut right, right_sources, right_source_ids) =
                 lower_glue_parent_expr(right, variables, name_to_id, constants, arena)?;
             sources.extend(right_sources);
             source_ids.extend(right_source_ids);
             source_ids.sort();
             source_ids.dedup();
+            if matches!(
+                op,
+                sv::ir::BinaryOp::EqCase
+                    | sv::ir::BinaryOp::NeCase
+                    | sv::ir::BinaryOp::EqWildcard
+                    | sv::ir::BinaryOp::NeWildcard
+            ) {
+                let common_width =
+                    celox_slt::get_width(left, arena).max(celox_slt::get_width(right, arena));
+                left = coerce_node_width(arena, left, Some(common_width), operands_signed).ok()?;
+                right =
+                    coerce_node_width(arena, right, Some(common_width), operands_signed).ok()?;
+            }
             Some((
                 arena
                     .alloc(SLTNode::Binary(left, binary_op_from_sv(*op), right))
@@ -1189,10 +1204,26 @@ fn lower_expr(
             ))
         }
         sv::ir::Expr::Binary { left, op, right } => {
-            let (left, mut sources) = lower_expr(left, variables, name_to_id, constants, arena)?;
-            let (right, right_sources) =
+            let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
+                && sv_expr_is_signed(right, variables, name_to_id);
+            let (mut left, mut sources) =
+                lower_expr(left, variables, name_to_id, constants, arena)?;
+            let (mut right, right_sources) =
                 lower_expr(right, variables, name_to_id, constants, arena)?;
             sources.extend(right_sources);
+            if matches!(
+                op,
+                sv::ir::BinaryOp::EqCase
+                    | sv::ir::BinaryOp::NeCase
+                    | sv::ir::BinaryOp::EqWildcard
+                    | sv::ir::BinaryOp::NeWildcard
+            ) {
+                let common_width =
+                    celox_slt::get_width(left, arena).max(celox_slt::get_width(right, arena));
+                left = coerce_node_width(arena, left, Some(common_width), operands_signed).ok()?;
+                right =
+                    coerce_node_width(arena, right, Some(common_width), operands_signed).ok()?;
+            }
             Some((
                 arena
                     .alloc(SLTNode::Binary(left, binary_op_from_sv(*op), right))
@@ -1444,13 +1475,31 @@ fn emit_ff_assignment_stores(
             }
             let target_width = target.access.msb - target.access.lsb + 1;
             let rhs_expr = assignment.assignment().rhs();
-            let rhs = lower_expr_to_sir(builder, rhs_expr, variables, name_to_id, constants)?;
-            let rhs = resize_sir_register(
-                builder,
-                rhs,
-                target_width,
-                sv_expr_is_signed(rhs_expr, variables, name_to_id),
-            )?;
+            let rhs = match rhs_expr {
+                sv::ir::Expr::Literal(literal) => match unbased_fill_literal(literal) {
+                    Some(fill) => lower_unbased_fill_literal(builder, fill, target_width)?,
+                    None => {
+                        let rhs =
+                            lower_expr_to_sir(builder, rhs_expr, variables, name_to_id, constants)?;
+                        resize_sir_register(
+                            builder,
+                            rhs,
+                            target_width,
+                            sv_expr_is_signed(rhs_expr, variables, name_to_id),
+                        )?
+                    }
+                },
+                _ => {
+                    let rhs =
+                        lower_expr_to_sir(builder, rhs_expr, variables, name_to_id, constants)?;
+                    resize_sir_register(
+                        builder,
+                        rhs,
+                        target_width,
+                        sv_expr_is_signed(rhs_expr, variables, name_to_id),
+                    )?
+                }
+            };
             let assigned =
                 replace_sir_slice(builder, value, rhs, target.access.lsb, target_width, width)?;
             value = match assignment.condition() {
