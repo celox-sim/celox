@@ -9,9 +9,9 @@ use celox_design::VarAtomBase;
 use celox_sir::{RegisterId, SIRBuilder};
 use num_traits::ToPrimitive;
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, CaseStatement, Comptime, Expression, Factor, Op, Shape, Statement,
-    SystemFunctionCall, SystemFunctionKind, Type, TypeKind, ValueVariant, VarId, VarIndex,
-    VarSelect,
+    ArrayLiteralItem, CasePattern, CaseStatement, Comptime, Expression, Factor, Op, Shape,
+    Statement, SystemFunctionCall, SystemFunctionKind, Type, TypeKind, ValueVariant, VarId,
+    VarIndex, VarSelect,
 };
 use veryl_parser::token_range::TokenRange;
 
@@ -134,7 +134,19 @@ impl<'a> FfParser<'a> {
                     || self.statements_have_runtime_effect(&statement.false_side, visiting)
             }
             Statement::Case(statement) => {
+                let pattern_effect = statement.arms.iter().any(|arm| {
+                    arm.patterns.iter().any(|pattern| match pattern {
+                        CasePattern::Eq(expr) => {
+                            self.expression_has_runtime_effect_inner(expr, visiting)
+                        }
+                        CasePattern::Range { lo, hi, .. } => {
+                            self.expression_has_runtime_effect_inner(lo, visiting)
+                                || self.expression_has_runtime_effect_inner(hi, visiting)
+                        }
+                    })
+                });
                 self.expression_has_runtime_effect_inner(&statement.case_target, visiting)
+                    || pattern_effect
                     || statement
                         .arms
                         .iter()
@@ -156,21 +168,217 @@ impl<'a> FfParser<'a> {
         })
     }
 
-    fn substitute_system_function_call(
+    fn statements_have_runtime_task(
+        &self,
+        statements: &[Statement],
+        visiting: &mut HashSet<VarId>,
+    ) -> bool {
+        statements.iter().any(|statement| match statement {
+            Statement::SystemFunctionCall(_) => true,
+            Statement::If(statement) => {
+                self.statements_have_runtime_task(&statement.true_side, visiting)
+                    || self.statements_have_runtime_task(&statement.false_side, visiting)
+            }
+            Statement::Case(statement) => {
+                statement
+                    .arms
+                    .iter()
+                    .any(|arm| self.statements_have_runtime_task(&arm.body, visiting))
+                    || self.statements_have_runtime_task(&statement.default, visiting)
+            }
+            Statement::For(statement) => {
+                self.statements_have_runtime_task(&statement.body, visiting)
+            }
+            Statement::FunctionCall(call) => {
+                if !visiting.insert(call.id) {
+                    return false;
+                }
+                let result = self
+                    .module
+                    .functions
+                    .get(&call.id)
+                    .and_then(|function| {
+                        if let Some(index) = &call.index {
+                            function.get_function(index)
+                        } else {
+                            function.get_function(&[])
+                        }
+                    })
+                    .is_some_and(|body| {
+                        self.statements_have_runtime_task(&body.statements, visiting)
+                    });
+                visiting.remove(&call.id);
+                result
+            }
+            Statement::IfReset(statement) => {
+                self.statements_have_runtime_task(&statement.true_side, visiting)
+                    || self.statements_have_runtime_task(&statement.false_side, visiting)
+            }
+            Statement::Assign(_)
+            | Statement::TbMethodCall(_)
+            | Statement::Break
+            | Statement::Unsupported(_)
+            | Statement::Null => false,
+        })
+    }
+
+    fn state_value_expr(id: VarId, state: &HashMap<VarId, Expression>) -> Expression {
+        state.get(&id).cloned().unwrap_or_else(|| {
+            Expression::Term(Box::new(Factor::Variable(
+                id,
+                VarIndex::default(),
+                VarSelect::default(),
+                Comptime::create_unknown(TokenRange::default()),
+            )))
+        })
+    }
+
+    fn merge_expression_states(
+        condition: &Expression,
+        base: &HashMap<VarId, Expression>,
+        then_state: &HashMap<VarId, Expression>,
+        else_state: &HashMap<VarId, Expression>,
+    ) -> HashMap<VarId, Expression> {
+        let ids: HashSet<VarId> = base
+            .keys()
+            .chain(then_state.keys())
+            .chain(else_state.keys())
+            .copied()
+            .collect();
+        ids.into_iter()
+            .map(|id| {
+                let then_expr = then_state
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| Self::state_value_expr(id, base));
+                let else_expr = else_state
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| Self::state_value_expr(id, base));
+                (
+                    id,
+                    Expression::Ternary(
+                        Box::new(Self::normalize_function_control_condition(
+                            condition.clone(),
+                        )),
+                        Box::new(then_expr),
+                        Box::new(else_expr),
+                        Box::new(Comptime::create_unknown(TokenRange::default())),
+                    ),
+                )
+            })
+            .collect()
+    }
+
+    fn capture_nested_function_outputs(
+        &self,
+        expr: &Expression,
+        state: &mut HashMap<VarId, Expression>,
+    ) -> Result<Expression, ParserError> {
+        let unknown = || Box::new(Comptime::create_unknown(TokenRange::default()));
+        Ok(match expr {
+            Expression::Term(factor) => match factor.as_ref() {
+                Factor::Variable(_, _, _, _) => Self::substitute_function_expr(expr, state),
+                Factor::FunctionCall(call) => {
+                    let mut call = call.clone();
+                    for input in call.inputs.values_mut() {
+                        *input = self.capture_nested_function_outputs(input, state)?;
+                    }
+                    *state = self.apply_function_call_to_state(&call, state)?;
+                    call.outputs.clear();
+                    Expression::Term(Box::new(Factor::FunctionCall(call)))
+                }
+                Factor::SystemFunctionCall(call) => {
+                    let (call, next) = self.prepare_system_function_call(call, state)?;
+                    *state = next;
+                    Expression::Term(Box::new(Factor::SystemFunctionCall(call)))
+                }
+                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => expr.clone(),
+            },
+            Expression::Binary(lhs, op, rhs, _) => {
+                let lhs = self.capture_nested_function_outputs(lhs, state)?;
+                let rhs = self.capture_nested_function_outputs(rhs, state)?;
+                Expression::Binary(Box::new(lhs), *op, Box::new(rhs), unknown())
+            }
+            Expression::Unary(op, inner, _) => Expression::Unary(
+                *op,
+                Box::new(self.capture_nested_function_outputs(inner, state)?),
+                unknown(),
+            ),
+            Expression::Ternary(condition, then_expr, else_expr, _) => {
+                let condition = self.capture_nested_function_outputs(condition, state)?;
+                let base = state.clone();
+                let mut then_state = base.clone();
+                let then_expr = self.capture_nested_function_outputs(then_expr, &mut then_state)?;
+                let mut else_state = base.clone();
+                let else_expr = self.capture_nested_function_outputs(else_expr, &mut else_state)?;
+                *state = Self::merge_expression_states(&condition, &base, &then_state, &else_state);
+                Expression::Ternary(
+                    Box::new(condition),
+                    Box::new(then_expr),
+                    Box::new(else_expr),
+                    unknown(),
+                )
+            }
+            Expression::Concatenation(parts, _) => {
+                let mut rewritten = Vec::with_capacity(parts.len());
+                for (expr, repeat) in parts {
+                    let expr = self.capture_nested_function_outputs(expr, state)?;
+                    let repeat = repeat
+                        .as_ref()
+                        .map(|repeat| self.capture_nested_function_outputs(repeat, state))
+                        .transpose()?;
+                    rewritten.push((expr, repeat));
+                }
+                Expression::Concatenation(rewritten, unknown())
+            }
+            Expression::ArrayLiteral(items, _) => {
+                let mut rewritten = Vec::with_capacity(items.len());
+                for item in items {
+                    rewritten.push(match item {
+                        ArrayLiteralItem::Value(expr, repeat) => ArrayLiteralItem::Value(
+                            Box::new(self.capture_nested_function_outputs(expr, state)?),
+                            repeat
+                                .as_ref()
+                                .map(|repeat| self.capture_nested_function_outputs(repeat, state))
+                                .transpose()?
+                                .map(Box::new),
+                        ),
+                        ArrayLiteralItem::Defaul(expr) => ArrayLiteralItem::Defaul(Box::new(
+                            self.capture_nested_function_outputs(expr, state)?,
+                        )),
+                    });
+                }
+                Expression::ArrayLiteral(rewritten, unknown())
+            }
+            Expression::StructConstructor(ty, fields, _) => {
+                let mut rewritten = Vec::with_capacity(fields.len());
+                for (name, expr) in fields {
+                    rewritten.push((*name, self.capture_nested_function_outputs(expr, state)?));
+                }
+                Expression::StructConstructor(ty.clone(), rewritten, unknown())
+            }
+        })
+    }
+
+    fn prepare_system_function_call(
+        &self,
         call: &SystemFunctionCall,
-        state: &HashMap<VarId, Expression>,
-    ) -> SystemFunctionCall {
+        initial: &HashMap<VarId, Expression>,
+    ) -> Result<(SystemFunctionCall, HashMap<VarId, Expression>), ParserError> {
         let mut call = call.clone();
-        let substitute_input = |input: &mut veryl_analyzer::ir::SystemFunctionInput| {
-            input.0 = Self::substitute_function_expr(&input.0, state);
-        };
+        let mut state = initial.clone();
         match &mut call.kind {
             SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
-                args.iter_mut().for_each(substitute_input);
+                for input in args {
+                    input.0 = self.capture_nested_function_outputs(&input.0, &mut state)?;
+                }
             }
             SystemFunctionKind::Assert { cond, args, .. } => {
-                substitute_input(cond);
-                args.iter_mut().for_each(substitute_input);
+                cond.0 = self.capture_nested_function_outputs(&cond.0, &mut state)?;
+                for input in args {
+                    input.0 = self.capture_nested_function_outputs(&input.0, &mut state)?;
+                }
             }
             SystemFunctionKind::Readmemh(_, _)
             | SystemFunctionKind::Finish
@@ -181,7 +389,7 @@ impl<'a> FfParser<'a> {
             | SystemFunctionKind::Signed(_)
             | SystemFunctionKind::Unsigned(_) => {}
         }
-        call
+        Ok((call, state))
     }
 
     fn emit_function_runtime_effects<A>(
@@ -246,7 +454,8 @@ impl<'a> FfParser<'a> {
                     }
                 }
                 Statement::SystemFunctionCall(call) => {
-                    let call = Self::substitute_system_function_call(call, &state);
+                    let (call, next_state) = self.prepare_system_function_call(call, &state)?;
+                    state = next_state;
                     self.parse_system_task_statement(
                         &call, targets, domain, convert, sources, ir_builder,
                     )?;
@@ -262,13 +471,21 @@ impl<'a> FfParser<'a> {
                     ));
                 }
                 Statement::Case(statement) => {
-                    return Err(ParserError::unsupported(
-                        66,
-                        LoweringPhase::FfLowering,
-                        "control flow around runtime effect in function body",
-                        format!("{statement}"),
-                        Some(&statement.token),
-                    ));
+                    let mut visiting = HashSet::default();
+                    let body_has_runtime_task = statement
+                        .arms
+                        .iter()
+                        .any(|arm| self.statements_have_runtime_task(&arm.body, &mut visiting))
+                        || self.statements_have_runtime_task(&statement.default, &mut visiting);
+                    if body_has_runtime_task {
+                        return Err(ParserError::unsupported(
+                            66,
+                            LoweringPhase::FfLowering,
+                            "control flow around runtime effect in function body",
+                            format!("{statement}"),
+                            Some(&statement.token),
+                        ));
+                    }
                 }
                 Statement::For(statement) => {
                     return Err(ParserError::unsupported(
@@ -580,7 +797,79 @@ impl<'a> FfParser<'a> {
             .find_map(|bindings| bindings.get(&var_id))
     }
 
-    fn materialize_effectful_function_inputs<A>(
+    fn expression_references_any(expr: &Expression, candidates: &HashSet<VarId>) -> bool {
+        let input_references = |input: &veryl_analyzer::ir::SystemFunctionInput| {
+            Self::expression_references_any(&input.0, candidates)
+        };
+        match expr {
+            Expression::Term(factor) => match factor.as_ref() {
+                Factor::Variable(id, index, select, _) => {
+                    candidates.contains(id)
+                        || index
+                            .0
+                            .iter()
+                            .any(|expr| Self::expression_references_any(expr, candidates))
+                        || select
+                            .0
+                            .iter()
+                            .any(|expr| Self::expression_references_any(expr, candidates))
+                        || select.1.as_ref().is_some_and(|(_, expr)| {
+                            Self::expression_references_any(expr, candidates)
+                        })
+                }
+                Factor::FunctionCall(call) => call
+                    .inputs
+                    .values()
+                    .any(|expr| Self::expression_references_any(expr, candidates)),
+                Factor::SystemFunctionCall(call) => match &call.kind {
+                    SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
+                        args.iter().any(input_references)
+                    }
+                    SystemFunctionKind::Assert { cond, args, .. } => {
+                        input_references(cond) || args.iter().any(input_references)
+                    }
+                    SystemFunctionKind::Bits(input)
+                    | SystemFunctionKind::Size(input)
+                    | SystemFunctionKind::Clog2(input)
+                    | SystemFunctionKind::Onehot(input)
+                    | SystemFunctionKind::Signed(input)
+                    | SystemFunctionKind::Unsigned(input) => input_references(input),
+                    SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
+                },
+                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+            },
+            Expression::Binary(lhs, _, rhs, _) => {
+                Self::expression_references_any(lhs, candidates)
+                    || Self::expression_references_any(rhs, candidates)
+            }
+            Expression::Unary(_, inner, _) => Self::expression_references_any(inner, candidates),
+            Expression::Ternary(cond, then_expr, else_expr, _) => {
+                Self::expression_references_any(cond, candidates)
+                    || Self::expression_references_any(then_expr, candidates)
+                    || Self::expression_references_any(else_expr, candidates)
+            }
+            Expression::Concatenation(items, _) => items.iter().any(|(expr, repeat)| {
+                Self::expression_references_any(expr, candidates)
+                    || repeat
+                        .as_ref()
+                        .is_some_and(|repeat| Self::expression_references_any(repeat, candidates))
+            }),
+            Expression::ArrayLiteral(items, _) => items.iter().any(|item| match item {
+                ArrayLiteralItem::Value(expr, repeat) => {
+                    Self::expression_references_any(expr, candidates)
+                        || repeat.as_ref().is_some_and(|repeat| {
+                            Self::expression_references_any(repeat, candidates)
+                        })
+                }
+                ArrayLiteralItem::Defaul(expr) => Self::expression_references_any(expr, candidates),
+            }),
+            Expression::StructConstructor(_, fields, _) => fields
+                .iter()
+                .any(|(_, expr)| Self::expression_references_any(expr, candidates)),
+        }
+    }
+
+    fn materialize_function_inputs<A>(
         &mut self,
         call: &veryl_analyzer::ir::FunctionCall,
         function_body: &veryl_analyzer::ir::FunctionBody,
@@ -591,12 +880,18 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<HashMap<VarId, RegisterId>, ParserError> {
         let mut values = HashMap::default();
+        let output_ids: HashSet<VarId> = call
+            .outputs
+            .values()
+            .flat_map(|destinations| destinations.iter().map(|dst| dst.id))
+            .collect();
         for (arg_path, arg_id) in &function_body.arg_map {
             let Some(actual) = call.inputs.get(arg_path) else {
                 continue;
             };
             if !super::expression::expression_has_side_effect(actual)
                 && !self.expression_has_runtime_effect(actual)
+                && !Self::expression_references_any(actual, &output_ids)
             {
                 continue;
             }
@@ -606,7 +901,7 @@ impl<'a> FfParser<'a> {
                 return Err(ParserError::unsupported(
                     43,
                     LoweringPhase::FfLowering,
-                    "effectful unpacked function argument",
+                    "materialized unpacked function argument",
                     format!("{actual}"),
                     Some(&call.comptime.token),
                 ));
@@ -839,7 +1134,10 @@ impl<'a> FfParser<'a> {
                     format!("{stmt}"),
                     Some(&ir.token),
                 )),
-                Statement::SystemFunctionCall(_) => Ok(state.clone()),
+                Statement::SystemFunctionCall(call) => {
+                    let (_, next_state) = parser.prepare_system_function_call(call, state)?;
+                    Ok(next_state)
+                }
                 Statement::FunctionCall(call) => parser.apply_function_call_to_state(call, state),
                 Statement::For(f) => Err(ParserError::unsupported(
                     43,
@@ -1015,8 +1313,9 @@ impl<'a> FfParser<'a> {
                     format!("{stmt}"),
                     Some(&ir.token),
                 )),
-                Statement::SystemFunctionCall(_) => {
-                    resolve_return_expr(parser, rest, ret_id, defs, substitute)
+                Statement::SystemFunctionCall(call) => {
+                    let (_, next_defs) = parser.prepare_system_function_call(call, defs)?;
+                    resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
                 }
                 Statement::FunctionCall(call) => {
                     let next_defs = parser.apply_function_call_to_state(call, defs)?;
@@ -1155,7 +1454,7 @@ impl<'a> FfParser<'a> {
                 bindings.insert(*arg_id, arg_expr.clone());
             }
         }
-        let materialized = self.materialize_effectful_function_inputs(
+        let materialized = self.materialize_function_inputs(
             call,
             &function_body,
             targets,

@@ -1589,6 +1589,16 @@ impl<'a> FfParser<'a> {
                         }
                     };
                     self.stack.push_back(selected);
+                    if let Some(context) = context {
+                        let adjusted = self.cast_reg_width_ext(
+                            ir_builder,
+                            selected,
+                            context.width,
+                            context.signed,
+                        );
+                        self.stack.pop_back();
+                        self.stack.push_back(adjusted);
+                    }
                     return Ok(());
                 }
                 if let Some(bound_expr) = self.get_bound_function_arg_expr(*var_id) {

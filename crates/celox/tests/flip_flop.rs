@@ -329,6 +329,167 @@ fn test_ff_assert_message_args_preserve_left_to_right_snapshots(sim) {
     );
 }
 
+fn test_ff_runtime_effect_function_snapshots_input_that_aliases_output(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, effect: output logic<8>, q: output logic<8>) {
+            function observed (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                $display("x=%0d", x);
+                written = x + 8'd1;
+                return x;
+            }
+
+            always_ff (clk) {
+                q = observed(effect, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(effect, 5u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 6u8.into());
+    assert_eq!(sim.get(q), 5u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "x=5".to_string(),
+        }],
+    );
+}
+
+fn test_ff_case_pattern_runtime_effect_is_eager(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, ok: input logic, d: input logic<8>) {
+            function observed_value (x: input logic<8>) -> logic<8> {
+                $display("pattern=%0d", x);
+                return x;
+            }
+
+            function message_value (x: input logic<8>) -> logic<8> {
+                case x {
+                    observed_value(8'd1): return 8'd11;
+                    default: return 8'd22;
+                }
+            }
+
+            always_ff (clk) {
+                $assert_continue(ok, "value=%0d", message_value(d));
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let ok = sim.signal("ok");
+    let d = sim.signal("d");
+
+    sim.modify(|io| {
+        io.set(ok, 1u8);
+        io.set(d, 1u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "pattern=1".to_string(),
+        }],
+    );
+}
+
+fn test_ff_nested_runtime_event_output_updates_outer_function_state(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x + 8'd2;
+            }
+
+            function observed (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                $display("value=%0d", update(x, written));
+                return x;
+            }
+
+            always_ff (clk) {
+                q = observed(d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 7u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 8u8.into());
+    assert_eq!(sim.get(q), 7u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "value=9".to_string(),
+        }],
+    );
+}
+
+fn test_ff_materialized_formal_slice_uses_expression_context(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, d: input logic<8>, q: output logic<16>) {
+            function inner (x: input logic<8>) -> logic<8> {
+                $display("inner=%0d", x);
+                return x;
+            }
+
+            function outer (x: input logic<8>) -> logic<16> {
+                return x[3:0] + 16'd1;
+            }
+
+            always_ff (clk) {
+                q = outer(inner(d));
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 0xafu8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0x0010u16.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "inner=175".to_string(),
+        }],
+    );
+}
+
 fn test_ff_runtime_events_format_verilog_radices(sim) {
     @omit_veryl;
     @ignore_on(wasm);
