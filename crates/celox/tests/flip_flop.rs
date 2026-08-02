@@ -869,6 +869,37 @@ fn test_ff_runtime_reverse_step_matches_emitted_sv_order(sim) {
     assert_eq!(sim.get(q), 1u32.into());
 }
 
+fn test_ff_runtime_reverse_exclusive_i32_upper_sentinel(sim) {
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            start: input signed logic<64>,
+            end_bound: input signed logic<64>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in rev start..end_bound {
+                    q = i as 32;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let end_bound = sim.signal("end_bound");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(start, 2147483640u64);
+        io.set(end_bound, 2147483648u64);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 2147483640u32.into());
+}
+
 fn test_ff_runtime_reverse_min_i32_end_wraps_before_range_check(sim) {
     // veryl-simulator 0.20.2's non-JIT interpreter evaluates `end - 1` as i64
     // without truncating it to the signed 32-bit loop-counter width. It therefore

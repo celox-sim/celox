@@ -1565,7 +1565,7 @@ impl<'a> FfParser<'a> {
                 compare_width,
                 loop_width,
                 loop_signed,
-                false,
+                !inclusive,
             );
             let bounds_fit = ir_builder.alloc_bit(1, false);
             ir_builder.emit(SIRInstruction::Binary(
