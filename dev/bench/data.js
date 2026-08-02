@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785654735513,
+  "lastUpdate": 1785656163661,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -148372,6 +148372,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
             "value": 126497.143229,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+s@gmail.com",
+            "name": "tig",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c00dbee8a64e5caff676abbb1a3f93436a66fd47",
+          "message": "Merge pull request #391 from celox-sim/fix/heliodor-host-metadata\n\nfix(ci): keep Heliodor host metadata outside checkout",
+          "timestamp": "2026-08-02T07:00:21Z",
+          "tree_id": "d97afee9b07f3fe829735c5c625208fd5c1b589f",
+          "url": "https://github.com/celox-sim/celox/commit/c00dbee8a64e5caff676abbb1a3f93436a66fd47"
+        },
+        "date": 1785656150164,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-jit/heliodor_linux_boot_execution",
+            "value": 109754.093137,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-total/heliodor_linux_boot_execution",
+            "value": 109780.694481,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl/heliodor_linux_boot_execution",
+            "value": 164848.284444,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-compile/heliodor_linux_boot_compilation",
+            "value": 116089.833471,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
+            "value": 124231.096789,
             "unit": "ms"
           }
         ]
