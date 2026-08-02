@@ -150,8 +150,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_labels_in_always_ff_case() {
-        let error = analyze_source(
+    fn accepts_unknown_labels_in_always_ff_case() {
+        let ir = analyze_source(
             r#"
                 module Top(
                     input logic clk,
@@ -168,16 +168,14 @@ mod tests {
             "#,
             Path::new("ff_case_unknown_label.sv"),
         )
-        .expect_err("X/Z case labels should be rejected until exact case equality is supported");
+        .expect("X/Z case labels should use exact four-state case equality");
 
-        assert!(
-            matches!(error, AnalyzerError::Unsupported(message) if message.contains("X/Z labels"))
-        );
+        assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 2);
     }
 
     #[test]
-    fn rejects_dynamic_labels_in_always_ff_case() {
-        let error = analyze_source(
+    fn accepts_dynamic_labels_in_always_ff_case() {
+        let ir = analyze_source(
             r#"
                 module Top(
                     input logic clk,
@@ -195,11 +193,9 @@ mod tests {
             "#,
             Path::new("ff_case_dynamic_label.sv"),
         )
-        .expect_err("dynamic labels require exact four-state case equality support");
+        .expect("dynamic labels should use exact four-state case equality");
 
-        assert!(
-            matches!(error, AnalyzerError::Unsupported(message) if message.contains("non-constant labels"))
-        );
+        assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 2);
     }
 
     #[test]

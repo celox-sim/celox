@@ -1756,6 +1756,8 @@ fn lower_expr_to_sir(
                 op,
                 sv::ir::BinaryOp::Eq
                     | sv::ir::BinaryOp::Ne
+                    | sv::ir::BinaryOp::EqCase
+                    | sv::ir::BinaryOp::NeCase
                     | sv::ir::BinaryOp::EqWildcard
                     | sv::ir::BinaryOp::NeWildcard
                     | sv::ir::BinaryOp::Lt
@@ -1776,6 +1778,8 @@ fn lower_expr_to_sir(
                 | sv::ir::BinaryOp::LogicOr
                 | sv::ir::BinaryOp::Eq
                 | sv::ir::BinaryOp::Ne
+                | sv::ir::BinaryOp::EqCase
+                | sv::ir::BinaryOp::NeCase
                 | sv::ir::BinaryOp::EqWildcard
                 | sv::ir::BinaryOp::NeWildcard
                 | sv::ir::BinaryOp::Lt
@@ -1787,7 +1791,11 @@ fn lower_expr_to_sir(
                     .width()
                     .max(builder.register(&right).width()),
             };
-            let reg = builder.alloc_logic(width);
+            let reg = if matches!(op, sv::ir::BinaryOp::EqCase | sv::ir::BinaryOp::NeCase) {
+                builder.alloc_bit(width, false)
+            } else {
+                builder.alloc_logic(width)
+            };
             builder.emit(SIRInstruction::Binary(
                 reg,
                 left,
@@ -1911,6 +1919,8 @@ fn binary_op_from_sv(op: sv::ir::BinaryOp) -> BinaryOp {
         sv::ir::BinaryOp::LogicOr => BinaryOp::LogicOr,
         sv::ir::BinaryOp::Eq => BinaryOp::Eq,
         sv::ir::BinaryOp::Ne => BinaryOp::Ne,
+        sv::ir::BinaryOp::EqCase => BinaryOp::EqCase,
+        sv::ir::BinaryOp::NeCase => BinaryOp::NeCase,
         sv::ir::BinaryOp::EqWildcard => BinaryOp::EqWildcard,
         sv::ir::BinaryOp::NeWildcard => BinaryOp::NeWildcard,
         sv::ir::BinaryOp::Lt => BinaryOp::LtU,

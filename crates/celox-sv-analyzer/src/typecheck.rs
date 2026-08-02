@@ -76,6 +76,8 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
                 BinaryOp::LogicOr => Some(((left != 0) || (right != 0)) as i128),
                 BinaryOp::Eq => Some((left == right) as i128),
                 BinaryOp::Ne => Some((left != right) as i128),
+                BinaryOp::EqCase => Some((left == right) as i128),
+                BinaryOp::NeCase => Some((left != right) as i128),
                 BinaryOp::EqWildcard => Some((left == right) as i128),
                 BinaryOp::NeWildcard => Some((left != right) as i128),
                 BinaryOp::Lt => Some((left < right) as i128),

@@ -91,6 +91,81 @@ sv_backends! {
     assert_eq!(sim.get(sim.signal("ne")), 1u8.into());
     }
 
+    fn simulates_systemverilog_case_equality_operators(sim) {
+        @setup {
+    let sv = r#"
+        module Top(
+            input logic [1:0] a,
+            input logic [1:0] b,
+            input logic [127:0] wide_a,
+            input logic [127:0] wide_b,
+            output logic eq_case,
+            output logic ne_case,
+            output logic wide_eq_case,
+            output logic wide_ne_case
+        );
+            assign eq_case = a === b;
+            assign ne_case = a !== b;
+            assign wide_eq_case = wide_a === wide_b;
+            assign wide_ne_case = wide_a !== wide_b;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("case_equality.sv"))], "Top")
+            .four_state(true);
+
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let wide_a = sim.signal("wide_a");
+    let wide_b = sim.signal("wide_b");
+    let unknown = BigUint::from(1u8) << 100usize;
+    let known = BigUint::from(5u8);
+
+    sim.modify(|io| {
+        io.set_four_state(a, BigUint::from(0b11u8), BigUint::from(0b01u8));
+        io.set_four_state(b, BigUint::from(0b11u8), BigUint::from(0b01u8));
+        io.set_four_state(wide_a, &known | &unknown, unknown.clone());
+        io.set_four_state(wide_b, &known | &unknown, unknown.clone());
+    }).unwrap();
+    assert_eq!(
+        sim.get_four_state(sim.signal("eq_case")),
+        (BigUint::from(1u8), BigUint::from(0u8))
+    );
+    assert_eq!(
+        sim.get_four_state(sim.signal("ne_case")),
+        (BigUint::from(0u8), BigUint::from(0u8))
+    );
+    assert_eq!(
+        sim.get_four_state(sim.signal("wide_eq_case")),
+        (BigUint::from(1u8), BigUint::from(0u8))
+    );
+    assert_eq!(
+        sim.get_four_state(sim.signal("wide_ne_case")),
+        (BigUint::from(0u8), BigUint::from(0u8))
+    );
+
+    sim.modify(|io| {
+        io.set_four_state(b, BigUint::from(0b10u8), BigUint::from(0b01u8));
+        io.set_four_state(wide_b, known.clone(), unknown.clone());
+    }).unwrap();
+    assert_eq!(
+        sim.get_four_state(sim.signal("eq_case")),
+        (BigUint::from(0u8), BigUint::from(0u8))
+    );
+    assert_eq!(
+        sim.get_four_state(sim.signal("ne_case")),
+        (BigUint::from(1u8), BigUint::from(0u8))
+    );
+    assert_eq!(
+        sim.get_four_state(sim.signal("wide_eq_case")),
+        (BigUint::from(0u8), BigUint::from(0u8))
+    );
+    assert_eq!(
+        sim.get_four_state(sim.signal("wide_ne_case")),
+        (BigUint::from(1u8), BigUint::from(0u8))
+    );
+    }
+
     fn simulates_systemverilog_unary_operators(sim) {
         @setup {
     let sv = r#"
@@ -556,6 +631,7 @@ sv_backends! {
             input logic clk,
             input logic rst,
             input logic [1:0] mode,
+            input logic [1:0] dynamic_label,
             input logic signed [1:0] signed_mode,
             input logic [7:0] d0,
             input logic [7:0] d1,
@@ -568,7 +644,9 @@ sv_backends! {
             output logic [7:0] q_fill,
             output logic [7:0] q_parameter,
             output logic [7:0] q_rhs_width,
-            output logic [7:0] q_overlap
+            output logic [7:0] q_overlap,
+            output logic [7:0] q_exact,
+            output logic [7:0] q_dynamic
         );
             localparam logic [1:0] P = 2'b11;
 
@@ -583,6 +661,8 @@ sv_backends! {
                     q_parameter <= 8'h00;
                     q_rhs_width <= 8'h00;
                     q_overlap <= 8'h00;
+                    q_exact <= 8'h00;
+                    q_dynamic <= 8'h00;
                 end else begin
                     case (mode)
                         0: begin
@@ -628,6 +708,17 @@ sv_backends! {
                         default: q_rhs_width <= 1'b1;
                     endcase
 
+                    case (mode)
+                        2'b1x: q_exact <= 8'ha1;
+                        2'b1z: q_exact <= 8'hb2;
+                        default: q_exact <= 8'hc3;
+                    endcase
+
+                    case (mode)
+                        dynamic_label: q_dynamic <= 8'hd4;
+                        default: q_dynamic <= 8'he5;
+                    endcase
+
                     q_overlap[0] <= 1'b1;
                     case (mode)
                         1: q_overlap <= 0;
@@ -644,6 +735,7 @@ sv_backends! {
     let clk = sim.event("clk");
     let rst = sim.signal("rst");
     let mode = sim.signal("mode");
+    let dynamic_label = sim.signal("dynamic_label");
     let signed_mode = sim.signal("signed_mode");
     let d0 = sim.signal("d0");
     let d1 = sim.signal("d1");
@@ -657,10 +749,13 @@ sv_backends! {
     let q_parameter = sim.signal("q_parameter");
     let q_rhs_width = sim.signal("q_rhs_width");
     let q_overlap = sim.signal("q_overlap");
+    let q_exact = sim.signal("q_exact");
+    let q_dynamic = sim.signal("q_dynamic");
 
     sim.modify(|io| {
         io.set(rst, 0u8);
         io.set(mode, 0u8);
+        io.set(dynamic_label, 0u8);
         io.set(signed_mode, 3u8);
         io.set(d0, 0x11u8);
         io.set(d1, 0x22u8);
@@ -676,6 +771,8 @@ sv_backends! {
     assert_eq!(sim.get(q_parameter), 0u8.into());
     assert_eq!(sim.get(q_rhs_width), 0u8.into());
     assert_eq!(sim.get(q_overlap), 0u8.into());
+    assert_eq!(sim.get(q_exact), 0u8.into());
+    assert_eq!(sim.get(q_dynamic), 0u8.into());
 
     sim.modify(|io| io.set(rst, 1u8)).unwrap();
     sim.tick(clk).unwrap();
@@ -721,6 +818,11 @@ sv_backends! {
 
     sim.modify(|io| {
         io.set_four_state(mode, BigUint::from(0u8), BigUint::from(0b11u8));
+        io.set_four_state(
+            dynamic_label,
+            BigUint::from(0u8),
+            BigUint::from(0b11u8),
+        );
         io.set(d2, 0x44u8);
     }).unwrap();
     sim.tick(clk).unwrap();
@@ -733,10 +835,44 @@ sv_backends! {
     assert_eq!(sim.get(q_parameter), 0x66u8.into());
     assert_eq!(sim.get(q_rhs_width), 1u8.into());
     assert_eq!(sim.get(q_overlap), 1u8.into());
+    assert_eq!(sim.get(q_exact), 0xc3u8.into());
+    assert_eq!(sim.get(q_dynamic), 0xd4u8.into());
 
     sim.modify(|io| io.set(d0, 0xffu8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q_fill), 0xa5u8.into());
+
+    // 2'b1x has payload 0b11 and mask 0b01; 2'b1z has payload 0b10
+    // with the same mask. Exact case equality must distinguish them.
+    sim.modify(|io| {
+        io.set_four_state(mode, BigUint::from(0b11u8), BigUint::from(0b01u8));
+        io.set_four_state(
+            dynamic_label,
+            BigUint::from(0b11u8),
+            BigUint::from(0b01u8),
+        );
+    }).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_exact), 0xa1u8.into());
+    assert_eq!(sim.get(q_dynamic), 0xd4u8.into());
+
+    sim.modify(|io| {
+        io.set_four_state(
+            dynamic_label,
+            BigUint::from(0b10u8),
+            BigUint::from(0b01u8),
+        );
+    }).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_exact), 0xa1u8.into());
+    assert_eq!(sim.get(q_dynamic), 0xe5u8.into());
+
+    sim.modify(|io| {
+        io.set_four_state(mode, BigUint::from(0b10u8), BigUint::from(0b01u8));
+    }).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_exact), 0xb2u8.into());
+    assert_eq!(sim.get(q_dynamic), 0xd4u8.into());
     }
 
     fn simulates_systemverilog_repeat_concat(sim) {

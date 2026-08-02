@@ -494,6 +494,8 @@ pub enum BinaryOp {
     LogicOr,
     Eq,
     Ne,
+    EqCase,
+    NeCase,
     EqWildcard,
     NeWildcard,
     Lt,
@@ -1945,64 +1947,10 @@ fn function_expr_from_case_statement(
 }
 
 fn case_item_condition(case_expr: Expr, item_expr: Expr) -> Expr {
-    Expr::Unary {
-        op: UnaryOp::ToTwoState,
-        expr: Box::new(Expr::Binary {
-            left: Box::new(case_expr),
-            op: BinaryOp::Eq,
-            right: Box::new(item_expr),
-        }),
-    }
-}
-
-fn expr_contains_unknown_literal(expr: &Expr) -> bool {
-    match expr {
-        Expr::Literal(value) => typecheck::parse_integral_literal(value)
-            .is_some_and(|literal| literal.mask != Default::default()),
-        Expr::Select { expr, .. } | Expr::Unary { expr, .. } => expr_contains_unknown_literal(expr),
-        Expr::Concat(parts) => parts.iter().any(expr_contains_unknown_literal),
-        Expr::RepeatConcat { parts, .. } => parts.iter().any(expr_contains_unknown_literal),
-        Expr::Binary { left, right, .. } => {
-            expr_contains_unknown_literal(left) || expr_contains_unknown_literal(right)
-        }
-        Expr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            expr_contains_unknown_literal(condition)
-                || expr_contains_unknown_literal(then_expr)
-                || expr_contains_unknown_literal(else_expr)
-        }
-        Expr::Call { args, .. } => args.iter().any(expr_contains_unknown_literal),
-        Expr::Ident(_) => false,
-    }
-}
-
-fn expr_is_static_case_label(expr: &Expr, const_env: &HashMap<String, i128>) -> bool {
-    match expr {
-        Expr::Literal(_) => true,
-        Expr::Ident(name) => const_env.contains_key(name),
-        Expr::Select { expr, .. } | Expr::Unary { expr, .. } => {
-            expr_is_static_case_label(expr, const_env)
-        }
-        Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => parts
-            .iter()
-            .all(|part| expr_is_static_case_label(part, const_env)),
-        Expr::Binary { left, right, .. } => {
-            expr_is_static_case_label(left, const_env)
-                && expr_is_static_case_label(right, const_env)
-        }
-        Expr::Mux {
-            condition,
-            then_expr,
-            else_expr,
-        } => {
-            expr_is_static_case_label(condition, const_env)
-                && expr_is_static_case_label(then_expr, const_env)
-                && expr_is_static_case_label(else_expr, const_env)
-        }
-        Expr::Call { .. } => false,
+    Expr::Binary {
+        left: Box::new(case_expr),
+        op: BinaryOp::EqCase,
+        right: Box::new(item_expr),
     }
 }
 
@@ -3324,16 +3272,6 @@ fn conditional_assignments_from_case_statement(
                     ) else {
                         continue;
                     };
-                    if expr_contains_unknown_literal(&expr) {
-                        return Err(AnalyzerError::Unsupported(
-                            "X/Z labels in always_ff case statements".to_string(),
-                        ));
-                    }
-                    if !expr_is_static_case_label(&expr, const_env) {
-                        return Err(AnalyzerError::Unsupported(
-                            "non-constant labels in always_ff case statements".to_string(),
-                        ));
-                    }
                     conditions.push(case_item_condition(case_expr.clone(), expr));
                 }
                 if let Some(condition) = conditions.into_iter().reduce(|left, right| Expr::Binary {
@@ -4061,7 +3999,12 @@ fn binary_precedence(op: BinaryOp) -> u8 {
         BinaryOp::Add | BinaryOp::Sub => 10,
         BinaryOp::Shl | BinaryOp::Shr => 9,
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => 8,
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard => 7,
+        BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::EqCase
+        | BinaryOp::NeCase
+        | BinaryOp::EqWildcard
+        | BinaryOp::NeWildcard => 7,
         BinaryOp::BitAnd => 6,
         BinaryOp::BitXor => 5,
         BinaryOp::BitOr => 4,
@@ -4546,6 +4489,8 @@ fn binary_op_from_symbol(symbol: &Locate, syntax_tree: &SyntaxTree) -> Option<Bi
         "||" => Some(BinaryOp::LogicOr),
         "==" => Some(BinaryOp::Eq),
         "!=" => Some(BinaryOp::Ne),
+        "===" => Some(BinaryOp::EqCase),
+        "!==" => Some(BinaryOp::NeCase),
         "==?" => Some(BinaryOp::EqWildcard),
         "!=?" => Some(BinaryOp::NeWildcard),
         "<" => Some(BinaryOp::Lt),

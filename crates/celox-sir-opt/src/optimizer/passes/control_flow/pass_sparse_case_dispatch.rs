@@ -1529,6 +1529,8 @@ fn runtime_instruction_cost(
                 BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => 4u128.saturating_mul(n),
                 BinaryOp::Eq
                 | BinaryOp::Ne
+                | BinaryOp::EqCase
+                | BinaryOp::NeCase
                 | BinaryOp::EqWildcard
                 | BinaryOp::NeWildcard
                 | BinaryOp::LtU

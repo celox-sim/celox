@@ -384,6 +384,8 @@ fn verify_instruction_types<A>(
         SIRInstruction::Binary(dst, lhs, op, rhs) => match op {
             BinaryOp::Eq
             | BinaryOp::Ne
+            | BinaryOp::EqCase
+            | BinaryOp::NeCase
             | BinaryOp::LtU
             | BinaryOp::LtS
             | BinaryOp::LeU

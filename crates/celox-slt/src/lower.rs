@@ -3112,6 +3112,8 @@ impl SLTToSIRLowerer {
             SLTNode::Binary(lhs, op, rhs) => match op {
                 BinaryOp::Eq
                 | BinaryOp::Ne
+                | BinaryOp::EqCase
+                | BinaryOp::NeCase
                 | BinaryOp::LtU
                 | BinaryOp::LtS
                 | BinaryOp::LeU
@@ -3456,6 +3458,8 @@ impl SLTToSIRLowerer {
                         BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => lhs,
                         BinaryOp::Eq
                         | BinaryOp::Ne
+                        | BinaryOp::EqCase
+                        | BinaryOp::NeCase
                         | BinaryOp::EqWildcard
                         | BinaryOp::NeWildcard
                         | BinaryOp::LtU
@@ -3981,6 +3985,8 @@ impl SLTToSIRLowerer {
             BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => 4 * chunks,
             BinaryOp::Eq
             | BinaryOp::Ne
+            | BinaryOp::EqCase
+            | BinaryOp::NeCase
             | BinaryOp::EqWildcard
             | BinaryOp::NeWildcard
             | BinaryOp::LtU
