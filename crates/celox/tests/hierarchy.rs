@@ -216,6 +216,50 @@ assign seen_o = seen;
 
     }
 
+    fn test_instance_input_function_output_preserves_runtime_display(sim) {
+        // veryl-simulator does not write the connection's function output
+        // actual back; wasm does not currently expose runtime event draining.
+        @omit_veryl;
+        @ignore_on(wasm);
+        @setup { let code = r#"
+module Child (
+i: input logic
+) {}
+module Top (
+a: input logic,
+seen_o: output logic
+) {
+function write_seen (
+x: input logic,
+seen: output logic
+) -> logic {
+seen = x;
+$display("seen=%0d", seen);
+return x;
+}
+var seen: logic;
+inst child: Child (
+i: write_seen(a, seen)
+);
+assign seen_o = seen;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let a = sim.signal("a");
+    let seen_o = sim.signal("seen_o");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(seen_o), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "seen=1".to_string(),
+        }],
+    );
+
+    }
+
     fn test_unconnected_child_output_needs_no_parent_glue(sim) {
         @setup { let code = r#"
 module Child (

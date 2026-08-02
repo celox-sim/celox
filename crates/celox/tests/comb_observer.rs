@@ -85,6 +85,40 @@ module Top (
     );
 }
 
+fn test_comb_callee_observer_converts_two_state_formal(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic,
+    q: output logic,
+) {
+    function observe (x: input bit) -> logic {
+        $display("x=%0d", x);
+        return x;
+    }
+
+    always_comb {
+        q = observe(a);
+    }
+}
+"#, "Top").four_state(true);
+
+    let a = sim.signal("a");
+    sim.drain_runtime_events();
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    sim.drain_runtime_events();
+    sim.modify(|io| {
+        io.set_four_state(a, celox::BigUint::from(1u8), celox::BigUint::from(1u8));
+    }).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "x=0".to_string(),
+        }],
+    );
+}
+
 fn test_comb_runtime_effect_inside_if_condition_is_collected(sim) {
     @omit_veryl;
     @ignore_on(wasm);

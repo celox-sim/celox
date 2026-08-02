@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn subtract_written_sensitivity<A: Copy + Eq + std::hash::Hash>(
+pub(crate) fn subtract_written_sensitivity<A: Copy + Eq + std::hash::Hash>(
     atoms: impl IntoIterator<Item = VarAtomBase<A>>,
     written_atoms: &[VarAtomBase<A>],
 ) -> HashSet<VarAtomBase<A>> {
@@ -36,10 +36,10 @@ pub(super) fn subtract_written_sensitivity<A: Copy + Eq + std::hash::Hash>(
 }
 
 #[derive(Default)]
-pub(super) struct CombEffectCollector {
-    pub(super) observers: Vec<CombObserver<VarId>>,
-    pub(super) sites: Vec<RuntimeEventSite>,
-    pub(super) sensitivity: HashSet<VarAtomBase<VarId>>,
+pub(crate) struct CombEffectCollector {
+    pub(crate) observers: Vec<CombObserver<VarId>>,
+    pub(crate) sites: Vec<RuntimeEventSite>,
+    pub(crate) sensitivity: HashSet<VarAtomBase<VarId>>,
     active_guard: Option<NodeId>,
     active_guard_sources: HashSet<VarAtomBase<VarId>>,
     loop_effects: Option<Vec<SLTForEffect>>,
@@ -364,6 +364,11 @@ fn collect_function_call_effects(
             arena,
             arg_width,
         )?;
+        let arg_node = if formal.r#type.is_2state() && !arg_expr.comptime().r#type.is_2state() {
+            arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, arg_node))?
+        } else {
+            arg_node
+        };
         // A runtime effect inside the callee executes as part of the caller's
         // always_comb process.  Its formal is only a local symbolic binding;
         // sensitivity must therefore retain the actual argument's sources.
@@ -612,7 +617,7 @@ fn for_range_contains_runtime_effect(module: &Module, range: &ForRange) -> bool 
     })
 }
 
-fn expression_contains_runtime_effect(module: &Module, expression: &Expression) -> bool {
+pub(crate) fn expression_contains_runtime_effect(module: &Module, expression: &Expression) -> bool {
     match expression {
         Expression::Term(factor) => match &**factor {
             Factor::FunctionCall(call) => function_call_contains_runtime_effect(module, call),
@@ -672,7 +677,7 @@ fn expression_contains_runtime_effect(module: &Module, expression: &Expression) 
     }
 }
 
-fn collect_expression_effects(
+pub(crate) fn collect_expression_effects(
     module: &Module,
     store: &SymbolicStore<VarId>,
     expr: &Expression,

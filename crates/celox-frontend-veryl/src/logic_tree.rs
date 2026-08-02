@@ -21,14 +21,17 @@ use std::{collections::BTreeSet, hash::Hash};
 
 use crate::{
     HashMap, HashSet, LoweringPhase, ParserError,
-    bitaccess::{PartSelectGeometry, eval_constexpr, eval_var_select, select_geometry},
+    bitaccess::{
+        PartSelectGeometry, celox_value_from_comptime, eval_constexpr, eval_var_select,
+        select_geometry,
+    },
     loop_provenance::LoopRecoveryCandidate,
     resolve_total_width,
 };
 use celox_design::{BinaryOp, BitAccess, RuntimeEventKind, RuntimeEventSite, UnaryOp, VarAtomBase};
 use celox_slt::{CombObserver, RangeStore, RangeStoreError};
 use num_bigint::{BigInt, BigUint, Sign};
-use num_traits::ToPrimitive as _;
+use num_traits::{ToPrimitive as _, Zero as _};
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignStatement, CasePattern, CaseStatement, CombDeclaration, Expression,
     Factor, ForBound, ForRange, ForStatement, Function, FunctionBody, FunctionCall, IfStatement,
@@ -39,10 +42,11 @@ use veryl_analyzer::value::{Value, byte_value_to_string};
 use veryl_parser::resource_table;
 use veryl_parser::token_range::TokenRange;
 
-use effect::{
-    CombEffectCollector, collect_comb_effects_statements, statements_contain_runtime_effect,
+pub(crate) use effect::{
+    CombEffectCollector, collect_expression_effects, expression_contains_runtime_effect,
     subtract_written_sensitivity,
 };
+use effect::{collect_comb_effects_statements, statements_contain_runtime_effect};
 pub use expr::coerce_node_width;
 pub(crate) use expr::eval_assignment_expression_effectful;
 use expr::{
@@ -1622,6 +1626,14 @@ fn collect_written_accesses(
     Ok(())
 }
 
+fn eval_fully_known_constexpr(expression: &Expression) -> Option<BigUint> {
+    let (_, mask, _, _) = celox_value_from_comptime(expression.comptime())?;
+    if !mask.is_zero() {
+        return None;
+    }
+    eval_constexpr(expression)
+}
+
 pub(super) fn collect_written_expression(
     module: &Module,
     expression: &Expression,
@@ -1657,7 +1669,7 @@ pub(super) fn collect_written_expression(
         Expression::Unary(_, inner, _) => collect_written_expression(module, inner, out),
         Expression::Binary(lhs, op, rhs, _) => {
             collect_written_expression(module, lhs, out)?;
-            let lhs_value = eval_constexpr(lhs);
+            let lhs_value = eval_fully_known_constexpr(lhs);
             let skips_rhs = match op {
                 Op::LogicAnd => lhs_value
                     .as_ref()
@@ -1674,7 +1686,7 @@ pub(super) fn collect_written_expression(
         }
         Expression::Ternary(cond, then_expr, else_expr, _) => {
             collect_written_expression(module, cond, out)?;
-            if let Some(value) = eval_constexpr(cond) {
+            if let Some(value) = eval_fully_known_constexpr(cond) {
                 return if value == BigUint::from(0u8) {
                     collect_written_expression(module, else_expr, out)
                 } else {
@@ -3673,6 +3685,51 @@ mod tests {
 
         let q_output = var_id_of(&module, &["q_output"]);
         assert!(!written.contains_key(&q_output));
+    }
+
+    #[test]
+    fn test_collect_written_accesses_preserves_indeterminate_expression_branches() {
+        let code = r#"
+            module Top (
+                d: input logic,
+                q: output logic,
+                ternary_then: output logic,
+                ternary_else: output logic,
+                short_circuit_rhs: output logic,
+            ) {
+                function write (
+                    x: input logic,
+                    y: output logic,
+                ) -> logic {
+                    y = x;
+                    return x;
+                }
+
+                always_comb {
+                    q = if 1'bx ? write(d, ternary_then) : write(d, ternary_else);
+                    q = 1'bx && write(d, short_circuit_rhs);
+                }
+            }
+        "#;
+        let module = parse_top_module(code);
+        let comb_decl = module
+            .declarations
+            .iter()
+            .find_map(|declaration| {
+                if let Declaration::Comb(comb) = declaration {
+                    Some(comb)
+                } else {
+                    None
+                }
+            })
+            .expect("No always_comb found in Top");
+        let mut written = HashMap::default();
+        collect_written_accesses(&module, &comb_decl.statements, &mut written).unwrap();
+
+        for name in ["ternary_then", "ternary_else", "short_circuit_rhs"] {
+            let id = var_id_of(&module, &[name]);
+            assert_eq!(written[&id], vec![BitAccess::new(0, 0)], "{name}");
+        }
     }
 
     #[test]

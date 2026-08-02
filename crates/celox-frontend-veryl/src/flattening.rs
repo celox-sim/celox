@@ -1010,6 +1010,66 @@ mod tests {
     }
 
     #[test]
+    fn instance_input_output_preserves_dynamic_self_address_sources() {
+        let code = r#"
+            module child(i: input logic) {}
+
+            module top(seed: input logic<2>, mem_o: output logic<2>) {
+                function set_bit (dst: output logic) -> logic {
+                    dst = 1'b1;
+                    return 1'b0;
+                }
+                var mem: logic<2>;
+                always_comb {
+                    mem = seed;
+                }
+                inst c: child(i: set_bit(mem[mem[0]]));
+                assign mem_o = mem;
+            }
+        "#;
+
+        let (sim_modules, name_to_id, ir) = setup(code);
+        let top_module_ir = ir
+            .components
+            .iter()
+            .find_map(|component| match component {
+                Component::Module(module) if module.name.to_string() == "top" => Some(module),
+                _ => None,
+            })
+            .unwrap();
+        let top_module_sim = &sim_modules[&name_to_id[&top_module_ir.name]];
+        let glue = top_module_sim
+            .glue_blocks
+            .values()
+            .flatten()
+            .next()
+            .unwrap();
+        let parent_effect = glue
+            .output_ports
+            .iter()
+            .map(|(_, path)| path)
+            .find(|path| {
+                matches!(
+                    path.target.var(),
+                    Some(VarAtomBase {
+                        id: GlueAddr::Parent(_),
+                        ..
+                    })
+                )
+            })
+            .unwrap();
+
+        assert!(
+            parent_effect.address_sources.iter().any(|address| {
+                parent_effect.previous_sources.iter().any(|previous| {
+                    previous.id == address.id && previous.access.overlaps(&address.access)
+                })
+            }),
+            "the self-referential dynamic address must remain an address source"
+        );
+    }
+
+    #[test]
     fn test_flatting_simple_hierarchy() {
         let code = r#"
             module child(

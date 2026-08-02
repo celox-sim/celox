@@ -10,9 +10,10 @@ use crate::{
     bitslicer::BitSlicer,
     ff::FfParser,
     logic_tree::{
-        SymbolicStore, coerce_node_width, collect_written_expression,
-        eval_assignment_expression_effectful, eval_expression, get_width,
-        parse_comb_with_loop_recovery,
+        CombEffectCollector, SymbolicStore, coerce_node_width, collect_expression_effects,
+        collect_written_expression, eval_assignment_expression_effectful, eval_expression,
+        expression_contains_runtime_effect, get_width, parse_comb_with_loop_recovery,
+        subtract_written_sensitivity,
     },
     loop_provenance::{LoopProvenance, LoopRecoveryCandidate},
     registry::get_port_type,
@@ -31,8 +32,8 @@ use celox_slt::{
 };
 use num_bigint::BigUint;
 use veryl_analyzer::ir::{
-    AssignDestination, Component, Declaration, Expression, InstDeclaration, Module, Statement,
-    SystemFunctionInput, SystemFunctionKind, VarId,
+    ArrayLiteralItem, AssignDestination, Component, Declaration, Expression, Factor,
+    InstDeclaration, Module, Statement, SystemFunctionInput, SystemFunctionKind, VarId,
 };
 use veryl_analyzer::value::Value;
 use veryl_analyzer::value::byte_value_to_string;
@@ -296,10 +297,158 @@ fn build_dynamic_output_glue(
     Ok((result, prefix, sources, previous_sources, address_sources))
 }
 
+fn collect_parent_address_expression_sources(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    target: VarId,
+    expression: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+    out: &mut HashMap<VarId, HashSet<VarAtomBase<VarId>>>,
+) -> Result<(), ParserError> {
+    let ((_, sources), _) = eval_expression(module, store, expression, arena, None)?;
+    out.entry(target).or_default().extend(sources);
+    collect_parent_output_address_sources(module, store, expression, arena, out)
+}
+
+fn collect_parent_output_address_sources(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    expression: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+    out: &mut HashMap<VarId, HashSet<VarAtomBase<VarId>>>,
+) -> Result<(), ParserError> {
+    match expression {
+        Expression::Term(factor) => match factor.as_ref() {
+            Factor::FunctionCall(call) => {
+                for input in call.inputs.values() {
+                    collect_parent_output_address_sources(module, store, input, arena, out)?;
+                }
+                for destinations in call.outputs.values() {
+                    for destination in destinations {
+                        for address in destination
+                            .index
+                            .0
+                            .iter()
+                            .chain(destination.select.0.iter())
+                            .chain(
+                                destination
+                                    .select
+                                    .1
+                                    .iter()
+                                    .map(|(_, expression)| expression),
+                            )
+                        {
+                            collect_parent_address_expression_sources(
+                                module,
+                                store,
+                                destination.id,
+                                address,
+                                arena,
+                                out,
+                            )?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Factor::Variable(_, index, select, _) => {
+                for address in index
+                    .0
+                    .iter()
+                    .chain(select.0.iter())
+                    .chain(select.1.iter().map(|(_, expression)| expression))
+                {
+                    collect_parent_output_address_sources(module, store, address, arena, out)?;
+                }
+                Ok(())
+            }
+            Factor::SystemFunctionCall(call) => {
+                let mut collect = |input: &SystemFunctionInput| {
+                    collect_parent_output_address_sources(module, store, &input.0, arena, out)
+                };
+                match &call.kind {
+                    SystemFunctionKind::Clog2(input)
+                    | SystemFunctionKind::Onehot(input)
+                    | SystemFunctionKind::Signed(input)
+                    | SystemFunctionKind::Unsigned(input) => collect(input),
+                    SystemFunctionKind::Display(inputs) | SystemFunctionKind::Write(inputs) => {
+                        for input in inputs {
+                            collect(input)?;
+                        }
+                        Ok(())
+                    }
+                    SystemFunctionKind::Assert { cond, args, .. } => {
+                        collect(cond)?;
+                        for input in args {
+                            collect(input)?;
+                        }
+                        Ok(())
+                    }
+                    SystemFunctionKind::Bits(_)
+                    | SystemFunctionKind::Size(_)
+                    | SystemFunctionKind::Readmemh(_, _)
+                    | SystemFunctionKind::Finish => Ok(()),
+                }
+            }
+            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+        },
+        Expression::Unary(_, inner, _) => {
+            collect_parent_output_address_sources(module, store, inner, arena, out)
+        }
+        Expression::Binary(lhs, _, rhs, _) => {
+            collect_parent_output_address_sources(module, store, lhs, arena, out)?;
+            collect_parent_output_address_sources(module, store, rhs, arena, out)
+        }
+        Expression::Ternary(cond, then_expression, else_expression, _) => {
+            collect_parent_output_address_sources(module, store, cond, arena, out)?;
+            collect_parent_output_address_sources(module, store, then_expression, arena, out)?;
+            collect_parent_output_address_sources(module, store, else_expression, arena, out)
+        }
+        Expression::Concatenation(parts, _) => {
+            for (part, repeat) in parts {
+                collect_parent_output_address_sources(module, store, part, arena, out)?;
+                if let Some(repeat) = repeat {
+                    collect_parent_output_address_sources(module, store, repeat, arena, out)?;
+                }
+            }
+            Ok(())
+        }
+        Expression::ArrayLiteral(items, _) => {
+            for item in items {
+                match item {
+                    ArrayLiteralItem::Value(expression, repeat) => {
+                        collect_parent_output_address_sources(
+                            module, store, expression, arena, out,
+                        )?;
+                        if let Some(repeat) = repeat {
+                            collect_parent_output_address_sources(
+                                module, store, repeat, arena, out,
+                            )?;
+                        }
+                    }
+                    ArrayLiteralItem::Defaul(expression) => {
+                        collect_parent_output_address_sources(
+                            module, store, expression, arena, out,
+                        )?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        Expression::StructConstructor(_, fields, _) => {
+            for (_, expression) in fields {
+                collect_parent_output_address_sources(module, store, expression, arena, out)?;
+            }
+            Ok(())
+        }
+    }
+}
+
 fn build_parent_effect_glue(
     initial_store: &SymbolicStore<VarId>,
     store: &SymbolicStore<VarId>,
     written_accesses: &HashMap<VarId, Vec<BitAccess>>,
+    output_address_sources: &HashMap<VarId, HashSet<VarAtomBase<VarId>>>,
     parent_arena: &SLTNodeArena<VarId>,
     glue_arena: &mut SLTNodeArena<GlueAddr>,
 ) -> Result<Vec<(Vec<VarId>, LogicPath<GlueAddr>)>, ParserError> {
@@ -393,6 +542,23 @@ fn build_parent_effect_glue(
                         source.id == target.id && source.access.overlaps(&target.access)
                     })
                     .collect();
+                let address_sources = output_address_sources
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .map(|source| {
+                        VarAtomBase::new(
+                            GlueAddr::Parent(source.id),
+                            source.access.lsb,
+                            source.access.msb,
+                        )
+                    })
+                    .filter(|address| {
+                        sources.iter().any(|source| {
+                            source.id == address.id && source.access.overlaps(&address.access)
+                        })
+                    })
+                    .collect();
 
                 paths.push((
                     vec![*id],
@@ -401,7 +567,7 @@ fn build_parent_effect_glue(
                         expr: mapped,
                         sources,
                         previous_sources,
-                        address_sources: HashSet::default(),
+                        address_sources,
                         local_inputs: Vec::new(),
                         order_before: HashSet::default(),
                         comb_capture_enable_sites: Vec::new(),
@@ -687,6 +853,98 @@ impl<'a> ModuleParser<'a> {
                 &mut self.arena,
                 width,
             )?;
+            let mut output_address_sources = HashMap::default();
+            collect_parent_output_address_sources(
+                self.module,
+                &parent_store,
+                &input.expr,
+                &mut self.arena,
+                &mut output_address_sources,
+            )?;
+
+            if expression_contains_runtime_effect(self.module, &input.expr) {
+                let arena_start = self.arena.len();
+                let mut effects = CombEffectCollector::default();
+                collect_expression_effects(
+                    self.module,
+                    &parent_store,
+                    &input.expr,
+                    &mut self.arena,
+                    &mut effects,
+                )?;
+
+                let written_atoms: Vec<_> = written_accesses
+                    .iter()
+                    .flat_map(|(&id, accesses)| {
+                        accesses
+                            .iter()
+                            .map(move |access| VarAtomBase::new(id, access.lsb, access.msb))
+                    })
+                    .collect();
+                let mut process_sensitivity = std::mem::take(&mut effects.sensitivity);
+                process_sensitivity.extend(expr_sources.iter().copied());
+                for (&id, accesses) in &written_accesses {
+                    let Some(range_store) = connection_store.get(&id) else {
+                        continue;
+                    };
+                    for &access in accesses {
+                        for (value, _) in range_store.get_parts(access).map_err(|error| {
+                            ParserError::illegal_context(
+                                "instance input function output",
+                                error.to_string(),
+                                Some(&input.expr.token_range()),
+                            )
+                        })? {
+                            if let Some((_, sources)) = value {
+                                process_sensitivity.extend(sources);
+                            }
+                        }
+                    }
+                }
+                let mut process_sensitivity =
+                    subtract_written_sensitivity(process_sensitivity, &written_atoms);
+                process_sensitivity.extend(
+                    output_address_sources
+                        .values()
+                        .flat_map(|sources| sources.iter().copied()),
+                );
+                let process_sensitivity: Vec<_> = process_sensitivity.into_iter().collect();
+                for observer in &mut effects.observers {
+                    observer.sensitivity = process_sensitivity.clone();
+                    observer.written_input_atoms = observer
+                        .observed_inputs
+                        .iter()
+                        .chain(observer.position_inputs.iter())
+                        .copied()
+                        .filter(|atom| {
+                            written_atoms.iter().any(|written| {
+                                written.id == atom.id && written.access.overlaps(&atom.access)
+                            })
+                        })
+                        .collect();
+                    observer.written_inputs = observer
+                        .written_input_atoms
+                        .iter()
+                        .map(|atom| atom.id)
+                        .collect::<HashSet<_>>()
+                        .into_iter()
+                        .collect();
+                }
+
+                let site_offset = self.comb_runtime_event_sites.len();
+                for observer in &mut effects.observers {
+                    observer.site_id += site_offset as u32;
+                    observer.activation_group = site_offset as u32;
+                }
+                let arena_end = self.arena.len();
+                remap_for_effect_site_ids(
+                    &mut self.arena,
+                    arena_start..arena_end,
+                    site_offset as u32,
+                )?;
+                self.comb_observers.extend(effects.observers);
+                self.comb_runtime_event_sites.extend(effects.sites);
+            }
 
             // Map Parent VarId to GlueAddr::Parent
             let mut cache = HashMap::default();
@@ -720,6 +978,7 @@ impl<'a> ModuleParser<'a> {
                 &parent_store,
                 &connection_store,
                 &written_accesses,
+                &output_address_sources,
                 &self.arena,
                 &mut glue_arena,
             )?);
