@@ -223,10 +223,14 @@ assign seen_o = seen;
         @ignore_on(wasm);
         @setup { let code = r#"
 module Child (
-i: input logic
-) {}
+i: input logic,
+o: output logic
+) {
+assign o = i;
+}
 module Top (
 a: input logic,
+child_o: output logic,
 seen_o: output logic
 ) {
 function write_seen (
@@ -239,17 +243,20 @@ return x;
 }
 var seen: logic;
 inst child: Child (
-i: write_seen(a, seen)
+i: write_seen(a, seen),
+o: child_o
 );
 assign seen_o = seen;
 }
 "#; }
         @build Simulator::builder(code, "Top");
     let a = sim.signal("a");
+    let child_o = sim.signal("child_o");
     let seen_o = sim.signal("seen_o");
     sim.drain_runtime_events();
 
     sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(child_o), 1u8.into());
     assert_eq!(sim.get(seen_o), 1u8.into());
     assert_eq!(
         sim.drain_runtime_events(),

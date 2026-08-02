@@ -865,9 +865,16 @@ impl<'a> ModuleParser<'a> {
             if expression_contains_runtime_effect(self.module, &input.expr) {
                 let arena_start = self.arena.len();
                 let mut effects = CombEffectCollector::default();
+                let mut effect_store = SymbolicStore::default();
+                for (&id, variable) in &self.module.variables {
+                    effect_store.insert(
+                        id,
+                        RangeStore::new(None, resolve_total_width(self.module, variable)?),
+                    );
+                }
                 collect_expression_effects(
                     self.module,
-                    &parent_store,
+                    &effect_store,
                     &input.expr,
                     &mut self.arena,
                     &mut effects,
