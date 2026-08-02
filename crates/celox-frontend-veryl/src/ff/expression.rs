@@ -453,6 +453,34 @@ impl<'a> FfParser<'a> {
         let layout = self.array_view_layout(var_id)?;
 
         let mut cached_elements = std::collections::HashMap::new();
+        let mut source_order = Vec::new();
+        Self::collect_array_literal_elements_in_source_order(items, &mut source_order);
+        for selected_expr in source_order {
+            let cache_key = selected_expr as *const Expression as usize;
+            if cached_elements.contains_key(&cache_key) {
+                continue;
+            }
+            self.parse_expression(
+                selected_expr,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+                Some(layout.element_width),
+            )?;
+            let reg = self.stack.pop_back().unwrap();
+            let reg = self.coerce_register_to_formal(
+                ir_builder,
+                reg,
+                layout.element_width,
+                selected_expr.comptime().r#type.signed,
+                layout.signed,
+                layout.is_2state,
+            );
+            cached_elements.insert(cache_key, reg);
+        }
+
         let mut elements = Vec::with_capacity(layout.element_count);
         for linear_index in 0..layout.element_count {
             let mut remainder = linear_index;
@@ -468,29 +496,8 @@ impl<'a> FfParser<'a> {
                 unreachable!("validated array literal covers every formal element");
             };
             let cache_key = selected_expr as *const Expression as usize;
-            let selected_reg = if let Some(reg) = cached_elements.get(&cache_key) {
-                *reg
-            } else {
-                self.parse_expression(
-                    selected_expr,
-                    targets,
-                    domain,
-                    convert,
-                    sources,
-                    ir_builder,
-                    Some(layout.element_width),
-                )?;
-                let reg = self.stack.pop_back().unwrap();
-                let reg = self.coerce_register_to_formal(
-                    ir_builder,
-                    reg,
-                    layout.element_width,
-                    selected_expr.comptime().r#type.signed,
-                    layout.signed,
-                    layout.is_2state,
-                );
-                cached_elements.insert(cache_key, reg);
-                reg
+            let Some(&selected_reg) = cached_elements.get(&cache_key) else {
+                unreachable!("every selected element was evaluated in literal source order");
             };
             elements.push(selected_reg);
         }
@@ -508,6 +515,22 @@ impl<'a> FfParser<'a> {
             elements,
             owns_backing: true,
         })
+    }
+
+    fn collect_array_literal_elements_in_source_order<'b>(
+        items: &'b [ArrayLiteralItem],
+        elements: &mut Vec<&'b Expression>,
+    ) {
+        for item in items {
+            let expr = match item {
+                ArrayLiteralItem::Value(expr, _) | ArrayLiteralItem::Defaul(expr) => expr.as_ref(),
+            };
+            if let Expression::ArrayLiteral(nested, _) = expr {
+                Self::collect_array_literal_elements_in_source_order(nested, elements);
+            } else {
+                elements.push(expr);
+            }
+        }
     }
 
     fn store_array_view_elements<A>(
@@ -668,9 +691,10 @@ impl<'a> FfParser<'a> {
                     }
                 }
                 Factor::SystemFunctionCall(call) => match &call.kind {
-                    SystemFunctionKind::Bits(input)
-                    | SystemFunctionKind::Size(input)
-                    | SystemFunctionKind::Clog2(input)
+                    // Reflection queries are compile-time constants and do
+                    // not evaluate their operand during expression lowering.
+                    SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => {}
+                    SystemFunctionKind::Clog2(input)
                     | SystemFunctionKind::Onehot(input)
                     | SystemFunctionKind::Signed(input)
                     | SystemFunctionKind::Unsigned(input) => collect(&input.0, views, seen),
