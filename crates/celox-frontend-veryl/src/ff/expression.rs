@@ -43,9 +43,8 @@ pub(super) fn expression_has_side_effect(expr: &Expression) -> bool {
                 !call.outputs.is_empty() || call.inputs.values().any(expression_has_side_effect)
             }
             Factor::SystemFunctionCall(call) => match &call.kind {
-                SystemFunctionKind::Bits(input)
-                | SystemFunctionKind::Size(input)
-                | SystemFunctionKind::Clog2(input)
+                SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => false,
+                SystemFunctionKind::Clog2(input)
                 | SystemFunctionKind::Onehot(input)
                 | SystemFunctionKind::Signed(input)
                 | SystemFunctionKind::Unsigned(input) => input_has_side_effect(input),
@@ -2472,6 +2471,32 @@ impl<'a> FfParser<'a> {
     }
 
     fn parse_expression_in_context<A>(
+        &mut self,
+        expr: &Expression,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+        context: Option<ValueContext>,
+    ) -> Result<(), ParserError> {
+        let state = self
+            .get_bound_function_event_arg_state(expr.token_range())
+            .cloned();
+        let has_state = state.is_some();
+        if let Some(state) = state {
+            self.function_arg_stack.push(state);
+        }
+        let result = self.parse_expression_in_context_inner(
+            expr, targets, domain, convert, sources, ir_builder, context,
+        );
+        if has_state {
+            self.function_arg_stack.pop();
+        }
+        result
+    }
+
+    fn parse_expression_in_context_inner<A>(
         &mut self,
         expr: &Expression,
         targets: &mut Vec<VarAtomBase<A>>,
