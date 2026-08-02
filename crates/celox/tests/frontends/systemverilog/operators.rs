@@ -911,10 +911,12 @@ sv_backends! {
             input logic mode,
             input logic signed [1:0] signed_mode,
             input logic [255:0] wide_mode,
+            input logic [255:0] wide_expr_mode,
             output logic [7:0] q_negative,
             output logic [7:0] q_scalar_signed,
             output logic [7:0] q_wide_parameter,
             output logic [7:0] q_wide_fill,
+            output logic [7:0] q_wide_expression,
             output logic [63:0] q_fill,
             output logic [63:0] q_shift
         );
@@ -922,6 +924,7 @@ sv_backends! {
             localparam logic signed SCALAR_SIGNED = 1'b1;
             localparam logic [255:0] WIDE_NEGATIVE = -1;
             localparam logic [255:0] WIDE_FILL = '1;
+            localparam logic [255:0] WIDE_SHIFT = 256'b1 << 200;
 
             always_ff @(posedge clk) begin
                 case (signed_mode)
@@ -939,6 +942,10 @@ sv_backends! {
                 case (wide_mode)
                     WIDE_FILL: q_wide_fill <= 8'hc7;
                     default: q_wide_fill <= 0;
+                endcase
+                case (wide_expr_mode)
+                    WIDE_SHIFT: q_wide_expression <= 8'hd8;
+                    default: q_wide_expression <= 0;
                 endcase
                 case (mode)
                     0: q_fill <= '1;
@@ -961,12 +968,15 @@ sv_backends! {
     let mode = sim.signal("mode");
     let signed_mode = sim.signal("signed_mode");
     let wide_mode = sim.signal("wide_mode");
+    let wide_expr_mode = sim.signal("wide_expr_mode");
     let wide_negative = (BigUint::from(1u8) << 256) - BigUint::from(1u8);
+    let wide_shift = BigUint::from(1u8) << 200;
 
     sim.modify(|io| {
         io.set(mode, 0u8);
         io.set(signed_mode, 3u8);
         io.set_wide(wide_mode, wide_negative);
+        io.set_wide(wide_expr_mode, wide_shift);
     }).unwrap();
     sim.tick(clk).unwrap();
 
@@ -974,6 +984,7 @@ sv_backends! {
     assert_eq!(sim.get(sim.signal("q_scalar_signed")), 0xa5u8.into());
     assert_eq!(sim.get(sim.signal("q_wide_parameter")), 0xb6u8.into());
     assert_eq!(sim.get(sim.signal("q_wide_fill")), 0xc7u8.into());
+    assert_eq!(sim.get(sim.signal("q_wide_expression")), 0xd8u8.into());
     assert_eq!(sim.get(sim.signal("q_fill")), u64::MAX.into());
     assert_eq!(sim.get(sim.signal("q_shift")), (1u64 << 40).into());
     }
@@ -996,10 +1007,13 @@ sv_backends! {
             output logic [7:0] q_parameter_x_fill,
             output logic [7:0] q_parameter_z_fill,
             output logic [7:0] q_function_integer,
+            output logic [7:0] q_function_typedef,
             output logic q_const_case_equality,
             output logic q_const_case_fill,
             output logic q_const_wildcard_equality
         );
+            typedef logic [1:0] word_t;
+
             localparam logic [1:0] X_LABEL = 2'b1x;
             localparam EXPR_LABEL = 2'b11 + 2'b00;
             localparam logic [3:0] X_FILL = 'x;
@@ -1030,6 +1044,10 @@ sv_backends! {
 
             function automatic integer decode_integer(input logic ignored);
                 return 2;
+            endfunction
+
+            function automatic word_t decode_typedef(input logic ignored);
+                return 4;
             endfunction
 
             always_ff @(posedge clk) begin
@@ -1063,6 +1081,10 @@ sv_backends! {
                 case (decode_integer(mode[0]))
                     2: q_function_integer <= 8'he9;
                     default: q_function_integer <= 0;
+                endcase
+                case (decode_typedef(mode[0]))
+                    2'b00: q_function_typedef <= 8'hfa;
+                    default: q_function_typedef <= 0;
                 endcase
                 q_const_case_equality <= MATCH_X;
                 q_const_case_fill <= MATCH_FILL;
@@ -1103,6 +1125,7 @@ sv_backends! {
         (BigUint::from(0u8), BigUint::from(0x0fu8)),
     );
     assert_eq!(sim.get(sim.signal("q_function_integer")), 0xe9u8.into());
+    assert_eq!(sim.get(sim.signal("q_function_typedef")), 0xfau8.into());
     assert_eq!(sim.get(sim.signal("q_const_case_equality")), 1u8.into());
     assert_eq!(sim.get(sim.signal("q_const_case_fill")), 1u8.into());
     assert_eq!(
@@ -1131,6 +1154,7 @@ sv_backends! {
         (BigUint::from(0u8), BigUint::from(0x0fu8)),
     );
     assert_eq!(sim.get(sim.signal("q_function_integer")), 0xe9u8.into());
+    assert_eq!(sim.get(sim.signal("q_function_typedef")), 0xfau8.into());
     assert_eq!(sim.get(sim.signal("q_const_case_equality")), 1u8.into());
     assert_eq!(sim.get(sim.signal("q_const_case_fill")), 1u8.into());
     assert_eq!(

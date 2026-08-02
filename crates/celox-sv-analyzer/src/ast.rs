@@ -95,7 +95,7 @@ impl Module {
         let signals = signals_from_module_node(node.clone(), syntax_tree)?;
         let instances = instances_from_module_node(node.clone(), syntax_tree)?;
         let const_env = const_env_from_parameters(&parameters);
-        let parameter_literals = parameter_literal_env(&parameters, &const_env);
+        let parameter_values = parameter_value_env(&parameters, &const_env);
         let packed_dimensions = packed_dimensions_from_ports_and_signals(&ports, &signals);
         let functions =
             functions_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions);
@@ -113,13 +113,11 @@ impl Module {
             node.clone(),
             syntax_tree,
             &const_env,
-            &parameter_literals,
+            &parameter_values,
             &packed_dimensions,
         )?
         .into_iter()
-        .map(|process| {
-            expand_ff_process_calls(process, &functions, &const_env, &parameter_literals)
-        })
+        .map(|process| expand_ff_process_calls(process, &functions, &const_env, &parameter_values))
         .collect();
         let assignments = comb_processes
             .iter()
@@ -1278,11 +1276,11 @@ fn const_env_from_parameters(parameters: &[Parameter]) -> HashMap<String, i128> 
     env
 }
 
-fn parameter_literal_env(
+fn parameter_value_env(
     parameters: &[Parameter],
     const_env: &HashMap<String, i128>,
-) -> HashMap<String, String> {
-    let mut literals = HashMap::new();
+) -> HashMap<String, Expr> {
+    let mut values = HashMap::new();
     let mut parameter_types = HashMap::new();
     for parameter in parameters {
         let inferred_type = parameter
@@ -1299,9 +1297,9 @@ fn parameter_literal_env(
             parameter_types.insert(parameter.name().to_string(), ExprType { width, signed });
         }
 
-        let literal = if let Some(value) = const_env.get(parameter.name()).copied() {
+        let value = if let Some(value) = const_env.get(parameter.name()).copied() {
             if let Some(width) = width {
-                format_typed_parameter_literal(value, width, signed)
+                Expr::Literal(format_typed_parameter_literal(value, width, signed))
             } else if value.is_negative() {
                 let width = (128 - (!value as u128).leading_zeros() as usize + 1).max(32);
                 let mask = if width == 128 {
@@ -1309,20 +1307,67 @@ fn parameter_literal_env(
                 } else {
                     (1u128 << width) - 1
                 };
-                format!("{width}'sd{}", (value as u128) & mask)
+                Expr::Literal(format!("{width}'sd{}", (value as u128) & mask))
             } else if let Some(ConstExpr::Literal(literal)) = parameter.value() {
-                literal.clone()
+                Expr::Literal(literal.clone())
             } else {
-                value.to_string()
+                Expr::Literal(value.to_string())
             }
-        } else if let Some(ConstExpr::Literal(literal)) = parameter.value() {
-            literal.clone()
+        } else if let Some(value) = parameter.value().cloned() {
+            let value = substitute_expr_constants_with_parameter_literals(
+                const_expr_to_expr(value),
+                const_env,
+                &values,
+            );
+            if let Some(width) = width {
+                Expr::Resize {
+                    expr: Box::new(value),
+                    width,
+                    signed,
+                }
+            } else {
+                value
+            }
         } else {
             continue;
         };
-        literals.insert(parameter.name().to_string(), literal);
+        values.insert(parameter.name().to_string(), value);
     }
-    literals
+    values
+}
+
+fn const_expr_to_expr(expr: ConstExpr) -> Expr {
+    match expr {
+        ConstExpr::Literal(value) => Expr::Literal(value),
+        ConstExpr::Ident(name) => Expr::Ident(name),
+        ConstExpr::Select { expr, bit } => Expr::Select {
+            expr: Box::new(const_expr_to_expr(*expr)),
+            msb: (*bit).clone(),
+            lsb: *bit,
+        },
+        ConstExpr::Function { name, args } => Expr::Call {
+            name,
+            args: args.into_iter().map(const_expr_to_expr).collect(),
+        },
+        ConstExpr::Unary { op, expr } => Expr::Unary {
+            op,
+            expr: Box::new(const_expr_to_expr(*expr)),
+        },
+        ConstExpr::Binary { left, op, right } => Expr::Binary {
+            left: Box::new(const_expr_to_expr(*left)),
+            op,
+            right: Box::new(const_expr_to_expr(*right)),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expr::Mux {
+            condition: Box::new(const_expr_to_expr(*condition)),
+            then_expr: Box::new(const_expr_to_expr(*then_expr)),
+            else_expr: Box::new(const_expr_to_expr(*else_expr)),
+        },
+    }
 }
 
 fn format_typed_parameter_literal(value: i128, width: usize, signed: bool) -> String {
@@ -1894,7 +1939,10 @@ fn function_return_type(
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
     let alias = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases);
-    if alias.is_some() || unwrap_node!(node.clone(), TypeIdentifier).is_some() {
+    if alias.is_some() {
+        return value_type_from_ref_node(node, syntax_tree, const_env, type_aliases);
+    }
+    if unwrap_node!(node.clone(), TypeIdentifier).is_some() {
         return None;
     }
     if let Some(r#type) = integer_atom_expr_type(node.clone()) {
@@ -2702,7 +2750,7 @@ fn substitute_assignment_constants(
 fn substitute_assignment_constants_with_parameter_literals(
     assignment: Assignment,
     const_env: &HashMap<String, i128>,
-    parameter_literals: &HashMap<String, String>,
+    parameter_literals: &HashMap<String, Expr>,
 ) -> Assignment {
     Assignment::new(
         substitute_lvalue_constants(assignment.lhs, const_env),
@@ -2728,12 +2776,12 @@ fn substitute_lvalue_constants(lvalue: LValue, const_env: &HashMap<String, i128>
 fn substitute_expr_constants_with_parameter_literals(
     expr: Expr,
     const_env: &HashMap<String, i128>,
-    parameter_literals: &HashMap<String, String>,
+    parameter_literals: &HashMap<String, Expr>,
 ) -> Expr {
     match expr {
         Expr::Ident(name) => parameter_literals
             .get(&name)
-            .map(|literal| Expr::Literal(literal.clone()))
+            .cloned()
             .or_else(|| {
                 const_env
                     .get(&name)
@@ -2866,7 +2914,7 @@ fn expand_ff_process_calls(
     process: FfProcess,
     functions: &HashMap<String, Function>,
     const_env: &HashMap<String, i128>,
-    parameter_literals: &HashMap<String, String>,
+    parameter_literals: &HashMap<String, Expr>,
 ) -> FfProcess {
     FfProcess::new(
         process.events,
@@ -3208,7 +3256,7 @@ fn ff_processes_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    parameter_literals: &HashMap<String, String>,
+    parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Result<Vec<FfProcess>, AnalyzerError> {
     let mut processes = Vec::new();
@@ -3229,7 +3277,7 @@ fn ff_processes_from_non_port_module_item(
     item: &sv_parser::NonPortModuleItem,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    parameter_literals: &HashMap<String, String>,
+    parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
 ) -> Result<(), AnalyzerError> {
@@ -3265,7 +3313,7 @@ fn ff_processes_from_generate_item(
     item: &sv_parser::GenerateItem,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    parameter_literals: &HashMap<String, String>,
+    parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
 ) -> Result<(), AnalyzerError> {
@@ -3286,7 +3334,7 @@ fn ff_processes_from_module_or_generate_item(
     item: &sv_parser::ModuleOrGenerateItem,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    parameter_literals: &HashMap<String, String>,
+    parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
 ) -> Result<(), AnalyzerError> {
@@ -3307,7 +3355,7 @@ fn ff_processes_from_module_common_item(
     item: &sv_parser::ModuleCommonItem,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    parameter_literals: &HashMap<String, String>,
+    parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
 ) -> Result<(), AnalyzerError> {
@@ -3361,7 +3409,7 @@ fn ff_processes_from_generate_block(
     block: &sv_parser::GenerateBlock,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    parameter_literals: &HashMap<String, String>,
+    parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
 ) -> Result<(), AnalyzerError> {
@@ -3396,7 +3444,7 @@ fn ff_process_from_always_construct(
     always: &sv_parser::AlwaysConstruct,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    parameter_literals: &HashMap<String, String>,
+    parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Result<Option<FfProcess>, AnalyzerError> {
     if !matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_)) {
