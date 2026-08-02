@@ -1,6 +1,6 @@
 pub use celox_sir_opt::{OptLevel, OptimizeOptions, SirPass};
 
-pub mod coalescing;
+pub mod sir;
 
 pub fn optimize(
     program: &mut crate::ir::UnoptimizedSir,

@@ -244,13 +244,10 @@ pub struct SimulatorOptions {
 impl Default for SimulatorOptions {
     fn default() -> Self {
         let opt = crate::optimizer::OptimizeOptions::default();
-        let cranelift = crate::backend::CraneliftOptions::for_speed_optimization(
-            opt.opt_level() != crate::optimizer::OptLevel::O0,
-        );
         Self {
             four_state: false,
             optimize_options: opt,
-            cranelift_options: cranelift,
+            cranelift_options: crate::backend::CraneliftOptions::default(),
             #[cfg(target_arch = "x86_64")]
             x86_options: crate::backend::X86BackendOptions::default(),
             trace: Default::default(),
@@ -1022,7 +1019,7 @@ fn run_dead_store_elimination(
         }
     }
 
-    crate::optimizer::coalescing::optimize_rooted_comb_memory(
+    crate::optimizer::sir::optimize_rooted_comb_memory(
         program,
         &externally_live,
         options.four_state,

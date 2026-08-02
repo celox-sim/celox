@@ -205,7 +205,7 @@ impl OptimizedSir {
                     )
                 });
         }
-        crate::optimizer::coalescing::retain_final_identity_aliases(&mut program, four_state);
+        crate::optimizer::sir::retain_final_identity_aliases(&mut program, four_state);
         let layout = crate::backend::MemoryLayout::build(&program, four_state, mode);
 
         // Remove identity Stores for aliases validated by the layout
@@ -224,7 +224,7 @@ impl OptimizedSir {
                 .map(|(&alias, &canonical)| (alias, canonical))
                 .collect();
             if !aliased.is_empty() {
-                crate::optimizer::coalescing::remove_final_identity_alias_stores(
+                crate::optimizer::sir::remove_final_identity_alias_stores(
                     &mut program,
                     &aliased,
                     four_state,

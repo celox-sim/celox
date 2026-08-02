@@ -1,0 +1,19 @@
+use crate::PassOptions;
+use crate::ir::{ExecutionUnit, RegionedAbsoluteAddr};
+
+use super::block_opt::schedule_instructions;
+use super::pass_manager::ExecutionUnitPass;
+
+pub(in crate::optimizer) struct ReschedulePass;
+
+impl ExecutionUnitPass for ReschedulePass {
+    fn name(&self) -> &'static str {
+        "reschedule"
+    }
+
+    fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions) {
+        for block in eu.blocks.values_mut() {
+            schedule_instructions(&mut block.instructions, options.max_inflight_loads);
+        }
+    }
+}
