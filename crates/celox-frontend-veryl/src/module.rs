@@ -608,26 +608,18 @@ fn collect_parent_output_address_sources(
             collect_parent_output_address_sources(module, store, else_expression, arena, out)
         }
         Expression::Concatenation(parts, _) => {
-            for (part, repeat) in parts {
+            for (part, _) in parts {
                 collect_parent_output_address_sources(module, store, part, arena, out)?;
-                if let Some(repeat) = repeat {
-                    collect_parent_output_address_sources(module, store, repeat, arena, out)?;
-                }
             }
             Ok(())
         }
         Expression::ArrayLiteral(items, _) => {
             for item in items {
                 match item {
-                    ArrayLiteralItem::Value(expression, repeat) => {
+                    ArrayLiteralItem::Value(expression, _) => {
                         collect_parent_output_address_sources(
                             module, store, expression, arena, out,
                         )?;
-                        if let Some(repeat) = repeat {
-                            collect_parent_output_address_sources(
-                                module, store, repeat, arena, out,
-                            )?;
-                        }
                     }
                     ArrayLiteralItem::Defaul(expression) => {
                         collect_parent_output_address_sources(
@@ -1477,6 +1469,32 @@ impl<'a> ModuleParser<'a> {
                     )?;
                     destination_store = next_store;
                 }
+
+                // Runtime effects in a later destination execute after this
+                // child slice has been written. Model that statement position
+                // with a parent read: scheduling orders the observer after the
+                // corresponding glue path, and capture then sees the actual
+                // child-driven value without introducing a child VarId into
+                // the parent module arena.
+                let effect_preview = self.arena.alloc(SLTNode::Input {
+                    variable: dst.id,
+                    signed: self.module.variables[&dst.id].r#type.signed,
+                    index: vec![],
+                    access,
+                })?;
+                let effect_sources =
+                    std::iter::once(VarAtomBase::new(dst.id, access.lsb, access.msb)).collect();
+                output_effect_store
+                    .get_mut(&dst.id)
+                    .expect("output effect store contains every parent variable")
+                    .update(access, Some((effect_preview, effect_sources)))
+                    .map_err(|error| {
+                        ParserError::illegal_context(
+                            "output connection effect preview",
+                            error.to_string(),
+                            Some(&dst.token),
+                        )
+                    })?;
 
                 current_offset = slice_end;
             }

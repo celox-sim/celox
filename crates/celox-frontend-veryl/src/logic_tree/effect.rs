@@ -661,18 +661,12 @@ pub(crate) fn expression_contains_runtime_effect(module: &Module, expression: &E
                 || expression_contains_runtime_effect(module, then_expr)
                 || expression_contains_runtime_effect(module, else_expr)
         }
-        Expression::Concatenation(items, _) => items.iter().any(|(expression, repeat)| {
-            expression_contains_runtime_effect(module, expression)
-                || repeat
-                    .as_ref()
-                    .is_some_and(|repeat| expression_contains_runtime_effect(module, repeat))
-        }),
+        Expression::Concatenation(items, _) => items
+            .iter()
+            .any(|(expression, _)| expression_contains_runtime_effect(module, expression)),
         Expression::ArrayLiteral(items, _) => items.iter().any(|item| match item {
-            ArrayLiteralItem::Value(expression, repeat) => {
+            ArrayLiteralItem::Value(expression, _) => {
                 expression_contains_runtime_effect(module, expression)
-                    || repeat
-                        .as_ref()
-                        .is_some_and(|repeat| expression_contains_runtime_effect(module, repeat))
             }
             ArrayLiteralItem::Defaul(expression) => {
                 expression_contains_runtime_effect(module, expression)
@@ -766,7 +760,7 @@ pub(crate) fn collect_expression_effects(
         }
         Expression::Concatenation(items, _) => {
             let mut item_store = store.clone();
-            for (item_expr, repeat_expr) in items {
+            for (item_expr, _) in items {
                 collect_and_advance_expression(
                     module,
                     &mut item_store,
@@ -774,15 +768,6 @@ pub(crate) fn collect_expression_effects(
                     arena,
                     collector,
                 )?;
-                if let Some(repeat_expr) = repeat_expr {
-                    collect_and_advance_expression(
-                        module,
-                        &mut item_store,
-                        repeat_expr,
-                        arena,
-                        collector,
-                    )?;
-                }
             }
             Ok(())
         }
@@ -790,7 +775,7 @@ pub(crate) fn collect_expression_effects(
             let mut item_store = store.clone();
             for item in items {
                 match item {
-                    ArrayLiteralItem::Value(item_expr, repeat_expr) => {
+                    ArrayLiteralItem::Value(item_expr, _) => {
                         collect_and_advance_expression(
                             module,
                             &mut item_store,
@@ -798,15 +783,6 @@ pub(crate) fn collect_expression_effects(
                             arena,
                             collector,
                         )?;
-                        if let Some(repeat_expr) = repeat_expr {
-                            collect_and_advance_expression(
-                                module,
-                                &mut item_store,
-                                repeat_expr,
-                                arena,
-                                collector,
-                            )?;
-                        }
                     }
                     ArrayLiteralItem::Defaul(default_expr) => {
                         collect_and_advance_expression(
@@ -1977,22 +1953,16 @@ fn collect_expression_position_inputs(
             collect_expression_position_inputs(module, else_expr, out)
         }
         Expression::Concatenation(parts, _) => {
-            for (part, repeat) in parts {
+            for (part, _) in parts {
                 collect_expression_position_inputs(module, part, out)?;
-                if let Some(repeat) = repeat {
-                    collect_expression_position_inputs(module, repeat, out)?;
-                }
             }
             Ok(())
         }
         Expression::ArrayLiteral(items, _) => {
             for item in items {
                 match item {
-                    ArrayLiteralItem::Value(expr, repeat) => {
+                    ArrayLiteralItem::Value(expr, _) => {
                         collect_expression_position_inputs(module, expr, out)?;
-                        if let Some(repeat) = repeat {
-                            collect_expression_position_inputs(module, repeat, out)?;
-                        }
                     }
                     ArrayLiteralItem::Defaul(expr) => {
                         collect_expression_position_inputs(module, expr, out)?;
