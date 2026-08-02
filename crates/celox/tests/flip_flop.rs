@@ -492,6 +492,39 @@ fn test_ff_runtime_for_bitwise_steps(sim) {
     assert_eq!(sim.get(q_xor), 5u8.into());
 }
 
+fn test_ff_signed_xor_step_uses_loop_counter_width(sim) {
+    // The Veryl reference simulator also evaluates this update at the widened bound width.
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            wide_start: input signed logic<32>,
+            wide_end: input signed logic<128>,
+            q: output signed logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in wide_start..=wide_end step ^= 2147483648 {
+                    q = i;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let wide_start = sim.signal("wide_start");
+    let wide_end = sim.signal("wide_end");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(wide_start, -8i32);
+        io.set_wide(wide_end, BigUint::from(2_147_483_640u32));
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0x7fff_fff8u32.into());
+}
+
 fn test_ff_runtime_for_break(sim) {
     @setup { let code = r#"
         module Top (

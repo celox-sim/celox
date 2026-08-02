@@ -1791,11 +1791,16 @@ impl<'a> FfParser<'a> {
                 ir_builder.switch_to_block(advance_bb);
             }
 
-            let current_math =
-                self.cast_reg_width_ext(ir_builder, body_counter, math_width, loop_signed);
-            let step_reg = ir_builder.alloc_bit(math_width, loop_signed);
+            let step_width = if matches!(stepped_op, Some(Op::BitOr | Op::BitXor)) {
+                loop_width
+            } else {
+                math_width
+            };
+            let current_step =
+                self.cast_reg_width_ext(ir_builder, body_counter, step_width, loop_signed);
+            let step_reg = ir_builder.alloc_bit(step_width, loop_signed);
             ir_builder.emit(SIRInstruction::Imm(step_reg, SIRValue::new(step as u64)));
-            let next_reg = ir_builder.alloc_bit(math_width, loop_signed);
+            let next_step = ir_builder.alloc_bit(step_width, loop_signed);
             let op = match stepped_op {
                 Some(Op::Mul) => BinaryOp::Mul,
                 Some(Op::LogicShiftL | Op::ArithShiftL) => BinaryOp::Shl,
@@ -1811,7 +1816,15 @@ impl<'a> FfParser<'a> {
                     ));
                 }
             };
-            ir_builder.emit(SIRInstruction::Binary(next_reg, current_math, op, step_reg));
+            ir_builder.emit(SIRInstruction::Binary(
+                next_step,
+                current_step,
+                op,
+                step_reg,
+            ));
+            let current_math =
+                self.cast_reg_width_ext(ir_builder, current_step, math_width, loop_signed);
+            let next_reg = self.cast_reg_width_ext(ir_builder, next_step, math_width, loop_signed);
             let progress_reg = ir_builder.alloc_bit(1, false);
             ir_builder.emit(SIRInstruction::Binary(
                 progress_reg,

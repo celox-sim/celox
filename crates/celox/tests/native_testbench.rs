@@ -285,6 +285,9 @@ fn test_for_loop_bitwise_steps() {
             var cnt: logic<32>;
             var or_end: logic<32>;
             var xor_end: logic<32>;
+            var xor_wide_start: signed logic<32>;
+            var xor_wide_end: signed logic<128>;
+            var xor_wide_last: signed logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
                 rst.assert(clk);
@@ -298,6 +301,13 @@ fn test_for_loop_bitwise_steps() {
                     clk.next(i);
                 }}
                 $assert(cnt == 32'd18);
+                xor_wide_start = (0 - 8) as 32;
+                xor_wide_end = 2147483640;
+                xor_wide_last = 0;
+                for i in xor_wide_start..=xor_wide_end step ^= 2147483648 {{
+                    xor_wide_last = i;
+                }}
+                $assert(xor_wide_last == 32'sh7fff_fff8);
                 $finish();
             }}
         }}

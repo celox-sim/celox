@@ -200,6 +200,34 @@ fn test_runtime_bitwise_steps_in_synth_for_loops(sim) {
     assert_eq!(sim.get(xor_last), 5u32.into());
 }
 
+fn test_signed_xor_step_uses_loop_counter_width(sim) {
+    // The Veryl reference simulator also evaluates this update at the widened bound width.
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            wide_end: input signed logic<128>,
+            last: output signed logic<32>
+        ) {
+            var start: signed logic<32>;
+            always_comb {
+                start = (0 - 8) as 32;
+                last = 0;
+                for i in start..=wide_end step ^= 2147483648 {
+                    last = i;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let wide_end = sim.signal("wide_end");
+    let last = sim.signal("last");
+    sim.modify(|io| io.set_wide(wide_end, BigUint::from(2_147_483_640u32)))
+        .unwrap();
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(last), 0x7fff_fff8u32.into());
+}
+
 fn test_runtime_bounds_terminal_inclusive_mul_loop_exits_cleanly(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
