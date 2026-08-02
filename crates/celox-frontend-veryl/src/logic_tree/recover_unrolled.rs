@@ -11,7 +11,7 @@ use veryl_parser::token_range::TokenRange;
 
 use super::{
     ActiveGuard, BoundaryMap, NodeId, SLTForFoldGroupState, SLTNode, SLTNodeArena, SymbolicStore,
-    combine_active_guard, combine_parts_with_default, eval_expression, eval_statement,
+    combine_active_guard, combine_parts_with_default, eval_expression_effectful, eval_statement,
     eval_statement_with_recovery, get_width, merge_boundaries, procedural_condition,
     range_store_error,
 };
@@ -38,7 +38,7 @@ pub(super) fn eval_statements(
             if guarded_matches.len() == 1 {
                 let candidate = guarded_matches[0];
                 let ((guard, guard_sources), guard_boundaries) =
-                    eval_expression(module, &store, &if_stmt.cond, arena, None)?;
+                    eval_expression_effectful(module, &mut store, &if_stmt.cond, arena, None)?;
                 let guard = procedural_condition(arena, guard)?;
                 let guard = combine_active_guard(arena, active_guard, guard, &guard_sources)?;
                 if let Some((next_store, recovered_boundaries)) = recover_group(

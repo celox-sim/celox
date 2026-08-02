@@ -31,10 +31,10 @@ use celox_slt::{CombObserver, RangeStore, RangeStoreError};
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, AssignStatement, CaseStatement, CombDeclaration, Expression, Factor,
-    ForBound, ForRange, ForStatement, Function, FunctionCall, IfStatement, Module, Op, Statement,
-    SystemFunctionCall, SystemFunctionInput, SystemFunctionKind, VarId, VarIndex, VarPath,
-    VarSelect,
+    ArrayLiteralItem, AssignStatement, CasePattern, CaseStatement, CombDeclaration, Expression,
+    Factor, ForBound, ForRange, ForStatement, Function, FunctionCall, IfStatement, Module, Op,
+    Statement, SystemFunctionCall, SystemFunctionInput, SystemFunctionKind, VarId, VarIndex,
+    VarPath, VarSelect,
 };
 use veryl_analyzer::value::{Value, byte_value_to_string};
 use veryl_parser::resource_table;
@@ -47,7 +47,7 @@ use effect::{
 pub use expr::coerce_node_width;
 use expr::{
     eval_array_literal_expression_effectful, eval_assignment_expression_effectful,
-    eval_function_body_return, merge_boundaries,
+    eval_expression_effectful, eval_function_body_return, merge_boundaries,
 };
 pub use expr::{eval_assignment_expression, eval_expression, get_width};
 use state::{FunctionControlState, LoopControlState};
@@ -442,7 +442,9 @@ fn eval_statement(
             "if_reset".to_string(),
             Some(&ir.token),
         )),
-        Statement::SystemFunctionCall(_) => Ok((store, boundaries)),
+        Statement::SystemFunctionCall(call) => {
+            eval_system_function_call_side_effects(module, store, boundaries, call, arena)
+        }
         Statement::FunctionCall(fc) => eval_statement_form_function_call(
             module,
             store,
@@ -506,6 +508,51 @@ fn eval_statement_with_recovery(
     }
 }
 
+fn eval_system_function_call_side_effects(
+    module: &Module,
+    mut store: SymbolicStore<VarId>,
+    mut boundaries: BoundaryMap<VarId>,
+    call: &SystemFunctionCall,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    fn eval_input(
+        module: &Module,
+        store: &mut SymbolicStore<VarId>,
+        boundaries: &mut BoundaryMap<VarId>,
+        input: &SystemFunctionInput,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<(), ParserError> {
+        let (_, input_boundaries) =
+            eval_expression_effectful(module, store, &input.0, arena, None)?;
+        *boundaries = merge_boundaries(std::mem::take(boundaries), input_boundaries);
+        Ok(())
+    }
+
+    match &call.kind {
+        SystemFunctionKind::Display(inputs) | SystemFunctionKind::Write(inputs) => {
+            for input in inputs {
+                eval_input(module, &mut store, &mut boundaries, input, arena)?;
+            }
+        }
+        SystemFunctionKind::Assert { cond, args, .. } => {
+            eval_input(module, &mut store, &mut boundaries, cond, arena)?;
+            for input in args {
+                eval_input(module, &mut store, &mut boundaries, input, arena)?;
+            }
+        }
+        SystemFunctionKind::Bits(_)
+        | SystemFunctionKind::Size(_)
+        | SystemFunctionKind::Clog2(_)
+        | SystemFunctionKind::Onehot(_)
+        | SystemFunctionKind::Signed(_)
+        | SystemFunctionKind::Unsigned(_)
+        | SystemFunctionKind::Readmemh(_, _)
+        | SystemFunctionKind::Finish => {}
+    }
+
+    Ok((store, boundaries))
+}
+
 fn eval_statements(
     module: &Module,
     store: SymbolicStore<VarId>,
@@ -551,7 +598,7 @@ fn eval_case_with_recovery(
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     fn eval_from_arm(
         module: &Module,
-        store: SymbolicStore<VarId>,
+        mut store: SymbolicStore<VarId>,
         boundaries: BoundaryMap<VarId>,
         case_stmt: &CaseStatement,
         arm_index: usize,
@@ -573,7 +620,7 @@ fn eval_case_with_recovery(
 
         let cond = case_arm_condition_expr(&case_stmt.case_target, &arm.patterns);
         let ((cond_expr, cond_sources), cond_bounds) =
-            eval_expression(module, &store, &cond, arena, None)?;
+            eval_expression_effectful(module, &mut store, &cond, arena, None)?;
         let cond_expr = procedural_condition(arena, cond_expr)?;
         let boundaries = merge_boundaries(boundaries, cond_bounds);
 
@@ -660,7 +707,7 @@ fn eval_case(
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     fn eval_from_arm(
         module: &Module,
-        store: SymbolicStore<VarId>,
+        mut store: SymbolicStore<VarId>,
         boundaries: BoundaryMap<VarId>,
         case_stmt: &CaseStatement,
         arm_index: usize,
@@ -672,7 +719,7 @@ fn eval_case(
 
         let cond = case_arm_condition_expr(&case_stmt.case_target, &arm.patterns);
         let ((cond_expr, cond_sources), cond_bounds) =
-            eval_expression(module, &store, &cond, arena, None)?;
+            eval_expression_effectful(module, &mut store, &cond, arena, None)?;
         let cond_expr = procedural_condition(arena, cond_expr)?;
         let boundaries = merge_boundaries(boundaries, cond_bounds);
 
@@ -977,7 +1024,20 @@ fn eval_loop_statement(
             "if_reset".to_string(),
             Some(&ir.token),
         )),
-        Statement::SystemFunctionCall(_) => Ok(state),
+        Statement::SystemFunctionCall(call) => {
+            let (store, boundaries) = eval_system_function_call_side_effects(
+                module,
+                state.store,
+                state.boundaries,
+                call,
+                arena,
+            )?;
+            Ok(LoopControlState {
+                store,
+                boundaries,
+                ..state
+            })
+        }
         Statement::FunctionCall(fc) => {
             let guard_state = state.clone();
             let (next_store, next_boundaries) = eval_statement_form_function_call(
@@ -1016,7 +1076,7 @@ fn eval_loop_case(
 ) -> Result<LoopControlState, ParserError> {
     fn eval_from_arm(
         module: &Module,
-        state: LoopControlState,
+        mut state: LoopControlState,
         case_stmt: &CaseStatement,
         arm_index: usize,
         arena: &mut SLTNodeArena<VarId>,
@@ -1028,9 +1088,9 @@ fn eval_loop_case(
                 .try_fold(state, |s, step| eval_loop_statement(module, s, step, arena));
         };
 
-        let ((cond_expr, cond_sources), cond_bounds) = eval_expression(
+        let ((cond_expr, cond_sources), cond_bounds) = eval_expression_effectful(
             module,
-            &state.store,
+            &mut state.store,
             &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
             arena,
             None,
@@ -1103,12 +1163,12 @@ fn eval_loop_case(
 
 fn eval_loop_if(
     module: &Module,
-    state: LoopControlState,
+    mut state: LoopControlState,
     stmt: &IfStatement,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<LoopControlState, ParserError> {
     let ((cond_expr, cond_sources), cond_bounds) =
-        eval_expression(module, &state.store, &stmt.cond, arena, None)?;
+        eval_expression_effectful(module, &mut state.store, &stmt.cond, arena, None)?;
     let cond_expr = procedural_condition(arena, cond_expr)?;
     let boundaries = merge_boundaries(state.boundaries, cond_bounds);
 
@@ -1316,29 +1376,59 @@ fn collect_written_accesses(
                 }
             }
             Statement::If(if_stmt) => {
+                collect_written_expression(module, &if_stmt.cond, out)?;
                 collect_written_accesses(module, &if_stmt.true_side, out)?;
                 collect_written_accesses(module, &if_stmt.false_side, out)?;
             }
             Statement::Case(case_stmt) => {
+                collect_written_expression(module, &case_stmt.case_target, out)?;
                 for arm in &case_stmt.arms {
+                    for pattern in &arm.patterns {
+                        match pattern {
+                            CasePattern::Eq(expression) => {
+                                collect_written_expression(module, expression, out)?;
+                            }
+                            CasePattern::Range { lo, hi, .. } => {
+                                collect_written_expression(module, lo, out)?;
+                                collect_written_expression(module, hi, out)?;
+                            }
+                        }
+                    }
                     collect_written_accesses(module, &arm.body, out)?;
                 }
                 collect_written_accesses(module, &case_stmt.default, out)?;
             }
-            Statement::For(for_stmt) => collect_written_accesses(module, &for_stmt.body, out)?,
+            Statement::For(for_stmt) => {
+                let (start, end) = match &for_stmt.range {
+                    ForRange::Forward { start, end, .. }
+                    | ForRange::Reverse { start, end, .. }
+                    | ForRange::Stepped { start, end, .. } => (start, end),
+                };
+                for bound in [start, end] {
+                    if let ForBound::Expression(expression) = bound {
+                        collect_written_expression(module, expression, out)?;
+                    }
+                }
+                collect_written_accesses(module, &for_stmt.body, out)?;
+            }
             Statement::IfReset(if_reset) => {
                 collect_written_accesses(module, &if_reset.true_side, out)?;
                 collect_written_accesses(module, &if_reset.false_side, out)?;
             }
             Statement::FunctionCall(call) => {
+                for input in call.inputs.values() {
+                    collect_written_expression(module, input, out)?;
+                }
                 for dsts in call.outputs.values() {
                     for dst in dsts {
                         collect_written_destination(module, out, dst)?;
                     }
                 }
             }
-            Statement::SystemFunctionCall(_)
-            | Statement::TbMethodCall(_)
+            Statement::SystemFunctionCall(call) => {
+                collect_written_system_function_call(module, call, out)?;
+            }
+            Statement::TbMethodCall(_)
             | Statement::Break
             | Statement::Unsupported(_)
             | Statement::Null => {}
@@ -1375,31 +1465,7 @@ fn collect_written_expression(
                 Ok(())
             }
             Factor::SystemFunctionCall(call) => {
-                let mut collect_input =
-                    |input: &SystemFunctionInput| collect_written_expression(module, &input.0, out);
-                match &call.kind {
-                    SystemFunctionKind::Bits(input)
-                    | SystemFunctionKind::Size(input)
-                    | SystemFunctionKind::Clog2(input)
-                    | SystemFunctionKind::Onehot(input)
-                    | SystemFunctionKind::Signed(input)
-                    | SystemFunctionKind::Unsigned(input) => collect_input(input),
-                    SystemFunctionKind::Readmemh(input, _) => collect_input(input),
-                    SystemFunctionKind::Display(inputs) | SystemFunctionKind::Write(inputs) => {
-                        for input in inputs {
-                            collect_input(input)?;
-                        }
-                        Ok(())
-                    }
-                    SystemFunctionKind::Assert { cond, args, .. } => {
-                        collect_input(cond)?;
-                        for input in args {
-                            collect_input(input)?;
-                        }
-                        Ok(())
-                    }
-                    SystemFunctionKind::Finish => Ok(()),
-                }
+                collect_written_system_function_call(module, call, out)
             }
             Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
         },
@@ -1447,11 +1513,49 @@ fn collect_written_expression(
     }
 }
 
+fn collect_written_system_function_call(
+    module: &Module,
+    call: &SystemFunctionCall,
+    out: &mut HashMap<VarId, Vec<BitAccess>>,
+) -> Result<(), ParserError> {
+    let mut collect_input =
+        |input: &SystemFunctionInput| collect_written_expression(module, &input.0, out);
+    match &call.kind {
+        SystemFunctionKind::Bits(input)
+        | SystemFunctionKind::Size(input)
+        | SystemFunctionKind::Clog2(input)
+        | SystemFunctionKind::Onehot(input)
+        | SystemFunctionKind::Signed(input)
+        | SystemFunctionKind::Unsigned(input) => collect_input(input),
+        SystemFunctionKind::Readmemh(input, _) => collect_input(input),
+        SystemFunctionKind::Display(inputs) | SystemFunctionKind::Write(inputs) => {
+            for input in inputs {
+                collect_input(input)?;
+            }
+            Ok(())
+        }
+        SystemFunctionKind::Assert { cond, args, .. } => {
+            collect_input(cond)?;
+            for input in args {
+                collect_input(input)?;
+            }
+            Ok(())
+        }
+        SystemFunctionKind::Finish => Ok(()),
+    }
+}
+
 fn collect_written_destination(
     module: &Module,
     out: &mut HashMap<VarId, Vec<BitAccess>>,
     dst: &veryl_analyzer::ir::AssignDestination,
 ) -> Result<(), ParserError> {
+    for expression in dst.index.0.iter().chain(dst.select.0.iter()) {
+        collect_written_expression(module, expression, out)?;
+    }
+    if let Some((_, expression)) = &dst.select.1 {
+        collect_written_expression(module, expression, out)?;
+    }
     let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
     out.entry(dst.id).or_default().push(access);
     Ok(())
@@ -2190,7 +2294,7 @@ fn assign_node_to_dsts(
 
 fn eval_statement_form_function_call(
     module: &Module,
-    store: SymbolicStore<VarId>,
+    mut store: SymbolicStore<VarId>,
     mut boundaries: BoundaryMap<VarId>,
     call: &veryl_analyzer::ir::FunctionCall,
     arena: &mut SLTNodeArena<VarId>,
@@ -2220,7 +2324,7 @@ fn eval_statement_form_function_call(
         ));
     };
 
-    let mut local_store = store.clone();
+    let mut evaluated_inputs = Vec::with_capacity(call.inputs.len());
 
     for (arg_path, arg_id) in &function_body.arg_map {
         let Some(arg_expr) = call.inputs.get(arg_path) else {
@@ -2244,15 +2348,20 @@ fn eval_statement_form_function_call(
         })?;
         let arg_width = resolve_total_width(module, formal)?;
         let ((arg_node, arg_sources), arg_bounds) =
-            eval_assignment_expression(module, &store, arg_expr, arena, arg_width)?;
+            eval_assignment_expression_effectful(module, &mut store, arg_expr, arena, arg_width)?;
         let arg_node = if formal.r#type.is_2state() && !arg_expr.comptime().r#type.is_2state() {
             arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, arg_node))?
         } else {
             arg_node
         };
         boundaries = merge_boundaries(boundaries, arg_bounds);
+        evaluated_inputs.push((*arg_id, arg_node, arg_sources, arg_width));
+    }
+
+    let mut local_store = store.clone();
+    for (arg_id, arg_node, arg_sources, arg_width) in evaluated_inputs {
         local_store.insert(
-            *arg_id,
+            arg_id,
             RangeStore::new(Some((arg_node, arg_sources)), arg_width),
         );
     }
@@ -2359,7 +2468,7 @@ struct DynamicSelectOffset {
 /// offset so direct dynamic loads and read-modify-write paths cannot diverge.
 fn eval_dynamic_select_offset(
     module: &Module,
-    store: &SymbolicStore<VarId>,
+    store: &mut expr::ExpressionStore<'_>,
     var_id: VarId,
     index: &VarIndex,
     select: &VarSelect,
@@ -2387,7 +2496,7 @@ fn eval_dynamic_select_offset(
     expressions.extend(select.0.clone());
     for (dimension, expression) in expressions[..geometry.dimension_count].iter().enumerate() {
         let ((node, node_sources), node_boundaries) =
-            eval_expression(module, store, expression, arena, None)?;
+            expr::eval_expression_in_context(module, store, expression, arena, None)?;
         sources.extend(node_sources);
         boundaries = merge_boundaries(boundaries, node_boundaries);
         let stride = geometry.strides.get(dimension).copied().ok_or_else(|| {
@@ -2452,7 +2561,13 @@ fn eval_dynamic_select_offset(
                     )
                 })?;
                 let ((anchor, anchor_sources), anchor_boundaries) =
-                    eval_expression(module, store, anchor_expression, arena, None)?;
+                    expr::eval_expression_in_context(
+                        module,
+                        store,
+                        anchor_expression,
+                        arena,
+                        None,
+                    )?;
                 sources.extend(anchor_sources);
                 boundaries = merge_boundaries(boundaries, anchor_boundaries);
                 match part {
@@ -2526,15 +2641,18 @@ fn eval_dynamic_assign(
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     let mut all_sources = rhs_sources;
-    let select_offset = eval_dynamic_select_offset(
-        module,
-        &store,
-        dst.id,
-        &dst.index,
-        &dst.select,
-        arena,
-        Some(&dst.token),
-    )?;
+    let select_offset = {
+        let mut expression_store = expr::ExpressionStore::Effectful(&mut store);
+        eval_dynamic_select_offset(
+            module,
+            &mut expression_store,
+            dst.id,
+            &dst.index,
+            &dst.select,
+            arena,
+            Some(&dst.token),
+        )?
+    };
     boundaries = merge_boundaries(boundaries, select_offset.boundaries);
     all_sources.extend(select_offset.sources);
     let offset_node = select_offset.node;
@@ -2631,7 +2749,7 @@ fn eval_dynamic_assign(
 }
 fn eval_if_with_recovery(
     module: &Module,
-    initial_store: SymbolicStore<VarId>,
+    mut initial_store: SymbolicStore<VarId>,
     mut boundaries: HashMap<VarId, BTreeSet<usize>>,
     stmt: &IfStatement,
     arena: &mut SLTNodeArena<VarId>,
@@ -2639,7 +2757,7 @@ fn eval_if_with_recovery(
     active_guard: Option<&ActiveGuard>,
 ) -> Result<(SymbolicStore<VarId>, HashMap<VarId, BTreeSet<usize>>), ParserError> {
     let ((cond_expr, cond_sources), cond_bounds) =
-        eval_expression(module, &initial_store, &stmt.cond, arena, None)?;
+        eval_expression_effectful(module, &mut initial_store, &stmt.cond, arena, None)?;
     let cond_expr = procedural_condition(arena, cond_expr)?;
     boundaries.extend(cond_bounds);
 
@@ -2699,13 +2817,13 @@ fn eval_if_with_recovery(
 
 fn eval_if(
     module: &Module,
-    initial_store: SymbolicStore<VarId>,
+    mut initial_store: SymbolicStore<VarId>,
     mut boundaries: HashMap<VarId, BTreeSet<usize>>,
     stmt: &IfStatement,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, HashMap<VarId, BTreeSet<usize>>), ParserError> {
     let ((cond_expr, cond_sources), cond_bounds) =
-        eval_expression(module, &initial_store, &stmt.cond, arena, None)?;
+        eval_expression_effectful(module, &mut initial_store, &stmt.cond, arena, None)?;
     let cond_expr = procedural_condition(arena, cond_expr)?;
     boundaries.extend(cond_bounds);
 

@@ -13,13 +13,13 @@ use veryl_analyzer::ir::{CasePattern, Type, ValueVariant};
 
 use super::state::{FunctionControlState, FunctionLoopControlState};
 
-enum ExpressionStore<'a> {
+pub(super) enum ExpressionStore<'a> {
     ReadOnly(&'a SymbolicStore<VarId>),
     Effectful(&'a mut SymbolicStore<VarId>),
 }
 
 impl ExpressionStore<'_> {
-    fn current(&self) -> &SymbolicStore<VarId> {
+    pub(super) fn current(&self) -> &SymbolicStore<VarId> {
         match self {
             Self::ReadOnly(store) => store,
             Self::Effectful(store) => store,
@@ -523,13 +523,13 @@ pub(super) fn eval_function_body_return(
 
     fn eval_function_if(
         module: &Module,
-        state: FunctionControlState,
+        mut state: FunctionControlState,
         if_stmt: &IfStatement,
         ret_id: VarId,
         arena: &mut SLTNodeArena<VarId>,
     ) -> Result<FunctionControlState, ParserError> {
         let ((cond_expr, cond_sources), cond_bounds) =
-            eval_expression(module, &state.store, &if_stmt.cond, arena, Some(1))?;
+            eval_expression_effectful(module, &mut state.store, &if_stmt.cond, arena, Some(1))?;
         let cond_expr = procedural_condition(arena, cond_expr)?;
         let boundaries = merge_boundaries(state.boundaries, cond_bounds);
 
@@ -655,13 +655,18 @@ pub(super) fn eval_function_body_return(
 
         fn eval_function_loop_if(
             module: &Module,
-            state: FunctionLoopControlState,
+            mut state: FunctionLoopControlState,
             if_stmt: &IfStatement,
             ret_id: VarId,
             arena: &mut SLTNodeArena<VarId>,
         ) -> Result<FunctionLoopControlState, ParserError> {
-            let ((cond_expr, cond_sources), cond_bounds) =
-                eval_expression(module, &state.function.store, &if_stmt.cond, arena, Some(1))?;
+            let ((cond_expr, cond_sources), cond_bounds) = eval_expression_effectful(
+                module,
+                &mut state.function.store,
+                &if_stmt.cond,
+                arena,
+                Some(1),
+            )?;
             let cond_expr = procedural_condition(arena, cond_expr)?;
             let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
 
@@ -758,7 +763,7 @@ pub(super) fn eval_function_body_return(
         ) -> Result<FunctionLoopControlState, ParserError> {
             fn eval_from_arm(
                 module: &Module,
-                state: FunctionLoopControlState,
+                mut state: FunctionLoopControlState,
                 case_stmt: &CaseStatement,
                 arm_index: usize,
                 ret_id: VarId,
@@ -770,9 +775,9 @@ pub(super) fn eval_function_body_return(
                     });
                 };
 
-                let ((cond_expr, cond_sources), cond_bounds) = eval_expression(
+                let ((cond_expr, cond_sources), cond_bounds) = eval_expression_effectful(
                     module,
-                    &state.function.store,
+                    &mut state.function.store,
                     &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
                     arena,
                     Some(1),
@@ -893,6 +898,7 @@ pub(super) fn eval_function_body_return(
                 Statement::Assign(_)
                 | Statement::For(_)
                 | Statement::FunctionCall(_)
+                | Statement::SystemFunctionCall(_)
                 | Statement::Null => {
                     let guard_state = state.clone();
                     let next_function =
@@ -909,7 +915,6 @@ pub(super) fn eval_function_body_return(
                     format!("{stmt}"),
                     Some(&ir.token),
                 )),
-                Statement::SystemFunctionCall(_) => Ok(state),
                 Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
                     Err(ParserError::illegal_context(
                         "statement in comb function body",
@@ -1308,16 +1313,27 @@ pub(super) fn eval_function_body_return(
 
     fn eval_function_break_if(
         module: &Module,
-        state: FunctionLoopControlState,
+        mut state: FunctionLoopControlState,
         if_stmt: &IfStatement,
         ret_id: VarId,
         arena: &mut SLTNodeArena<VarId>,
     ) -> Result<FunctionLoopControlState, ParserError> {
-        let outer_state = state.clone();
-        let ((cond_expr, cond_sources), cond_bounds) =
-            eval_expression(module, &state.function.store, &if_stmt.cond, arena, Some(1))?;
+        let ((cond_expr, cond_sources), cond_bounds) = eval_expression_effectful(
+            module,
+            &mut state.function.store,
+            &if_stmt.cond,
+            arena,
+            Some(1),
+        )?;
         let cond_expr = procedural_condition(arena, cond_expr)?;
-        let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
+        let boundaries = merge_boundaries(state.function.boundaries.clone(), cond_bounds);
+        let outer_state = FunctionLoopControlState {
+            function: FunctionControlState {
+                boundaries: boundaries.clone(),
+                ..state.function.clone()
+            },
+            ..state.clone()
+        };
 
         let executed_state = if let Some(cond_val) = constant_bool(arena, cond_expr) {
             let side = if cond_val {
@@ -1439,7 +1455,7 @@ pub(super) fn eval_function_body_return(
     ) -> Result<FunctionLoopControlState, ParserError> {
         fn eval_from_arm(
             module: &Module,
-            state: FunctionLoopControlState,
+            mut state: FunctionLoopControlState,
             case_stmt: &CaseStatement,
             arm_index: usize,
             ret_id: VarId,
@@ -1451,9 +1467,9 @@ pub(super) fn eval_function_body_return(
                 });
             };
 
-            let ((cond_expr, cond_sources), cond_bounds) = eval_expression(
+            let ((cond_expr, cond_sources), cond_bounds) = eval_expression_effectful(
                 module,
-                &state.function.store,
+                &mut state.function.store,
                 &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
                 arena,
                 Some(1),
@@ -1600,6 +1616,7 @@ pub(super) fn eval_function_body_return(
             Statement::Assign(_)
             | Statement::For(_)
             | Statement::FunctionCall(_)
+            | Statement::SystemFunctionCall(_)
             | Statement::Null => {
                 let guard_state = state.clone();
                 let next_function =
@@ -1616,7 +1633,6 @@ pub(super) fn eval_function_body_return(
                 format!("{stmt}"),
                 Some(&ir.token),
             )),
-            Statement::SystemFunctionCall(_) => Ok(state),
             Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
                 Err(ParserError::illegal_context(
                     "statement in comb function body",
@@ -1691,7 +1707,7 @@ pub(super) fn eval_function_body_return(
     ) -> Result<FunctionControlState, ParserError> {
         fn eval_from_arm(
             module: &Module,
-            state: FunctionControlState,
+            mut state: FunctionControlState,
             case_stmt: &CaseStatement,
             arm_index: usize,
             ret_id: VarId,
@@ -1701,9 +1717,9 @@ pub(super) fn eval_function_body_return(
                 return eval_function_statements(module, state, &case_stmt.default, ret_id, arena);
             };
 
-            let ((cond_expr, cond_sources), cond_bounds) = eval_expression(
+            let ((cond_expr, cond_sources), cond_bounds) = eval_expression_effectful(
                 module,
-                &state.store,
+                &mut state.store,
                 &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
                 arena,
                 Some(1),
@@ -1838,7 +1854,25 @@ pub(super) fn eval_function_body_return(
                 format!("{stmt}"),
                 Some(&ir.token),
             )),
-            Statement::SystemFunctionCall(_) => Ok(state),
+            Statement::SystemFunctionCall(call) => {
+                let guard_state = state.clone();
+                let (next_store, next_bounds) = super::eval_system_function_call_side_effects(
+                    module,
+                    state.store,
+                    state.boundaries,
+                    call,
+                    arena,
+                )?;
+                apply_function_guard(
+                    module,
+                    guard_state,
+                    next_store,
+                    next_bounds,
+                    bool_node(arena, true)?,
+                    HashSet::default(),
+                    arena,
+                )
+            }
             Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
                 Err(ParserError::illegal_context(
                     "statement in comb function body",
@@ -1915,16 +1949,6 @@ fn eval_function_call_expression(
     call: &veryl_analyzer::ir::FunctionCall,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
-    if !call.outputs.is_empty() && store.effectful_mut().is_none() {
-        return Err(ParserError::unsupported(
-            60,
-            LoweringPhase::CombLowering,
-            "function call with output arguments",
-            format!("{call}"),
-            Some(&call.comptime.token),
-        ));
-    }
-
     let Some(function) = module.functions.get(&call.id) else {
         return Err(ParserError::unsupported(
             62,
@@ -2011,12 +2035,7 @@ fn eval_function_call_expression(
     let ((ret_node, ret_sources), ret_bounds, final_local_store) =
         eval_function_body_return(module, &local_store, &function_body, ret_id, arena)?;
 
-    let output_bounds = if call.outputs.is_empty() {
-        BoundaryMap::default()
-    } else {
-        let caller_store = store
-            .effectful_mut()
-            .expect("output calls require effectful store");
+    let output_bounds = if let Some(caller_store) = store.effectful_mut() {
         let current_store = std::mem::take(caller_store);
         let (next_store, bounds) = super::apply_function_call_outputs(
             module,
@@ -2030,6 +2049,8 @@ fn eval_function_call_expression(
         )?;
         *caller_store = next_store;
         bounds
+    } else {
+        BoundaryMap::default()
     };
 
     Ok((
@@ -2053,7 +2074,22 @@ pub fn eval_expression(
     eval_expression_in_context(module, &mut store, expr, arena, context)
 }
 
-fn eval_expression_in_context(
+pub(super) fn eval_expression_effectful(
+    module: &Module,
+    store: &mut SymbolicStore<VarId>,
+    expr: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+    context_width: Option<usize>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let context = context_width.map(|width| ValueContext {
+        width,
+        signed: expression_signed(expr),
+    });
+    let mut store = ExpressionStore::Effectful(store);
+    eval_expression_in_context(module, &mut store, expr, arena, context)
+}
+
+pub(super) fn eval_expression_in_context(
     module: &Module,
     store: &mut ExpressionStore<'_>,
     expr: &Expression,
@@ -2718,7 +2754,7 @@ fn eval_factor(
                     boundaries: all_bounds,
                 } = super::eval_dynamic_select_offset(
                     module,
-                    store.current(),
+                    store,
                     *var_id,
                     index,
                     select,
@@ -2807,7 +2843,7 @@ fn eval_factor(
             Ok(((node, HashSet::default()), BoundaryMap::default()))
         }
         Factor::SystemFunctionCall(call) => {
-            eval_system_function_call(module, store.current(), call, arena, context)
+            eval_system_function_call(module, store, call, arena, context)
         }
         Factor::FunctionCall(call) => {
             let ((node, sources), bounds) =
@@ -2902,7 +2938,7 @@ pub fn coerce_node_width<A: Hash + Eq + Clone>(
 
 fn eval_system_function_call(
     module: &Module,
-    store: &SymbolicStore<VarId>,
+    store: &mut ExpressionStore<'_>,
     call: &SystemFunctionCall,
     arena: &mut SLTNodeArena<VarId>,
     context: Option<ValueContext>,
@@ -2910,7 +2946,7 @@ fn eval_system_function_call(
     let context_width = context.map(|context| context.width);
     match &call.kind {
         SystemFunctionKind::Bits(input) => {
-            let width = system_function_input_bits_width(module, store, &input.0, arena)?;
+            let width = system_function_input_bits_width(module, store.current(), &input.0, arena)?;
             let result = arena.alloc(SLTNode::Constant(
                 BigUint::from(width),
                 BigUint::from(0u8),
@@ -2926,7 +2962,7 @@ fn eval_system_function_call(
             Ok(((result, HashSet::default()), HashMap::default()))
         }
         SystemFunctionKind::Size(input) => {
-            let size = system_function_input_size(module, store, &input.0, arena)?;
+            let size = system_function_input_size(module, store.current(), &input.0, arena)?;
             let result = arena.alloc(SLTNode::Constant(
                 BigUint::from(size),
                 BigUint::from(0u8),
@@ -2942,7 +2978,8 @@ fn eval_system_function_call(
             Ok(((result, HashSet::default()), HashMap::default()))
         }
         SystemFunctionKind::Clog2(input) => {
-            let ((arg, sources), bounds) = eval_expression(module, store, &input.0, arena, None)?;
+            let ((arg, sources), bounds) =
+                eval_expression_in_context(module, store, &input.0, arena, None)?;
             let width = get_width(arg, arena);
             let mut result = arena.alloc(SLTNode::Constant(
                 BigUint::from(0u8),
@@ -2979,7 +3016,8 @@ fn eval_system_function_call(
             Ok(((result, sources), bounds))
         }
         SystemFunctionKind::Onehot(input) => {
-            let ((arg, sources), bounds) = eval_expression(module, store, &input.0, arena, None)?;
+            let ((arg, sources), bounds) =
+                eval_expression_in_context(module, store, &input.0, arena, None)?;
             let width = get_width(arg, arena);
             let zero = arena.alloc(SLTNode::Constant(
                 BigUint::from(0u8),
@@ -3007,7 +3045,8 @@ fn eval_system_function_call(
             Ok(((result, sources), bounds))
         }
         SystemFunctionKind::Signed(input) | SystemFunctionKind::Unsigned(input) => {
-            let ((arg, sources), bounds) = eval_expression(module, store, &input.0, arena, None)?;
+            let ((arg, sources), bounds) =
+                eval_expression_in_context(module, store, &input.0, arena, None)?;
             let signed = matches!(call.kind, SystemFunctionKind::Signed(_));
             Ok((
                 (

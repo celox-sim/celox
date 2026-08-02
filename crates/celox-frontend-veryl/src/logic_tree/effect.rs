@@ -615,7 +615,7 @@ fn collect_function_body_effects(
 
     fn collect_case_from_arm(
         module: &Module,
-        state: FunctionControlState,
+        mut state: FunctionControlState,
         case_stmt: &CaseStatement,
         arm_index: usize,
         ret_id: VarId,
@@ -635,7 +635,7 @@ fn collect_function_body_effects(
         })?;
 
         let ((cond_node, cond_sources), cond_bounds) =
-            eval_expression(module, &state.store, &cond, arena, None)?;
+            eval_expression_effectful(module, &mut state.store, &cond, arena, None)?;
         let cond_node = procedural_condition(arena, cond_node)?;
         let boundaries = merge_boundaries(state.boundaries, cond_bounds);
 
@@ -1039,7 +1039,7 @@ fn collect_function_body_effects(
 
     fn collect_statement(
         module: &Module,
-        state: FunctionControlState,
+        mut state: FunctionControlState,
         stmt: &Statement,
         ret_id: VarId,
         arena: &mut SLTNodeArena<VarId>,
@@ -1075,13 +1075,29 @@ fn collect_function_body_effects(
                 )
             }
             Statement::SystemFunctionCall(call) => {
+                let guard_state = state.clone();
                 let store = state.store.clone();
                 let live = state.live_expr;
                 let live_sources = state.live_sources.clone();
                 with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
                     collect_system_function_effect(module, &store, call, arena, collector)
                 })?;
-                Ok(state)
+                let (next_store, next_boundaries) = eval_system_function_call_side_effects(
+                    module,
+                    state.store,
+                    state.boundaries,
+                    call,
+                    arena,
+                )?;
+                apply_function_guard(
+                    module,
+                    guard_state,
+                    next_store,
+                    next_boundaries,
+                    bool_node(arena, true)?,
+                    HashSet::default(),
+                    arena,
+                )
             }
             Statement::FunctionCall(call) => {
                 let guard_state = state.clone();
@@ -1117,8 +1133,13 @@ fn collect_function_body_effects(
                     collect_expression_effects(module, &store, &if_stmt.cond, arena, collector)
                 })?;
 
-                let ((cond_node, cond_sources), cond_boundaries) =
-                    eval_expression(module, &state.store, &if_stmt.cond, arena, None)?;
+                let ((cond_node, cond_sources), cond_boundaries) = eval_expression_effectful(
+                    module,
+                    &mut state.store,
+                    &if_stmt.cond,
+                    arena,
+                    None,
+                )?;
                 let cond_node = procedural_condition(arena, cond_node)?;
                 let boundaries = merge_boundaries(state.boundaries, cond_boundaries);
                 let true_guard = arena.alloc(SLTNode::Binary(
@@ -1360,6 +1381,14 @@ pub(super) fn collect_comb_effects_statements(
             }
             Statement::SystemFunctionCall(call) => {
                 collect_system_function_effect(module, &store, call, arena, collector)?;
+                let (next_store, _) = eval_system_function_call_side_effects(
+                    module,
+                    store,
+                    BoundaryMap::default(),
+                    call,
+                    arena,
+                )?;
+                store = next_store;
             }
             Statement::FunctionCall(call) => {
                 collect_function_call_effects(module, &store, call, arena, collector)?;
@@ -1379,7 +1408,7 @@ pub(super) fn collect_comb_effects_statements(
             Statement::If(if_stmt) => {
                 collect_expression_effects(module, &store, &if_stmt.cond, arena, collector)?;
                 let ((cond_node, sources), _) =
-                    eval_expression(module, &store, &if_stmt.cond, arena, None)?;
+                    eval_expression_effectful(module, &mut store, &if_stmt.cond, arena, None)?;
                 let cond_node = procedural_condition(arena, cond_node)?;
                 collector.sensitivity.extend(sources.iter().copied());
                 let saved_guard = collector.active_guard;
@@ -1450,7 +1479,7 @@ fn collect_comb_effects_case(
 ) -> Result<SymbolicStore<VarId>, ParserError> {
     fn collect_from_arm(
         module: &Module,
-        store: SymbolicStore<VarId>,
+        mut store: SymbolicStore<VarId>,
         case_stmt: &CaseStatement,
         arm_index: usize,
         arena: &mut SLTNodeArena<VarId>,
@@ -1468,7 +1497,8 @@ fn collect_comb_effects_case(
 
         let cond = case_arm_condition_expr(&case_stmt.case_target, &arm.patterns);
         collect_expression_effects(module, &store, &cond, arena, collector)?;
-        let ((cond_node, sources), _) = eval_expression(module, &store, &cond, arena, None)?;
+        let ((cond_node, sources), _) =
+            eval_expression_effectful(module, &mut store, &cond, arena, None)?;
         let cond_node = procedural_condition(arena, cond_node)?;
         collector.sensitivity.extend(sources.iter().copied());
 
