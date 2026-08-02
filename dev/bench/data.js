@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785661233033,
+  "lastUpdate": 1785663888837,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -148519,6 +148519,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
             "value": 81875.039373,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+s@gmail.com",
+            "name": "tig",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c3214c34c86f979f7baeb49504a908bc0399f513",
+          "message": "Merge pull request #397 from celox-sim/refactor/remove-string-errors\n\nrefactor(errors): remove stringly typed results",
+          "timestamp": "2026-08-02T09:03:35Z",
+          "tree_id": "17568496a3602118f19110175b1471ffc66973d1",
+          "url": "https://github.com/celox-sim/celox/commit/c3214c34c86f979f7baeb49504a908bc0399f513"
+        },
+        "date": 1785663874711,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-jit/heliodor_linux_boot_execution",
+            "value": 98168.695492,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-total/heliodor_linux_boot_execution",
+            "value": 98187.510635,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl/heliodor_linux_boot_execution",
+            "value": 113324.776725,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-compile/heliodor_linux_boot_compilation",
+            "value": 118580.119847,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
+            "value": 122666.712446,
             "unit": "ms"
           }
         ]
