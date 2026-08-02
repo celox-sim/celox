@@ -676,8 +676,7 @@ struct CacheKey {
     sources: Vec<(String, String)>,
     top: String,
     four_state: bool,
-    /// Encoded OptimizeOptions: per-pass flags + OptLevel packed into a u32.
-    optimize_flags: u32,
+    sir_optimization: SirOptimizationCacheKey,
     cranelift_opt_level: u8,
     regalloc_algorithm: u8,
     enable_alias_analysis: bool,
@@ -701,23 +700,32 @@ struct CacheKey {
     metadata_reset_type: Option<u8>,
 }
 
+/// Collision-free representation of every SIR code-generation option.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SirOptimizationCacheKey {
+    opt_level: celox::OptLevel,
+    enabled_passes: Box<[bool]>,
+    max_native_memory_width: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<&celox::OptimizeOptions> for SirOptimizationCacheKey {
+    fn from(options: &celox::OptimizeOptions) -> Self {
+        Self {
+            opt_level: options.opt_level(),
+            enabled_passes: celox::SirPass::ALL
+                .iter()
+                .map(|&pass| options.is_enabled(pass))
+                .collect(),
+            max_native_memory_width: options.max_native_memory_width(),
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 static JIT_CACHE: std::sync::LazyLock<Mutex<HashMap<CacheKey, Arc<CachedBuild>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-
-#[cfg(not(target_arch = "wasm32"))]
-/// Pack OptimizeOptions into a u32 bitmask for cache key hashing.
-/// Lower 20 bits: per-pass enabled flags. Upper bits: OptLevel.
-fn encode_optimize_options(opts: &celox::OptimizeOptions) -> u32 {
-    let mut flags: u32 = 0;
-    for (i, &pass) in celox::SirPass::ALL.iter().enumerate() {
-        if opts.is_enabled(pass) {
-            flags |= 1 << i;
-        }
-    }
-    flags |= (opts.opt_level() as u32) << 24;
-    flags
-}
 
 #[cfg(not(target_arch = "wasm32"))]
 /// Build a collision-free cache key from source content, top module, and options.
@@ -741,7 +749,7 @@ fn build_cache_key(
         sources: sorted_sources,
         top: top.to_string(),
         four_state: opts.four_state,
-        optimize_flags: encode_optimize_options(&opts.optimize_options),
+        sir_optimization: SirOptimizationCacheKey::from(&opts.optimize_options),
         cranelift_opt_level: opts.cranelift_options.opt_level as u8,
         regalloc_algorithm: opts.cranelift_options.regalloc_algorithm as u8,
         enable_alias_analysis: opts.cranelift_options.enable_alias_analysis,
@@ -2336,6 +2344,45 @@ mod tests {
         let k1 = build_cache_key(&src, "Top", &opts, None);
         let k2 = build_cache_key(&src, "Top", &opts, None);
         assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn high_index_sir_pass_changes_cache_key_without_bit_packing() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let enabled = default_opts();
+        let mut disabled = default_opts();
+        disabled.common.optimize_options = disabled
+            .common
+            .optimize_options
+            .clone()
+            .disable(celox::SirPass::IdentityStoreBypass);
+
+        assert_ne!(
+            build_cache_key(&src, "Top", &enabled, None),
+            build_cache_key(&src, "Top", &disabled, None)
+        );
+    }
+
+    #[test]
+    fn native_memory_width_changes_cache_key() {
+        let src = make_sources(&[("module Top {}", "a.veryl")]);
+        let mut narrow = default_opts();
+        narrow.common.optimize_options = narrow
+            .common
+            .optimize_options
+            .clone()
+            .with_max_native_memory_width(64);
+        let mut wide = default_opts();
+        wide.common.optimize_options = wide
+            .common
+            .optimize_options
+            .clone()
+            .with_max_native_memory_width(128);
+
+        assert_ne!(
+            build_cache_key(&src, "Top", &narrow, None),
+            build_cache_key(&src, "Top", &wide, None)
+        );
     }
 
     #[test]

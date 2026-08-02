@@ -157,38 +157,38 @@ fn prepare_merged_sir(
 
     verify(&sir_eu, "before x86 merged-SIR optimization")?;
     if let Some(first_ff_unit) = first_ff_unit {
-        let removed = crate::optimizer::coalescing::eliminate_unobserved_comb_state_stores(
+        let removed = crate::optimizer::sir::eliminate_unobserved_comb_state_stores(
             &mut sir_eu,
             &merge_provenance,
             first_ff_unit,
         )
         .map_err(|message| codegen_err(format!("comb/FF state-publication DSE: {message}")))?;
         if removed != 0 {
-            crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
+            crate::optimizer::sir::remove_dead_sir_definitions(&mut sir_eu);
             verify(&sir_eu, "after comb/FF state-publication DSE")?;
         }
     }
     if label == "eval_comb_apply_ff"
-        && crate::optimizer::coalescing::promote_fused_comb_static_slots(&mut sir_eu).map_err(
+        && crate::optimizer::sir::promote_fused_comb_static_slots(&mut sir_eu).map_err(
             |message| codegen_err(format!("final fused comb StateSSA promotion: {message}")),
         )?
     {
-        crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
+        crate::optimizer::sir::remove_dead_sir_definitions(&mut sir_eu);
         verify(&sir_eu, "after final fused comb StateSSA promotion")?;
     }
-    crate::optimizer::coalescing::pass_eliminate_working_round_trip::eliminate_working_round_trip(
+    crate::optimizer::sir::pass_eliminate_working_round_trip::eliminate_working_round_trip(
         &mut sir_eu,
         &boundaries,
     );
     verify(&sir_eu, "after x86 direct working rewrite")?;
     let promoted_working =
-        crate::optimizer::coalescing::promote_eval_apply_working_round_trips(&mut sir_eu);
+        crate::optimizer::sir::promote_eval_apply_working_round_trips(&mut sir_eu);
     if promoted_working {
         verify(&sir_eu, "after x86 working StateSSA")?;
-        crate::optimizer::coalescing::remove_dead_sir_definitions(&mut sir_eu);
+        crate::optimizer::sir::remove_dead_sir_definitions(&mut sir_eu);
         verify(&sir_eu, "after x86 working StateSSA DCE")?;
     }
-    crate::optimizer::coalescing::optimize_native_merged_chain(
+    crate::optimizer::sir::optimize_native_merged_chain(
         &mut sir_eu,
         layout,
         four_state,
