@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785667351614,
+  "lastUpdate": 1785670369533,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -149504,6 +149504,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
             "value": 124255.361244,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+s@gmail.com",
+            "name": "tig",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "06f1635c2e9162772e3ef9f2d09922edfe451617",
+          "message": "Merge pull request #399 from celox-sim/fix/issue-65-for-loops\n\nfix(frontend): support bitwise for-loop steps",
+          "timestamp": "2026-08-02T10:54:22Z",
+          "tree_id": "c240260e0267dacf9a33ead438f4d4eaca833084",
+          "url": "https://github.com/celox-sim/celox/commit/06f1635c2e9162772e3ef9f2d09922edfe451617"
+        },
+        "date": 1785670357915,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-jit/heliodor_linux_boot_execution",
+            "value": 110734.587375,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-total/heliodor_linux_boot_execution",
+            "value": 110757.148446,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl/heliodor_linux_boot_execution",
+            "value": 162537.362084,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-compile/heliodor_linux_boot_compilation",
+            "value": 115625.739105,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
+            "value": 125432.051961,
             "unit": "ms"
           }
         ]
