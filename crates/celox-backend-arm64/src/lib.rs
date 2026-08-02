@@ -15,6 +15,7 @@ use std::fmt;
 mod allocation;
 pub mod jit_mem;
 mod legacy_allocation;
+pub mod mir;
 pub mod scalar;
 
 /// Virtual general-purpose register in bootstrap ARM64 MIR.

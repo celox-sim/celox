@@ -3,10 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use celox_backend_x86::native::mir::{
-    BaseReg, BlockId, BranchPredicate, CmpKind, MFunction, MInst, OpSize, PackedLaneCompareRhs,
-    SparseCommitDescriptor, VReg,
-};
+use celox_backend_x86::native::mir::MFunction as LegacyFunction;
 use celox_backend_x86::native::regalloc::AssignmentMap as LegacyAssignment;
 use celox_backend_x86::native::scalar_pipeline::{
     PreparedScalarFunction, ScalarPrepareError as PrepareError, prepare_scalar_eu,
@@ -20,6 +17,10 @@ use dynasmrt::{DynamicLabel, DynasmApi, DynasmError, DynasmLabelApi, VecAssemble
 
 use crate::Arm64Reg;
 use crate::allocation::{Assignment, CopyDestination, CopyOperation, CopySource, EdgeCopyPlan};
+use crate::mir::{
+    BaseReg, BlockId, BranchPredicate, CmpKind, MFunction, MInst, OpSize, PackedLaneCompareRhs,
+    SPARSE_COMMIT_DESCRIPTOR_WORDS, VReg,
+};
 
 const STATE_REG: u8 = 0;
 const SCRATCH0: u8 = 16;
@@ -53,10 +54,10 @@ pub struct NativeFunctionTrace {
 #[derive(Debug)]
 pub enum EmitError {
     Assembly(DynasmError),
-    MissingAssignment(VReg),
+    MissingAssignment(u32),
     Range(&'static str),
     Unsupported(&'static str),
-    Ssa(celox_backend_x86::native::ssa_destroy::SsaDestructionError),
+    LegacyLowering(String),
 }
 
 impl fmt::Display for EmitError {
@@ -66,7 +67,7 @@ impl fmt::Display for EmitError {
             Self::MissingAssignment(value) => {
                 write!(
                     formatter,
-                    "ARM64 MIR value {value} has no physical assignment"
+                    "ARM64 MIR value v{value} has no physical assignment"
                 )
             }
             Self::Range(message) => write!(formatter, "ARM64 emission range error: {message}"),
@@ -76,7 +77,7 @@ impl fmt::Display for EmitError {
                     "ARM64 emission does not yet support {instruction}"
                 )
             }
-            Self::Ssa(error) => error.fmt(formatter),
+            Self::LegacyLowering(error) => error.fmt(formatter),
         }
     }
 }
@@ -89,9 +90,14 @@ impl From<DynasmError> for EmitError {
     }
 }
 
-impl From<celox_backend_x86::native::ssa_destroy::SsaDestructionError> for EmitError {
-    fn from(error: celox_backend_x86::native::ssa_destroy::SsaDestructionError) -> Self {
-        Self::Ssa(error)
+impl From<crate::legacy_allocation::LegacyLoweringError> for EmitError {
+    fn from(error: crate::legacy_allocation::LegacyLoweringError) -> Self {
+        match error {
+            crate::legacy_allocation::LegacyLoweringError::Unsupported(instruction) => {
+                Self::Unsupported(instruction)
+            }
+            error => Self::LegacyLowering(error.to_string()),
+        }
     }
 }
 
@@ -168,18 +174,17 @@ pub fn emit_prepared_eu(
 
 /// Emit an already allocated MIR function. Primarily used by focused tests.
 pub fn emit(
-    function: &MFunction,
+    function: &LegacyFunction,
     assignment: &LegacyAssignment,
     spill_frame_size: u32,
 ) -> Result<EmitResult, EmitError> {
-    let (assignment, plan) =
-        crate::legacy_allocation::adapt(function, assignment, spill_frame_size)?;
+    let allocated = crate::legacy_allocation::adapt(function, assignment, spill_frame_size)?;
     emit_function(
-        function,
-        &assignment,
+        &allocated.function,
+        &allocated.assignment,
         spill_frame_size,
         4096,
-        &plan,
+        &allocated.edge_copies,
         false,
         false,
     )
@@ -190,17 +195,17 @@ fn emit_prepared(
     tick_loop: bool,
     check_runtime_events: bool,
 ) -> Result<EmitResult, EmitError> {
-    let (assignment, plan) = crate::legacy_allocation::adapt(
+    let allocated = crate::legacy_allocation::adapt(
         &prepared.function,
         &prepared.allocation,
         prepared.spill_frame_size,
     )?;
     emit_function(
-        &prepared.function,
-        &assignment,
+        &allocated.function,
+        &allocated.assignment,
         prepared.spill_frame_size,
         prepared.state_size(),
-        &plan,
+        &allocated.edge_copies,
         tick_loop,
         check_runtime_events,
     )
@@ -210,7 +215,7 @@ fn resolve(assignment: &Assignment<VReg>, value: VReg) -> Result<u8, EmitError> 
     assignment
         .get(&value)
         .map(Arm64Reg::number)
-        .ok_or(EmitError::MissingAssignment(value))
+        .ok_or(EmitError::MissingAssignment(value.0))
 }
 
 fn align16(value: usize) -> Result<usize, EmitError> {
@@ -889,7 +894,6 @@ fn emit_instruction(
             emit_load_imm(ops, STATE_REG, *code as u64);
             dynasm!(ops ; .arch aarch64 ; b =>epilogue);
         }
-        MInst::X86Simd(_) => return Err(EmitError::Unsupported("x86 SIMD MIR")),
         MInst::PackedLaneCompare {
             dst,
             rhs,
@@ -1323,10 +1327,10 @@ fn emit_sparse_commit_worklist(
         let end_index = active_capacity.min(first_index + 64);
         for active_index in first_index..end_index {
             let row_start = active_index
-                .checked_mul(SparseCommitDescriptor::WORDS)
+                .checked_mul(SPARSE_COMMIT_DESCRIPTOR_WORDS)
                 .ok_or(EmitError::Range("sparse descriptor index overflow"))?;
             let row = descriptors
-                .get(row_start..row_start + SparseCommitDescriptor::WORDS)
+                .get(row_start..row_start + SPARSE_COMMIT_DESCRIPTOR_WORDS)
                 .ok_or(EmitError::Range("sparse descriptor row is missing"))?;
             let skip = ops.new_dynamic_label();
             let mask = 1_u64 << (active_index % 64);
@@ -1886,9 +1890,13 @@ pub fn disassemble(code: &[u8], base_addr: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use celox_backend_x86::native::mir::{
+        BaseReg, BlockId, MBlock, MFunction, MInst, OpSize, SpillDesc, VRegAllocator,
+    };
     #[cfg(target_arch = "aarch64")]
-    use celox_backend_x86::native::mir::PhiNode;
-    use celox_backend_x86::native::mir::{MBlock, SpillDesc, VRegAllocator};
+    use celox_backend_x86::native::mir::{
+        CmpKind, PackedLaneCompareRhs, PhiNode, SparseCommitDescriptor,
+    };
     use celox_backend_x86::native::regalloc::AssignmentMap;
     #[cfg(target_arch = "aarch64")]
     use celox_backend_x86::native::regalloc::assignment::EdgeLocation;
@@ -2014,7 +2022,7 @@ mod tests {
         let result = emit(&function, &assignment, 0).unwrap();
         assert!(!result.code.is_empty());
         assert!(result.text_size <= result.code.len());
-        assert_eq!(result.block_offsets, vec![(BlockId(0), 4)]);
+        assert_eq!(result.block_offsets, vec![(crate::mir::BlockId(0), 4)]);
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -2511,9 +2519,17 @@ mod tests {
         assignment.set(current, PhysReg::RAX);
         assignment.set(one, PhysReg::RDX);
         assignment.set(next, PhysReg::RSI);
-        let (assignment, plan) =
-            crate::legacy_allocation::adapt(&function, &assignment, 0).unwrap();
-        let emitted = emit_function(&function, &assignment, 0, 64, &plan, true, false).unwrap();
+        let allocated = crate::legacy_allocation::adapt(&function, &assignment, 0).unwrap();
+        let emitted = emit_function(
+            &allocated.function,
+            &allocated.assignment,
+            0,
+            64,
+            &allocated.edge_copies,
+            true,
+            false,
+        )
+        .unwrap();
         let code = crate::jit_mem::JitCode::new(&emitted.code).unwrap();
         let mut state = [0_u8; 40];
         state[STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET
