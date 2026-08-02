@@ -2655,6 +2655,7 @@ impl SLTToSIRLowerer {
                 updates,
                 effects,
                 *continue_cond,
+                env,
             ),
             SLTNode::ForFoldGroup { .. } => {
                 let spec = FoldGroupLowerSpec::from_root(node, arena)
@@ -3158,7 +3159,14 @@ impl SLTToSIRLowerer {
             } => {
                 self.get_bound_signed(*then_expr, arena) && self.get_bound_signed(*else_expr, arena)
             }
-            SLTNode::ForFold { loop_signed, .. } => *loop_signed,
+            SLTNode::ForFold {
+                loop_signed,
+                result,
+                ..
+            } => match result {
+                crate::SLTForFoldResult::State(_) => *loop_signed,
+                crate::SLTForFoldResult::Transient { .. } => false,
+            },
             // The grouped result has concat layout and is therefore unsigned,
             // independently of the loop counter's signedness.
             SLTNode::ForFoldGroup { .. } => false,
@@ -3925,6 +3933,7 @@ impl SLTToSIRLowerer {
             SLTNode::ForFold {
                 start,
                 end,
+                result,
                 initials,
                 updates,
                 effects,
@@ -3938,11 +3947,20 @@ impl SLTToSIRLowerer {
                 if let SLTLoopBound::Expr(node) = end {
                     children.push(*node);
                 }
+                if let crate::SLTForFoldResult::Transient { initial, update } = result {
+                    children.push(*initial);
+                    children.push(*update);
+                }
                 children.extend(initials.iter().map(|update| update.expr));
                 children.extend(updates.iter().map(|update| update.expr));
                 for effect in effects {
-                    children.extend(effect.guard);
-                    children.extend(effect.args.iter().copied());
+                    match effect {
+                        crate::SLTForEffect::Event { guard, args, .. } => {
+                            children.extend(*guard);
+                            children.extend(args.iter().copied());
+                        }
+                        crate::SLTForEffect::Runner(runner) => children.push(*runner),
+                    }
                 }
                 children.push(*continue_cond);
                 children
@@ -5004,6 +5022,7 @@ impl SLTToSIRLowerer {
         signed: bool,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
+        env: Option<&LowerEnv<'_, A>>,
     ) -> RegisterId {
         match bound {
             SLTLoopBound::Const(v) => {
@@ -5012,7 +5031,7 @@ impl SLTToSIRLowerer {
                 reg
             }
             SLTLoopBound::Expr(node) => {
-                let reg = self.lower_inner(builder, *node, arena, cache, None, true);
+                let reg = self.lower_inner(builder, *node, arena, cache, env, env.is_none());
                 let source_signed = self.get_bound_signed(*node, arena);
                 let extend_signed = source_signed && signed;
                 let sized = self.cast_reg_width_ext(builder, reg, width, extend_signed);
@@ -5524,11 +5543,12 @@ impl SLTToSIRLowerer {
         step: usize,
         step_op: SLTStepOp,
         reverse: bool,
-        result: &VarAtomBase<A>,
+        result: &crate::SLTForFoldResult<A>,
         initials: &[crate::SLTForUpdate<A>],
         updates: &[crate::SLTForUpdate<A>],
         effects: &[crate::SLTForEffect],
         continue_cond: NodeId,
+        parent_env: Option<&LowerEnv<'_, A>>,
     ) -> RegisterId {
         let mut counter_width = loop_width.max(1);
         counter_width = counter_width.max(Self::bound_width(start));
@@ -5555,6 +5575,7 @@ impl SLTToSIRLowerer {
             loop_signed,
             arena,
             cache,
+            parent_env,
         );
         let end_reg = self.lower_bound(
             builder,
@@ -5564,6 +5585,7 @@ impl SLTToSIRLowerer {
             loop_signed,
             arena,
             cache,
+            parent_env,
         );
         let one_reg = builder.alloc_bit(compare_width, loop_signed);
         builder.emit(SIRInstruction::Imm(one_reg, SIRValue::new(1u64)));
@@ -5577,39 +5599,73 @@ impl SLTToSIRLowerer {
 
         let init_counter = if reverse { end_reg } else { start_reg };
 
-        let initial_states: Vec<RegisterId> = initials
+        let mut initial_states: Vec<RegisterId> = initials
             .iter()
             .zip(updates.iter())
             .map(|(init, update)| {
-                let reg = self.lower_inner(builder, init.expr, arena, cache, None, true);
+                let reg = self.lower_inner(
+                    builder,
+                    init.expr,
+                    arena,
+                    cache,
+                    parent_env,
+                    parent_env.is_none(),
+                );
                 let width = update.target.access.msb - update.target.access.lsb + 1;
                 self.cast_reg_width(builder, reg, width)
             })
             .collect();
+        if let crate::SLTForFoldResult::Transient { initial, update } = result {
+            let reg = self.lower_inner(
+                builder,
+                *initial,
+                arena,
+                cache,
+                parent_env,
+                parent_env.is_none(),
+            );
+            initial_states.push(self.cast_reg_width(builder, reg, self.get_width(*update, arena)));
+        }
+
+        let transient_width = match result {
+            crate::SLTForFoldResult::State(_) => None,
+            crate::SLTForFoldResult::Transient { update, .. } => {
+                Some(self.get_width(*update, arena))
+            }
+        };
 
         let header_counter = builder.alloc_bit(compare_width, loop_signed);
-        let header_states: Vec<_> = updates
+        let mut header_states: Vec<_> = updates
             .iter()
             .map(|update| {
                 let width = update.target.access.msb - update.target.access.lsb + 1;
                 builder.alloc_logic(width)
             })
             .collect();
+        if let Some(width) = transient_width {
+            header_states.push(builder.alloc_logic(width));
+        }
         let body_counter = builder.alloc_bit(compare_width, loop_signed);
-        let body_states: Vec<_> = updates
+        let mut body_states: Vec<_> = updates
             .iter()
             .map(|update| {
                 let width = update.target.access.msb - update.target.access.lsb + 1;
                 builder.alloc_logic(width)
             })
             .collect();
-        let exit_states: Vec<_> = updates
+        if let Some(width) = transient_width {
+            body_states.push(builder.alloc_logic(width));
+        }
+        let mut exit_states: Vec<_> = updates
             .iter()
             .map(|update| {
                 let width = update.target.access.msb - update.target.access.lsb + 1;
                 builder.alloc_logic(width)
             })
             .collect();
+        if let Some(width) = transient_width {
+            exit_states.push(builder.alloc_logic(width));
+        }
 
         let header_params = std::iter::once(header_counter)
             .chain(header_states.iter().copied())
@@ -5793,11 +5849,11 @@ impl SLTToSIRLowerer {
         );
         let env = LowerEnv {
             inputs: env_inputs,
-            parent: None,
+            parent: parent_env,
         };
         let mut local_cache = crate::HashMap::default();
         self.lower_for_effects(builder, arena, &mut local_cache, &env, effects);
-        let next_states: Vec<_> = updates
+        let mut next_states: Vec<_> = updates
             .iter()
             .map(|update| {
                 let reg = self.lower_inner(
@@ -5812,6 +5868,11 @@ impl SLTToSIRLowerer {
                 self.cast_reg_width(builder, reg, width)
             })
             .collect();
+        if let crate::SLTForFoldResult::Transient { update, .. } = result {
+            let reg =
+                self.lower_inner(builder, *update, arena, &mut local_cache, Some(&env), false);
+            next_states.push(self.cast_reg_width(builder, reg, self.get_width(*update, arena)));
+        }
 
         let continue_reg = self.lower_inner(
             builder,
@@ -6021,10 +6082,13 @@ impl SLTToSIRLowerer {
         }
 
         builder.switch_to_block(exit_block);
-        let result_idx = updates
-            .iter()
-            .position(|update| update.target == *result)
-            .expect("ForFold result target must be present in updates");
+        let result_idx = match result {
+            crate::SLTForFoldResult::State(result) => updates
+                .iter()
+                .position(|update| update.target == *result)
+                .expect("ForFold result target must be present in updates"),
+            crate::SLTForFoldResult::Transient { .. } => updates.len(),
+        };
         exit_states[result_idx]
     }
 
@@ -6037,24 +6101,37 @@ impl SLTToSIRLowerer {
         effects: &[crate::SLTForEffect],
     ) {
         for effect in effects {
+            let crate::SLTForEffect::Event {
+                site_id,
+                guard,
+                emit_on_true,
+                args,
+                fatal_error_code,
+            } = effect
+            else {
+                let crate::SLTForEffect::Runner(runner) = effect else {
+                    unreachable!()
+                };
+                self.lower_inner(builder, *runner, arena, cache, Some(env), false);
+                continue;
+            };
             let emit = |builder: &mut SIRBuilder<A>,
                         this: &Self,
                         cache: &mut crate::HashMap<NodeId, RegisterId>| {
-                let args = effect
-                    .args
+                let args = args
                     .iter()
                     .map(|arg| this.lower_inner(builder, *arg, arena, cache, Some(env), false))
                     .collect();
                 builder.emit(SIRInstruction::CombCaptureEvent {
-                    site_id: effect.site_id,
+                    site_id: *site_id,
                     args,
-                    fatal_error_code: effect.fatal_error_code,
+                    fatal_error_code: *fatal_error_code,
                     consume_enabled: false,
                 });
             };
-            if let Some(guard) = effect.guard {
-                let cond = self.lower_inner(builder, guard, arena, cache, Some(env), false);
-                let branch_cond = if effect.emit_on_true {
+            if let Some(guard) = guard {
+                let cond = self.lower_inner(builder, *guard, arena, cache, Some(env), false);
+                let branch_cond = if *emit_on_true {
                     cond
                 } else {
                     let inverted = builder.alloc_bit(1, false);
@@ -8751,7 +8828,7 @@ mod tests {
                 step: 1,
                 step_op: SLTStepOp::Add,
                 reverse: false,
-                result: target,
+                result: crate::SLTForFoldResult::State(target),
                 initials: vec![crate::SLTForUpdate {
                     target,
                     expr: initial,
@@ -8760,7 +8837,7 @@ mod tests {
                     target,
                     expr: update,
                 }],
-                effects: vec![crate::SLTForEffect {
+                effects: vec![crate::SLTForEffect::Event {
                     site_id: 1,
                     guard: None,
                     emit_on_true: true,
@@ -10203,6 +10280,7 @@ mod tests {
             false,
             &arena,
             &mut cache,
+            None,
         );
         assert!(matches!(
             builder.register(&reg),

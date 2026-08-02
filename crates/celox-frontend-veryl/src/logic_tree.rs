@@ -5,8 +5,8 @@ mod state;
 
 pub(crate) mod node {
     pub use celox_slt::{
-        NodeId, SLTForEffect, SLTForFoldGroupState, SLTForUpdate, SLTIndex, SLTIndexKind,
-        SLTLoopBound, SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTStepOp,
+        NodeId, SLTForEffect, SLTForFoldGroupState, SLTForFoldResult, SLTForUpdate, SLTIndex,
+        SLTIndexKind, SLTLoopBound, SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTStepOp,
     };
 }
 
@@ -52,8 +52,8 @@ type ActiveGuard = (NodeId, HashSet<VarAtomBase<VarId>>);
 
 pub use node::SLTNodeArenaEditError;
 pub use node::{
-    NodeId, SLTForEffect, SLTForFoldGroupState, SLTForUpdate, SLTIndex, SLTIndexKind, SLTLoopBound,
-    SLTNode, SLTNodeArena, SLTStepOp,
+    NodeId, SLTForEffect, SLTForFoldGroupState, SLTForFoldResult, SLTForUpdate, SLTIndex,
+    SLTIndexKind, SLTLoopBound, SLTNode, SLTNodeArena, SLTStepOp,
 };
 pub use node_facts::{SLTNodeFacts, SLTNodeFactsError};
 
@@ -341,6 +341,7 @@ fn collect_comb_path_stats(
         SLTNode::ForFold {
             start,
             end,
+            result,
             initials,
             updates,
             effects,
@@ -354,6 +355,10 @@ fn collect_comb_path_stats(
             if let SLTLoopBound::Expr(node) = end {
                 collect_comb_path_stats(*node, arena, visited, stats);
             }
+            if let SLTForFoldResult::Transient { initial, update } = result {
+                collect_comb_path_stats(*initial, arena, visited, stats);
+                collect_comb_path_stats(*update, arena, visited, stats);
+            }
             for init in initials {
                 collect_comb_path_stats(init.expr, arena, visited, stats);
             }
@@ -361,11 +366,18 @@ fn collect_comb_path_stats(
                 collect_comb_path_stats(update.expr, arena, visited, stats);
             }
             for effect in effects {
-                if let Some(guard) = effect.guard {
-                    collect_comb_path_stats(guard, arena, visited, stats);
-                }
-                for arg in &effect.args {
-                    collect_comb_path_stats(*arg, arena, visited, stats);
+                match effect {
+                    SLTForEffect::Event { guard, args, .. } => {
+                        if let Some(guard) = guard {
+                            collect_comb_path_stats(*guard, arena, visited, stats);
+                        }
+                        for arg in args {
+                            collect_comb_path_stats(*arg, arena, visited, stats);
+                        }
+                    }
+                    SLTForEffect::Runner(runner) => {
+                        collect_comb_path_stats(*runner, arena, visited, stats);
+                    }
                 }
             }
             collect_comb_path_stats(*continue_cond, arena, visited, stats);
@@ -1600,7 +1612,7 @@ fn eval_for_with_effects(
             step,
             step_op,
             reverse,
-            result,
+            result: SLTForFoldResult::State(result),
             initials: initial_updates.clone(),
             updates: folded_updates.clone(),
             effects: effects.to_vec(),
@@ -1653,7 +1665,7 @@ fn eval_for_with_effects(
             step,
             step_op,
             reverse,
-            result: target,
+            result: SLTForFoldResult::State(target),
             initials: initial_updates.clone(),
             updates: folded_updates.clone(),
             effects: Vec::new(),
@@ -2052,16 +2064,6 @@ fn eval_statement_form_function_call(
     arena: &mut SLTNodeArena<VarId>,
     phase: LoweringPhase,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
-    if call.outputs.is_empty() {
-        return Err(ParserError::unsupported(
-            58,
-            phase,
-            "statement-form function call without output arguments",
-            format!("{call}"),
-            Some(&call.comptime.token),
-        ));
-    }
-
     let Some(function) = module.functions.get(&call.id) else {
         return Err(ParserError::unsupported(
             60,
@@ -2689,6 +2691,7 @@ mod tests {
     pub struct CombResult {
         pub paths: Vec<LogicPath<VarId>>,
         pub boundaries: HashMap<VarId, BTreeSet<usize>>,
+        pub runtime_events: Vec<RuntimeEventSite>,
     }
     pub fn parse_top_module(code: &str) -> Module {
         symbol_table::clear();
@@ -2739,9 +2742,16 @@ mod tests {
             })
             .expect("No always_comb found in Top");
         let mut arena = SLTNodeArena::new();
-        let (paths, _, boundaries, _, _) =
+        let (paths, _, boundaries, _, runtime_events) =
             super::parse_comb(&top_module, comb_decl, &mut arena).unwrap();
-        (top_module, CombResult { paths, boundaries })
+        (
+            top_module,
+            CombResult {
+                paths,
+                boundaries,
+                runtime_events,
+            },
+        )
     }
     pub fn var_id_of(module: &Module, var_path: &[&str]) -> VarId {
         let mut var_path_str_id = Vec::new();
@@ -2815,6 +2825,37 @@ mod tests {
 
         assert!(bounds.contains(&0));
         assert!(bounds.contains(&4));
+    }
+
+    #[test]
+    fn test_statement_form_function_call_without_outputs_in_function_body() {
+        let code = r#"
+            module Top (a: input logic<8>, q: output logic<8>) {
+                function f (x: input logic<8>) {
+                    $assert(x == x);
+                }
+
+                function g (x: input logic<8>) -> logic<8> {
+                    f(x);
+                    return x;
+                }
+
+                always_comb {
+                    q = g(a);
+                }
+            }
+        "#;
+        let (module, result) = inspect_comb(code);
+        let a_id = var_id_of(&module, &["a"]);
+        let q_id = var_id_of(&module, &["q"]);
+        let q_path = result
+            .paths
+            .iter()
+            .find(|path| path.target.var().is_some_and(|target| target.id == q_id))
+            .expect("q assignment should be lowered");
+
+        assert!(q_path.sources.iter().any(|source| source.id == a_id));
+        assert_eq!(result.runtime_events.len(), 1);
     }
 
     #[test]

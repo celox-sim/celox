@@ -442,14 +442,6 @@ pub(super) fn eval_function_body_return(
         Ok(combine_parts_with_default(ret_id, 0, ret_parts, arena)?)
     }
 
-    fn function_control_target(
-        module: &Module,
-        ret_id: VarId,
-    ) -> Result<VarAtomBase<VarId>, ParserError> {
-        let ret_width = resolve_total_width(module, &module.variables[&ret_id])?;
-        Ok(VarAtomBase::new(ret_id, ret_width, ret_width))
-    }
-
     fn apply_function_guard(
         module: &Module,
         state: FunctionControlState,
@@ -1165,7 +1157,7 @@ pub(super) fn eval_function_body_return(
                 step,
                 step_op,
                 reverse,
-                result: *target,
+                result: SLTForFoldResult::State(*target),
                 initials: initial_updates.clone(),
                 updates: folded_updates.clone(),
                 effects: Vec::new(),
@@ -1201,17 +1193,7 @@ pub(super) fn eval_function_body_return(
 
         let next_live_expr = if statement_contains_return(&Statement::For(for_stmt.clone()), ret_id)
         {
-            let control_target = function_control_target(module, ret_id)?;
-            let mut control_initials = initial_updates.clone();
-            control_initials.push(SLTForUpdate {
-                target: control_target,
-                expr: bool_node(arena, true)?,
-            });
-            let mut control_updates = folded_updates.clone();
-            control_updates.push(SLTForUpdate {
-                target: control_target,
-                expr: iter_state.function.live_expr,
-            });
+            let initial = bool_node(arena, true)?;
             arena.alloc(SLTNode::ForFold {
                 loop_var: for_stmt.var_id,
                 loop_width,
@@ -1222,11 +1204,14 @@ pub(super) fn eval_function_body_return(
                 step,
                 step_op,
                 reverse,
-                result: control_target,
-                initials: control_initials,
-                updates: control_updates,
+                result: SLTForFoldResult::Transient {
+                    initial,
+                    update: iter_state.function.live_expr,
+                },
+                initials: initial_updates,
+                updates: folded_updates,
                 effects: Vec::new(),
-                continue_cond: iter_state.continue_expr,
+                continue_cond: loop_effective_continue,
             })?
         } else {
             bool_node(arena, true)?
@@ -2966,7 +2951,10 @@ pub(super) fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarI
             else_expr,
             ..
         } => is_signed(module, *then_expr, arena) && is_signed(module, *else_expr, arena),
-        SLTNode::ForFold { result, .. } => module.variables[&result.id].r#type.signed,
+        SLTNode::ForFold { result, .. } => match result {
+            SLTForFoldResult::State(result) => module.variables[&result.id].r#type.signed,
+            SLTForFoldResult::Transient { .. } => false,
+        },
         SLTNode::ForFoldGroup { .. } => false,
         SLTNode::Slice { .. } => false,
         SLTNode::Concat(_) => false,

@@ -161,14 +161,17 @@ fn collect_system_function_effect(
         }
         (RuntimeEventKind::Display, _, Some(_)) => unreachable!("display has no explicit guard"),
     };
-    let loop_effect = collector.loop_effects.as_ref().map(|_| SLTForEffect {
-        site_id,
-        guard,
-        emit_on_true: matches!(kind, RuntimeEventKind::Display),
-        args: observer_args.clone(),
-        fatal_error_code: matches!(kind, RuntimeEventKind::AssertFatal)
-            .then_some(1_000_000 + site_id as i64),
-    });
+    let loop_effect = collector
+        .loop_effects
+        .as_ref()
+        .map(|_| SLTForEffect::Event {
+            site_id,
+            guard,
+            emit_on_true: matches!(kind, RuntimeEventKind::Display),
+            args: observer_args.clone(),
+            fatal_error_code: matches!(kind, RuntimeEventKind::AssertFatal)
+                .then_some(1_000_000 + site_id as i64),
+        });
     let observed_ids: HashSet<_> = observed_inputs.iter().map(|atom| atom.id).collect();
     let position_ids: HashSet<_> = position_inputs.iter().map(|atom| atom.id).collect();
     let preceding_writes: Vec<_> = store
@@ -740,6 +743,300 @@ fn collect_function_body_effects(
         })
     }
 
+    fn apply_function_guard(
+        module: &Module,
+        state: FunctionControlState,
+        next_store: SymbolicStore<VarId>,
+        next_boundaries: BoundaryMap<VarId>,
+        next_live_expr: NodeId,
+        next_live_sources: HashSet<VarAtomBase<VarId>>,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<FunctionControlState, ParserError> {
+        match constant_bool(arena, state.live_expr) {
+            Some(true) => Ok(FunctionControlState {
+                store: next_store,
+                boundaries: merge_boundaries(state.boundaries, next_boundaries),
+                live_expr: next_live_expr,
+                live_sources: next_live_sources,
+            }),
+            Some(false) => Ok(state),
+            None => {
+                let store = merge_symbolic_stores(
+                    module,
+                    &next_store,
+                    &state.store,
+                    state.live_expr,
+                    &state.live_sources,
+                    arena,
+                )?;
+                let live_expr = match constant_bool(arena, next_live_expr) {
+                    Some(true) => state.live_expr,
+                    Some(false) => bool_node(arena, false)?,
+                    None => arena.alloc(SLTNode::Binary(
+                        state.live_expr,
+                        BinaryOp::And,
+                        next_live_expr,
+                    ))?,
+                };
+                let mut live_sources = state.live_sources;
+                live_sources.extend(next_live_sources);
+                Ok(FunctionControlState {
+                    store,
+                    boundaries: merge_boundaries(state.boundaries, next_boundaries),
+                    live_expr,
+                    live_sources,
+                })
+            }
+        }
+    }
+
+    fn statement_contains_return(stmt: &Statement, ret_id: VarId) -> bool {
+        match stmt {
+            Statement::Assign(assign) => function_assigns_whole_var(assign, ret_id),
+            Statement::If(if_stmt) => if_stmt
+                .true_side
+                .iter()
+                .chain(&if_stmt.false_side)
+                .any(|stmt| statement_contains_return(stmt, ret_id)),
+            Statement::Case(case_stmt) => case_stmt
+                .arms
+                .iter()
+                .flat_map(|arm| &arm.body)
+                .chain(&case_stmt.default)
+                .any(|stmt| statement_contains_return(stmt, ret_id)),
+            Statement::For(for_stmt) => for_stmt
+                .body
+                .iter()
+                .any(|stmt| statement_contains_return(stmt, ret_id)),
+            Statement::IfReset(if_reset) => if_reset
+                .true_side
+                .iter()
+                .chain(&if_reset.false_side)
+                .any(|stmt| statement_contains_return(stmt, ret_id)),
+            Statement::SystemFunctionCall(_)
+            | Statement::FunctionCall(_)
+            | Statement::TbMethodCall(_)
+            | Statement::Break
+            | Statement::Unsupported(_)
+            | Statement::Null => false,
+        }
+    }
+
+    fn collect_function_for(
+        module: &Module,
+        state: FunctionControlState,
+        for_stmt: &ForStatement,
+        ret_id: VarId,
+        arena: &mut SLTNodeArena<VarId>,
+        collector: &mut CombEffectCollector,
+    ) -> Result<FunctionControlState, ParserError> {
+        let Some(loop_width) = for_stmt.var_type.total_width() else {
+            return Err(ParserError::unsupported(
+                65,
+                LoweringPhase::CombLowering,
+                "for loop variable width",
+                format!("{:?}", for_stmt.var_name),
+                Some(&for_stmt.token),
+            ));
+        };
+
+        let mut iter_store = state.store.clone();
+        let mut written_accesses = HashMap::default();
+        collect_written_accesses(module, &for_stmt.body, &mut written_accesses)?;
+        for (id, accesses) in written_accesses {
+            let width = resolve_total_width(module, &module.variables[&id])?;
+            let mut loop_store = RangeStore::new(None, width);
+            let mut covered = vec![false; width];
+            for access in accesses {
+                for slot in covered.iter_mut().take(access.msb + 1).skip(access.lsb) {
+                    *slot = true;
+                }
+            }
+            let original = state
+                .store
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| RangeStore::new(None, width));
+            let mut bit = 0;
+            while bit < width {
+                if covered[bit] {
+                    bit += 1;
+                    continue;
+                }
+                let start = bit;
+                while bit < width && !covered[bit] {
+                    bit += 1;
+                }
+                let access = BitAccess::new(start, bit - 1);
+                let parts = original.get_parts(access).map_err(|error| {
+                    super::range_store_error(
+                        "function observer for-loop state",
+                        error,
+                        Some(&for_stmt.token),
+                    )
+                })?;
+                let (expr, sources) = combine_parts_with_default(id, access.lsb, parts, arena)?;
+                loop_store
+                    .update(access, Some((expr, sources)))
+                    .map_err(|error| {
+                        super::range_store_error(
+                            "function observer for-loop state",
+                            error,
+                            Some(&for_stmt.token),
+                        )
+                    })?;
+            }
+            iter_store.insert(id, loop_store);
+        }
+        iter_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
+
+        let observer_start = collector.observers.len();
+        let saved_loop_effects = collector.loop_effects.take();
+        collector.loop_effects = Some(Vec::new());
+        let iter_state = with_collector_guard(
+            collector,
+            arena,
+            state.live_expr,
+            state.live_sources.clone(),
+            |collector, arena| {
+                collect_statements(
+                    module,
+                    FunctionControlState {
+                        store: iter_store,
+                        boundaries: state.boundaries.clone(),
+                        live_expr: bool_node(arena, true)?,
+                        live_sources: HashSet::default(),
+                    },
+                    &for_stmt.body,
+                    ret_id,
+                    arena,
+                    collector,
+                )
+            },
+        )?;
+        let loop_effects = collector.loop_effects.take().unwrap_or_default();
+        collector.loop_effects = saved_loop_effects;
+
+        // Effect arguments after the loop only consume this store while the
+        // function remains live. On that path no return was taken, so the
+        // ordinary loop fold and the function-aware fold have identical data
+        // state; the separate transient result below carries the control state.
+        let (result_store, boundaries) = eval_for(
+            module,
+            state.store.clone(),
+            state.boundaries.clone(),
+            for_stmt,
+            arena,
+        )?;
+        let template = result_store
+            .values()
+            .flat_map(|range_store| range_store.ranges.values())
+            .filter_map(|(value, _, _)| value.as_ref().map(|(node, _)| *node))
+            .find(|node| {
+                matches!(
+                    arena.get(*node),
+                    SLTNode::ForFold { loop_var, .. } if *loop_var == for_stmt.var_id
+                )
+            })
+            .ok_or_else(|| {
+                ParserError::illegal_context(
+                    "function observer for-loop control",
+                    "loop result fold is absent from the symbolic store",
+                    Some(&for_stmt.token),
+                )
+            })?;
+        let SLTNode::ForFold {
+            loop_var,
+            loop_width,
+            loop_signed,
+            start,
+            end,
+            inclusive,
+            step,
+            step_op,
+            reverse,
+            result,
+            initials,
+            updates,
+            continue_cond,
+            ..
+        } = arena.get(template).clone()
+        else {
+            unreachable!();
+        };
+        let effective_continue = arena.alloc(SLTNode::Binary(
+            continue_cond,
+            BinaryOp::And,
+            iter_state.live_expr,
+        ))?;
+
+        if !loop_effects.is_empty() {
+            let runner = arena.alloc(SLTNode::ForFold {
+                loop_var,
+                loop_width,
+                loop_signed,
+                start: start.clone(),
+                end: end.clone(),
+                inclusive,
+                step,
+                step_op,
+                reverse,
+                result: result.clone(),
+                initials: initials.clone(),
+                updates: updates.clone(),
+                effects: loop_effects,
+                continue_cond: effective_continue,
+            })?;
+            if let Some(parent_effects) = &mut collector.loop_effects {
+                parent_effects.push(SLTForEffect::Runner(runner));
+            } else {
+                attach_loop_runner_to_first_observer(collector, observer_start, Some(runner));
+            }
+        }
+
+        let initial = bool_node(arena, true)?;
+        let live_expr = arena.alloc(SLTNode::ForFold {
+            loop_var,
+            loop_width,
+            loop_signed,
+            start,
+            end,
+            inclusive,
+            step,
+            step_op,
+            reverse,
+            result: SLTForFoldResult::Transient {
+                initial,
+                update: iter_state.live_expr,
+            },
+            initials,
+            updates,
+            effects: Vec::new(),
+            continue_cond: effective_continue,
+        })?;
+
+        let (start_bound, end_bound) = match &for_stmt.range {
+            ForRange::Forward { start, end, .. }
+            | ForRange::Reverse { start, end, .. }
+            | ForRange::Stepped { start, end, .. } => (start, end),
+        };
+        let (_, start_sources, _) = eval_for_bound(module, &state.store, start_bound, arena)?;
+        let (_, end_sources, _) = eval_for_bound(module, &state.store, end_bound, arena)?;
+        let mut live_sources = iter_state.live_sources;
+        live_sources.extend(start_sources);
+        live_sources.extend(end_sources);
+
+        apply_function_guard(
+            module,
+            state,
+            result_store,
+            boundaries,
+            live_expr,
+            live_sources,
+            arena,
+        )
+    }
+
     fn collect_statement(
         module: &Module,
         state: FunctionControlState,
@@ -753,6 +1050,7 @@ fn collect_function_body_effects(
         }
         match stmt {
             Statement::Assign(assign) => {
+                let guard_state = state.clone();
                 let store = state.store.clone();
                 let live = state.live_expr;
                 let live_sources = state.live_sources.clone();
@@ -766,12 +1064,15 @@ fn collect_function_body_effects(
                 } else {
                     bool_node(arena, true)?
                 };
-                Ok(FunctionControlState {
+                apply_function_guard(
+                    module,
+                    guard_state,
                     store,
                     boundaries,
                     live_expr,
-                    live_sources: HashSet::default(),
-                })
+                    HashSet::default(),
+                    arena,
+                )
             }
             Statement::SystemFunctionCall(call) => {
                 let store = state.store.clone();
@@ -783,6 +1084,7 @@ fn collect_function_body_effects(
                 Ok(state)
             }
             Statement::FunctionCall(call) => {
+                let guard_state = state.clone();
                 let store = state.store.clone();
                 let live = state.live_expr;
                 let live_sources = state.live_sources.clone();
@@ -797,12 +1099,15 @@ fn collect_function_body_effects(
                     arena,
                     LoweringPhase::CombLowering,
                 )?;
-                Ok(FunctionControlState {
+                apply_function_guard(
+                    module,
+                    guard_state,
                     store,
                     boundaries,
-                    live_expr: bool_node(arena, true)?,
-                    live_sources: HashSet::default(),
-                })
+                    bool_node(arena, true)?,
+                    HashSet::default(),
+                    arena,
+                )
             }
             Statement::If(if_stmt) => {
                 let store = state.store.clone();
@@ -812,9 +1117,10 @@ fn collect_function_body_effects(
                     collect_expression_effects(module, &store, &if_stmt.cond, arena, collector)
                 })?;
 
-                let ((cond_node, cond_sources), _) =
+                let ((cond_node, cond_sources), cond_boundaries) =
                     eval_expression(module, &state.store, &if_stmt.cond, arena, None)?;
                 let cond_node = procedural_condition(arena, cond_node)?;
+                let boundaries = merge_boundaries(state.boundaries, cond_boundaries);
                 let true_guard = arena.alloc(SLTNode::Binary(
                     state.live_expr,
                     BinaryOp::LogicAnd,
@@ -822,21 +1128,25 @@ fn collect_function_body_effects(
                 ))?;
                 let mut true_sources = state.live_sources.clone();
                 true_sources.extend(cond_sources.iter().copied());
-                with_collector_guard(
+                let true_state = with_collector_guard(
                     collector,
                     arena,
                     true_guard,
                     true_sources,
                     |collector, arena| {
-                        let _ = collect_statements(
+                        collect_statements(
                             module,
-                            state.clone(),
+                            FunctionControlState {
+                                store: state.store.clone(),
+                                boundaries: boundaries.clone(),
+                                live_expr: state.live_expr,
+                                live_sources: state.live_sources.clone(),
+                            },
                             &if_stmt.true_side,
                             ret_id,
                             arena,
                             collector,
-                        )?;
-                        Ok(())
+                        )
                     },
                 )?;
 
@@ -848,37 +1158,59 @@ fn collect_function_body_effects(
                 ))?;
                 let mut false_sources = state.live_sources.clone();
                 false_sources.extend(cond_sources.iter().copied());
-                with_collector_guard(
+                let false_state = with_collector_guard(
                     collector,
                     arena,
                     false_guard,
                     false_sources,
                     |collector, arena| {
-                        let _ = collect_statements(
+                        collect_statements(
                             module,
-                            state.clone(),
+                            FunctionControlState {
+                                store: state.store,
+                                boundaries,
+                                live_expr: state.live_expr,
+                                live_sources: state.live_sources,
+                            },
                             &if_stmt.false_side,
                             ret_id,
                             arena,
                             collector,
-                        )?;
-                        Ok(())
+                        )
                     },
                 )?;
 
-                let (store, boundaries) =
-                    eval_if(module, state.store, state.boundaries, if_stmt, arena)?;
+                let mut live_sources = cond_sources;
+                live_sources.extend(true_state.live_sources.iter().copied());
+                live_sources.extend(false_state.live_sources.iter().copied());
+
                 Ok(FunctionControlState {
-                    store,
-                    boundaries,
-                    live_expr: bool_node(arena, true)?,
-                    live_sources: HashSet::default(),
+                    store: merge_symbolic_stores(
+                        module,
+                        &true_state.store,
+                        &false_state.store,
+                        cond_node,
+                        &live_sources,
+                        arena,
+                    )?,
+                    boundaries: merge_boundaries(true_state.boundaries, false_state.boundaries),
+                    live_expr: merge_control_expr(
+                        cond_node,
+                        true_state.live_expr,
+                        false_state.live_expr,
+                        arena,
+                    )?,
+                    live_sources,
                 })
             }
             Statement::Case(case_stmt) => {
                 collect_case_from_arm(module, state, case_stmt, 0, ret_id, arena, collector)
             }
             Statement::For(for_stmt) => {
+                if statement_contains_return(&Statement::For(for_stmt.clone()), ret_id) {
+                    return collect_function_for(module, state, for_stmt, ret_id, arena, collector);
+                }
+                let guard_state = state.clone();
                 let store = state.store.clone();
                 let live = state.live_expr;
                 let live_sources = state.live_sources.clone();
@@ -888,12 +1220,15 @@ fn collect_function_body_effects(
                 })?;
                 let (store, boundaries) =
                     eval_for(module, state.store, state.boundaries, for_stmt, arena)?;
-                Ok(FunctionControlState {
+                apply_function_guard(
+                    module,
+                    guard_state,
                     store,
                     boundaries,
-                    live_expr: bool_node(arena, true)?,
-                    live_sources: HashSet::default(),
-                })
+                    bool_node(arena, true)?,
+                    HashSet::default(),
+                    arena,
+                )
             }
             Statement::Null => Ok(state),
             Statement::IfReset(ir) => Err(ParserError::illegal_context(

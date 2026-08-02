@@ -208,6 +208,7 @@ fn node_reads_only_covered_ranges<Addr: Clone + Eq + Hash>(
             SLTNode::ForFold {
                 start,
                 end,
+                result,
                 initials,
                 updates,
                 effects,
@@ -220,11 +221,20 @@ fn node_reads_only_covered_ranges<Addr: Clone + Eq + Hash>(
                 if let crate::SLTLoopBound::Expr(node) = end {
                     work.push(*node);
                 }
+                if let crate::SLTForFoldResult::Transient { initial, update } = result {
+                    work.push(*initial);
+                    work.push(*update);
+                }
                 work.extend(initials.iter().map(|state| state.expr));
                 work.extend(updates.iter().map(|state| state.expr));
                 for effect in effects {
-                    work.extend(effect.guard);
-                    work.extend(effect.args.iter().copied());
+                    match effect {
+                        crate::SLTForEffect::Event { guard, args, .. } => {
+                            work.extend(*guard);
+                            work.extend(args.iter().copied());
+                        }
+                        crate::SLTForEffect::Runner(runner) => work.push(*runner),
+                    }
                 }
                 work.push(*continue_cond);
             }
@@ -307,6 +317,7 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
             loop_var,
             start,
             end,
+            result,
             initials,
             updates,
             effects,
@@ -326,6 +337,10 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
                     set.extend(collect_node_input_deps(*node, arena, memo, inverse_memo));
                 }
             }
+            if let crate::SLTForFoldResult::Transient { initial, update } = result {
+                set.extend(collect_node_input_deps(*initial, arena, memo, inverse_memo));
+                set.extend(collect_node_input_deps(*update, arena, memo, inverse_memo));
+            }
             for init in initials {
                 set.extend(collect_node_input_deps(
                     init.expr,
@@ -343,11 +358,18 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
                 ));
             }
             for effect in effects {
-                if let Some(guard) = effect.guard {
-                    set.extend(collect_node_input_deps(guard, arena, memo, inverse_memo));
-                }
-                for arg in &effect.args {
-                    set.extend(collect_node_input_deps(*arg, arena, memo, inverse_memo));
+                match effect {
+                    crate::SLTForEffect::Event { guard, args, .. } => {
+                        if let Some(guard) = guard {
+                            set.extend(collect_node_input_deps(*guard, arena, memo, inverse_memo));
+                        }
+                        for arg in args {
+                            set.extend(collect_node_input_deps(*arg, arena, memo, inverse_memo));
+                        }
+                    }
+                    crate::SLTForEffect::Runner(runner) => {
+                        set.extend(collect_node_input_deps(*runner, arena, memo, inverse_memo));
+                    }
                 }
             }
             set.remove(loop_var);
@@ -1158,6 +1180,7 @@ fn push_scheduler_node_children<Addr: Clone + Eq + Hash>(
         SLTNode::ForFold {
             start,
             end,
+            result,
             initials,
             updates,
             effects,
@@ -1170,11 +1193,20 @@ fn push_scheduler_node_children<Addr: Clone + Eq + Hash>(
             if let crate::SLTLoopBound::Expr(node) = end {
                 work.push(*node);
             }
+            if let crate::SLTForFoldResult::Transient { initial, update } = result {
+                work.push(*initial);
+                work.push(*update);
+            }
             work.extend(initials.iter().map(|state| state.expr));
             work.extend(updates.iter().map(|state| state.expr));
             for effect in effects {
-                work.extend(effect.guard);
-                work.extend(effect.args.iter().copied());
+                match effect {
+                    crate::SLTForEffect::Event { guard, args, .. } => {
+                        work.extend(*guard);
+                        work.extend(args.iter().copied());
+                    }
+                    crate::SLTForEffect::Runner(runner) => work.push(*runner),
+                }
             }
             work.push(*continue_cond);
         }

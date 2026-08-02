@@ -119,7 +119,9 @@ where
                         ),
                     ));
                 }
-                verify_atom(&result.id, result.access, "ForFold result", node_id)?;
+                if let crate::SLTForFoldResult::State(result) = result {
+                    verify_atom(&result.id, result.access, "ForFold result", node_id)?;
+                }
                 for update in initials.iter().chain(updates) {
                     verify_atom(
                         &update.target.id,
@@ -387,7 +389,7 @@ mod tests {
                 step: 1,
                 step_op: SLTStepOp::Add,
                 reverse: false,
-                result: target,
+                result: crate::SLTForFoldResult::State(target),
                 initials: vec![SLTForUpdate {
                     target,
                     expr: value,
