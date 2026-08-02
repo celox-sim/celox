@@ -103,6 +103,10 @@ sv_backends! {
             output logic ne_case,
             output logic eq_case_unsized,
             output logic eq_wildcard_unsized,
+            output logic eq_case_fill,
+            output logic ne_case_fill,
+            output logic eq_wildcard_fill,
+            output logic ne_wildcard_fill,
             output logic wide_eq_case,
             output logic wide_ne_case
         );
@@ -110,6 +114,10 @@ sv_backends! {
             assign ne_case = a !== b;
             assign eq_case_unsized = a === 0;
             assign eq_wildcard_unsized = a ==? 0;
+            assign eq_case_fill = a === '1;
+            assign ne_case_fill = a !== '1;
+            assign eq_wildcard_fill = a ==? '1;
+            assign ne_wildcard_fill = a !=? '1;
             assign wide_eq_case = wide_a === wide_b;
             assign wide_ne_case = wide_a !== wide_b;
         endmodule
@@ -174,6 +182,16 @@ sv_backends! {
     sim.modify(|io| io.set(a, 0u8)).unwrap();
     assert_eq!(sim.get(sim.signal("eq_case_unsized")), 1u8.into());
     assert_eq!(sim.get(sim.signal("eq_wildcard_unsized")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("eq_case_fill")), 0u8.into());
+    assert_eq!(sim.get(sim.signal("ne_case_fill")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("eq_wildcard_fill")), 0u8.into());
+    assert_eq!(sim.get(sim.signal("ne_wildcard_fill")), 1u8.into());
+
+    sim.modify(|io| io.set(a, 0b11u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("eq_case_fill")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("ne_case_fill")), 0u8.into());
+    assert_eq!(sim.get(sim.signal("eq_wildcard_fill")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("ne_wildcard_fill")), 0u8.into());
     }
 
     fn simulates_systemverilog_unary_operators(sim) {
@@ -934,6 +952,69 @@ sv_backends! {
     assert_eq!(sim.get(sim.signal("q_negative")), 0xffu8.into());
     assert_eq!(sim.get(sim.signal("q_scalar_signed")), 0xa5u8.into());
     assert_eq!(sim.get(sim.signal("q_fill")), u64::MAX.into());
+    }
+
+    fn simulates_systemverilog_always_ff_case_calls_and_xz_parameters(sim) {
+        @setup {
+    let sv = r#"
+        module Top(
+            input logic clk,
+            input logic [1:0] mode,
+            input logic [7:0] d,
+            output logic [7:0] q_unrelated,
+            output logic [7:0] q_function,
+            output logic [7:0] q_parameter_xz
+        );
+            localparam logic [1:0] X_LABEL = 2'b1x;
+
+            function automatic logic [1:0] decode(input logic [1:0] value);
+                return value;
+            endfunction
+
+            function automatic logic [7:0] passthrough(input logic [7:0] value);
+                return value;
+            endfunction
+
+            always_ff @(posedge clk) begin
+                q_unrelated <= d;
+                case (decode(mode))
+                    2'b01: q_function <= passthrough(d);
+                    default: q_function <= 0;
+                endcase
+                case (mode)
+                    X_LABEL: q_parameter_xz <= 8'ha5;
+                    default: q_parameter_xz <= 0;
+                endcase
+            end
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(sv, Path::new("ff_case_calls_and_xz_parameters.sv"))],
+            "Top",
+        ).four_state(true);
+
+    let clk = sim.event("clk");
+    let mode = sim.signal("mode");
+    let d = sim.signal("d");
+
+    sim.modify(|io| {
+        io.set(mode, 1u8);
+        io.set(d, 0x3cu8);
+    }).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(sim.signal("q_unrelated")), 0x3cu8.into());
+    assert_eq!(sim.get(sim.signal("q_function")), 0x3cu8.into());
+    assert_eq!(sim.get(sim.signal("q_parameter_xz")), 0u8.into());
+
+    sim.modify(|io| {
+        io.set_four_state(mode, BigUint::from(0b11u8), BigUint::from(0b01u8));
+        io.set(d, 0x5au8);
+    }).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(sim.signal("q_unrelated")), 0x5au8.into());
+    assert_eq!(sim.get(sim.signal("q_function")), 0u8.into());
+    assert_eq!(sim.get(sim.signal("q_parameter_xz")), 0xa5u8.into());
     }
 
     fn simulates_systemverilog_repeat_concat(sim) {

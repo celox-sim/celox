@@ -114,7 +114,12 @@ impl Module {
             &const_env,
             &parameter_literals,
             &packed_dimensions,
-        )?;
+        )?
+        .into_iter()
+        .map(|process| {
+            expand_ff_process_calls(process, &functions, &const_env, &parameter_literals)
+        })
+        .collect();
         let assignments = comb_processes
             .iter()
             .flat_map(|process| process.assignments().iter().cloned())
@@ -1245,8 +1250,7 @@ fn parameter_literal_env(
     parameters
         .iter()
         .filter_map(|parameter| {
-            let value = *const_env.get(parameter.name())?;
-            let literal =
+            let literal = if let Some(value) = const_env.get(parameter.name()).copied() {
                 if let Some(width) = parameter.declared_width.filter(|width| *width <= 128) {
                     let mask = if width == 128 {
                         u128::MAX
@@ -1272,7 +1276,12 @@ fn parameter_literal_env(
                     literal.clone()
                 } else {
                     value.to_string()
-                };
+                }
+            } else if let Some(ConstExpr::Literal(literal)) = parameter.value() {
+                literal.clone()
+            } else {
+                return None;
+            };
             Some((parameter.name().to_string(), literal))
         })
         .collect()
@@ -2573,6 +2582,36 @@ fn expand_process_calls(
             .assignments
             .into_iter()
             .map(|assignment| expand_assignment_calls(assignment, functions))
+            .collect(),
+    )
+}
+
+fn expand_ff_process_calls(
+    process: FfProcess,
+    functions: &HashMap<String, Function>,
+    const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, String>,
+) -> FfProcess {
+    FfProcess::new(
+        process.events,
+        process
+            .assignments
+            .into_iter()
+            .map(|assignment| {
+                let condition = assignment.condition.map(|condition| {
+                    substitute_expr_constants_with_parameter_literals(
+                        expand_expr_calls(condition, functions, 0),
+                        const_env,
+                        parameter_literals,
+                    )
+                });
+                let assignment = substitute_assignment_constants_with_parameter_literals(
+                    expand_assignment_calls(assignment.assignment, functions),
+                    const_env,
+                    parameter_literals,
+                );
+                ConditionalAssignment::new(condition, assignment)
+            })
             .collect(),
     )
 }

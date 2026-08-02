@@ -953,21 +953,71 @@ fn lower_glue_parent_expr(
         sv::ir::Expr::Binary { left, op, right } => {
             let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
                 && sv_expr_is_signed(right, variables, name_to_id);
-            let (mut left, mut sources, mut source_ids) =
-                lower_glue_parent_expr(left, variables, name_to_id, constants, arena)?;
-            let (mut right, right_sources, right_source_ids) =
-                lower_glue_parent_expr(right, variables, name_to_id, constants, arena)?;
-            sources.extend(right_sources);
-            source_ids.extend(right_source_ids);
-            source_ids.sort();
-            source_ids.dedup();
-            if matches!(
+            let context_sized_comparison = matches!(
                 op,
                 sv::ir::BinaryOp::EqCase
                     | sv::ir::BinaryOp::NeCase
                     | sv::ir::BinaryOp::EqWildcard
                     | sv::ir::BinaryOp::NeWildcard
-            ) {
+            );
+            let left_fill = context_sized_comparison
+                .then(|| expr_unbased_fill_literal(left))
+                .flatten();
+            let right_fill = context_sized_comparison
+                .then(|| expr_unbased_fill_literal(right))
+                .flatten();
+            let (
+                (mut left, mut sources, mut source_ids),
+                (mut right, right_sources, right_source_ids),
+            ) = match (left_fill, right_fill) {
+                (Some(left_fill), Some(right_fill)) => (
+                    (
+                        lower_unbased_fill_literal_slt(arena, left_fill, 1)?,
+                        HashSet::default(),
+                        Vec::new(),
+                    ),
+                    (
+                        lower_unbased_fill_literal_slt(arena, right_fill, 1)?,
+                        HashSet::default(),
+                        Vec::new(),
+                    ),
+                ),
+                (Some(fill), None) => {
+                    let right =
+                        lower_glue_parent_expr(right, variables, name_to_id, constants, arena)?;
+                    let width = celox_slt::get_width(right.0, arena);
+                    (
+                        (
+                            lower_unbased_fill_literal_slt(arena, fill, width)?,
+                            HashSet::default(),
+                            Vec::new(),
+                        ),
+                        right,
+                    )
+                }
+                (None, Some(fill)) => {
+                    let left =
+                        lower_glue_parent_expr(left, variables, name_to_id, constants, arena)?;
+                    let width = celox_slt::get_width(left.0, arena);
+                    (
+                        left,
+                        (
+                            lower_unbased_fill_literal_slt(arena, fill, width)?,
+                            HashSet::default(),
+                            Vec::new(),
+                        ),
+                    )
+                }
+                (None, None) => (
+                    lower_glue_parent_expr(left, variables, name_to_id, constants, arena)?,
+                    lower_glue_parent_expr(right, variables, name_to_id, constants, arena)?,
+                ),
+            };
+            sources.extend(right_sources);
+            source_ids.extend(right_source_ids);
+            source_ids.sort();
+            source_ids.dedup();
+            if context_sized_comparison {
                 let common_width =
                     celox_slt::get_width(left, arena).max(celox_slt::get_width(right, arena));
                 left = coerce_node_width(arena, left, Some(common_width), operands_signed).ok()?;
@@ -1206,18 +1256,60 @@ fn lower_expr(
         sv::ir::Expr::Binary { left, op, right } => {
             let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
                 && sv_expr_is_signed(right, variables, name_to_id);
-            let (mut left, mut sources) =
-                lower_expr(left, variables, name_to_id, constants, arena)?;
-            let (mut right, right_sources) =
-                lower_expr(right, variables, name_to_id, constants, arena)?;
-            sources.extend(right_sources);
-            if matches!(
+            let context_sized_comparison = matches!(
                 op,
                 sv::ir::BinaryOp::EqCase
                     | sv::ir::BinaryOp::NeCase
                     | sv::ir::BinaryOp::EqWildcard
                     | sv::ir::BinaryOp::NeWildcard
-            ) {
+            );
+            let left_fill = context_sized_comparison
+                .then(|| expr_unbased_fill_literal(left))
+                .flatten();
+            let right_fill = context_sized_comparison
+                .then(|| expr_unbased_fill_literal(right))
+                .flatten();
+            let ((mut left, mut sources), (mut right, right_sources)) =
+                match (left_fill, right_fill) {
+                    (Some(left_fill), Some(right_fill)) => (
+                        (
+                            lower_unbased_fill_literal_slt(arena, left_fill, 1)?,
+                            HashSet::default(),
+                        ),
+                        (
+                            lower_unbased_fill_literal_slt(arena, right_fill, 1)?,
+                            HashSet::default(),
+                        ),
+                    ),
+                    (Some(fill), None) => {
+                        let right = lower_expr(right, variables, name_to_id, constants, arena)?;
+                        let width = celox_slt::get_width(right.0, arena);
+                        (
+                            (
+                                lower_unbased_fill_literal_slt(arena, fill, width)?,
+                                HashSet::default(),
+                            ),
+                            right,
+                        )
+                    }
+                    (None, Some(fill)) => {
+                        let left = lower_expr(left, variables, name_to_id, constants, arena)?;
+                        let width = celox_slt::get_width(left.0, arena);
+                        (
+                            left,
+                            (
+                                lower_unbased_fill_literal_slt(arena, fill, width)?,
+                                HashSet::default(),
+                            ),
+                        )
+                    }
+                    (None, None) => (
+                        lower_expr(left, variables, name_to_id, constants, arena)?,
+                        lower_expr(right, variables, name_to_id, constants, arena)?,
+                    ),
+                };
+            sources.extend(right_sources);
+            if context_sized_comparison {
                 let common_width =
                     celox_slt::get_width(left, arena).max(celox_slt::get_width(right, arena));
                 left = coerce_node_width(arena, left, Some(common_width), operands_signed).ok()?;
@@ -1685,23 +1777,45 @@ fn unbased_fill_literal(literal: &str) -> Option<char> {
     (chars.next()? == '\'' && chars.clone().count() == 1).then_some(chars.next()?)
 }
 
-fn lower_unbased_fill_literal(
-    builder: &mut SIRBuilder<RegionedVarAddr>,
-    fill: char,
-    width: usize,
-) -> Option<celox_sir::RegisterId> {
+fn expr_unbased_fill_literal(expr: &sv::ir::Expr) -> Option<char> {
+    match expr {
+        sv::ir::Expr::Literal(literal) => unbased_fill_literal(literal),
+        _ => None,
+    }
+}
+
+fn unbased_fill_value(fill: char, width: usize) -> Option<(BigUint, BigUint)> {
     let all_ones = if width == 0 {
         BigUint::default()
     } else {
         (BigUint::from(1u8) << width) - BigUint::from(1u8)
     };
-    let (value, mask) = match fill {
-        '0' => (BigUint::default(), BigUint::default()),
-        '1' => (all_ones, BigUint::default()),
-        'x' => (all_ones.clone(), all_ones),
-        'z' | '?' => (BigUint::default(), all_ones),
-        _ => return None,
-    };
+    match fill {
+        '0' => Some((BigUint::default(), BigUint::default())),
+        '1' => Some((all_ones, BigUint::default())),
+        'x' => Some((all_ones.clone(), all_ones)),
+        'z' | '?' => Some((BigUint::default(), all_ones)),
+        _ => None,
+    }
+}
+
+fn lower_unbased_fill_literal_slt<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    fill: char,
+    width: usize,
+) -> Option<celox_slt::NodeId> {
+    let (value, mask) = unbased_fill_value(fill, width)?;
+    arena
+        .alloc(SLTNode::Constant(value, mask, width, false))
+        .ok()
+}
+
+fn lower_unbased_fill_literal(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    fill: char,
+    width: usize,
+) -> Option<celox_sir::RegisterId> {
+    let (value, mask) = unbased_fill_value(fill, width)?;
     let register = builder.alloc_logic(width);
     builder.emit(SIRInstruction::Imm(
         register,
