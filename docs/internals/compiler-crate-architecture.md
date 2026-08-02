@@ -38,6 +38,13 @@ The `celox` crate is the public facade and compiler driver. It wires these phase
 together, selects a backend, and exposes the simulator API. Lower-level crates do
 not depend on the facade.
 
+The facade's default `host-runtime` feature owns host execution, Cranelift,
+Wasmtime, the x86 backend, and the test macro. WebAssembly bindings disable that
+feature and depend only on the shared compiler plus `celox-backend-wasm`. Target
+checks therefore remain at the x86 selection boundary; shared compiler crates do
+not infer optimization or timing policy from the architecture they are compiled
+for.
+
 ## Component ownership
 
 | Crate | Owns | Must not own |

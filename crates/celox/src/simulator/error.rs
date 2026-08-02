@@ -42,7 +42,6 @@ fn render_analyzer_error(error: &veryl_analyzer::AnalyzerError) -> String {
 pub enum SimulatorErrorKind {
     SIRParser(crate::ParserError),
     Analyzer(Vec<veryl_analyzer::AnalyzerError>),
-    #[cfg(not(target_arch = "wasm32"))]
     Runtime(crate::RuntimeErrorCode),
     Codegen(CodegenError),
 }
@@ -51,7 +50,7 @@ pub enum SimulatorErrorKind {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum CodegenError {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(feature = "host-runtime")]
     #[error("{0}")]
     Cranelift(
         #[from]
@@ -73,28 +72,28 @@ pub enum CodegenError {
         source: celox_sir::verify::SirVerifyError,
     },
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
     #[error("native emission failed: {source}")]
     NativePipeline {
         #[source]
         source: celox_backend_x86::native::emit::ChainedEmitError,
     },
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
     #[error("native emission failed: {source}")]
     NativeEmission {
         #[source]
         source: celox_backend_x86::native::emit::EmitError,
     },
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
     #[error("failed to allocate executable native memory: {source}")]
     NativeMemory {
         #[source]
         source: std::io::Error,
     },
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(feature = "host-runtime")]
     #[error("WASM {stage} failed: {source}")]
     Wasm {
         stage: &'static str,
@@ -102,12 +101,13 @@ pub enum CodegenError {
         source: wasmtime::Error,
     },
 
+    #[cfg(feature = "host-runtime")]
     #[error("{message}")]
     Message { message: String },
 }
 
+#[cfg(feature = "host-runtime")]
 impl CodegenError {
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn message(message: impl Into<String>) -> Self {
         Self::Message {
             message: message.into(),
@@ -160,7 +160,6 @@ impl fmt::Display for SimulatorError {
                     f.write_str(&render_analyzer_error(e))?;
                 }
             }
-            #[cfg(not(target_arch = "wasm32"))]
             SimulatorErrorKind::Runtime(e) => write!(f, "Runtime error: {e}")?,
             SimulatorErrorKind::Codegen(error) => write!(f, "JIT Code generation error: {error}")?,
         }
@@ -181,7 +180,6 @@ impl std::error::Error for SimulatorError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self.kind.as_ref() {
             SimulatorErrorKind::SIRParser(e) => Some(e),
-            #[cfg(not(target_arch = "wasm32"))]
             SimulatorErrorKind::Runtime(e) => Some(e),
             SimulatorErrorKind::Codegen(error) => Some(error),
             _ => None,
@@ -189,7 +187,6 @@ impl std::error::Error for SimulatorError {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl From<crate::RuntimeErrorCode> for SimulatorError {
     fn from(e: crate::RuntimeErrorCode) -> Self {
         SimulatorError::new(SimulatorErrorKind::Runtime(e))
@@ -208,14 +205,14 @@ impl From<CodegenError> for SimulatorError {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "host-runtime")]
 impl From<celox_backend_cranelift::CraneliftError> for SimulatorError {
     fn from(error: celox_backend_cranelift::CraneliftError) -> Self {
         CodegenError::from(error).into()
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "host-runtime"))]
 mod tests {
     use std::error::Error as _;
 
@@ -236,7 +233,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn simulator_error_keeps_the_backend_source_chain() {
         let backend = celox_backend_cranelift::CraneliftError::NativeTarget {

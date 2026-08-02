@@ -274,6 +274,145 @@ fn test_for_loop_step() {
 }
 
 #[test]
+fn test_for_loop_bitwise_steps() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var cnt: logic<32>;
+            var or_end: logic<32>;
+            var xor_end: logic<32>;
+            var xor_wide_start: signed logic<32>;
+            var xor_wide_end: signed logic<128>;
+            var xor_wide_last: signed logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                or_end = 7;
+                xor_end = 5;
+                for i in 3..=or_end step |= 6 {{
+                    clk.next(i);
+                    if i == or_end {{
+                        break;
+                    }}
+                }}
+                $assert(cnt == 32'd10);
+                for i in 3..=xor_end step ^= 6 {{
+                    clk.next(i);
+                    if i == xor_end {{
+                        break;
+                    }}
+                }}
+                $assert(cnt == 32'd18);
+                xor_wide_start = (0 - 8) as 32;
+                xor_wide_end = 2147483640;
+                xor_wide_last = 0;
+                for i in xor_wide_start..=xor_wide_end step ^= 2147483648 {{
+                    xor_wide_last = i;
+                    if i == 2147483640 {{
+                        break;
+                    }}
+                }}
+                $assert(xor_wide_last == 32'sh7fff_fff8);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_for_loop_i32_bitwise_steps_discard_high_step_bits() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var or_end: signed logic<128>;
+            var xor_end: signed logic<128>;
+            var or_last: signed logic<32>;
+            var xor_last: signed logic<32>;
+            initial {
+                or_end = 7;
+                xor_end = 5;
+                or_last = 0;
+                for i in 3..=or_end step |= 4294967302 {
+                    or_last = i;
+                    if i == 7 {
+                        break;
+                    }
+                }
+                xor_last = 0;
+                for i in 3..=xor_end step ^= 4294967302 {
+                    xor_last = i;
+                    if i == 5 {
+                        break;
+                    }
+                }
+                $assert(or_last == 7);
+                $assert(xor_last == 5);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_for_loop_i32_xor_step_with_only_high_bits_fails() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var end_bound: logic<32>;
+            var last: logic<32>;
+            initial {
+                end_bound = 4;
+                last = 0;
+                for i in 3..end_bound step ^= 4294967296 {
+                    last = i;
+                }
+                $finish();
+            }
+        }
+    "#;
+    let TestResult::Fail(message) = Simulator::builder(code, "t").run_test().unwrap() else {
+        panic!("expected non-progressing loop failure");
+    };
+    assert!(message.contains("non-progressing stepped for loop"));
+}
+
+#[test]
+fn test_for_loop_i32_or_step_with_only_existing_low_bits_fails() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var end_bound: logic<32>;
+            var last: logic<32>;
+            initial {
+                end_bound = 4;
+                last = 0;
+                for i in 3..end_bound step |= 4294967299 {
+                    last = i;
+                }
+                $finish();
+            }
+        }
+    "#;
+    let TestResult::Fail(message) = Simulator::builder(code, "t").run_test().unwrap() else {
+        panic!("expected non-progressing loop failure");
+    };
+    assert!(message.contains("non-progressing stepped for loop"));
+}
+
+#[test]
 fn test_for_loop_rev() {
     let code = format!(
         r#"

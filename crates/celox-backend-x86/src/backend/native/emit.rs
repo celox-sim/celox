@@ -25,10 +25,8 @@ use crate::native::ssa_destroy::{
     EdgeCopyPlan, ParallelCopyDestination, ParallelCopyOperation, ParallelCopySource,
     SsaDestructionPlan,
 };
-use celox_state_layout::{
-    STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET, STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET,
-    STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET,
-};
+use crate::{STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET, STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET};
+use celox_state_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET;
 
 pub use crate::native::ssa_destroy::SsaDestructionError;
 

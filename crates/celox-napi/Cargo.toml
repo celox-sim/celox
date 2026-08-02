@@ -14,7 +14,6 @@ crate-type = ["cdylib"]
 [dependencies]
 napi              = { version = "=3.12.0", features = ["napi8", "serde-json"] }
 napi-derive       = "=3.6.1"
-celox             = { path = "../celox" }
 celox-ts-gen      = { path = "../celox-ts-gen" }
 veryl-analyzer    = { workspace = true }
 veryl-metadata    = { workspace = true }
@@ -25,6 +24,12 @@ serde             = { workspace = true }
 serde_json        = { workspace = true }
 toml              = { workspace = true }
 globset           = "0.4"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+celox = { path = "../celox" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+celox = { path = "../celox", default-features = false }
 
 [build-dependencies]
 napi-build = "=2.4.0"

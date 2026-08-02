@@ -293,6 +293,29 @@ fn sign_extend_u128(raw: u128, width: usize) -> i128 {
     }
 }
 
+fn truncate_i128_to_width(value: i128, width: usize, signed: bool) -> i128 {
+    let width = width.max(1);
+    if width >= 128 {
+        return value;
+    }
+    let raw = (value as u128) & ((1u128 << width) - 1);
+    if signed {
+        sign_extend_u128(raw, width)
+    } else {
+        raw as i128
+    }
+}
+
+fn truncate_usize_to_width(value: usize, width: usize) -> usize {
+    if width >= usize::BITS as usize {
+        value
+    } else if width == 0 {
+        0
+    } else {
+        value & ((1usize << width) - 1)
+    }
+}
+
 fn sign_extend_biguint(raw: BigUint, width: usize) -> BigInt {
     let width = width.max(1);
     let sign_bit = BigUint::from(1u8) << (width - 1);
@@ -532,6 +555,8 @@ fn exec_for_loop<B: SimBackend>(
                 }
                 let new_i = match op {
                     Op::Mul => i.saturating_mul(step_i),
+                    Op::BitOr => i | step_i,
+                    Op::BitXor => i ^ step_i,
                     Op::LogicShiftL | Op::ArithShiftL => {
                         if step >= i128::BITS as usize {
                             break;
@@ -540,7 +565,14 @@ fn exec_for_loop<B: SimBackend>(
                     }
                     _ => i.saturating_add(step_i),
                 };
-                if new_i == i {
+                let new_i = if matches!(op, Op::BitOr | Op::BitXor) {
+                    loop_var.as_ref().map_or(new_i, |(_, width, signed)| {
+                        truncate_i128_to_width(new_i, *width, *signed)
+                    })
+                } else {
+                    new_i
+                };
+                if new_i <= i {
                     return ExecResult::Fail("non-progressing stepped for loop".to_string());
                 }
                 i = new_i;
@@ -623,6 +655,8 @@ fn exec_for_loop<B: SimBackend>(
             }
             let new_i = match op {
                 Op::Mul => i.saturating_mul(step),
+                Op::BitOr => i | step,
+                Op::BitXor => i ^ step,
                 Op::LogicShiftL | Op::ArithShiftL => {
                     if step >= usize::BITS as usize {
                         break;
@@ -631,7 +665,14 @@ fn exec_for_loop<B: SimBackend>(
                 }
                 _ => i.saturating_add(step),
             };
-            if new_i == i {
+            let new_i = if matches!(op, Op::BitOr | Op::BitXor) {
+                loop_var.as_ref().map_or(new_i, |(_, width, _)| {
+                    truncate_usize_to_width(new_i, *width)
+                })
+            } else {
+                new_i
+            };
+            if new_i <= i {
                 return ExecResult::Fail("non-progressing stepped for loop".to_string());
             }
             i = new_i;
@@ -1157,7 +1198,7 @@ fn exec_one_detailed<B: SimBackend>(
     }
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(all(test, feature = "host-runtime"))]
 mod tests {
     use std::error::Error as _;
 

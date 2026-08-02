@@ -10,7 +10,6 @@ use crate::{
 /// RegisterIds and BlockIds are renumbered to avoid conflicts.
 /// Returns (merged_eu, eu_entry_block_ids) where eu_entry_block_ids[i] is the
 /// BlockId of the i-th EU's entry block in the merged EU (for i > 0).
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>, Vec<BlockId>) {
     let units = units.iter().collect::<Vec<_>>();
     merge_sir_eu_refs(&units)
@@ -23,21 +22,17 @@ pub fn merge_sir_eus<A: Clone>(units: &[ExecutionUnit<A>]) -> (ExecutionUnit<A>,
 #[derive(Debug, Clone)]
 pub struct SirMergeProvenance {
     pub unit_entries: Vec<BlockId>,
-    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     pub block_units: HashMap<BlockId, usize>,
 }
 
 /// Reference-based variant of [`merge_sir_eus`] used when one compilation
 /// unit is assembled from multiple Program-owned EU slices.
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub fn merge_sir_eu_refs<A: Clone>(
     units: &[&ExecutionUnit<A>],
 ) -> (ExecutionUnit<A>, Vec<BlockId>) {
     let (merged, provenance) = merge_sir_eu_refs_with_provenance(units);
     (merged, provenance.unit_entries[1..].to_vec())
 }
-
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub fn merge_sir_eu_refs_with_provenance<A: Clone>(
     units: &[&ExecutionUnit<A>],
 ) -> (ExecutionUnit<A>, SirMergeProvenance) {
@@ -181,8 +176,6 @@ pub fn merge_sir_eu_refs_with_provenance<A: Clone>(
         },
     )
 }
-
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub fn inline_single_predecessor_jumps<A: Clone>(
     eu: &mut ExecutionUnit<A>,
 ) -> Result<bool, crate::verify::SirVerifyError> {
@@ -308,8 +301,6 @@ pub fn inline_single_predecessor_jumps<A: Clone>(
     }
     Ok(changed)
 }
-
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn replace_sir_offset_uses(offset: &mut SIROffset, replacements: &HashMap<RegisterId, RegisterId>) {
     match offset {
         SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
@@ -334,8 +325,6 @@ fn replace_sir_offset_uses(offset: &mut SIROffset, replacements: &HashMap<Regist
         }
     }
 }
-
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn replace_sir_uses<A>(
     instruction: &mut SIRInstruction<A>,
     replacements: &HashMap<RegisterId, RegisterId>,
@@ -390,8 +379,6 @@ fn replace_sir_uses<A>(
         }
     }
 }
-
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn replace_sir_terminator_uses(
     terminator: &mut SIRTerminator,
     replacements: &HashMap<RegisterId, RegisterId>,
@@ -430,8 +417,6 @@ fn replace_sir_terminator_uses(
         SIRTerminator::Return | SIRTerminator::Error(_) => {}
     }
 }
-
-#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn renumber_sir_inst<A: Clone>(
     inst: &SIRInstruction<A>,
     ro: usize,

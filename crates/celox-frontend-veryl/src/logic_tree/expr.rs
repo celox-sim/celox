@@ -896,15 +896,7 @@ pub(super) fn eval_function_body_return(
             }
         }
 
-        let Some(loop_width) = for_stmt.var_type.total_width() else {
-            return Err(ParserError::unsupported(
-                65,
-                LoweringPhase::CombLowering,
-                "for loop variable width",
-                format!("{:?}", for_stmt.var_name),
-                Some(&for_stmt.token),
-            ));
-        };
+        let loop_width = resolve_total_width(module, &module.variables[&for_stmt.var_id])?;
         let (start_bound, end_bound) = match &for_stmt.range {
             ForRange::Forward { start, end, .. }
             | ForRange::Reverse { start, end, .. }
@@ -1066,10 +1058,10 @@ pub(super) fn eval_function_body_return(
                 let step_op = match op {
                     Op::Mul => SLTStepOp::Mul,
                     Op::LogicShiftL | Op::ArithShiftL => SLTStepOp::Shl,
+                    Op::BitOr => SLTStepOp::BitOr,
+                    Op::BitXor => SLTStepOp::BitXor,
                     other => {
-                        return Err(ParserError::unsupported(
-                            65,
-                            LoweringPhase::CombLowering,
+                        return Err(ParserError::illegal_context(
                             "for loop step operator",
                             format!("{other:?}"),
                             Some(&for_stmt.token),

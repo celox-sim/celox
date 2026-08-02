@@ -7,8 +7,6 @@ use veryl_metadata::{ClockType, Metadata, ResetType};
 use veryl_parser::Parser;
 use veryl_parser::resource_table;
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::ir::LaidOutProgram;
 use crate::parser::BuildConfig;
 use crate::{ParserError, SimulatorError, SimulatorErrorKind, ir::OptimizedSir, parser};
 
@@ -262,6 +260,7 @@ pub fn compile_sv_to_sir(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_sv_to_sir_with_layout_mode(
     sources: &[(&str, &Path)],
     top: &str,
@@ -485,712 +484,713 @@ fn compile_hdl_to_sir_with_layout_mode(
 
 // ── JIT-specific types and builders (native only) ────────────────────
 
-#[cfg(not(target_arch = "wasm32"))]
-use super::Simulator;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::backend::JitBackend;
+#[cfg(feature = "host-runtime")]
+mod host {
+    use super::super::Simulator;
+    use super::*;
+    use crate::backend::JitBackend;
+    use crate::ir::LaidOutProgram;
 
-/// Controls which stores the dead store elimination pass preserves.
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DeadStorePolicy {
-    /// Keep all stores (no dead store elimination). Default for user-facing builds.
-    #[default]
-    Off,
-    /// Eliminate stores except those explicitly marked live via `live_signal()`
-    /// and those loaded by execution units.
-    PreserveListedSignals,
-    /// Eliminate stores except those to top-module ports and those loaded by EUs.
-    PreserveTopPorts,
-    /// Eliminate stores except those to ports of *all* instances and those loaded by EUs.
-    PreserveAllPorts,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone)]
-pub struct SimulatorOptions {
-    pub four_state: bool,
-    /// Per-pass SIRT optimizer flags.
-    pub optimize_options: crate::optimizer::OptimizeOptions,
-    /// Fine-grained Cranelift backend options.
-    pub cranelift_options: crate::backend::CraneliftOptions,
-    #[cfg(target_arch = "x86_64")]
-    pub x86_options: crate::backend::X86BackendOptions,
-    pub trace: crate::debug::TraceOptions,
-    pub diagnostics: crate::RuntimeDiagnostics,
-    /// When true, JIT-compiled functions emit trigger detection code for
-    /// edge-based event discovery. Only needed by [`crate::Simulation`].
-    pub emit_triggers: bool,
-    /// Dead store elimination policy.
-    pub dead_store_policy: DeadStorePolicy,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Default for SimulatorOptions {
-    fn default() -> Self {
-        let opt = crate::optimizer::OptimizeOptions::default();
-        Self {
-            four_state: false,
-            optimize_options: opt,
-            cranelift_options: crate::backend::CraneliftOptions::default(),
-            #[cfg(target_arch = "x86_64")]
-            x86_options: crate::backend::X86BackendOptions::default(),
-            trace: Default::default(),
-            diagnostics: Default::default(),
-            emit_triggers: false,
-            dead_store_policy: DeadStorePolicy::Off,
-        }
-    }
-}
-
-/// A fluent builder for configuring and initializing a [`Simulator`] or
-/// [`Simulation`](crate::Simulation).
-///
-/// Use [`Simulator::builder()`] or [`Simulation::builder()`](crate::Simulation::builder)
-/// to obtain the appropriate variant. Both share the same configuration methods;
-/// only `.build()` differs in return type.
-#[cfg(not(target_arch = "wasm32"))]
-pub struct SimulatorBuilder<'a, Target = Simulator> {
-    sources: Vec<(&'a str, &'a Path)>,
-    sv_sources: Vec<(&'a str, &'a Path)>,
-    top: &'a str,
-    ignored_loops: Vec<(
-        (Vec<(String, usize)>, Vec<String>),
-        (Vec<(String, usize)>, Vec<String>),
-    )>,
-    true_loops: Vec<(
-        (Vec<(String, usize)>, Vec<String>),
-        (Vec<(String, usize)>, Vec<String>),
-        usize,
-    )>,
-    options: SimulatorOptions,
-    vcd_path: Option<std::path::PathBuf>,
-    metadata: Option<Metadata>,
-    clock_type: Option<ClockType>,
-    reset_type: Option<ResetType>,
-    param_overrides: Vec<(String, u64)>,
-    live_signals: Vec<(Vec<(String, usize)>, Vec<String>)>,
-    _marker: std::marker::PhantomData<Target>,
-}
-
-/// Configuration methods shared by all builder variants.
-#[cfg(not(target_arch = "wasm32"))]
-impl<'a, Target> SimulatorBuilder<'a, Target> {
-    /// Returns the source files passed to this builder.
-    pub fn sources(&self) -> &[(&'a str, &'a Path)] {
-        &self.sources
+    /// Controls which stores the dead store elimination pass preserves.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub enum DeadStorePolicy {
+        /// Keep all stores (no dead store elimination). Default for user-facing builds.
+        #[default]
+        Off,
+        /// Eliminate stores except those explicitly marked live via `live_signal()`
+        /// and those loaded by execution units.
+        PreserveListedSignals,
+        /// Eliminate stores except those to top-module ports and those loaded by EUs.
+        PreserveTopPorts,
+        /// Eliminate stores except those to ports of *all* instances and those loaded by EUs.
+        PreserveAllPorts,
     }
 
-    /// Returns the SystemVerilog source files passed to this builder.
-    pub fn sv_sources(&self) -> &[(&'a str, &'a Path)] {
-        &self.sv_sources
-    }
-
-    /// Replace the builder's SystemVerilog source set.
-    pub fn with_sv_sources(mut self, sources: Vec<(&'a str, &'a Path)>) -> Self {
-        self.sv_sources = sources;
-        self
-    }
-
-    /// Returns the top module name.
-    pub fn top(&self) -> &'a str {
-        self.top
-    }
-
-    /// Supply project metadata (clock/reset settings, etc.) instead of defaults.
-    pub fn with_metadata(mut self, metadata: Metadata) -> Self {
-        self.metadata = Some(metadata);
-        self
-    }
-
-    /// Override the clock type (posedge/negedge) from metadata or defaults.
-    pub fn clock_type(mut self, clock_type: ClockType) -> Self {
-        self.clock_type = Some(clock_type);
-        self
-    }
-
-    /// Override the reset type (async_high/async_low/sync_high/sync_low) from metadata or defaults.
-    pub fn reset_type(mut self, reset_type: ResetType) -> Self {
-        self.reset_type = Some(reset_type);
-        self
-    }
-
-    /// Override a top-level module parameter value.
-    pub fn param(mut self, name: &str, value: u64) -> Self {
-        self.param_overrides.push((name.to_string(), value));
-        self
-    }
-
-    /// Enable VCD dumping to the specified file.
-    pub fn vcd<P: AsRef<std::path::Path>>(mut self, path: P) -> Self {
-        self.vcd_path = Some(path.as_ref().to_path_buf());
-        self
-    }
-
-    /// Enable 4-state (0, 1, X, Z) simulation mode.
-    pub fn four_state(mut self, enable: bool) -> Self {
-        self.options.four_state = enable;
-        self
-    }
-
-    /// Set the overall optimization level. Sets defaults for SIR passes,
-    /// Cranelift options, and DSE policy. Per-pass overrides can be applied after.
-    pub fn opt_level(mut self, level: crate::optimizer::OptLevel) -> Self {
-        self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level);
-        self.options.cranelift_options = crate::backend::CraneliftOptions::for_speed_optimization(
-            level != crate::optimizer::OptLevel::O0,
-        );
-        self.options.dead_store_policy = match level {
-            crate::optimizer::OptLevel::O2 => DeadStorePolicy::PreserveTopPorts,
-            _ => DeadStorePolicy::Off,
-        };
-        self
-    }
-
-    /// Enable a specific SIR pass, overriding the OptLevel default.
-    pub fn enable_pass(mut self, pass: crate::optimizer::SirPass) -> Self {
-        if pass == crate::optimizer::SirPass::TailCallSplit {
-            self.options.cranelift_options.tail_call_split = true;
-        }
-        self.options.optimize_options = self.options.optimize_options.enable(pass);
-        self
-    }
-
-    /// Disable a specific SIR pass, overriding the OptLevel default.
-    pub fn disable_pass(mut self, pass: crate::optimizer::SirPass) -> Self {
-        if pass == crate::optimizer::SirPass::TailCallSplit {
-            self.options.cranelift_options.tail_call_split = false;
-        }
-        self.options.optimize_options = self.options.optimize_options.disable(pass);
-        self
-    }
-
-    /// Enable or disable all SIRT optimization passes at once.
-    /// Shorthand: `true` → `OptLevel::O1`, `false` → `OptLevel::O0`.
-    pub fn optimize(mut self, enable: bool) -> Self {
-        self.options.optimize_options = if enable {
-            crate::optimizer::OptimizeOptions::all()
-        } else {
-            crate::optimizer::OptimizeOptions::none()
-        };
-        self
-    }
-
-    /// Set per-pass optimizer flags directly.
-    pub fn optimize_options(mut self, options: crate::optimizer::OptimizeOptions) -> Self {
-        self.options.cranelift_options.tail_call_split =
-            options.is_enabled(crate::optimizer::SirPass::TailCallSplit);
-        self.options.optimize_options = options;
-        self
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    pub fn x86_slp(mut self, enable: bool) -> Self {
-        self.options.x86_options.slp = enable;
-        self
-    }
-
-    /// Set fine-grained Cranelift backend options.
-    pub fn cranelift_options(mut self, options: crate::backend::CraneliftOptions) -> Self {
-        self.options.cranelift_options = options;
-        self
-    }
-
-    /// Set the register allocator algorithm.
-    pub fn regalloc_algorithm(mut self, algo: crate::backend::RegallocAlgorithm) -> Self {
-        self.options.cranelift_options.regalloc_algorithm = algo;
-        self
-    }
-
-    /// Enable or disable alias analysis in the Cranelift egraph pass.
-    pub fn enable_alias_analysis(mut self, enable: bool) -> Self {
-        self.options.cranelift_options.enable_alias_analysis = enable;
-        self
-    }
-
-    /// Enable or disable the Cranelift IR verifier.
-    pub fn enable_verifier(mut self, enable: bool) -> Self {
-        self.options.cranelift_options.enable_verifier = enable;
-        self
-    }
-
-    /// Set the dead store elimination policy.
-    pub fn dead_store_policy(mut self, policy: DeadStorePolicy) -> Self {
-        self.options.dead_store_policy = policy;
-        self
-    }
-
-    /// Mark a signal as externally observable (live) for dead store elimination.
-    pub fn live_signal(
-        mut self,
-        instance_path: Vec<(String, usize)>,
-        var_path: Vec<String>,
-    ) -> Self {
-        self.live_signals.push((instance_path, var_path));
-        self
-    }
-
-    /// Configure compilation tracing options.
-    pub fn trace(mut self, trace: crate::debug::TraceOptions) -> Self {
-        self.options.trace = trace;
-        self
-    }
-
-    /// Configure diagnostics explicitly for this build.
-    pub fn diagnostics(mut self, diagnostics: crate::DiagnosticsOptions) -> Self {
-        self.options.diagnostics = diagnostics.runtime;
-        self.options.optimize_options.diagnostics = diagnostics.sir;
-        self.options.cranelift_options.diagnostics = diagnostics.cranelift;
+    #[derive(Debug, Clone)]
+    pub struct SimulatorOptions {
+        pub four_state: bool,
+        /// Per-pass SIRT optimizer flags.
+        pub optimize_options: crate::optimizer::OptimizeOptions,
+        /// Fine-grained Cranelift backend options.
+        pub cranelift_options: crate::backend::CraneliftOptions,
         #[cfg(target_arch = "x86_64")]
-        {
-            self.options.x86_options.diagnostics = diagnostics.native;
-            if let Some(enabled) = diagnostics.native_tick_loop {
-                self.options.x86_options.native_tick_loop = enabled;
+        pub x86_options: crate::backend::X86BackendOptions,
+        pub trace: crate::debug::TraceOptions,
+        pub diagnostics: crate::RuntimeDiagnostics,
+        /// When true, JIT-compiled functions emit trigger detection code for
+        /// edge-based event discovery. Only needed by [`crate::Simulation`].
+        pub emit_triggers: bool,
+        /// Dead store elimination policy.
+        pub dead_store_policy: DeadStorePolicy,
+    }
+
+    impl Default for SimulatorOptions {
+        fn default() -> Self {
+            let opt = crate::optimizer::OptimizeOptions::default();
+            Self {
+                four_state: false,
+                optimize_options: opt,
+                cranelift_options: crate::backend::CraneliftOptions::default(),
+                #[cfg(target_arch = "x86_64")]
+                x86_options: crate::backend::X86BackendOptions::default(),
+                trace: Default::default(),
+                diagnostics: Default::default(),
+                emit_triggers: false,
+                dead_store_policy: DeadStorePolicy::Off,
             }
         }
-        self
     }
 
-    /// Import legacy `CELOX_*` diagnostics switches once at the API boundary.
-    pub fn diagnostics_from_env(self) -> Self {
-        self.diagnostics(crate::DiagnosticsOptions::from_env())
-    }
-
-    pub fn trace_sim_modules(mut self) -> Self {
-        self.options.trace.sim_modules = true;
-        self
-    }
-
-    pub fn trace_pre_atomized_comb_blocks(mut self) -> Self {
-        self.options.trace.pre_atomized_comb_blocks = true;
-        self
-    }
-
-    pub fn trace_atomized_comb_blocks(mut self) -> Self {
-        self.options.trace.atomized_comb_blocks = true;
-        self
-    }
-
-    pub fn trace_flattened_comb_blocks(mut self) -> Self {
-        self.options.trace.flattened_comb_blocks = true;
-        self
-    }
-
-    pub fn trace_scheduled_units(mut self) -> Self {
-        self.options.trace.scheduled_units = true;
-        self
-    }
-
-    pub fn trace_pre_optimized_sir(mut self) -> Self {
-        self.options.trace.pre_optimized_sir = true;
-        self
-    }
-
-    pub fn trace_post_optimized_sir(mut self) -> Self {
-        self.options.trace.post_optimized_sir = true;
-        self
-    }
-
-    pub fn trace_analyzer_ir(mut self) -> Self {
-        self.options.trace.analyzer_ir = true;
-        self
-    }
-
-    pub fn trace_pre_optimized_clif(mut self) -> Self {
-        self.options.trace.pre_optimized_clif = true;
-        self
-    }
-
-    pub fn trace_post_optimized_clif(mut self) -> Self {
-        self.options.trace.post_optimized_clif = true;
-        self
-    }
-
-    pub fn trace_native(mut self) -> Self {
-        self.options.trace.native = true;
-        self
-    }
-
-    pub fn trace_mir(mut self) -> Self {
-        self.options.trace.mir = true;
-        self
-    }
-
-    /// Add one profile-selected native JIT block to state-layout feasibility
-    /// analysis. The analysis is captured by [`Self::build_with_trace`] from
-    /// the exact merged SIR passed to native instruction selection.
-    pub fn trace_native_profile_block(
-        mut self,
-        function: impl Into<String>,
-        block: u32,
-        samples: u64,
-    ) -> Self {
-        self.options
-            .trace
-            .native_profile_blocks
-            .push(crate::debug::NativeProfileBlock {
-                function: function.into(),
-                block,
-                samples,
-            });
-        self
-    }
-
-    pub fn trace_on_build(mut self) -> Self {
-        self.options.trace.output_to_stdout = true;
-        self
-    }
-
-    /// Explicitly ignore a dependency between two signals.
-    pub fn false_loop(
-        mut self,
-        from: (Vec<(String, usize)>, Vec<String>),
-        to: (Vec<(String, usize)>, Vec<String>),
-    ) -> Self {
-        self.ignored_loops.push((from, to));
-        self
-    }
-
-    /// Mark a dependency as a "true loop" and specify its convergence limit.
-    pub fn true_loop(
-        mut self,
-        from: (Vec<(String, usize)>, Vec<String>),
-        to: (Vec<(String, usize)>, Vec<String>),
-        max_iter: usize,
-    ) -> Self {
-        self.true_loops.push((from, to, max_iter));
-        self
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl<'a> SimulatorBuilder<'a, Simulator> {
-    pub fn new(code: &'a str, top: &'a str) -> Self {
-        Self {
-            sources: vec![(code, Path::new(""))],
-            sv_sources: Vec::new(),
-            top,
-            ignored_loops: Vec::new(),
-            true_loops: Vec::new(),
-            options: SimulatorOptions::default(),
-            vcd_path: None,
-            metadata: None,
-            clock_type: None,
-            reset_type: None,
-            param_overrides: Vec::new(),
-            live_signals: Vec::new(),
-            _marker: std::marker::PhantomData,
-        }
-    }
-
-    pub fn from_sources(sources: Vec<(&'a str, &'a Path)>, top: &'a str) -> Self {
-        Self {
-            sources,
-            sv_sources: Vec::new(),
-            top,
-            ignored_loops: Vec::new(),
-            true_loops: Vec::new(),
-            options: SimulatorOptions::default(),
-            vcd_path: None,
-            metadata: None,
-            clock_type: None,
-            reset_type: None,
-            param_overrides: Vec::new(),
-            live_signals: Vec::new(),
-            _marker: std::marker::PhantomData,
-        }
-    }
-
-    pub fn from_sv_sources(sources: Vec<(&'a str, &'a Path)>, top: &'a str) -> Self {
-        Self {
-            sources: Vec::new(),
-            sv_sources: sources,
-            top,
-            ignored_loops: Vec::new(),
-            true_loops: Vec::new(),
-            options: SimulatorOptions::default(),
-            vcd_path: None,
-            metadata: None,
-            clock_type: None,
-            reset_type: None,
-            param_overrides: Vec::new(),
-            live_signals: Vec::new(),
-            _marker: std::marker::PhantomData,
-        }
-    }
-
-    pub fn from_mixed_sources(
+    /// A fluent builder for configuring and initializing a [`Simulator`] or
+    /// [`Simulation`](crate::Simulation).
+    ///
+    /// Use [`Simulator::builder()`] or [`Simulation::builder()`](crate::Simulation::builder)
+    /// to obtain the appropriate variant. Both share the same configuration methods;
+    /// only `.build()` differs in return type.
+    pub struct SimulatorBuilder<'a, Target = Simulator> {
         sources: Vec<(&'a str, &'a Path)>,
         sv_sources: Vec<(&'a str, &'a Path)>,
         top: &'a str,
-    ) -> Self {
-        Self {
-            sources,
-            sv_sources,
-            top,
-            ignored_loops: Vec::new(),
-            true_loops: Vec::new(),
-            options: SimulatorOptions::default(),
-            vcd_path: None,
-            metadata: None,
-            clock_type: None,
-            reset_type: None,
-            param_overrides: Vec::new(),
-            live_signals: Vec::new(),
-            _marker: std::marker::PhantomData,
+        ignored_loops: Vec<(
+            (Vec<(String, usize)>, Vec<String>),
+            (Vec<(String, usize)>, Vec<String>),
+        )>,
+        true_loops: Vec<(
+            (Vec<(String, usize)>, Vec<String>),
+            (Vec<(String, usize)>, Vec<String>),
+            usize,
+        )>,
+        options: SimulatorOptions,
+        vcd_path: Option<std::path::PathBuf>,
+        metadata: Option<Metadata>,
+        clock_type: Option<ClockType>,
+        reset_type: Option<ResetType>,
+        param_overrides: Vec<(String, u64)>,
+        live_signals: Vec<(Vec<(String, usize)>, Vec<String>)>,
+        _marker: std::marker::PhantomData<Target>,
+    }
+
+    /// Configuration methods shared by all builder variants.
+    impl<'a, Target> SimulatorBuilder<'a, Target> {
+        /// Returns the source files passed to this builder.
+        pub fn sources(&self) -> &[(&'a str, &'a Path)] {
+            &self.sources
+        }
+
+        /// Returns the SystemVerilog source files passed to this builder.
+        pub fn sv_sources(&self) -> &[(&'a str, &'a Path)] {
+            &self.sv_sources
+        }
+
+        /// Replace the builder's SystemVerilog source set.
+        pub fn with_sv_sources(mut self, sources: Vec<(&'a str, &'a Path)>) -> Self {
+            self.sv_sources = sources;
+            self
+        }
+
+        /// Returns the top module name.
+        pub fn top(&self) -> &'a str {
+            self.top
+        }
+
+        /// Supply project metadata (clock/reset settings, etc.) instead of defaults.
+        pub fn with_metadata(mut self, metadata: Metadata) -> Self {
+            self.metadata = Some(metadata);
+            self
+        }
+
+        /// Override the clock type (posedge/negedge) from metadata or defaults.
+        pub fn clock_type(mut self, clock_type: ClockType) -> Self {
+            self.clock_type = Some(clock_type);
+            self
+        }
+
+        /// Override the reset type (async_high/async_low/sync_high/sync_low) from metadata or defaults.
+        pub fn reset_type(mut self, reset_type: ResetType) -> Self {
+            self.reset_type = Some(reset_type);
+            self
+        }
+
+        /// Override a top-level module parameter value.
+        pub fn param(mut self, name: &str, value: u64) -> Self {
+            self.param_overrides.push((name.to_string(), value));
+            self
+        }
+
+        /// Enable VCD dumping to the specified file.
+        pub fn vcd<P: AsRef<std::path::Path>>(mut self, path: P) -> Self {
+            self.vcd_path = Some(path.as_ref().to_path_buf());
+            self
+        }
+
+        /// Enable 4-state (0, 1, X, Z) simulation mode.
+        pub fn four_state(mut self, enable: bool) -> Self {
+            self.options.four_state = enable;
+            self
+        }
+
+        /// Set the overall optimization level. Sets defaults for SIR passes,
+        /// Cranelift options, and DSE policy. Per-pass overrides can be applied after.
+        pub fn opt_level(mut self, level: crate::optimizer::OptLevel) -> Self {
+            self.options.optimize_options = crate::optimizer::OptimizeOptions::new(level);
+            self.options.cranelift_options =
+                crate::backend::CraneliftOptions::for_speed_optimization(
+                    level != crate::optimizer::OptLevel::O0,
+                );
+            self.options.dead_store_policy = match level {
+                crate::optimizer::OptLevel::O2 => DeadStorePolicy::PreserveTopPorts,
+                _ => DeadStorePolicy::Off,
+            };
+            self
+        }
+
+        /// Enable a specific SIR pass, overriding the OptLevel default.
+        pub fn enable_pass(mut self, pass: crate::optimizer::SirPass) -> Self {
+            if pass == crate::optimizer::SirPass::TailCallSplit {
+                self.options.cranelift_options.tail_call_split = true;
+            }
+            self.options.optimize_options = self.options.optimize_options.enable(pass);
+            self
+        }
+
+        /// Disable a specific SIR pass, overriding the OptLevel default.
+        pub fn disable_pass(mut self, pass: crate::optimizer::SirPass) -> Self {
+            if pass == crate::optimizer::SirPass::TailCallSplit {
+                self.options.cranelift_options.tail_call_split = false;
+            }
+            self.options.optimize_options = self.options.optimize_options.disable(pass);
+            self
+        }
+
+        /// Enable or disable all SIRT optimization passes at once.
+        /// Shorthand: `true` → `OptLevel::O1`, `false` → `OptLevel::O0`.
+        pub fn optimize(mut self, enable: bool) -> Self {
+            self.options.optimize_options = if enable {
+                crate::optimizer::OptimizeOptions::all()
+            } else {
+                crate::optimizer::OptimizeOptions::none()
+            };
+            self
+        }
+
+        /// Set per-pass optimizer flags directly.
+        pub fn optimize_options(mut self, options: crate::optimizer::OptimizeOptions) -> Self {
+            self.options.cranelift_options.tail_call_split =
+                options.is_enabled(crate::optimizer::SirPass::TailCallSplit);
+            self.options.optimize_options = options;
+            self
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        pub fn x86_slp(mut self, enable: bool) -> Self {
+            self.options.x86_options.slp = enable;
+            self
+        }
+
+        /// Set fine-grained Cranelift backend options.
+        pub fn cranelift_options(mut self, options: crate::backend::CraneliftOptions) -> Self {
+            self.options.cranelift_options = options;
+            self
+        }
+
+        /// Set the register allocator algorithm.
+        pub fn regalloc_algorithm(mut self, algo: crate::backend::RegallocAlgorithm) -> Self {
+            self.options.cranelift_options.regalloc_algorithm = algo;
+            self
+        }
+
+        /// Enable or disable alias analysis in the Cranelift egraph pass.
+        pub fn enable_alias_analysis(mut self, enable: bool) -> Self {
+            self.options.cranelift_options.enable_alias_analysis = enable;
+            self
+        }
+
+        /// Enable or disable the Cranelift IR verifier.
+        pub fn enable_verifier(mut self, enable: bool) -> Self {
+            self.options.cranelift_options.enable_verifier = enable;
+            self
+        }
+
+        /// Set the dead store elimination policy.
+        pub fn dead_store_policy(mut self, policy: DeadStorePolicy) -> Self {
+            self.options.dead_store_policy = policy;
+            self
+        }
+
+        /// Mark a signal as externally observable (live) for dead store elimination.
+        pub fn live_signal(
+            mut self,
+            instance_path: Vec<(String, usize)>,
+            var_path: Vec<String>,
+        ) -> Self {
+            self.live_signals.push((instance_path, var_path));
+            self
+        }
+
+        /// Configure compilation tracing options.
+        pub fn trace(mut self, trace: crate::debug::TraceOptions) -> Self {
+            self.options.trace = trace;
+            self
+        }
+
+        /// Configure diagnostics explicitly for this build.
+        pub fn diagnostics(mut self, diagnostics: crate::DiagnosticsOptions) -> Self {
+            self.options.diagnostics = diagnostics.runtime;
+            self.options.optimize_options.diagnostics = diagnostics.sir;
+            self.options.cranelift_options.diagnostics = diagnostics.cranelift;
+            #[cfg(target_arch = "x86_64")]
+            {
+                self.options.x86_options.diagnostics = diagnostics.native;
+                if let Some(enabled) = diagnostics.native_tick_loop {
+                    self.options.x86_options.native_tick_loop = enabled;
+                }
+            }
+            self
+        }
+
+        /// Import legacy `CELOX_*` diagnostics switches once at the API boundary.
+        pub fn diagnostics_from_env(self) -> Self {
+            self.diagnostics(crate::DiagnosticsOptions::from_env())
+        }
+
+        pub fn trace_sim_modules(mut self) -> Self {
+            self.options.trace.sim_modules = true;
+            self
+        }
+
+        pub fn trace_pre_atomized_comb_blocks(mut self) -> Self {
+            self.options.trace.pre_atomized_comb_blocks = true;
+            self
+        }
+
+        pub fn trace_atomized_comb_blocks(mut self) -> Self {
+            self.options.trace.atomized_comb_blocks = true;
+            self
+        }
+
+        pub fn trace_flattened_comb_blocks(mut self) -> Self {
+            self.options.trace.flattened_comb_blocks = true;
+            self
+        }
+
+        pub fn trace_scheduled_units(mut self) -> Self {
+            self.options.trace.scheduled_units = true;
+            self
+        }
+
+        pub fn trace_pre_optimized_sir(mut self) -> Self {
+            self.options.trace.pre_optimized_sir = true;
+            self
+        }
+
+        pub fn trace_post_optimized_sir(mut self) -> Self {
+            self.options.trace.post_optimized_sir = true;
+            self
+        }
+
+        pub fn trace_analyzer_ir(mut self) -> Self {
+            self.options.trace.analyzer_ir = true;
+            self
+        }
+
+        pub fn trace_pre_optimized_clif(mut self) -> Self {
+            self.options.trace.pre_optimized_clif = true;
+            self
+        }
+
+        pub fn trace_post_optimized_clif(mut self) -> Self {
+            self.options.trace.post_optimized_clif = true;
+            self
+        }
+
+        pub fn trace_native(mut self) -> Self {
+            self.options.trace.native = true;
+            self
+        }
+
+        pub fn trace_mir(mut self) -> Self {
+            self.options.trace.mir = true;
+            self
+        }
+
+        /// Add one profile-selected native JIT block to state-layout feasibility
+        /// analysis. The analysis is captured by [`Self::build_with_trace`] from
+        /// the exact merged SIR passed to native instruction selection.
+        pub fn trace_native_profile_block(
+            mut self,
+            function: impl Into<String>,
+            block: u32,
+            samples: u64,
+        ) -> Self {
+            self.options
+                .trace
+                .native_profile_blocks
+                .push(crate::debug::NativeProfileBlock {
+                    function: function.into(),
+                    block,
+                    samples,
+                });
+            self
+        }
+
+        pub fn trace_on_build(mut self) -> Self {
+            self.options.trace.output_to_stdout = true;
+            self
+        }
+
+        /// Explicitly ignore a dependency between two signals.
+        pub fn false_loop(
+            mut self,
+            from: (Vec<(String, usize)>, Vec<String>),
+            to: (Vec<(String, usize)>, Vec<String>),
+        ) -> Self {
+            self.ignored_loops.push((from, to));
+            self
+        }
+
+        /// Mark a dependency as a "true loop" and specify its convergence limit.
+        pub fn true_loop(
+            mut self,
+            from: (Vec<(String, usize)>, Vec<String>),
+            to: (Vec<(String, usize)>, Vec<String>),
+            max_iter: usize,
+        ) -> Self {
+            self.true_loops.push((from, to, max_iter));
+            self
         }
     }
 
-    /// Compile SIR, finalize its state layout, and return the typed artifact
-    /// along with the remaining builder state.
-    /// Consumes self.
-    fn into_laid_out_program(
-        self,
-        layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
-    ) -> Result<
-        (
-            crate::ir::LaidOutProgram,
-            Vec<veryl_analyzer::AnalyzerError>,
-            SimulatorOptions,
-            Option<std::path::PathBuf>,
-        ),
-        SimulatorError,
-    > {
-        let phase_timing = self.options.diagnostics.phase_timing;
-        let compile_start = phase_timing.then(crate::timing::now);
-        let (program, warnings) = compile_hdl_to_sir_with_layout_mode(
-            &self.sources,
-            &self.sv_sources,
-            self.top,
-            &self.ignored_loops,
-            &self.true_loops,
-            self.options.four_state,
-            &self.options.trace,
-            None,
-            self.metadata,
-            self.clock_type,
-            self.reset_type,
-            &self.param_overrides,
-            &self.options.optimize_options,
-            &self.options.diagnostics,
-            layout_mode,
-        )?;
-        if let Some(start) = compile_start {
-            tracing::debug!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
+    impl<'a> SimulatorBuilder<'a, Simulator> {
+        pub fn new(code: &'a str, top: &'a str) -> Self {
+            Self {
+                sources: vec![(code, Path::new(""))],
+                sv_sources: Vec::new(),
+                top,
+                ignored_loops: Vec::new(),
+                true_loops: Vec::new(),
+                options: SimulatorOptions::default(),
+                vcd_path: None,
+                metadata: None,
+                clock_type: None,
+                reset_type: None,
+                param_overrides: Vec::new(),
+                live_signals: Vec::new(),
+                _marker: std::marker::PhantomData,
+            }
         }
 
-        // Build memory layout (consumes semantic layout requirements).
-        let layout_start = phase_timing.then(crate::timing::now);
-        let mut laid_out = program.into_laid_out_with_mode(self.options.four_state, layout_mode);
-        if let Some(start) = layout_start {
-            tracing::debug!("[phase-timing] build_layout: {:?}", start.elapsed());
+        pub fn from_sources(sources: Vec<(&'a str, &'a Path)>, top: &'a str) -> Self {
+            Self {
+                sources,
+                sv_sources: Vec::new(),
+                top,
+                ignored_loops: Vec::new(),
+                true_loops: Vec::new(),
+                options: SimulatorOptions::default(),
+                vcd_path: None,
+                metadata: None,
+                clock_type: None,
+                reset_type: None,
+                param_overrides: Vec::new(),
+                live_signals: Vec::new(),
+                _marker: std::marker::PhantomData,
+            }
         }
 
-        if self.options.dead_store_policy != DeadStorePolicy::Off {
-            let dse_start = phase_timing.then(crate::timing::now);
-            run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
-            if let Some(start) = dse_start {
+        pub fn from_sv_sources(sources: Vec<(&'a str, &'a Path)>, top: &'a str) -> Self {
+            Self {
+                sources: Vec::new(),
+                sv_sources: sources,
+                top,
+                ignored_loops: Vec::new(),
+                true_loops: Vec::new(),
+                options: SimulatorOptions::default(),
+                vcd_path: None,
+                metadata: None,
+                clock_type: None,
+                reset_type: None,
+                param_overrides: Vec::new(),
+                live_signals: Vec::new(),
+                _marker: std::marker::PhantomData,
+            }
+        }
+
+        pub fn from_mixed_sources(
+            sources: Vec<(&'a str, &'a Path)>,
+            sv_sources: Vec<(&'a str, &'a Path)>,
+            top: &'a str,
+        ) -> Self {
+            Self {
+                sources,
+                sv_sources,
+                top,
+                ignored_loops: Vec::new(),
+                true_loops: Vec::new(),
+                options: SimulatorOptions::default(),
+                vcd_path: None,
+                metadata: None,
+                clock_type: None,
+                reset_type: None,
+                param_overrides: Vec::new(),
+                live_signals: Vec::new(),
+                _marker: std::marker::PhantomData,
+            }
+        }
+
+        /// Compile SIR, finalize its state layout, and return the typed artifact
+        /// along with the remaining builder state.
+        /// Consumes self.
+        fn into_laid_out_program(
+            self,
+            layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+        ) -> Result<
+            (
+                crate::ir::LaidOutProgram,
+                Vec<veryl_analyzer::AnalyzerError>,
+                SimulatorOptions,
+                Option<std::path::PathBuf>,
+            ),
+            SimulatorError,
+        > {
+            let phase_timing = self.options.diagnostics.phase_timing;
+            let compile_start = phase_timing.then(crate::timing::now);
+            let (program, warnings) = compile_hdl_to_sir_with_layout_mode(
+                &self.sources,
+                &self.sv_sources,
+                self.top,
+                &self.ignored_loops,
+                &self.true_loops,
+                self.options.four_state,
+                &self.options.trace,
+                None,
+                self.metadata,
+                self.clock_type,
+                self.reset_type,
+                &self.param_overrides,
+                &self.options.optimize_options,
+                &self.options.diagnostics,
+                layout_mode,
+            )?;
+            if let Some(start) = compile_start {
+                tracing::debug!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
+            }
+
+            // Build memory layout (consumes semantic layout requirements).
+            let layout_start = phase_timing.then(crate::timing::now);
+            let mut laid_out =
+                program.into_laid_out_with_mode(self.options.four_state, layout_mode);
+            if let Some(start) = layout_start {
+                tracing::debug!("[phase-timing] build_layout: {:?}", start.elapsed());
+            }
+
+            if self.options.dead_store_policy != DeadStorePolicy::Off {
+                let dse_start = phase_timing.then(crate::timing::now);
+                run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
+                if let Some(start) = dse_start {
+                    tracing::debug!(
+                        "[phase-timing] dead_store_elimination: {:?}",
+                        start.elapsed()
+                    );
+                }
+            }
+
+            Ok((laid_out, warnings, self.options, self.vcd_path))
+        }
+
+        /// Compiles the Veryl source and constructs the simulator.
+        /// Uses the native x86-64 backend on x86-64, Cranelift elsewhere.
+        pub fn build(self) -> Result<Simulator<crate::DefaultBackend>, SimulatorError> {
+            #[cfg(target_arch = "x86_64")]
+            {
+                self.build_native()
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                self.build_cranelift()
+            }
+        }
+
+        /// Compiles using the Cranelift JIT backend.
+        pub fn build_cranelift(self) -> Result<Simulator<JitBackend>, SimulatorError> {
+            let phase_timing = self.options.diagnostics.phase_timing;
+            let phase_start = phase_timing.then(crate::timing::now);
+
+            let (laid_out, warnings, options, vcd_path) = self
+                .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+
+            if let Some(s) = phase_start {
                 tracing::debug!(
-                    "[phase-timing] dead_store_elimination: {:?}",
+                    "[phase-timing] compile_and_layout (total): {:?}",
+                    s.elapsed()
+                );
+            }
+
+            let jit_start = phase_timing.then(crate::timing::now);
+            let mut trace = crate::debug::CompilationTrace::default();
+            let wants_codegen_trace = options.trace.pre_optimized_clif
+                || options.trace.post_optimized_clif
+                || options.trace.native;
+            let backend = JitBackend::new(
+                &laid_out,
+                &options,
+                wants_codegen_trace.then_some(&mut trace),
+            )?;
+            if options.trace.output_to_stdout {
+                trace.print();
+            }
+            if let Some(s) = jit_start {
+                tracing::debug!("[phase-timing] jit_backend: {:?}", s.elapsed());
+            }
+
+            let mut sim =
+                Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+            sim.diagnostics = options.diagnostics.clone();
+            if let Some(path) = vcd_path {
+                let descs = sim.build_vcd_descs(options.four_state);
+                let vcd_writer = crate::VcdWriter::new(path, &descs)
+                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                sim.vcd_writer = Some(vcd_writer);
+            }
+            sim.apply_initial_values();
+            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            Ok(sim)
+        }
+
+        /// Compiles using the native x86-64 backend.
+        #[cfg(target_arch = "x86_64")]
+        pub fn build_native(
+            self,
+        ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
+            let phase_timing = self.options.diagnostics.phase_timing;
+            let sir_start = phase_timing.then(crate::timing::now);
+            let (laid_out, warnings, options, vcd_path) = self.into_laid_out_program(
+                crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+            )?;
+            if let Some(start) = sir_start {
+                tracing::debug!(
+                    "[phase-timing] into_laid_out_program total: {:?}",
                     start.elapsed()
                 );
             }
-        }
-
-        Ok((laid_out, warnings, self.options, self.vcd_path))
-    }
-
-    /// Compiles the Veryl source and constructs the simulator.
-    /// Uses the native x86-64 backend on x86-64, Cranelift elsewhere.
-    pub fn build(self) -> Result<Simulator<crate::DefaultBackend>, SimulatorError> {
-        #[cfg(target_arch = "x86_64")]
-        {
-            self.build_native()
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            self.build_cranelift()
-        }
-    }
-
-    /// Compiles using the Cranelift JIT backend.
-    pub fn build_cranelift(self) -> Result<Simulator<JitBackend>, SimulatorError> {
-        let phase_timing = self.options.diagnostics.phase_timing;
-        let phase_start = phase_timing.then(crate::timing::now);
-
-        let (laid_out, warnings, options, vcd_path) =
-            self.into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
-
-        if let Some(s) = phase_start {
-            tracing::debug!(
-                "[phase-timing] compile_and_layout (total): {:?}",
-                s.elapsed()
-            );
-        }
-
-        let jit_start = phase_timing.then(crate::timing::now);
-        let mut trace = crate::debug::CompilationTrace::default();
-        let wants_codegen_trace = options.trace.pre_optimized_clif
-            || options.trace.post_optimized_clif
-            || options.trace.native;
-        let backend = JitBackend::new(
-            &laid_out,
-            &options,
-            wants_codegen_trace.then_some(&mut trace),
-        )?;
-        if options.trace.output_to_stdout {
-            trace.print();
-        }
-        if let Some(s) = jit_start {
-            tracing::debug!("[phase-timing] jit_backend: {:?}", s.elapsed());
-        }
-
-        let mut sim =
-            Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
-        sim.diagnostics = options.diagnostics.clone();
-        if let Some(path) = vcd_path {
-            let descs = sim.build_vcd_descs(options.four_state);
-            let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
-                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
-            sim.vcd_writer = Some(vcd_writer);
-        }
-        sim.apply_initial_values();
-        sim.modify(|_| {}).map_err(SimulatorError::from)?;
-        Ok(sim)
-    }
-
-    /// Compiles using the native x86-64 backend.
-    #[cfg(target_arch = "x86_64")]
-    pub fn build_native(
-        self,
-    ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
-        let phase_timing = self.options.diagnostics.phase_timing;
-        let sir_start = phase_timing.then(crate::timing::now);
-        let (laid_out, warnings, options, vcd_path) = self.into_laid_out_program(
-            crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
-        )?;
-        if let Some(start) = sir_start {
-            tracing::debug!(
-                "[phase-timing] into_laid_out_program total: {:?}",
-                start.elapsed()
-            );
-        }
-        let backend_start = phase_timing.then(crate::timing::now);
-        let backend = crate::backend::native::NativeBackend::new(&laid_out, &options)?;
-        if let Some(start) = backend_start {
-            tracing::debug!("[phase-timing] native_backend: {:?}", start.elapsed());
-        }
-        let mut sim =
-            Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
-        sim.diagnostics = options.diagnostics.clone();
-        if let Some(path) = vcd_path {
-            let descs = sim.build_vcd_descs(options.four_state);
-            let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
-                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
-            sim.vcd_writer = Some(vcd_writer);
-        }
-        let apply_initial_start = phase_timing.then(crate::timing::now);
-        sim.apply_initial_values();
-        if let Some(start) = apply_initial_start {
-            tracing::debug!("[phase-timing] apply_initial_values: {:?}", start.elapsed());
-        }
-        let settle_start = phase_timing.then(crate::timing::now);
-        sim.modify(|_| {}).map_err(SimulatorError::from)?;
-        if let Some(start) = settle_start {
-            tracing::debug!("[phase-timing] initial_settle: {:?}", start.elapsed());
-        }
-        Ok(sim)
-    }
-
-    /// Compiles using the Wasmtime WASM backend.
-    pub fn build_wasm(
-        self,
-    ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
-        let (laid_out, warnings, options, vcd_path) =
-            self.into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
-        let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)?;
-        let mut sim =
-            Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
-        sim.diagnostics = options.diagnostics.clone();
-        if let Some(path) = vcd_path {
-            let descs = sim.build_vcd_descs(options.four_state);
-            let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
-                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
-            sim.vcd_writer = Some(vcd_writer);
-        }
-        sim.apply_initial_values();
-        sim.modify(|_| {}).map_err(SimulatorError::from)?;
-        Ok(sim)
-    }
-
-    /// Compiles and runs a native testbench (`#[test]` module).
-    pub fn run_test(self) -> Result<crate::testbench::TestResult, SimulatorError> {
-        run_test_with_sim(self.build()?)
-    }
-
-    /// Compiles and runs a testbench using the Cranelift JIT backend.
-    pub fn run_test_cranelift(self) -> Result<crate::testbench::TestResult, SimulatorError> {
-        run_test_with_sim(self.build_cranelift()?)
-    }
-
-    /// Compiles and runs a testbench using the custom native backend.
-    #[cfg(target_arch = "x86_64")]
-    pub fn run_test_native(self) -> Result<crate::testbench::TestResult, SimulatorError> {
-        run_test_with_sim(self.build_native()?)
-    }
-
-    /// Compiles and runs a native testbench, returning assertion results
-    /// observed before the test finishes or stops on a fatal failure.
-    pub fn run_test_detailed(self) -> Result<crate::testbench::TestResultDetailed, SimulatorError> {
-        let mut sim = self.build()?;
-        let testbench = crate::testbench::compile_initial_testbench(&sim).ok_or_else(|| {
-            SimulatorError::new(SimulatorErrorKind::Codegen(crate::CodegenError::message(
-                "no initial block found — this module is not a native testbench",
-            )))
-        })?;
-        Ok(crate::testbench::run_testbench_detailed(
-            &mut sim,
-            testbench.statements(),
-        ))
-    }
-
-    /// Compiles the Veryl source and constructs the core logic simulator,
-    /// while capturing compilation trace data as configured by TraceOptions.
-    pub fn build_with_trace(self) -> crate::debug::CompilationTraceResult {
-        let mut trace = crate::debug::CompilationTrace::default();
-        #[cfg(target_arch = "x86_64")]
-        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
-        #[cfg(not(target_arch = "x86_64"))]
-        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
-        let program_res = compile_hdl_to_sir_with_layout_mode(
-            &self.sources,
-            &self.sv_sources,
-            self.top,
-            &self.ignored_loops,
-            &self.true_loops,
-            self.options.four_state,
-            &self.options.trace,
-            Some(&mut trace),
-            self.metadata,
-            self.clock_type,
-            self.reset_type,
-            &self.param_overrides,
-            &self.options.optimize_options,
-            &self.options.diagnostics,
-            layout_mode,
-        );
-
-        let sim_res = program_res.and_then(|(program, warnings)| {
-            let mut laid_out =
-                program.into_laid_out_with_mode(self.options.four_state, layout_mode);
-
-            if self.options.dead_store_policy != DeadStorePolicy::Off {
-                run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
+            let backend_start = phase_timing.then(crate::timing::now);
+            let backend = crate::backend::native::NativeBackend::new(&laid_out, &options)?;
+            if let Some(start) = backend_start {
+                tracing::debug!("[phase-timing] native_backend: {:?}", start.elapsed());
             }
+            let mut sim =
+                Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+            sim.diagnostics = options.diagnostics.clone();
+            if let Some(path) = vcd_path {
+                let descs = sim.build_vcd_descs(options.four_state);
+                let vcd_writer = crate::VcdWriter::new(path, &descs)
+                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                sim.vcd_writer = Some(vcd_writer);
+            }
+            let apply_initial_start = phase_timing.then(crate::timing::now);
+            sim.apply_initial_values();
+            if let Some(start) = apply_initial_start {
+                tracing::debug!("[phase-timing] apply_initial_values: {:?}", start.elapsed());
+            }
+            let settle_start = phase_timing.then(crate::timing::now);
+            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            if let Some(start) = settle_start {
+                tracing::debug!("[phase-timing] initial_settle: {:?}", start.elapsed());
+            }
+            Ok(sim)
+        }
 
+        /// Compiles using the Wasmtime WASM backend.
+        pub fn build_wasm(
+            self,
+        ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
+            let (laid_out, warnings, options, vcd_path) = self
+                .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
+            let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)?;
+            let mut sim =
+                Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+            sim.diagnostics = options.diagnostics.clone();
+            if let Some(path) = vcd_path {
+                let descs = sim.build_vcd_descs(options.four_state);
+                let vcd_writer = crate::VcdWriter::new(path, &descs)
+                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                sim.vcd_writer = Some(vcd_writer);
+            }
+            sim.apply_initial_values();
+            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            Ok(sim)
+        }
+
+        /// Compiles and runs a native testbench (`#[test]` module).
+        pub fn run_test(self) -> Result<crate::testbench::TestResult, SimulatorError> {
+            run_test_with_sim(self.build()?)
+        }
+
+        /// Compiles and runs a testbench using the Cranelift JIT backend.
+        pub fn run_test_cranelift(self) -> Result<crate::testbench::TestResult, SimulatorError> {
+            run_test_with_sim(self.build_cranelift()?)
+        }
+
+        /// Compiles and runs a testbench using the custom native backend.
+        #[cfg(target_arch = "x86_64")]
+        pub fn run_test_native(self) -> Result<crate::testbench::TestResult, SimulatorError> {
+            run_test_with_sim(self.build_native()?)
+        }
+
+        /// Compiles and runs a native testbench, returning assertion results
+        /// observed before the test finishes or stops on a fatal failure.
+        pub fn run_test_detailed(
+            self,
+        ) -> Result<crate::testbench::TestResultDetailed, SimulatorError> {
+            let mut sim = self.build()?;
+            let testbench = crate::testbench::compile_initial_testbench(&sim).ok_or_else(|| {
+                SimulatorError::new(SimulatorErrorKind::Codegen(crate::CodegenError::message(
+                    "no initial block found — this module is not a native testbench",
+                )))
+            })?;
+            Ok(crate::testbench::run_testbench_detailed(
+                &mut sim,
+                testbench.statements(),
+            ))
+        }
+
+        /// Compiles the Veryl source and constructs the core logic simulator,
+        /// while capturing compilation trace data as configured by TraceOptions.
+        pub fn build_with_trace(self) -> crate::debug::CompilationTraceResult {
+            let mut trace = crate::debug::CompilationTrace::default();
             #[cfg(target_arch = "x86_64")]
-            let backend =
-                if self.options.trace.mir || !self.options.trace.native_profile_blocks.is_empty() {
+            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
+            #[cfg(not(target_arch = "x86_64"))]
+            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
+            let program_res = compile_hdl_to_sir_with_layout_mode(
+                &self.sources,
+                &self.sv_sources,
+                self.top,
+                &self.ignored_loops,
+                &self.true_loops,
+                self.options.four_state,
+                &self.options.trace,
+                Some(&mut trace),
+                self.metadata,
+                self.clock_type,
+                self.reset_type,
+                &self.param_overrides,
+                &self.options.optimize_options,
+                &self.options.diagnostics,
+                layout_mode,
+            );
+
+            let sim_res = program_res.and_then(|(program, warnings)| {
+                let mut laid_out =
+                    program.into_laid_out_with_mode(self.options.four_state, layout_mode);
+
+                if self.options.dead_store_policy != DeadStorePolicy::Off {
+                    run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
+                }
+
+                #[cfg(target_arch = "x86_64")]
+                let backend = if self.options.trace.mir
+                    || !self.options.trace.native_profile_blocks.is_empty()
+                {
                     let (backend, native_trace) =
                         crate::backend::native::NativeBackend::new_with_codegen_trace(
                             &laid_out,
@@ -1204,167 +1204,185 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
                 } else {
                     crate::backend::native::NativeBackend::new(&laid_out, &self.options)?
                 };
+                #[cfg(not(target_arch = "x86_64"))]
+                let backend = JitBackend::new(&laid_out, &self.options, None)?;
+
+                let mut sim =
+                    Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+                sim.diagnostics = self.options.diagnostics.clone();
+                sim.apply_initial_values();
+                sim.modify(|_| {}).map_err(SimulatorError::from)?;
+                Ok(sim)
+            });
+
+            if self.options.trace.output_to_stdout {
+                trace.print();
+            }
+
+            crate::debug::CompilationTraceResult {
+                res: sim_res,
+                trace,
+            }
+        }
+    }
+
+    fn run_test_with_sim<B: crate::backend::SimBackend>(
+        mut sim: Simulator<B>,
+    ) -> Result<crate::testbench::TestResult, SimulatorError> {
+        let phase_timing = sim.diagnostics.phase_timing;
+        let testbench_start = phase_timing.then(crate::timing::now);
+        let testbench = crate::testbench::compile_initial_testbench(&sim).ok_or_else(|| {
+            SimulatorError::new(SimulatorErrorKind::Codegen(crate::CodegenError::message(
+                "no initial block found — this module is not a native testbench",
+            )))
+        })?;
+        let result = crate::testbench::run_testbench(&mut sim, testbench.statements());
+        if let Some(start) = testbench_start {
+            tracing::debug!("[phase-timing] testbench: {:?}", start.elapsed());
+        }
+        Ok(result)
+    }
+
+    impl<'a> SimulatorBuilder<'a, crate::Simulation> {
+        pub(crate) fn new(code: &'a str, top: &'a str) -> Self {
+            Self {
+                sources: vec![(code, Path::new(""))],
+                sv_sources: Vec::new(),
+                top,
+                ignored_loops: Vec::new(),
+                true_loops: Vec::new(),
+                options: SimulatorOptions::default(),
+                vcd_path: None,
+                metadata: None,
+                clock_type: None,
+                reset_type: None,
+                param_overrides: Vec::new(),
+                live_signals: Vec::new(),
+                _marker: std::marker::PhantomData,
+            }
+        }
+
+        pub(crate) fn from_sources(sources: Vec<(&'a str, &'a Path)>, top: &'a str) -> Self {
+            Self {
+                sources,
+                sv_sources: Vec::new(),
+                top,
+                ignored_loops: Vec::new(),
+                true_loops: Vec::new(),
+                options: SimulatorOptions::default(),
+                vcd_path: None,
+                metadata: None,
+                clock_type: None,
+                reset_type: None,
+                param_overrides: Vec::new(),
+                live_signals: Vec::new(),
+                _marker: std::marker::PhantomData,
+            }
+        }
+
+        /// Compiles the Veryl source and constructs the timed simulation wrapper.
+        pub fn build(mut self) -> Result<crate::Simulation, SimulatorError> {
+            self.options.emit_triggers = true;
+            #[cfg(target_arch = "x86_64")]
+            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
             #[cfg(not(target_arch = "x86_64"))]
-            let backend = JitBackend::new(&laid_out, &self.options, None)?;
+            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
+            let (program, warnings) = compile_hdl_to_sir_with_layout_mode(
+                &self.sources,
+                &self.sv_sources,
+                self.top,
+                &self.ignored_loops,
+                &self.true_loops,
+                self.options.four_state,
+                &self.options.trace,
+                None,
+                self.metadata,
+                self.clock_type,
+                self.reset_type,
+                &self.param_overrides,
+                &self.options.optimize_options,
+                &self.options.diagnostics,
+                layout_mode,
+            )?;
+            let mut laid_out =
+                program.into_laid_out_with_mode(self.options.four_state, layout_mode);
+
+            if self.options.dead_store_policy != DeadStorePolicy::Off {
+                run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
+            }
+            #[cfg(target_arch = "x86_64")]
+            let backend = crate::backend::native::NativeBackend::new(&laid_out, &self.options)?;
+            #[cfg(not(target_arch = "x86_64"))]
+            let backend = crate::backend::JitBackend::new(&laid_out, &self.options, None)?;
 
             let mut sim =
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.diagnostics = self.options.diagnostics.clone();
+            if let Some(path) = self.vcd_path {
+                let descs = sim.build_vcd_descs(self.options.four_state);
+                let vcd_writer = crate::VcdWriter::new(path, &descs)
+                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                sim.vcd_writer = Some(vcd_writer);
+            }
             sim.apply_initial_values();
             sim.modify(|_| {}).map_err(SimulatorError::from)?;
-            Ok(sim)
-        });
-
-        if self.options.trace.output_to_stdout {
-            trace.print();
-        }
-
-        crate::debug::CompilationTraceResult {
-            res: sim_res,
-            trace,
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn run_test_with_sim<B: crate::backend::SimBackend>(
-    mut sim: Simulator<B>,
-) -> Result<crate::testbench::TestResult, SimulatorError> {
-    let phase_timing = sim.diagnostics.phase_timing;
-    let testbench_start = phase_timing.then(crate::timing::now);
-    let testbench = crate::testbench::compile_initial_testbench(&sim).ok_or_else(|| {
-        SimulatorError::new(SimulatorErrorKind::Codegen(crate::CodegenError::message(
-            "no initial block found — this module is not a native testbench",
-        )))
-    })?;
-    let result = crate::testbench::run_testbench(&mut sim, testbench.statements());
-    if let Some(start) = testbench_start {
-        tracing::debug!("[phase-timing] testbench: {:?}", start.elapsed());
-    }
-    Ok(result)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl<'a> SimulatorBuilder<'a, crate::Simulation> {
-    pub(crate) fn new(code: &'a str, top: &'a str) -> Self {
-        Self {
-            sources: vec![(code, Path::new(""))],
-            sv_sources: Vec::new(),
-            top,
-            ignored_loops: Vec::new(),
-            true_loops: Vec::new(),
-            options: SimulatorOptions::default(),
-            vcd_path: None,
-            metadata: None,
-            clock_type: None,
-            reset_type: None,
-            param_overrides: Vec::new(),
-            live_signals: Vec::new(),
-            _marker: std::marker::PhantomData,
+            Ok(crate::Simulation::new(sim))
         }
     }
 
-    pub(crate) fn from_sources(sources: Vec<(&'a str, &'a Path)>, top: &'a str) -> Self {
-        Self {
-            sources,
-            sv_sources: Vec::new(),
-            top,
-            ignored_loops: Vec::new(),
-            true_loops: Vec::new(),
-            options: SimulatorOptions::default(),
-            vcd_path: None,
-            metadata: None,
-            clock_type: None,
-            reset_type: None,
-            param_overrides: Vec::new(),
-            live_signals: Vec::new(),
-            _marker: std::marker::PhantomData,
+    /// Resolve user-specified `(instance_path, var_path)` to `AbsoluteAddr` and run DSE.
+    fn run_dead_store_elimination(
+        program: &mut LaidOutProgram,
+        live_signals: &[(Vec<(String, usize)>, Vec<String>)],
+        options: &SimulatorOptions,
+    ) {
+        use crate::HashSet;
+        use crate::ir::InstancePath;
+        let mut externally_live = HashSet::default();
+
+        // Native testbench expressions bypass SIR and read simulator memory
+        // directly. Their inputs are therefore external DSE roots just like
+        // signals named with `live_signal()`.
+        externally_live.extend(program.runtime_schema.testbench_read_roots.iter().copied());
+
+        // User-specified live signals
+        for (inst_path, var_path) in live_signals {
+            let inst_refs: Vec<(&str, usize)> =
+                inst_path.iter().map(|(s, i)| (s.as_str(), *i)).collect();
+            let var_refs: Vec<&str> = var_path.iter().map(|s| s.as_str()).collect();
+            let addr = program.get_addr(&inst_refs, &var_refs).unwrap();
+            externally_live.insert(addr);
         }
-    }
 
-    /// Compiles the Veryl source and constructs the timed simulation wrapper.
-    pub fn build(mut self) -> Result<crate::Simulation, SimulatorError> {
-        self.options.emit_triggers = true;
-        #[cfg(target_arch = "x86_64")]
-        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
-        #[cfg(not(target_arch = "x86_64"))]
-        let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
-        let (program, warnings) = compile_hdl_to_sir_with_layout_mode(
-            &self.sources,
-            &self.sv_sources,
-            self.top,
-            &self.ignored_loops,
-            &self.true_loops,
-            self.options.four_state,
-            &self.options.trace,
-            None,
-            self.metadata,
-            self.clock_type,
-            self.reset_type,
-            &self.param_overrides,
-            &self.options.optimize_options,
-            &self.options.diagnostics,
-            layout_mode,
-        )?;
-        let mut laid_out = program.into_laid_out_with_mode(self.options.four_state, layout_mode);
-
-        if self.options.dead_store_policy != DeadStorePolicy::Off {
-            run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
+        // PreserveTopPorts: auto-collect top module port addresses
+        if options.dead_store_policy == DeadStorePolicy::PreserveTopPorts {
+            if let Some(&top_instance_id) = program.frontend.instance_ids.get(&InstancePath(vec![]))
+            {
+                if let Some(&top_module_id) = program.frontend.instance_module.get(&top_instance_id)
+                {
+                    if let Some(top_vars) = program.frontend.module_variables.get(&top_module_id) {
+                        for info in top_vars.values() {
+                            if info.var_kind.is_port() {
+                                if let Some(address) =
+                                    program.state_address_for_source(top_instance_id, info.id)
+                                {
+                                    externally_live.insert(address);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-        #[cfg(target_arch = "x86_64")]
-        let backend = crate::backend::native::NativeBackend::new(&laid_out, &self.options)?;
-        #[cfg(not(target_arch = "x86_64"))]
-        let backend = crate::backend::JitBackend::new(&laid_out, &self.options, None)?;
 
-        let mut sim =
-            Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
-        sim.diagnostics = self.options.diagnostics.clone();
-        if let Some(path) = self.vcd_path {
-            let descs = sim.build_vcd_descs(self.options.four_state);
-            let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
-                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
-            sim.vcd_writer = Some(vcd_writer);
-        }
-        sim.apply_initial_values();
-        sim.modify(|_| {}).map_err(SimulatorError::from)?;
-        Ok(crate::Simulation::new(sim))
-    }
-}
-
-/// Resolve user-specified `(instance_path, var_path)` to `AbsoluteAddr` and run DSE.
-#[cfg(not(target_arch = "wasm32"))]
-fn run_dead_store_elimination(
-    program: &mut LaidOutProgram,
-    live_signals: &[(Vec<(String, usize)>, Vec<String>)],
-    options: &SimulatorOptions,
-) {
-    use crate::HashSet;
-    use crate::ir::InstancePath;
-    let mut externally_live = HashSet::default();
-
-    // Native testbench expressions bypass SIR and read simulator memory
-    // directly. Their inputs are therefore external DSE roots just like
-    // signals named with `live_signal()`.
-    externally_live.extend(program.runtime_schema.testbench_read_roots.iter().copied());
-
-    // User-specified live signals
-    for (inst_path, var_path) in live_signals {
-        let inst_refs: Vec<(&str, usize)> =
-            inst_path.iter().map(|(s, i)| (s.as_str(), *i)).collect();
-        let var_refs: Vec<&str> = var_path.iter().map(|s| s.as_str()).collect();
-        let addr = program.get_addr(&inst_refs, &var_refs).unwrap();
-        externally_live.insert(addr);
-    }
-
-    // PreserveTopPorts: auto-collect top module port addresses
-    if options.dead_store_policy == DeadStorePolicy::PreserveTopPorts {
-        if let Some(&top_instance_id) = program.frontend.instance_ids.get(&InstancePath(vec![])) {
-            if let Some(&top_module_id) = program.frontend.instance_module.get(&top_instance_id) {
-                if let Some(top_vars) = program.frontend.module_variables.get(&top_module_id) {
-                    for info in top_vars.values() {
+        // PreserveAllPorts: collect port addresses from every instance
+        if options.dead_store_policy == DeadStorePolicy::PreserveAllPorts {
+            for (&instance_id, &module_id) in &program.frontend.instance_module {
+                if let Some(vars) = program.frontend.module_variables.get(&module_id) {
+                    for info in vars.values() {
                         if info.var_kind.is_port() {
                             if let Some(address) =
-                                program.state_address_for_source(top_instance_id, info.id)
+                                program.state_address_for_source(instance_id, info.id)
                             {
                                 externally_live.insert(address);
                             }
@@ -1373,28 +1391,14 @@ fn run_dead_store_elimination(
                 }
             }
         }
-    }
 
-    // PreserveAllPorts: collect port addresses from every instance
-    if options.dead_store_policy == DeadStorePolicy::PreserveAllPorts {
-        for (&instance_id, &module_id) in &program.frontend.instance_module {
-            if let Some(vars) = program.frontend.module_variables.get(&module_id) {
-                for info in vars.values() {
-                    if info.var_kind.is_port() {
-                        if let Some(address) =
-                            program.state_address_for_source(instance_id, info.id)
-                        {
-                            externally_live.insert(address);
-                        }
-                    }
-                }
-            }
-        }
+        crate::optimizer::sir::optimize_rooted_comb_memory(
+            program,
+            &externally_live,
+            options.four_state,
+        );
     }
-
-    crate::optimizer::sir::optimize_rooted_comb_memory(
-        program,
-        &externally_live,
-        options.four_state,
-    );
 }
+
+#[cfg(feature = "host-runtime")]
+pub use host::*;

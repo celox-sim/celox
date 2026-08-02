@@ -6,7 +6,7 @@ pub(crate) use celox_design::{
 };
 #[cfg(test)]
 pub(crate) use celox_design::{BinaryOp, UnaryOp};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "host-runtime")]
 pub(crate) use celox_design::{
     InitialStateData, InitialStateWriteRun, RuntimeEventKind, RuntimeEventSite,
 };
@@ -54,9 +54,9 @@ pub(crate) enum DesignProjectionError {
     MetadataMismatch { address: AbsoluteAddr },
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "host-runtime")]
 pub type InitialMemoryWriteRun = InitialStateWriteRun;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "host-runtime")]
 pub type InitialMemoryData = InitialStateData;
 pub type RuntimeErrorInfo<Addr = AbsoluteAddr> = celox_design::RuntimeErrorInfo<Addr>;
 
@@ -128,7 +128,7 @@ impl OptimizedSir {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
     pub(crate) fn into_runtime(self) -> RuntimeProgram {
         self.runtime
     }
@@ -497,7 +497,7 @@ pub(crate) mod verify {
 pub use celox_slt::{GlueAddrBase, GlueBlockBase};
 
 pub use celox_frontend_veryl::SimModule;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
 pub(crate) use celox_runtime::SignalArrayLayout;
 pub use celox_runtime::SignalRef;
 

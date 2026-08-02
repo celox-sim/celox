@@ -448,6 +448,8 @@ impl<A: Hash + Eq + Clone> SLTNode<A> {
                     match step_op {
                         SLTStepOp::Add => write!(f, "+=")?,
                         SLTStepOp::Mul => write!(f, "*=")?,
+                        SLTStepOp::BitOr => write!(f, "|=")?,
+                        SLTStepOp::BitXor => write!(f, "^=")?,
                         SLTStepOp::Shl => write!(f, "<<=")?,
                     }
                     write!(f, " {step}")?;
@@ -552,6 +554,8 @@ pub enum SLTStepOp {
     Add,
     Mul,
     Shl,
+    BitOr,
+    BitXor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
