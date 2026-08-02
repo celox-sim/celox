@@ -3,7 +3,7 @@ use crate::context_width::{
     ValueContext, binary_semantics, cast_semantics, expression_signed, resolve_binary_op,
 };
 use crate::{
-    LoweringPhase, ParserError,
+    HashMap, LoweringPhase, ParserError,
     bitaccess::{
         celox_value_from_comptime, celox_value_from_comptime_in_context, eval_var_select,
         get_access_width, is_static_access,
@@ -84,6 +84,14 @@ fn expression_has_side_effect(expr: &Expression) -> bool {
             .iter()
             .any(|(_, expr)| expression_has_side_effect(expr)),
     }
+}
+
+#[derive(Clone, Copy)]
+struct ArrayViewLayout {
+    element_count: usize,
+    element_width: usize,
+    signed: bool,
+    is_2state: bool,
 }
 
 fn add_offset_term<A>(
@@ -386,78 +394,234 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    fn materialize_bound_array_literal_access<A>(
+    fn array_view_layout(&self, var_id: VarId) -> Result<ArrayViewLayout, ParserError> {
+        let Some(variable) = self.module.variables.get(&var_id) else {
+            unreachable!("validated function argument must have a formal variable");
+        };
+        if variable.r#type.array.is_empty() {
+            unreachable!("array view requires an array variable");
+        }
+        let Some(element_count) = variable
+            .r#type
+            .array
+            .iter()
+            .copied()
+            .try_fold(1usize, |total, dim| {
+                dim.and_then(|dim| total.checked_mul(dim))
+            })
+        else {
+            unreachable!("function argument validation resolves array dimensions without overflow");
+        };
+        let total_width = resolve_total_width(self.module, variable)?;
+        if element_count == 0 || !total_width.is_multiple_of(element_count) {
+            unreachable!("array has a nonzero element count that divides its width");
+        }
+        Ok(ArrayViewLayout {
+            element_count,
+            element_width: total_width / element_count,
+            signed: variable.r#type.signed,
+            is_2state: variable.r#type.is_2state(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_bound_array_literal_view<A>(
         &mut self,
         var_id: VarId,
         items: &[ArrayLiteralItem],
-        index: &VarIndex,
-        select: &VarSelect,
         targets: &mut Vec<VarAtomBase<A>>,
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
-    ) -> Result<bool, ParserError> {
+    ) -> Result<(), ParserError> {
+        // Function bodies are lowered inline, so the formal's working region
+        // is a call-scoped temporary. Populate it before lowering any output
+        // or return expression so every later access is dominated by these
+        // stores, including accesses inside short-circuit control flow.
         let Some(formal) = self.module.variables.get(&var_id) else {
-            return Ok(false);
+            unreachable!("validated function argument must have a formal variable");
         };
         if formal.r#type.array.is_empty() {
-            return Ok(false);
-        }
-        if select.1.is_some() {
-            return Ok(false);
+            unreachable!("array literal view requires an array formal");
         }
 
         let array_dims: Option<Vec<usize>> = formal.r#type.array.iter().copied().collect();
         let Some(array_dims) = array_dims else {
-            return Ok(false);
+            unreachable!("function argument shape validation resolves formal dimensions");
         };
+        let layout = self.array_view_layout(var_id)?;
 
-        let mut all_indices = index.0.clone();
-        all_indices.extend(select.0.iter().cloned());
-        if all_indices.len() != array_dims.len() {
-            return Ok(false);
-        }
-
-        let mut resolved_indices = Vec::with_capacity(all_indices.len());
-        for (i, expr) in all_indices.iter().enumerate() {
-            let Some(idx) = self.get_constant_value(expr).map(|x| x as usize) else {
-                return Ok(false);
-            };
-            let dim = array_dims[i];
-            if idx >= dim {
-                return Ok(false);
+        let mut cached_elements = std::collections::HashMap::new();
+        for linear_index in 0..layout.element_count {
+            let mut remainder = linear_index;
+            let mut coordinates = vec![0usize; array_dims.len()];
+            for dimension in (0..array_dims.len()).rev() {
+                coordinates[dimension] = remainder % array_dims[dimension];
+                remainder /= array_dims[dimension];
             }
-            resolved_indices.push(idx);
+
+            let Some(selected_expr) =
+                self.select_array_literal_element(items, &coordinates, &array_dims)
+            else {
+                unreachable!("validated array literal covers every formal element");
+            };
+            let cache_key = selected_expr as *const Expression as usize;
+            let selected_reg = if let Some(reg) = cached_elements.get(&cache_key) {
+                *reg
+            } else {
+                self.parse_expression(
+                    selected_expr,
+                    targets,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
+                    Some(layout.element_width),
+                )?;
+                let reg = self.stack.pop_back().unwrap();
+                let reg = self.coerce_register_to_formal(
+                    ir_builder,
+                    reg,
+                    layout.element_width,
+                    selected_expr.comptime().r#type.signed,
+                    layout.signed,
+                    layout.is_2state,
+                );
+                cached_elements.insert(cache_key, reg);
+                reg
+            };
+            let element_index = ir_builder.alloc_bit(64, false);
+            ir_builder.emit(SIRInstruction::Imm(
+                element_index,
+                SIRValue::new(linear_index as u64),
+            ));
+            ir_builder.emit(SIRInstruction::Store(
+                convert(var_id, WORKING_REGION),
+                SIROffset::Element {
+                    index: element_index,
+                    element_width: layout.element_width,
+                    bit_offset: 0,
+                    dynamic_bit_offset: None,
+                },
+                layout.element_width,
+                selected_reg,
+                Vec::new(),
+                Vec::new(),
+            ));
         }
 
-        let Some(selected_expr) =
-            self.select_array_literal_element(items, &resolved_indices, &array_dims)
-        else {
-            return Ok(false);
-        };
+        Ok(())
+    }
 
-        let access_width = get_access_width(self.module, var_id, index, select)?;
-        self.parse_expression(
-            selected_expr,
-            targets,
-            domain,
-            convert,
-            sources,
-            ir_builder,
-            Some(access_width),
-        )?;
-        let selected_reg = self.stack.pop_back().unwrap();
-        let coerced = self.coerce_register_to_formal(
-            ir_builder,
-            selected_reg,
-            access_width,
-            selected_expr.comptime().r#type.signed,
-            formal.r#type.signed,
-            formal.r#type.is_2state(),
-        );
-        self.stack.push_back(coerced);
-        Ok(true)
+    fn materialize_converted_array_view<A>(
+        &mut self,
+        var_id: VarId,
+        backing_var_id: VarId,
+        convert: &impl Fn(VarId, u32) -> A,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        // A view can alias an existing backing only when both formals use the
+        // same element storage representation. Otherwise create a converted
+        // temporary for the callee while preserving element-wise coercion.
+        let target = self.array_view_layout(var_id)?;
+        let source = self.array_view_layout(backing_var_id)?;
+        if target.element_count != source.element_count {
+            unreachable!("function argument shape validation preserves array element count");
+        }
+
+        for linear_index in 0..target.element_count {
+            let element_index = ir_builder.alloc_bit(64, false);
+            ir_builder.emit(SIRInstruction::Imm(
+                element_index,
+                SIRValue::new(linear_index as u64),
+            ));
+            let source_reg = if source.is_2state {
+                ir_builder.alloc_bit(source.element_width, source.signed)
+            } else {
+                ir_builder.alloc_logic(source.element_width)
+            };
+            ir_builder.emit(SIRInstruction::Load(
+                source_reg,
+                convert(backing_var_id, WORKING_REGION),
+                SIROffset::Element {
+                    index: element_index,
+                    element_width: source.element_width,
+                    bit_offset: 0,
+                    dynamic_bit_offset: None,
+                },
+                source.element_width,
+            ));
+            let converted = self.coerce_register_to_formal(
+                ir_builder,
+                source_reg,
+                target.element_width,
+                source.signed,
+                target.signed,
+                target.is_2state,
+            );
+            ir_builder.emit(SIRInstruction::Store(
+                convert(var_id, WORKING_REGION),
+                SIROffset::Element {
+                    index: element_index,
+                    element_width: target.element_width,
+                    bit_offset: 0,
+                    dynamic_bit_offset: None,
+                },
+                target.element_width,
+                converted,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn materialize_function_array_views<A>(
+        &mut self,
+        bindings: &HashMap<VarId, Expression>,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<HashMap<VarId, VarId>, ParserError> {
+        let mut views = HashMap::default();
+        for (&var_id, bound_expr) in bindings {
+            if let Expression::ArrayLiteral(items, _) = bound_expr {
+                if self.module.variables[&var_id].r#type.array.is_empty() {
+                    continue;
+                }
+                self.materialize_bound_array_literal_view(
+                    var_id, items, targets, domain, convert, sources, ir_builder,
+                )?;
+                views.insert(var_id, var_id);
+            } else if let Expression::Term(factor) = bound_expr
+                && let Factor::Variable(bound_var_id, index, select, _) = factor.as_ref()
+                && index.0.is_empty()
+                && select.0.is_empty()
+                && select.1.is_none()
+                && let Some(backing_var_id) = self.get_bound_function_array_view(*bound_var_id)
+            {
+                let target = self.array_view_layout(var_id)?;
+                let backing = self.array_view_layout(backing_var_id)?;
+                if target.element_width == backing.element_width
+                    && target.is_2state == backing.is_2state
+                {
+                    views.insert(var_id, backing_var_id);
+                } else {
+                    self.materialize_converted_array_view(
+                        var_id,
+                        backing_var_id,
+                        convert,
+                        ir_builder,
+                    )?;
+                    views.insert(var_id, var_id);
+                }
+            }
+        }
+        Ok(views)
     }
 
     fn select_array_literal_element<'b>(
@@ -530,6 +694,53 @@ impl<'a> FfParser<'a> {
             _ if default_expr.comptime().r#type.array.is_empty() => Some(default_expr),
             _ => None,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_bound_array_literal_view<A>(
+        &mut self,
+        var_id: VarId,
+        backing_var_id: VarId,
+        index: &VarIndex,
+        select: &VarSelect,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        let width = get_access_width(self.module, var_id, index, select)?;
+        let formal = &self.module.variables[&var_id];
+        let dest = if formal.r#type.is_2state() {
+            ir_builder.alloc_bit(width, formal.r#type.signed)
+        } else {
+            ir_builder.alloc_logic(width)
+        };
+        let mut offset =
+            self.emit_offset_calc(var_id, index, select, domain, convert, sources, ir_builder)?;
+        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
+            let element_count = formal
+                .r#type
+                .array
+                .iter()
+                .flatten()
+                .copied()
+                .product::<usize>();
+            if element_count == 0 || !width.is_multiple_of(element_count) {
+                unreachable!("array view width is divisible by its nonzero element count");
+            }
+            offset = SIROffset::PackedElements {
+                bit_offset: 0,
+                element_width: width / element_count,
+            };
+        }
+        ir_builder.emit(SIRInstruction::Load(
+            dest,
+            convert(backing_var_id, WORKING_REGION),
+            offset,
+            width,
+        ));
+        self.stack.push_back(dest);
+        Ok(())
     }
 
     fn eval_formal_type_select(
@@ -1537,6 +1748,30 @@ impl<'a> FfParser<'a> {
                         }
                     }
                 }
+                if let Some(backing_var_id) = self.get_bound_function_array_view(*var_id) {
+                    self.load_bound_array_literal_view(
+                        *var_id,
+                        backing_var_id,
+                        var_index,
+                        var_select,
+                        domain,
+                        convert,
+                        sources,
+                        ir_builder,
+                    )?;
+                    if let Some(context) = context {
+                        let selected = self.stack.pop_back().unwrap();
+                        let adjusted = self.cast_reg_width_ext(
+                            ir_builder,
+                            selected,
+                            context.width,
+                            context.signed,
+                        );
+                        self.stack.push_back(adjusted);
+                    }
+                    return Ok(());
+                }
+
                 if let Some(bound_expr) = self.get_bound_function_arg_expr(*var_id) {
                     let bound_expr = bound_expr.clone();
                     if var_index.0.is_empty() && var_select.0.is_empty() && var_select.1.is_none() {
@@ -1563,15 +1798,6 @@ impl<'a> FfParser<'a> {
                             self.stack.push_back(adjusted);
                         }
                         return Ok(());
-                    }
-
-                    if let Expression::ArrayLiteral(items, _) = &bound_expr {
-                        if self.materialize_bound_array_literal_access(
-                            *var_id, items, var_index, var_select, targets, domain, convert,
-                            sources, ir_builder,
-                        )? {
-                            return Ok(());
-                        }
                     }
 
                     let Expression::Term(bound_factor) = &bound_expr else {
@@ -1667,15 +1893,29 @@ impl<'a> FfParser<'a> {
                     merged_select.0.extend(var_select.0.iter().cloned());
                     merged_select.1 = var_select.1.clone();
 
-                    self.op_load(
-                        *bound_var_id,
-                        &merged_index,
-                        &merged_select,
-                        domain,
-                        convert,
-                        sources,
-                        ir_builder,
-                    )?;
+                    if let Some(backing_var_id) = self.get_bound_function_array_view(*bound_var_id)
+                    {
+                        self.load_bound_array_literal_view(
+                            *bound_var_id,
+                            backing_var_id,
+                            &merged_index,
+                            &merged_select,
+                            domain,
+                            convert,
+                            sources,
+                            ir_builder,
+                        )?;
+                    } else {
+                        self.op_load(
+                            *bound_var_id,
+                            &merged_index,
+                            &merged_select,
+                            domain,
+                            convert,
+                            sources,
+                            ir_builder,
+                        )?;
+                    }
                 } else {
                     self.op_load(
                         *var_id, var_index, var_select, domain, convert, sources, ir_builder,

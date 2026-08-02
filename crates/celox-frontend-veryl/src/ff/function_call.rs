@@ -273,6 +273,13 @@ impl<'a> FfParser<'a> {
             .find_map(|bindings| bindings.get(&var_id))
     }
 
+    pub(super) fn get_bound_function_array_view(&self, var_id: VarId) -> Option<VarId> {
+        self.function_array_view_stack
+            .iter()
+            .rev()
+            .find_map(|bindings| bindings.get(&var_id).copied())
+    }
+
     pub(super) fn substitute_function_expr(
         expr: &Expression,
         defs: &HashMap<VarId, Expression>,
@@ -803,6 +810,9 @@ impl<'a> FfParser<'a> {
                 bindings.insert(*arg_id, arg_expr.clone());
             }
         }
+        let array_views = self.materialize_function_array_views(
+            &bindings, targets, domain, convert, sources, ir_builder,
+        )?;
 
         for (arg_path, dsts) in &call.outputs {
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
@@ -817,8 +827,12 @@ impl<'a> FfParser<'a> {
 
             let expr = self.extract_function_target_expr(&function_body, *arg_id, &bindings)?;
             self.function_arg_stack.push(bindings.clone());
-            self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None)?;
+            self.function_array_view_stack.push(array_views.clone());
+            let parse_result =
+                self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None);
+            self.function_array_view_stack.pop();
             self.function_arg_stack.pop();
+            parse_result?;
 
             let rhs_reg = self
                 .stack
@@ -840,9 +854,11 @@ impl<'a> FfParser<'a> {
         let ret_expr = self.extract_function_return_expr(&function_body, ret_id)?;
 
         self.function_arg_stack.push(bindings);
+        self.function_array_view_stack.push(array_views);
         let result = self.parse_expression(
             &ret_expr, targets, domain, convert, sources, ir_builder, None,
         );
+        self.function_array_view_stack.pop();
         self.function_arg_stack.pop();
 
         result
@@ -897,6 +913,9 @@ impl<'a> FfParser<'a> {
                 bindings.insert(*arg_id, arg_expr.clone());
             }
         }
+        let array_views = self.materialize_function_array_views(
+            &bindings, targets, domain, convert, sources, ir_builder,
+        )?;
 
         for (arg_path, dsts) in &call.outputs {
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
@@ -911,8 +930,12 @@ impl<'a> FfParser<'a> {
 
             let expr = self.extract_function_target_expr(&function_body, *arg_id, &bindings)?;
             self.function_arg_stack.push(bindings.clone());
-            self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None)?;
+            self.function_array_view_stack.push(array_views.clone());
+            let parse_result =
+                self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None);
+            self.function_array_view_stack.pop();
             self.function_arg_stack.pop();
+            parse_result?;
 
             let rhs_reg = self
                 .stack

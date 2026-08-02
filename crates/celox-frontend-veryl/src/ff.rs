@@ -277,6 +277,9 @@ pub struct FfParser<'a> {
     loop_exit_blocks: Vec<BlockId>,
     reset: Option<FfReset>,
     function_arg_stack: Vec<HashMap<VarId, Expression>>,
+    // Maps an active array formal to the formal whose working region owns
+    // its call-scoped backing storage.
+    function_array_view_stack: Vec<HashMap<VarId, VarId>>,
     runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     runtime_event_sites: Vec<RuntimeEventSite>,
     next_runtime_error_code: i64,
@@ -314,6 +317,7 @@ impl<'a> FfParser<'a> {
             loop_exit_blocks: Vec::new(),
             reset: None,
             function_arg_stack: Vec::new(),
+            function_array_view_stack: Vec::new(),
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
             next_runtime_error_code: 2000,
