@@ -2052,16 +2052,6 @@ fn eval_statement_form_function_call(
     arena: &mut SLTNodeArena<VarId>,
     phase: LoweringPhase,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
-    if call.outputs.is_empty() {
-        return Err(ParserError::unsupported(
-            58,
-            phase,
-            "statement-form function call without output arguments",
-            format!("{call}"),
-            Some(&call.comptime.token),
-        ));
-    }
-
     let Some(function) = module.functions.get(&call.id) else {
         return Err(ParserError::unsupported(
             60,
@@ -2689,6 +2679,7 @@ mod tests {
     pub struct CombResult {
         pub paths: Vec<LogicPath<VarId>>,
         pub boundaries: HashMap<VarId, BTreeSet<usize>>,
+        pub runtime_events: Vec<RuntimeEventSite>,
     }
     pub fn parse_top_module(code: &str) -> Module {
         symbol_table::clear();
@@ -2739,9 +2730,16 @@ mod tests {
             })
             .expect("No always_comb found in Top");
         let mut arena = SLTNodeArena::new();
-        let (paths, _, boundaries, _, _) =
+        let (paths, _, boundaries, _, runtime_events) =
             super::parse_comb(&top_module, comb_decl, &mut arena).unwrap();
-        (top_module, CombResult { paths, boundaries })
+        (
+            top_module,
+            CombResult {
+                paths,
+                boundaries,
+                runtime_events,
+            },
+        )
     }
     pub fn var_id_of(module: &Module, var_path: &[&str]) -> VarId {
         let mut var_path_str_id = Vec::new();
@@ -2815,6 +2813,37 @@ mod tests {
 
         assert!(bounds.contains(&0));
         assert!(bounds.contains(&4));
+    }
+
+    #[test]
+    fn test_statement_form_function_call_without_outputs_in_function_body() {
+        let code = r#"
+            module Top (a: input logic<8>, q: output logic<8>) {
+                function f (x: input logic<8>) {
+                    $assert(x == x);
+                }
+
+                function g (x: input logic<8>) -> logic<8> {
+                    f(x);
+                    return x;
+                }
+
+                always_comb {
+                    q = g(a);
+                }
+            }
+        "#;
+        let (module, result) = inspect_comb(code);
+        let a_id = var_id_of(&module, &["a"]);
+        let q_id = var_id_of(&module, &["q"]);
+        let q_path = result
+            .paths
+            .iter()
+            .find(|path| path.target.var().is_some_and(|target| target.id == q_id))
+            .expect("q assignment should be lowered");
+
+        assert!(q_path.sources.iter().any(|source| source.id == a_id));
+        assert_eq!(result.runtime_events.len(), 1);
     }
 
     #[test]
