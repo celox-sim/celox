@@ -406,6 +406,50 @@ fn test_ff_case_pattern_runtime_effect_is_eager(sim) {
     );
 }
 
+fn test_ff_statement_function_materializes_effectful_case_controls(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, d: input logic<8>) {
+            function observed (
+                tag: input logic<8>,
+                x: input logic<8>
+            ) -> logic<8> {
+                $display("case %0d=%0d", tag, x);
+                return x;
+            }
+
+            function consume (x: input logic<8>) {
+                case observed(8'd1, x) {
+                    observed(8'd2, 8'd1): {}
+                    default: {}
+                }
+            }
+
+            always_ff (clk) {
+                consume(d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+
+    sim.modify(|io| io.set(d, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "case 1=1".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "case 2=1".to_string(),
+            },
+        ],
+    );
+}
+
 fn test_ff_nested_runtime_event_output_updates_outer_function_state(sim) {
     @omit_veryl;
     @ignore_on(wasm);

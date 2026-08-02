@@ -963,6 +963,86 @@ fn test_ff_runtime_effect_after_conditional_return_is_rejected() {
 }
 
 #[test]
+fn test_ff_effectful_assignment_under_if_is_rejected() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            enable: input logic,
+            d: input logic<8>,
+            q: output logic<8>
+        ) {
+            function observed (x: input logic<8>) -> logic<8> {
+                $display("x=%0d", x);
+                return x;
+            }
+
+            function outer (
+                enable: input logic,
+                x: input logic<8>
+            ) -> logic<8> {
+                var unused: logic<8>;
+                if enable {
+                    unused = observed(x);
+                }
+                return x;
+            }
+
+            always_ff (clk) {
+                q = outer(enable, d);
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("effectful assignment under conditional control must be rejected");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 66);
+            assert_eq!(
+                *feature,
+                "control flow around runtime effect in function body"
+            );
+        }
+        other => panic!("expected conditional runtime-effect error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_ff_statement_call_with_effectful_input_is_rejected() {
+    let code = r#"
+        module Top (clk: input clock, d: input logic<8>) {
+            function observed (x: input logic<8>) -> logic<8> {
+                $display("x=%0d", x);
+                return x;
+            }
+
+            function consume (x: input logic<8>) {
+            }
+
+            function outer (x: input logic<8>) {
+                consume(observed(x));
+            }
+
+            always_ff (clk) {
+                outer(d);
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("effectful statement-call input must be rejected");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 66);
+            assert_eq!(*feature, "nested runtime effect in function body");
+        }
+        other => panic!("expected nested runtime-effect error, got: {other:?}"),
+    }
+}
+
+#[test]
 fn test_ff_array_literal_multiple_default_is_illegal_context() {
     let code = r#"
         module Top (
