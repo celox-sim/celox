@@ -1914,6 +1914,7 @@ fn function_from_declaration(
         }
         sv_parser::FunctionBodyDeclaration::WithoutPort(body) => {
             let name = identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), syntax_tree)?;
+            let params = tf_item_params(&body.nodes.4, syntax_tree, const_env, type_aliases);
             let expr = function_body_expr(&body.nodes.5, syntax_tree, packed_dimensions)?;
             let return_type = function_return_type(
                 RefNode::FunctionDataTypeOrImplicit(&body.nodes.0),
@@ -1923,7 +1924,7 @@ fn function_from_declaration(
             );
             Some(Function {
                 name,
-                params: Vec::new(),
+                params,
                 body: expr,
                 return_width: return_type.map(|r#type| r#type.width),
                 return_signed: return_type.is_some_and(|r#type| r#type.signed),
@@ -1990,6 +1991,38 @@ fn tf_params(
             })
         })
         .collect()
+}
+
+fn tf_item_params(
+    items: &[sv_parser::TfItemDeclaration],
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Vec<FunctionParam> {
+    let mut params = Vec::new();
+    for item in items {
+        let sv_parser::TfItemDeclaration::TfPortDeclaration(declaration) = item else {
+            continue;
+        };
+        let r#type = value_type_from_ref_node(
+            RefNode::DataTypeOrImplicit(&declaration.nodes.3),
+            syntax_tree,
+            const_env,
+            type_aliases,
+        );
+        for (identifier, _, _) in declaration.nodes.4.nodes.0.contents() {
+            let Some(name) = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
+            else {
+                continue;
+            };
+            params.push(FunctionParam {
+                name,
+                width: r#type.map(|r#type| r#type.width),
+                signed: r#type.is_some_and(|r#type| r#type.signed),
+            });
+        }
+    }
+    params
 }
 
 fn value_type_from_ref_node(

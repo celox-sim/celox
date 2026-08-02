@@ -1008,6 +1008,7 @@ sv_backends! {
             output logic [7:0] q_parameter_z_fill,
             output logic [7:0] q_function_integer,
             output logic [7:0] q_function_typedef,
+            output logic [7:0] q_function_nonansi,
             output logic q_const_case_equality,
             output logic q_const_case_fill,
             output logic q_const_wildcard_equality
@@ -1050,6 +1051,11 @@ sv_backends! {
                 return 4;
             endfunction
 
+            function automatic logic decode_nonansi;
+                input logic [1:0] value;
+                return value === 0;
+            endfunction
+
             always_ff @(posedge clk) begin
                 q_unrelated <= d;
                 case (decode(mode))
@@ -1085,6 +1091,10 @@ sv_backends! {
                 case (decode_typedef(mode[0]))
                     2'b00: q_function_typedef <= 8'hfa;
                     default: q_function_typedef <= 0;
+                endcase
+                case (decode_nonansi(4'b0100))
+                    1'b1: q_function_nonansi <= 8'hab;
+                    default: q_function_nonansi <= 0;
                 endcase
                 q_const_case_equality <= MATCH_X;
                 q_const_case_fill <= MATCH_FILL;
@@ -1126,6 +1136,7 @@ sv_backends! {
     );
     assert_eq!(sim.get(sim.signal("q_function_integer")), 0xe9u8.into());
     assert_eq!(sim.get(sim.signal("q_function_typedef")), 0xfau8.into());
+    assert_eq!(sim.get(sim.signal("q_function_nonansi")), 0xabu8.into());
     assert_eq!(sim.get(sim.signal("q_const_case_equality")), 1u8.into());
     assert_eq!(sim.get(sim.signal("q_const_case_fill")), 1u8.into());
     assert_eq!(
@@ -1155,6 +1166,7 @@ sv_backends! {
     );
     assert_eq!(sim.get(sim.signal("q_function_integer")), 0xe9u8.into());
     assert_eq!(sim.get(sim.signal("q_function_typedef")), 0xfau8.into());
+    assert_eq!(sim.get(sim.signal("q_function_nonansi")), 0xabu8.into());
     assert_eq!(sim.get(sim.signal("q_const_case_equality")), 1u8.into());
     assert_eq!(sim.get(sim.signal("q_const_case_fill")), 1u8.into());
     assert_eq!(
