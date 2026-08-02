@@ -3,13 +3,13 @@ use crate::ir::{
     AbsoluteAddr, OptimizedSir, RegisterId, SIRInstruction, SIROffset, STABLE_REGION,
     collect_exact_zero_registers,
 };
-#[cfg(target_arch = "x86_64")]
-pub use celox_state_layout::STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET;
+#[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+pub use celox_backend_x86::STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET;
 pub use celox_state_layout::{
     LayoutInput, LayoutRequirements, LayoutSource, MemoryLayoutMode, StateObjectLayout,
     UnpackedArrayLayout, get_byte_size,
 };
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "host-runtime")]
 pub use celox_state_layout::{
     RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
     RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,

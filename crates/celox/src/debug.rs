@@ -97,13 +97,13 @@ impl CompilationTrace {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "host-runtime")]
 pub struct CompilationTraceResult {
     pub res: Result<crate::simulator::Simulator, crate::simulator::SimulatorError>,
     pub trace: CompilationTrace,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "host-runtime")]
 impl CompilationTraceResult {
     pub fn expect(self, msg: &str) -> crate::simulator::Simulator {
         match self.res {

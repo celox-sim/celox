@@ -72,6 +72,27 @@ pub type RegionedAbsoluteAddr = celox_design::RegionedStateAddr;
 pub type SirProgram = celox_sir::SirProgram<AbsoluteAddr, RegionedAbsoluteAddr>;
 pub type MemoryLayout = celox_state_layout::MemoryLayout<AbsoluteAddr>;
 
+/// Remaining iterations for an in-function native tick loop.
+pub const STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET: usize = 8;
+/// Runtime-event sequence observed when a native tick batch starts.
+pub const STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET: usize = 24;
+
+const _: () = {
+    assert!(
+        celox_state_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET + 8
+            <= STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET
+    );
+    assert!(
+        STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET + 8
+            <= celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET
+    );
+    assert!(
+        celox_state_layout::STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET + 8
+            <= STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET
+    );
+    assert!(STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET + 8 <= celox_state_layout::STATE_HEADER_SIZE);
+};
+
 pub mod timing {
     pub fn now() -> std::time::Instant {
         std::time::Instant::now()

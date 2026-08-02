@@ -10,7 +10,7 @@ license.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-celox = { path = "../celox" }
+celox = { path = "../celox", default-features = false }
 veryl-parser = { workspace = true }
 wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"

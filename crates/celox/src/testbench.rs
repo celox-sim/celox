@@ -1140,7 +1140,7 @@ fn exec_one_detailed<B: SimBackend>(
     }
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(all(test, feature = "host-runtime"))]
 mod tests {
     use super::*;
     use crate::{Simulator, TestResult};

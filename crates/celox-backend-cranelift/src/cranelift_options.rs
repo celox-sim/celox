@@ -1,7 +1,6 @@
 //! Cranelift-owned compilation policy.
 
 /// Cranelift backend optimization level.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CraneliftOptLevel {
     /// No Cranelift-level optimizations.
@@ -13,7 +12,6 @@ pub enum CraneliftOptLevel {
     SpeedAndSize,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl CraneliftOptLevel {
     /// Returns the Cranelift settings string for this level.
     pub fn as_cranelift_str(self) -> &'static str {
@@ -26,7 +24,6 @@ impl CraneliftOptLevel {
 }
 
 /// Register allocator algorithm for the Cranelift backend.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RegallocAlgorithm {
     /// Backtracking allocator with range splitting.
@@ -38,7 +35,6 @@ pub enum RegallocAlgorithm {
     SinglePass,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl RegallocAlgorithm {
     /// Returns the Cranelift settings string for this algorithm.
     pub fn as_cranelift_str(self) -> &'static str {
@@ -50,14 +46,12 @@ impl RegallocAlgorithm {
 }
 
 /// Fine-grained Cranelift backend options beyond the optimization level.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CraneliftDiagnostics {
     pub pass_timing: bool,
 }
 
 /// Fine-grained Cranelift backend options beyond the optimization level.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy)]
 pub struct CraneliftOptions {
     /// Optimization level (default: Speed).
@@ -75,7 +69,6 @@ pub struct CraneliftOptions {
     pub diagnostics: CraneliftDiagnostics,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Default for CraneliftOptions {
     fn default() -> Self {
         Self {
@@ -89,7 +82,6 @@ impl Default for CraneliftOptions {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl CraneliftOptions {
     /// Fast compilation preset: no optimizations, single-pass regalloc, no verifier.
     pub fn fast_compile() -> Self {

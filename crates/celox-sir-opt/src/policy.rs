@@ -175,7 +175,7 @@ impl OptimizeOptions {
             opt_level: level,
             enabled: HashSet::default(),
             disabled: HashSet::default(),
-            max_native_memory_width: if cfg!(target_arch = "x86_64") {
+            max_native_memory_width: if cfg!(feature = "wide-native-memory") {
                 128
             } else {
                 64

@@ -23,7 +23,6 @@ pub trait EventHandle: Copy + std::fmt::Debug {
 ///
 /// `Simulator<B>` is generic over this trait so that the same high-level
 /// API works with any backend. `JitBackend` is the default.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub trait SimBackend {
     /// The event handle type produced by this backend.
     type Event: EventHandle;

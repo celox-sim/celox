@@ -8,6 +8,16 @@ license.workspace     = true
 description.workspace = true
 edition.workspace     = true
 
+[features]
+default = ["host-runtime"]
+host-runtime = [
+    "dep:celox-backend-cranelift",
+    "dep:celox-backend-x86",
+    "dep:celox-macros",
+    "dep:wasmtime",
+    "celox-sir-opt/timing",
+]
+
 [dependencies]
 toml                  = { workspace = true }
 veryl-analyzer        = { workspace = true }
@@ -19,7 +29,7 @@ celox-backend-wasm    = { path = "../celox-backend-wasm" }
 celox-design          = { path = "../celox-design" }
 celox-frontend-veryl  = { path = "../celox-frontend-veryl" }
 celox-sir             = { path = "../celox-sir" }
-celox-sir-opt         = { path = "../celox-sir-opt" }
+celox-sir-opt         = { path = "../celox-sir-opt", default-features = false }
 celox-slt             = { path = "../celox-slt" }
 celox-state-layout    = { path = "../celox-state-layout" }
 celox-runtime         = { path = "../celox-runtime" }
@@ -35,16 +45,13 @@ num-traits            = { workspace = true }
 bit-set               = { workspace = true }
 itertools             = { workspace = true }
 tracing               = { workspace = true }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-celox-macros          = { path = "../celox-macros" }
-celox-backend-cranelift = { path = "../celox-backend-cranelift" }
-chrono                = "0.4"
-libc                  = { workspace = true }
-wasmtime              = "47"
+celox-macros          = { path = "../celox-macros", optional = true }
+celox-backend-cranelift = { path = "../celox-backend-cranelift", optional = true }
+wasmtime              = { version = "47", optional = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-celox-backend-x86     = { path = "../celox-backend-x86" }
+celox-backend-x86     = { path = "../celox-backend-x86", optional = true }
+celox-sir-opt         = { path = "../celox-sir-opt", default-features = false, features = ["wide-native-memory"] }
 
 [dev-dependencies]
 insta      = "1.46"
