@@ -1,4 +1,5 @@
 use std::fmt;
+use thiserror::Error;
 
 /// Render a `miette::Diagnostic` to a plain-text string (no ANSI colors).
 ///
@@ -43,7 +44,75 @@ pub enum SimulatorErrorKind {
     Analyzer(Vec<veryl_analyzer::AnalyzerError>),
     #[cfg(not(target_arch = "wasm32"))]
     Runtime(crate::RuntimeErrorCode),
-    Codegen(String),
+    Codegen(CodegenError),
+}
+
+/// Structured failure while preparing executable simulator code.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum CodegenError {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("{0}")]
+    Cranelift(
+        #[from]
+        #[source]
+        celox_backend_cranelift::CraneliftError,
+    ),
+
+    #[error("{context}: {source}")]
+    Optimization {
+        context: &'static str,
+        #[source]
+        source: celox_sir_opt::OptimizationError,
+    },
+
+    #[error("{phase}: {source}")]
+    SirVerification {
+        phase: String,
+        #[source]
+        source: celox_sir::verify::SirVerifyError,
+    },
+
+    #[cfg(target_arch = "x86_64")]
+    #[error("native emission failed: {source}")]
+    NativePipeline {
+        #[source]
+        source: celox_backend_x86::native::emit::ChainedEmitError,
+    },
+
+    #[cfg(target_arch = "x86_64")]
+    #[error("native emission failed: {source}")]
+    NativeEmission {
+        #[source]
+        source: celox_backend_x86::native::emit::EmitError,
+    },
+
+    #[cfg(target_arch = "x86_64")]
+    #[error("failed to allocate executable native memory: {source}")]
+    NativeMemory {
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("WASM {stage} failed: {source}")]
+    Wasm {
+        stage: &'static str,
+        #[source]
+        source: wasmtime::Error,
+    },
+
+    #[error("{message}")]
+    Message { message: String },
+}
+
+impl CodegenError {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn message(message: impl Into<String>) -> Self {
+        Self::Message {
+            message: message.into(),
+        }
+    }
 }
 
 /// A simulator error that may also carry accumulated analyzer warnings.
@@ -93,7 +162,7 @@ impl fmt::Display for SimulatorError {
             }
             #[cfg(not(target_arch = "wasm32"))]
             SimulatorErrorKind::Runtime(e) => write!(f, "Runtime error: {e}")?,
-            SimulatorErrorKind::Codegen(msg) => write!(f, "JIT Code generation error: {msg}")?,
+            SimulatorErrorKind::Codegen(error) => write!(f, "JIT Code generation error: {error}")?,
         }
         if !self.warnings.is_empty() {
             f.write_str("\n\n--- warnings ---\n\n")?;
@@ -114,6 +183,7 @@ impl std::error::Error for SimulatorError {
             SimulatorErrorKind::SIRParser(e) => Some(e),
             #[cfg(not(target_arch = "wasm32"))]
             SimulatorErrorKind::Runtime(e) => Some(e),
+            SimulatorErrorKind::Codegen(error) => Some(error),
             _ => None,
         }
     }
@@ -132,8 +202,51 @@ impl From<crate::ParserError> for SimulatorError {
     }
 }
 
-impl From<String> for SimulatorError {
-    fn from(msg: String) -> Self {
-        SimulatorError::new(SimulatorErrorKind::Codegen(msg))
+impl From<CodegenError> for SimulatorError {
+    fn from(error: CodegenError) -> Self {
+        SimulatorError::new(SimulatorErrorKind::Codegen(error))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<celox_backend_cranelift::CraneliftError> for SimulatorError {
+    fn from(error: celox_backend_cranelift::CraneliftError) -> Self {
+        CodegenError::from(error).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use super::{CodegenError, SimulatorError, SimulatorErrorKind};
+
+    #[test]
+    fn codegen_error_is_available_as_the_simulator_error_source() {
+        let error = SimulatorError::from(CodegenError::message("compile worker stopped"));
+
+        assert!(matches!(error.kind(), SimulatorErrorKind::Codegen(_)));
+        assert_eq!(
+            error.to_string(),
+            "JIT Code generation error: compile worker stopped"
+        );
+        assert_eq!(
+            error.source().unwrap().to_string(),
+            "compile worker stopped"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn simulator_error_keeps_the_backend_source_chain() {
+        let backend = celox_backend_cranelift::CraneliftError::NativeTarget {
+            message: "unsupported test target",
+        };
+        let error = SimulatorError::from(backend);
+
+        let codegen = error.source().expect("codegen source");
+        assert!(codegen.to_string().contains("native target"));
+        let backend = codegen.source().expect("backend source");
+        assert!(backend.to_string().contains("unsupported test target"));
     }
 }

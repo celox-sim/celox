@@ -20,6 +20,10 @@ use crate::{
 
 use super::wasm_codegen;
 
+fn wasm_codegen_error(stage: &'static str, source: wasmtime::Error) -> crate::SimulatorError {
+    crate::CodegenError::Wasm { stage, source }.into()
+}
+
 /// Opaque handle to a compiled WASM event (clock/async-reset) function.
 #[derive(Clone, Copy)]
 pub struct WasmEventRef {
@@ -167,9 +171,8 @@ impl WasmBackend {
             options.four_state,
             options.emit_triggers,
         );
-        let comb_module = Module::new(&engine, &comb_wasm.bytes).map_err(|e| {
-            crate::SimulatorError::from(format!("WASM compilation failed (eval_comb): {e:?}"))
-        })?;
+        let comb_module = Module::new(&engine, &comb_wasm.bytes)
+            .map_err(|source| wasm_codegen_error("eval_comb compilation", source))?;
 
         // Compile event functions
         let mut event_modules = Vec::new();
@@ -207,9 +210,8 @@ impl WasmBackend {
                     options.four_state,
                     options.emit_triggers,
                 );
-                let module = Module::new(&engine, &wasm.bytes).map_err(|e| {
-                    crate::SimulatorError::from(format!("WASM compilation failed (ff): {e:?}"))
-                })?;
+                let module = Module::new(&engine, &wasm.bytes)
+                    .map_err(|source| wasm_codegen_error("FF compilation", source))?;
                 let idx = modules.len();
                 modules.push((canonical, module));
                 emap.insert(
@@ -304,7 +306,7 @@ impl WasmBackend {
             &mut store,
             wasmtime::MemoryType::new(mem_pages as u32, None),
         )
-        .map_err(|e| crate::SimulatorError::from(format!("WASM memory creation failed: {e}")))?;
+        .map_err(|source| wasm_codegen_error("memory creation", source))?;
 
         // Initialize 4-state regions to X
         {
@@ -336,13 +338,13 @@ impl WasmBackend {
             let mut linker = Linker::new(engine);
             linker
                 .define(&mut *store, "env", "memory", *memory)
-                .map_err(|e| format!("WASM linker error: {e}"))?;
+                .map_err(|source| wasm_codegen_error("linking", source))?;
             let instance = linker
                 .instantiate(&mut *store, module)
-                .map_err(|e| format!("WASM instantiation error: {e}"))?;
+                .map_err(|source| wasm_codegen_error("instantiation", source))?;
             let func = instance
                 .get_typed_func::<(), i64>(&mut *store, "run")
-                .map_err(|e| format!("WASM function not found: {e}"))?;
+                .map_err(|source| wasm_codegen_error("entry-point lookup", source))?;
             Ok(func)
         }
 

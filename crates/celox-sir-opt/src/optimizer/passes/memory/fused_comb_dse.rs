@@ -1,6 +1,6 @@
 use crate::ir::cfg::SirCfg;
 use crate::ir::*;
-use crate::{HashMap, HashSet};
+use crate::{HashMap, HashSet, OptimizationError};
 
 use super::state_ssa::{MemoryAccessKind, MemoryVersionId, StateSsa};
 
@@ -49,11 +49,14 @@ pub(in crate::optimizer) fn eliminate(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     provenance: &crate::ir::SirMergeProvenance,
     first_ff_unit: usize,
-) -> Result<usize, String> {
+) -> Result<usize, OptimizationError> {
     if first_ff_unit == 0 || first_ff_unit >= provenance.unit_entries.len() {
-        return Err(format!(
-            "invalid comb/FF phase cut: first_ff_unit={first_ff_unit} units={}",
-            provenance.unit_entries.len()
+        return Err(OptimizationError::invalid_input(
+            "fused comb dead-store elimination",
+            format!(
+                "invalid comb/FF phase cut: first_ff_unit={first_ff_unit} units={}",
+                provenance.unit_entries.len()
+            ),
         ));
     }
     eliminate_candidates(
@@ -75,7 +78,7 @@ pub(in crate::optimizer) fn eliminate(
 pub(in crate::optimizer) fn eliminate_shared(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     direct_ff_writes: &[VarAtomBase<RegionedAbsoluteAddr>],
-) -> Result<usize, String> {
+) -> Result<usize, OptimizationError> {
     eliminate_candidates(eu, |_| true, direct_ff_writes)
 }
 
@@ -83,10 +86,13 @@ fn eliminate_candidates(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     is_comb_block: impl Fn(BlockId) -> bool,
     protected_writes: &[VarAtomBase<RegionedAbsoluteAddr>],
-) -> Result<usize, String> {
-    let cfg = SirCfg::analyze(eu).map_err(|error| error.to_string())?;
-    let state =
-        StateSsa::analyze(eu, &cfg, STABLE_REGION, None).map_err(|error| error.to_string())?;
+) -> Result<usize, OptimizationError> {
+    let cfg = SirCfg::analyze(eu).map_err(|error| {
+        OptimizationError::control_flow("fused comb dead-store elimination", error)
+    })?;
+    let state = StateSsa::analyze(eu, &cfg, STABLE_REGION, None).map_err(|error| {
+        OptimizationError::state_ssa("fused comb dead-store elimination", error)
+    })?;
 
     let mut live = vec![false; state.accesses.len()];
     for access in &state.accesses {

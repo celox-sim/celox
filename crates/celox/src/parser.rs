@@ -29,18 +29,22 @@ fn apply_fused_optimization_hints(
         for unit in units {
             let removed =
                 crate::optimizer::sir::eliminate_shared_comb_state_stores(unit, &direct_ff_writes)
-                    .map_err(|message| {
+                    .map_err(|error| {
                         ParserError::illegal_context(
                             "shared comb/FF state-publication DSE",
-                            message,
+                            error.to_string(),
                             None,
                         )
                     })?;
             if removed != 0 {
                 crate::optimizer::sir::remove_dead_sir_definitions(unit);
             }
-            if crate::optimizer::sir::promote_fused_comb_static_slots(unit).map_err(|message| {
-                ParserError::illegal_context("fused comb StateSSA promotion", message, None)
+            if crate::optimizer::sir::promote_fused_comb_static_slots(unit).map_err(|error| {
+                ParserError::illegal_context(
+                    "fused comb StateSSA promotion",
+                    error.to_string(),
+                    None,
+                )
             })? {
                 crate::optimizer::sir::remove_dead_sir_definitions(unit);
             }

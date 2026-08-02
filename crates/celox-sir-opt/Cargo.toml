@@ -18,6 +18,7 @@ fxhash              = { workspace = true }
 itertools           = { workspace = true }
 num-bigint          = "0.4"
 num-traits          = { workspace = true }
+thiserror           = { workspace = true }
 
 [lints]
 workspace = true
