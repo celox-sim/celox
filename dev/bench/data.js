@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785657582312,
+  "lastUpdate": 1785661233033,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -148470,6 +148470,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
             "value": 132402.629412,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+s@gmail.com",
+            "name": "tig",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "59382a2eb4918885a421b2caec29c1c6834ad63d",
+          "message": "Merge pull request #394 from celox-sim/docs/add-npm-badge\n\ndocs(readme): add npm version badge",
+          "timestamp": "2026-08-02T08:09:50Z",
+          "tree_id": "f24eeb7bf93e9653894b3fc70126eedc5165545d",
+          "url": "https://github.com/celox-sim/celox/commit/59382a2eb4918885a421b2caec29c1c6834ad63d"
+        },
+        "date": 1785661221181,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-jit/heliodor_linux_boot_execution",
+            "value": 76175.678522,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-total/heliodor_linux_boot_execution",
+            "value": 76180.926521,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl/heliodor_linux_boot_execution",
+            "value": 66072.401672,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-compile/heliodor_linux_boot_compilation",
+            "value": 92883.501743,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
+            "value": 81875.039373,
             "unit": "ms"
           }
         ]
