@@ -910,13 +910,18 @@ sv_backends! {
             input logic clk,
             input logic mode,
             input logic signed [1:0] signed_mode,
+            input logic [255:0] wide_mode,
             output logic [7:0] q_negative,
             output logic [7:0] q_scalar_signed,
+            output logic [7:0] q_wide_parameter,
+            output logic [7:0] q_wide_fill,
             output logic [63:0] q_fill,
             output logic [63:0] q_shift
         );
             localparam NEGATIVE = -1;
             localparam logic signed SCALAR_SIGNED = 1'b1;
+            localparam logic [255:0] WIDE_NEGATIVE = -1;
+            localparam logic [255:0] WIDE_FILL = '1;
 
             always_ff @(posedge clk) begin
                 case (signed_mode)
@@ -926,6 +931,14 @@ sv_backends! {
                 case (signed_mode)
                     SCALAR_SIGNED: q_scalar_signed <= 8'ha5;
                     default: q_scalar_signed <= 0;
+                endcase
+                case (wide_mode)
+                    WIDE_NEGATIVE: q_wide_parameter <= 8'hb6;
+                    default: q_wide_parameter <= 0;
+                endcase
+                case (wide_mode)
+                    WIDE_FILL: q_wide_fill <= 8'hc7;
+                    default: q_wide_fill <= 0;
                 endcase
                 case (mode)
                     0: q_fill <= '1;
@@ -947,15 +960,20 @@ sv_backends! {
     let clk = sim.event("clk");
     let mode = sim.signal("mode");
     let signed_mode = sim.signal("signed_mode");
+    let wide_mode = sim.signal("wide_mode");
+    let wide_negative = (BigUint::from(1u8) << 256) - BigUint::from(1u8);
 
     sim.modify(|io| {
         io.set(mode, 0u8);
         io.set(signed_mode, 3u8);
+        io.set_wide(wide_mode, wide_negative);
     }).unwrap();
     sim.tick(clk).unwrap();
 
     assert_eq!(sim.get(sim.signal("q_negative")), 0xffu8.into());
     assert_eq!(sim.get(sim.signal("q_scalar_signed")), 0xa5u8.into());
+    assert_eq!(sim.get(sim.signal("q_wide_parameter")), 0xb6u8.into());
+    assert_eq!(sim.get(sim.signal("q_wide_fill")), 0xc7u8.into());
     assert_eq!(sim.get(sim.signal("q_fill")), u64::MAX.into());
     assert_eq!(sim.get(sim.signal("q_shift")), (1u64 << 40).into());
     }

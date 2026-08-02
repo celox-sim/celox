@@ -1237,13 +1237,18 @@ fn normalize_unbased_unsized_parameter_value(
 ) -> Option<ConstExpr> {
     let signing = if signed.unwrap_or(false) { "s" } else { "" };
     match (value, width) {
-        (Some(ConstExpr::Literal(value)), Some(width)) if value == "'1" && width <= 128 => {
-            let bits = if width == 128 {
-                u128::MAX
+        (Some(ConstExpr::Literal(value)), Some(width)) if value == "'1" => {
+            let literal = if width <= 128 {
+                let bits = if width == 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << width) - 1
+                };
+                format!("{width}'{signing}d{bits}")
             } else {
-                (1u128 << width) - 1
+                format!("{width}'{signing}b{}", "1".repeat(width))
             };
-            Some(ConstExpr::Literal(format!("{width}'{signing}d{bits}")))
+            Some(ConstExpr::Literal(literal))
         }
         (Some(ConstExpr::Literal(value)), Some(width)) if value == "'0" => {
             Some(ConstExpr::Literal(format!("{width}'{signing}d0")))
@@ -1295,15 +1300,8 @@ fn parameter_literal_env(
         }
 
         let literal = if let Some(value) = const_env.get(parameter.name()).copied() {
-            if let Some(width) = width.filter(|width| *width <= 128) {
-                let mask = if width == 128 {
-                    u128::MAX
-                } else {
-                    (1u128 << width) - 1
-                };
-                let bits = (value as u128) & mask;
-                let signing = if signed { "s" } else { "" };
-                format!("{width}'{signing}d{bits}")
+            if let Some(width) = width {
+                format_typed_parameter_literal(value, width, signed)
             } else if value.is_negative() {
                 let width = (128 - (!value as u128).leading_zeros() as usize + 1).max(32);
                 let mask = if width == 128 {
@@ -1325,6 +1323,24 @@ fn parameter_literal_env(
         literals.insert(parameter.name().to_string(), literal);
     }
     literals
+}
+
+fn format_typed_parameter_literal(value: i128, width: usize, signed: bool) -> String {
+    let signing = if signed { "s" } else { "" };
+    if width <= 128 {
+        let mask = if width == 128 {
+            u128::MAX
+        } else {
+            (1u128 << width) - 1
+        };
+        let bits = (value as u128) & mask;
+        format!("{width}'{signing}d{bits}")
+    } else {
+        let extension = if value.is_negative() { '1' } else { '0' };
+        let high_bits = extension.to_string().repeat(width - 128);
+        let low_bits = value as u128;
+        format!("{width}'{signing}b{high_bits}{low_bits:0128b}")
+    }
 }
 
 #[derive(Clone, Copy)]
