@@ -2090,6 +2090,18 @@ impl<'a> ISelContext<'a> {
         }
     }
 
+    fn const_mask_value(&self, reg: RegisterId) -> Option<u64> {
+        if !self.four_state {
+            return Some(0);
+        }
+
+        let vreg = self.mask_map.map.get(reg.0).copied().flatten()?;
+        match self.spill_descs.get(vreg.0 as usize).map(|desc| &desc.kind) {
+            Some(SpillKind::Remat { value }) => Some(*value),
+            _ => None,
+        }
+    }
+
     /// Resolve the mask byte offset for a variable.
     /// The mask is stored immediately after the value in memory.
     fn mask_byte_offset(&self, addr: &RegionedAbsoluteAddr, bit_offset: usize) -> i32 {
@@ -8514,7 +8526,9 @@ fn lower_instruction(
             // Constant folding: if both operands are known constants, compute result
             let lhs_const = ctx.consts.get(lhs).copied();
             let rhs_const = ctx.consts.get(rhs).copied();
-            if let (Some(lc), Some(rc)) = (lhs_const, rhs_const) {
+            let masks_are_known_zero =
+                ctx.const_mask_value(*lhs) == Some(0) && ctx.const_mask_value(*rhs) == Some(0);
+            if masks_are_known_zero && let (Some(lc), Some(rc)) = (lhs_const, rhs_const) {
                 let result = match op {
                     BinaryOp::Add => Some(lc.wrapping_add(rc)),
                     BinaryOp::Sub => Some(lc.wrapping_sub(rc)),
@@ -8537,7 +8551,6 @@ fn lower_instruction(
                     });
                     ctx.consts.insert(*dst, val);
                     set_low_zero_bits(ctx, *dst, low_zero_bits_const(val));
-                    // 4-state: constants always have mask=0
                     if ctx.four_state {
                         let z = ctx.alloc_vreg(SpillDesc::remat(0));
                         block.push(MInst::LoadImm { dst: z, value: 0 });

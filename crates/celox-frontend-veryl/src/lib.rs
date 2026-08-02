@@ -30,7 +30,10 @@ pub use error::{LoweringPhase, ParserError, SourceLocation};
 pub use global_ff::{
     FfClockRecipe, FfRuntimeRelocation, SharedClockLowering, build_ff_clock_recipes,
 };
-pub use hierarchy::{SymbolicRtl, parse_ir, parse_ir_with_loop_provenance};
+pub use hierarchy::{
+    ExternalHierarchy, ExternalModule, SymbolicRtl, parse_ir, parse_ir_with_external_hierarchy,
+    parse_ir_with_loop_provenance,
+};
 pub use module_artifact::{
     FusedSirOptimizationHints, RelocationModule, ScheduledRtl, ScheduledRtlOutput, SimModule,
 };

@@ -14,6 +14,7 @@ use crate::{ParserError, SimulatorError, SimulatorErrorKind, ir::OptimizedSir, p
 
 fn analyze(
     sources: &[(&str, &Path)],
+    sv_sources: Option<&[(&str, &Path)]>,
     top: &str,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -93,20 +94,38 @@ fn analyze(
     if let Some(rt) = reset_type {
         build_config.reset_type = rt;
     }
-    let sir = parser::parse(
-        &top,
-        &ir,
-        &loop_provenance,
-        &build_config,
-        ignored_loops,
-        true_loops,
-        four_state,
-        trace_opts,
-        trace_out,
-        optimize_options,
-        diagnostics,
-        preserve_element_storage_layout,
-    );
+    let sir = if let Some(sv_sources) = sv_sources {
+        parser::parse_mixed(
+            &top,
+            &ir,
+            &loop_provenance,
+            sv_sources,
+            &build_config,
+            ignored_loops,
+            true_loops,
+            four_state,
+            trace_opts,
+            trace_out,
+            optimize_options,
+            diagnostics,
+            preserve_element_storage_layout,
+        )
+    } else {
+        parser::parse(
+            &top,
+            &ir,
+            &loop_provenance,
+            &build_config,
+            ignored_loops,
+            true_loops,
+            four_state,
+            trace_opts,
+            trace_out,
+            optimize_options,
+            diagnostics,
+            preserve_element_storage_layout,
+        )
+    };
     (sir, errors)
 }
 
@@ -178,6 +197,7 @@ fn compile_to_sir_with_layout_mode(
 ) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
     let (sir, errors) = analyze(
         sources,
+        None,
         top,
         ignored_loops,
         true_loops,
@@ -201,6 +221,265 @@ fn compile_to_sir_with_layout_mode(
     match sir {
         Ok(p) => Ok((p, warnings)),
         Err(e) => Err(SimulatorError::from(e).with_warnings(warnings)),
+    }
+}
+
+/// Compile SystemVerilog sources to optimized SIR.
+pub fn compile_sv_to_sir(
+    sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    optimize_options: &crate::optimizer::OptimizeOptions,
+) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
+    compile_sv_to_sir_with_layout_mode(
+        sources,
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        optimize_options,
+        &crate::RuntimeDiagnostics::default(),
+        crate::backend::memory_layout::MemoryLayoutMode::Packed,
+    )
+}
+
+fn compile_sv_to_sir_with_layout_mode(
+    sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostics: &crate::RuntimeDiagnostics,
+    layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
+    let metadata = metadata.unwrap_or_else(|| Metadata::create_default("prj").unwrap());
+    let mut build_config = BuildConfig::from(&metadata.build);
+    if let Some(clock_type) = clock_type {
+        build_config.clock_type = clock_type;
+    }
+    if let Some(reset_type) = reset_type {
+        build_config.reset_type = reset_type;
+    }
+    parser::parse_sv(
+        sources,
+        top,
+        &build_config,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        optimize_options,
+        diagnostics,
+        layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+    )
+    .map(|program| (program, Vec::new()))
+    .map_err(SimulatorError::from)
+}
+
+/// Compile a Veryl hierarchy with SystemVerilog modules to optimized SIR.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_mixed_to_sir(
+    sources: &[(&str, &Path)],
+    sv_sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
+    optimize_options: &crate::optimizer::OptimizeOptions,
+) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
+    compile_mixed_to_sir_with_layout_mode(
+        sources,
+        sv_sources,
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        param_overrides,
+        optimize_options,
+        &crate::RuntimeDiagnostics::default(),
+        crate::backend::memory_layout::MemoryLayoutMode::Packed,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_mixed_to_sir_with_layout_mode(
+    sources: &[(&str, &Path)],
+    sv_sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostics: &crate::RuntimeDiagnostics,
+    layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
+    let (sir, errors) = analyze(
+        sources,
+        Some(sv_sources),
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        param_overrides,
+        optimize_options,
+        diagnostics,
+        layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+    );
+    let (real_errors, warnings): (Vec<_>, Vec<_>) = errors.into_iter().partition(|e| e.is_error());
+    if !real_errors.is_empty() {
+        return Err(
+            SimulatorError::new(SimulatorErrorKind::Analyzer(real_errors)).with_warnings(warnings),
+        );
+    }
+    match sir {
+        Ok(program) => Ok((program, warnings)),
+        Err(error) => Err(SimulatorError::from(error).with_warnings(warnings)),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_hdl_to_sir_with_layout_mode(
+    sources: &[(&str, &Path)],
+    sv_sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostics: &crate::RuntimeDiagnostics,
+    layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
+    match (sources.is_empty(), sv_sources.is_empty()) {
+        (_, true) => compile_to_sir_with_layout_mode(
+            sources,
+            top,
+            ignored_loops,
+            true_loops,
+            four_state,
+            trace_opts,
+            trace_out,
+            metadata,
+            clock_type,
+            reset_type,
+            param_overrides,
+            optimize_options,
+            diagnostics,
+            layout_mode,
+        ),
+        (true, false) => compile_sv_to_sir_with_layout_mode(
+            sv_sources,
+            top,
+            ignored_loops,
+            true_loops,
+            four_state,
+            trace_opts,
+            trace_out,
+            metadata,
+            clock_type,
+            reset_type,
+            optimize_options,
+            diagnostics,
+            layout_mode,
+        ),
+        (false, false) => compile_mixed_to_sir_with_layout_mode(
+            sources,
+            sv_sources,
+            top,
+            ignored_loops,
+            true_loops,
+            four_state,
+            trace_opts,
+            trace_out,
+            metadata,
+            clock_type,
+            reset_type,
+            param_overrides,
+            optimize_options,
+            diagnostics,
+            layout_mode,
+        ),
     }
 }
 
@@ -273,6 +552,7 @@ impl Default for SimulatorOptions {
 #[cfg(not(target_arch = "wasm32"))]
 pub struct SimulatorBuilder<'a, Target = Simulator> {
     sources: Vec<(&'a str, &'a Path)>,
+    sv_sources: Vec<(&'a str, &'a Path)>,
     top: &'a str,
     ignored_loops: Vec<(
         (Vec<(String, usize)>, Vec<String>),
@@ -299,6 +579,17 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
     /// Returns the source files passed to this builder.
     pub fn sources(&self) -> &[(&'a str, &'a Path)] {
         &self.sources
+    }
+
+    /// Returns the SystemVerilog source files passed to this builder.
+    pub fn sv_sources(&self) -> &[(&'a str, &'a Path)] {
+        &self.sv_sources
+    }
+
+    /// Replace the builder's SystemVerilog source set.
+    pub fn with_sv_sources(mut self, sources: Vec<(&'a str, &'a Path)>) -> Self {
+        self.sv_sources = sources;
+        self
     }
 
     /// Returns the top module name.
@@ -577,6 +868,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     pub fn new(code: &'a str, top: &'a str) -> Self {
         Self {
             sources: vec![(code, Path::new(""))],
+            sv_sources: Vec::new(),
             top,
             ignored_loops: Vec::new(),
             true_loops: Vec::new(),
@@ -594,6 +886,47 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     pub fn from_sources(sources: Vec<(&'a str, &'a Path)>, top: &'a str) -> Self {
         Self {
             sources,
+            sv_sources: Vec::new(),
+            top,
+            ignored_loops: Vec::new(),
+            true_loops: Vec::new(),
+            options: SimulatorOptions::default(),
+            vcd_path: None,
+            metadata: None,
+            clock_type: None,
+            reset_type: None,
+            param_overrides: Vec::new(),
+            live_signals: Vec::new(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn from_sv_sources(sources: Vec<(&'a str, &'a Path)>, top: &'a str) -> Self {
+        Self {
+            sources: Vec::new(),
+            sv_sources: sources,
+            top,
+            ignored_loops: Vec::new(),
+            true_loops: Vec::new(),
+            options: SimulatorOptions::default(),
+            vcd_path: None,
+            metadata: None,
+            clock_type: None,
+            reset_type: None,
+            param_overrides: Vec::new(),
+            live_signals: Vec::new(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn from_mixed_sources(
+        sources: Vec<(&'a str, &'a Path)>,
+        sv_sources: Vec<(&'a str, &'a Path)>,
+        top: &'a str,
+    ) -> Self {
+        Self {
+            sources,
+            sv_sources,
             top,
             ignored_loops: Vec::new(),
             true_loops: Vec::new(),
@@ -625,8 +958,9 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     > {
         let phase_timing = self.options.diagnostics.phase_timing;
         let compile_start = phase_timing.then(crate::timing::now);
-        let (program, warnings) = compile_to_sir_with_layout_mode(
+        let (program, warnings) = compile_hdl_to_sir_with_layout_mode(
             &self.sources,
+            &self.sv_sources,
             self.top,
             &self.ignored_loops,
             &self.true_loops,
@@ -828,8 +1162,9 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
         #[cfg(not(target_arch = "x86_64"))]
         let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
-        let program_res = compile_to_sir_with_layout_mode(
+        let program_res = compile_hdl_to_sir_with_layout_mode(
             &self.sources,
+            &self.sv_sources,
             self.top,
             &self.ignored_loops,
             &self.true_loops,
@@ -914,6 +1249,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
     pub(crate) fn new(code: &'a str, top: &'a str) -> Self {
         Self {
             sources: vec![(code, Path::new(""))],
+            sv_sources: Vec::new(),
             top,
             ignored_loops: Vec::new(),
             true_loops: Vec::new(),
@@ -931,6 +1267,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
     pub(crate) fn from_sources(sources: Vec<(&'a str, &'a Path)>, top: &'a str) -> Self {
         Self {
             sources,
+            sv_sources: Vec::new(),
             top,
             ignored_loops: Vec::new(),
             true_loops: Vec::new(),
@@ -952,8 +1289,9 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
         let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
         #[cfg(not(target_arch = "x86_64"))]
         let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
-        let (program, warnings) = compile_to_sir_with_layout_mode(
+        let (program, warnings) = compile_hdl_to_sir_with_layout_mode(
             &self.sources,
+            &self.sv_sources,
             self.top,
             &self.ignored_loops,
             &self.true_loops,

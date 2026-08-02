@@ -24,9 +24,9 @@ use num_bigint::BigUint;
 mod builder;
 mod error;
 
-pub use builder::compile_to_sir;
 #[cfg(not(target_arch = "wasm32"))]
 pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions};
+pub use builder::{compile_mixed_to_sir, compile_sv_to_sir, compile_to_sir};
 pub use error::render_diagnostic;
 pub use error::{CodegenError, SimulatorError, SimulatorErrorKind};
 
@@ -1425,6 +1425,23 @@ impl Simulator {
         top: &'a str,
     ) -> SimulatorBuilder<'a, Simulator> {
         SimulatorBuilder::<Simulator>::from_sources(sources, top)
+    }
+
+    /// Build a simulator directly from SystemVerilog sources.
+    pub fn from_sv_sources<'a>(
+        sources: Vec<(&'a str, &'a std::path::Path)>,
+        top: &'a str,
+    ) -> SimulatorBuilder<'a, Simulator> {
+        SimulatorBuilder::<Simulator>::from_sv_sources(sources, top)
+    }
+
+    /// Build a simulator from a Veryl hierarchy with SystemVerilog children.
+    pub fn from_mixed_sources<'a>(
+        sources: Vec<(&'a str, &'a std::path::Path)>,
+        sv_sources: Vec<(&'a str, &'a std::path::Path)>,
+        top: &'a str,
+    ) -> SimulatorBuilder<'a, Simulator> {
+        SimulatorBuilder::<Simulator>::from_mixed_sources(sources, sv_sources, top)
     }
 }
 
