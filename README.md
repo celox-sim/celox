@@ -1,5 +1,7 @@
 # Celox
 
+[![npm version](https://img.shields.io/npm/v/%40celox-sim%2Fcelox.svg)](https://www.npmjs.com/package/@celox-sim/celox)
+
 JIT simulator for [Veryl HDL](https://veryl-lang.org/). Celox lowers Veryl
 designs to native x86-64 machine code through a custom compiler pipeline.
 
