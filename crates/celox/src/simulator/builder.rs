@@ -810,9 +810,9 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     pub fn run_test_detailed(self) -> Result<crate::testbench::TestResultDetailed, SimulatorError> {
         let mut sim = self.build()?;
         let testbench = crate::testbench::compile_initial_testbench(&sim).ok_or_else(|| {
-            SimulatorError::new(SimulatorErrorKind::Codegen(
-                "no initial block found — this module is not a native testbench".into(),
-            ))
+            SimulatorError::new(SimulatorErrorKind::Codegen(crate::CodegenError::message(
+                "no initial block found — this module is not a native testbench",
+            )))
         })?;
         Ok(crate::testbench::run_testbench_detailed(
             &mut sim,
@@ -898,9 +898,9 @@ fn run_test_with_sim<B: crate::backend::SimBackend>(
     let phase_timing = sim.diagnostics.phase_timing;
     let testbench_start = phase_timing.then(crate::timing::now);
     let testbench = crate::testbench::compile_initial_testbench(&sim).ok_or_else(|| {
-        SimulatorError::new(SimulatorErrorKind::Codegen(
-            "no initial block found — this module is not a native testbench".into(),
-        ))
+        SimulatorError::new(SimulatorErrorKind::Codegen(crate::CodegenError::message(
+            "no initial block found — this module is not a native testbench",
+        )))
     })?;
     let result = crate::testbench::run_testbench(&mut sim, testbench.statements());
     if let Some(start) = testbench_start {

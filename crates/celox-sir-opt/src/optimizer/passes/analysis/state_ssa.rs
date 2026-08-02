@@ -227,7 +227,7 @@ pub(in crate::optimizer) struct StateSsa {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::optimizer) enum StateSsaError {
+pub(crate) enum StateSsaError {
     MissingRegister(RegisterId),
     MissingReachingVersion { block: BlockId, slot: usize },
     MissingPhiIncoming { block: BlockId, slot: usize },

@@ -16,6 +16,7 @@ const MEM_SHIFT_THRESHOLD: usize = 4;
 
 pub mod cost_model;
 mod cranelift_options;
+mod error;
 mod jit_engine;
 pub mod tail_call_split;
 mod translator;
@@ -24,6 +25,7 @@ mod wide_ops;
 pub use cranelift_options::{
     CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, RegallocAlgorithm,
 };
+pub use error::CraneliftError;
 pub use jit_engine::JitEngine;
 pub use translator::SIRTranslator;
 

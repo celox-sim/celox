@@ -462,10 +462,13 @@ fn rewrite_global_static_slots_in_place(
 /// Store/Load pair.
 pub(crate) fn promote_fused_comb_static_slots(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-) -> Result<bool, String> {
-    let cfg = SirCfg::analyze(eu).map_err(|error| error.to_string())?;
-    let state =
-        StateSsa::analyze(eu, &cfg, STABLE_REGION, None).map_err(|error| error.to_string())?;
+) -> Result<bool, crate::OptimizationError> {
+    let cfg = SirCfg::analyze(eu).map_err(|error| {
+        crate::OptimizationError::control_flow("fused comb static-slot promotion", error)
+    })?;
+    let state = StateSsa::analyze(eu, &cfg, STABLE_REGION, None).map_err(|error| {
+        crate::OptimizationError::state_ssa("fused comb static-slot promotion", error)
+    })?;
     let promotable = state
         .slots
         .iter()
@@ -491,11 +494,18 @@ pub(crate) fn promote_fused_comb_static_slots(
         None,
         &mut stable_passthroughs,
     )
-    .ok_or_else(|| "failed to construct fused comb STABLE StateSSA".to_string())?;
+    .ok_or_else(|| {
+        crate::OptimizationError::invariant(
+            "fused comb static-slot promotion",
+            "failed to construct fused comb STABLE StateSSA",
+        )
+    })?;
     if !changed {
         return Ok(false);
     }
-    eu.verify_result().map_err(|error| error.to_string())?;
+    eu.verify_result().map_err(|error| {
+        crate::OptimizationError::verification("fused comb static-slot promotion", error)
+    })?;
     Ok(true)
 }
 

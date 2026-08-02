@@ -28,7 +28,7 @@ pub use builder::compile_to_sir;
 #[cfg(not(target_arch = "wasm32"))]
 pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions};
 pub use error::render_diagnostic;
-pub use error::{SimulatorError, SimulatorErrorKind};
+pub use error::{CodegenError, SimulatorError, SimulatorErrorKind};
 
 /// Hierarchical instance tree with resolved signals.
 #[cfg(not(target_arch = "wasm32"))]

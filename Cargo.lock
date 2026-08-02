@@ -465,6 +465,7 @@ dependencies = [
  "cranelift-native",
  "fxhash",
  "num-bigint",
+ "thiserror 2.0.19",
  "tracing",
 ]
 
@@ -625,6 +626,7 @@ dependencies = [
  "itertools 0.15.0",
  "num-bigint",
  "num-traits",
+ "thiserror 2.0.19",
  "tracing",
 ]
 

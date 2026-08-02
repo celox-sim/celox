@@ -11,7 +11,7 @@ use bit_set::BitSet;
 use num_bigint::BigUint;
 
 use crate::ir::{AbsoluteAddr, LaidOutProgram, SignalArrayLayout, SignalRef};
-use crate::{HashMap, SimulatorError, SimulatorOptions};
+use crate::{CodegenError, HashMap, SimulatorError, SimulatorOptions};
 
 use super::super::RuntimeEventBuffer;
 use super::super::traits::SimulatorErrorCode;
@@ -116,8 +116,12 @@ impl SharedNativeCode {
 // Compilation
 // ────────────────────────────────────────────────────────────────
 
-fn codegen_err(msg: String) -> SimulatorError {
-    SimulatorError::new(crate::simulator::SimulatorErrorKind::Codegen(msg))
+fn codegen_err(error: CodegenError) -> SimulatorError {
+    error.into()
+}
+
+fn codegen_message(message: impl Into<String>) -> SimulatorError {
+    codegen_err(CodegenError::message(message))
 }
 
 struct CompiledNativeFunction {
@@ -143,17 +147,25 @@ fn prepare_merged_sir(
 ) -> Result<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, SimulatorError> {
     for (unit_index, unit) in units.iter().enumerate() {
         if let Err(error) = unit.verify_result() {
-            return Err(codegen_err(format!(
-                "invalid SIR before x86 source-unit merge: {label} source unit {unit_index}: {error}"
-            )));
+            return Err(codegen_err(CodegenError::SirVerification {
+                phase: format!(
+                    "invalid SIR before x86 source-unit merge: {label} source unit {unit_index}"
+                ),
+                source: error,
+            }));
         }
     }
 
     let (mut sir_eu, merge_provenance) = celox_sir::merge_sir_eu_refs_with_provenance(units);
     let boundaries = merge_provenance.unit_entries[1..].to_vec();
-    let verify = |eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, phase| {
-        eu.verify_result()
-            .map_err(|error| codegen_err(format!("{phase}: {error}")))
+    let verify = |eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>,
+                  phase: &'static str| {
+        eu.verify_result().map_err(|source| {
+            codegen_err(CodegenError::SirVerification {
+                phase: phase.to_string(),
+                source,
+            })
+        })
     };
 
     verify(&sir_eu, "before x86 merged-SIR optimization")?;
@@ -163,7 +175,12 @@ fn prepare_merged_sir(
             &merge_provenance,
             first_ff_unit,
         )
-        .map_err(|message| codegen_err(format!("comb/FF state-publication DSE: {message}")))?;
+        .map_err(|source| {
+            codegen_err(CodegenError::Optimization {
+                context: "comb/FF state-publication DSE",
+                source,
+            })
+        })?;
         if removed != 0 {
             crate::optimizer::sir::remove_dead_sir_definitions(&mut sir_eu);
             verify(&sir_eu, "after comb/FF state-publication DSE")?;
@@ -171,7 +188,12 @@ fn prepare_merged_sir(
     }
     if label == "eval_comb_apply_ff"
         && crate::optimizer::sir::promote_fused_comb_static_slots(&mut sir_eu).map_err(
-            |message| codegen_err(format!("final fused comb StateSSA promotion: {message}")),
+            |source| {
+                codegen_err(CodegenError::Optimization {
+                    context: "final fused comb StateSSA promotion",
+                    source,
+                })
+            },
         )?
     {
         crate::optimizer::sir::remove_dead_sir_definitions(&mut sir_eu);
@@ -196,7 +218,12 @@ fn prepare_merged_sir(
         label == "eval_comb_apply_ff",
         diagnostics,
     )
-    .map_err(|(phase, error)| codegen_err(format!("{phase}: {error}")))?;
+    .map_err(|(phase, source)| {
+        codegen_err(CodegenError::SirVerification {
+            phase: phase.to_string(),
+            source,
+        })
+    })?;
     verify(&sir_eu, "after x86 merged-chain cleanup")?;
     Ok(sir_eu)
 }
@@ -241,7 +268,7 @@ fn compile_unit_refs(
         block.push(super::mir::MInst::Return);
         empty_func.push_block(block);
         let empty_result = emit::emit(&empty_func, &regalloc::AssignmentMap::default(), 0)
-            .map_err(|e| codegen_err(format!("emit error: {e}")))?;
+            .map_err(|source| codegen_err(CodegenError::NativeEmission { source }))?;
         let trace = capture_trace.then(|| emit::NativeFunctionTrace {
             optimized_sir: "<empty native function>\n".into(),
             reactive_graph: String::new(),
@@ -259,7 +286,7 @@ fn compile_unit_refs(
             label,
             x86_options.diagnostics.perf_map,
         )
-        .map_err(|e| codegen_err(format!("mmap error: {e}")))?;
+        .map_err(|source| codegen_err(CodegenError::NativeMemory { source }))?;
         return Ok(CompiledNativeFunction {
             code,
             trace,
@@ -285,7 +312,7 @@ fn compile_unit_refs(
         x86_options,
         trace.as_mut(),
     )
-    .map_err(|e| codegen_err(format!("emit error: {e}")))?;
+    .map_err(|source| codegen_err(CodegenError::NativePipeline { source }))?;
     if let Some(start) = start {
         tracing::debug!(
             "[native-timing] compile_units done label={label} bytes={} elapsed={:?}",
@@ -301,7 +328,7 @@ fn compile_unit_refs(
         &symbols,
         x86_options.diagnostics.perf_map,
     )
-    .map_err(|e| codegen_err(format!("mmap error: {e}")))?;
+    .map_err(|source| codegen_err(CodegenError::NativeMemory { source }))?;
     Ok(CompiledNativeFunction {
         code,
         trace,
@@ -662,12 +689,12 @@ fn compile_program(
 
         let comb_jit = comb_handle
             .join()
-            .map_err(|_| codegen_err("native eval_comb compile thread panicked".into()))??;
+            .map_err(|_| codegen_message("native eval_comb compile thread panicked"))??;
         let mut compiled_ff_codes = HashMap::default();
         for handle in task_handles {
             let compiled = handle
                 .join()
-                .map_err(|_| codegen_err("native FF compile thread panicked".into()))??;
+                .map_err(|_| codegen_message("native FF compile thread panicked"))??;
             compiled_ff_codes.extend(compiled);
         }
         Ok::<_, SimulatorError>((comb_jit, compiled_ff_codes))

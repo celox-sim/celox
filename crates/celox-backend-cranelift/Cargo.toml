@@ -13,6 +13,7 @@ celox-design = { path = "../celox-design" }
 celox-sir = { path = "../celox-sir" }
 celox-state-layout = { path = "../celox-state-layout" }
 fxhash = { workspace = true }
+thiserror = { workspace = true }
 cranelift = "0.134.0"
 cranelift-module = "0.134.0"
 cranelift-jit = "0.134.0"

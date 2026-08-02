@@ -3,7 +3,6 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Module};
 
-use crate::CompileOptions;
 use crate::MemoryLayout;
 use crate::RegionedAbsoluteAddr;
 use crate::cost_model::{
@@ -11,6 +10,7 @@ use crate::cost_model::{
 };
 use crate::tail_call_split::MemorySpilledPlan;
 use crate::tail_call_split::TailCallChunk;
+use crate::{CompileOptions, CraneliftError};
 
 use super::SIRTranslator;
 use super::translator::core::get_cl_type;
@@ -28,19 +28,19 @@ pub struct JitEngine {
 }
 
 impl JitEngine {
-    pub fn new(layout: MemoryLayout, options: &CompileOptions) -> Result<Self, String> {
+    pub fn new(layout: MemoryLayout, options: &CompileOptions) -> Result<Self, CraneliftError> {
         let mut flag_builder = settings::builder();
         let cl_opts = &options.cranelift;
 
         flag_builder
             .set("opt_level", cl_opts.opt_level.as_cranelift_str())
-            .map_err(|e| e.to_string())?;
+            .map_err(|source| CraneliftError::setting("opt_level", source))?;
         flag_builder
             .set(
                 "regalloc_algorithm",
                 cl_opts.regalloc_algorithm.as_cranelift_str(),
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|source| CraneliftError::setting("regalloc_algorithm", source))?;
         flag_builder
             .set(
                 "enable_alias_analysis",
@@ -50,7 +50,7 @@ impl JitEngine {
                     "false"
                 },
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|source| CraneliftError::setting("enable_alias_analysis", source))?;
         flag_builder
             .set(
                 "enable_verifier",
@@ -60,17 +60,18 @@ impl JitEngine {
                     "false"
                 },
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|source| CraneliftError::setting("enable_verifier", source))?;
         // Required for tail calls (return_call instruction)
         flag_builder
             .set("preserve_frame_pointers", "true")
-            .map_err(|e| e.to_string())?;
+            .map_err(|source| CraneliftError::setting("preserve_frame_pointers", source))?;
 
-        let isa_builder = cranelift_native::builder().map_err(|e| e.to_string())?;
+        let isa_builder = cranelift_native::builder()
+            .map_err(|message| CraneliftError::NativeTarget { message })?;
 
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
-            .map_err(|e| e.to_string())?;
+            .map_err(|source| CraneliftError::TargetIsa { source })?;
 
         let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         let module = JITModule::new(builder);
@@ -98,7 +99,7 @@ impl JitEngine {
         pre_clif_out: Option<&mut String>,
         post_clif_out: Option<&mut String>,
         native_out: Option<&mut String>,
-    ) -> Result<(), String> {
+    ) -> Result<(), CraneliftError> {
         if let Some(out) = pre_clif_out {
             out.push_str(&format!("{}\n{}\n", label, ctx.func.display()));
         }
@@ -110,7 +111,7 @@ impl JitEngine {
         let isa = self.module.isa();
         let mut ctrl_plane = cranelift::codegen::control::ControlPlane::default();
         ctx.optimize(isa, &mut ctrl_plane)
-            .map_err(|e| format!("{label} optimization failed: {e:#?}"))?;
+            .map_err(|source| CraneliftError::optimize(label, source))?;
 
         if let Some(out) = post_clif_out {
             out.push_str(&format!("{}\n{}\n", label, ctx.func.display()));
@@ -118,7 +119,9 @@ impl JitEngine {
 
         self.module
             .define_function(func_id, ctx)
-            .map_err(|e| format!("Failed to define {label}: {e}"))?;
+            .map_err(|source| {
+                CraneliftError::module(format!("failed to define {label}"), source)
+            })?;
 
         if let Some(out) = native_out {
             if let Some(compiled) = ctx.compiled_code() {
@@ -138,7 +141,10 @@ impl JitEngine {
 
     /// Create a SystemV entry wrapper that calls the first chunk function via a
     /// regular `call` (not tail-call), bridging from SystemV to Tail calling convention.
-    fn build_entry_wrapper(&mut self, first_chunk_func_id: FuncId) -> Result<FuncId, String> {
+    fn build_entry_wrapper(
+        &mut self,
+        first_chunk_func_id: FuncId,
+    ) -> Result<FuncId, CraneliftError> {
         let mut ctx = self.module.make_context();
         define_simulation_function(&mut self.module, &mut ctx);
 
@@ -166,16 +172,16 @@ impl JitEngine {
         let isa = self.module.isa();
         let mut ctrl_plane = cranelift::codegen::control::ControlPlane::default();
         ctx.optimize(isa, &mut ctrl_plane)
-            .map_err(|e| format!("Entry wrapper optimization failed: {e:#?}"))?;
+            .map_err(|source| CraneliftError::optimize("entry wrapper", source))?;
 
         let func_id = self
             .module
             .declare_anonymous_function(&ctx.func.signature)
-            .map_err(|e| format!("Failed to declare entry wrapper: {e}"))?;
+            .map_err(|source| CraneliftError::module("failed to declare entry wrapper", source))?;
 
         self.module
             .define_function(func_id, &mut ctx)
-            .map_err(|e| format!("Failed to define entry wrapper: {e}"))?;
+            .map_err(|source| CraneliftError::module("failed to define entry wrapper", source))?;
 
         Ok(func_id)
     }
@@ -186,7 +192,7 @@ impl JitEngine {
         pre_clif_out: Option<&mut String>,
         post_clif_out: Option<&mut String>,
         native_out: Option<&mut String>,
-    ) -> Result<*const u8, String> {
+    ) -> Result<*const u8, CraneliftError> {
         let four_state = self.translator.options.four_state;
         let mut total_inst_cost = 0usize;
         let mut total_value_count = 0usize;
@@ -223,7 +229,7 @@ impl JitEngine {
         pre_clif_out: Option<&mut String>,
         post_clif_out: Option<&mut String>,
         native_out: Option<&mut String>,
-    ) -> Result<*const u8, String> {
+    ) -> Result<*const u8, CraneliftError> {
         let mut ctx = self.module.make_context();
         let mut builder_ctx = FunctionBuilderContext::new();
 
@@ -246,7 +252,9 @@ impl JitEngine {
         let func_id = self
             .module
             .declare_anonymous_function(&ctx.func.signature)
-            .map_err(|e| format!("Failed to declare master function: {e}"))?;
+            .map_err(|source| {
+                CraneliftError::module("failed to declare master function", source)
+            })?;
 
         self.optimize_and_define(
             &mut ctx,
@@ -257,9 +265,9 @@ impl JitEngine {
             native_out,
         )?;
 
-        self.module
-            .finalize_definitions()
-            .map_err(|e| format!("Failed to finalize JIT definitions: {e}"))?;
+        self.module.finalize_definitions().map_err(|source| {
+            CraneliftError::module("failed to finalize JIT definitions", source)
+        })?;
 
         Ok(self.module.get_finalized_function(func_id))
     }
@@ -272,7 +280,7 @@ impl JitEngine {
         mut pre_clif_out: Option<&mut String>,
         mut post_clif_out: Option<&mut String>,
         mut native_out: Option<&mut String>,
-    ) -> Result<*const u8, String> {
+    ) -> Result<*const u8, CraneliftError> {
         let timing = self.translator.options.cranelift.diagnostics.pass_timing;
         let four_state = self.translator.options.four_state;
 
@@ -353,7 +361,12 @@ impl JitEngine {
             let func_id = self
                 .module
                 .declare_anonymous_function(&ctx.func.signature)
-                .map_err(|e| format!("Failed to declare batch {batch_idx} function: {e}"))?;
+                .map_err(|source| {
+                    CraneliftError::module(
+                        format!("failed to declare batch {batch_idx} function"),
+                        source,
+                    )
+                })?;
 
             let label = format!("=== eval_comb batch[{batch_idx}] ===");
             self.optimize_and_define(
@@ -421,7 +434,9 @@ impl JitEngine {
         let wrapper_func_id = self
             .module
             .declare_anonymous_function(&ctx.func.signature)
-            .map_err(|e| format!("Failed to declare wrapper function: {e}"))?;
+            .map_err(|source| {
+                CraneliftError::module("failed to declare wrapper function", source)
+            })?;
 
         self.optimize_and_define(
             &mut ctx,
@@ -432,9 +447,9 @@ impl JitEngine {
             native_out,
         )?;
 
-        self.module
-            .finalize_definitions()
-            .map_err(|e| format!("Failed to finalize JIT definitions: {e}"))?;
+        self.module.finalize_definitions().map_err(|source| {
+            CraneliftError::module("failed to finalize JIT definitions", source)
+        })?;
 
         Ok(self.module.get_finalized_function(wrapper_func_id))
     }
@@ -446,7 +461,7 @@ impl JitEngine {
         mut pre_clif_out: Option<&mut String>,
         mut post_clif_out: Option<&mut String>,
         mut native_out: Option<&mut String>,
-    ) -> Result<*const u8, String> {
+    ) -> Result<*const u8, CraneliftError> {
         let ptr_type = self.module.target_config().pointer_type();
         let four_state = self.translator.options.four_state;
 
@@ -480,7 +495,9 @@ impl JitEngine {
             let func_id = self
                 .module
                 .declare_anonymous_function(&sig)
-                .map_err(|e| format!("Failed to declare chunk function: {e}"))?;
+                .map_err(|source| {
+                    CraneliftError::module("failed to declare chunk function", source)
+                })?;
             chunk_func_ids.push(func_id);
             chunk_sigs.push(sig);
         }
@@ -521,9 +538,9 @@ impl JitEngine {
         let entry_func_id = self.build_entry_wrapper(chunk_func_ids[0])?;
 
         // 4. Finalize definitions
-        self.module
-            .finalize_definitions()
-            .map_err(|e| format!("Failed to finalize JIT definitions: {e}"))?;
+        self.module.finalize_definitions().map_err(|source| {
+            CraneliftError::module("failed to finalize JIT definitions", source)
+        })?;
 
         Ok(self.module.get_finalized_function(entry_func_id))
     }
@@ -538,7 +555,7 @@ impl JitEngine {
         mut pre_clif_out: Option<&mut String>,
         mut post_clif_out: Option<&mut String>,
         mut native_out: Option<&mut String>,
-    ) -> Result<*const u8, String> {
+    ) -> Result<*const u8, CraneliftError> {
         let ptr_type = self.module.target_config().pointer_type();
         let scratch_base_offset = self.translator.layout.scratch_base_offset;
 
@@ -552,7 +569,9 @@ impl JitEngine {
             let func_id = self
                 .module
                 .declare_anonymous_function(&sig)
-                .map_err(|e| format!("Failed to declare spilled chunk function: {e}"))?;
+                .map_err(|source| {
+                    CraneliftError::module("failed to declare spilled chunk function", source)
+                })?;
             chunk_func_ids.push(func_id);
         }
 
@@ -595,9 +614,9 @@ impl JitEngine {
         let entry_func_id = self.build_entry_wrapper(chunk_func_ids[0])?;
 
         // 4. Finalize definitions
-        self.module
-            .finalize_definitions()
-            .map_err(|e| format!("Failed to finalize JIT definitions: {e}"))?;
+        self.module.finalize_definitions().map_err(|source| {
+            CraneliftError::module("failed to finalize JIT definitions", source)
+        })?;
 
         Ok(self.module.get_finalized_function(entry_func_id))
     }

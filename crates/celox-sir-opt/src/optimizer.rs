@@ -8,9 +8,11 @@ mod native;
 mod passes;
 mod pipeline;
 
+pub(crate) use passes::analysis::state_ssa::StateSsaError;
 use passes::*;
 use pipeline::pass_manager::ExecutionUnitPass;
 
+pub use crate::{OptimizationError, OptimizationErrorKind};
 pub use api::{
     eliminate_shared_comb_state_stores, eliminate_unobserved_comb_state_stores,
     optimize_rooted_comb_memory, promote_eval_apply_working_round_trips,

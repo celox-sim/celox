@@ -23,20 +23,20 @@ pub fn eliminate_unobserved_comb_state_stores(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     provenance: &crate::ir::SirMergeProvenance,
     first_ff_unit: usize,
-) -> Result<usize, String> {
+) -> Result<usize, crate::OptimizationError> {
     fused_comb_dse::eliminate(eu, provenance, first_ff_unit)
 }
 
 pub fn eliminate_shared_comb_state_stores(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     direct_ff_writes: &[crate::ir::VarAtomBase<RegionedAbsoluteAddr>],
-) -> Result<usize, String> {
+) -> Result<usize, crate::OptimizationError> {
     fused_comb_dse::eliminate_shared(eu, direct_ff_writes)
 }
 
 pub fn promote_fused_comb_static_slots(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
-) -> Result<bool, String> {
+) -> Result<bool, crate::OptimizationError> {
     pass_global_store_load_forwarding::promote_fused_comb_static_slots(eu)
 }
 

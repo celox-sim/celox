@@ -109,11 +109,10 @@ pub use simulator::RuntimeFormatContext;
 pub use simulator::Simulator;
 #[cfg(not(target_arch = "wasm32"))]
 pub use simulator::SimulatorBuilder;
-pub use simulator::SimulatorError;
-pub use simulator::SimulatorErrorKind;
 #[cfg(not(target_arch = "wasm32"))]
 pub use simulator::SimulatorOptions;
 pub use simulator::render_diagnostic;
+pub use simulator::{CodegenError, SimulatorError, SimulatorErrorKind};
 #[cfg(not(target_arch = "wasm32"))]
 pub use simulator::{InstanceHierarchy, NamedEvent, NamedSignal};
 #[cfg(not(target_arch = "wasm32"))]

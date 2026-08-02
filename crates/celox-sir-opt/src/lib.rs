@@ -70,8 +70,10 @@ pub mod timing {
 /// Cost-model threshold for preferring chunked memory shifts.
 const MEM_SHIFT_THRESHOLD: usize = 4;
 
+mod error;
 mod memory_contract;
 pub mod optimizer;
+pub use error::{OptimizationError, OptimizationErrorKind};
 pub use memory_contract::verify_memory_offset_contract;
 
 pub fn optimize(
