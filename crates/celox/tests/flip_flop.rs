@@ -635,6 +635,64 @@ fn test_ff_i32_or_step_with_only_existing_low_bits_reports_true_loop(sim) {
     );
 }
 
+fn test_ff_i32_mul_step_overflow_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            end_bound: input signed logic<64>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in 1500000000..end_bound step *= 2 {
+                    q += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let end_bound = sim.signal("end_bound");
+
+    // The first update overflows i32 even though its widened value would
+    // already exceed this still-representable bound.
+    sim.set(end_bound, 1_600_000_000u64);
+    assert_eq!(
+        sim.tick(clk).unwrap_err().to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
+    );
+}
+
+fn test_ff_i32_shl_step_overflow_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            end_bound: input signed logic<64>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in 1073741824..end_bound step <<= 1 {
+                    q += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let end_bound = sim.signal("end_bound");
+
+    // The first update overflows i32 even though its widened value would
+    // already exceed this still-representable bound.
+    sim.set(end_bound, 1_500_000_000u64);
+    assert_eq!(
+        sim.tick(clk).unwrap_err().to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
+    );
+}
+
 fn test_ff_runtime_for_break(sim) {
     @setup { let code = r#"
         module Top (

@@ -5950,7 +5950,13 @@ impl SLTToSIRLowerer {
             ));
             let current_math =
                 self.cast_reg_width_ext(builder, current_step, math_width, loop_signed);
-            let next_math = self.cast_reg_width_ext(builder, next_step, math_width, loop_signed);
+            // The emitted SystemVerilog loop variable has `loop_width` bits
+            // (`int`/i32 for Veryl). Apply the compound assignment at that
+            // width before checking progress or the loop bound; otherwise a
+            // widened host counter can step through values the emitted loop
+            // can never represent and incorrectly terminate.
+            let next_visible = self.cast_reg_width_ext(builder, next_step, loop_width, loop_signed);
+            let next_math = self.cast_reg_width_ext(builder, next_visible, math_width, loop_signed);
 
             let progress = builder.alloc_bit(1, false);
             builder.emit(SIRInstruction::Binary(

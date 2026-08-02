@@ -542,19 +542,16 @@ fn exec_for_loop<B: SimBackend>(
                     Op::BitXor => i ^ step_i,
                     Op::LogicShiftL | Op::ArithShiftL => {
                         if step >= i128::BITS as usize {
-                            break;
+                            0
+                        } else {
+                            i.checked_shl(step as u32).unwrap_or(0)
                         }
-                        i.checked_shl(step as u32).unwrap_or(0)
                     }
                     _ => i.saturating_add(step_i),
                 };
-                let new_i = if matches!(op, Op::BitOr | Op::BitXor) {
-                    loop_var.as_ref().map_or(new_i, |(_, width, signed)| {
-                        truncate_i128_to_width(new_i, *width, *signed)
-                    })
-                } else {
-                    new_i
-                };
+                let new_i = loop_var.as_ref().map_or(new_i, |(_, width, signed)| {
+                    truncate_i128_to_width(new_i, *width, *signed)
+                });
                 if new_i <= i {
                     return ExecResult::Fail("non-progressing stepped for loop".to_string());
                 }
@@ -571,8 +568,14 @@ fn exec_for_loop<B: SimBackend>(
                     return r;
                 }
                 let Some(next) = i.checked_add(step_i) else {
-                    break;
+                    return ExecResult::Fail("non-progressing stepped for loop".to_string());
                 };
+                let next = loop_var.as_ref().map_or(next, |(_, width, signed)| {
+                    truncate_i128_to_width(next, *width, *signed)
+                });
+                if next <= i {
+                    return ExecResult::Fail("non-progressing stepped for loop".to_string());
+                }
                 i = next;
             }
         }
@@ -642,19 +645,16 @@ fn exec_for_loop<B: SimBackend>(
                 Op::BitXor => i ^ step,
                 Op::LogicShiftL | Op::ArithShiftL => {
                     if step >= usize::BITS as usize {
-                        break;
+                        0
+                    } else {
+                        i << step
                     }
-                    i << step
                 }
                 _ => i.saturating_add(step),
             };
-            let new_i = if matches!(op, Op::BitOr | Op::BitXor) {
-                loop_var.as_ref().map_or(new_i, |(_, width, _)| {
-                    truncate_usize_to_width(new_i, *width)
-                })
-            } else {
-                new_i
-            };
+            let new_i = loop_var.as_ref().map_or(new_i, |(_, width, _)| {
+                truncate_usize_to_width(new_i, *width)
+            });
             if new_i <= i {
                 return ExecResult::Fail("non-progressing stepped for loop".to_string());
             }
@@ -671,8 +671,14 @@ fn exec_for_loop<B: SimBackend>(
                 return r;
             }
             let Some(next) = i.checked_add(step) else {
-                break;
+                return ExecResult::Fail("non-progressing stepped for loop".to_string());
             };
+            let next = loop_var
+                .as_ref()
+                .map_or(next, |(_, width, _)| truncate_usize_to_width(next, *width));
+            if next <= i {
+                return ExecResult::Fail("non-progressing stepped for loop".to_string());
+            }
             i = next;
         }
     }

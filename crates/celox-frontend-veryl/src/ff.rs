@@ -1868,7 +1868,13 @@ impl<'a> FfParser<'a> {
             ));
             let current_math =
                 self.cast_reg_width_ext(ir_builder, current_step, math_width, loop_signed);
-            let next_reg = self.cast_reg_width_ext(ir_builder, next_step, math_width, loop_signed);
+            // Compound assignment updates the fixed-width loop variable
+            // before the next comparison. Truncate to that visible width so
+            // overflow cannot be hidden by the widened comparison path.
+            let next_visible =
+                self.cast_reg_width_ext(ir_builder, next_step, loop_width, loop_signed);
+            let next_reg =
+                self.cast_reg_width_ext(ir_builder, next_visible, math_width, loop_signed);
             let progress_reg = ir_builder.alloc_bit(1, false);
             ir_builder.emit(SIRInstruction::Binary(
                 progress_reg,

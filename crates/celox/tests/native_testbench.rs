@@ -648,7 +648,7 @@ fn test_for_loop_expression_bound_arith_shift_step() {
 }
 
 #[test]
-fn test_for_loop_expression_bound_large_arith_shift_stops_after_first_iteration() {
+fn test_for_loop_expression_bound_large_arith_shift_reports_non_progress() {
     let code = format!(
         r#"
         {COUNTER}
@@ -670,10 +670,36 @@ fn test_for_loop_expression_bound_large_arith_shift_stops_after_first_iteration(
         }}
     "#
     );
-    assert_eq!(
-        Simulator::builder(&code, "t").run_test().unwrap(),
-        TestResult::Pass,
-    );
+    let TestResult::Fail(message) = Simulator::builder(&code, "t").run_test().unwrap() else {
+        panic!("expected non-progressing loop failure");
+    };
+    assert!(message.contains("non-progressing stepped for loop"));
+}
+
+#[test]
+fn test_for_loop_i32_mul_and_shl_overflow_fail() {
+    for (start, end, step) in [
+        ("1500000000", "3100000000", "*= 2"),
+        ("1073741824", "2147483649", "<<= 1"),
+    ] {
+        let code = format!(
+            r#"
+            #[test(t)]
+            module t {{
+                var end_bound: signed logic<64>;
+                initial {{
+                    end_bound = 64'sd{end};
+                    for _i in {start}..end_bound step {step} {{}}
+                    $finish();
+                }}
+            }}
+        "#
+        );
+        let TestResult::Fail(message) = Simulator::builder(&code, "t").run_test().unwrap() else {
+            panic!("expected non-progressing loop failure for step {step}");
+        };
+        assert!(message.contains("non-progressing stepped for loop"));
+    }
 }
 
 #[test]
@@ -975,7 +1001,7 @@ fn test_expression_vm_preserves_wide_fixed_width_semantics() {
 }
 
 #[test]
-fn test_for_loop_dynamic_inclusive_max_bound_runs_terminal_iteration() {
+fn test_for_loop_dynamic_inclusive_unrepresentable_max_bound_reports_non_progress() {
     let code = format!(
         r#"
         {COUNTER}
@@ -999,10 +1025,10 @@ fn test_for_loop_dynamic_inclusive_max_bound_runs_terminal_iteration() {
         }}
     "#
     );
-    assert_eq!(
-        Simulator::builder(&code, "t").run_test().unwrap(),
-        TestResult::Pass,
-    );
+    let TestResult::Fail(message) = Simulator::builder(&code, "t").run_test().unwrap() else {
+        panic!("expected non-progressing loop failure");
+    };
+    assert!(message.contains("non-progressing stepped for loop"));
 }
 
 #[test]

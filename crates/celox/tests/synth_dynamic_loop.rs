@@ -326,6 +326,50 @@ fn test_i32_or_step_with_only_existing_low_bits_reports_true_loop(sim) {
     assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
 }
 
+fn test_i32_mul_step_overflow_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            end_bound: input signed logic<64>,
+            hits: output logic<32>
+        ) {
+            always_comb {
+                hits = 0;
+                for i in 1500000000..end_bound step *= 2 {
+                    hits += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let end_bound = sim.signal("end_bound");
+    sim.set(end_bound, 3_100_000_000u64);
+    assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+}
+
+fn test_i32_shl_step_overflow_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            end_bound: input signed logic<64>,
+            hits: output logic<32>
+        ) {
+            always_comb {
+                hits = 0;
+                for i in 1073741824..end_bound step <<= 1 {
+                    hits += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let end_bound = sim.signal("end_bound");
+    sim.set(end_bound, 2_147_483_649u64);
+    assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+}
+
 fn test_runtime_bounds_terminal_inclusive_mul_loop_exits_cleanly(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
