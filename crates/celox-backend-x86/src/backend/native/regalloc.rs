@@ -442,7 +442,7 @@ fn run_regalloc_in_place(
 /// allocation walk. ISel may append CFG-lowering blocks after their logical
 /// successors (for example runtime-event blocks), so numeric/block-vector
 /// order is not a valid way to distinguish forward edges from backedges.
-fn reorder_blocks_rpo(func: &mut MFunction) -> Result<(), String> {
+fn reorder_blocks_rpo(func: &mut MFunction) -> Result<(), cfg::CfgError> {
     use super::mir::BlockId;
     use std::collections::{HashMap, HashSet};
 
@@ -496,7 +496,11 @@ fn reorder_blocks_rpo(func: &mut MFunction) -> Result<(), String> {
             .iter()
             .any(|block| !positions.contains_key(&block.id))
     {
-        return Err("reverse-postorder layout is not a bijection over MIR blocks".into());
+        return Err(cfg::CfgError::new(
+            "CFG.RPO_BIJECTION",
+            None,
+            "reverse-postorder layout is not a bijection over MIR blocks",
+        ));
     }
     func.blocks
         .sort_by_key(|block| positions.get(&block.id).copied().unwrap_or(usize::MAX));

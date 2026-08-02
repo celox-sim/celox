@@ -5,6 +5,7 @@
 //! memory buffer.  Signals ≤64 bits use native `u64` arithmetic with zero
 //! heap allocation; wider signals fall back to `BigUint`.
 
+use crate::RuntimeErrorCode;
 use crate::backend::memory_layout::{
     RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
     RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
@@ -64,6 +65,17 @@ pub(crate) type AssertMessage = ExecutableAssertMessage;
 pub type ClockCount = ExecutableClockCount;
 
 pub type LoopBound = ExecutableLoopBound;
+
+#[derive(Debug, thiserror::Error)]
+enum TestbenchEvaluationError {
+    #[error("eval_comb: {source}")]
+    EvalComb {
+        #[source]
+        source: RuntimeErrorCode,
+    },
+    #[error("dynamic signed for-loop bound exceeds host i128")]
+    SignedLoopBoundOutOfRange,
+}
 
 pub(crate) type TestbenchStatement<B> = ExecutableStatement<<B as SimBackend>::Event, SignalRef>;
 
@@ -185,11 +197,12 @@ impl From<ExecResult> for TestResult {
 fn eval_clock_count<B: SimBackend>(
     sim: &mut Simulator<B>,
     count: &ClockCount,
-) -> Result<u64, String> {
+) -> Result<u64, TestbenchEvaluationError> {
     Ok(match count {
         ClockCount::Static(n) => *n,
         ClockCount::Dynamic(expr) => {
-            sim.eval_comb().map_err(|e| format!("eval_comb: {e}"))?;
+            sim.eval_comb()
+                .map_err(|source| TestbenchEvaluationError::EvalComb { source })?;
             let (ptr, _) = sim.memory_as_mut_ptr();
             expr.eval_u64(ptr)
         }
@@ -199,7 +212,7 @@ fn eval_clock_count<B: SimBackend>(
 fn eval_loop_bound<B: SimBackend>(
     sim: &mut Simulator<B>,
     bound: &LoopBound,
-) -> Result<EvaluatedLoopBound, String> {
+) -> Result<EvaluatedLoopBound, TestbenchEvaluationError> {
     match bound {
         LoopBound::Static(v) => Ok(EvaluatedLoopBound::Unsigned(*v)),
         LoopBound::Dynamic {
@@ -207,7 +220,8 @@ fn eval_loop_bound<B: SimBackend>(
             width,
             signed,
         } => {
-            sim.eval_comb().map_err(|e| format!("eval_comb: {e}"))?;
+            sim.eval_comb()
+                .map_err(|source| TestbenchEvaluationError::EvalComb { source })?;
             let (ptr, _) = sim.memory_as_mut_ptr();
             let value = expr.eval_value(ptr);
             if *signed {
@@ -235,7 +249,10 @@ enum EvaluatedLoopBound {
     SignedWide(BigInt),
 }
 
-fn decode_signed_loop_bound(value: TbValue, width: usize) -> Result<EvaluatedLoopBound, String> {
+fn decode_signed_loop_bound(
+    value: TbValue,
+    width: usize,
+) -> Result<EvaluatedLoopBound, TestbenchEvaluationError> {
     let width = width.max(1);
     match value {
         TbValue::U64(v) => {
@@ -256,7 +273,7 @@ fn decode_signed_loop_bound(value: TbValue, width: usize) -> Result<EvaluatedLoo
             }
             let raw = v
                 .to_u128()
-                .ok_or_else(|| "dynamic signed for-loop bound exceeds host i128".to_string())?;
+                .ok_or(TestbenchEvaluationError::SignedLoopBoundOutOfRange)?;
             Ok(EvaluatedLoopBound::Signed(sign_extend_u128(raw, width)))
         }
     }
@@ -371,11 +388,11 @@ fn exec_for_loop<B: SimBackend>(
 ) -> ExecResult {
     let start = match eval_loop_bound(sim, start) {
         Ok(v) => v,
-        Err(e) => return ExecResult::Fail(e),
+        Err(error) => return ExecResult::Fail(error.to_string()),
     };
     let end = match eval_loop_bound(sim, end) {
         Ok(v) => v,
-        Err(e) => return ExecResult::Fail(e),
+        Err(error) => return ExecResult::Fail(error.to_string()),
     };
 
     if matches!(start, EvaluatedLoopBound::UnsignedWide(_))
@@ -1004,7 +1021,7 @@ fn exec_one_detailed<B: SimBackend>(
                     }
                     ExecResult::Continue
                 }
-                Err(e) => ExecResult::Fail(e),
+                Err(error) => ExecResult::Fail(error.to_string()),
             }
         }
         GenericTestbenchStatement::ResetAssert {
@@ -1142,8 +1159,19 @@ fn exec_one_detailed<B: SimBackend>(
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use std::error::Error as _;
+
     use super::*;
     use crate::{Simulator, TestResult};
+
+    #[test]
+    fn evaluation_error_preserves_runtime_error_source() {
+        let error = TestbenchEvaluationError::EvalComb {
+            source: RuntimeErrorCode::InternalError,
+        };
+
+        assert!(error.source().unwrap().is::<RuntimeErrorCode>());
+    }
 
     #[test]
     fn traced_build_registers_compiled_testbench_runtime_event_sites() {

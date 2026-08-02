@@ -14610,6 +14610,85 @@ mod tests {
     }
 
     #[test]
+    fn four_state_constant_binary_preserves_unknown_mask() {
+        let output_var = VarId::default();
+        let output_abs = AbsoluteAddr {
+            instance_id: InstanceId(0),
+            var_id: output_var,
+        };
+        let output = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, output_abs);
+        let lhs = RegisterId(0);
+        let rhs = RegisterId(1);
+        let result = RegisterId(2);
+        let logic4 = RegisterType::Logic { width: 4 };
+        let unit = ExecutionUnit {
+            entry_block_id: SirBlockId(0),
+            blocks: [(
+                SirBlockId(0),
+                BasicBlock {
+                    id: SirBlockId(0),
+                    params: vec![],
+                    instructions: vec![
+                        SIRInstruction::Imm(lhs, SIRValue::new_four_state(0b1010u8, 0u8)),
+                        SIRInstruction::Imm(rhs, SIRValue::new_four_state(0b0010u8, 0b0011u8)),
+                        SIRInstruction::Binary(result, lhs, BinaryOp::Xor, rhs),
+                        SIRInstruction::Store(
+                            output,
+                            SIROffset::Static(0),
+                            4,
+                            result,
+                            vec![],
+                            vec![],
+                        ),
+                    ],
+                    terminator: SIRTerminator::Return,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            register_map: [
+                (lhs, logic4.clone()),
+                (rhs, logic4.clone()),
+                (result, logic4),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        unit.verify();
+
+        let mut layout = empty_layout();
+        layout.four_state = true;
+        layout.offsets.insert(output_abs, 0);
+        layout.widths.insert(output_abs, 4);
+        layout.is_4states.insert(output_abs, true);
+        layout.total_size = 2;
+        layout.working_base_offset = 2;
+        layout.sparse_base_offset = 2;
+        layout.merged_total_size = 2;
+        layout.triggered_bits_offset = 2;
+        layout.scratch_base_offset = 2;
+
+        let mut function = lower_execution_unit(&unit, &layout, true);
+        function.verify();
+        mir_legalize::legalize(&mut function);
+        mir_opt::optimize(&mut function);
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        mir_opt::post_regalloc_peephole(&mut function);
+        function.verify();
+        let emitted = emit::emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+        let jit = JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0u8; 2];
+        assert_eq!(unsafe { jit.call(&mut state) }, 0);
+        assert_eq!(state[0] & 0b1111, 0b1011, "value plane");
+        assert_eq!(state[1] & 0b1111, 0b0011, "mask plane");
+    }
+
+    #[test]
     fn lowers_bit_packed_field_compare_to_word_swar() {
         if !crate::native::features::X86Features::detect().bmi2() {
             return;

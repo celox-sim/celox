@@ -1,7 +1,6 @@
 #![allow(clippy::disallowed_macros)] // CLI errors and progress intentionally use stderr
 
 use std::{
-    error::Error,
     fs,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -64,6 +63,28 @@ struct Options {
     x86_slp: bool,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum CeloxHeliodorError {
+    #[error(transparent)]
+    Metadata(#[from] veryl_metadata::MetadataError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("Celox build failed: {source:?}")]
+    Build {
+        #[from]
+        #[source]
+        source: celox::SimulatorError,
+    },
+    #[error("{message}")]
+    InvalidConfiguration { message: &'static str },
+    #[error("{artifact} trace was not captured")]
+    MissingTrace { artifact: &'static str },
+    #[error("no initial block found — this module is not a native testbench")]
+    MissingInitialBlock,
+    #[error("{message}")]
+    TestFailed { message: String },
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum Backend {
     Native,
@@ -109,7 +130,7 @@ fn main() {
     }
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
+fn run() -> Result<(), CeloxHeliodorError> {
     let cli = Cli::parse();
     let opts = Options {
         project: cli.project,
@@ -137,10 +158,14 @@ fn run() -> Result<(), Box<dyn Error>> {
             .unwrap_or(cfg!(target_arch = "x86_64")),
     };
     if !opts.native_profile_blocks.is_empty() && opts.dump_ir_dir.is_none() {
-        return Err("--native-profile-block requires --dump-ir-dir".into());
+        return Err(CeloxHeliodorError::InvalidConfiguration {
+            message: "--native-profile-block requires --dump-ir-dir",
+        });
     }
     if opts.dump_ir_and_run && opts.dump_ir_dir.is_none() {
-        return Err("--dump-ir-and-run requires --dump-ir-dir".into());
+        return Err(CeloxHeliodorError::InvalidConfiguration {
+            message: "--dump-ir-and-run requires --dump-ir-dir",
+        });
     }
     let (sources, metadata) = load_sources(&opts.project, &opts.source_files)?;
     let source_refs: Vec<(&str, &Path)> = sources
@@ -177,7 +202,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     if let Some(output_dir) = opts.dump_ir_dir {
         if matches!(opts.backend, Backend::Cranelift) {
-            return Err("--dump-ir-dir is only supported with --backend native".into());
+            return Err(CeloxHeliodorError::InvalidConfiguration {
+                message: "--dump-ir-dir is only supported with --backend native",
+            });
         }
         fs::create_dir_all(&output_dir)?;
         let trace_result = builder
@@ -207,23 +234,38 @@ fn run() -> Result<(), Box<dyn Error>> {
                 sir_path.display()
             );
         }
-        let mut sim = res.map_err(|error| format!("Celox build failed: {error:?}"))?;
-        let _pre_optimized_sir =
-            pre_optimized_sir.ok_or("pre-optimized SIR trace was not captured")?;
-        let _sir = sir.ok_or("post-optimized SIR trace was not captured")?;
-        let native_sir = trace
-            .native_optimized_sir
+        let mut sim = res?;
+        let _pre_optimized_sir = pre_optimized_sir.ok_or(CeloxHeliodorError::MissingTrace {
+            artifact: "pre-optimized SIR",
+        })?;
+        let _sir = sir.ok_or(CeloxHeliodorError::MissingTrace {
+            artifact: "post-optimized SIR",
+        })?;
+        let native_sir =
+            trace
+                .native_optimized_sir
+                .take()
+                .ok_or(CeloxHeliodorError::MissingTrace {
+                    artifact: "native optimized SIR",
+                })?;
+        let mir = trace
+            .mir
             .take()
-            .ok_or("native optimized SIR trace was not captured")?;
-        let mir = trace.mir.take().ok_or("MIR trace was not captured")?;
-        let reactive_graph = trace
-            .reactive_event_graph
-            .take()
-            .ok_or("reactive event graph was not captured")?;
-        let state_layout = trace
-            .native_state_layout
-            .take()
-            .ok_or("native state-layout analysis was not captured")?;
+            .ok_or(CeloxHeliodorError::MissingTrace { artifact: "MIR" })?;
+        let reactive_graph =
+            trace
+                .reactive_event_graph
+                .take()
+                .ok_or(CeloxHeliodorError::MissingTrace {
+                    artifact: "reactive event graph",
+                })?;
+        let state_layout =
+            trace
+                .native_state_layout
+                .take()
+                .ok_or(CeloxHeliodorError::MissingTrace {
+                    artifact: "native state-layout analysis",
+                })?;
         let native_sir_path = output_dir.join("native_optimized.sir");
         let mir_path = output_dir.join("mir.txt");
         let reactive_graph_path = output_dir.join("reactive_event_graph.txt");
@@ -265,8 +307,8 @@ fn run() -> Result<(), Box<dyn Error>> {
             trace,
         ));
         if opts.dump_ir_and_run {
-            let testbench = compile_initial_testbench(&sim)
-                .ok_or("no initial block found — this module is not a native testbench")?;
+            let testbench =
+                compile_initial_testbench(&sim).ok_or(CeloxHeliodorError::MissingInitialBlock)?;
             sim.start_native_execution_timing();
             let execute_cpu_start = process_cpu_time();
             let execute_start = Instant::now();
@@ -321,7 +363,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         opts.test,
                         elapsed.as_nanos()
                     );
-                    Err(message.into())
+                    Err(CeloxHeliodorError::TestFailed { message })
                 }
             };
         }
@@ -371,8 +413,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     ) = match opts.backend {
         Backend::Native => {
             let mut sim = builder.build_native()?;
-            let testbench = compile_initial_testbench(&sim)
-                .ok_or("no initial block found — this module is not a native testbench")?;
+            let testbench =
+                compile_initial_testbench(&sim).ok_or(CeloxHeliodorError::MissingInitialBlock)?;
             let compile_elapsed = compile_start.elapsed();
             sim.start_native_execution_timing();
             let execute_cpu_start = process_cpu_time();
@@ -401,8 +443,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         Backend::Cranelift => {
             let mut sim = builder.build_cranelift()?;
-            let testbench = compile_initial_testbench(&sim)
-                .ok_or("no initial block found — this module is not a native testbench")?;
+            let testbench =
+                compile_initial_testbench(&sim).ok_or(CeloxHeliodorError::MissingInitialBlock)?;
             let compile_elapsed = compile_start.elapsed();
             let execute_cpu_start = process_cpu_time();
             let execute_start = Instant::now();
@@ -463,7 +505,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 opts.test,
                 elapsed.as_nanos()
             );
-            Err(message.into())
+            Err(CeloxHeliodorError::TestFailed { message })
         }
     }
 }
@@ -514,41 +556,92 @@ fn process_cpu_time() -> Option<Duration> {
     None
 }
 
-fn parse_positive_u64(value: &str) -> Result<u64, String> {
+#[derive(Debug, thiserror::Error)]
+enum CliValueError {
+    #[error("invalid positive integer: {value}")]
+    InvalidPositiveInteger {
+        value: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
+    #[error("value must be greater than zero")]
+    NonPositiveInteger,
+    #[error("invalid native memory width: {value}")]
+    InvalidNativeMemoryWidth { value: String },
+    #[error("invalid native profile block: {value}")]
+    InvalidNativeProfileBlock { value: String },
+    #[error("invalid block number in native profile block: {value}")]
+    InvalidNativeProfileBlockNumber {
+        value: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
+    #[error("invalid sample count in native profile block: {value}")]
+    InvalidNativeProfileSampleCount {
+        value: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
+    #[error("invalid pass override: {value}")]
+    InvalidPassOverride { value: String },
+    #[error("unknown SIR pass: {name}")]
+    UnknownSirPass { name: String },
+}
+
+fn parse_positive_u64(value: &str) -> Result<u64, CliValueError> {
     let parsed = value
         .parse::<u64>()
-        .map_err(|_| format!("invalid positive integer: {value}"))?;
+        .map_err(|source| CliValueError::InvalidPositiveInteger {
+            value: value.to_owned(),
+            source,
+        })?;
     if parsed == 0 {
-        Err("value must be greater than zero".to_string())
+        Err(CliValueError::NonPositiveInteger)
     } else {
         Ok(parsed)
     }
 }
 
-fn parse_native_memory_width(value: &str) -> Result<usize, String> {
+fn parse_native_memory_width(value: &str) -> Result<usize, CliValueError> {
     match value {
         "64" => Ok(64),
         "128" => Ok(128),
-        _ => Err(format!("invalid native memory width: {value}")),
+        _ => Err(CliValueError::InvalidNativeMemoryWidth {
+            value: value.to_owned(),
+        }),
     }
 }
 
-fn parse_native_profile_block(value: &str) -> Result<celox::NativeProfileBlock, String> {
-    let (function_and_block, samples) = value
-        .rsplit_once(':')
-        .ok_or_else(|| format!("invalid native profile block: {value}"))?;
-    let (function, block) = function_and_block
-        .rsplit_once(':')
-        .ok_or_else(|| format!("invalid native profile block: {value}"))?;
+fn parse_native_profile_block(value: &str) -> Result<celox::NativeProfileBlock, CliValueError> {
+    let (function_and_block, samples) =
+        value
+            .rsplit_once(':')
+            .ok_or_else(|| CliValueError::InvalidNativeProfileBlock {
+                value: value.to_owned(),
+            })?;
+    let (function, block) = function_and_block.rsplit_once(':').ok_or_else(|| {
+        CliValueError::InvalidNativeProfileBlock {
+            value: value.to_owned(),
+        }
+    })?;
     let block = block.strip_prefix("bb").unwrap_or(block);
-    let block = block
-        .parse::<u32>()
-        .map_err(|_| format!("invalid block number in native profile block: {value}"))?;
-    let samples = samples
-        .parse::<u64>()
-        .map_err(|_| format!("invalid sample count in native profile block: {value}"))?;
+    let block =
+        block
+            .parse::<u32>()
+            .map_err(|source| CliValueError::InvalidNativeProfileBlockNumber {
+                value: value.to_owned(),
+                source,
+            })?;
+    let samples = samples.parse::<u64>().map_err(|source| {
+        CliValueError::InvalidNativeProfileSampleCount {
+            value: value.to_owned(),
+            source,
+        }
+    })?;
     if function.is_empty() || samples == 0 {
-        return Err(format!("invalid native profile block: {value}"));
+        return Err(CliValueError::InvalidNativeProfileBlock {
+            value: value.to_owned(),
+        });
     }
     Ok(celox::NativeProfileBlock {
         function: function.to_string(),
@@ -557,22 +650,26 @@ fn parse_native_profile_block(value: &str) -> Result<celox::NativeProfileBlock, 
     })
 }
 
-fn parse_pass_override(value: &str) -> Result<(bool, SirPass), String> {
+fn parse_pass_override(value: &str) -> Result<(bool, SirPass), CliValueError> {
     let (enable, name) = if let Some(name) = value.strip_prefix('+') {
         (true, name)
     } else if let Some(name) = value.strip_prefix('-') {
         (false, name)
     } else {
-        return Err(format!("invalid pass override: {value}"));
+        return Err(CliValueError::InvalidPassOverride {
+            value: value.to_owned(),
+        });
     };
-    let pass = SirPass::parse(name).ok_or_else(|| format!("unknown SIR pass: {name}"))?;
+    let pass = SirPass::parse(name).ok_or_else(|| CliValueError::UnknownSirPass {
+        name: name.to_owned(),
+    })?;
     Ok((enable, pass))
 }
 
 fn load_sources(
     project_path: &Path,
     source_files: &[PathBuf],
-) -> Result<(Vec<(String, PathBuf)>, Metadata), Box<dyn Error>> {
+) -> Result<(Vec<(String, PathBuf)>, Metadata), CeloxHeliodorError> {
     let toml_path = Metadata::search_from(project_path)?;
     let mut metadata = Metadata::load(&toml_path)?;
     let paths: Vec<PathBuf> = if source_files.is_empty() {
@@ -603,9 +700,22 @@ fn load_sources(
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use clap::Parser;
 
-    use super::{Cli, OptimizationLevel};
+    use super::{Cli, CliValueError, OptimizationLevel, parse_positive_u64};
+
+    #[test]
+    fn numeric_parser_preserves_parse_error_source() {
+        let error = parse_positive_u64("not-a-number").unwrap_err();
+
+        assert!(matches!(
+            &error,
+            CliValueError::InvalidPositiveInteger { .. }
+        ));
+        assert!(error.source().unwrap().is::<std::num::ParseIntError>());
+    }
 
     #[test]
     fn opt_level_is_case_insensitive() {
