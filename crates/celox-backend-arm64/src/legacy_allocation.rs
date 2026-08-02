@@ -21,6 +21,7 @@ use crate::mir::{self, AllocatedFunction};
 #[derive(Debug)]
 pub(crate) enum LegacyLoweringError {
     Ssa(SsaDestructionError),
+    TargetAllocation(crate::regalloc::TargetRegallocError),
     Unsupported(&'static str),
 }
 
@@ -28,6 +29,7 @@ impl fmt::Display for LegacyLoweringError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ssa(error) => error.fmt(formatter),
+            Self::TargetAllocation(error) => error.fmt(formatter),
             Self::Unsupported(instruction) => {
                 write!(formatter, "AArch64 lowering does not support {instruction}")
             }
@@ -40,6 +42,12 @@ impl std::error::Error for LegacyLoweringError {}
 impl From<SsaDestructionError> for LegacyLoweringError {
     fn from(error: SsaDestructionError) -> Self {
         Self::Ssa(error)
+    }
+}
+
+impl From<crate::regalloc::TargetRegallocError> for LegacyLoweringError {
+    fn from(error: crate::regalloc::TargetRegallocError) -> Self {
+        Self::TargetAllocation(error)
     }
 }
 
@@ -75,6 +83,20 @@ pub(crate) fn adapt(
         .map(|block| {
             Ok(mir::MBlock {
                 id: adapt_block(block.id),
+                phis: block
+                    .phis
+                    .iter()
+                    .map(|phi| mir::PhiNode {
+                        dst: adapt_vreg(phi.dst),
+                        sources: phi
+                            .sources
+                            .iter()
+                            .map(|&(predecessor, value)| {
+                                (adapt_block(predecessor), adapt_vreg(value))
+                            })
+                            .collect(),
+                    })
+                    .collect(),
                 insts: block
                     .insts
                     .iter()
@@ -83,11 +105,13 @@ pub(crate) fn adapt(
             })
         })
         .collect::<Result<_, LegacyLoweringError>>()?;
-    Ok(AllocatedFunction {
+    let allocated = AllocatedFunction {
         function: mir::MFunction::new(blocks, function.constant_tables().to_vec()),
         assignment: target_assignment,
         edge_copies: target_plan,
-    })
+    };
+    crate::regalloc::verify_allocated(&allocated)?;
+    Ok(allocated)
 }
 
 fn adapt_vreg(value: legacy_mir::VReg) -> mir::VReg {

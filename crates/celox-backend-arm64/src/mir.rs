@@ -489,10 +489,238 @@ pub(crate) enum MInst {
     },
 }
 
+impl MInst {
+    pub(crate) fn def(&self) -> Option<VReg> {
+        match self {
+            Self::Mov { dst, .. }
+            | Self::Mov32 { dst, .. }
+            | Self::LoadImm { dst, .. }
+            | Self::Scratch { dst }
+            | Self::LoadConstantTableAddr { dst, .. }
+            | Self::Load { dst, .. }
+            | Self::LoadPtr { dst, .. }
+            | Self::LoadIndexed { dst, .. }
+            | Self::PackedLaneCompare { dst, .. }
+            | Self::PackedByteAffineCompare { dst, .. }
+            | Self::LoadPtrIndexed { dst, .. }
+            | Self::Add { dst, .. }
+            | Self::Add32 { dst, .. }
+            | Self::Sub { dst, .. }
+            | Self::Sub32 { dst, .. }
+            | Self::Mul { dst, .. }
+            | Self::Mul32 { dst, .. }
+            | Self::UMulHi { dst, .. }
+            | Self::And { dst, .. }
+            | Self::And32 { dst, .. }
+            | Self::Or { dst, .. }
+            | Self::Or32 { dst, .. }
+            | Self::Xor { dst, .. }
+            | Self::Xor32 { dst, .. }
+            | Self::Shr { dst, .. }
+            | Self::Shl { dst, .. }
+            | Self::Sar { dst, .. }
+            | Self::AndImm { dst, .. }
+            | Self::AndImm32 { dst, .. }
+            | Self::OrImm { dst, .. }
+            | Self::ShrImm { dst, .. }
+            | Self::ShlImm { dst, .. }
+            | Self::SarImm { dst, .. }
+            | Self::AddImm { dst, .. }
+            | Self::SubImm { dst, .. }
+            | Self::Cmp { dst, .. }
+            | Self::CmpImm { dst, .. }
+            | Self::UDiv { dst, .. }
+            | Self::URem { dst, .. }
+            | Self::SDiv { dst, .. }
+            | Self::SRem { dst, .. }
+            | Self::BitNot { dst, .. }
+            | Self::Neg { dst, .. }
+            | Self::Popcnt { dst, .. }
+            | Self::Bsf { dst, .. }
+            | Self::Bsr { dst, .. }
+            | Self::BsrOr { dst, .. }
+            | Self::Pext { dst, .. }
+            | Self::Pdep { dst, .. }
+            | Self::Select { dst, .. }
+            | Self::CmpSelect { dst, .. }
+            | Self::CmpImmSelect { dst, .. }
+            | Self::GuardedCmpSelect { dst, .. } => Some(*dst),
+            Self::Store { .. }
+            | Self::AndStoreImm { .. }
+            | Self::OrStoreImm { .. }
+            | Self::StorePtr { .. }
+            | Self::ReleaseStorePtr { .. }
+            | Self::StoreIndexed { .. }
+            | Self::OrStoreIndexed { .. }
+            | Self::StorePtrIndexed { .. }
+            | Self::ReleaseStorePtrIndexed { .. }
+            | Self::MemCopy { .. }
+            | Self::MemFill { .. }
+            | Self::SparseCommit { .. }
+            | Self::SparseMarkActive { .. }
+            | Self::SparseCommitWorklist { .. }
+            | Self::Branch { .. }
+            | Self::BranchPred { .. }
+            | Self::JumpTable { .. }
+            | Self::Jump { .. }
+            | Self::Return
+            | Self::ReturnError { .. } => None,
+        }
+    }
+
+    pub(crate) fn uses(&self) -> Vec<VReg> {
+        match self {
+            Self::Mov { src, .. } | Self::Mov32 { src, .. } => vec![*src],
+            Self::LoadImm { .. }
+            | Self::Scratch { .. }
+            | Self::LoadConstantTableAddr { .. }
+            | Self::Load { .. }
+            | Self::AndStoreImm { .. }
+            | Self::OrStoreImm { .. }
+            | Self::MemCopy { .. }
+            | Self::MemFill { .. }
+            | Self::SparseCommit { .. }
+            | Self::SparseMarkActive { .. }
+            | Self::SparseCommitWorklist { .. } => Vec::new(),
+            Self::Store { src, .. } => vec![*src],
+            Self::LoadPtr { ptr, .. } => vec![*ptr],
+            Self::StorePtr { ptr, src, .. } | Self::ReleaseStorePtr { ptr, src, .. } => {
+                vec![*ptr, *src]
+            }
+            Self::LoadIndexed { index, .. } => vec![*index],
+            Self::PackedLaneCompare {
+                rhs: PackedLaneCompareRhs::Scalar(value),
+                ..
+            } => vec![*value],
+            Self::PackedLaneCompare {
+                rhs: PackedLaneCompareRhs::Memory { .. },
+                ..
+            } => Vec::new(),
+            Self::PackedByteAffineCompare { base, rhs, .. } => vec![*base, *rhs],
+            Self::StoreIndexed { index, src, .. } | Self::OrStoreIndexed { index, src, .. } => {
+                vec![*index, *src]
+            }
+            Self::LoadPtrIndexed { ptr, index, .. } => vec![*ptr, *index],
+            Self::StorePtrIndexed {
+                ptr, index, src, ..
+            }
+            | Self::ReleaseStorePtrIndexed {
+                ptr, index, src, ..
+            } => vec![*ptr, *index, *src],
+            Self::Add { lhs, rhs, .. }
+            | Self::Add32 { lhs, rhs, .. }
+            | Self::Sub { lhs, rhs, .. }
+            | Self::Sub32 { lhs, rhs, .. }
+            | Self::Mul { lhs, rhs, .. }
+            | Self::Mul32 { lhs, rhs, .. }
+            | Self::UMulHi { lhs, rhs, .. }
+            | Self::And { lhs, rhs, .. }
+            | Self::And32 { lhs, rhs, .. }
+            | Self::Or { lhs, rhs, .. }
+            | Self::Or32 { lhs, rhs, .. }
+            | Self::Xor { lhs, rhs, .. }
+            | Self::Xor32 { lhs, rhs, .. }
+            | Self::Shr { lhs, rhs, .. }
+            | Self::Shl { lhs, rhs, .. }
+            | Self::Sar { lhs, rhs, .. }
+            | Self::Cmp { lhs, rhs, .. }
+            | Self::UDiv { lhs, rhs, .. }
+            | Self::URem { lhs, rhs, .. }
+            | Self::SDiv { lhs, rhs, .. }
+            | Self::SRem { lhs, rhs, .. } => vec![*lhs, *rhs],
+            Self::AndImm { src, .. }
+            | Self::AndImm32 { src, .. }
+            | Self::OrImm { src, .. }
+            | Self::ShrImm { src, .. }
+            | Self::ShlImm { src, .. }
+            | Self::SarImm { src, .. }
+            | Self::AddImm { src, .. }
+            | Self::SubImm { src, .. }
+            | Self::BitNot { src, .. }
+            | Self::Neg { src, .. }
+            | Self::Popcnt { src, .. }
+            | Self::Bsf { src, .. }
+            | Self::Bsr { src, .. }
+            | Self::BsrOr { src, .. } => vec![*src],
+            Self::CmpImm { lhs, .. } => vec![*lhs],
+            Self::Pext { src, mask, .. } | Self::Pdep { src, mask, .. } => vec![*src, *mask],
+            Self::Select {
+                cond,
+                true_val,
+                false_val,
+                ..
+            } => vec![*cond, *true_val, *false_val],
+            Self::CmpSelect {
+                lhs,
+                rhs,
+                true_val,
+                false_val,
+                ..
+            } => vec![*lhs, *rhs, *true_val, *false_val],
+            Self::CmpImmSelect {
+                lhs,
+                true_val,
+                false_val,
+                ..
+            } => vec![*lhs, *true_val, *false_val],
+            Self::GuardedCmpSelect {
+                guard,
+                lhs,
+                rhs,
+                true_val,
+                false_val,
+                ..
+            } => vec![*guard, *lhs, *rhs, *true_val, *false_val],
+            Self::Branch { cond, .. } => vec![*cond],
+            Self::BranchPred {
+                predicate: BranchPredicate::Compare { lhs, rhs, .. },
+                ..
+            } => vec![*lhs, *rhs],
+            Self::BranchPred {
+                predicate: BranchPredicate::CompareImm { lhs, .. },
+                ..
+            } => vec![*lhs],
+            Self::BranchPred {
+                predicate: BranchPredicate::MemoryNonZero { .. },
+                ..
+            } => Vec::new(),
+            Self::JumpTable { index, .. } => vec![*index],
+            Self::Jump { .. } | Self::Return | Self::ReturnError { .. } => Vec::new(),
+        }
+    }
+
+    pub(crate) fn is_copy(&self) -> bool {
+        matches!(self, Self::Mov { .. })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PhiNode {
+    pub(crate) dst: VReg,
+    pub(crate) sources: Vec<(BlockId, VReg)>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct MBlock {
     pub(crate) id: BlockId,
+    pub(crate) phis: Vec<PhiNode>,
     pub(crate) insts: Vec<MInst>,
+}
+
+impl MBlock {
+    pub(crate) fn successors(&self) -> Vec<BlockId> {
+        match self.insts.last() {
+            Some(MInst::Branch {
+                true_bb, false_bb, ..
+            })
+            | Some(MInst::BranchPred {
+                true_bb, false_bb, ..
+            }) => vec![*true_bb, *false_bb],
+            Some(MInst::JumpTable { targets, .. }) => targets.to_vec(),
+            Some(MInst::Jump { target }) => vec![*target],
+            _ => Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
