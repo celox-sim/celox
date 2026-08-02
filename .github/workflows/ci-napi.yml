@@ -1,13 +1,22 @@
 name: NAPI Build & Publish
 
 on:
-  push:
-    branches: [master]
-    paths:
-      - ".release-please-manifest.json"
+  repository_dispatch:
+    types: [napi-release]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed release tag to publish or retry
+        required: true
+        type: string
+
+concurrency:
+  group: napi-publish-${{ github.event.client_payload.tag || inputs.tag }}
+  cancel-in-progress: false
 
 env:
   CARGO_INCREMENTAL: "0"
+  RELEASE_TAG: ${{ github.event.client_payload.tag || inputs.tag }}
 
 permissions:
   contents: read
@@ -18,6 +27,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Check release tag
+        shell: bash
+        run: |
+          expected_tag="v$(tr -d '\r\n' < VERSION)"
+          if [ "$RELEASE_TAG" != "$expected_tag" ]; then
+            echo "Release tag $RELEASE_TAG does not match VERSION ($expected_tag)." >&2
+            exit 1
+          fi
+
+      - name: Check published GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          published_tag="$(
+            gh release view "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json tagName,isDraft,isPrerelease \
+              --jq 'select(.isDraft == false and .isPrerelease == false) | .tagName'
+          )"
+          if [ "$published_tag" != "$RELEASE_TAG" ]; then
+            echo "Published GitHub Release $RELEASE_TAG was not found." >&2
+            exit 1
+          fi
 
       - name: Check synchronized versions and stable dependencies
         run: node scripts/check-release-version.mjs
@@ -51,6 +87,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ env.RELEASE_TAG }}
           submodules: recursive
 
       - uses: actions/setup-node@v7
@@ -121,6 +158,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ env.RELEASE_TAG }}
           submodules: recursive
 
       - uses: actions/setup-node@v7
@@ -142,7 +180,7 @@ jobs:
         run: pnpm --filter="!@celox-sim/celox-napi" --filter="!@celox-sim/playground" -r build
 
       - name: Run tests
-        run: pnpm -r test
+        run: pnpm --filter="!@celox-sim/celox-napi" --filter="!@celox-sim/playground" -r test
 
   publish:
     needs: test
@@ -154,6 +192,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ env.RELEASE_TAG }}
           submodules: recursive
 
       - uses: actions/setup-node@v7
@@ -190,10 +229,15 @@ jobs:
 
       - name: Copy index files from build artifacts
         working-directory: crates/celox-napi
+        shell: bash
         run: |
-          FIRST_DIR=$(ls -d artifacts/bindings-*/ | head -1)
-          cp "$FIRST_DIR/index.js" .
-          cp "$FIRST_DIR/index.d.ts" .
+          first_dir="$(find artifacts -mindepth 1 -maxdepth 1 -type d -name 'bindings-*' -print -quit)"
+          if [ -z "$first_dir" ]; then
+            echo "No binding artifact directory was downloaded." >&2
+            exit 1
+          fi
+          cp "$first_dir/index.js" .
+          cp "$first_dir/index.d.ts" .
 
       - name: Prepublish
         working-directory: crates/celox-napi
@@ -206,9 +250,9 @@ jobs:
         run: |
           echo "Publishing version: $(node -p "require('./package.json').version")"
           echo "=== Main package ==="
-          ls -la index.js index.d.ts *.node
+          ls -la index.js index.d.ts ./*.node
           echo "=== Platform packages ==="
-          ls -la npm/*/
+          ls -la ./npm/*/
 
       - name: Publish platform packages
         working-directory: crates/celox-napi
@@ -248,6 +292,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ env.RELEASE_TAG }}
           submodules: recursive
 
       - uses: actions/setup-node@v7
