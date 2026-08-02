@@ -805,8 +805,18 @@ fn collect_assignment_effects(
     // Mirror that order in a collector-local store so observers in an index
     // see RHS output writes and later destination expressions see earlier ones.
     let mut destination_store = store.clone();
-    let _ = eval_assignment_rhs_effectful(module, &mut destination_store, assign, arena)?;
+    let ((rhs_expr, rhs_sources), _) =
+        eval_assignment_rhs_effectful(module, &mut destination_store, assign, arena)?;
+    let rhs_expected_width = checked_destination_width(
+        module,
+        &assign.dst,
+        "assignment destination",
+        Some(&assign.expr.token_range()),
+    )?;
+    let rhs_is_2state = assign.expr.comptime().r#type.is_2state();
+    let mut current_offset = 0;
     for destination in assign.dst.iter().rev() {
+        let mut collection_store = destination_store.clone();
         for expression in destination
             .index
             .0
@@ -820,10 +830,42 @@ fn collect_assignment_effects(
                     .map(|(_, expression)| expression),
             )
         {
-            collect_expression_effects(module, &destination_store, expression, arena, collector)?;
-            let _ =
-                eval_expression_effectful(module, &mut destination_store, expression, arena, None)?;
+            collect_and_advance_expression(
+                module,
+                &mut collection_store,
+                expression,
+                arena,
+                collector,
+            )?;
         }
+
+        let part_width = crate::bitaccess::get_access_width(
+            module,
+            destination.id,
+            &destination.index,
+            &destination.select,
+        )?;
+        let (slice_access, next_offset) =
+            checked_assignment_slice(current_offset, part_width, rhs_expected_width, destination)?;
+        let destination_expr = if assign.dst.len() == 1 {
+            rhs_expr
+        } else {
+            arena.alloc(SLTNode::Slice {
+                expr: rhs_expr,
+                access: slice_access,
+            })?
+        };
+        (destination_store, _) = super::apply_assignment_destination(
+            module,
+            destination_store,
+            BoundaryMap::default(),
+            destination,
+            destination_expr,
+            rhs_sources.clone(),
+            rhs_is_2state,
+            arena,
+        )?;
+        current_offset = next_offset;
     }
     Ok(())
 }
@@ -974,11 +1016,24 @@ fn collect_factor_effects(
 ) -> Result<(), ParserError> {
     match factor {
         Factor::Variable(_, index, select, _) => {
+            let mut position_store = store.clone();
             for expr in index.0.iter().chain(select.0.iter()) {
-                collect_expression_effects(module, store, expr, arena, collector)?;
+                collect_and_advance_expression(
+                    module,
+                    &mut position_store,
+                    expr,
+                    arena,
+                    collector,
+                )?;
             }
             if let Some((_, expr)) = &select.1 {
-                collect_expression_effects(module, store, expr, arena, collector)?;
+                collect_and_advance_expression(
+                    module,
+                    &mut position_store,
+                    expr,
+                    arena,
+                    collector,
+                )?;
             }
             Ok(())
         }
@@ -1299,7 +1354,28 @@ fn collect_function_body_effects(
             ));
         };
 
+        // Return-aware loops use this collector instead of
+        // collect_comb_effects_for. Mirror bound evaluation here so bound
+        // events are retained and the body sees output writes from both bounds.
         let mut iter_store = state.store.clone();
+        let (start_bound, end_bound) = for_range_bounds(&for_stmt.range);
+        for bound in [start_bound, end_bound] {
+            let ForBound::Expression(expression) = bound else {
+                continue;
+            };
+            let store = iter_store.clone();
+            with_collector_guard(
+                collector,
+                arena,
+                state.live_expr,
+                state.live_sources.clone(),
+                |collector, arena| {
+                    collect_expression_effects(module, &store, expression, arena, collector)
+                },
+            )?;
+            let _ = eval_expression_effectful(module, &mut iter_store, expression, arena, None)?;
+        }
+
         let mut written_accesses = HashMap::default();
         collect_written_accesses(module, &for_stmt.body, &mut written_accesses)?;
         for (id, accesses) in written_accesses {
@@ -1311,8 +1387,7 @@ fn collect_function_body_effects(
                     *slot = true;
                 }
             }
-            let original = state
-                .store
+            let original = iter_store
                 .get(&id)
                 .cloned()
                 .unwrap_or_else(|| RangeStore::new(None, width));

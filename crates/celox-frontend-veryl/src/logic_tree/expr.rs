@@ -993,6 +993,8 @@ pub(super) fn eval_function_body_return(
             ));
         }
 
+        let guard_state = state.clone();
+        let mut bound_store = state.store.clone();
         let (
             start,
             end,
@@ -1012,9 +1014,9 @@ pub(super) fn eval_function_body_return(
                 step,
             } => {
                 let (start, start_sources, start_bounds) =
-                    eval_for_bound_effectful(module, &mut state.store, range_start, arena)?;
+                    eval_for_bound_effectful(module, &mut bound_store, range_start, arena)?;
                 let (end, end_sources, end_bounds) =
-                    eval_for_bound_effectful(module, &mut state.store, range_end, arena)?;
+                    eval_for_bound_effectful(module, &mut bound_store, range_end, arena)?;
                 (
                     start,
                     end,
@@ -1035,9 +1037,9 @@ pub(super) fn eval_function_body_return(
                 step,
             } => {
                 let (start, start_sources, start_bounds) =
-                    eval_for_bound_effectful(module, &mut state.store, range_start, arena)?;
+                    eval_for_bound_effectful(module, &mut bound_store, range_start, arena)?;
                 let (end, end_sources, end_bounds) =
-                    eval_for_bound_effectful(module, &mut state.store, range_end, arena)?;
+                    eval_for_bound_effectful(module, &mut bound_store, range_end, arena)?;
                 (
                     start,
                     end,
@@ -1059,9 +1061,9 @@ pub(super) fn eval_function_body_return(
                 op,
             } => {
                 let (start, start_sources, start_bounds) =
-                    eval_for_bound_effectful(module, &mut state.store, range_start, arena)?;
+                    eval_for_bound_effectful(module, &mut bound_store, range_start, arena)?;
                 let (end, end_sources, end_bounds) =
-                    eval_for_bound_effectful(module, &mut state.store, range_end, arena)?;
+                    eval_for_bound_effectful(module, &mut bound_store, range_end, arena)?;
                 let step_op = match op {
                     Op::Mul => SLTStepOp::Mul,
                     Op::LogicShiftL | Op::ArithShiftL => SLTStepOp::Shl,
@@ -1089,8 +1091,16 @@ pub(super) fn eval_function_body_return(
                 )
             }
         };
-        state.boundaries = merge_boundaries(state.boundaries, start_bounds);
-        state.boundaries = merge_boundaries(state.boundaries, end_bounds);
+        let bound_boundaries = merge_boundaries(start_bounds, end_bounds);
+        state = apply_function_guard(
+            module,
+            guard_state,
+            bound_store,
+            bound_boundaries,
+            bool_node(arena, true)?,
+            HashSet::default(),
+            arena,
+        )?;
 
         let mut symbolic_store = state.store.clone();
         let mut written_accesses = HashMap::default();

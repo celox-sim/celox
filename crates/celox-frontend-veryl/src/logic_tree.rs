@@ -2367,6 +2367,48 @@ fn eval_assign(
     Ok((store, boundaries))
 }
 
+pub(super) fn apply_assignment_destination(
+    module: &Module,
+    mut store: SymbolicStore<VarId>,
+    mut boundaries: BoundaryMap<VarId>,
+    destination: &veryl_analyzer::ir::AssignDestination,
+    rhs_expr: NodeId,
+    rhs_sources: HashSet<VarAtomBase<VarId>>,
+    rhs_is_2state: bool,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    if crate::bitaccess::is_static_access(&destination.index, &destination.select) {
+        let access = eval_var_select(
+            module,
+            destination.id,
+            &destination.index,
+            &destination.select,
+        )?;
+        record_assignment_boundary(&mut boundaries, destination, access)?;
+        update_assignment_range(
+            module,
+            &mut store,
+            destination,
+            access,
+            (rhs_expr, rhs_sources),
+            rhs_is_2state,
+            arena,
+        )?;
+        Ok((store, boundaries))
+    } else {
+        eval_dynamic_assign(
+            module,
+            store,
+            boundaries,
+            destination,
+            rhs_expr,
+            rhs_sources,
+            rhs_is_2state,
+            arena,
+        )
+    }
+}
+
 fn assign_node_to_dsts(
     module: &Module,
     mut store: SymbolicStore<VarId>,
