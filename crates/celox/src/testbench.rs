@@ -515,6 +515,8 @@ fn exec_for_loop<B: SimBackend>(
                 }
                 let new_i = match op {
                     Op::Mul => i.saturating_mul(step_i),
+                    Op::BitOr => i | step_i,
+                    Op::BitXor => i ^ step_i,
                     Op::LogicShiftL | Op::ArithShiftL => {
                         if step >= i128::BITS as usize {
                             break;
@@ -523,7 +525,7 @@ fn exec_for_loop<B: SimBackend>(
                     }
                     _ => i.saturating_add(step_i),
                 };
-                if new_i == i {
+                if new_i <= i {
                     return ExecResult::Fail("non-progressing stepped for loop".to_string());
                 }
                 i = new_i;
@@ -606,6 +608,8 @@ fn exec_for_loop<B: SimBackend>(
             }
             let new_i = match op {
                 Op::Mul => i.saturating_mul(step),
+                Op::BitOr => i | step,
+                Op::BitXor => i ^ step,
                 Op::LogicShiftL | Op::ArithShiftL => {
                     if step >= usize::BITS as usize {
                         break;
@@ -614,7 +618,7 @@ fn exec_for_loop<B: SimBackend>(
                 }
                 _ => i.saturating_add(step),
             };
-            if new_i == i {
+            if new_i <= i {
                 return ExecResult::Fail("non-progressing stepped for loop".to_string());
             }
             i = new_i;

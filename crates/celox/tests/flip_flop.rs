@@ -453,6 +453,45 @@ fn test_ff_runtime_for_bounds(sim) {
     assert_eq!(sim.get(q_step), 8u32.into());
 }
 
+fn test_ff_runtime_for_bitwise_steps(sim) {
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            or_end: input logic<8>,
+            xor_end: input logic<8>,
+            q_or: output logic<8>,
+            q_xor: output logic<8>
+        ) {
+            always_ff (clk) {
+                q_or = 0;
+                for i in 3..=or_end step |= 6 {
+                    q_or = i as 8;
+                }
+
+                q_xor = 0;
+                for i in 3..=xor_end step ^= 6 {
+                    q_xor = i as 8;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let or_end = sim.signal("or_end");
+    let xor_end = sim.signal("xor_end");
+    let q_or = sim.signal("q_or");
+    let q_xor = sim.signal("q_xor");
+
+    sim.modify(|io| {
+        io.set(or_end, 7u8);
+        io.set(xor_end, 5u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q_or), 7u8.into());
+    assert_eq!(sim.get(q_xor), 5u8.into());
+}
+
 fn test_ff_runtime_for_break(sim) {
     @setup { let code = r#"
         module Top (

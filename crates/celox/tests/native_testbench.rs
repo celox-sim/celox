@@ -274,6 +274,42 @@ fn test_for_loop_step() {
 }
 
 #[test]
+fn test_for_loop_bitwise_steps() {
+    let code = format!(
+        r#"
+        {COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var cnt: logic<32>;
+            var or_end: logic<32>;
+            var xor_end: logic<32>;
+            inst dut: Counter (clk, rst, cnt);
+            initial {{
+                rst.assert(clk);
+                or_end = 7;
+                xor_end = 5;
+                for i in 3..=or_end step |= 6 {{
+                    clk.next(i);
+                }}
+                $assert(cnt == 32'd10);
+                for i in 3..=xor_end step ^= 6 {{
+                    clk.next(i);
+                }}
+                $assert(cnt == 32'd18);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
 fn test_for_loop_rev() {
     let code = format!(
         r#"

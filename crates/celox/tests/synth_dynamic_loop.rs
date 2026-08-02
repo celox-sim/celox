@@ -165,6 +165,41 @@ fn test_runtime_bounds_in_synth_for_loops(sim) {
     assert_eq!(sim.get(sum_step), 15u32.into());
 }
 
+fn test_runtime_bitwise_steps_in_synth_for_loops(sim) {
+    @setup { let code = r#"
+        module Top (
+            or_end: input logic<32>,
+            xor_end: input logic<32>,
+            or_last: output logic<32>,
+            xor_last: output logic<32>
+        ) {
+            always_comb {
+                or_last = 0;
+                for i in 3..=or_end step |= 6 {
+                    or_last = i;
+                }
+
+                xor_last = 0;
+                for i in 3..=xor_end step ^= 6 {
+                    xor_last = i;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let or_end = sim.signal("or_end");
+    let xor_end = sim.signal("xor_end");
+    let or_last = sim.signal("or_last");
+    let xor_last = sim.signal("xor_last");
+
+    sim.set(or_end, 7u32);
+    sim.set(xor_end, 5u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(or_last), 7u32.into());
+    assert_eq!(sim.get(xor_last), 5u32.into());
+}
+
 fn test_runtime_bounds_terminal_inclusive_mul_loop_exits_cleanly(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"

@@ -4,6 +4,7 @@ use crate::{
     BuildConfig, HashMap, HashSet, LoweringPhase, ParserError, RegionedVarAddr,
     bitaccess::{celox_value_from_comptime_in_context, eval_constexpr},
     case::case_arm_condition_expr,
+    resolve_total_width,
 };
 use bit_set::BitSet;
 use celox_design::{
@@ -1050,6 +1051,7 @@ impl<'a> FfParser<'a> {
                 base_width.saturating_add(step_bits)
             }
             Some(Op::LogicShiftL | Op::ArithShiftL) => base_width.saturating_add(step.max(1)),
+            Some(Op::BitOr | Op::BitXor) => base_width,
             Some(Op::Add) | None => {
                 if step <= 1 {
                     return base_width;
@@ -1232,15 +1234,8 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
-        let Some(base_loop_width) = stmt.var_type.total_width() else {
-            return Err(ParserError::unsupported(
-                65,
-                LoweringPhase::FfLowering,
-                "for loop variable width",
-                format!("{:?}", stmt.var_name),
-                Some(&stmt.token),
-            ));
-        };
+        let base_loop_width =
+            resolve_total_width(self.module, &self.module.variables[&stmt.var_id])?;
         let loop_signed = stmt.var_type.signed;
 
         let (start_bound, end_bound, inclusive, step, reverse, stepped_op, start_const, end_const) =
@@ -1309,9 +1304,7 @@ impl<'a> FfParser<'a> {
             && !const_empty
             && !const_singleton
         {
-            return Err(ParserError::unsupported(
-                65,
-                LoweringPhase::FfLowering,
+            return Err(ParserError::illegal_context(
                 "non-progressing for loop in always_ff",
                 format!("{:?}", stmt.var_name),
                 Some(&stmt.token),
@@ -1806,12 +1799,12 @@ impl<'a> FfParser<'a> {
             let op = match stepped_op {
                 Some(Op::Mul) => BinaryOp::Mul,
                 Some(Op::LogicShiftL | Op::ArithShiftL) => BinaryOp::Shl,
+                Some(Op::BitOr) => BinaryOp::Or,
+                Some(Op::BitXor) => BinaryOp::Xor,
                 Some(Op::Add) | None => BinaryOp::Add,
                 Some(other) => {
                     self.local_working_vars.remove(&stmt.var_id);
-                    return Err(ParserError::unsupported(
-                        65,
-                        LoweringPhase::FfLowering,
+                    return Err(ParserError::illegal_context(
                         "for loop step operator in always_ff",
                         format!("{other:?}"),
                         Some(&stmt.token),
@@ -1845,6 +1838,13 @@ impl<'a> FfParser<'a> {
                 },
                 current_math,
             ));
+            let range_check_bb = ir_builder.new_block();
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: increasing_reg,
+                true_block: (range_check_bb, vec![]),
+                false_block: (stall_bb, vec![]),
+            });
+            ir_builder.switch_to_block(range_check_bb);
             let end_reg = self.cast_reg_width_ext(ir_builder, end_limit, math_width, loop_signed);
             let in_range_reg = ir_builder.alloc_bit(1, false);
             ir_builder.emit(SIRInstruction::Binary(
@@ -1861,17 +1861,10 @@ impl<'a> FfParser<'a> {
                 },
                 end_reg,
             ));
-            let can_continue_reg = ir_builder.alloc_bit(1, false);
-            ir_builder.emit(SIRInstruction::Binary(
-                can_continue_reg,
-                increasing_reg,
-                BinaryOp::LogicAnd,
-                in_range_reg,
-            ));
             let next_counter =
                 self.cast_reg_width_ext(ir_builder, next_reg, compare_width, loop_signed);
             ir_builder.seal_block(SIRTerminator::Branch {
-                cond: can_continue_reg,
+                cond: in_range_reg,
                 true_block: (header_bb, vec![next_counter]),
                 false_block: (exit_bb, vec![]),
             });
@@ -2191,6 +2184,8 @@ impl<'a> FfParser<'a> {
         match stepped_op {
             Some(Op::Mul) => step == 0 || step == 1 || start_const == Some(0),
             Some(Op::LogicShiftL | Op::ArithShiftL) => step == 0 || start_const == Some(0),
+            Some(Op::BitOr) => start_const.is_some_and(|start| (start | step) == start),
+            Some(Op::BitXor) => step == 0,
             Some(Op::Add) | None => step == 0,
             Some(_) => false,
         }
