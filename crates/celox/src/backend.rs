@@ -1,5 +1,8 @@
 pub(crate) mod memory_layout;
-#[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "host-runtime",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 pub(crate) mod native;
 #[cfg(feature = "host-runtime")]
 mod runtime;
@@ -21,7 +24,7 @@ mod host {
         CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, RegallocAlgorithm,
     };
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub use celox_backend_x86::{NativeDiagnostics, NativeDumpOptions, X86BackendOptions};
 }
 

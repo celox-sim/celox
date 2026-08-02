@@ -7,13 +7,13 @@ use super::mir::{BlockId, MFunction, MInst, VReg};
 use super::regalloc::assignment::{AssignmentMap, EdgeLocation, PhysReg, clobbers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum ParallelCopyDestination {
+pub enum ParallelCopyDestination {
     Register(PhysReg),
     Stack(i32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum ParallelCopySource {
+pub enum ParallelCopySource {
     Register(PhysReg),
     Stack(i32),
     Immediate(u64),
@@ -53,7 +53,7 @@ impl ParallelCopy {
 /// register `xchg` is multiple uops, so K-1 exchanges are not competitive
 /// with K+1 ordinary moves once K is at least three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ParallelCopyOperation {
+pub enum ParallelCopyOperation {
     Move {
         destination: ParallelCopyDestination,
         source: ParallelCopySource,
@@ -80,12 +80,12 @@ pub(crate) struct ParallelCopyWork {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EdgeCopyPlan {
+pub struct EdgeCopyPlan {
     pub predecessor: BlockId,
     pub successor: BlockId,
-    pub rows: Vec<ParallelCopy>,
+    pub(crate) rows: Vec<ParallelCopy>,
     pub operations: Vec<ParallelCopyOperation>,
-    pub work: ParallelCopyWork,
+    pub(crate) work: ParallelCopyWork,
 }
 
 impl EdgeCopyPlan {
@@ -95,7 +95,7 @@ impl EdgeCopyPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct SsaDestructionPlan {
+pub struct SsaDestructionPlan {
     edges: BTreeMap<(BlockId, BlockId), EdgeCopyPlan>,
 }
 
@@ -179,7 +179,7 @@ impl SsaDestructionPlan {
     /// Resolve every semantic phi row to its source and destination location.
     /// Identity rows remain in the plan so the verifier can prove completeness;
     /// lowering alone is allowed to elide them.
-    pub(crate) fn build(
+    pub fn build(
         func: &MFunction,
         assignment: &AssignmentMap,
     ) -> Result<Self, SsaDestructionError> {
@@ -257,7 +257,7 @@ impl SsaDestructionPlan {
 
     /// Independently compare a materialized plan with MIR phi semantics and the
     /// completed assignment before any machine code is emitted.
-    pub(crate) fn verify(
+    pub fn verify(
         &self,
         func: &MFunction,
         assignment: &AssignmentMap,
@@ -427,7 +427,7 @@ impl SsaDestructionPlan {
         Ok(())
     }
 
-    pub(crate) fn edge(&self, predecessor: BlockId, successor: BlockId) -> Option<&EdgeCopyPlan> {
+    pub fn edge(&self, predecessor: BlockId, successor: BlockId) -> Option<&EdgeCopyPlan> {
         self.edges.get(&(predecessor, successor))
     }
 

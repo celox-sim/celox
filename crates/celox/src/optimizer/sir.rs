@@ -1,21 +1,33 @@
-#[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "host-runtime",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 use std::sync::Arc;
 
 #[cfg(feature = "host-runtime")]
 use crate::ir::LaidOutProgram;
 use crate::ir::{AbsoluteAddr, OptimizedSir};
-#[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "host-runtime",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 use crate::ir::{
     ExecutionUnit, RegionedAbsoluteAddr, SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION,
 };
 
-#[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "host-runtime",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 pub use celox_sir_opt::optimizer::pass_eliminate_working_round_trip;
 pub(crate) use celox_sir_opt::optimizer::{
     eliminate_shared_comb_state_stores, promote_fused_comb_static_slots,
     remove_dead_sir_definitions,
 };
-#[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "host-runtime",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 pub(crate) use celox_sir_opt::optimizer::{
     eliminate_unobserved_comb_state_stores, promote_eval_apply_working_round_trips,
 };
@@ -51,7 +63,10 @@ pub(crate) fn optimize_rooted_comb_memory(
     });
 }
 
-#[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "host-runtime",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 pub(crate) fn optimize_native_merged_chain(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     layout: &crate::backend::MemoryLayout,
@@ -90,7 +105,10 @@ pub(crate) fn optimize_native_merged_chain(
     )
 }
 
-#[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "host-runtime",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn packed_range_is_physically_contiguous(
     layout: &crate::backend::MemoryLayout,
     destination: RegionedAbsoluteAddr,

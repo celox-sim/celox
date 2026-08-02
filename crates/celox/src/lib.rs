@@ -79,23 +79,23 @@ mod host_api {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub mod native_backend {
-        //! Re-exports for the native x86-64 backend (for testing/integration).
+        //! Re-exports for the custom native backend (for testing/integration).
         pub use crate::backend::native::*;
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub use crate::backend::native::backend::NativeEventRef;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub use crate::backend::native::{NativeBackend, SharedNativeCode};
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub use crate::backend::{NativeDiagnostics, NativeDumpOptions};
 
-    /// Default simulation backend: NativeBackend on x86-64, JitBackend (Cranelift) elsewhere.
-    #[cfg(target_arch = "x86_64")]
+    /// Default simulation backend: custom native on x86-64/AArch64, Cranelift elsewhere.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub type DefaultBackend = NativeBackend;
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     pub type DefaultBackend = JitBackend;
 }
 

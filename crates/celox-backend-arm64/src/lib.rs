@@ -11,6 +11,9 @@ use celox_backend_common::regalloc::{
 use std::collections::HashMap;
 use std::fmt;
 
+pub mod jit_mem;
+pub mod scalar;
+
 /// Virtual general-purpose register in bootstrap ARM64 MIR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VReg(u32);

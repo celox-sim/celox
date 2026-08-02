@@ -109,6 +109,12 @@ pub(super) fn use_constraints(
     inst: &MInst,
     shift_encoding: VariableShiftEncoding,
 ) -> Vec<RegConstraint> {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = shift_encoding;
+        return inst.uses().iter().map(|_| RegConstraint::Any).collect();
+    }
+    #[cfg(target_arch = "x86_64")]
     match inst {
         // BMI2's three-operand shifts accept the count in any GPR. Baseline
         // x86 shifts require it in CL (the low byte of RCX).
@@ -126,6 +132,12 @@ pub(super) fn use_constraints(
 
 /// Returns physical registers clobbered by this instruction (besides dst).
 pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = inst;
+        return &[];
+    }
+    #[cfg(target_arch = "x86_64")]
     match inst {
         MInst::UDiv { .. }
         | MInst::URem { .. }

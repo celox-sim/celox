@@ -9,6 +9,9 @@ edition.workspace = true
 
 [dependencies]
 celox-backend-common = { path = "../celox-backend-common" }
+celox-backend-x86 = { path = "../celox-backend-x86" }
+celox-state-layout = { path = "../celox-state-layout" }
+dynasmrt = "5.1.0"
 
 [target.'cfg(all(target_arch = "aarch64", target_os = "linux"))'.dev-dependencies]
 libc = { workspace = true }

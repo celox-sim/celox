@@ -14,6 +14,12 @@ pub const RUNTIME_EVENT_CAPACITY: usize = 1024;
 pub const RUNTIME_EVENT_WRITING: u64 = u64::MAX;
 pub const STATE_HEADER_SIZE: usize = 32;
 pub const STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET: usize = 0;
+/// Remaining iterations for an in-function native tick loop.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub const STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET: usize = 8;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub const STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET: usize = 24;
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET: usize = 16;
 /// Runtime-event write sequence observed when a native tick batch starts.
 pub const RUNTIME_EVENT_HEADER_SIZE: usize = 8;
@@ -610,5 +616,25 @@ mod tests {
         assert_eq!(expanded.offsets, base.offsets);
         assert_eq!(expanded.working_offsets, base.working_offsets);
         assert_eq!(expanded.triggered_bits_offset, base.triggered_bits_offset);
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    fn state_header_fields_do_not_overlap() {
+        const {
+            assert!(
+                STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET + 8
+                    <= STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET
+            );
+            assert!(
+                STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET + 8
+                    <= STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET
+            );
+            assert!(
+                STATE_HEADER_COMB_CAPTURE_ENABLED_ADDR_OFFSET + 8
+                    <= STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET
+            );
+            assert!(STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET + 8 <= STATE_HEADER_SIZE);
+        }
     }
 }
