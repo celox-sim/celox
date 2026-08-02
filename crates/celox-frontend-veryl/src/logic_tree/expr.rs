@@ -13,36 +13,23 @@ use veryl_analyzer::ir::{CasePattern, Type, ValueVariant};
 use super::state::{FunctionControlState, FunctionLoopControlState};
 
 pub(super) enum ExpressionStore<'a> {
-    ReadOnly {
-        store: &'a SymbolicStore<VarId>,
-        reject_output_calls: bool,
-    },
+    ReadOnly(&'a SymbolicStore<VarId>),
     Effectful(&'a mut SymbolicStore<VarId>),
 }
 
 impl ExpressionStore<'_> {
     pub(super) fn current(&self) -> &SymbolicStore<VarId> {
         match self {
-            Self::ReadOnly { store, .. } => store,
+            Self::ReadOnly(store) => store,
             Self::Effectful(store) => store,
         }
     }
 
     fn effectful_mut(&mut self) -> Option<&mut SymbolicStore<VarId>> {
         match self {
-            Self::ReadOnly { .. } => None,
+            Self::ReadOnly(_) => None,
             Self::Effectful(store) => Some(store),
         }
-    }
-
-    fn rejects_output_calls(&self) -> bool {
-        matches!(
-            self,
-            Self::ReadOnly {
-                reject_output_calls: true,
-                ..
-            }
-        )
     }
 }
 
@@ -2059,16 +2046,6 @@ fn eval_function_call_expression(
     call: &veryl_analyzer::ir::FunctionCall,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
-    if !call.outputs.is_empty() && store.rejects_output_calls() {
-        return Err(ParserError::unsupported(
-            60,
-            LoweringPhase::CombLowering,
-            "function call with output arguments",
-            format!("{call}"),
-            Some(&call.comptime.token),
-        ));
-    }
-
     let Some(function) = module.functions.get(&call.id) else {
         return Err(ParserError::unsupported(
             62,
@@ -2182,10 +2159,7 @@ pub fn eval_expression(
         width,
         signed: expression_signed(expr),
     });
-    let mut store = ExpressionStore::ReadOnly {
-        store,
-        reject_output_calls: false,
-    };
+    let mut store = ExpressionStore::ReadOnly(store);
     eval_expression_in_context(module, &mut store, expr, arena, context)
 }
 
@@ -2959,27 +2933,11 @@ pub fn eval_assignment_expression(
         ));
     }
 
-    // Instance input glue has no effectful caller store in which a function
-    // output can be written back. Reject such calls instead of silently
-    // accepting their return value and discarding the output assignment.
-    let mut store = ExpressionStore::ReadOnly {
-        store,
-        reject_output_calls: true,
-    };
-    let value = eval_expression_in_context(
-        module,
-        &mut store,
-        expr,
-        arena,
-        Some(ValueContext {
-            width: target_width,
-            signed: expression_signed(expr),
-        }),
-    )?;
+    let value = eval_expression(module, store, expr, arena, Some(target_width))?;
     finish_assignment_expression(expr, arena, target_width, value)
 }
 
-pub(super) fn eval_assignment_expression_effectful(
+pub(crate) fn eval_assignment_expression_effectful(
     module: &Module,
     store: &mut SymbolicStore<VarId>,
     expr: &Expression,

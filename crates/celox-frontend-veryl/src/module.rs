@@ -10,7 +10,8 @@ use crate::{
     bitslicer::BitSlicer,
     ff::FfParser,
     logic_tree::{
-        SymbolicStore, coerce_node_width, eval_assignment_expression, eval_expression, get_width,
+        SymbolicStore, coerce_node_width, collect_written_expression,
+        eval_assignment_expression_effectful, eval_expression, get_width,
         parse_comb_with_loop_recovery,
     },
     loop_provenance::{LoopProvenance, LoopRecoveryCandidate},
@@ -295,6 +296,99 @@ fn build_dynamic_output_glue(
     Ok((result, prefix, sources, previous_sources, address_sources))
 }
 
+fn build_parent_effect_glue(
+    store: &SymbolicStore<VarId>,
+    written_accesses: &HashMap<VarId, Vec<BitAccess>>,
+    parent_arena: &SLTNodeArena<VarId>,
+    glue_arena: &mut SLTNodeArena<GlueAddr>,
+) -> Result<Vec<(Vec<VarId>, LogicPath<GlueAddr>)>, ParserError> {
+    let mut paths = Vec::new();
+
+    for (id, accesses) in written_accesses {
+        let Some(range_store) = store.get(id) else {
+            continue;
+        };
+        let mut emitted = BTreeSet::new();
+
+        for (&lsb, (value, width, origin)) in &range_store.ranges {
+            let Some((expr, _)) = value else {
+                continue;
+            };
+            let msb = lsb
+                .checked_add(*width)
+                .and_then(|end| end.checked_sub(1))
+                .ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "instance input function output",
+                        "symbolic output range overflows usize",
+                        None,
+                    )
+                })?;
+            let stored_access = BitAccess::new(lsb, msb);
+
+            for written_access in accesses {
+                let target_lsb = stored_access.lsb.max(written_access.lsb);
+                let target_msb = stored_access.msb.min(written_access.msb);
+                if target_lsb > target_msb || !emitted.insert((target_lsb, target_msb)) {
+                    continue;
+                }
+
+                let target_width = target_msb - target_lsb + 1;
+                let relative_lsb = target_lsb.checked_sub(*origin).ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "instance input function output",
+                        "symbolic output range precedes its source origin",
+                        None,
+                    )
+                })?;
+                let relative_msb = relative_lsb + target_width - 1;
+                let mut cache = HashMap::default();
+                let mapped = parent_arena.get(*expr).map_addr(
+                    *expr,
+                    parent_arena,
+                    glue_arena,
+                    &mut cache,
+                    &|var_id| GlueAddr::Parent(*var_id),
+                )?;
+                let mapped = if relative_lsb == 0 && target_width == get_width(mapped, glue_arena) {
+                    mapped
+                } else {
+                    glue_arena.alloc(SLTNode::Slice {
+                        expr: mapped,
+                        access: BitAccess::new(relative_lsb, relative_msb),
+                    })?
+                };
+                let sources = collect_glue_sources(mapped, glue_arena);
+                let target = VarAtomBase::new(GlueAddr::Parent(*id), target_lsb, target_msb);
+                let previous_sources = sources
+                    .iter()
+                    .copied()
+                    .filter(|source| {
+                        source.id == target.id && source.access.overlaps(&target.access)
+                    })
+                    .collect();
+
+                paths.push((
+                    vec![*id],
+                    LogicPath {
+                        target: LogicPathTarget::Var(target),
+                        expr: mapped,
+                        sources,
+                        previous_sources,
+                        address_sources: HashSet::default(),
+                        local_inputs: Vec::new(),
+                        order_before: HashSet::default(),
+                        comb_capture_enable_sites: Vec::new(),
+                        pre_lower_nodes: Vec::new(),
+                    },
+                ));
+            }
+        }
+    }
+
+    Ok(paths)
+}
+
 fn verify_glue_block(
     block: &GlueBlock,
     variable_widths: &HashMap<GlueAddr, usize>,
@@ -524,6 +618,7 @@ impl<'a> ModuleParser<'a> {
 
         // 1. Inputs (Parent -> Child)
         let mut input_ports = Vec::new();
+        let mut output_ports = Vec::new();
         let mut glue_arena = SLTNodeArena::<GlueAddr>::new();
 
         // Parent context store
@@ -556,9 +651,12 @@ impl<'a> ModuleParser<'a> {
                     Some(&input.expr.token_range()),
                 ));
             }
-            let ((expr_node, expr_sources), _bounds) = eval_assignment_expression(
+            let mut written_accesses = HashMap::default();
+            collect_written_expression(self.module, &input.expr, &mut written_accesses)?;
+            let mut connection_store = parent_store.clone();
+            let ((expr_node, expr_sources), _bounds) = eval_assignment_expression_effectful(
                 self.module,
-                &parent_store,
+                &mut connection_store,
                 &input.expr,
                 &mut self.arena,
                 width,
@@ -592,11 +690,15 @@ impl<'a> ModuleParser<'a> {
 
             let parent_vars: Vec<_> = expr_sources.iter().map(|s| s.id).collect();
             input_ports.push((parent_vars, path));
+            output_ports.extend(build_parent_effect_glue(
+                &connection_store,
+                &written_accesses,
+                &self.arena,
+                &mut glue_arena,
+            )?);
         }
 
         // 2. Outputs (Child -> Parent)
-        let mut output_ports = Vec::new();
-
         for output in &decl.outputs {
             // The analyzer includes deliberately unconnected child outputs
             // with an empty destination list. They produce no parent glue;

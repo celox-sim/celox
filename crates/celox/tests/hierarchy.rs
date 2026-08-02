@@ -82,6 +82,100 @@ o_data: top_out
 
     }
 
+    fn test_instance_input_function_output_writeback(sim) {
+        // veryl-simulator currently evaluates the connection value but does
+        // not write the function output actual back to the parent variable.
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Child (
+i: input logic,
+o: output logic
+) {
+assign o = i;
+}
+module Top (
+a: input logic,
+child_o: output logic,
+seen_o: output logic
+) {
+function write_seen (
+x: input logic,
+seen: output logic
+) -> logic {
+seen = x;
+return x;
+}
+var seen: logic;
+inst child: Child (
+i: write_seen(a, seen),
+o: child_o
+);
+assign seen_o = seen;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let a = sim.signal("a");
+    let child_o = sim.signal("child_o");
+    let seen_o = sim.signal("seen_o");
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(child_o), 1u8.into());
+    assert_eq!(sim.get(seen_o), 1u8.into());
+
+    }
+
+    fn test_instance_input_function_output_concat_dynamic_writeback(sim) {
+        // veryl-simulator currently evaluates the connection value but does
+        // not write the function output actual back to the parent variables.
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Child (
+i: input logic,
+o: output logic
+) {
+assign o = i;
+}
+module Top (
+value: input logic<2>,
+index: input logic,
+child_o: output logic,
+mem_o: output logic<2>,
+tmp_o: output logic
+) {
+function write_pair (
+x: input logic<2>,
+dst: output logic<2>
+) -> logic {
+dst = x;
+return x[0];
+}
+var mem: logic<2>;
+var tmp: logic;
+inst child: Child (
+i: write_pair(value, {mem[index], tmp}),
+o: child_o
+);
+assign mem_o = mem;
+assign tmp_o = tmp;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let value = sim.signal("value");
+    let index = sim.signal("index");
+    let child_o = sim.signal("child_o");
+    let mem_o = sim.signal("mem_o");
+    let tmp_o = sim.signal("tmp_o");
+
+    sim.modify(|io| {
+        io.set(value, 3u8);
+        io.set(index, 1u8);
+    }).unwrap();
+    assert_eq!(sim.get(child_o), 1u8.into());
+    assert_eq!(sim.get(mem_o), 2u8.into());
+    assert_eq!(sim.get(tmp_o), 1u8.into());
+
+    }
+
     fn test_unconnected_child_output_needs_no_parent_glue(sim) {
         @setup { let code = r#"
 module Child (

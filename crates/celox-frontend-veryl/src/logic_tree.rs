@@ -44,10 +44,11 @@ use effect::{
     subtract_written_sensitivity,
 };
 pub use expr::coerce_node_width;
+pub(crate) use expr::eval_assignment_expression_effectful;
 use expr::{
-    eval_array_literal_expression_effectful, eval_assignment_expression_effectful,
-    eval_case_arm_condition_effectful, eval_case_target_effectful, eval_expression_effectful,
-    eval_function_body_return, merge_boundaries,
+    eval_array_literal_expression_effectful, eval_case_arm_condition_effectful,
+    eval_case_target_effectful, eval_expression_effectful, eval_function_body_return,
+    merge_boundaries,
 };
 pub use expr::{eval_assignment_expression, eval_expression, get_width};
 use state::{FunctionControlState, LoopControlState};
@@ -1621,7 +1622,7 @@ fn collect_written_accesses(
     Ok(())
 }
 
-fn collect_written_expression(
+pub(super) fn collect_written_expression(
     module: &Module,
     expression: &Expression,
     out: &mut HashMap<VarId, Vec<BitAccess>>,
