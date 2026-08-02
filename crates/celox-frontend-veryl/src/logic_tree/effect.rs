@@ -132,6 +132,15 @@ fn collect_system_function_effect(
         _ => unreachable!("non-event system functions return before event collection"),
     };
     let (site_id, value_args) = register_comb_runtime_event_site(collector, kind, args);
+    // Collector-local site IDs restart at zero. The source token keeps
+    // otherwise identical captures from different declarations distinct.
+    let capture_site_key = u32::try_from(call.comptime.token.beg.id.0).map_err(|_| {
+        ParserError::illegal_context(
+            "combinational observer capture",
+            "source token identity exceeds the capture-key range",
+            Some(&call.comptime.token),
+        )
+    })?;
     // Event operands are evaluated left to right.  Keep the environment from
     // the start of the event so writes performed by later operands cannot
     // retroactively rebind inputs in an earlier operand or in the assertion
@@ -155,6 +164,13 @@ fn collect_system_function_effect(
         None
     };
     for (arg_index, arg) in value_args.iter().enumerate() {
+        let arg_index = u32::try_from(arg_index).map_err(|_| {
+            ParserError::illegal_context(
+                "combinational observer capture",
+                "event argument count exceeds the capture-key range",
+                Some(&call.comptime.token),
+            )
+        })?;
         collect_expression_effects(module, store, &arg.0, arena, collector)?;
         let ((node, sources), arg_boundaries) =
             eval_expression_effectful(module, store, &arg.0, arena, None)?;
@@ -164,7 +180,7 @@ fn collect_system_function_effect(
         collect_expression_position_inputs(module, &arg.0, &mut position_inputs)?;
         observer_args.push(arena.alloc(SLTNode::Capture {
             expr: node,
-            key: (u64::from(site_id) << 32) | arg_index as u64,
+            key: (u64::from(capture_site_key) << 32) | u64::from(arg_index),
         })?);
     }
     observed_inputs.extend(collector.active_guard_sources.iter().copied());
@@ -189,7 +205,7 @@ fn collect_system_function_effect(
     .map(|node| {
         arena.alloc(SLTNode::Capture {
             expr: node,
-            key: (u64::from(site_id) << 32) | u64::from(u32::MAX),
+            key: (u64::from(capture_site_key) << 32) | u64::from(u32::MAX),
         })
     })
     .transpose()?;

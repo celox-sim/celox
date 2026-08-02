@@ -789,6 +789,29 @@ mod tests {
     }
 
     #[test]
+    fn distinct_comb_collectors_do_not_intern_event_captures_together() {
+        let (sim_modules, _, _) = setup(
+            r#"
+module Top (x: input logic<8>) {
+    always_comb {
+        $display("first=%0d", x);
+    }
+    always_comb {
+        $display("second=%0d", x);
+    }
+}
+"#,
+        );
+        let module = sim_modules.values().next().expect("missing parsed module");
+        assert_eq!(module.comb_observers.len(), 2);
+        let first = module.comb_observers[0].args[0];
+        let second = module.comb_observers[1].args[0];
+        assert_ne!(first, second);
+        assert!(matches!(module.arena.get(first), SLTNode::Capture { .. }));
+        assert!(matches!(module.arena.get(second), SLTNode::Capture { .. }));
+    }
+
+    #[test]
     fn atomization_does_not_remerge_unpacked_elements() {
         let address = AbsoluteAddr {
             instance_id: InstanceId(0),

@@ -822,6 +822,13 @@ fn lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
     if path.local_inputs.is_empty() {
         return lowerer.lower(builder, node, arena, lower_cache);
     }
+    // Unbound captures may already have been materialized before a later
+    // write. Do not rebuild them under the observer's unrelated local inputs.
+    if matches!(arena.get(node), crate::SLTNode::Capture { .. })
+        && let Some(reg) = lower_cache.get(&node)
+    {
+        return *reg;
+    }
     let mut env_inputs = HashMap::default();
     for (addr, local_node) in &path.local_inputs {
         let reg = lowerer.lower(builder, *local_node, arena, lower_cache);

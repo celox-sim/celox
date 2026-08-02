@@ -1797,7 +1797,7 @@ fn build_comb_observer_capture_paths(
             RuntimeEventKind::AssertFatal
         )
         .then_some(observer.site_id as i64);
-        let pre_lower_nodes = observer_pre_lower_nodes(observer);
+        let pre_lower_nodes = observer_pre_lower_nodes(observer, arena);
         for idx in &order_after {
             comb_blocks[idx.0]
                 .pre_lower_nodes
@@ -1997,16 +1997,30 @@ fn observer_trigger_paths(
         .collect()
 }
 
-fn observer_pre_lower_nodes(observer: &CombObserver<AbsoluteAddr>) -> Vec<NodeId> {
-    if !observer.local_inputs.is_empty() {
-        return Vec::new();
-    }
+fn observer_pre_lower_nodes(
+    observer: &CombObserver<AbsoluteAddr>,
+    arena: &SLTNodeArena<AbsoluteAddr>,
+) -> Vec<NodeId> {
+    let local_input_ids: HashSet<_> = observer.local_inputs.iter().map(|(id, _)| *id).collect();
     let mut nodes = Vec::with_capacity(observer.args.len() + usize::from(observer.guard.is_some()));
     if let Some(guard) = observer.guard {
         nodes.push(guard);
     }
     nodes.extend(observer.args.iter().copied());
     nodes
+        .into_iter()
+        .filter(|node| {
+            let mut inputs = HashSet::default();
+            crate::flattening::collect_inputs(*node, arena, &mut inputs);
+            // A capture independent of local bindings can be materialized at
+            // its statement position. Bound captures still need the event's
+            // environment, while constants need no early snapshot.
+            !inputs.is_empty()
+                && inputs
+                    .iter()
+                    .all(|input| !local_input_ids.contains(&input.id))
+        })
+        .collect()
 }
 
 fn annotate_comb_capture_enable_sites(

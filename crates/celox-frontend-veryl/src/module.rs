@@ -1324,13 +1324,7 @@ impl<'a> ModuleParser<'a> {
             // So we strictly follow `emit_multi_dst_assign` logic.
             // "Current offset starts at 0" and "dst in dsts.iter().rev()".
             for dst in output.dst.iter().rev() {
-                for address in dst
-                    .index
-                    .0
-                    .iter()
-                    .chain(dst.select.0.iter())
-                    .chain(dst.select.1.iter().map(|(_, expression)| expression))
-                {
+                for address in dst.index.0.iter().chain(dst.select.0.iter()) {
                     collect_and_advance_expression(
                         self.module,
                         &mut output_effect_store,
