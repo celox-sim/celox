@@ -2168,6 +2168,29 @@ fn test_ff_function_call_forwards_array_literal_view_to_nested_call(sim) {
     assert_eq!(sim.get(out_q), 0x22u32.into());
 }
 
+fn test_ff_function_call_restores_array_literal_view_after_reentrant_call(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function pick (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return x[index];
+            }
+            always_ff (clk) {
+                out_q = pick('{8'h11, 8'h22}, pick('{8'h00, 8'h01}, 0));
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x11u32.into());
+}
+
 fn test_ff_function_call_converts_array_literal_view_for_wider_nested_formal(sim) {
     @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
@@ -2720,6 +2743,69 @@ fn test_ff_function_array_literal_view_sir() {
     let trace = setup_and_trace(code, "Top");
     let output = trace.format_program().unwrap();
     assert_snapshot!("ff_function_array_literal_view_sir", output);
+}
+
+#[test]
+fn test_ff_function_static_array_literal_access_is_lazy() {
+    let code = r#"
+    module Top (
+        clk: input clock,
+        in0: input logic<8>,
+        out_q: output logic<8>
+    ) {
+        function first (x: input logic<8>[1024]) -> logic<8> {
+            return x[0];
+        }
+        always_ff (clk) {
+            out_q = first('{default: in0});
+        }
+    }
+"#;
+    let trace = setup_and_trace(code, "Top");
+    let output = trace.format_program().unwrap();
+
+    assert!(!output.contains("Store(addr=first.x"), "{output}");
+    assert!(output.lines().count() < 100, "{output}");
+}
+
+#[test]
+fn test_ff_array_literal_argument_is_not_reevaluated_for_array_output() {
+    let code = r#"
+    module Top (
+        clk: input clock,
+        in0: input logic<8>,
+        out_q: output logic<8>
+    ) {
+        function observe (
+            x: input logic<8>,
+            side: output logic<8>
+        ) -> logic<8> {
+            side = x;
+            return x;
+        }
+        function copy (
+            x: input logic<8>[2],
+            y: output logic<8>[2]
+        ) -> logic<8> {
+            y = x;
+            return y[0];
+        }
+        var copied: logic<8>[2];
+        var side: logic<8>;
+        always_ff (clk) {
+            out_q = copy('{observe(in0, side), 8'h22}, copied);
+        }
+    }
+"#;
+    let result = SimulatorBuilder::new(code, "Top")
+        .optimize(false)
+        .trace_sim_modules()
+        .trace_pre_optimized_sir()
+        .build_with_trace();
+    assert!(result.res.is_ok(), "{:?}", result.res.err());
+    let output = result.trace.format_pre_optimized_sir().unwrap();
+
+    assert_eq!(output.matches("Store(addr=side").count(), 1, "{output}");
 }
 
 #[test]

@@ -255,6 +255,17 @@ pub struct FfGroupParseResult<A = RegionedVarAddr> {
     pub dynamic_write_vars: HashSet<VarId>,
 }
 
+#[derive(Clone)]
+struct FunctionArrayView {
+    backing_var_id: VarId,
+    // Registers preserve this invocation's values if a nested invocation
+    // temporarily reuses the same formal working region.
+    elements: Vec<RegisterId>,
+    // Aliased forwarding views do not write their backing and therefore do
+    // not require the caller's snapshot to be restored.
+    owns_backing: bool,
+}
+
 impl<A> Default for FfGroupParseResult<A> {
     fn default() -> Self {
         Self {
@@ -277,9 +288,9 @@ pub struct FfParser<'a> {
     loop_exit_blocks: Vec<BlockId>,
     reset: Option<FfReset>,
     function_arg_stack: Vec<HashMap<VarId, Expression>>,
-    // Maps an active array formal to the formal whose working region owns
-    // its call-scoped backing storage.
-    function_array_view_stack: Vec<HashMap<VarId, VarId>>,
+    // Maps an active array formal to its call-specific register snapshot and
+    // the formal working region used for O(1) dynamic element loads.
+    function_array_view_stack: Vec<HashMap<VarId, FunctionArrayView>>,
     runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     runtime_event_sites: Vec<RuntimeEventSite>,
     next_runtime_error_code: i64,

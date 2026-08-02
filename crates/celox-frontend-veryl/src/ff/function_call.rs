@@ -274,10 +274,14 @@ impl<'a> FfParser<'a> {
     }
 
     pub(super) fn get_bound_function_array_view(&self, var_id: VarId) -> Option<VarId> {
-        self.function_array_view_stack
-            .iter()
-            .rev()
-            .find_map(|bindings| bindings.get(&var_id).copied())
+        for frame in (0..self.function_arg_stack.len()).rev() {
+            if self.function_arg_stack[frame].contains_key(&var_id) {
+                return self.function_array_view_stack[frame]
+                    .get(&var_id)
+                    .map(|view| view.backing_var_id);
+            }
+        }
+        None
     }
 
     pub(super) fn substitute_function_expr(
@@ -810,9 +814,9 @@ impl<'a> FfParser<'a> {
                 bindings.insert(*arg_id, arg_expr.clone());
             }
         }
-        let array_views = self.materialize_function_array_views(
-            &bindings, targets, domain, convert, sources, ir_builder,
-        )?;
+        let mut array_views = HashMap::default();
+        let mut symbolic_bindings = bindings.clone();
+        symbolic_bindings.retain(|var_id, _| self.module.variables[var_id].r#type.array.is_empty());
 
         for (arg_path, dsts) in &call.outputs {
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
@@ -825,12 +829,17 @@ impl<'a> FfParser<'a> {
                 ));
             };
 
-            let expr = self.extract_function_target_expr(&function_body, *arg_id, &bindings)?;
+            let expr =
+                self.extract_function_target_expr(&function_body, *arg_id, &symbolic_bindings)?;
             self.function_arg_stack.push(bindings.clone());
-            self.function_array_view_stack.push(array_views.clone());
-            let parse_result =
-                self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None);
-            self.function_array_view_stack.pop();
+            self.function_array_view_stack.push(array_views);
+            let parse_result = (|| {
+                self.prepare_function_array_views_for_expression(
+                    &expr, targets, domain, convert, sources, ir_builder,
+                )?;
+                self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None)
+            })();
+            array_views = self.function_array_view_stack.pop().unwrap();
             self.function_arg_stack.pop();
             parse_result?;
 
@@ -855,11 +864,17 @@ impl<'a> FfParser<'a> {
 
         self.function_arg_stack.push(bindings);
         self.function_array_view_stack.push(array_views);
-        let result = self.parse_expression(
-            &ret_expr, targets, domain, convert, sources, ir_builder, None,
-        );
-        self.function_array_view_stack.pop();
+        let result = (|| {
+            self.prepare_function_array_views_for_expression(
+                &ret_expr, targets, domain, convert, sources, ir_builder,
+            )?;
+            self.parse_expression(
+                &ret_expr, targets, domain, convert, sources, ir_builder, None,
+            )
+        })();
+        let finished_views = self.function_array_view_stack.pop().unwrap();
         self.function_arg_stack.pop();
+        self.restore_active_function_array_views(&finished_views, convert, ir_builder)?;
 
         result
     }
@@ -913,9 +928,9 @@ impl<'a> FfParser<'a> {
                 bindings.insert(*arg_id, arg_expr.clone());
             }
         }
-        let array_views = self.materialize_function_array_views(
-            &bindings, targets, domain, convert, sources, ir_builder,
-        )?;
+        let mut array_views = HashMap::default();
+        let mut symbolic_bindings = bindings.clone();
+        symbolic_bindings.retain(|var_id, _| self.module.variables[var_id].r#type.array.is_empty());
 
         for (arg_path, dsts) in &call.outputs {
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
@@ -928,12 +943,17 @@ impl<'a> FfParser<'a> {
                 ));
             };
 
-            let expr = self.extract_function_target_expr(&function_body, *arg_id, &bindings)?;
+            let expr =
+                self.extract_function_target_expr(&function_body, *arg_id, &symbolic_bindings)?;
             self.function_arg_stack.push(bindings.clone());
-            self.function_array_view_stack.push(array_views.clone());
-            let parse_result =
-                self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None);
-            self.function_array_view_stack.pop();
+            self.function_array_view_stack.push(array_views);
+            let parse_result = (|| {
+                self.prepare_function_array_views_for_expression(
+                    &expr, targets, domain, convert, sources, ir_builder,
+                )?;
+                self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None)
+            })();
+            array_views = self.function_array_view_stack.pop().unwrap();
             self.function_arg_stack.pop();
             parse_result?;
 
@@ -945,6 +965,8 @@ impl<'a> FfParser<'a> {
                 rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
             )?;
         }
+
+        self.restore_active_function_array_views(&array_views, convert, ir_builder)?;
 
         Ok(())
     }

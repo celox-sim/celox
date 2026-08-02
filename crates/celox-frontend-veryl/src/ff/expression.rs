@@ -1,9 +1,9 @@
-use super::{Domain, FfParser};
+use super::{Domain, FfParser, FunctionArrayView};
 use crate::context_width::{
     ValueContext, binary_semantics, cast_semantics, expression_signed, resolve_binary_op,
 };
 use crate::{
-    HashMap, LoweringPhase, ParserError,
+    HashMap, HashSet, LoweringPhase, ParserError,
     bitaccess::{
         celox_value_from_comptime, celox_value_from_comptime_in_context, eval_var_select,
         get_access_width, is_static_access,
@@ -434,7 +434,7 @@ impl<'a> FfParser<'a> {
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
-    ) -> Result<(), ParserError> {
+    ) -> Result<FunctionArrayView, ParserError> {
         // Function bodies are lowered inline, so the formal's working region
         // is a call-scoped temporary. Populate it before lowering any output
         // or return expression so every later access is dominated by these
@@ -453,6 +453,7 @@ impl<'a> FfParser<'a> {
         let layout = self.array_view_layout(var_id)?;
 
         let mut cached_elements = std::collections::HashMap::new();
+        let mut elements = Vec::with_capacity(layout.element_count);
         for linear_index in 0..layout.element_count {
             let mut remainder = linear_index;
             let mut coordinates = vec![0usize; array_dims.len()];
@@ -491,27 +492,52 @@ impl<'a> FfParser<'a> {
                 cached_elements.insert(cache_key, reg);
                 reg
             };
+            elements.push(selected_reg);
+        }
+
+        self.store_array_view_elements(
+            var_id,
+            &elements,
+            layout.element_width,
+            convert,
+            ir_builder,
+        );
+
+        Ok(FunctionArrayView {
+            backing_var_id: var_id,
+            elements,
+            owns_backing: true,
+        })
+    }
+
+    fn store_array_view_elements<A>(
+        &self,
+        backing_var_id: VarId,
+        elements: &[RegisterId],
+        element_width: usize,
+        convert: &impl Fn(VarId, u32) -> A,
+        ir_builder: &mut SIRBuilder<A>,
+    ) {
+        for (linear_index, &element) in elements.iter().enumerate() {
             let element_index = ir_builder.alloc_bit(64, false);
             ir_builder.emit(SIRInstruction::Imm(
                 element_index,
                 SIRValue::new(linear_index as u64),
             ));
             ir_builder.emit(SIRInstruction::Store(
-                convert(var_id, WORKING_REGION),
+                convert(backing_var_id, WORKING_REGION),
                 SIROffset::Element {
                     index: element_index,
-                    element_width: layout.element_width,
+                    element_width,
                     bit_offset: 0,
                     dynamic_bit_offset: None,
                 },
-                layout.element_width,
-                selected_reg,
+                element_width,
+                element,
                 Vec::new(),
                 Vec::new(),
             ));
         }
-
-        Ok(())
     }
 
     fn materialize_converted_array_view<A>(
@@ -520,7 +546,7 @@ impl<'a> FfParser<'a> {
         backing_var_id: VarId,
         convert: &impl Fn(VarId, u32) -> A,
         ir_builder: &mut SIRBuilder<A>,
-    ) -> Result<(), ParserError> {
+    ) -> Result<FunctionArrayView, ParserError> {
         // A view can alias an existing backing only when both formals use the
         // same element storage representation. Otherwise create a converted
         // temporary for the callee while preserving element-wise coercion.
@@ -530,6 +556,7 @@ impl<'a> FfParser<'a> {
             unreachable!("function argument shape validation preserves array element count");
         }
 
+        let mut elements = Vec::with_capacity(target.element_count);
         for linear_index in 0..target.element_count {
             let element_index = ir_builder.alloc_bit(64, false);
             ir_builder.emit(SIRInstruction::Imm(
@@ -560,68 +587,330 @@ impl<'a> FfParser<'a> {
                 target.signed,
                 target.is_2state,
             );
-            ir_builder.emit(SIRInstruction::Store(
-                convert(var_id, WORKING_REGION),
-                SIROffset::Element {
-                    index: element_index,
-                    element_width: target.element_width,
-                    bit_offset: 0,
-                    dynamic_bit_offset: None,
-                },
-                target.element_width,
-                converted,
-                Vec::new(),
-                Vec::new(),
-            ));
+            elements.push(converted);
         }
-        Ok(())
+        self.store_array_view_elements(
+            var_id,
+            &elements,
+            target.element_width,
+            convert,
+            ir_builder,
+        );
+        Ok(FunctionArrayView {
+            backing_var_id: var_id,
+            elements,
+            owns_backing: true,
+        })
+    }
+
+    fn array_access_needs_view(&self, var_id: VarId, index: &VarIndex, select: &VarSelect) -> bool {
+        let Some(formal) = self.module.variables.get(&var_id) else {
+            return false;
+        };
+        if formal.r#type.array.is_empty() {
+            return false;
+        }
+        if select.1.is_some() {
+            return true;
+        }
+        let Some(array_dims) = formal
+            .r#type
+            .array
+            .iter()
+            .copied()
+            .collect::<Option<Vec<_>>>()
+        else {
+            return true;
+        };
+        let all_indices = index.0.iter().chain(&select.0).collect::<Vec<_>>();
+        all_indices.len() != array_dims.len()
+            || all_indices.iter().zip(array_dims).any(|(expr, dim)| {
+                self.get_constant_value(expr)
+                    .is_none_or(|value| value as usize >= dim)
+            })
+    }
+
+    fn collect_array_views_for_expression(
+        &self,
+        expr: &Expression,
+        views: &mut Vec<VarId>,
+        seen: &mut HashSet<VarId>,
+    ) {
+        let collect = |expr, views: &mut Vec<_>, seen: &mut HashSet<_>| {
+            self.collect_array_views_for_expression(expr, views, seen)
+        };
+        match expr {
+            Expression::Term(factor) => match factor.as_ref() {
+                Factor::Variable(var_id, index, select, _) => {
+                    let is_bound_here = self
+                        .function_arg_stack
+                        .last()
+                        .is_some_and(|bindings| bindings.contains_key(var_id));
+                    if is_bound_here
+                        && self.array_access_needs_view(*var_id, index, select)
+                        && seen.insert(*var_id)
+                    {
+                        views.push(*var_id);
+                    }
+                    for expr in &index.0 {
+                        collect(expr, views, seen);
+                    }
+                    for expr in &select.0 {
+                        collect(expr, views, seen);
+                    }
+                    if let Some((_, expr)) = &select.1 {
+                        collect(expr, views, seen);
+                    }
+                }
+                Factor::FunctionCall(call) => {
+                    for expr in call.inputs.values() {
+                        collect(expr, views, seen);
+                    }
+                }
+                Factor::SystemFunctionCall(call) => match &call.kind {
+                    SystemFunctionKind::Bits(input)
+                    | SystemFunctionKind::Size(input)
+                    | SystemFunctionKind::Clog2(input)
+                    | SystemFunctionKind::Onehot(input)
+                    | SystemFunctionKind::Signed(input)
+                    | SystemFunctionKind::Unsigned(input) => collect(&input.0, views, seen),
+                    SystemFunctionKind::Readmemh(_, _)
+                    | SystemFunctionKind::Display(_)
+                    | SystemFunctionKind::Write(_)
+                    | SystemFunctionKind::Assert { .. }
+                    | SystemFunctionKind::Finish => {}
+                },
+                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+            },
+            Expression::Binary(lhs, _, rhs, _) => {
+                collect(lhs, views, seen);
+                collect(rhs, views, seen);
+            }
+            Expression::Unary(_, inner, _) => collect(inner, views, seen),
+            Expression::Ternary(cond, then_expr, else_expr, _) => {
+                collect(cond, views, seen);
+                collect(then_expr, views, seen);
+                collect(else_expr, views, seen);
+            }
+            Expression::Concatenation(items, _) => {
+                for (expr, repeat) in items {
+                    collect(expr, views, seen);
+                    if let Some(repeat) = repeat {
+                        collect(repeat, views, seen);
+                    }
+                }
+            }
+            Expression::ArrayLiteral(items, _) => {
+                for item in items {
+                    match item {
+                        ArrayLiteralItem::Value(expr, repeat) => {
+                            collect(expr, views, seen);
+                            if let Some(repeat) = repeat {
+                                collect(repeat, views, seen);
+                            }
+                        }
+                        ArrayLiteralItem::Defaul(expr) => collect(expr, views, seen),
+                    }
+                }
+            }
+            Expression::StructConstructor(_, fields, _) => {
+                for (_, expr) in fields {
+                    collect(expr, views, seen);
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn materialize_function_array_views<A>(
+    fn ensure_function_array_view_at<A>(
         &mut self,
-        bindings: &HashMap<VarId, Expression>,
+        frame: usize,
+        var_id: VarId,
         targets: &mut Vec<VarAtomBase<A>>,
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
-    ) -> Result<HashMap<VarId, VarId>, ParserError> {
-        let mut views = HashMap::default();
-        for (&var_id, bound_expr) in bindings {
-            if let Expression::ArrayLiteral(items, _) = bound_expr {
-                if self.module.variables[&var_id].r#type.array.is_empty() {
-                    continue;
-                }
-                self.materialize_bound_array_literal_view(
-                    var_id, items, targets, domain, convert, sources, ir_builder,
-                )?;
-                views.insert(var_id, var_id);
-            } else if let Expression::Term(factor) = bound_expr
-                && let Factor::Variable(bound_var_id, index, select, _) = factor.as_ref()
-                && index.0.is_empty()
-                && select.0.is_empty()
-                && select.1.is_none()
-                && let Some(backing_var_id) = self.get_bound_function_array_view(*bound_var_id)
+    ) -> Result<Option<FunctionArrayView>, ParserError> {
+        if let Some(view) = self.function_array_view_stack[frame].get(&var_id) {
+            return Ok(Some(view.clone()));
+        }
+        let Some(bound_expr) = self.function_arg_stack[frame].get(&var_id).cloned() else {
+            return Ok(None);
+        };
+
+        let view = match bound_expr {
+            Expression::ArrayLiteral(items, _)
+                if !self.module.variables[&var_id].r#type.array.is_empty() =>
             {
+                Some(self.materialize_bound_array_literal_view(
+                    var_id, &items, targets, domain, convert, sources, ir_builder,
+                )?)
+            }
+            Expression::Term(factor) => {
+                let Factor::Variable(bound_var_id, index, select, _) = factor.as_ref() else {
+                    return Ok(None);
+                };
+                if !index.0.is_empty() || !select.0.is_empty() || select.1.is_some() {
+                    return Ok(None);
+                }
+                let Some(source_frame) = (0..frame)
+                    .rev()
+                    .find(|&i| self.function_arg_stack[i].contains_key(bound_var_id))
+                else {
+                    return Ok(None);
+                };
+                let Some(source_view) = self.ensure_function_array_view_at(
+                    source_frame,
+                    *bound_var_id,
+                    targets,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
+                )?
+                else {
+                    return Ok(None);
+                };
                 let target = self.array_view_layout(var_id)?;
-                let backing = self.array_view_layout(backing_var_id)?;
-                if target.element_width == backing.element_width
-                    && target.is_2state == backing.is_2state
+                let source = self.array_view_layout(*bound_var_id)?;
+                if target.element_width == source.element_width
+                    && target.is_2state == source.is_2state
                 {
-                    views.insert(var_id, backing_var_id);
+                    Some(FunctionArrayView {
+                        backing_var_id: source_view.backing_var_id,
+                        elements: source_view.elements,
+                        owns_backing: false,
+                    })
                 } else {
-                    self.materialize_converted_array_view(
+                    Some(self.materialize_converted_array_view(
                         var_id,
-                        backing_var_id,
+                        source_view.backing_var_id,
                         convert,
                         ir_builder,
-                    )?;
-                    views.insert(var_id, var_id);
+                    )?)
+                }
+            }
+            _ => None,
+        };
+        if let Some(view) = &view {
+            self.function_array_view_stack[frame].insert(var_id, view.clone());
+        }
+        Ok(view)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_function_array_views_for_expression<A>(
+        &mut self,
+        expr: &Expression,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        let Some(frame) = self.function_arg_stack.len().checked_sub(1) else {
+            return Ok(());
+        };
+        // Prepare outside the expression's control-flow lowering so every
+        // dynamic load is dominated by the stores that initialize its view.
+        // Fully static literal element accesses are deliberately omitted and
+        // continue through the direct-selection path below.
+        let mut views = Vec::new();
+        self.collect_array_views_for_expression(expr, &mut views, &mut HashSet::default());
+        for var_id in views {
+            self.ensure_function_array_view_at(
+                frame, var_id, targets, domain, convert, sources, ir_builder,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn restore_active_function_array_views<A>(
+        &self,
+        finished_views: &HashMap<VarId, FunctionArrayView>,
+        convert: &impl Fn(VarId, u32) -> A,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        let clobbered = finished_views
+            .values()
+            .filter(|view| view.owns_backing)
+            .map(|view| view.backing_var_id)
+            .collect::<HashSet<_>>();
+        let mut restored = HashSet::default();
+        for frame in self.function_array_view_stack.iter().rev() {
+            for view in frame.values() {
+                if clobbered.contains(&view.backing_var_id) && restored.insert(view.backing_var_id)
+                {
+                    let layout = self.array_view_layout(view.backing_var_id)?;
+                    self.store_array_view_elements(
+                        view.backing_var_id,
+                        &view.elements,
+                        layout.element_width,
+                        convert,
+                        ir_builder,
+                    );
                 }
             }
         }
-        Ok(views)
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_bound_array_literal_access<A>(
+        &mut self,
+        var_id: VarId,
+        items: &[ArrayLiteralItem],
+        index: &VarIndex,
+        select: &VarSelect,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<bool, ParserError> {
+        if self.array_access_needs_view(var_id, index, select) {
+            return Ok(false);
+        }
+        let formal = &self.module.variables[&var_id];
+        let array_dims = formal
+            .r#type
+            .array
+            .iter()
+            .copied()
+            .flatten()
+            .collect::<Vec<_>>();
+        let all_indices = index.0.iter().chain(&select.0).collect::<Vec<_>>();
+        let resolved_indices = all_indices
+            .iter()
+            .map(|expr| self.get_constant_value(expr).unwrap() as usize)
+            .collect::<Vec<_>>();
+        let Some(selected_expr) =
+            self.select_array_literal_element(items, &resolved_indices, &array_dims)
+        else {
+            return Ok(false);
+        };
+        let access_width = get_access_width(self.module, var_id, index, select)?;
+        self.parse_expression(
+            selected_expr,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+            Some(access_width),
+        )?;
+        let selected_reg = self.stack.pop_back().unwrap();
+        let coerced = self.coerce_register_to_formal(
+            ir_builder,
+            selected_reg,
+            access_width,
+            selected_expr.comptime().r#type.signed,
+            formal.r#type.signed,
+            formal.r#type.is_2state(),
+        );
+        self.stack.push_back(coerced);
+        Ok(true)
     }
 
     fn select_array_literal_element<'b>(
@@ -632,12 +921,8 @@ impl<'a> FfParser<'a> {
     ) -> Option<&'b Expression> {
         // Function argument shape validation has already rejected unresolved
         // repeats and duplicate defaults, including in nested literals.
-        let Some((&target_idx, rest_indices)) = indices.split_first() else {
-            return None;
-        };
-        let Some((_dim, rest_dims)) = dims.split_first() else {
-            return None;
-        };
+        let (&target_idx, rest_indices) = indices.split_first()?;
+        let (_dim, rest_dims) = dims.split_first()?;
 
         let mut pos = 0usize;
         let mut default_expr: Option<&Expression> = None;
@@ -681,9 +966,7 @@ impl<'a> FfParser<'a> {
             }
         }
 
-        let Some(default_expr) = default_expr else {
-            return None;
-        };
+        let default_expr = default_expr?;
         if rest_dims.is_empty() {
             return Some(default_expr);
         }
@@ -1119,7 +1402,7 @@ impl<'a> FfParser<'a> {
             return Ok(());
         }
 
-        let offset = self.emit_offset_calc(
+        let mut offset = self.emit_offset_calc(
             dst.id,
             &dst.index,
             &dst.select,
@@ -1128,6 +1411,29 @@ impl<'a> FfParser<'a> {
             sources,
             ir_builder,
         )?;
+        if !target_type.array.is_empty()
+            && dst.index.0.is_empty()
+            && dst.select.0.is_empty()
+            && dst.select.1.is_none()
+        {
+            let Some(element_count) = target_type
+                .array
+                .iter()
+                .copied()
+                .try_fold(1usize, |total, dim| {
+                    dim.and_then(|dim| total.checked_mul(dim))
+                })
+            else {
+                unreachable!("whole-array store dimensions are resolved without overflow");
+            };
+            if element_count == 0 || !target_width.is_multiple_of(element_count) {
+                unreachable!("whole-array store width is divisible by its nonzero element count");
+            }
+            offset = SIROffset::PackedElements {
+                bit_offset: 0,
+                element_width: target_width / element_count,
+            };
+        }
         let is_static = is_static_access(&dst.index, &dst.select);
         let store_region = if matches!(domain, Domain::Ff)
             && (!is_static || self.sparse_write_vars.contains(&dst.id))
@@ -1797,6 +2103,15 @@ impl<'a> FfParser<'a> {
                             );
                             self.stack.push_back(adjusted);
                         }
+                        return Ok(());
+                    }
+
+                    if let Expression::ArrayLiteral(items, _) = &bound_expr
+                        && self.materialize_bound_array_literal_access(
+                            *var_id, items, var_index, var_select, targets, domain, convert,
+                            sources, ir_builder,
+                        )?
+                    {
                         return Ok(());
                     }
 
