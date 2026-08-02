@@ -1929,12 +1929,11 @@ fn eval_function_call_expression(
     let mut arg_bounds = BoundaryMap::default();
     for (arg_path, arg_id) in &function_body.arg_map {
         let Some(arg_expr) = call.inputs.get(arg_path) else {
-            return Err(ParserError::unsupported(
-                61,
-                LoweringPhase::CombLowering,
-                "function call missing argument",
-                format!("{call}"),
-                Some(&call.comptime.token),
+            return Err(super::invalid_function_call_argument_error(
+                function,
+                arg_path,
+                "formal argument has neither an input expression nor an output destination",
+                call,
             ));
         };
 

@@ -32,8 +32,9 @@ use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignStatement, CaseStatement, CombDeclaration, Expression, Factor,
-    ForBound, ForRange, ForStatement, IfStatement, Module, Op, Statement, SystemFunctionCall,
-    SystemFunctionInput, SystemFunctionKind, VarId, VarIndex, VarSelect,
+    ForBound, ForRange, ForStatement, Function, FunctionCall, IfStatement, Module, Op, Statement,
+    SystemFunctionCall, SystemFunctionInput, SystemFunctionKind, VarId, VarIndex, VarPath,
+    VarSelect,
 };
 use veryl_analyzer::value::{Value, byte_value_to_string};
 use veryl_parser::resource_table;
@@ -63,6 +64,23 @@ pub(super) fn range_store_error(
     token: Option<&TokenRange>,
 ) -> ParserError {
     ParserError::illegal_context(context, error.to_string(), token)
+}
+
+/// Veryl validates function arity before producing usable IR. A formal argument
+/// absent from both connection maps is therefore invalid IR, not an unsupported
+/// lowering shape.
+pub(super) fn invalid_function_call_argument_error(
+    function: &Function,
+    arg_path: &VarPath,
+    detail: &'static str,
+    call: &FunctionCall,
+) -> ParserError {
+    ParserError::invalid_function_argument_binding(
+        function.path.to_string(),
+        arg_path.to_string(),
+        detail,
+        Some(&call.comptime.token),
+    )
 }
 
 #[cfg(test)]
@@ -2095,12 +2113,11 @@ fn eval_statement_form_function_call(
             if call.outputs.contains_key(arg_path) {
                 continue;
             }
-            return Err(ParserError::unsupported(
-                61,
-                phase,
-                "function call missing argument",
-                format!("{call}"),
-                Some(&call.comptime.token),
+            return Err(invalid_function_call_argument_error(
+                function,
+                arg_path,
+                "formal argument has neither an input expression nor an output destination",
+                call,
             ));
         };
 
@@ -2142,12 +2159,11 @@ fn eval_statement_form_function_call(
 
     for (arg_path, dsts) in &call.outputs {
         let Some(arg_id) = function_body.arg_map.get(arg_path) else {
-            return Err(ParserError::unsupported(
-                61,
-                phase,
-                "function call missing argument",
-                format!("{call}"),
-                Some(&call.comptime.token),
+            return Err(invalid_function_call_argument_error(
+                function,
+                arg_path,
+                "output argument does not match any formal argument",
+                call,
             ));
         };
 
@@ -2825,6 +2841,139 @@ mod tests {
 
         assert!(bounds.contains(&0));
         assert!(bounds.contains(&4));
+    }
+
+    #[test]
+    fn test_invalid_statement_function_argument_reports_binding_diagnostic() {
+        let code = r#"
+            module Top (a: input logic<8>, q: output logic<8>) {
+                function f (
+                    x: input logic<8>,
+                    y: output logic<8>,
+                ) {
+                    y = x;
+                }
+
+                always_comb {
+                    f(a, q);
+                }
+            }
+        "#;
+        let mut module = parse_top_module(code);
+        let comb_index = module
+            .declarations
+            .iter()
+            .position(|declaration| matches!(declaration, Declaration::Comb(_)))
+            .unwrap();
+        let Declaration::Comb(comb) = &mut module.declarations[comb_index] else {
+            unreachable!();
+        };
+        let Statement::FunctionCall(call) = &mut comb.statements[0] else {
+            panic!("expected statement-form function call");
+        };
+        call.inputs.clear();
+
+        let Declaration::Comb(comb) = &module.declarations[comb_index] else {
+            unreachable!();
+        };
+        let mut arena = SLTNodeArena::new();
+        let error = match super::parse_comb(&module, comb, &mut arena) {
+            Ok(_) => panic!("expected an invalid function argument error"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "Invalid argument binding for `x` in call to function `f`: formal argument has neither an input expression nor an output destination"
+        );
+        assert_eq!(
+            miette::Diagnostic::code(&error).unwrap().to_string(),
+            "invalid_function_argument_binding"
+        );
+        match error {
+            ParserError::InvalidFunctionArgumentBinding {
+                function,
+                argument,
+                detail,
+                source_location,
+            } => {
+                assert_eq!(function, "f");
+                assert_eq!(argument, "x");
+                assert_eq!(
+                    detail,
+                    "formal argument has neither an input expression nor an output destination"
+                );
+                assert!(source_location.is_some());
+            }
+            error => panic!("expected an argument binding diagnostic, got {error:?}"),
+        }
+    }
+
+    #[test]
+    fn test_invalid_expression_function_argument_reports_binding_diagnostic() {
+        let code = r#"
+            module Top (a: input logic<8>, q: output logic<8>) {
+                function f (x: input logic<8>) -> logic<8> {
+                    return x;
+                }
+
+                always_comb {
+                    q = f(a);
+                }
+            }
+        "#;
+        let mut module = parse_top_module(code);
+        let comb_index = module
+            .declarations
+            .iter()
+            .position(|declaration| matches!(declaration, Declaration::Comb(_)))
+            .unwrap();
+        let Declaration::Comb(comb) = &mut module.declarations[comb_index] else {
+            unreachable!();
+        };
+        let Statement::Assign(assign) = &mut comb.statements[0] else {
+            panic!("expected assignment statement");
+        };
+        let Expression::Term(factor) = &mut assign.expr else {
+            panic!("expected function-call term");
+        };
+        let Factor::FunctionCall(call) = factor.as_mut() else {
+            panic!("expected expression-form function call");
+        };
+        call.inputs.clear();
+
+        let Declaration::Comb(comb) = &module.declarations[comb_index] else {
+            unreachable!();
+        };
+        let mut arena = SLTNodeArena::new();
+        let error = match super::parse_comb(&module, comb, &mut arena) {
+            Ok(_) => panic!("expected an invalid function argument error"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "Invalid argument binding for `x` in call to function `f`: formal argument has neither an input expression nor an output destination"
+        );
+        assert_eq!(
+            miette::Diagnostic::code(&error).unwrap().to_string(),
+            "invalid_function_argument_binding"
+        );
+        match error {
+            ParserError::InvalidFunctionArgumentBinding {
+                function,
+                argument,
+                detail,
+                source_location,
+            } => {
+                assert_eq!(function, "f");
+                assert_eq!(argument, "x");
+                assert_eq!(
+                    detail,
+                    "formal argument has neither an input expression nor an output destination"
+                );
+                assert!(source_location.is_some());
+            }
+            error => panic!("expected an argument binding diagnostic, got {error:?}"),
+        }
     }
 
     #[test]
