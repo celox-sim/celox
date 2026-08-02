@@ -94,6 +94,19 @@ struct ArrayViewLayout {
     is_2state: bool,
 }
 
+#[derive(Clone, Copy)]
+struct ArrayLiteralSelection<'a> {
+    expr: &'a Expression,
+    element_index: usize,
+    element_count: usize,
+}
+
+#[derive(Default)]
+struct FunctionInputUsage {
+    runtime_reads: HashSet<VarId>,
+    array_views: HashSet<VarId>,
+}
+
 fn add_offset_term<A>(
     accumulator: &mut Option<RegisterId>,
     term: RegisterId,
@@ -460,6 +473,28 @@ impl<'a> FfParser<'a> {
             if cached_elements.contains_key(&cache_key) {
                 continue;
             }
+            let element_count = selected_expr
+                .comptime()
+                .r#type
+                .array
+                .iter()
+                .copied()
+                .try_fold(1usize, |total, dim| {
+                    dim.and_then(|dim| total.checked_mul(dim))
+                })
+                .unwrap_or_else(|| {
+                    unreachable!(
+                        "function argument validation resolves array literal item dimensions"
+                    )
+                });
+            self.prepare_function_array_views_for_expression(
+                selected_expr,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+            )?;
             self.parse_expression(
                 selected_expr,
                 targets,
@@ -467,18 +502,23 @@ impl<'a> FfParser<'a> {
                 convert,
                 sources,
                 ir_builder,
-                Some(layout.element_width),
+                (element_count == 1).then_some(layout.element_width),
             )?;
             let reg = self.stack.pop_back().unwrap();
-            let reg = self.coerce_register_to_formal(
-                ir_builder,
-                reg,
-                layout.element_width,
-                selected_expr.comptime().r#type.signed,
-                layout.signed,
-                layout.is_2state,
-            );
-            cached_elements.insert(cache_key, reg);
+            let mut item_elements = Vec::with_capacity(element_count);
+            for element_index in 0..element_count {
+                let element =
+                    self.slice_array_value_element(reg, element_index, element_count, ir_builder);
+                item_elements.push(self.coerce_register_to_formal(
+                    ir_builder,
+                    element,
+                    layout.element_width,
+                    selected_expr.comptime().r#type.signed,
+                    layout.signed,
+                    layout.is_2state,
+                ));
+            }
+            cached_elements.insert(cache_key, item_elements);
         }
 
         let mut elements = Vec::with_capacity(layout.element_count);
@@ -490,14 +530,20 @@ impl<'a> FfParser<'a> {
                 remainder /= array_dims[dimension];
             }
 
-            let Some(selected_expr) =
+            let Some(selection) =
                 self.select_array_literal_element(items, &coordinates, &array_dims)
             else {
                 unreachable!("validated array literal covers every formal element");
             };
-            let cache_key = selected_expr as *const Expression as usize;
-            let Some(&selected_reg) = cached_elements.get(&cache_key) else {
+            let cache_key = selection.expr as *const Expression as usize;
+            let Some(selected_regs) = cached_elements.get(&cache_key) else {
                 unreachable!("every selected element was evaluated in literal source order");
+            };
+            if selected_regs.len() != selection.element_count {
+                unreachable!("selected array literal item has the validated element count");
+            }
+            let Some(&selected_reg) = selected_regs.get(selection.element_index) else {
+                unreachable!("selected array literal item index is in bounds");
             };
             elements.push(selected_reg);
         }
@@ -531,6 +577,41 @@ impl<'a> FfParser<'a> {
                 elements.push(expr);
             }
         }
+    }
+
+    fn slice_array_value_element<A>(
+        &self,
+        reg: RegisterId,
+        element_index: usize,
+        element_count: usize,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> RegisterId {
+        if element_count == 0 || element_index >= element_count {
+            unreachable!("validated array value element index is in bounds");
+        }
+        if element_count == 1 {
+            return reg;
+        }
+        let source_width = ir_builder.register(&reg).width();
+        if !source_width.is_multiple_of(element_count) {
+            unreachable!("validated array value has a divisible nonzero width");
+        }
+        let source_element_width = source_width / element_count;
+        let source_type = ir_builder.register(&reg).clone();
+        let element = match source_type {
+            RegisterType::Logic { .. } => ir_builder.alloc_logic(source_element_width),
+            RegisterType::Bit { signed, .. } => ir_builder.alloc_bit(source_element_width, signed),
+        };
+        // Whole unpacked-array values use PackedElements order: coordinate
+        // zero starts at the low end of the register.
+        let bit_offset = element_index * source_element_width;
+        ir_builder.emit(SIRInstruction::Slice(
+            element,
+            reg,
+            bit_offset,
+            source_element_width,
+        ));
+        element
     }
 
     fn store_array_view_elements<A>(
@@ -653,6 +734,153 @@ impl<'a> FfParser<'a> {
             })
     }
 
+    fn function_input_usage(
+        &self,
+        call: &veryl_analyzer::ir::FunctionCall,
+        active_calls: &mut HashSet<VarId>,
+    ) -> Option<FunctionInputUsage> {
+        if !active_calls.insert(call.id) {
+            return None;
+        }
+        let result = (|| {
+            let function = self.module.functions.get(&call.id)?;
+            let function_body = if let Some(index) = &call.index {
+                function.get_function(index)?
+            } else {
+                function.get_function(&[])?
+            };
+            let mut usage = FunctionInputUsage::default();
+            for arg_path in call.outputs.keys() {
+                let arg_id = *function_body.arg_map.get(arg_path)?;
+                let expr = self
+                    .extract_function_target_expr(&function_body, arg_id, &HashMap::default())
+                    .ok()?;
+                self.collect_function_input_usage(&expr, &mut usage, active_calls)?;
+            }
+            if let Some(ret_id) = function_body.ret {
+                let expr = self
+                    .extract_function_return_expr(&function_body, ret_id)
+                    .ok()?;
+                self.collect_function_input_usage(&expr, &mut usage, active_calls)?;
+            }
+            let formals = function_body
+                .arg_map
+                .values()
+                .copied()
+                .collect::<HashSet<_>>();
+            usage
+                .runtime_reads
+                .retain(|var_id| formals.contains(var_id));
+            usage.array_views.retain(|var_id| formals.contains(var_id));
+            Some(usage)
+        })();
+        active_calls.remove(&call.id);
+        result
+    }
+
+    fn collect_function_input_usage(
+        &self,
+        expr: &Expression,
+        usage: &mut FunctionInputUsage,
+        active_calls: &mut HashSet<VarId>,
+    ) -> Option<()> {
+        match expr {
+            Expression::Term(factor) => match factor.as_ref() {
+                Factor::Variable(var_id, index, select, _) => {
+                    usage.runtime_reads.insert(*var_id);
+                    if self.array_access_needs_view(*var_id, index, select) {
+                        usage.array_views.insert(*var_id);
+                    }
+                    for expr in &index.0 {
+                        self.collect_function_input_usage(expr, usage, active_calls)?;
+                    }
+                    for expr in &select.0 {
+                        self.collect_function_input_usage(expr, usage, active_calls)?;
+                    }
+                    if let Some((_, expr)) = &select.1 {
+                        self.collect_function_input_usage(expr, usage, active_calls)?;
+                    }
+                }
+                Factor::FunctionCall(call) => {
+                    let nested_usage = self.function_input_usage(call, active_calls)?;
+                    let function = self.module.functions.get(&call.id)?;
+                    let function_body = if let Some(index) = &call.index {
+                        function.get_function(index)?
+                    } else {
+                        function.get_function(&[])?
+                    };
+                    for (arg_path, arg_id) in &function_body.arg_map {
+                        let formal = &self.module.variables[arg_id];
+                        let needs_actual = if formal.r#type.array.is_empty() {
+                            nested_usage.runtime_reads.contains(arg_id)
+                        } else {
+                            nested_usage.array_views.contains(arg_id)
+                        };
+                        if needs_actual && let Some(expr) = call.inputs.get(arg_path) {
+                            self.collect_function_input_usage(expr, usage, active_calls)?;
+                        }
+                    }
+                }
+                Factor::SystemFunctionCall(call) => match &call.kind {
+                    SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => {}
+                    SystemFunctionKind::Clog2(input)
+                    | SystemFunctionKind::Onehot(input)
+                    | SystemFunctionKind::Signed(input)
+                    | SystemFunctionKind::Unsigned(input) => {
+                        self.collect_function_input_usage(&input.0, usage, active_calls)?;
+                    }
+                    SystemFunctionKind::Readmemh(_, _)
+                    | SystemFunctionKind::Display(_)
+                    | SystemFunctionKind::Write(_)
+                    | SystemFunctionKind::Assert { .. }
+                    | SystemFunctionKind::Finish => {}
+                },
+                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+            },
+            Expression::Binary(lhs, _, rhs, _) => {
+                self.collect_function_input_usage(lhs, usage, active_calls)?;
+                self.collect_function_input_usage(rhs, usage, active_calls)?;
+            }
+            Expression::Unary(_, inner, _) => {
+                self.collect_function_input_usage(inner, usage, active_calls)?;
+            }
+            Expression::Ternary(cond, then_expr, else_expr, _) => {
+                self.collect_function_input_usage(cond, usage, active_calls)?;
+                self.collect_function_input_usage(then_expr, usage, active_calls)?;
+                self.collect_function_input_usage(else_expr, usage, active_calls)?;
+            }
+            Expression::Concatenation(items, _) => {
+                for (expr, repeat) in items {
+                    self.collect_function_input_usage(expr, usage, active_calls)?;
+                    if let Some(repeat) = repeat {
+                        self.collect_function_input_usage(repeat, usage, active_calls)?;
+                    }
+                }
+            }
+            Expression::ArrayLiteral(items, _) => {
+                for item in items {
+                    match item {
+                        ArrayLiteralItem::Value(expr, repeat) => {
+                            self.collect_function_input_usage(expr, usage, active_calls)?;
+                            if let Some(repeat) = repeat {
+                                self.collect_function_input_usage(repeat, usage, active_calls)?;
+                            }
+                        }
+                        ArrayLiteralItem::Defaul(expr) => {
+                            self.collect_function_input_usage(expr, usage, active_calls)?;
+                        }
+                    }
+                }
+            }
+            Expression::StructConstructor(_, fields, _) => {
+                for (_, expr) in fields {
+                    self.collect_function_input_usage(expr, usage, active_calls)?;
+                }
+            }
+        }
+        Some(())
+    }
+
     fn collect_array_views_for_expression(
         &self,
         expr: &Expression,
@@ -686,8 +914,32 @@ impl<'a> FfParser<'a> {
                     }
                 }
                 Factor::FunctionCall(call) => {
-                    for expr in call.inputs.values() {
-                        collect(expr, views, seen);
+                    let input_usage = self.function_input_usage(call, &mut HashSet::default());
+                    let function_body = self.module.functions.get(&call.id).and_then(|function| {
+                        if let Some(index) = &call.index {
+                            function.get_function(index)
+                        } else {
+                            function.get_function(&[])
+                        }
+                    });
+                    if let (Some(input_usage), Some(function_body)) = (input_usage, function_body) {
+                        for (arg_path, arg_id) in &function_body.arg_map {
+                            let formal = &self.module.variables[arg_id];
+                            let needs_actual = if formal.r#type.array.is_empty() {
+                                input_usage.runtime_reads.contains(arg_id)
+                            } else {
+                                input_usage.array_views.contains(arg_id)
+                            };
+                            if needs_actual && let Some(expr) = call.inputs.get(arg_path) {
+                                collect(expr, views, seen);
+                            }
+                        }
+                    } else {
+                        // Unsupported or recursive callees will fail during
+                        // normal lowering; keep the conservative traversal.
+                        for expr in call.inputs.values() {
+                            collect(expr, views, seen);
+                        }
                     }
                 }
                 Factor::SystemFunctionCall(call) => match &call.kind {
@@ -713,8 +965,19 @@ impl<'a> FfParser<'a> {
             Expression::Unary(_, inner, _) => collect(inner, views, seen),
             Expression::Ternary(cond, then_expr, else_expr, _) => {
                 collect(cond, views, seen);
-                collect(then_expr, views, seen);
-                collect(else_expr, views, seen);
+                let mut then_views = Vec::new();
+                let mut then_seen = HashSet::default();
+                collect(then_expr, &mut then_views, &mut then_seen);
+                let mut else_views = Vec::new();
+                let mut else_seen = HashSet::default();
+                collect(else_expr, &mut else_views, &mut else_seen);
+                // Only views required by both arms may be prepared before the
+                // condition. Arm-local views are prepared inside that arm.
+                for var_id in then_views {
+                    if else_seen.contains(&var_id) && seen.insert(var_id) {
+                        views.push(var_id);
+                    }
+                }
             }
             Expression::Concatenation(items, _) => {
                 for (expr, repeat) in items {
@@ -850,6 +1113,14 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
+    fn expression_needs_unmaterialized_array_view(&self, expr: &Expression) -> bool {
+        let mut views = Vec::new();
+        self.collect_array_views_for_expression(expr, &mut views, &mut HashSet::default());
+        views
+            .into_iter()
+            .any(|var_id| self.get_bound_function_array_view(var_id).is_none())
+    }
+
     pub(super) fn restore_active_function_array_views<A>(
         &self,
         finished_views: &HashMap<VarId, FunctionArrayView>,
@@ -909,12 +1180,21 @@ impl<'a> FfParser<'a> {
             .iter()
             .map(|expr| self.get_constant_value(expr).unwrap() as usize)
             .collect::<Vec<_>>();
-        let Some(selected_expr) =
+        let Some(selection) =
             self.select_array_literal_element(items, &resolved_indices, &array_dims)
         else {
             return Ok(false);
         };
         let access_width = get_access_width(self.module, var_id, index, select)?;
+        let selected_expr = selection.expr;
+        self.prepare_function_array_views_for_expression(
+            selected_expr,
+            targets,
+            domain,
+            convert,
+            sources,
+            ir_builder,
+        )?;
         self.parse_expression(
             selected_expr,
             targets,
@@ -922,9 +1202,15 @@ impl<'a> FfParser<'a> {
             convert,
             sources,
             ir_builder,
-            Some(access_width),
+            (selection.element_count == 1).then_some(access_width),
         )?;
         let selected_reg = self.stack.pop_back().unwrap();
+        let selected_reg = self.slice_array_value_element(
+            selected_reg,
+            selection.element_index,
+            selection.element_count,
+            ir_builder,
+        );
         let coerced = self.coerce_register_to_formal(
             ir_builder,
             selected_reg,
@@ -942,7 +1228,7 @@ impl<'a> FfParser<'a> {
         items: &'b [ArrayLiteralItem],
         indices: &[usize],
         dims: &[usize],
-    ) -> Option<&'b Expression> {
+    ) -> Option<ArrayLiteralSelection<'b>> {
         // Function argument shape validation has already rejected unresolved
         // repeats and duplicate defaults, including in nested literals.
         let (&target_idx, rest_indices) = indices.split_first()?;
@@ -967,14 +1253,28 @@ impl<'a> FfParser<'a> {
 
                     if target_idx < pos + rep_count {
                         if rest_dims.is_empty() {
-                            return Some(expr);
+                            return Some(ArrayLiteralSelection {
+                                expr,
+                                element_index: 0,
+                                element_count: 1,
+                            });
                         }
                         return match expr.as_ref() {
                             Expression::ArrayLiteral(nested, _) => {
                                 self.select_array_literal_element(nested, rest_indices, rest_dims)
                             }
-                            _ if expr.comptime().r#type.array.is_empty() => Some(expr),
-                            _ => None,
+                            _ if expr.comptime().r#type.array.is_empty() => {
+                                Some(ArrayLiteralSelection {
+                                    expr,
+                                    element_index: 0,
+                                    element_count: 1,
+                                })
+                            }
+                            _ => Some(ArrayLiteralSelection {
+                                expr,
+                                element_index: Self::linear_array_index(rest_indices, rest_dims)?,
+                                element_count: rest_dims.iter().product(),
+                            }),
                         };
                     }
                     pos += rep_count;
@@ -992,15 +1292,41 @@ impl<'a> FfParser<'a> {
 
         let default_expr = default_expr?;
         if rest_dims.is_empty() {
-            return Some(default_expr);
+            return Some(ArrayLiteralSelection {
+                expr: default_expr,
+                element_index: 0,
+                element_count: 1,
+            });
         }
         match default_expr {
             Expression::ArrayLiteral(nested, _) => {
                 self.select_array_literal_element(nested, rest_indices, rest_dims)
             }
-            _ if default_expr.comptime().r#type.array.is_empty() => Some(default_expr),
-            _ => None,
+            _ if default_expr.comptime().r#type.array.is_empty() => Some(ArrayLiteralSelection {
+                expr: default_expr,
+                element_index: 0,
+                element_count: 1,
+            }),
+            _ => Some(ArrayLiteralSelection {
+                expr: default_expr,
+                element_index: Self::linear_array_index(rest_indices, rest_dims)?,
+                element_count: rest_dims.iter().product(),
+            }),
         }
+    }
+
+    fn linear_array_index(indices: &[usize], dims: &[usize]) -> Option<usize> {
+        if indices.len() != dims.len() {
+            return None;
+        }
+        indices
+            .iter()
+            .zip(dims)
+            .try_fold(0usize, |linear, (&index, &dim)| {
+                (index < dim)
+                    .then(|| linear.checked_mul(dim)?.checked_add(index))
+                    .flatten()
+            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2167,8 +2493,12 @@ impl<'a> FfParser<'a> {
                         return Ok(());
                     };
 
-                    let Factor::Variable(bound_var_id, bound_var_index, bound_var_select, _) =
-                        bound_factor.as_ref()
+                    let Factor::Variable(
+                        bound_var_id,
+                        bound_var_index,
+                        bound_var_select,
+                        bound_comptime,
+                    ) = bound_factor.as_ref()
                     else {
                         let Some(access) =
                             self.eval_formal_type_select(*var_id, var_index, var_select)
@@ -2244,6 +2574,37 @@ impl<'a> FfParser<'a> {
                             sources,
                             ir_builder,
                         )?;
+                    } else if self.get_bound_function_arg_expr(*bound_var_id).is_some() {
+                        // Resolve forwarded formals recursively so a nested
+                        // static access keeps the original literal's lazy
+                        // direct-selection path.
+                        self.parse_factor(
+                            &Factor::Variable(
+                                *bound_var_id,
+                                merged_index,
+                                merged_select,
+                                bound_comptime.clone(),
+                            ),
+                            targets,
+                            domain,
+                            convert,
+                            sources,
+                            ir_builder,
+                            None,
+                        )?;
+                        let forwarded = self.stack.pop_back().unwrap();
+                        let access_width =
+                            get_access_width(self.module, *var_id, var_index, var_select)?;
+                        let formal = &self.module.variables[var_id];
+                        let forwarded = self.coerce_register_to_formal(
+                            ir_builder,
+                            forwarded,
+                            access_width,
+                            bound_comptime.r#type.signed,
+                            formal.r#type.signed,
+                            formal.r#type.is_2state(),
+                        );
+                        self.stack.push_back(forwarded);
                     } else {
                         self.op_load(
                             *bound_var_id,
@@ -2540,7 +2901,13 @@ impl<'a> FfParser<'a> {
         )?;
         let cond_reg = self.stack.pop_back().unwrap();
 
-        if !expression_has_side_effect(then) && !expression_has_side_effect(els) {
+        let branch_materializes_array_view = self.expression_needs_unmaterialized_array_view(then)
+            || self.expression_needs_unmaterialized_array_view(els);
+
+        if !expression_has_side_effect(then)
+            && !expression_has_side_effect(els)
+            && !branch_materializes_array_view
+        {
             self.parse_expression_in_context(
                 then,
                 targets,
@@ -2569,6 +2936,7 @@ impl<'a> FfParser<'a> {
 
         let pre_ternary_defined = self.defined_ranges.clone();
         let pre_ternary_dynamic = self.dynamic_defined_vars.clone();
+        let pre_ternary_array_views = self.function_array_view_stack.clone();
 
         // A known condition evaluates only the selected arm. An X/Z
         // condition evaluates both arms and merges their bits.
@@ -2614,6 +2982,9 @@ impl<'a> FfParser<'a> {
         });
 
         ir_builder.switch_to_block(then_block);
+        self.prepare_function_array_views_for_expression(
+            then, targets, domain, convert, sources, ir_builder,
+        )?;
         self.parse_expression_in_context(
             then,
             targets,
@@ -2633,7 +3004,11 @@ impl<'a> FfParser<'a> {
             false_block: (else_block, vec![then_val, merge_else]),
         });
 
+        self.function_array_view_stack = pre_ternary_array_views.clone();
         ir_builder.switch_to_block(else_block);
+        self.prepare_function_array_views_for_expression(
+            els, targets, domain, convert, sources, ir_builder,
+        )?;
         self.parse_expression_in_context(
             els,
             targets,
@@ -2662,6 +3037,10 @@ impl<'a> FfParser<'a> {
 
         ir_builder.switch_to_block(direct_else_block);
         ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![else_val]));
+
+        // An arm-local view is not initialized on paths that skip that arm,
+        // so it must not escape the ternary's merge point.
+        self.function_array_view_stack = pre_ternary_array_views;
 
         ir_builder.switch_to_block(merge_block);
         self.defined_ranges = self.intersect_defined_states(then_defined, else_defined);
