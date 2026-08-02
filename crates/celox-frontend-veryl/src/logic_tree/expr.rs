@@ -2,7 +2,6 @@ use super::*;
 
 use crate::{
     bitaccess::{celox_value_from_comptime, celox_value_from_comptime_in_context},
-    case::case_arm_condition_expr,
     context_width::{
         ValueContext, binary_semantics, cast_semantics, expression_signed, get_expr_width,
         resolve_binary_op,
@@ -521,17 +520,48 @@ pub(super) fn eval_function_body_return(
         }
     }
 
+    fn eval_function_expression(
+        module: &Module,
+        state: FunctionControlState,
+        expression: &Expression,
+        context_width: Option<usize>,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<(FunctionControlState, NodeId, HashSet<VarAtomBase<VarId>>), ParserError> {
+        let mut next_store = state.store.clone();
+        let ((node, sources), boundaries) =
+            eval_expression_effectful(module, &mut next_store, expression, arena, context_width)?;
+        let state = apply_function_guard(
+            module,
+            state,
+            next_store,
+            boundaries,
+            bool_node(arena, true)?,
+            HashSet::default(),
+            arena,
+        )?;
+        Ok((state, node, sources))
+    }
+
+    fn eval_function_condition(
+        module: &Module,
+        state: FunctionControlState,
+        condition: &Expression,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<(FunctionControlState, NodeId, HashSet<VarAtomBase<VarId>>), ParserError> {
+        let (state, condition, sources) =
+            eval_function_expression(module, state, condition, Some(1), arena)?;
+        Ok((state, procedural_condition(arena, condition)?, sources))
+    }
+
     fn eval_function_if(
         module: &Module,
-        mut state: FunctionControlState,
+        state: FunctionControlState,
         if_stmt: &IfStatement,
         ret_id: VarId,
         arena: &mut SLTNodeArena<VarId>,
     ) -> Result<FunctionControlState, ParserError> {
-        let ((cond_expr, cond_sources), cond_bounds) =
-            eval_expression_effectful(module, &mut state.store, &if_stmt.cond, arena, Some(1))?;
-        let cond_expr = procedural_condition(arena, cond_expr)?;
-        let boundaries = merge_boundaries(state.boundaries, cond_bounds);
+        let (state, cond_expr, cond_sources) =
+            eval_function_condition(module, state, &if_stmt.cond, arena)?;
 
         if let Some(cond_val) = constant_bool(arena, cond_expr) {
             let side = if cond_val {
@@ -539,23 +569,14 @@ pub(super) fn eval_function_body_return(
             } else {
                 &if_stmt.false_side
             };
-            return eval_function_statements(
-                module,
-                FunctionControlState {
-                    boundaries,
-                    ..state
-                },
-                side,
-                ret_id,
-                arena,
-            );
+            return eval_function_statements(module, state, side, ret_id, arena);
         }
 
         let then_state = eval_function_statements(
             module,
             FunctionControlState {
                 store: state.store.clone(),
-                boundaries: boundaries.clone(),
+                boundaries: state.boundaries.clone(),
                 live_expr: state.live_expr,
                 live_sources: state.live_sources.clone(),
             },
@@ -567,7 +588,7 @@ pub(super) fn eval_function_body_return(
             module,
             FunctionControlState {
                 store: state.store,
-                boundaries,
+                boundaries: state.boundaries,
                 live_expr: state.live_expr,
                 live_sources: state.live_sources,
             },
@@ -660,15 +681,9 @@ pub(super) fn eval_function_body_return(
             ret_id: VarId,
             arena: &mut SLTNodeArena<VarId>,
         ) -> Result<FunctionLoopControlState, ParserError> {
-            let ((cond_expr, cond_sources), cond_bounds) = eval_expression_effectful(
-                module,
-                &mut state.function.store,
-                &if_stmt.cond,
-                arena,
-                Some(1),
-            )?;
-            let cond_expr = procedural_condition(arena, cond_expr)?;
-            let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
+            let (function, cond_expr, cond_sources) =
+                eval_function_condition(module, state.function.clone(), &if_stmt.cond, arena)?;
+            state.function = function;
 
             if let Some(cond_val) = constant_bool(arena, cond_expr) {
                 let side = if cond_val {
@@ -676,23 +691,16 @@ pub(super) fn eval_function_body_return(
                 } else {
                     &if_stmt.false_side
                 };
-                return side.iter().try_fold(
-                    FunctionLoopControlState {
-                        function: FunctionControlState {
-                            boundaries,
-                            ..state.function
-                        },
-                        ..state
-                    },
-                    |s, step| eval_function_loop_statement(module, s, step, ret_id, arena),
-                );
+                return side.iter().try_fold(state, |s, step| {
+                    eval_function_loop_statement(module, s, step, ret_id, arena)
+                });
             }
 
             let then_state = if_stmt.true_side.iter().try_fold(
                 FunctionLoopControlState {
                     function: FunctionControlState {
                         store: state.function.store.clone(),
-                        boundaries: boundaries.clone(),
+                        boundaries: state.function.boundaries.clone(),
                         live_expr: state.function.live_expr,
                         live_sources: state.function.live_sources.clone(),
                     },
@@ -705,7 +713,7 @@ pub(super) fn eval_function_body_return(
                 FunctionLoopControlState {
                     function: FunctionControlState {
                         store: state.function.store,
-                        boundaries,
+                        boundaries: state.function.boundaries,
                         live_expr: state.function.live_expr,
                         live_sources: state.function.live_sources,
                     },
@@ -756,7 +764,7 @@ pub(super) fn eval_function_body_return(
 
         fn eval_function_loop_case(
             module: &Module,
-            state: FunctionLoopControlState,
+            mut state: FunctionLoopControlState,
             case_stmt: &CaseStatement,
             ret_id: VarId,
             arena: &mut SLTNodeArena<VarId>,
@@ -765,6 +773,7 @@ pub(super) fn eval_function_body_return(
                 module: &Module,
                 mut state: FunctionLoopControlState,
                 case_stmt: &CaseStatement,
+                target: &EvaluatedCaseTarget,
                 arm_index: usize,
                 ret_id: VarId,
                 arena: &mut SLTNodeArena<VarId>,
@@ -775,15 +784,26 @@ pub(super) fn eval_function_body_return(
                     });
                 };
 
-                let ((cond_expr, cond_sources), cond_bounds) = eval_expression_effectful(
+                let mut next_store = state.function.store.clone();
+                let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
                     module,
-                    &mut state.function.store,
-                    &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
+                    &mut next_store,
+                    &case_stmt.case_target,
+                    target,
+                    &arm.patterns,
                     arena,
-                    Some(1),
+                )?;
+                state.function = apply_function_guard(
+                    module,
+                    state.function,
+                    next_store,
+                    cond_bounds,
+                    bool_node(arena, true)?,
+                    HashSet::default(),
+                    arena,
                 )?;
                 let cond_expr = procedural_condition(arena, cond_expr)?;
-                let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
+                let boundaries = state.function.boundaries.clone();
 
                 if let Some(cond_val) = constant_bool(arena, cond_expr) {
                     let state = FunctionLoopControlState {
@@ -798,7 +818,15 @@ pub(super) fn eval_function_body_return(
                             eval_function_loop_statement(module, s, step, ret_id, arena)
                         })
                     } else {
-                        eval_from_arm(module, state, case_stmt, arm_index + 1, ret_id, arena)
+                        eval_from_arm(
+                            module,
+                            state,
+                            case_stmt,
+                            target,
+                            arm_index + 1,
+                            ret_id,
+                            arena,
+                        )
                     };
                 }
 
@@ -828,6 +856,7 @@ pub(super) fn eval_function_body_return(
                         continue_sources: state.continue_sources,
                     },
                     case_stmt,
+                    target,
                     arm_index + 1,
                     ret_id,
                     arena,
@@ -872,7 +901,19 @@ pub(super) fn eval_function_body_return(
                 })
             }
 
-            eval_from_arm(module, state, case_stmt, 0, ret_id, arena)
+            let (function, target_node, target_sources) = eval_function_expression(
+                module,
+                state.function.clone(),
+                &case_stmt.case_target,
+                None,
+                arena,
+            )?;
+            state.function = function;
+            let target = EvaluatedCaseTarget {
+                node: target_node,
+                sources: target_sources,
+            };
+            eval_from_arm(module, state, case_stmt, &target, 0, ret_id, arena)
         }
 
         fn eval_function_loop_statement(
@@ -1318,22 +1359,10 @@ pub(super) fn eval_function_body_return(
         ret_id: VarId,
         arena: &mut SLTNodeArena<VarId>,
     ) -> Result<FunctionLoopControlState, ParserError> {
-        let ((cond_expr, cond_sources), cond_bounds) = eval_expression_effectful(
-            module,
-            &mut state.function.store,
-            &if_stmt.cond,
-            arena,
-            Some(1),
-        )?;
-        let cond_expr = procedural_condition(arena, cond_expr)?;
-        let boundaries = merge_boundaries(state.function.boundaries.clone(), cond_bounds);
-        let outer_state = FunctionLoopControlState {
-            function: FunctionControlState {
-                boundaries: boundaries.clone(),
-                ..state.function.clone()
-            },
-            ..state.clone()
-        };
+        let (function, cond_expr, cond_sources) =
+            eval_function_condition(module, state.function.clone(), &if_stmt.cond, arena)?;
+        state.function = function;
+        let outer_state = state.clone();
 
         let executed_state = if let Some(cond_val) = constant_bool(arena, cond_expr) {
             let side = if cond_val {
@@ -1341,22 +1370,15 @@ pub(super) fn eval_function_body_return(
             } else {
                 &if_stmt.false_side
             };
-            side.iter().try_fold(
-                FunctionLoopControlState {
-                    function: FunctionControlState {
-                        boundaries,
-                        ..state.function
-                    },
-                    ..state
-                },
-                |s, step| eval_function_break_statement(module, s, step, ret_id, arena),
-            )?
+            side.iter().try_fold(state, |s, step| {
+                eval_function_break_statement(module, s, step, ret_id, arena)
+            })?
         } else {
             let then_state = if_stmt.true_side.iter().try_fold(
                 FunctionLoopControlState {
                     function: FunctionControlState {
                         store: state.function.store.clone(),
-                        boundaries: boundaries.clone(),
+                        boundaries: state.function.boundaries.clone(),
                         live_expr: state.function.live_expr,
                         live_sources: state.function.live_sources.clone(),
                     },
@@ -1369,7 +1391,7 @@ pub(super) fn eval_function_body_return(
                 FunctionLoopControlState {
                     function: FunctionControlState {
                         store: state.function.store,
-                        boundaries,
+                        boundaries: state.function.boundaries,
                         live_expr: state.function.live_expr,
                         live_sources: state.function.live_sources,
                     },
@@ -1448,7 +1470,7 @@ pub(super) fn eval_function_body_return(
 
     fn eval_function_break_case(
         module: &Module,
-        state: FunctionLoopControlState,
+        mut state: FunctionLoopControlState,
         case_stmt: &CaseStatement,
         ret_id: VarId,
         arena: &mut SLTNodeArena<VarId>,
@@ -1457,6 +1479,7 @@ pub(super) fn eval_function_body_return(
             module: &Module,
             mut state: FunctionLoopControlState,
             case_stmt: &CaseStatement,
+            target: &EvaluatedCaseTarget,
             arm_index: usize,
             ret_id: VarId,
             arena: &mut SLTNodeArena<VarId>,
@@ -1467,15 +1490,26 @@ pub(super) fn eval_function_body_return(
                 });
             };
 
-            let ((cond_expr, cond_sources), cond_bounds) = eval_expression_effectful(
+            let mut next_store = state.function.store.clone();
+            let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
                 module,
-                &mut state.function.store,
-                &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
+                &mut next_store,
+                &case_stmt.case_target,
+                target,
+                &arm.patterns,
                 arena,
-                Some(1),
+            )?;
+            state.function = apply_function_guard(
+                module,
+                state.function,
+                next_store,
+                cond_bounds,
+                bool_node(arena, true)?,
+                HashSet::default(),
+                arena,
             )?;
             let cond_expr = procedural_condition(arena, cond_expr)?;
-            let boundaries = merge_boundaries(state.function.boundaries, cond_bounds);
+            let boundaries = state.function.boundaries.clone();
 
             if let Some(cond_val) = constant_bool(arena, cond_expr) {
                 let state = FunctionLoopControlState {
@@ -1490,7 +1524,15 @@ pub(super) fn eval_function_body_return(
                         eval_function_break_statement(module, s, step, ret_id, arena)
                     })
                 } else {
-                    eval_from_arm(module, state, case_stmt, arm_index + 1, ret_id, arena)
+                    eval_from_arm(
+                        module,
+                        state,
+                        case_stmt,
+                        target,
+                        arm_index + 1,
+                        ret_id,
+                        arena,
+                    )
                 };
             }
 
@@ -1520,6 +1562,7 @@ pub(super) fn eval_function_body_return(
                     continue_sources: state.continue_sources,
                 },
                 case_stmt,
+                target,
                 arm_index + 1,
                 ret_id,
                 arena,
@@ -1564,8 +1607,20 @@ pub(super) fn eval_function_body_return(
             })
         }
 
+        let (function, target_node, target_sources) = eval_function_expression(
+            module,
+            state.function.clone(),
+            &case_stmt.case_target,
+            None,
+            arena,
+        )?;
+        state.function = function;
+        let target = EvaluatedCaseTarget {
+            node: target_node,
+            sources: target_sources,
+        };
         let outer_state = state.clone();
-        let executed_state = eval_from_arm(module, state, case_stmt, 0, ret_id, arena)?;
+        let executed_state = eval_from_arm(module, state, case_stmt, &target, 0, ret_id, arena)?;
 
         if matches!(constant_bool(arena, outer_state.continue_expr), Some(true)) {
             return Ok(executed_state);
@@ -1700,7 +1755,7 @@ pub(super) fn eval_function_body_return(
 
     fn eval_function_case(
         module: &Module,
-        state: FunctionControlState,
+        mut state: FunctionControlState,
         case_stmt: &CaseStatement,
         ret_id: VarId,
         arena: &mut SLTNodeArena<VarId>,
@@ -1709,6 +1764,7 @@ pub(super) fn eval_function_body_return(
             module: &Module,
             mut state: FunctionControlState,
             case_stmt: &CaseStatement,
+            target: &EvaluatedCaseTarget,
             arm_index: usize,
             ret_id: VarId,
             arena: &mut SLTNodeArena<VarId>,
@@ -1717,15 +1773,26 @@ pub(super) fn eval_function_body_return(
                 return eval_function_statements(module, state, &case_stmt.default, ret_id, arena);
             };
 
-            let ((cond_expr, cond_sources), cond_bounds) = eval_expression_effectful(
+            let mut next_store = state.store.clone();
+            let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
                 module,
-                &mut state.store,
-                &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
+                &mut next_store,
+                &case_stmt.case_target,
+                target,
+                &arm.patterns,
                 arena,
-                Some(1),
+            )?;
+            state = apply_function_guard(
+                module,
+                state,
+                next_store,
+                cond_bounds,
+                bool_node(arena, true)?,
+                HashSet::default(),
+                arena,
             )?;
             let cond_expr = procedural_condition(arena, cond_expr)?;
-            let boundaries = merge_boundaries(state.boundaries, cond_bounds);
+            let boundaries = state.boundaries.clone();
 
             if let Some(cond_val) = constant_bool(arena, cond_expr) {
                 let state = FunctionControlState {
@@ -1735,7 +1802,15 @@ pub(super) fn eval_function_body_return(
                 return if cond_val {
                     eval_function_statements(module, state, &arm.body, ret_id, arena)
                 } else {
-                    eval_from_arm(module, state, case_stmt, arm_index + 1, ret_id, arena)
+                    eval_from_arm(
+                        module,
+                        state,
+                        case_stmt,
+                        target,
+                        arm_index + 1,
+                        ret_id,
+                        arena,
+                    )
                 };
             }
 
@@ -1760,6 +1835,7 @@ pub(super) fn eval_function_body_return(
                     live_sources: state.live_sources,
                 },
                 case_stmt,
+                target,
                 arm_index + 1,
                 ret_id,
                 arena,
@@ -1789,7 +1865,14 @@ pub(super) fn eval_function_body_return(
             })
         }
 
-        eval_from_arm(module, state, case_stmt, 0, ret_id, arena)
+        let (next_state, target_node, target_sources) =
+            eval_function_expression(module, state, &case_stmt.case_target, None, arena)?;
+        state = next_state;
+        let target = EvaluatedCaseTarget {
+            node: target_node,
+            sources: target_sources,
+        };
+        eval_from_arm(module, state, case_stmt, &target, 0, ret_id, arena)
     }
 
     fn eval_function_statement(
@@ -2089,6 +2172,241 @@ pub(super) fn eval_expression_effectful(
     eval_expression_in_context(module, &mut store, expr, arena, context)
 }
 
+pub(super) struct EvaluatedCaseTarget {
+    pub(super) node: NodeId,
+    pub(super) sources: HashSet<VarAtomBase<VarId>>,
+}
+
+pub(super) fn eval_case_target_effectful(
+    module: &Module,
+    store: &mut SymbolicStore<VarId>,
+    target: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(EvaluatedCaseTarget, BoundaryMap<VarId>), ParserError> {
+    let ((node, sources), boundaries) =
+        eval_expression_effectful(module, store, target, arena, None)?;
+    Ok((EvaluatedCaseTarget { node, sources }, boundaries))
+}
+
+fn short_circuit_rhs_guard(
+    arena: &mut SLTNodeArena<VarId>,
+    lhs: NodeId,
+    is_and: bool,
+) -> Result<NodeId, ParserError> {
+    let not_lhs = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, lhs))?;
+    let shortcut_truth = if is_and {
+        not_lhs
+    } else {
+        arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, not_lhs))?
+    };
+    let shortcut = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, shortcut_truth))?;
+    Ok(arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, shortcut))?)
+}
+
+fn eval_case_comparison(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
+    target_expr: &Expression,
+    target: &EvaluatedCaseTarget,
+    other: &Expression,
+    target_is_lhs: bool,
+    op: Op,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let target_width = get_expr_width(target_expr)
+        .or_else(|| target_expr.comptime().r#type.total_width())
+        .unwrap_or(1);
+    let other_width = get_expr_width(other)
+        .or_else(|| other.comptime().r#type.total_width())
+        .unwrap_or(1);
+    let target_signed = expression_signed(target_expr);
+    let other_signed = expression_signed(other);
+    let (lhs_width, rhs_width, lhs_signed, rhs_signed) = if target_is_lhs {
+        (target_width, other_width, target_signed, other_signed)
+    } else {
+        (other_width, target_width, other_signed, target_signed)
+    };
+    let semantics = binary_semantics(
+        op,
+        lhs_width,
+        rhs_width,
+        lhs_signed,
+        rhs_signed,
+        Some(ValueContext {
+            width: 1,
+            signed: false,
+        }),
+    );
+
+    let target_context = if target_is_lhs {
+        semantics.lhs_context
+    } else {
+        semantics.rhs_context
+    };
+    let target_node = coerce_node_width(
+        arena,
+        target.node,
+        target_context.map(|context| context.width),
+        target_context
+            .map(|context| context.signed)
+            .unwrap_or(target_signed),
+    )?;
+    let other_context = if target_is_lhs {
+        semantics.rhs_context
+    } else {
+        semantics.lhs_context
+    };
+    let ((other_node, other_sources), boundaries) =
+        eval_expression_in_context(module, store, other, arena, other_context)?;
+    let (lhs, rhs) = if target_is_lhs {
+        (target_node, other_node)
+    } else {
+        (other_node, target_node)
+    };
+    let node = arena.alloc(SLTNode::Binary(
+        lhs,
+        resolve_binary_op(op, semantics.lhs_signed, semantics.rhs_signed),
+        rhs,
+    ))?;
+    let node = coerce_node_width(
+        arena,
+        node,
+        Some(semantics.result_width),
+        semantics.result_signed,
+    )?;
+    let mut sources = target.sources.clone();
+    sources.extend(other_sources);
+    Ok(((node, sources), boundaries))
+}
+
+fn merge_short_circuit_case_condition(
+    module: &Module,
+    store: &mut SymbolicStore<VarId>,
+    lhs: ((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>),
+    eval_rhs: impl FnOnce(
+        &mut SymbolicStore<VarId>,
+        &mut SLTNodeArena<VarId>,
+    ) -> Result<
+        ((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>),
+        ParserError,
+    >,
+    is_and: bool,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let ((lhs_node, mut sources), lhs_boundaries) = lhs;
+    let base_store = store.clone();
+    let mut rhs_store = base_store.clone();
+    let ((rhs_node, rhs_sources), rhs_boundaries) = eval_rhs(&mut rhs_store, arena)?;
+    let execute_rhs = short_circuit_rhs_guard(arena, lhs_node, is_and)?;
+    *store = super::merge_symbolic_stores(
+        module,
+        &rhs_store,
+        &base_store,
+        execute_rhs,
+        &sources,
+        arena,
+    )?;
+    sources.extend(rhs_sources);
+    let op = if is_and {
+        BinaryOp::LogicAnd
+    } else {
+        BinaryOp::LogicOr
+    };
+    Ok((
+        (
+            arena.alloc(SLTNode::Binary(lhs_node, op, rhs_node))?,
+            sources,
+        ),
+        merge_boundaries(lhs_boundaries, rhs_boundaries),
+    ))
+}
+
+pub(super) fn eval_case_arm_condition_effectful(
+    module: &Module,
+    store: &mut SymbolicStore<VarId>,
+    target_expr: &Expression,
+    target: &EvaluatedCaseTarget,
+    patterns: &[CasePattern],
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    fn eval_pattern(
+        module: &Module,
+        store: &mut SymbolicStore<VarId>,
+        target_expr: &Expression,
+        target: &EvaluatedCaseTarget,
+        pattern: &CasePattern,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+        match pattern {
+            CasePattern::Eq(value) => {
+                let mut store = ExpressionStore::Effectful(store);
+                eval_case_comparison(
+                    module,
+                    &mut store,
+                    target_expr,
+                    target,
+                    value,
+                    true,
+                    Op::EqWildcard,
+                    arena,
+                )
+            }
+            CasePattern::Range { lo, hi, inclusive } => {
+                let lhs = {
+                    let mut expression_store = ExpressionStore::Effectful(store);
+                    eval_case_comparison(
+                        module,
+                        &mut expression_store,
+                        target_expr,
+                        target,
+                        lo,
+                        false,
+                        Op::LessEq,
+                        arena,
+                    )?
+                };
+                merge_short_circuit_case_condition(
+                    module,
+                    store,
+                    lhs,
+                    |rhs_store, arena| {
+                        let mut expression_store = ExpressionStore::Effectful(rhs_store);
+                        eval_case_comparison(
+                            module,
+                            &mut expression_store,
+                            target_expr,
+                            target,
+                            hi,
+                            true,
+                            if *inclusive { Op::LessEq } else { Op::Less },
+                            arena,
+                        )
+                    },
+                    true,
+                    arena,
+                )
+            }
+        }
+    }
+
+    let mut patterns = patterns.iter();
+    let first = patterns
+        .next()
+        .expect("CaseArm must have at least one pattern");
+    let mut condition = eval_pattern(module, store, target_expr, target, first, arena)?;
+    for pattern in patterns {
+        condition = merge_short_circuit_case_condition(
+            module,
+            store,
+            condition,
+            |rhs_store, arena| eval_pattern(module, rhs_store, target_expr, target, pattern, arena),
+            false,
+            arena,
+        )?;
+    }
+    Ok(condition)
+}
+
 pub(super) fn eval_expression_in_context(
     module: &Module,
     store: &mut ExpressionStore<'_>,
@@ -2233,39 +2551,46 @@ pub(super) fn eval_expression_in_context(
             }
             let ((l_expr, l_sources), l_bounds) =
                 eval_expression_in_context(module, store, lhs, arena, semantics.lhs_context)?;
-            let ((r_expr, r_sources), r_bounds) =
-                if store.effectful_mut().is_some() && matches!(op, Op::LogicAnd | Op::LogicOr) {
-                    let base_store = store.current().clone();
-                    let mut rhs_store = base_store.clone();
-                    let mut rhs_state = ExpressionStore::Effectful(&mut rhs_store);
-                    let rhs_value = eval_expression_in_context(
-                        module,
-                        &mut rhs_state,
-                        rhs,
-                        arena,
-                        semantics.rhs_context,
-                    )?;
-                    let execute_rhs = if matches!(op, Op::LogicAnd) {
-                        l_expr
-                    } else {
-                        arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, l_expr))?
-                    };
-                    let merged_store = super::merge_symbolic_stores(
-                        module,
-                        &rhs_store,
-                        &base_store,
-                        execute_rhs,
-                        &l_sources,
-                        arena,
-                    )?;
-                    *store
-                        .effectful_mut()
-                        .expect("effectful binary expression must retain a mutable store") =
-                        merged_store;
-                    rhs_value
+            let ((r_expr, r_sources), r_bounds) = if store.effectful_mut().is_some()
+                && matches!(op, Op::LogicAnd | Op::LogicOr)
+            {
+                let base_store = store.current().clone();
+                let mut rhs_store = base_store.clone();
+                let mut rhs_state = ExpressionStore::Effectful(&mut rhs_store);
+                let rhs_value = eval_expression_in_context(
+                    module,
+                    &mut rhs_state,
+                    rhs,
+                    arena,
+                    semantics.rhs_context,
+                )?;
+                // Only a definite dominant value skips the RHS.  Map the
+                // four-state shortcut predicate through ToTwoState so X/Z
+                // continues into the RHS, matching the FF lowering.
+                let not_lhs = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, l_expr))?;
+                let shortcut_truth = if matches!(op, Op::LogicAnd) {
+                    not_lhs
                 } else {
-                    eval_expression_in_context(module, store, rhs, arena, semantics.rhs_context)?
+                    arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, not_lhs))?
                 };
+                let shortcut = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, shortcut_truth))?;
+                let execute_rhs = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, shortcut))?;
+                let merged_store = super::merge_symbolic_stores(
+                    module,
+                    &rhs_store,
+                    &base_store,
+                    execute_rhs,
+                    &l_sources,
+                    arena,
+                )?;
+                *store
+                    .effectful_mut()
+                    .expect("effectful binary expression must retain a mutable store") =
+                    merged_store;
+                rhs_value
+            } else {
+                eval_expression_in_context(module, store, rhs, arena, semantics.rhs_context)?
+            };
 
             let mut sources = l_sources;
             sources.extend(r_sources);

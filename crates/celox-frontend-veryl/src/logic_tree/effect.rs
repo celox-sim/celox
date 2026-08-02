@@ -1,5 +1,4 @@
 use super::*;
-use crate::case::case_arm_condition_expr;
 
 pub(super) fn subtract_written_sensitivity<A: Copy + Eq + std::hash::Hash>(
     atoms: impl IntoIterator<Item = VarAtomBase<A>>,
@@ -94,11 +93,11 @@ fn register_comb_runtime_event_site<'a>(
 
 fn collect_system_function_effect(
     module: &Module,
-    store: &SymbolicStore<VarId>,
+    store: &mut SymbolicStore<VarId>,
     call: &SystemFunctionCall,
     arena: &mut SLTNodeArena<VarId>,
     collector: &mut CombEffectCollector,
-) -> Result<(), ParserError> {
+) -> Result<BoundaryMap<VarId>, ParserError> {
     let (kind, cond, args) = match &call.kind {
         SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
             (RuntimeEventKind::Display, None, args.as_slice())
@@ -121,20 +120,15 @@ fn collect_system_function_effect(
         }
     };
     let (site_id, value_args) = register_comb_runtime_event_site(collector, kind, args);
+    let mut boundaries = BoundaryMap::default();
     let mut observer_args = Vec::new();
     let mut observed_inputs = HashSet::default();
     let mut position_inputs = HashSet::default();
-    for arg in value_args {
-        collect_expression_effects(module, store, &arg.0, arena, collector)?;
-        let ((node, sources), _) = eval_expression(module, store, &arg.0, arena, None)?;
-        observed_inputs.extend(sources.iter().copied());
-        collector.sensitivity.extend(sources);
-        collect_expression_position_inputs(module, &arg.0, &mut position_inputs)?;
-        observer_args.push(node);
-    }
     let explicit_guard = if let Some(cond) = cond {
         collect_expression_effects(module, store, cond, arena, collector)?;
-        let ((cond_node, cond_sources), _) = eval_expression(module, store, cond, arena, None)?;
+        let ((cond_node, cond_sources), cond_boundaries) =
+            eval_expression_effectful(module, store, cond, arena, None)?;
+        boundaries = merge_boundaries(boundaries, cond_boundaries);
         observed_inputs.extend(cond_sources.iter().copied());
         collector.sensitivity.extend(cond_sources);
         collect_expression_position_inputs(module, cond, &mut position_inputs)?;
@@ -142,6 +136,16 @@ fn collect_system_function_effect(
     } else {
         None
     };
+    for arg in value_args {
+        collect_expression_effects(module, store, &arg.0, arena, collector)?;
+        let ((node, sources), arg_boundaries) =
+            eval_expression_effectful(module, store, &arg.0, arena, None)?;
+        boundaries = merge_boundaries(boundaries, arg_boundaries);
+        observed_inputs.extend(sources.iter().copied());
+        collector.sensitivity.extend(sources);
+        collect_expression_position_inputs(module, &arg.0, &mut position_inputs)?;
+        observer_args.push(node);
+    }
     observed_inputs.extend(collector.active_guard_sources.iter().copied());
     let guard = match (kind, collector.active_guard, explicit_guard) {
         (RuntimeEventKind::Display, active, None) => active,
@@ -188,7 +192,7 @@ fn collect_system_function_effect(
         })
         .collect();
     let mut local_inputs = Vec::new();
-    for (id, range_store) in store {
+    for (id, range_store) in store.iter() {
         if !observed_ids.contains(id) {
             continue;
         }
@@ -270,7 +274,7 @@ fn collect_system_function_effect(
     if let (Some(loop_effects), Some(loop_effect)) = (&mut collector.loop_effects, loop_effect) {
         loop_effects.push(loop_effect);
     }
-    Ok(())
+    Ok(boundaries)
 }
 
 fn with_collector_guard<T, F>(
@@ -553,6 +557,27 @@ fn collect_expression_effects(
     }
 }
 
+fn collect_case_pattern_effects(
+    module: &Module,
+    store: &SymbolicStore<VarId>,
+    patterns: &[CasePattern],
+    arena: &mut SLTNodeArena<VarId>,
+    collector: &mut CombEffectCollector,
+) -> Result<(), ParserError> {
+    for pattern in patterns {
+        match pattern {
+            CasePattern::Eq(expression) => {
+                collect_expression_effects(module, store, expression, arena, collector)?;
+            }
+            CasePattern::Range { lo, hi, .. } => {
+                collect_expression_effects(module, store, lo, arena, collector)?;
+                collect_expression_effects(module, store, hi, arena, collector)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn collect_factor_effects(
     module: &Module,
     store: &SymbolicStore<VarId>,
@@ -574,9 +599,8 @@ fn collect_factor_effects(
             collect_function_call_effects(module, store, call, arena, collector)
         }
         Factor::SystemFunctionCall(call) => match &call.kind {
-            SystemFunctionKind::Bits(input)
-            | SystemFunctionKind::Size(input)
-            | SystemFunctionKind::Clog2(input)
+            SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => Ok(()),
+            SystemFunctionKind::Clog2(input)
             | SystemFunctionKind::Onehot(input)
             | SystemFunctionKind::Signed(input)
             | SystemFunctionKind::Unsigned(input) => {
@@ -617,6 +641,7 @@ fn collect_function_body_effects(
         module: &Module,
         mut state: FunctionControlState,
         case_stmt: &CaseStatement,
+        target: &expr::EvaluatedCaseTarget,
         arm_index: usize,
         ret_id: VarId,
         arena: &mut SLTNodeArena<VarId>,
@@ -626,18 +651,33 @@ fn collect_function_body_effects(
             return collect_statements(module, state, &case_stmt.default, ret_id, arena, collector);
         };
 
-        let cond = case_arm_condition_expr(&case_stmt.case_target, &arm.patterns);
         let store = state.store.clone();
         let live = state.live_expr;
         let live_sources = state.live_sources.clone();
         with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
-            collect_expression_effects(module, &store, &cond, arena, collector)
+            collect_case_pattern_effects(module, &store, &arm.patterns, arena, collector)
         })?;
 
-        let ((cond_node, cond_sources), cond_bounds) =
-            eval_expression_effectful(module, &mut state.store, &cond, arena, None)?;
+        let mut next_store = state.store.clone();
+        let ((cond_node, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
+            module,
+            &mut next_store,
+            &case_stmt.case_target,
+            target,
+            &arm.patterns,
+            arena,
+        )?;
+        state = apply_function_guard(
+            module,
+            state,
+            next_store,
+            cond_bounds,
+            bool_node(arena, true)?,
+            HashSet::default(),
+            arena,
+        )?;
         let cond_node = procedural_condition(arena, cond_node)?;
-        let boundaries = merge_boundaries(state.boundaries, cond_bounds);
+        let boundaries = state.boundaries.clone();
 
         if let Some(cond_val) = constant_bool(arena, cond_node) {
             let state = FunctionControlState {
@@ -651,6 +691,7 @@ fn collect_function_body_effects(
                     module,
                     state,
                     case_stmt,
+                    target,
                     arm_index + 1,
                     ret_id,
                     arena,
@@ -711,6 +752,7 @@ fn collect_function_body_effects(
                         live_sources: state.live_sources,
                     },
                     case_stmt,
+                    target,
                     arm_index + 1,
                     ret_id,
                     arena,
@@ -788,6 +830,28 @@ fn collect_function_body_effects(
                 })
             }
         }
+    }
+
+    fn eval_guarded_function_expression(
+        module: &Module,
+        state: FunctionControlState,
+        expression: &Expression,
+        context_width: Option<usize>,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<(FunctionControlState, NodeId, HashSet<VarAtomBase<VarId>>), ParserError> {
+        let mut next_store = state.store.clone();
+        let ((node, sources), boundaries) =
+            eval_expression_effectful(module, &mut next_store, expression, arena, context_width)?;
+        let state = apply_function_guard(
+            module,
+            state,
+            next_store,
+            boundaries,
+            bool_node(arena, true)?,
+            HashSet::default(),
+            arena,
+        )?;
+        Ok((state, node, sources))
     }
 
     fn statement_contains_return(stmt: &Statement, ret_id: VarId) -> bool {
@@ -1076,24 +1140,29 @@ fn collect_function_body_effects(
             }
             Statement::SystemFunctionCall(call) => {
                 let guard_state = state.clone();
-                let store = state.store.clone();
+                let mut next_store = state.store.clone();
                 let live = state.live_expr;
                 let live_sources = state.live_sources.clone();
-                with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
-                    collect_system_function_effect(module, &store, call, arena, collector)
-                })?;
-                let (next_store, next_boundaries) = eval_system_function_call_side_effects(
-                    module,
-                    state.store,
-                    state.boundaries,
-                    call,
+                let effect_boundaries = with_collector_guard(
+                    collector,
                     arena,
+                    live,
+                    live_sources,
+                    |collector, arena| {
+                        collect_system_function_effect(
+                            module,
+                            &mut next_store,
+                            call,
+                            arena,
+                            collector,
+                        )
+                    },
                 )?;
                 apply_function_guard(
                     module,
                     guard_state,
                     next_store,
-                    next_boundaries,
+                    effect_boundaries,
                     bool_node(arena, true)?,
                     HashSet::default(),
                     arena,
@@ -1133,15 +1202,11 @@ fn collect_function_body_effects(
                     collect_expression_effects(module, &store, &if_stmt.cond, arena, collector)
                 })?;
 
-                let ((cond_node, cond_sources), cond_boundaries) = eval_expression_effectful(
-                    module,
-                    &mut state.store,
-                    &if_stmt.cond,
-                    arena,
-                    None,
-                )?;
+                let (next_state, cond_node, cond_sources) =
+                    eval_guarded_function_expression(module, state, &if_stmt.cond, None, arena)?;
+                state = next_state;
                 let cond_node = procedural_condition(arena, cond_node)?;
-                let boundaries = merge_boundaries(state.boundaries, cond_boundaries);
+                let boundaries = state.boundaries.clone();
                 let true_guard = arena.alloc(SLTNode::Binary(
                     state.live_expr,
                     BinaryOp::LogicAnd,
@@ -1225,7 +1290,32 @@ fn collect_function_body_effects(
                 })
             }
             Statement::Case(case_stmt) => {
-                collect_case_from_arm(module, state, case_stmt, 0, ret_id, arena, collector)
+                let store = state.store.clone();
+                let live = state.live_expr;
+                let live_sources = state.live_sources.clone();
+                with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
+                    collect_expression_effects(
+                        module,
+                        &store,
+                        &case_stmt.case_target,
+                        arena,
+                        collector,
+                    )
+                })?;
+                let (state, target_node, target_sources) = eval_guarded_function_expression(
+                    module,
+                    state,
+                    &case_stmt.case_target,
+                    None,
+                    arena,
+                )?;
+                let target = expr::EvaluatedCaseTarget {
+                    node: target_node,
+                    sources: target_sources,
+                };
+                collect_case_from_arm(
+                    module, state, case_stmt, &target, 0, ret_id, arena, collector,
+                )
             }
             Statement::For(for_stmt) => {
                 if statement_contains_return(&Statement::For(for_stmt.clone()), ret_id) {
@@ -1380,15 +1470,7 @@ pub(super) fn collect_comb_effects_statements(
                 store = next_store;
             }
             Statement::SystemFunctionCall(call) => {
-                collect_system_function_effect(module, &store, call, arena, collector)?;
-                let (next_store, _) = eval_system_function_call_side_effects(
-                    module,
-                    store,
-                    BoundaryMap::default(),
-                    call,
-                    arena,
-                )?;
-                store = next_store;
+                collect_system_function_effect(module, &mut store, call, arena, collector)?;
             }
             Statement::FunctionCall(call) => {
                 collect_function_call_effects(module, &store, call, arena, collector)?;
@@ -1472,7 +1554,7 @@ pub(super) fn collect_comb_effects_statements(
 
 fn collect_comb_effects_case(
     module: &Module,
-    store: SymbolicStore<VarId>,
+    mut store: SymbolicStore<VarId>,
     case_stmt: &CaseStatement,
     arena: &mut SLTNodeArena<VarId>,
     collector: &mut CombEffectCollector,
@@ -1481,6 +1563,7 @@ fn collect_comb_effects_case(
         module: &Module,
         mut store: SymbolicStore<VarId>,
         case_stmt: &CaseStatement,
+        target: &expr::EvaluatedCaseTarget,
         arm_index: usize,
         arena: &mut SLTNodeArena<VarId>,
         collector: &mut CombEffectCollector,
@@ -1495,10 +1578,15 @@ fn collect_comb_effects_case(
             );
         };
 
-        let cond = case_arm_condition_expr(&case_stmt.case_target, &arm.patterns);
-        collect_expression_effects(module, &store, &cond, arena, collector)?;
-        let ((cond_node, sources), _) =
-            eval_expression_effectful(module, &mut store, &cond, arena, None)?;
+        collect_case_pattern_effects(module, &store, &arm.patterns, arena, collector)?;
+        let ((cond_node, sources), _) = eval_case_arm_condition_effectful(
+            module,
+            &mut store,
+            &case_stmt.case_target,
+            target,
+            &arm.patterns,
+            arena,
+        )?;
         let cond_node = procedural_condition(arena, cond_node)?;
         collector.sensitivity.extend(sources.iter().copied());
 
@@ -1526,8 +1614,15 @@ fn collect_comb_effects_case(
         false_sources.extend(sources.iter().copied());
         collector.active_guard = Some(false_guard);
         collector.active_guard_sources = false_sources;
-        let else_store =
-            collect_from_arm(module, store, case_stmt, arm_index + 1, arena, collector)?;
+        let else_store = collect_from_arm(
+            module,
+            store,
+            case_stmt,
+            target,
+            arm_index + 1,
+            arena,
+            collector,
+        )?;
 
         collector.active_guard = saved_guard;
         collector.active_guard_sources = saved_guard_sources;
@@ -1541,7 +1636,10 @@ fn collect_comb_effects_case(
         )
     }
 
-    collect_from_arm(module, store, case_stmt, 0, arena, collector)
+    collect_expression_effects(module, &store, &case_stmt.case_target, arena, collector)?;
+    let (target, _) =
+        eval_case_target_effectful(module, &mut store, &case_stmt.case_target, arena)?;
+    collect_from_arm(module, store, case_stmt, &target, 0, arena, collector)
 }
 
 fn collect_comb_effects_for(

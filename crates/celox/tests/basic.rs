@@ -927,6 +927,174 @@ module Top (
     assert_eq!(sim.get(q_output), 11u32.into());
     }
 
+    fn test_comb_case_target_output_call_is_evaluated_once(sim) {
+        // Veryl simulator 0.20.2 re-evaluates the effectful case target for
+        // each arm, so the second comparison observes the first writeback.
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    q: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x;
+    }
+
+    var tmp: logic<8>;
+    always_comb {
+        tmp = 8'd0;
+        case f(tmp, tmp) {
+            8'd9: q = 8'd9;
+            8'd0: q = 8'd10;
+            default: q = 8'd12;
+        }
+        q_output = tmp;
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let q = sim.signal("q");
+    let q_output = sim.signal("q_output");
+
+    assert_eq!(sim.get(q), 10u32.into());
+    assert_eq!(sim.get(q_output), 1u32.into());
+    }
+
+    fn test_comb_loop_bound_output_call_writes_back_once(sim) {
+        // Veryl simulator 0.20.2 accepts this program but drops the output
+        // argument writeback from the runtime loop-bound expression.
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x;
+    }
+
+    always_comb {
+        q = 8'd0;
+        q_output = 8'd0;
+        for i in f(d, q_output)..4 {
+            q = q + 8'd1;
+        }
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+    let q_output = sim.signal("q_output");
+
+    sim.modify(|io| io.set(d, 1u8)).unwrap();
+    assert_eq!(sim.get(q), 3u32.into());
+    assert_eq!(sim.get(q_output), 2u32.into());
+    }
+
+    fn test_comb_value_system_function_statement_applies_argument_outputs(sim) {
+        // Veryl simulator 0.20.2 rejects value-returning system functions in
+        // statement position even though the analyzer accepts the source.
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    always_comb {
+        q_output = 8'd0;
+        $unsigned(f(d, q_output));
+        q = q_output;
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+    let q_output = sim.signal("q_output");
+
+    sim.modify(|io| io.set(d, 10u8)).unwrap();
+    assert_eq!(sim.get(q), 11u32.into());
+    assert_eq!(sim.get(q_output), 11u32.into());
+    }
+
+    fn test_comb_function_condition_output_is_guarded_after_early_return(sim) {
+        // Veryl simulator 0.20.2 does not preserve this nested early-return
+        // behavior when the later condition contains an output call.
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    sel: input logic,
+    d: input logic<8>,
+    q: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function inner (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic {
+        y = x + 8'd1;
+        return 1'b1;
+    }
+
+    function outer (
+        sel: input logic,
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        if sel {
+            return 8'd0;
+        }
+        if inner(x, y) {
+            return x + 8'd2;
+        }
+        return 8'd1;
+    }
+
+    always_comb {
+        q_output = 8'd7;
+        q = outer(sel, d, q_output);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let sel = sim.signal("sel");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+    let q_output = sim.signal("q_output");
+
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set(d, 10u8);
+    }).unwrap();
+    assert_eq!(sim.get(q), 0u32.into());
+    // The outer output formal is still copied back with its default value,
+    // but the skipped inner call must not overwrite it with d + 1.
+    assert_eq!(sim.get(q_output), 0u32.into());
+
+    sim.modify(|io| io.set(sel, 0u8)).unwrap();
+    assert_eq!(sim.get(q), 12u32.into());
+    assert_eq!(sim.get(q_output), 11u32.into());
+    }
+
     fn test_comb_function_call_statement_ignores_return_value(sim) {
         @ignore_on(veryl);
         @setup { let code = r#"

@@ -6,6 +6,41 @@ use celox::{DeadStorePolicy, Simulator};
 mod test_utils;
 
 all_backends! {
+fn test_comb_display_arguments_observe_output_call_writeback_order(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    d: input logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    always_comb {
+        q_output = 8'd0;
+        $display("ret=%0d out=%0d", f(d, q_output), q_output);
+    }
+}
+"#, "Top");
+
+    let d = sim.signal("d");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(d, 10u8)).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "ret=12 out=11".to_string(),
+        }],
+    );
+}
+
 fn test_comb_display_follows_always_comb_sensitivity_after_settle(sim) {
     @omit_veryl;
     @ignore_on(wasm);

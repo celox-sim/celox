@@ -22,7 +22,6 @@ use std::{collections::BTreeSet, hash::Hash};
 use crate::{
     HashMap, HashSet, LoweringPhase, ParserError,
     bitaccess::{PartSelectGeometry, eval_constexpr, eval_var_select, select_geometry},
-    case::case_arm_condition_expr,
     loop_provenance::LoopRecoveryCandidate,
     resolve_total_width,
 };
@@ -47,7 +46,8 @@ use effect::{
 pub use expr::coerce_node_width;
 use expr::{
     eval_array_literal_expression_effectful, eval_assignment_expression_effectful,
-    eval_expression_effectful, eval_function_body_return, merge_boundaries,
+    eval_case_arm_condition_effectful, eval_case_target_effectful, eval_expression_effectful,
+    eval_function_body_return, merge_boundaries,
 };
 pub use expr::{eval_assignment_expression, eval_expression, get_width};
 use state::{FunctionControlState, LoopControlState};
@@ -540,12 +540,14 @@ fn eval_system_function_call_side_effects(
                 eval_input(module, &mut store, &mut boundaries, input, arena)?;
             }
         }
+        SystemFunctionKind::Clog2(input)
+        | SystemFunctionKind::Onehot(input)
+        | SystemFunctionKind::Signed(input)
+        | SystemFunctionKind::Unsigned(input) => {
+            eval_input(module, &mut store, &mut boundaries, input, arena)?;
+        }
         SystemFunctionKind::Bits(_)
         | SystemFunctionKind::Size(_)
-        | SystemFunctionKind::Clog2(_)
-        | SystemFunctionKind::Onehot(_)
-        | SystemFunctionKind::Signed(_)
-        | SystemFunctionKind::Unsigned(_)
         | SystemFunctionKind::Readmemh(_, _)
         | SystemFunctionKind::Finish => {}
     }
@@ -589,7 +591,7 @@ fn eval_statements_with_recovery(
 
 fn eval_case_with_recovery(
     module: &Module,
-    store: SymbolicStore<VarId>,
+    mut store: SymbolicStore<VarId>,
     boundaries: BoundaryMap<VarId>,
     case_stmt: &CaseStatement,
     arena: &mut SLTNodeArena<VarId>,
@@ -601,6 +603,7 @@ fn eval_case_with_recovery(
         mut store: SymbolicStore<VarId>,
         boundaries: BoundaryMap<VarId>,
         case_stmt: &CaseStatement,
+        target: &expr::EvaluatedCaseTarget,
         arm_index: usize,
         arena: &mut SLTNodeArena<VarId>,
         loop_candidates: &[LoopRecoveryCandidate],
@@ -618,9 +621,14 @@ fn eval_case_with_recovery(
             );
         };
 
-        let cond = case_arm_condition_expr(&case_stmt.case_target, &arm.patterns);
-        let ((cond_expr, cond_sources), cond_bounds) =
-            eval_expression_effectful(module, &mut store, &cond, arena, None)?;
+        let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
+            module,
+            &mut store,
+            &case_stmt.case_target,
+            target,
+            &arm.patterns,
+            arena,
+        )?;
         let cond_expr = procedural_condition(arena, cond_expr)?;
         let boundaries = merge_boundaries(boundaries, cond_bounds);
 
@@ -641,6 +649,7 @@ fn eval_case_with_recovery(
                     store,
                     boundaries,
                     case_stmt,
+                    target,
                     arm_index + 1,
                     arena,
                     loop_candidates,
@@ -667,6 +676,7 @@ fn eval_case_with_recovery(
             store,
             boundaries,
             case_stmt,
+            target,
             arm_index + 1,
             arena,
             loop_candidates,
@@ -686,11 +696,15 @@ fn eval_case_with_recovery(
         ))
     }
 
+    let (target, target_boundaries) =
+        eval_case_target_effectful(module, &mut store, &case_stmt.case_target, arena)?;
+    let boundaries = merge_boundaries(boundaries, target_boundaries);
     eval_from_arm(
         module,
         store,
         boundaries,
         case_stmt,
+        &target,
         0,
         arena,
         loop_candidates,
@@ -710,6 +724,7 @@ fn eval_case(
         mut store: SymbolicStore<VarId>,
         boundaries: BoundaryMap<VarId>,
         case_stmt: &CaseStatement,
+        target: &expr::EvaluatedCaseTarget,
         arm_index: usize,
         arena: &mut SLTNodeArena<VarId>,
     ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
@@ -717,9 +732,14 @@ fn eval_case(
             return eval_statements(module, store, boundaries, &case_stmt.default, arena);
         };
 
-        let cond = case_arm_condition_expr(&case_stmt.case_target, &arm.patterns);
-        let ((cond_expr, cond_sources), cond_bounds) =
-            eval_expression_effectful(module, &mut store, &cond, arena, None)?;
+        let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
+            module,
+            &mut store,
+            &case_stmt.case_target,
+            target,
+            &arm.patterns,
+            arena,
+        )?;
         let cond_expr = procedural_condition(arena, cond_expr)?;
         let boundaries = merge_boundaries(boundaries, cond_bounds);
 
@@ -727,14 +747,29 @@ fn eval_case(
             return if cond_val {
                 eval_statements(module, store, boundaries, &arm.body, arena)
             } else {
-                eval_from_arm(module, store, boundaries, case_stmt, arm_index + 1, arena)
+                eval_from_arm(
+                    module,
+                    store,
+                    boundaries,
+                    case_stmt,
+                    target,
+                    arm_index + 1,
+                    arena,
+                )
             };
         }
 
         let (then_store, then_boundaries) =
             eval_statements(module, store.clone(), boundaries.clone(), &arm.body, arena)?;
-        let (else_store, else_boundaries) =
-            eval_from_arm(module, store, boundaries, case_stmt, arm_index + 1, arena)?;
+        let (else_store, else_boundaries) = eval_from_arm(
+            module,
+            store,
+            boundaries,
+            case_stmt,
+            target,
+            arm_index + 1,
+            arena,
+        )?;
 
         Ok((
             merge_symbolic_stores(
@@ -749,7 +784,18 @@ fn eval_case(
         ))
     }
 
-    eval_from_arm(module, store, boundaries, case_stmt, 0, arena)
+    let mut store = store;
+    let (target, target_boundaries) =
+        eval_case_target_effectful(module, &mut store, &case_stmt.case_target, arena)?;
+    eval_from_arm(
+        module,
+        store,
+        merge_boundaries(boundaries, target_boundaries),
+        case_stmt,
+        &target,
+        0,
+        arena,
+    )
 }
 
 fn bool_node(arena: &mut SLTNodeArena<VarId>, value: bool) -> Result<NodeId, SLTNodeFactsError> {
@@ -1070,7 +1116,7 @@ fn eval_loop_statement(
 
 fn eval_loop_case(
     module: &Module,
-    state: LoopControlState,
+    mut state: LoopControlState,
     case_stmt: &CaseStatement,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<LoopControlState, ParserError> {
@@ -1078,6 +1124,7 @@ fn eval_loop_case(
         module: &Module,
         mut state: LoopControlState,
         case_stmt: &CaseStatement,
+        target: &expr::EvaluatedCaseTarget,
         arm_index: usize,
         arena: &mut SLTNodeArena<VarId>,
     ) -> Result<LoopControlState, ParserError> {
@@ -1088,12 +1135,13 @@ fn eval_loop_case(
                 .try_fold(state, |s, step| eval_loop_statement(module, s, step, arena));
         };
 
-        let ((cond_expr, cond_sources), cond_bounds) = eval_expression_effectful(
+        let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
             module,
             &mut state.store,
-            &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
+            &case_stmt.case_target,
+            target,
+            &arm.patterns,
             arena,
-            None,
         )?;
         let cond_expr = procedural_condition(arena, cond_expr)?;
         let boundaries = merge_boundaries(state.boundaries, cond_bounds);
@@ -1108,7 +1156,7 @@ fn eval_loop_case(
                     .iter()
                     .try_fold(state, |s, step| eval_loop_statement(module, s, step, arena))
             } else {
-                eval_from_arm(module, state, case_stmt, arm_index + 1, arena)
+                eval_from_arm(module, state, case_stmt, target, arm_index + 1, arena)
             };
         }
 
@@ -1130,6 +1178,7 @@ fn eval_loop_case(
                 continue_sources: state.continue_sources,
             },
             case_stmt,
+            target,
             arm_index + 1,
             arena,
         )?;
@@ -1158,7 +1207,10 @@ fn eval_loop_case(
         })
     }
 
-    eval_from_arm(module, state, case_stmt, 0, arena)
+    let (target, target_boundaries) =
+        eval_case_target_effectful(module, &mut state.store, &case_stmt.case_target, arena)?;
+    state.boundaries = merge_boundaries(state.boundaries, target_boundaries);
+    eval_from_arm(module, state, case_stmt, &target, 0, arena)
 }
 
 fn eval_loop_if(
@@ -1293,6 +1345,33 @@ fn eval_for_bound(
         ForBound::Expression(expr) => {
             let ((node, sources), bounds) = eval_expression(module, store, expr, arena, None)?;
             Ok((SLTLoopBound::Expr(node), sources, bounds))
+        }
+    }
+}
+
+fn eval_for_bound_effectful(
+    module: &Module,
+    store: &mut SymbolicStore<VarId>,
+    bound: &ForBound,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<
+    (
+        SLTLoopBound,
+        HashSet<VarAtomBase<VarId>>,
+        BoundaryMap<VarId>,
+    ),
+    ParserError,
+> {
+    match bound {
+        ForBound::Const(value) => Ok((
+            SLTLoopBound::Const(*value),
+            HashSet::default(),
+            BoundaryMap::default(),
+        )),
+        ForBound::Expression(expression) => {
+            let ((node, sources), boundaries) =
+                eval_expression_effectful(module, store, expression, arena, None)?;
+            Ok((SLTLoopBound::Expr(node), sources, boundaries))
         }
     }
 }
@@ -1521,9 +1600,10 @@ fn collect_written_system_function_call(
     let mut collect_input =
         |input: &SystemFunctionInput| collect_written_expression(module, &input.0, out);
     match &call.kind {
-        SystemFunctionKind::Bits(input)
-        | SystemFunctionKind::Size(input)
-        | SystemFunctionKind::Clog2(input)
+        // These operands are queried for shape only and are not evaluated at
+        // runtime, so nested output arguments are not writes of this process.
+        SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => Ok(()),
+        SystemFunctionKind::Clog2(input)
         | SystemFunctionKind::Onehot(input)
         | SystemFunctionKind::Signed(input)
         | SystemFunctionKind::Unsigned(input) => collect_input(input),
@@ -1574,8 +1654,8 @@ fn eval_for(
 
 fn eval_for_with_effects(
     module: &Module,
-    store: SymbolicStore<VarId>,
-    boundaries: HashMap<VarId, BTreeSet<usize>>,
+    mut store: SymbolicStore<VarId>,
+    mut boundaries: HashMap<VarId, BTreeSet<usize>>,
     for_stmt: &ForStatement,
     arena: &mut SLTNodeArena<VarId>,
     effects: &[SLTForEffect],
@@ -1611,6 +1691,96 @@ fn eval_for_with_effects(
             Some(&for_stmt.token),
         ));
     }
+
+    // Bounds are ordinary runtime expressions. Evaluate them once, from left
+    // to right, before constructing the loop state so output-argument writes
+    // are visible both inside the loop and after it.
+    let (start, end, start_sources, end_sources, inclusive, step, step_op, reverse) =
+        match &for_stmt.range {
+            ForRange::Forward {
+                start: range_start,
+                end: range_end,
+                inclusive,
+                step,
+            } => {
+                let (start, start_sources, start_bounds) =
+                    eval_for_bound_effectful(module, &mut store, range_start, arena)?;
+                boundaries = merge_boundaries(boundaries, start_bounds);
+                let (end, end_sources, end_bounds) =
+                    eval_for_bound_effectful(module, &mut store, range_end, arena)?;
+                boundaries = merge_boundaries(boundaries, end_bounds);
+                (
+                    start,
+                    end,
+                    start_sources,
+                    end_sources,
+                    *inclusive,
+                    *step,
+                    SLTStepOp::Add,
+                    false,
+                )
+            }
+            ForRange::Reverse {
+                start: range_start,
+                end: range_end,
+                inclusive,
+                step,
+            } => {
+                let (start, start_sources, start_bounds) =
+                    eval_for_bound_effectful(module, &mut store, range_start, arena)?;
+                boundaries = merge_boundaries(boundaries, start_bounds);
+                let (end, end_sources, end_bounds) =
+                    eval_for_bound_effectful(module, &mut store, range_end, arena)?;
+                boundaries = merge_boundaries(boundaries, end_bounds);
+                (
+                    start,
+                    end,
+                    start_sources,
+                    end_sources,
+                    *inclusive,
+                    *step,
+                    SLTStepOp::Add,
+                    true,
+                )
+            }
+            ForRange::Stepped {
+                start: range_start,
+                end: range_end,
+                inclusive,
+                step,
+                op,
+            } => {
+                let (start, start_sources, start_bounds) =
+                    eval_for_bound_effectful(module, &mut store, range_start, arena)?;
+                boundaries = merge_boundaries(boundaries, start_bounds);
+                let (end, end_sources, end_bounds) =
+                    eval_for_bound_effectful(module, &mut store, range_end, arena)?;
+                boundaries = merge_boundaries(boundaries, end_bounds);
+                let step_op = match op {
+                    Op::Mul => SLTStepOp::Mul,
+                    Op::LogicShiftL | Op::ArithShiftL => SLTStepOp::Shl,
+                    Op::BitOr => SLTStepOp::BitOr,
+                    Op::BitXor => SLTStepOp::BitXor,
+                    other => {
+                        return Err(ParserError::illegal_context(
+                            "for loop step operator",
+                            format!("{other:?}"),
+                            Some(&for_stmt.token),
+                        ));
+                    }
+                };
+                (
+                    start,
+                    end,
+                    start_sources,
+                    end_sources,
+                    *inclusive,
+                    *step,
+                    step_op,
+                    false,
+                )
+            }
+        };
 
     let mut symbolic_store = store.clone();
     let mut written_accesses = HashMap::default();
@@ -1663,104 +1833,7 @@ fn eval_for_with_effects(
         |state, stmt| eval_loop_statement(module, state, stmt, arena),
     )?;
     let iter_store_after = loop_state.store;
-    let mut merged_boundaries = loop_state.boundaries;
-
-    let (
-        start,
-        end,
-        start_sources,
-        end_sources,
-        start_bounds,
-        end_bounds,
-        inclusive,
-        step,
-        step_op,
-        reverse,
-    ) = match &for_stmt.range {
-        ForRange::Forward {
-            start: range_start,
-            end: range_end,
-            inclusive,
-            step,
-        } => {
-            let (start, start_sources, start_bounds) =
-                eval_for_bound(module, &store, range_start, arena)?;
-            let (end, end_sources, end_bounds) = eval_for_bound(module, &store, range_end, arena)?;
-            (
-                start,
-                end,
-                start_sources,
-                end_sources,
-                start_bounds,
-                end_bounds,
-                *inclusive,
-                *step,
-                SLTStepOp::Add,
-                false,
-            )
-        }
-        ForRange::Reverse {
-            start: range_start,
-            end: range_end,
-            inclusive,
-            step,
-        } => {
-            let (start, start_sources, start_bounds) =
-                eval_for_bound(module, &store, range_start, arena)?;
-            let (end, end_sources, end_bounds) = eval_for_bound(module, &store, range_end, arena)?;
-            (
-                start,
-                end,
-                start_sources,
-                end_sources,
-                start_bounds,
-                end_bounds,
-                *inclusive,
-                *step,
-                SLTStepOp::Add,
-                true,
-            )
-        }
-        ForRange::Stepped {
-            start: range_start,
-            end: range_end,
-            inclusive,
-            step,
-            op,
-        } => {
-            let (start, start_sources, start_bounds) =
-                eval_for_bound(module, &store, range_start, arena)?;
-            let (end, end_sources, end_bounds) = eval_for_bound(module, &store, range_end, arena)?;
-            let step_op = match op {
-                Op::Mul => SLTStepOp::Mul,
-                Op::LogicShiftL | Op::ArithShiftL => SLTStepOp::Shl,
-                Op::BitOr => SLTStepOp::BitOr,
-                Op::BitXor => SLTStepOp::BitXor,
-                other => {
-                    return Err(ParserError::illegal_context(
-                        "for loop step operator",
-                        format!("{other:?}"),
-                        Some(&for_stmt.token),
-                    ));
-                }
-            };
-            (
-                start,
-                end,
-                start_sources,
-                end_sources,
-                start_bounds,
-                end_bounds,
-                *inclusive,
-                *step,
-                step_op,
-                false,
-            )
-        }
-    };
-
-    merged_boundaries = merge_boundaries(merged_boundaries, start_bounds);
-    merged_boundaries = merge_boundaries(merged_boundaries, end_bounds);
+    let merged_boundaries = loop_state.boundaries;
 
     let updates = extract_store_updates(&iter_store_before, &iter_store_after, arena)?;
     if updates.is_empty() && effects.is_empty() {
@@ -3347,6 +3420,60 @@ mod tests {
 
         let q_output = var_id_of(&module, &["q_output"]);
         assert_eq!(written[&q_output], vec![BitAccess::new(0, 7)]);
+    }
+
+    #[test]
+    fn test_collect_written_accesses_excludes_unevaluated_shape_operands() {
+        let code = r#"
+            module Top (
+                d: input logic<8>,
+                q: output logic<32>,
+                q_output: output logic<8>,
+            ) {
+                function f (
+                    x: input logic<8>,
+                    y: output logic<8>,
+                ) -> logic<8> {
+                    y = x + 8'd1;
+                    return x;
+                }
+
+                always_comb {
+                    q_output = 8'd0;
+                    q = $bits(f(d, q_output)) + $size(f(d, q_output));
+                }
+            }
+        "#;
+        let module = parse_top_module(code);
+        let comb_decl = module
+            .declarations
+            .iter()
+            .find_map(|declaration| {
+                if let Declaration::Comb(comb) = declaration {
+                    Some(comb)
+                } else {
+                    None
+                }
+            })
+            .expect("No always_comb found in Top");
+        let q = var_id_of(&module, &["q"]);
+        let expression = comb_decl
+            .statements
+            .iter()
+            .filter_map(|statement| {
+                if let Statement::Assign(assign) = statement {
+                    Some(assign)
+                } else {
+                    None
+                }
+            })
+            .find(|assign| assign.dst.iter().any(|dst| dst.id == q))
+            .expect("No q assignment found in Top");
+        let mut written = HashMap::default();
+        collect_written_expression(&module, &expression.expr, &mut written).unwrap();
+
+        let q_output = var_id_of(&module, &["q_output"]);
+        assert!(!written.contains_key(&q_output));
     }
 
     #[test]

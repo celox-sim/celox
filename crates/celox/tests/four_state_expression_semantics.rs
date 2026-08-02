@@ -5,6 +5,40 @@ use celox::{BigUint, Simulator};
 mod test_utils;
 
 all_backends! {
+    fn indeterminate_short_circuit_lhs_executes_effectful_rhs(sim) {
+        @omit_veryl;
+        @build Simulator::builder(r#"
+module Top (
+    u: input logic,
+    and_output: output logic,
+    or_output: output logic,
+    and_result: output logic,
+    or_result: output logic,
+) {
+    function set_output (y: output logic) -> logic {
+        y = 1'b1;
+        return 1'b1;
+    }
+
+    always_comb {
+        and_output = 1'b0;
+        or_output = 1'b0;
+        and_result = u && set_output(and_output);
+        or_result = u || set_output(or_output);
+    }
+}
+"#, "Top").four_state(true);
+
+        let u = sim.signal("u");
+        sim.modify(|io| {
+            io.set_four_state(u, BigUint::from(0u8), BigUint::from(1u8));
+        })
+        .unwrap();
+
+        assert_eq!(sim.get(sim.signal("and_output")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("or_output")), 1u8.into());
+    }
+
     fn logical_unknown_truth_table_matches_comb_and_ff(sim) {
         @omit_veryl;
         @build Simulator::builder(r#"
