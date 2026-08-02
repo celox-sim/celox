@@ -348,7 +348,7 @@ fn collect_function_call_effects(
     };
 
     let mut actual_store = store.clone();
-    let mut local_store = store.clone();
+    let mut formal_bindings = Vec::new();
     for (arg_id, arg_expr) in super::ordered_function_inputs(function, &function_body, call)? {
         collect_expression_effects(module, &actual_store, arg_expr, arena, collector)?;
         let mut actual_inputs = HashSet::default();
@@ -373,11 +373,18 @@ fn collect_function_call_effects(
         // always_comb process.  Its formal is only a local symbolic binding;
         // sensitivity must therefore retain the actual argument's sources.
         collector.sensitivity.extend(arg_sources.iter().copied());
-        local_store.insert(
+        formal_bindings.push((
             arg_id,
             RangeStore::new(Some((arg_node, arg_sources)), arg_width),
-        );
+        ));
     }
+
+    // Actuals are evaluated in caller order and may write module-scoped
+    // variables through nested output arguments.  Callee runtime effects must
+    // therefore start from that advanced caller state, just like value
+    // evaluation does, before formal bindings shadow their module entries.
+    let mut local_store = actual_store.clone();
+    local_store.extend(formal_bindings);
 
     let final_local_store = if let Some(ret_id) = function_body.ret {
         collect_function_body_effects(
@@ -830,7 +837,7 @@ pub(crate) fn collect_expression_effects(
     }
 }
 
-fn collect_and_advance_expression(
+pub(crate) fn collect_and_advance_expression(
     module: &Module,
     store: &mut SymbolicStore<VarId>,
     expression: &Expression,

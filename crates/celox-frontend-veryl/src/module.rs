@@ -10,10 +10,10 @@ use crate::{
     bitslicer::BitSlicer,
     ff::FfParser,
     logic_tree::{
-        CombEffectCollector, SymbolicStore, coerce_node_width, collect_expression_effects,
-        collect_written_expression, eval_assignment_expression_effectful, eval_expression,
-        expression_contains_runtime_effect, get_width, parse_comb_with_loop_recovery,
-        subtract_written_sensitivity,
+        CombEffectCollector, SymbolicStore, coerce_node_width, collect_and_advance_expression,
+        collect_expression_effects, collect_written_expression, combine_parts_with_default,
+        eval_assignment_expression_effectful, eval_expression, expression_contains_runtime_effect,
+        get_width, parse_comb_with_loop_recovery, subtract_written_sensitivity,
     },
     loop_provenance::{LoopProvenance, LoopRecoveryCandidate},
     registry::get_port_type,
@@ -247,12 +247,36 @@ fn build_dynamic_output_glue(
         ));
     }
     let full_access = BitAccess::new(0, variable_width - 1);
-    let old_value = glue_arena.alloc(SLTNode::Input {
-        variable: GlueAddr::Parent(dst.id),
-        signed: variable.r#type.signed,
-        index: Vec::new(),
-        access: full_access,
+    let range_store = parent_store.get(&dst.id).ok_or_else(|| {
+        ParserError::illegal_context(
+            "dynamic output port destination",
+            "destination variable is absent from the parent symbolic store",
+            Some(&dst.token),
+        )
     })?;
+    let parts = range_store.get_parts(full_access).map_err(|error| {
+        ParserError::illegal_context(
+            "dynamic output port destination",
+            error.to_string(),
+            Some(&dst.token),
+        )
+    })?;
+    let (old_value, _) =
+        combine_parts_with_default(dst.id, 0, parts, parent_arena).map_err(|error| {
+            ParserError::SltVerify {
+                phase: "dynamic output port destination",
+                error,
+            }
+        })?;
+    let mut cache = HashMap::default();
+    let old_value = parent_arena.get(old_value).map_addr(
+        old_value,
+        parent_arena,
+        glue_arena,
+        &mut cache,
+        &|id| GlueAddr::Parent(*id),
+    )?;
+    sources.extend(collect_glue_sources(old_value, glue_arena));
 
     let low_mask = (BigUint::from(1u8) << access_width) - BigUint::from(1u8);
     let low_mask = glue_arena.alloc(SLTNode::Constant(
@@ -591,6 +615,32 @@ fn build_parent_effect_glue(
     Ok(paths)
 }
 
+fn subtract_composed_accesses(
+    written_accesses: &mut HashMap<VarId, Vec<BitAccess>>,
+    composed_accesses: &[(VarId, BitAccess)],
+) {
+    for &(id, composed) in composed_accesses {
+        let Some(accesses) = written_accesses.get_mut(&id) else {
+            continue;
+        };
+        let mut remaining = Vec::new();
+        for access in accesses.drain(..) {
+            if !access.overlaps(&composed) {
+                remaining.push(access);
+                continue;
+            }
+            if access.lsb < composed.lsb {
+                remaining.push(BitAccess::new(access.lsb, composed.lsb - 1));
+            }
+            if access.msb > composed.msb {
+                remaining.push(BitAccess::new(composed.msb + 1, access.msb));
+            }
+        }
+        *accesses = remaining;
+    }
+    written_accesses.retain(|_, accesses| !accesses.is_empty());
+}
+
 fn verify_glue_block(
     block: &GlueBlock,
     variable_widths: &HashMap<GlueAddr, usize>,
@@ -798,6 +848,64 @@ impl<'a> ModuleParser<'a> {
         Ok(())
     }
 
+    fn attach_connection_effects(
+        &mut self,
+        arena_start: usize,
+        mut effects: CombEffectCollector,
+        written_accesses: &HashMap<VarId, Vec<BitAccess>>,
+        process_sensitivity: HashSet<VarAtomBase<VarId>>,
+        preserved_address_sources: HashSet<VarAtomBase<VarId>>,
+    ) -> Result<(), ParserError> {
+        if effects.observers.is_empty() && effects.sites.is_empty() {
+            return Ok(());
+        }
+
+        let written_atoms: Vec<_> = written_accesses
+            .iter()
+            .flat_map(|(&id, accesses)| {
+                accesses
+                    .iter()
+                    .map(move |access| VarAtomBase::new(id, access.lsb, access.msb))
+            })
+            .collect();
+        let mut process_sensitivity =
+            subtract_written_sensitivity(process_sensitivity, &written_atoms);
+        process_sensitivity.extend(preserved_address_sources);
+        let process_sensitivity: Vec<_> = process_sensitivity.into_iter().collect();
+        for observer in &mut effects.observers {
+            observer.sensitivity = process_sensitivity.clone();
+            observer.written_input_atoms = observer
+                .observed_inputs
+                .iter()
+                .chain(observer.position_inputs.iter())
+                .copied()
+                .filter(|atom| {
+                    written_atoms.iter().any(|written| {
+                        written.id == atom.id && written.access.overlaps(&atom.access)
+                    })
+                })
+                .collect();
+            observer.written_inputs = observer
+                .written_input_atoms
+                .iter()
+                .map(|atom| atom.id)
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+        }
+
+        let site_offset = self.comb_runtime_event_sites.len();
+        for observer in &mut effects.observers {
+            observer.site_id += site_offset as u32;
+            observer.activation_group = site_offset as u32;
+        }
+        let arena_end = self.arena.len();
+        remap_for_effect_site_ids(&mut self.arena, arena_start..arena_end, site_offset as u32)?;
+        self.comb_observers.extend(effects.observers);
+        self.comb_runtime_event_sites.extend(effects.sites);
+        Ok(())
+    }
+
     fn parse_inst_declaration(
         &mut self,
         decl: &InstDeclaration,
@@ -890,14 +998,6 @@ impl<'a> ModuleParser<'a> {
                     &mut effects,
                 )?;
 
-                let written_atoms: Vec<_> = written_accesses
-                    .iter()
-                    .flat_map(|(&id, accesses)| {
-                        accesses
-                            .iter()
-                            .map(move |access| VarAtomBase::new(id, access.lsb, access.msb))
-                    })
-                    .collect();
                 let mut process_sensitivity = std::mem::take(&mut effects.sensitivity);
                 process_sensitivity.extend(expr_sources.iter().copied());
                 for (&id, accesses) in &written_accesses {
@@ -918,49 +1018,17 @@ impl<'a> ModuleParser<'a> {
                         }
                     }
                 }
-                let mut process_sensitivity =
-                    subtract_written_sensitivity(process_sensitivity, &written_atoms);
-                process_sensitivity.extend(
-                    output_address_sources
-                        .values()
-                        .flat_map(|sources| sources.iter().copied()),
-                );
-                let process_sensitivity: Vec<_> = process_sensitivity.into_iter().collect();
-                for observer in &mut effects.observers {
-                    observer.sensitivity = process_sensitivity.clone();
-                    observer.written_input_atoms = observer
-                        .observed_inputs
-                        .iter()
-                        .chain(observer.position_inputs.iter())
-                        .copied()
-                        .filter(|atom| {
-                            written_atoms.iter().any(|written| {
-                                written.id == atom.id && written.access.overlaps(&atom.access)
-                            })
-                        })
-                        .collect();
-                    observer.written_inputs = observer
-                        .written_input_atoms
-                        .iter()
-                        .map(|atom| atom.id)
-                        .collect::<HashSet<_>>()
-                        .into_iter()
-                        .collect();
-                }
-
-                let site_offset = self.comb_runtime_event_sites.len();
-                for observer in &mut effects.observers {
-                    observer.site_id += site_offset as u32;
-                    observer.activation_group = site_offset as u32;
-                }
-                let arena_end = self.arena.len();
-                remap_for_effect_site_ids(
-                    &mut self.arena,
-                    arena_start..arena_end,
-                    site_offset as u32,
+                let preserved_address_sources = output_address_sources
+                    .values()
+                    .flat_map(|sources| sources.iter().copied())
+                    .collect();
+                self.attach_connection_effects(
+                    arena_start,
+                    effects,
+                    &written_accesses,
+                    process_sensitivity,
+                    preserved_address_sources,
                 )?;
-                self.comb_observers.extend(effects.observers);
-                self.comb_runtime_event_sites.extend(effects.sites);
             }
 
             // Map Parent VarId to GlueAddr::Parent
@@ -1038,6 +1106,16 @@ impl<'a> ModuleParser<'a> {
             let mut destination_store = parent_store.clone();
             let mut destination_written_accesses = HashMap::default();
             let mut destination_address_sources = HashMap::default();
+            let mut composed_output_accesses = Vec::new();
+            let output_effect_arena_start = self.arena.len();
+            let mut output_effects = CombEffectCollector::default();
+            let mut output_effect_store = SymbolicStore::default();
+            for (&id, variable) in &self.module.variables {
+                output_effect_store.insert(
+                    id,
+                    RangeStore::new(None, resolve_total_width(self.module, variable)?),
+                );
+            }
             // Iterate destinations from LSB (last in list for multi-dst assign usually? No wait)
             // `emit_multi_dst_assign` iterates `dsts.iter().rev()`.
             // So we strictly follow `emit_multi_dst_assign` logic.
@@ -1050,6 +1128,13 @@ impl<'a> ModuleParser<'a> {
                     .chain(dst.select.0.iter())
                     .chain(dst.select.1.iter().map(|(_, expression)| expression))
                 {
+                    collect_and_advance_expression(
+                        self.module,
+                        &mut output_effect_store,
+                        address,
+                        &mut self.arena,
+                        &mut output_effects,
+                    )?;
                     collect_written_expression(
                         self.module,
                         address,
@@ -1096,33 +1181,40 @@ impl<'a> ModuleParser<'a> {
                     })?
                 };
 
-                let (expr, access, sources, previous_sources, address_sources) =
-                    if is_static_access(&dst.index, &dst.select) {
-                        let mut sources = HashSet::default();
-                        sources.insert(VarAtomBase::new(
-                            GlueAddr::Child(child_port_id),
-                            0,
-                            width - 1,
-                        ));
-                        (
-                            rhs_part,
-                            prefix_access,
-                            sources,
-                            HashSet::default(),
-                            HashSet::default(),
-                        )
-                    } else {
-                        build_dynamic_output_glue(
-                            self.module,
-                            &mut destination_store,
-                            &mut self.arena,
-                            &mut glue_arena,
-                            dst,
-                            rhs_part,
-                            output.dst.len() == 1
-                                && child_module.variables[&child_port_id].r#type.signed,
-                        )?
-                    };
+                let dynamic_access = !is_static_access(&dst.index, &dst.select);
+                let (expr, access, sources, previous_sources, address_sources) = if !dynamic_access
+                {
+                    let mut sources = HashSet::default();
+                    sources.insert(VarAtomBase::new(
+                        GlueAddr::Child(child_port_id),
+                        0,
+                        width - 1,
+                    ));
+                    (
+                        rhs_part,
+                        prefix_access,
+                        sources,
+                        HashSet::default(),
+                        HashSet::default(),
+                    )
+                } else {
+                    build_dynamic_output_glue(
+                        self.module,
+                        &mut destination_store,
+                        &mut self.arena,
+                        &mut glue_arena,
+                        dst,
+                        rhs_part,
+                        output.dst.len() == 1
+                            && child_module.variables[&child_port_id].r#type.signed,
+                    )?
+                };
+                if dynamic_access {
+                    // The dynamic child assignment expression was built from
+                    // the advanced destination store, so it already contains
+                    // preceding index-call writes within this access.
+                    composed_output_accesses.push((dst.id, access));
+                }
 
                 let path = LogicPath {
                     target: LogicPathTarget::Var(VarAtomBase::new(
@@ -1143,10 +1235,24 @@ impl<'a> ModuleParser<'a> {
 
                 current_offset = slice_end;
             }
+            let process_sensitivity = std::mem::take(&mut output_effects.sensitivity);
+            let preserved_address_sources = destination_address_sources
+                .values()
+                .flat_map(|sources| sources.iter().copied())
+                .collect();
+            self.attach_connection_effects(
+                output_effect_arena_start,
+                output_effects,
+                &destination_written_accesses,
+                process_sensitivity,
+                preserved_address_sources,
+            )?;
+            let mut remaining_written_accesses = destination_written_accesses.clone();
+            subtract_composed_accesses(&mut remaining_written_accesses, &composed_output_accesses);
             output_ports.extend(build_parent_effect_glue(
                 &parent_store,
                 &destination_store,
-                &destination_written_accesses,
+                &remaining_written_accesses,
                 &destination_address_sources,
                 &self.arena,
                 &mut glue_arena,

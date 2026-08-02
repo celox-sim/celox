@@ -43,8 +43,8 @@ use veryl_parser::resource_table;
 use veryl_parser::token_range::TokenRange;
 
 pub(crate) use effect::{
-    CombEffectCollector, collect_expression_effects, expression_contains_runtime_effect,
-    subtract_written_sensitivity,
+    CombEffectCollector, collect_and_advance_expression, collect_expression_effects,
+    expression_contains_runtime_effect, subtract_written_sensitivity,
 };
 use effect::{collect_comb_effects_statements, statements_contain_runtime_effect};
 pub use expr::coerce_node_width;
@@ -3147,7 +3147,7 @@ fn eval_if(
     ))
 }
 
-fn combine_parts_with_default<A: Clone + PartialEq + Eq + Hash>(
+pub(crate) fn combine_parts_with_default<A: Clone + PartialEq + Eq + Hash>(
     var_id: A,
     start_lsb: usize,
     parts: Vec<(Option<(NodeId, HashSet<VarAtomBase<A>>)>, BitAccess)>,

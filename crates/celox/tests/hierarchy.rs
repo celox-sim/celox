@@ -311,6 +311,92 @@ assign tmp_o = tmp;
 
     }
 
+    fn test_instance_output_dynamic_index_preserves_runtime_display(sim) {
+        // veryl-simulator does not write the dynamic connection index call's
+        // output actual back; wasm does not currently expose runtime events.
+        @omit_veryl;
+        @ignore_on(wasm);
+        @setup { let code = r#"
+module Child (i: input logic, o: output logic) {
+assign o = i;
+}
+module Top (
+sel: input logic,
+mem_o: output logic<2>,
+tmp_o: output logic
+) {
+function choose_index (
+x: input logic,
+tmp: output logic
+) -> logic {
+tmp = x;
+$display("index=%0d", x);
+return x;
+}
+var mem: logic<2>;
+var tmp: logic;
+inst child: Child (
+i: 1'b1,
+o: mem[choose_index(sel, tmp)]
+);
+assign mem_o = mem;
+assign tmp_o = tmp;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let sel = sim.signal("sel");
+    let mem_o = sim.signal("mem_o");
+    let tmp_o = sim.signal("tmp_o");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(sel, 1u8)).unwrap();
+    assert_eq!(sim.get(mem_o), 3u8.into());
+    assert_eq!(sim.get(tmp_o), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "index=1".to_string(),
+        }],
+    );
+
+    }
+
+    fn test_instance_output_dynamic_index_composes_aliasing_writeback(sim) {
+        // veryl-simulator does not write the dynamic connection index call's
+        // output actual back to the parent array.
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Child (i: input logic, o: output logic) {
+assign o = i;
+}
+module Top (
+sel: input logic,
+mem_o: output logic<2>
+) {
+function choose_index (
+x: input logic,
+tmp: output logic
+) -> logic {
+tmp = x;
+return x;
+}
+var mem: logic<2>;
+inst child: Child (
+i: 1'b1,
+o: mem[choose_index(sel, mem[0])]
+);
+assign mem_o = mem;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let sel = sim.signal("sel");
+    let mem_o = sim.signal("mem_o");
+
+    sim.modify(|io| io.set(sel, 1u8)).unwrap();
+    assert_eq!(sim.get(mem_o), 3u8.into());
+
+    }
+
     fn test_unconnected_child_output_needs_no_parent_glue(sim) {
         @setup { let code = r#"
 module Child (
