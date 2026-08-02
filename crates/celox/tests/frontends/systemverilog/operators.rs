@@ -549,6 +549,87 @@ sv_backends! {
     assert_eq!(sim.get(q), 0u8.into());
     }
 
+    fn simulates_systemverilog_always_ff_case(sim) {
+        @setup {
+    let sv = r#"
+        module Top(
+            input logic clk,
+            input logic rst,
+            input logic [1:0] mode,
+            input logic [7:0] d0,
+            input logic [7:0] d1,
+            input logic [7:0] d2,
+            output logic [7:0] q,
+            output logic [7:0] q_hold
+        );
+            always_ff @(posedge clk, negedge rst) begin
+                if (!rst) begin
+                    q <= 8'h00;
+                    q_hold <= 8'h00;
+                end else begin
+                    case (mode)
+                        2'b00: begin
+                            q <= d0;
+                            q_hold <= d0;
+                        end
+                        2'b01, 2'b10: begin
+                            q <= d1;
+                            q_hold <= d1;
+                        end
+                        default: q <= d2;
+                    endcase
+                end
+            end
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("ff_case.sv"))], "Top")
+            .four_state(true);
+
+    let clk = sim.event("clk");
+    let rst = sim.signal("rst");
+    let mode = sim.signal("mode");
+    let d0 = sim.signal("d0");
+    let d1 = sim.signal("d1");
+    let d2 = sim.signal("d2");
+    let q = sim.signal("q");
+    let q_hold = sim.signal("q_hold");
+
+    sim.modify(|io| {
+        io.set(rst, 0u8);
+        io.set(mode, 0u8);
+        io.set(d0, 0x11u8);
+        io.set(d1, 0x22u8);
+        io.set(d2, 0x33u8);
+    }).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0u8.into());
+    assert_eq!(sim.get(q_hold), 0u8.into());
+
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0x11u8.into());
+    assert_eq!(sim.get(q_hold), 0x11u8.into());
+
+    sim.modify(|io| io.set(mode, 2u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0x22u8.into());
+    assert_eq!(sim.get(q_hold), 0x22u8.into());
+
+    sim.modify(|io| io.set(mode, 3u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0x33u8.into());
+    assert_eq!(sim.get(q_hold), 0x22u8.into());
+
+    sim.modify(|io| {
+        io.set_four_state(mode, BigUint::from(0u8), BigUint::from(0b11u8));
+        io.set(d2, 0x44u8);
+    }).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0x44u8.into());
+    assert_eq!(sim.get(q_hold), 0x22u8.into());
+    }
+
     fn simulates_systemverilog_repeat_concat(sim) {
         @setup {
     let sv = r#"

@@ -114,6 +114,42 @@ mod tests {
     }
 
     #[test]
+    fn records_always_ff_case_branches() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic clk,
+                    input logic [1:0] mode,
+                    input logic [7:0] d0,
+                    input logic [7:0] d1,
+                    input logic [7:0] d2,
+                    output logic [7:0] q
+                );
+                    always_ff @(posedge clk) begin
+                        case (mode)
+                            2'b00: q <= d0;
+                            2'b01, 2'b10: q <= d1;
+                            default: q <= d2;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("ff_case.sv"),
+        )
+        .expect("SV analysis should succeed");
+
+        let process = &ir.modules()[0].ff_processes()[0];
+        assert_eq!(process.events().len(), 1);
+        assert_eq!(process.assignments().len(), 3);
+        assert!(
+            process
+                .assignments()
+                .iter()
+                .all(|assignment| assignment.condition().is_some())
+        );
+    }
+
+    #[test]
     fn inlines_simple_function_call() {
         let ir = analyze_source(
             r#"

@@ -1549,17 +1549,33 @@ fn lower_expr_to_sir(
         sv::ir::Expr::Unary { op, expr } => {
             let inner = lower_expr_to_sir(builder, expr, variables, name_to_id, constants)?;
             let width = builder.register(&inner).width();
-            let reg = builder.alloc_logic(width);
+            let reg = if matches!(op, sv::ir::UnaryOp::ToTwoState) {
+                builder.alloc_bit(width, false)
+            } else {
+                builder.alloc_logic(width)
+            };
             builder.emit(SIRInstruction::Unary(reg, unary_op_from_sv(*op)?, inner));
             Some(reg)
         }
         sv::ir::Expr::Binary { left, op, right } => {
             let left = lower_expr_to_sir(builder, left, variables, name_to_id, constants)?;
             let right = lower_expr_to_sir(builder, right, variables, name_to_id, constants)?;
-            let width = builder
-                .register(&left)
-                .width()
-                .max(builder.register(&right).width());
+            let width = match op {
+                sv::ir::BinaryOp::LogicAnd
+                | sv::ir::BinaryOp::LogicOr
+                | sv::ir::BinaryOp::Eq
+                | sv::ir::BinaryOp::Ne
+                | sv::ir::BinaryOp::EqWildcard
+                | sv::ir::BinaryOp::NeWildcard
+                | sv::ir::BinaryOp::Lt
+                | sv::ir::BinaryOp::Le
+                | sv::ir::BinaryOp::Gt
+                | sv::ir::BinaryOp::Ge => 1,
+                _ => builder
+                    .register(&left)
+                    .width()
+                    .max(builder.register(&right).width()),
+            };
             let reg = builder.alloc_logic(width);
             builder.emit(SIRInstruction::Binary(
                 reg,
@@ -1661,6 +1677,7 @@ fn unary_op_from_sv(op: sv::ir::UnaryOp) -> Option<UnaryOp> {
         sv::ir::UnaryOp::Minus => Some(UnaryOp::Minus),
         sv::ir::UnaryOp::BitNot => Some(UnaryOp::BitNot),
         sv::ir::UnaryOp::LogicNot => Some(UnaryOp::LogicNot),
+        sv::ir::UnaryOp::ToTwoState => Some(UnaryOp::ToTwoState),
         sv::ir::UnaryOp::RedAnd => Some(UnaryOp::And),
         sv::ir::UnaryOp::RedOr => Some(UnaryOp::Or),
         sv::ir::UnaryOp::RedXor => Some(UnaryOp::Xor),
@@ -1683,6 +1700,8 @@ fn binary_op_from_sv(op: sv::ir::BinaryOp) -> BinaryOp {
         sv::ir::BinaryOp::LogicOr => BinaryOp::LogicOr,
         sv::ir::BinaryOp::Eq => BinaryOp::Eq,
         sv::ir::BinaryOp::Ne => BinaryOp::Ne,
+        sv::ir::BinaryOp::EqWildcard => BinaryOp::EqWildcard,
+        sv::ir::BinaryOp::NeWildcard => BinaryOp::NeWildcard,
         sv::ir::BinaryOp::Lt => BinaryOp::LtU,
         sv::ir::BinaryOp::Le => BinaryOp::LeU,
         sv::ir::BinaryOp::Gt => BinaryOp::GtU,

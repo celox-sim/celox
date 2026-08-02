@@ -458,6 +458,7 @@ pub enum UnaryOp {
     Minus,
     BitNot,
     LogicNot,
+    ToTwoState,
     RedAnd,
     RedOr,
     RedXor,
@@ -479,6 +480,8 @@ pub enum BinaryOp {
     LogicOr,
     Eq,
     Ne,
+    EqWildcard,
+    NeWildcard,
     Lt,
     Le,
     Gt,
@@ -1892,10 +1895,16 @@ fn case_item_condition(case_expr: Expr, item_expr: Expr) -> Expr {
     if expr_is_literal_one(&case_expr) {
         item_expr
     } else {
-        Expr::Binary {
-            left: Box::new(case_expr),
-            op: BinaryOp::Eq,
-            right: Box::new(item_expr),
+        Expr::Unary {
+            // Case labels in the initial synthesizable subset are known
+            // values. Wildcard equality detects a definite mismatch, while
+            // the two-state projection makes an X/Z selector a non-match.
+            op: UnaryOp::ToTwoState,
+            expr: Box::new(Expr::Binary {
+                left: Box::new(case_expr),
+                op: BinaryOp::EqWildcard,
+                right: Box::new(item_expr),
+            }),
         }
     }
 }
@@ -2995,6 +3004,15 @@ fn conditional_assignments_from_statement(
                 assignments,
             );
         }
+        sv_parser::StatementItem::CaseStatement(stmt) => {
+            conditional_assignments_from_case_statement(
+                stmt,
+                condition,
+                syntax_tree,
+                packed_dimensions,
+                assignments,
+            );
+        }
         _ => {}
     }
 }
@@ -3059,6 +3077,90 @@ fn conditional_assignments_from_conditional_statement(
     }
 }
 
+fn conditional_assignments_from_case_statement(
+    stmt: &sv_parser::CaseStatement,
+    parent_condition: Option<Expr>,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    assignments: &mut Vec<ConditionalAssignment>,
+) {
+    let sv_parser::CaseStatement::Normal(stmt) = stmt else {
+        return;
+    };
+    if !matches!(&stmt.nodes.1, sv_parser::CaseKeyword::Case(_)) {
+        return;
+    }
+    let Some(case_expr) = expr_from_expression_with_types(
+        &stmt.nodes.2.nodes.1.nodes.0,
+        syntax_tree,
+        packed_dimensions,
+    ) else {
+        return;
+    };
+
+    let mut branches = Vec::new();
+    let mut default_branch = None;
+    for item in std::iter::once(&stmt.nodes.3).chain(stmt.nodes.4.iter()) {
+        match item {
+            sv_parser::CaseItem::NonDefault(item) => {
+                let conditions = item
+                    .nodes
+                    .0
+                    .contents()
+                    .into_iter()
+                    .filter_map(|expr| {
+                        expr_from_expression_with_types(
+                            &expr.nodes.0,
+                            syntax_tree,
+                            packed_dimensions,
+                        )
+                    })
+                    .map(|expr| case_item_condition(case_expr.clone(), expr))
+                    .collect::<Vec<_>>();
+                if let Some(condition) = conditions.into_iter().reduce(|left, right| Expr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::LogicOr,
+                    right: Box::new(right),
+                }) {
+                    branches.push((condition, &item.nodes.2));
+                }
+            }
+            sv_parser::CaseItem::Default(item) => {
+                default_branch = Some(&item.nodes.2);
+            }
+        }
+    }
+
+    let mut prior_false = Vec::new();
+    for (branch_condition, branch) in branches {
+        let mut terms = prior_false.clone();
+        terms.push(branch_condition.clone());
+        let condition = combine_expr_condition_terms(parent_condition.clone(), terms);
+        conditional_assignments_from_statement_or_null(
+            branch,
+            condition,
+            syntax_tree,
+            packed_dimensions,
+            assignments,
+        );
+        prior_false.push(Expr::Unary {
+            op: UnaryOp::LogicNot,
+            expr: Box::new(branch_condition),
+        });
+    }
+
+    if let Some(branch) = default_branch {
+        let condition = combine_expr_condition_terms(parent_condition, prior_false);
+        conditional_assignments_from_statement_or_null(
+            branch,
+            condition,
+            syntax_tree,
+            packed_dimensions,
+            assignments,
+        );
+    }
+}
+
 fn expr_from_cond_predicate(
     predicate: &sv_parser::CondPredicate,
     syntax_tree: &SyntaxTree,
@@ -3076,11 +3178,13 @@ fn combine_expr_conditions(parent: Option<Expr>, child: Expr) -> Option<Expr> {
 }
 
 fn combine_expr_condition_terms(parent: Option<Expr>, terms: Vec<Expr>) -> Option<Expr> {
-    let condition = terms.into_iter().reduce(|left, right| Expr::Binary {
+    let Some(condition) = terms.into_iter().reduce(|left, right| Expr::Binary {
         left: Box::new(left),
         op: BinaryOp::LogicAnd,
         right: Box::new(right),
-    })?;
+    }) else {
+        return parent;
+    };
     Some(match parent {
         Some(parent) => Expr::Binary {
             left: Box::new(parent),
@@ -3735,7 +3839,7 @@ fn binary_precedence(op: BinaryOp) -> u8 {
         BinaryOp::Add | BinaryOp::Sub => 10,
         BinaryOp::Shl | BinaryOp::Shr => 9,
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => 8,
-        BinaryOp::Eq | BinaryOp::Ne => 7,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard => 7,
         BinaryOp::BitAnd => 6,
         BinaryOp::BitXor => 5,
         BinaryOp::BitOr => 4,
@@ -4218,8 +4322,10 @@ fn binary_op_from_symbol(symbol: &Locate, syntax_tree: &SyntaxTree) -> Option<Bi
         "^" => Some(BinaryOp::BitXor),
         "&&" => Some(BinaryOp::LogicAnd),
         "||" => Some(BinaryOp::LogicOr),
-        "==" | "==?" => Some(BinaryOp::Eq),
-        "!=" | "!=?" => Some(BinaryOp::Ne),
+        "==" => Some(BinaryOp::Eq),
+        "!=" => Some(BinaryOp::Ne),
+        "==?" => Some(BinaryOp::EqWildcard),
+        "!=?" => Some(BinaryOp::NeWildcard),
         "<" => Some(BinaryOp::Lt),
         "<=" => Some(BinaryOp::Le),
         ">" => Some(BinaryOp::Gt),
