@@ -703,6 +703,97 @@ fn test_for_loop_i32_mul_and_shl_overflow_fail() {
 }
 
 #[test]
+fn test_for_loop_static_bounds_use_signed_i32_progress() {
+    for (start, end, step) in [
+        ("2147483647", "2147483648", "+= 1"),
+        ("1500000000", "1600000000", "*= 2"),
+        ("1073741824", "1500000000", "<<= 1"),
+        ("1", "100", "|= 2147483648"),
+        ("1", "100", "^= 2147483648"),
+    ] {
+        let code = format!(
+            r#"
+            #[test(t)]
+            module t {{
+                initial {{
+                    for _i in {start}..{end} step {step} {{}}
+                    $finish();
+                }}
+            }}
+        "#
+        );
+        let TestResult::Fail(message) = Simulator::builder(&code, "t").run_test().unwrap() else {
+            panic!("expected signed i32 loop failure for step {step}");
+        };
+        assert!(message.contains("non-progressing stepped for loop"));
+    }
+}
+
+#[test]
+fn test_for_loop_large_multiplier_preserves_low_i32_bits() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var start: logic<64>;
+            var end_bound: logic<64>;
+            initial {
+                start = 2;
+                end_bound = 3;
+                for _i in start..end_bound step *= 9223372036854775808 {}
+                $finish();
+            }
+        }
+    "#;
+    let TestResult::Fail(message) = Simulator::builder(code, "t").run_test().unwrap() else {
+        panic!("expected fixed-width multiplication failure");
+    };
+    assert!(message.contains("non-progressing stepped for loop"));
+}
+
+#[test]
+fn test_for_loop_reverse_step_matches_emitted_sv_order() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var digits: logic<32>;
+            initial {
+                digits = 0;
+                for i in rev 0..10 step += 2 {
+                    digits = digits * 10 + i as 32;
+                }
+                $assert(digits == 32'd97531);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_for_loop_reverse_i32_step_truncation_reports_non_progress() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var start: signed logic<64>;
+            var end_bound: signed logic<64>;
+            initial {
+                start = 0;
+                end_bound = 3;
+                for _i in rev start..=end_bound step += 4294967296 {}
+                $finish();
+            }
+        }
+    "#;
+    let TestResult::Fail(message) = Simulator::builder(code, "t").run_test().unwrap() else {
+        panic!("expected reverse fixed-width step failure");
+    };
+    assert!(message.contains("non-progressing stepped for loop"));
+}
+
+#[test]
 fn test_for_loop_expression_bound_non_progress_reports_failure() {
     let code = format!(
         r#"
@@ -731,7 +822,7 @@ fn test_for_loop_expression_bound_non_progress_reports_failure() {
 }
 
 #[test]
-fn test_for_loop_expression_bound_terminal_inclusive_mul_succeeds() {
+fn test_for_loop_expression_bound_terminal_inclusive_mul_reports_non_progress() {
     let code = format!(
         r#"
         {COUNTER}
@@ -753,10 +844,10 @@ fn test_for_loop_expression_bound_terminal_inclusive_mul_succeeds() {
         }}
     "#
     );
-    assert_eq!(
-        Simulator::builder(&code, "t").run_test().unwrap(),
-        TestResult::Pass,
-    );
+    let TestResult::Fail(message) = Simulator::builder(&code, "t").run_test().unwrap() else {
+        panic!("expected non-progressing loop failure");
+    };
+    assert!(message.contains("non-progressing stepped for loop"));
 }
 
 #[test]

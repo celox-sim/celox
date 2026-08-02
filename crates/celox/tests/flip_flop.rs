@@ -810,7 +810,7 @@ fn test_ff_runtime_for_zero_iteration_mul_loop_is_allowed(sim) {
     assert_eq!(sim.get(q), 0xaau32.into());
 }
 
-fn test_ff_runtime_for_terminal_inclusive_mul_loop_is_allowed(sim) {
+fn test_ff_runtime_for_terminal_inclusive_mul_loop_reports_true_loop(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
@@ -829,11 +829,77 @@ fn test_ff_runtime_for_terminal_inclusive_mul_loop_is_allowed(sim) {
     @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let count = sim.signal("count");
-    let q = sim.signal("q");
 
     sim.modify(|io| io.set(count, 0u8)).unwrap();
+    assert_eq!(
+        sim.tick(clk).unwrap_err().to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
+    );
+}
+
+fn test_ff_runtime_reverse_step_matches_emitted_sv_order(sim) {
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            start: input signed logic<64>,
+            end_bound: input signed logic<64>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in rev start..end_bound step += 2 {
+                    q = i as 32;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let end_bound = sim.signal("end_bound");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(start, 0u64);
+        io.set(end_bound, 10u64);
+    })
+    .unwrap();
     sim.tick(clk).unwrap();
+    // The last iteration is i = 1 for the emitted 9,7,5,3,1 order.
     assert_eq!(sim.get(q), 1u32.into());
+}
+
+fn test_ff_runtime_reverse_i32_step_truncation_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            start: input signed logic<64>,
+            end_bound: input signed logic<64>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in rev start..=end_bound step += 4294967296 {
+                    q += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let end_bound = sim.signal("end_bound");
+
+    sim.modify(|io| {
+        io.set(start, 0u64);
+        io.set(end_bound, 3u64);
+    })
+    .unwrap();
+    assert_eq!(
+        sim.tick(clk).unwrap_err().to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
+    );
 }
 
 fn test_ff_runtime_for_reverse_singleton_exits_cleanly(sim) {
