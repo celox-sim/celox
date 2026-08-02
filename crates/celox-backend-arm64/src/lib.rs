@@ -12,7 +12,9 @@ use celox_backend_common::regalloc::{
 use std::collections::HashMap;
 use std::fmt;
 
+mod allocation;
 pub mod jit_mem;
+mod legacy_allocation;
 pub mod scalar;
 
 /// Virtual general-purpose register in bootstrap ARM64 MIR.
@@ -26,6 +28,11 @@ pub struct Arm64Reg(u8);
 impl Arm64Reg {
     pub const X0: Self = Self(0);
 
+    pub(crate) const fn new(number: u8) -> Self {
+        assert!(number <= 30, "AArch64 GPR number must be at most 30");
+        Self(number)
+    }
+
     pub const fn number(self) -> u8 {
         self.0
     }
@@ -38,13 +45,13 @@ impl MachineRegister for Arm64Reg {
 }
 
 const ALLOCATABLE_REGS: [Arm64Reg; 7] = [
-    Arm64Reg(9),
-    Arm64Reg(10),
-    Arm64Reg(11),
-    Arm64Reg(12),
-    Arm64Reg(13),
-    Arm64Reg(14),
-    Arm64Reg(15),
+    Arm64Reg::new(9),
+    Arm64Reg::new(10),
+    Arm64Reg::new(11),
+    Arm64Reg::new(12),
+    Arm64Reg::new(13),
+    Arm64Reg::new(14),
+    Arm64Reg::new(15),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

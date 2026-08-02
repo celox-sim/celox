@@ -1,4 +1,4 @@
-//! AArch64 emission for the shared scalar native MIR pipeline.
+//! AArch64 emission for the transitional scalar MIR pipeline.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -7,13 +7,9 @@ use celox_backend_x86::native::mir::{
     BaseReg, BlockId, BranchPredicate, CmpKind, MFunction, MInst, OpSize, PackedLaneCompareRhs,
     SparseCommitDescriptor, VReg,
 };
-use celox_backend_x86::native::regalloc::AssignmentMap;
-use celox_backend_x86::native::regalloc::assignment::PhysReg;
+use celox_backend_x86::native::regalloc::AssignmentMap as LegacyAssignment;
 use celox_backend_x86::native::scalar_pipeline::{
     PreparedScalarFunction, ScalarPrepareError as PrepareError, prepare_scalar_eu,
-};
-use celox_backend_x86::native::ssa_destroy::{
-    ParallelCopyDestination, ParallelCopyOperation, ParallelCopySource, SsaDestructionPlan,
 };
 use celox_state_layout::{
     STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET, STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET,
@@ -21,6 +17,9 @@ use celox_state_layout::{
 };
 use dynasmrt::aarch64::Aarch64Relocation;
 use dynasmrt::{DynamicLabel, DynasmApi, DynasmError, DynasmLabelApi, VecAssembler, dynasm};
+
+use crate::Arm64Reg;
+use crate::allocation::{Assignment, CopyDestination, CopyOperation, CopySource, EdgeCopyPlan};
 
 const STATE_REG: u8 = 0;
 const SCRATCH0: u8 = 16;
@@ -170,14 +169,14 @@ pub fn emit_prepared_eu(
 /// Emit an already allocated MIR function. Primarily used by focused tests.
 pub fn emit(
     function: &MFunction,
-    assignment: &AssignmentMap,
+    assignment: &LegacyAssignment,
     spill_frame_size: u32,
 ) -> Result<EmitResult, EmitError> {
-    let plan = SsaDestructionPlan::build(function, assignment)?;
-    plan.verify(function, assignment, spill_frame_size)?;
+    let (assignment, plan) =
+        crate::legacy_allocation::adapt(function, assignment, spill_frame_size)?;
     emit_function(
         function,
-        assignment,
+        &assignment,
         spill_frame_size,
         4096,
         &plan,
@@ -191,15 +190,14 @@ fn emit_prepared(
     tick_loop: bool,
     check_runtime_events: bool,
 ) -> Result<EmitResult, EmitError> {
-    let plan = SsaDestructionPlan::build(&prepared.function, &prepared.allocation)?;
-    plan.verify(
+    let (assignment, plan) = crate::legacy_allocation::adapt(
         &prepared.function,
         &prepared.allocation,
         prepared.spill_frame_size,
     )?;
     emit_function(
         &prepared.function,
-        &prepared.allocation,
+        &assignment,
         prepared.spill_frame_size,
         prepared.state_size(),
         &plan,
@@ -208,33 +206,11 @@ fn emit_prepared(
     )
 }
 
-fn resolve(assignment: &AssignmentMap, value: VReg) -> Result<u8, EmitError> {
+fn resolve(assignment: &Assignment<VReg>, value: VReg) -> Result<u8, EmitError> {
     assignment
-        .get(value)
-        .map(physical_register)
+        .get(&value)
+        .map(Arm64Reg::number)
         .ok_or(EmitError::MissingAssignment(value))
-}
-
-/// The established allocator has fifteen colors. AArch64 exposes exactly
-/// fifteen volatile registers x1..x15 after reserving x0 for simulator state.
-fn physical_register(register: PhysReg) -> u8 {
-    match register {
-        PhysReg::RAX => 1,
-        PhysReg::RCX => 2,
-        PhysReg::RDX => 3,
-        PhysReg::RBX => 4,
-        PhysReg::RBP => 5,
-        PhysReg::RSI => 6,
-        PhysReg::RDI => 7,
-        PhysReg::R8 => 8,
-        PhysReg::R9 => 9,
-        PhysReg::R10 => 10,
-        PhysReg::R11 => 11,
-        PhysReg::R12 => 12,
-        PhysReg::R13 => 13,
-        PhysReg::R14 => 14,
-        PhysReg::R15 => 15,
-    }
 }
 
 fn align16(value: usize) -> Result<usize, EmitError> {
@@ -246,10 +222,10 @@ fn align16(value: usize) -> Result<usize, EmitError> {
 
 fn emit_function(
     function: &MFunction,
-    assignment: &AssignmentMap,
+    assignment: &Assignment<VReg>,
     spill_frame_size: u32,
     state_size: usize,
-    plan: &SsaDestructionPlan,
+    plan: &EdgeCopyPlan<BlockId>,
     tick_loop: bool,
     check_runtime_events: bool,
 ) -> Result<EmitResult, EmitError> {
@@ -398,10 +374,10 @@ fn emit_instruction(
     ops: &mut VecAssembler<Aarch64Relocation>,
     instruction: &MInst,
     block: BlockId,
-    assignment: &AssignmentMap,
+    assignment: &Assignment<VReg>,
     spill_base: usize,
     temporary_offset: usize,
-    plan: &SsaDestructionPlan,
+    plan: &EdgeCopyPlan<BlockId>,
     labels: &HashMap<BlockId, DynamicLabel>,
     table_labels: &[DynamicLabel],
     constant_tables: &[Vec<u64>],
@@ -1198,7 +1174,7 @@ fn emit_packed_lane_compare(
     element_stride: u8,
     bit_offset: u8,
     field_width: u8,
-    assignment: &AssignmentMap,
+    assignment: &Assignment<VReg>,
 ) -> Result<(), EmitError> {
     let size = match element_stride {
         1 => OpSize::S8,
@@ -1735,7 +1711,7 @@ fn emit_csel(
 fn emit_branch_predicate(
     ops: &mut VecAssembler<Aarch64Relocation>,
     predicate: BranchPredicate,
-    assignment: &AssignmentMap,
+    assignment: &Assignment<VReg>,
     spill_base: usize,
 ) -> Result<(), EmitError> {
     match predicate {
@@ -1785,23 +1761,23 @@ fn emit_conditional_branch(
 
 fn emit_edge_copies(
     ops: &mut VecAssembler<Aarch64Relocation>,
-    plan: &SsaDestructionPlan,
+    plan: &EdgeCopyPlan<BlockId>,
     predecessor: BlockId,
     successor: BlockId,
     spill_base: usize,
     temporary_offset: usize,
 ) -> Result<(), EmitError> {
-    let Some(edge) = plan.edge(predecessor, successor) else {
+    let Some(operations) = plan.edge(predecessor, successor) else {
         return Ok(());
     };
-    for operation in &edge.operations {
+    for operation in operations {
         match *operation {
-            ParallelCopyOperation::Move {
+            CopyOperation::Move {
                 destination,
                 source,
             } => emit_copy(ops, destination, source, spill_base)?,
-            ParallelCopyOperation::SwapRegisters { left, right } => {
-                let (left, right) = (physical_register(left), physical_register(right));
+            CopyOperation::SwapRegisters { left, right } => {
+                let (left, right) = (left.number(), right.number());
                 dynasm!(ops
                     ; .arch aarch64
                     ; mov x16, X(left)
@@ -1809,7 +1785,7 @@ fn emit_edge_copies(
                     ; mov X(right), x16
                 );
             }
-            ParallelCopyOperation::SaveTemporary(destination) => {
+            CopyOperation::SaveTemporary(destination) => {
                 read_copy_destination(ops, destination, spill_base, SCRATCH1)?;
                 // Address materialization uses x17 for the offset. Preserve
                 // the value being saved before computing the temporary slot.
@@ -1817,7 +1793,7 @@ fn emit_edge_copies(
                 emit_address(ops, STATE_REG, temporary_offset as i64);
                 emit_store(ops, 30, SCRATCH0, OpSize::S64);
             }
-            ParallelCopyOperation::RestoreTemporary(destination) => {
+            CopyOperation::RestoreTemporary(destination) => {
                 emit_address(ops, STATE_REG, temporary_offset as i64);
                 emit_load(ops, SCRATCH1, SCRATCH0, OpSize::S64);
                 write_copy_destination(ops, destination, spill_base, SCRATCH1)?;
@@ -1829,20 +1805,20 @@ fn emit_edge_copies(
 
 fn emit_copy(
     ops: &mut VecAssembler<Aarch64Relocation>,
-    destination: ParallelCopyDestination,
-    source: ParallelCopySource,
+    destination: CopyDestination,
+    source: CopySource,
     spill_base: usize,
 ) -> Result<(), EmitError> {
     match source {
-        ParallelCopySource::Register(register) => {
-            write_copy_destination(ops, destination, spill_base, physical_register(register))
+        CopySource::Register(register) => {
+            write_copy_destination(ops, destination, spill_base, register.number())
         }
-        ParallelCopySource::Stack(offset) => {
+        CopySource::Stack(offset) => {
             emit_address(ops, STATE_REG, spill_base as i64 + i64::from(offset));
             emit_load(ops, SCRATCH1, SCRATCH0, OpSize::S64);
             write_copy_destination(ops, destination, spill_base, SCRATCH1)
         }
-        ParallelCopySource::Immediate(value) => {
+        CopySource::Immediate(value) => {
             emit_load_imm(ops, SCRATCH1, value);
             write_copy_destination(ops, destination, spill_base, SCRATCH1)
         }
@@ -1851,16 +1827,16 @@ fn emit_copy(
 
 fn read_copy_destination(
     ops: &mut VecAssembler<Aarch64Relocation>,
-    destination: ParallelCopyDestination,
+    destination: CopyDestination,
     spill_base: usize,
     output: u8,
 ) -> Result<(), EmitError> {
     match destination {
-        ParallelCopyDestination::Register(register) => {
-            let register = physical_register(register);
+        CopyDestination::Register(register) => {
+            let register = register.number();
             dynasm!(ops ; .arch aarch64 ; mov X(output), X(register));
         }
-        ParallelCopyDestination::Stack(offset) => {
+        CopyDestination::Stack(offset) => {
             emit_address(ops, STATE_REG, spill_base as i64 + i64::from(offset));
             emit_load(ops, output, SCRATCH0, OpSize::S64);
         }
@@ -1870,16 +1846,16 @@ fn read_copy_destination(
 
 fn write_copy_destination(
     ops: &mut VecAssembler<Aarch64Relocation>,
-    destination: ParallelCopyDestination,
+    destination: CopyDestination,
     spill_base: usize,
     source: u8,
 ) -> Result<(), EmitError> {
     match destination {
-        ParallelCopyDestination::Register(register) => {
-            let register = physical_register(register);
+        CopyDestination::Register(register) => {
+            let register = register.number();
             dynasm!(ops ; .arch aarch64 ; mov X(register), X(source));
         }
-        ParallelCopyDestination::Stack(offset) => {
+        CopyDestination::Stack(offset) => {
             let source = if source == SCRATCH1 {
                 // emit_address reserves x17 for large/immediate offsets.
                 // Stack-to-stack and temporary restores arrive in x17, so
@@ -1913,8 +1889,10 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     use celox_backend_x86::native::mir::PhiNode;
     use celox_backend_x86::native::mir::{MBlock, SpillDesc, VRegAllocator};
+    use celox_backend_x86::native::regalloc::AssignmentMap;
     #[cfg(target_arch = "aarch64")]
     use celox_backend_x86::native::regalloc::assignment::EdgeLocation;
+    use celox_backend_x86::native::regalloc::assignment::PhysReg;
 
     fn state_update() -> (MFunction, AssignmentMap) {
         let mut vregs = VRegAllocator::new();
@@ -2533,7 +2511,8 @@ mod tests {
         assignment.set(current, PhysReg::RAX);
         assignment.set(one, PhysReg::RDX);
         assignment.set(next, PhysReg::RSI);
-        let plan = SsaDestructionPlan::build(&function, &assignment).unwrap();
+        let (assignment, plan) =
+            crate::legacy_allocation::adapt(&function, &assignment, 0).unwrap();
         let emitted = emit_function(&function, &assignment, 0, 64, &plan, true, false).unwrap();
         let code = crate::jit_mem::JitCode::new(&emitted.code).unwrap();
         let mut state = [0_u8; 40];
