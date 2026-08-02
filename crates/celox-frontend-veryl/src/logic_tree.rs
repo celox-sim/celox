@@ -138,6 +138,57 @@ pub(super) fn ordered_function_inputs<'a>(
     Ok(inputs)
 }
 
+/// Returns output destinations in formal declaration order.
+///
+/// Like inputs, output connections are stored in a hash map. Destination
+/// expressions may have effects, so their order must follow the declaration.
+pub(super) fn ordered_function_outputs<'a>(
+    function: &Function,
+    function_body: &FunctionBody,
+    call: &'a FunctionCall,
+) -> Result<Vec<(VarId, &'a [veryl_analyzer::ir::AssignDestination])>, ParserError> {
+    let mut outputs = Vec::with_capacity(call.outputs.len());
+    let mut ordered_ids = HashSet::default();
+    for arg in &function.args {
+        for (arg_path, _, _) in &arg.members {
+            let Some(destinations) = call.outputs.get(arg_path) else {
+                continue;
+            };
+            let Some(arg_id) = function_body.arg_map.get(arg_path) else {
+                return Err(invalid_function_call_argument_error(
+                    function,
+                    arg_path,
+                    "output argument does not match any formal argument",
+                    call,
+                ));
+            };
+            outputs.push((*arg_id, destinations.as_slice()));
+            ordered_ids.insert(*arg_id);
+        }
+    }
+
+    for arg_path in call.outputs.keys() {
+        let Some(arg_id) = function_body.arg_map.get(arg_path) else {
+            return Err(invalid_function_call_argument_error(
+                function,
+                arg_path,
+                "output argument does not match any formal argument",
+                call,
+            ));
+        };
+        if !ordered_ids.contains(arg_id) {
+            return Err(invalid_function_call_argument_error(
+                function,
+                arg_path,
+                "output argument is absent from the function declaration",
+                call,
+            ));
+        }
+    }
+
+    Ok(outputs)
+}
+
 #[cfg(test)]
 fn parse_comb(
     module: &Module,
@@ -2537,58 +2588,69 @@ fn apply_function_call_outputs(
     final_local_store: &SymbolicStore<VarId>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
-    for (arg_path, dsts) in &call.outputs {
-        let Some(arg_id) = function_body.arg_map.get(arg_path) else {
-            return Err(invalid_function_call_argument_error(
-                function,
-                arg_path,
-                "output argument does not match any formal argument",
-                call,
-            ));
-        };
-
-        let formal = module.variables.get(arg_id).ok_or_else(|| {
-            ParserError::illegal_context(
-                "function output value",
-                "formal variable is absent from the semantic module",
-                Some(&call.comptime.token),
-            )
-        })?;
-        let formal_width = resolve_total_width(module, formal)?;
-        if formal_width == 0 {
-            return Err(ParserError::illegal_context(
-                "function output value",
-                "formal output has zero width",
-                Some(&call.comptime.token),
-            ));
-        }
-        let access = BitAccess::new(0, formal_width - 1);
-        let range_store = final_local_store.get(arg_id).ok_or_else(|| {
-            ParserError::illegal_context(
-                "function output value",
-                "formal output is absent from the final symbolic store",
-                Some(&call.comptime.token),
-            )
-        })?;
-        let parts = range_store.get_parts(access).map_err(|error| {
-            range_store_error("function output value", error, Some(&call.comptime.token))
-        })?;
-        let (output_expr, output_sources) = combine_parts_with_default(*arg_id, 0, parts, arena)?;
-        let (next_store, next_boundaries) = assign_node_to_dsts(
+    for (arg_id, dsts) in ordered_function_outputs(function, function_body, call)? {
+        (store, boundaries) = apply_function_output(
             module,
             store,
             boundaries,
+            arg_id,
             dsts,
-            output_expr,
-            output_sources,
-            formal.r#type.is_2state(),
+            call,
+            final_local_store,
             arena,
         )?;
-        store = next_store;
-        boundaries = next_boundaries;
     }
 
     Ok((store, boundaries))
+}
+
+pub(super) fn apply_function_output(
+    module: &Module,
+    store: SymbolicStore<VarId>,
+    boundaries: BoundaryMap<VarId>,
+    arg_id: VarId,
+    dsts: &[veryl_analyzer::ir::AssignDestination],
+    call: &veryl_analyzer::ir::FunctionCall,
+    final_local_store: &SymbolicStore<VarId>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    let formal = module.variables.get(&arg_id).ok_or_else(|| {
+        ParserError::illegal_context(
+            "function output value",
+            "formal variable is absent from the semantic module",
+            Some(&call.comptime.token),
+        )
+    })?;
+    let formal_width = resolve_total_width(module, formal)?;
+    if formal_width == 0 {
+        return Err(ParserError::illegal_context(
+            "function output value",
+            "formal output has zero width",
+            Some(&call.comptime.token),
+        ));
+    }
+    let access = BitAccess::new(0, formal_width - 1);
+    let range_store = final_local_store.get(&arg_id).ok_or_else(|| {
+        ParserError::illegal_context(
+            "function output value",
+            "formal output is absent from the final symbolic store",
+            Some(&call.comptime.token),
+        )
+    })?;
+    let parts = range_store.get_parts(access).map_err(|error| {
+        range_store_error("function output value", error, Some(&call.comptime.token))
+    })?;
+    let (output_expr, output_sources) = combine_parts_with_default(arg_id, 0, parts, arena)?;
+    assign_node_to_dsts(
+        module,
+        store,
+        boundaries,
+        dsts,
+        output_expr,
+        output_sources,
+        formal.r#type.is_2state(),
+        arena,
+    )
 }
 
 struct DynamicSelectOffset {

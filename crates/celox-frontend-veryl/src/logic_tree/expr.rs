@@ -623,7 +623,7 @@ pub(super) fn eval_function_body_return(
 
     fn eval_function_for(
         module: &Module,
-        state: FunctionControlState,
+        mut state: FunctionControlState,
         for_stmt: &ForStatement,
         ret_id: VarId,
         arena: &mut SLTNodeArena<VarId>,
@@ -681,9 +681,10 @@ pub(super) fn eval_function_body_return(
             ret_id: VarId,
             arena: &mut SLTNodeArena<VarId>,
         ) -> Result<FunctionLoopControlState, ParserError> {
+            let guard_state = state.clone();
             let (function, cond_expr, cond_sources) =
                 eval_function_condition(module, state.function.clone(), &if_stmt.cond, arena)?;
-            state.function = function;
+            state = apply_function_loop_continue_guard(module, guard_state, function, arena)?;
 
             if let Some(cond_val) = constant_bool(arena, cond_expr) {
                 let side = if cond_val {
@@ -793,15 +794,18 @@ pub(super) fn eval_function_body_return(
                     &arm.patterns,
                     arena,
                 )?;
-                state.function = apply_function_guard(
+                let next_function = apply_function_guard(
                     module,
-                    state.function,
+                    state.function.clone(),
                     next_store,
                     cond_bounds,
                     bool_node(arena, true)?,
                     HashSet::default(),
                     arena,
                 )?;
+                let guard_state = state.clone();
+                state =
+                    apply_function_loop_continue_guard(module, guard_state, next_function, arena)?;
                 let cond_expr = procedural_condition(arena, cond_expr)?;
                 let boundaries = state.function.boundaries.clone();
 
@@ -901,6 +905,7 @@ pub(super) fn eval_function_body_return(
                 })
             }
 
+            let guard_state = state.clone();
             let (function, target_node, target_sources) = eval_function_expression(
                 module,
                 state.function.clone(),
@@ -908,7 +913,7 @@ pub(super) fn eval_function_body_return(
                 None,
                 arena,
             )?;
-            state.function = function;
+            state = apply_function_loop_continue_guard(module, guard_state, function, arena)?;
             let target = EvaluatedCaseTarget {
                 node: target_node,
                 sources: target_sources,
@@ -988,6 +993,105 @@ pub(super) fn eval_function_body_return(
             ));
         }
 
+        let (
+            start,
+            end,
+            start_sources,
+            end_sources,
+            start_bounds,
+            end_bounds,
+            inclusive,
+            step,
+            step_op,
+            reverse,
+        ) = match &for_stmt.range {
+            ForRange::Forward {
+                start: range_start,
+                end: range_end,
+                inclusive,
+                step,
+            } => {
+                let (start, start_sources, start_bounds) =
+                    eval_for_bound_effectful(module, &mut state.store, range_start, arena)?;
+                let (end, end_sources, end_bounds) =
+                    eval_for_bound_effectful(module, &mut state.store, range_end, arena)?;
+                (
+                    start,
+                    end,
+                    start_sources,
+                    end_sources,
+                    start_bounds,
+                    end_bounds,
+                    *inclusive,
+                    *step,
+                    SLTStepOp::Add,
+                    false,
+                )
+            }
+            ForRange::Reverse {
+                start: range_start,
+                end: range_end,
+                inclusive,
+                step,
+            } => {
+                let (start, start_sources, start_bounds) =
+                    eval_for_bound_effectful(module, &mut state.store, range_start, arena)?;
+                let (end, end_sources, end_bounds) =
+                    eval_for_bound_effectful(module, &mut state.store, range_end, arena)?;
+                (
+                    start,
+                    end,
+                    start_sources,
+                    end_sources,
+                    start_bounds,
+                    end_bounds,
+                    *inclusive,
+                    *step,
+                    SLTStepOp::Add,
+                    true,
+                )
+            }
+            ForRange::Stepped {
+                start: range_start,
+                end: range_end,
+                inclusive,
+                step,
+                op,
+            } => {
+                let (start, start_sources, start_bounds) =
+                    eval_for_bound_effectful(module, &mut state.store, range_start, arena)?;
+                let (end, end_sources, end_bounds) =
+                    eval_for_bound_effectful(module, &mut state.store, range_end, arena)?;
+                let step_op = match op {
+                    Op::Mul => SLTStepOp::Mul,
+                    Op::LogicShiftL | Op::ArithShiftL => SLTStepOp::Shl,
+                    Op::BitOr => SLTStepOp::BitOr,
+                    Op::BitXor => SLTStepOp::BitXor,
+                    other => {
+                        return Err(ParserError::illegal_context(
+                            "for loop step operator",
+                            format!("{other:?}"),
+                            Some(&for_stmt.token),
+                        ));
+                    }
+                };
+                (
+                    start,
+                    end,
+                    start_sources,
+                    end_sources,
+                    start_bounds,
+                    end_bounds,
+                    *inclusive,
+                    *step,
+                    step_op,
+                    false,
+                )
+            }
+        };
+        state.boundaries = merge_boundaries(state.boundaries, start_bounds);
+        state.boundaries = merge_boundaries(state.boundaries, end_bounds);
+
         let mut symbolic_store = state.store.clone();
         let mut written_accesses = HashMap::default();
         collect_written_accesses(module, &for_stmt.body, &mut written_accesses)?;
@@ -1054,107 +1158,7 @@ pub(super) fn eval_function_body_return(
             |s, stmt| eval_function_loop_statement(module, s, stmt, ret_id, arena),
         )?;
         let iter_store_after = iter_state.function.store;
-        let mut merged_boundaries = iter_state.function.boundaries;
-
-        let (
-            start,
-            end,
-            start_sources,
-            end_sources,
-            start_bounds,
-            end_bounds,
-            inclusive,
-            step,
-            step_op,
-            reverse,
-        ) = match &for_stmt.range {
-            ForRange::Forward {
-                start: range_start,
-                end: range_end,
-                inclusive,
-                step,
-            } => {
-                let (start, start_sources, start_bounds) =
-                    eval_for_bound(module, &state.store, range_start, arena)?;
-                let (end, end_sources, end_bounds) =
-                    eval_for_bound(module, &state.store, range_end, arena)?;
-                (
-                    start,
-                    end,
-                    start_sources,
-                    end_sources,
-                    start_bounds,
-                    end_bounds,
-                    *inclusive,
-                    *step,
-                    SLTStepOp::Add,
-                    false,
-                )
-            }
-            ForRange::Reverse {
-                start: range_start,
-                end: range_end,
-                inclusive,
-                step,
-            } => {
-                let (start, start_sources, start_bounds) =
-                    eval_for_bound(module, &state.store, range_start, arena)?;
-                let (end, end_sources, end_bounds) =
-                    eval_for_bound(module, &state.store, range_end, arena)?;
-                (
-                    start,
-                    end,
-                    start_sources,
-                    end_sources,
-                    start_bounds,
-                    end_bounds,
-                    *inclusive,
-                    *step,
-                    SLTStepOp::Add,
-                    true,
-                )
-            }
-            ForRange::Stepped {
-                start: range_start,
-                end: range_end,
-                inclusive,
-                step,
-                op,
-            } => {
-                let (start, start_sources, start_bounds) =
-                    eval_for_bound(module, &state.store, range_start, arena)?;
-                let (end, end_sources, end_bounds) =
-                    eval_for_bound(module, &state.store, range_end, arena)?;
-                let step_op = match op {
-                    Op::Mul => SLTStepOp::Mul,
-                    Op::LogicShiftL | Op::ArithShiftL => SLTStepOp::Shl,
-                    Op::BitOr => SLTStepOp::BitOr,
-                    Op::BitXor => SLTStepOp::BitXor,
-                    other => {
-                        return Err(ParserError::illegal_context(
-                            "for loop step operator",
-                            format!("{other:?}"),
-                            Some(&for_stmt.token),
-                        ));
-                    }
-                };
-                (
-                    start,
-                    end,
-                    start_sources,
-                    end_sources,
-                    start_bounds,
-                    end_bounds,
-                    *inclusive,
-                    *step,
-                    step_op,
-                    false,
-                )
-            }
-        };
-
-        merged_boundaries = merge_boundaries(merged_boundaries, start_bounds);
-        merged_boundaries = merge_boundaries(merged_boundaries, end_bounds);
+        let merged_boundaries = iter_state.function.boundaries;
 
         let updates = extract_store_updates(&iter_store_before, &iter_store_after, arena)?;
         let folded_updates: Vec<_> = updates
@@ -1359,10 +1363,10 @@ pub(super) fn eval_function_body_return(
         ret_id: VarId,
         arena: &mut SLTNodeArena<VarId>,
     ) -> Result<FunctionLoopControlState, ParserError> {
+        let outer_state = state.clone();
         let (function, cond_expr, cond_sources) =
             eval_function_condition(module, state.function.clone(), &if_stmt.cond, arena)?;
         state.function = function;
-        let outer_state = state.clone();
 
         let executed_state = if let Some(cond_val) = constant_bool(arena, cond_expr) {
             let side = if cond_val {
@@ -1607,6 +1611,7 @@ pub(super) fn eval_function_body_return(
             })
         }
 
+        let outer_state = state.clone();
         let (function, target_node, target_sources) = eval_function_expression(
             module,
             state.function.clone(),
@@ -1619,7 +1624,6 @@ pub(super) fn eval_function_body_return(
             node: target_node,
             sources: target_sources,
         };
-        let outer_state = state.clone();
         let executed_state = eval_from_arm(module, state, case_stmt, &target, 0, ret_id, arena)?;
 
         if matches!(constant_bool(arena, outer_state.continue_expr), Some(true)) {
