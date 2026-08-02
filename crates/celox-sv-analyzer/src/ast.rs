@@ -112,7 +112,7 @@ impl Module {
             syntax_tree,
             &const_env,
             &packed_dimensions,
-        );
+        )?;
         let assignments = comb_processes
             .iter()
             .flat_map(|process| process.assignments().iter().cloned())
@@ -1892,25 +1892,38 @@ fn function_expr_from_case_statement(
 }
 
 fn case_item_condition(case_expr: Expr, item_expr: Expr) -> Expr {
-    if expr_is_literal_one(&case_expr) {
-        item_expr
-    } else {
-        Expr::Unary {
-            // Case labels in the initial synthesizable subset are known
-            // values. Wildcard equality detects a definite mismatch, while
-            // the two-state projection makes an X/Z selector a non-match.
-            op: UnaryOp::ToTwoState,
-            expr: Box::new(Expr::Binary {
-                left: Box::new(case_expr),
-                op: BinaryOp::EqWildcard,
-                right: Box::new(item_expr),
-            }),
-        }
+    Expr::Unary {
+        op: UnaryOp::ToTwoState,
+        expr: Box::new(Expr::Binary {
+            left: Box::new(case_expr),
+            op: BinaryOp::Eq,
+            right: Box::new(item_expr),
+        }),
     }
 }
 
-fn expr_is_literal_one(expr: &Expr) -> bool {
-    matches!(expr, Expr::Literal(value) if value == "1" || value == "1'b1")
+fn expr_contains_unknown_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(value) => typecheck::parse_integral_literal(value)
+            .is_some_and(|literal| literal.mask != Default::default()),
+        Expr::Select { expr, .. } | Expr::Unary { expr, .. } => expr_contains_unknown_literal(expr),
+        Expr::Concat(parts) => parts.iter().any(expr_contains_unknown_literal),
+        Expr::RepeatConcat { parts, .. } => parts.iter().any(expr_contains_unknown_literal),
+        Expr::Binary { left, right, .. } => {
+            expr_contains_unknown_literal(left) || expr_contains_unknown_literal(right)
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_contains_unknown_literal(condition)
+                || expr_contains_unknown_literal(then_expr)
+                || expr_contains_unknown_literal(else_expr)
+        }
+        Expr::Call { args, .. } => args.iter().any(expr_contains_unknown_literal),
+        Expr::Ident(_) => false,
+    }
 }
 
 fn comb_processes_from_module_node(
@@ -2694,7 +2707,7 @@ fn ff_processes_from_module_node(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
-) -> Vec<FfProcess> {
+) -> Result<Vec<FfProcess>, AnalyzerError> {
     let mut processes = Vec::new();
     for item in module_non_port_items(node) {
         ff_processes_from_non_port_module_item(
@@ -2703,9 +2716,9 @@ fn ff_processes_from_module_node(
             const_env,
             packed_dimensions,
             &mut processes,
-        );
+        )?;
     }
-    processes
+    Ok(processes)
 }
 
 fn ff_processes_from_non_port_module_item(
@@ -2714,7 +2727,7 @@ fn ff_processes_from_non_port_module_item(
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     match item {
         sv_parser::NonPortModuleItem::GenerateRegion(region) => {
             for item in &region.nodes.1 {
@@ -2724,7 +2737,7 @@ fn ff_processes_from_non_port_module_item(
                     const_env,
                     packed_dimensions,
                     processes,
-                );
+                )?;
             }
         }
         sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) => {
@@ -2734,10 +2747,11 @@ fn ff_processes_from_non_port_module_item(
                 const_env,
                 packed_dimensions,
                 processes,
-            );
+            )?;
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn ff_processes_from_generate_item(
@@ -2746,7 +2760,7 @@ fn ff_processes_from_generate_item(
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
         ff_processes_from_module_or_generate_item(
             item,
@@ -2754,8 +2768,9 @@ fn ff_processes_from_generate_item(
             const_env,
             packed_dimensions,
             processes,
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn ff_processes_from_module_or_generate_item(
@@ -2764,7 +2779,7 @@ fn ff_processes_from_module_or_generate_item(
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     if let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item {
         ff_processes_from_module_common_item(
             &item.nodes.1,
@@ -2772,8 +2787,9 @@ fn ff_processes_from_module_or_generate_item(
             const_env,
             packed_dimensions,
             processes,
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn ff_processes_from_module_common_item(
@@ -2782,27 +2798,27 @@ fn ff_processes_from_module_common_item(
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     match item {
         sv_parser::ModuleCommonItem::AlwaysConstruct(always) => {
             if let Some(process) =
-                ff_process_from_always_construct(always, syntax_tree, const_env, packed_dimensions)
+                ff_process_from_always_construct(always, syntax_tree, const_env, packed_dimensions)?
             {
                 processes.push(process);
             }
         }
         sv_parser::ModuleCommonItem::ConditionalGenerateConstruct(generate) => {
             let sv_parser::ConditionalGenerateConstruct::If(generate) = &**generate else {
-                return;
+                return Ok(());
             };
             let Some(condition) = const_expr_from_ref_node(
                 RefNode::ConstantExpression(&generate.nodes.1.nodes.1),
                 syntax_tree,
             ) else {
-                return;
+                return Ok(());
             };
             let Some(condition_value) = eval_ast_const_expr(&condition, const_env) else {
-                return;
+                return Ok(());
             };
             let block = if condition_value != 0 {
                 Some(&generate.nodes.2)
@@ -2816,11 +2832,12 @@ fn ff_processes_from_module_common_item(
                     const_env,
                     packed_dimensions,
                     processes,
-                );
+                )?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn ff_processes_from_generate_block(
@@ -2829,7 +2846,7 @@ fn ff_processes_from_generate_block(
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     match block {
         sv_parser::GenerateBlock::GenerateItem(item) => {
             ff_processes_from_generate_item(
@@ -2838,7 +2855,7 @@ fn ff_processes_from_generate_block(
                 const_env,
                 packed_dimensions,
                 processes,
-            );
+            )?;
         }
         sv_parser::GenerateBlock::Multiple(block) => {
             for item in &block.nodes.3 {
@@ -2848,10 +2865,11 @@ fn ff_processes_from_generate_block(
                     const_env,
                     packed_dimensions,
                     processes,
-                );
+                )?;
             }
         }
     }
+    Ok(())
 }
 
 fn ff_process_from_always_construct(
@@ -2859,11 +2877,13 @@ fn ff_process_from_always_construct(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
-) -> Option<FfProcess> {
+) -> Result<Option<FfProcess>, AnalyzerError> {
     if !matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_)) {
-        return None;
+        return Ok(None);
     }
-    let (events, body) = ff_event_control_and_body(&always.nodes.1, syntax_tree)?;
+    let Some((events, body)) = ff_event_control_and_body(&always.nodes.1, syntax_tree) else {
+        return Ok(None);
+    };
     let mut assignments = Vec::new();
     conditional_assignments_from_statement_or_null(
         body,
@@ -2871,7 +2891,7 @@ fn ff_process_from_always_construct(
         syntax_tree,
         packed_dimensions,
         &mut assignments,
-    );
+    )?;
     let assignments = assignments
         .into_iter()
         .map(|assignment| {
@@ -2883,7 +2903,10 @@ fn ff_process_from_always_construct(
             )
         })
         .collect::<Vec<_>>();
-    (!events.is_empty() && !assignments.is_empty()).then(|| FfProcess::new(events, assignments))
+    Ok(
+        (!events.is_empty() && !assignments.is_empty())
+            .then(|| FfProcess::new(events, assignments)),
+    )
 }
 
 fn ff_event_control_and_body<'a>(
@@ -2949,7 +2972,7 @@ fn conditional_assignments_from_statement_or_null(
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     assignments: &mut Vec<ConditionalAssignment>,
-) {
+) -> Result<(), AnalyzerError> {
     if let sv_parser::StatementOrNull::Statement(stmt) = stmt {
         conditional_assignments_from_statement(
             stmt,
@@ -2957,8 +2980,9 @@ fn conditional_assignments_from_statement_or_null(
             syntax_tree,
             packed_dimensions,
             assignments,
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn conditional_assignments_from_statement(
@@ -2967,7 +2991,7 @@ fn conditional_assignments_from_statement(
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     assignments: &mut Vec<ConditionalAssignment>,
-) {
+) -> Result<(), AnalyzerError> {
     match &stmt.nodes.2 {
         sv_parser::StatementItem::NonblockingAssignment(assignment) => {
             let lhs =
@@ -2992,7 +3016,7 @@ fn conditional_assignments_from_statement(
                     syntax_tree,
                     packed_dimensions,
                     assignments,
-                );
+                )?;
             }
         }
         sv_parser::StatementItem::ConditionalStatement(stmt) => {
@@ -3002,7 +3026,7 @@ fn conditional_assignments_from_statement(
                 syntax_tree,
                 packed_dimensions,
                 assignments,
-            );
+            )?;
         }
         sv_parser::StatementItem::CaseStatement(stmt) => {
             conditional_assignments_from_case_statement(
@@ -3011,10 +3035,11 @@ fn conditional_assignments_from_statement(
                 syntax_tree,
                 packed_dimensions,
                 assignments,
-            );
+            )?;
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn conditional_assignments_from_conditional_statement(
@@ -3023,11 +3048,11 @@ fn conditional_assignments_from_conditional_statement(
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     assignments: &mut Vec<ConditionalAssignment>,
-) {
+) -> Result<(), AnalyzerError> {
     let Some(if_condition) =
         expr_from_cond_predicate(&stmt.nodes.2.nodes.1, syntax_tree, packed_dimensions)
     else {
-        return;
+        return Ok(());
     };
     let mut prior_false = Vec::new();
     let then_condition = combine_expr_conditions(parent_condition.clone(), if_condition.clone());
@@ -3037,7 +3062,7 @@ fn conditional_assignments_from_conditional_statement(
         syntax_tree,
         packed_dimensions,
         assignments,
-    );
+    )?;
     prior_false.push(Expr::Unary {
         op: UnaryOp::LogicNot,
         expr: Box::new(if_condition),
@@ -3047,7 +3072,7 @@ fn conditional_assignments_from_conditional_statement(
         let Some(branch_condition) =
             expr_from_cond_predicate(&predicate.nodes.1, syntax_tree, packed_dimensions)
         else {
-            return;
+            return Ok(());
         };
         let mut terms = prior_false.clone();
         terms.push(branch_condition.clone());
@@ -3058,7 +3083,7 @@ fn conditional_assignments_from_conditional_statement(
             syntax_tree,
             packed_dimensions,
             assignments,
-        );
+        )?;
         prior_false.push(Expr::Unary {
             op: UnaryOp::LogicNot,
             expr: Box::new(branch_condition),
@@ -3073,8 +3098,9 @@ fn conditional_assignments_from_conditional_statement(
             syntax_tree,
             packed_dimensions,
             assignments,
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn conditional_assignments_from_case_statement(
@@ -3083,19 +3109,19 @@ fn conditional_assignments_from_case_statement(
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     assignments: &mut Vec<ConditionalAssignment>,
-) {
+) -> Result<(), AnalyzerError> {
     let sv_parser::CaseStatement::Normal(stmt) = stmt else {
-        return;
+        return Ok(());
     };
     if !matches!(&stmt.nodes.1, sv_parser::CaseKeyword::Case(_)) {
-        return;
+        return Ok(());
     }
     let Some(case_expr) = expr_from_expression_with_types(
         &stmt.nodes.2.nodes.1.nodes.0,
         syntax_tree,
         packed_dimensions,
     ) else {
-        return;
+        return Ok(());
     };
 
     let mut branches = Vec::new();
@@ -3103,20 +3129,22 @@ fn conditional_assignments_from_case_statement(
     for item in std::iter::once(&stmt.nodes.3).chain(stmt.nodes.4.iter()) {
         match item {
             sv_parser::CaseItem::NonDefault(item) => {
-                let conditions = item
-                    .nodes
-                    .0
-                    .contents()
-                    .into_iter()
-                    .filter_map(|expr| {
-                        expr_from_expression_with_types(
-                            &expr.nodes.0,
-                            syntax_tree,
-                            packed_dimensions,
-                        )
-                    })
-                    .map(|expr| case_item_condition(case_expr.clone(), expr))
-                    .collect::<Vec<_>>();
+                let mut conditions = Vec::new();
+                for expr in item.nodes.0.contents() {
+                    let Some(expr) = expr_from_expression_with_types(
+                        &expr.nodes.0,
+                        syntax_tree,
+                        packed_dimensions,
+                    ) else {
+                        continue;
+                    };
+                    if expr_contains_unknown_literal(&expr) {
+                        return Err(AnalyzerError::Unsupported(
+                            "X/Z labels in always_ff case statements".to_string(),
+                        ));
+                    }
+                    conditions.push(case_item_condition(case_expr.clone(), expr));
+                }
                 if let Some(condition) = conditions.into_iter().reduce(|left, right| Expr::Binary {
                     left: Box::new(left),
                     op: BinaryOp::LogicOr,
@@ -3142,7 +3170,7 @@ fn conditional_assignments_from_case_statement(
             syntax_tree,
             packed_dimensions,
             assignments,
-        );
+        )?;
         prior_false.push(Expr::Unary {
             op: UnaryOp::LogicNot,
             expr: Box::new(branch_condition),
@@ -3157,8 +3185,9 @@ fn conditional_assignments_from_case_statement(
             syntax_tree,
             packed_dimensions,
             assignments,
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn expr_from_cond_predicate(

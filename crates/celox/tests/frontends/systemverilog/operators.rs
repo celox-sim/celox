@@ -560,24 +560,47 @@ sv_backends! {
             input logic [7:0] d1,
             input logic [7:0] d2,
             output logic [7:0] q,
-            output logic [7:0] q_hold
+            output logic [7:0] q_hold,
+            output logic [7:0] q_case_one,
+            output logic [7:0] q_before_case,
+            output logic [7:0] q_after_case
         );
             always_ff @(posedge clk, negedge rst) begin
                 if (!rst) begin
                     q <= 8'h00;
                     q_hold <= 8'h00;
+                    q_case_one <= 8'h00;
+                    q_before_case <= 8'h00;
+                    q_after_case <= 8'h00;
                 end else begin
                     case (mode)
-                        2'b00: begin
+                        0: begin
                             q <= d0;
                             q_hold <= d0;
                         end
-                        2'b01, 2'b10: begin
+                        1, 2: begin
                             q <= d1;
                             q_hold <= d1;
                         end
                         default: q <= d2;
                     endcase
+
+                    case (1)
+                        2'b10: q_case_one <= d0;
+                        default: q_case_one <= d2;
+                    endcase
+
+                    q_before_case <= 8'h55;
+                    case (mode)
+                        0: q_before_case <= d0;
+                        default: ;
+                    endcase
+
+                    case (mode)
+                        0: q_after_case <= d0;
+                        default: q_after_case <= d1;
+                    endcase
+                    q_after_case <= d2;
                 end
             end
         endmodule
@@ -594,6 +617,9 @@ sv_backends! {
     let d2 = sim.signal("d2");
     let q = sim.signal("q");
     let q_hold = sim.signal("q_hold");
+    let q_case_one = sim.signal("q_case_one");
+    let q_before_case = sim.signal("q_before_case");
+    let q_after_case = sim.signal("q_after_case");
 
     sim.modify(|io| {
         io.set(rst, 0u8);
@@ -605,21 +631,33 @@ sv_backends! {
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 0u8.into());
     assert_eq!(sim.get(q_hold), 0u8.into());
+    assert_eq!(sim.get(q_case_one), 0u8.into());
+    assert_eq!(sim.get(q_before_case), 0u8.into());
+    assert_eq!(sim.get(q_after_case), 0u8.into());
 
     sim.modify(|io| io.set(rst, 1u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 0x11u8.into());
     assert_eq!(sim.get(q_hold), 0x11u8.into());
+    assert_eq!(sim.get(q_case_one), 0x33u8.into());
+    assert_eq!(sim.get(q_before_case), 0x11u8.into());
+    assert_eq!(sim.get(q_after_case), 0x33u8.into());
 
     sim.modify(|io| io.set(mode, 2u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 0x22u8.into());
     assert_eq!(sim.get(q_hold), 0x22u8.into());
+    assert_eq!(sim.get(q_case_one), 0x33u8.into());
+    assert_eq!(sim.get(q_before_case), 0x55u8.into());
+    assert_eq!(sim.get(q_after_case), 0x33u8.into());
 
     sim.modify(|io| io.set(mode, 3u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 0x33u8.into());
     assert_eq!(sim.get(q_hold), 0x22u8.into());
+    assert_eq!(sim.get(q_case_one), 0x33u8.into());
+    assert_eq!(sim.get(q_before_case), 0x55u8.into());
+    assert_eq!(sim.get(q_after_case), 0x33u8.into());
 
     sim.modify(|io| {
         io.set_four_state(mode, BigUint::from(0u8), BigUint::from(0b11u8));
@@ -628,6 +666,9 @@ sv_backends! {
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 0x44u8.into());
     assert_eq!(sim.get(q_hold), 0x22u8.into());
+    assert_eq!(sim.get(q_case_one), 0x44u8.into());
+    assert_eq!(sim.get(q_before_case), 0x55u8.into());
+    assert_eq!(sim.get(q_after_case), 0x44u8.into());
     }
 
     fn simulates_systemverilog_repeat_concat(sim) {

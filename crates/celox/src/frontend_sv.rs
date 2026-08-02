@@ -18,7 +18,8 @@ use celox_frontend_veryl::{
     logic_tree::coerce_node_width,
 };
 use celox_sir::{
-    BlockId, ExecutionUnit, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator, SIRValue,
+    BlockId, ExecutionUnit, RegisterType, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
+    SIRValue,
 };
 use celox_slt::{
     CombObserver, GlueBlockBase, LogicPath, LogicPathTarget, SLTNode, SLTNodeArena, SymbolicStore,
@@ -1424,20 +1425,15 @@ fn emit_ff_assignment_stores(
             SIROffset::Static(target.access.lsb),
             width,
         ));
-        for assignment in process
-            .assignments()
-            .iter()
-            .filter(|assignment| {
-                lvalue_atom(
-                    assignment.assignment().lhs_value(),
-                    variables,
-                    name_to_id,
-                    constants,
-                )
-                .is_some_and(|candidate| candidate == *target)
-            })
-            .rev()
-        {
+        for assignment in process.assignments().iter().filter(|assignment| {
+            lvalue_atom(
+                assignment.assignment().lhs_value(),
+                variables,
+                name_to_id,
+                constants,
+            )
+            .is_some_and(|candidate| candidate == *target)
+        }) {
             let rhs = lower_expr_to_sir(
                 builder,
                 assignment.assignment().rhs(),
@@ -1489,6 +1485,106 @@ fn lvalue_atom(
             (low <= high && high < width).then(|| VarAtomBase::new(id, low, high))
         }
     }
+}
+
+fn sv_expr_is_signed(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<VarId, SvVariable>,
+    name_to_id: &HashMap<String, VarId>,
+    constants: &std::collections::HashMap<String, i128>,
+) -> bool {
+    match expr {
+        sv::ir::Expr::Ident(name) => {
+            name_to_id
+                .get(name)
+                .and_then(|id| variables.get(id))
+                .is_some_and(|variable| variable.signed)
+                || constants.contains_key(name)
+        }
+        sv::ir::Expr::Literal(literal) => {
+            sv::typecheck::parse_integral_literal(literal).is_some_and(|literal| literal.signed)
+        }
+        sv::ir::Expr::Select { .. }
+        | sv::ir::Expr::Concat(_)
+        | sv::ir::Expr::RepeatConcat { .. }
+        | sv::ir::Expr::Call { .. } => false,
+        sv::ir::Expr::Unary { op, expr } => {
+            matches!(
+                op,
+                sv::ir::UnaryOp::Plus | sv::ir::UnaryOp::Minus | sv::ir::UnaryOp::BitNot
+            ) && sv_expr_is_signed(expr, variables, name_to_id, constants)
+        }
+        sv::ir::Expr::Binary { left, op, right } => match op {
+            sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr => {
+                sv_expr_is_signed(left, variables, name_to_id, constants)
+            }
+            sv::ir::BinaryOp::Add
+            | sv::ir::BinaryOp::Sub
+            | sv::ir::BinaryOp::Mul
+            | sv::ir::BinaryOp::Div
+            | sv::ir::BinaryOp::Mod
+            | sv::ir::BinaryOp::BitAnd
+            | sv::ir::BinaryOp::BitOr
+            | sv::ir::BinaryOp::BitXor => {
+                sv_expr_is_signed(left, variables, name_to_id, constants)
+                    && sv_expr_is_signed(right, variables, name_to_id, constants)
+            }
+            _ => false,
+        },
+        sv::ir::Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            sv_expr_is_signed(then_expr, variables, name_to_id, constants)
+                && sv_expr_is_signed(else_expr, variables, name_to_id, constants)
+        }
+    }
+}
+
+fn resize_sir_register(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    source: celox_sir::RegisterId,
+    target_width: usize,
+    sign_extend: bool,
+) -> Option<celox_sir::RegisterId> {
+    let source_type = builder.register(&source).clone();
+    let source_width = source_type.width();
+    if source_width == target_width {
+        return Some(source);
+    }
+
+    let alloc_like = |builder: &mut SIRBuilder<RegionedVarAddr>, width| match &source_type {
+        RegisterType::Logic { .. } => builder.alloc_logic(width),
+        RegisterType::Bit { signed, .. } => builder.alloc_bit(width, *signed && sign_extend),
+    };
+
+    if source_width > target_width {
+        let resized = alloc_like(builder, target_width);
+        builder.emit(SIRInstruction::Slice(resized, source, 0, target_width));
+        return Some(resized);
+    }
+
+    let extension_width = target_width - source_width;
+    let mut parts = Vec::with_capacity(extension_width.saturating_add(1));
+    if sign_extend {
+        let sign = alloc_like(builder, 1);
+        builder.emit(SIRInstruction::Slice(
+            sign,
+            source,
+            source_width.checked_sub(1)?,
+            1,
+        ));
+        parts.extend(std::iter::repeat_n(sign, extension_width));
+    } else {
+        let zero = alloc_like(builder, extension_width);
+        builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        parts.push(zero);
+    }
+    parts.push(source);
+    let resized = alloc_like(builder, target_width);
+    builder.emit(SIRInstruction::Concat(resized, parts));
+    Some(resized)
 }
 
 fn lower_expr_to_sir(
@@ -1558,8 +1654,29 @@ fn lower_expr_to_sir(
             Some(reg)
         }
         sv::ir::Expr::Binary { left, op, right } => {
-            let left = lower_expr_to_sir(builder, left, variables, name_to_id, constants)?;
-            let right = lower_expr_to_sir(builder, right, variables, name_to_id, constants)?;
+            let operands_signed = sv_expr_is_signed(left, variables, name_to_id, constants)
+                && sv_expr_is_signed(right, variables, name_to_id, constants);
+            let mut left = lower_expr_to_sir(builder, left, variables, name_to_id, constants)?;
+            let mut right = lower_expr_to_sir(builder, right, variables, name_to_id, constants)?;
+            let comparison = matches!(
+                op,
+                sv::ir::BinaryOp::Eq
+                    | sv::ir::BinaryOp::Ne
+                    | sv::ir::BinaryOp::EqWildcard
+                    | sv::ir::BinaryOp::NeWildcard
+                    | sv::ir::BinaryOp::Lt
+                    | sv::ir::BinaryOp::Le
+                    | sv::ir::BinaryOp::Gt
+                    | sv::ir::BinaryOp::Ge
+            );
+            if comparison {
+                let common_width = builder
+                    .register(&left)
+                    .width()
+                    .max(builder.register(&right).width());
+                left = resize_sir_register(builder, left, common_width, operands_signed)?;
+                right = resize_sir_register(builder, right, common_width, operands_signed)?;
+            }
             let width = match op {
                 sv::ir::BinaryOp::LogicAnd
                 | sv::ir::BinaryOp::LogicOr
