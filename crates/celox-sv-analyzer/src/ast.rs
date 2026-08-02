@@ -666,10 +666,17 @@ impl ConditionalAssignment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Function {
     name: String,
-    params: Vec<String>,
+    params: Vec<FunctionParam>,
     body: Expr,
     return_width: Option<usize>,
     return_signed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FunctionParam {
+    name: String,
+    width: Option<usize>,
+    signed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1812,7 +1819,7 @@ fn function_from_declaration(
                 .nodes
                 .1
                 .as_ref()
-                .map(|ports| tf_port_names(ports, syntax_tree))
+                .map(|ports| tf_params(ports, syntax_tree, const_env, type_aliases))
                 .unwrap_or_default();
             let expr = function_body_expr(&body.nodes.6, syntax_tree, packed_dimensions)?;
             let return_type = function_return_type(
@@ -1875,16 +1882,64 @@ fn function_return_type(
     })
 }
 
-fn tf_port_names(list: &sv_parser::TfPortList, syntax_tree: &SyntaxTree) -> Vec<String> {
+fn tf_params(
+    list: &sv_parser::TfPortList,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Vec<FunctionParam> {
     list.nodes
         .0
         .contents()
         .into_iter()
         .filter_map(|port| {
             let (identifier, _, _) = port.nodes.4.as_ref()?;
-            identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
+            let name = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)?;
+            let r#type = value_type_from_ref_node(
+                RefNode::DataTypeOrImplicit(&port.nodes.3),
+                syntax_tree,
+                const_env,
+                type_aliases,
+            );
+            Some(FunctionParam {
+                name,
+                width: r#type.map(|r#type| r#type.width),
+                signed: r#type.is_some_and(|r#type| r#type.signed),
+            })
         })
         .collect()
+}
+
+fn value_type_from_ref_node(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<ExprType> {
+    let alias = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases);
+    let direct_ranges;
+    let ranges = if let Some(alias) = &alias {
+        alias.packed_ranges()
+    } else {
+        direct_ranges = packed_ranges_from_ref_node(node.clone(), syntax_tree);
+        &direct_ranges
+    };
+    let width = if ranges.is_empty() {
+        1
+    } else {
+        ranges.iter().try_fold(1usize, |acc, range| {
+            let left = eval_ast_const_expr(range.left(), const_env)?;
+            let right = eval_ast_const_expr(range.right(), const_env)?;
+            acc.checked_mul(left.abs_diff(right) as usize + 1)
+        })?
+    };
+    Some(ExprType {
+        width,
+        signed: alias
+            .as_ref()
+            .map(|r#type| r#type.is_signed())
+            .unwrap_or_else(|| is_signed_from_ref_node(node).unwrap_or(false)),
+    })
 }
 
 fn function_body_expr(
@@ -2902,8 +2957,19 @@ fn expand_expr_calls(
             let env = function
                 .params
                 .iter()
-                .cloned()
                 .zip(args)
+                .map(|(param, arg)| {
+                    let arg = if apply_return_type && let Some(width) = param.width {
+                        Expr::Resize {
+                            expr: Box::new(arg),
+                            width,
+                            signed: param.signed,
+                        }
+                    } else {
+                        arg
+                    };
+                    (param.name.clone(), arg)
+                })
                 .collect::<HashMap<_, _>>();
             let body = substitute_expr_idents(function.body.clone(), &env);
             let expanded = expand_expr_calls(body, functions, depth + 1, apply_return_type);

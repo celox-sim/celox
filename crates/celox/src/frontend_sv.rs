@@ -1590,8 +1590,14 @@ fn emit_ff_assignment_stores(
                 sv::ir::Expr::Literal(literal) => match unbased_fill_literal(literal) {
                     Some(fill) => lower_unbased_fill_literal(builder, fill, target_width)?,
                     None => {
-                        let rhs =
-                            lower_expr_to_sir(builder, rhs_expr, variables, name_to_id, constants)?;
+                        let rhs = lower_expr_to_sir_with_context(
+                            builder,
+                            rhs_expr,
+                            variables,
+                            name_to_id,
+                            constants,
+                            Some(target_width),
+                        )?;
                         resize_sir_register(
                             builder,
                             rhs,
@@ -1601,8 +1607,14 @@ fn emit_ff_assignment_stores(
                     }
                 },
                 _ => {
-                    let rhs =
-                        lower_expr_to_sir(builder, rhs_expr, variables, name_to_id, constants)?;
+                    let rhs = lower_expr_to_sir_with_context(
+                        builder,
+                        rhs_expr,
+                        variables,
+                        name_to_id,
+                        constants,
+                        Some(target_width),
+                    )?;
                     resize_sir_register(
                         builder,
                         rhs,
@@ -1851,6 +1863,17 @@ fn lower_expr_to_sir(
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
 ) -> Option<celox_sir::RegisterId> {
+    lower_expr_to_sir_with_context(builder, expr, variables, name_to_id, constants, None)
+}
+
+fn lower_expr_to_sir_with_context(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    expr: &sv::ir::Expr,
+    variables: &HashMap<VarId, SvVariable>,
+    name_to_id: &HashMap<String, VarId>,
+    constants: &std::collections::HashMap<String, i128>,
+    context_width: Option<usize>,
+) -> Option<celox_sir::RegisterId> {
     match expr {
         sv::ir::Expr::Ident(name) => {
             let Some(id) = name_to_id.get(name).copied() else {
@@ -1860,7 +1883,7 @@ fn lower_expr_to_sir(
                     reg,
                     SIRValue::new_four_state(*value as u128, 0u32),
                 ));
-                return Some(reg);
+                return resize_sir_register(builder, reg, context_width.unwrap_or(32), true);
             };
             let var = variables.get(&id)?;
             let reg = if var.is_4state {
@@ -1877,19 +1900,23 @@ fn lower_expr_to_sir(
                 SIROffset::Static(0),
                 var.width,
             ));
-            Some(reg)
+            resize_sir_register(builder, reg, context_width.unwrap_or(var.width), var.signed)
         }
         sv::ir::Expr::Literal(literal) => {
             let literal = sv::typecheck::parse_integral_literal(literal)?;
+            let width = literal.width;
+            let signed = literal.signed;
             let reg = builder.alloc_logic(literal.width);
             builder.emit(SIRInstruction::Imm(
                 reg,
                 SIRValue::new_four_state(literal.value, literal.mask),
             ));
-            Some(reg)
+            resize_sir_register(builder, reg, context_width.unwrap_or(width), signed)
         }
         sv::ir::Expr::Select { expr, msb, lsb } => {
-            let inner = lower_expr_to_sir(builder, expr, variables, name_to_id, constants)?;
+            let inner = lower_expr_to_sir_with_context(
+                builder, expr, variables, name_to_id, constants, None,
+            )?;
             let msb = sv::typecheck::eval_const_expr(msb, constants)?;
             let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
             let high = usize::try_from(msb.max(lsb)).ok()?;
@@ -1904,11 +1931,25 @@ fn lower_expr_to_sir(
             width,
             signed,
         } => {
-            let inner = lower_expr_to_sir(builder, expr, variables, name_to_id, constants)?;
+            let inner = lower_expr_to_sir_with_context(
+                builder,
+                expr,
+                variables,
+                name_to_id,
+                constants,
+                Some(*width),
+            )?;
             resize_sir_register(builder, inner, *width, *signed)
         }
         sv::ir::Expr::Unary { op, expr } => {
-            let inner = lower_expr_to_sir(builder, expr, variables, name_to_id, constants)?;
+            let inner = lower_expr_to_sir_with_context(
+                builder,
+                expr,
+                variables,
+                name_to_id,
+                constants,
+                context_width,
+            )?;
             let width = builder.register(&inner).width();
             let reg = if matches!(op, sv::ir::UnaryOp::ToTwoState) {
                 builder.alloc_bit(width, false)
@@ -1921,28 +1962,6 @@ fn lower_expr_to_sir(
         sv::ir::Expr::Binary { left, op, right } => {
             let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
                 && sv_expr_is_signed(right, variables, name_to_id);
-            let right_fill = match &**right {
-                sv::ir::Expr::Literal(literal) => unbased_fill_literal(literal),
-                _ => None,
-            };
-            let left_fill = match &**left {
-                sv::ir::Expr::Literal(literal) => unbased_fill_literal(literal),
-                _ => None,
-            };
-            let (mut left, mut right) = if let Some(fill) = right_fill {
-                let left = lower_expr_to_sir(builder, left, variables, name_to_id, constants)?;
-                let width = builder.register(&left).width();
-                (left, lower_unbased_fill_literal(builder, fill, width)?)
-            } else if let Some(fill) = left_fill {
-                let right = lower_expr_to_sir(builder, right, variables, name_to_id, constants)?;
-                let width = builder.register(&right).width();
-                (lower_unbased_fill_literal(builder, fill, width)?, right)
-            } else {
-                (
-                    lower_expr_to_sir(builder, left, variables, name_to_id, constants)?,
-                    lower_expr_to_sir(builder, right, variables, name_to_id, constants)?,
-                )
-            };
             let comparison = matches!(
                 op,
                 sv::ir::BinaryOp::Eq
@@ -1956,6 +1975,63 @@ fn lower_expr_to_sir(
                     | sv::ir::BinaryOp::Gt
                     | sv::ir::BinaryOp::Ge
             );
+            let context_determined = !comparison
+                && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
+            let left_context = context_determined.then_some(context_width).flatten();
+            let right_context = (context_determined
+                && !matches!(op, sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr))
+            .then_some(context_width)
+            .flatten();
+            let right_fill = match &**right {
+                sv::ir::Expr::Literal(literal) => unbased_fill_literal(literal),
+                _ => None,
+            };
+            let left_fill = match &**left {
+                sv::ir::Expr::Literal(literal) => unbased_fill_literal(literal),
+                _ => None,
+            };
+            let (mut left, mut right) = if let Some(fill) = right_fill {
+                let left = lower_expr_to_sir_with_context(
+                    builder,
+                    left,
+                    variables,
+                    name_to_id,
+                    constants,
+                    left_context,
+                )?;
+                let width = builder.register(&left).width();
+                (left, lower_unbased_fill_literal(builder, fill, width)?)
+            } else if let Some(fill) = left_fill {
+                let right = lower_expr_to_sir_with_context(
+                    builder,
+                    right,
+                    variables,
+                    name_to_id,
+                    constants,
+                    right_context,
+                )?;
+                let width = builder.register(&right).width();
+                (lower_unbased_fill_literal(builder, fill, width)?, right)
+            } else {
+                (
+                    lower_expr_to_sir_with_context(
+                        builder,
+                        left,
+                        variables,
+                        name_to_id,
+                        constants,
+                        left_context,
+                    )?,
+                    lower_expr_to_sir_with_context(
+                        builder,
+                        right,
+                        variables,
+                        name_to_id,
+                        constants,
+                        right_context,
+                    )?,
+                )
+            };
             if comparison {
                 let common_width = builder
                     .register(&left)
@@ -2034,12 +2110,25 @@ fn lower_expr_to_sir(
             then_expr,
             else_expr,
         } => {
-            let condition =
-                lower_expr_to_sir(builder, condition, variables, name_to_id, constants)?;
-            let then_expr =
-                lower_expr_to_sir(builder, then_expr, variables, name_to_id, constants)?;
-            let else_expr =
-                lower_expr_to_sir(builder, else_expr, variables, name_to_id, constants)?;
+            let condition = lower_expr_to_sir_with_context(
+                builder, condition, variables, name_to_id, constants, None,
+            )?;
+            let then_expr = lower_expr_to_sir_with_context(
+                builder,
+                then_expr,
+                variables,
+                name_to_id,
+                constants,
+                context_width,
+            )?;
+            let else_expr = lower_expr_to_sir_with_context(
+                builder,
+                else_expr,
+                variables,
+                name_to_id,
+                constants,
+                context_width,
+            )?;
             let width = builder
                 .register(&then_expr)
                 .width()

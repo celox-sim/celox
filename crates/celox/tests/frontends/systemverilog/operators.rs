@@ -912,7 +912,8 @@ sv_backends! {
             input logic signed [1:0] signed_mode,
             output logic [7:0] q_negative,
             output logic [7:0] q_scalar_signed,
-            output logic [63:0] q_fill
+            output logic [63:0] q_fill,
+            output logic [63:0] q_shift
         );
             localparam NEGATIVE = -1;
             localparam logic signed SCALAR_SIGNED = 1'b1;
@@ -929,6 +930,10 @@ sv_backends! {
                 case (mode)
                     0: q_fill <= '1;
                     default: q_fill <= '0;
+                endcase
+                case (mode)
+                    0: q_shift <= 1 << 40;
+                    default: q_shift <= 0;
                 endcase
             end
         endmodule
@@ -952,6 +957,7 @@ sv_backends! {
     assert_eq!(sim.get(sim.signal("q_negative")), 0xffu8.into());
     assert_eq!(sim.get(sim.signal("q_scalar_signed")), 0xa5u8.into());
     assert_eq!(sim.get(sim.signal("q_fill")), u64::MAX.into());
+    assert_eq!(sim.get(sim.signal("q_shift")), (1u64 << 40).into());
     }
 
     fn simulates_systemverilog_always_ff_case_calls_and_xz_parameters(sim) {
@@ -967,7 +973,8 @@ sv_backends! {
             output logic [7:0] q_parameter_xz,
             output logic [7:0] q_parameter_expr,
             output logic [7:0] q_function_width,
-            output logic [7:0] q_function_signed
+            output logic [7:0] q_function_signed,
+            output logic [7:0] q_function_param
         );
             localparam logic [1:0] X_LABEL = 2'b1x;
             localparam EXPR_LABEL = 2'b11 + 2'b00;
@@ -986,6 +993,10 @@ sv_backends! {
 
             function automatic logic signed decode_signed(input logic value);
                 return 1'b1;
+            endfunction
+
+            function automatic logic is_zero(input logic [1:0] value);
+                return value === 0;
             endfunction
 
             always_ff @(posedge clk) begin
@@ -1009,6 +1020,10 @@ sv_backends! {
                 case (signed_mode)
                     decode_signed(mode[0]): q_function_signed <= 8'hc7;
                     default: q_function_signed <= 0;
+                endcase
+                case (is_zero(4'b0100))
+                    1'b1: q_function_param <= 8'hd8;
+                    default: q_function_param <= 0;
                 endcase
             end
         endmodule
@@ -1036,6 +1051,7 @@ sv_backends! {
     assert_eq!(sim.get(sim.signal("q_parameter_expr")), 0xa6u8.into());
     assert_eq!(sim.get(sim.signal("q_function_width")), 0xb6u8.into());
     assert_eq!(sim.get(sim.signal("q_function_signed")), 0xc7u8.into());
+    assert_eq!(sim.get(sim.signal("q_function_param")), 0xd8u8.into());
 
     sim.modify(|io| {
         io.set_four_state(mode, BigUint::from(0b11u8), BigUint::from(0b01u8));
@@ -1048,6 +1064,7 @@ sv_backends! {
     assert_eq!(sim.get(sim.signal("q_parameter_expr")), 0xa6u8.into());
     assert_eq!(sim.get(sim.signal("q_function_width")), 0xb6u8.into());
     assert_eq!(sim.get(sim.signal("q_function_signed")), 0xc7u8.into());
+    assert_eq!(sim.get(sim.signal("q_function_param")), 0xd8u8.into());
     }
 
     fn simulates_systemverilog_repeat_concat(sim) {
