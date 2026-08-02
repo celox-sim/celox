@@ -13,9 +13,41 @@ use veryl_analyzer::ir::{CasePattern, Type, ValueVariant};
 
 use super::state::{FunctionControlState, FunctionLoopControlState};
 
-pub(super) fn eval_array_literal_expression(
+enum ExpressionStore<'a> {
+    ReadOnly(&'a SymbolicStore<VarId>),
+    Effectful(&'a mut SymbolicStore<VarId>),
+}
+
+impl ExpressionStore<'_> {
+    fn current(&self) -> &SymbolicStore<VarId> {
+        match self {
+            Self::ReadOnly(store) => store,
+            Self::Effectful(store) => store,
+        }
+    }
+
+    fn effectful_mut(&mut self) -> Option<&mut SymbolicStore<VarId>> {
+        match self {
+            Self::ReadOnly(_) => None,
+            Self::Effectful(store) => Some(store),
+        }
+    }
+}
+
+pub(super) fn eval_array_literal_expression_effectful(
     module: &Module,
-    store: &SymbolicStore<VarId>,
+    store: &mut SymbolicStore<VarId>,
+    items: &[ArrayLiteralItem],
+    expected_width: Option<usize>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let mut store = ExpressionStore::Effectful(store);
+    eval_array_literal_expression_in_store(module, &mut store, items, expected_width, arena)
+}
+
+fn eval_array_literal_expression_in_store(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
     items: &[ArrayLiteralItem],
     expected_width: Option<usize>,
     arena: &mut SLTNodeArena<VarId>,
@@ -31,7 +63,7 @@ pub(super) fn eval_array_literal_expression(
         match item {
             ArrayLiteralItem::Value(sub_expr, repeat) => {
                 let ((part_expr, part_sources), p_bounds) =
-                    eval_expression(module, store, sub_expr, arena, None)?;
+                    eval_expression_in_context(module, store, sub_expr, arena, None)?;
                 all_bounds = merge_boundaries(all_bounds, p_bounds);
                 total_sources.extend(part_sources);
 
@@ -69,7 +101,7 @@ pub(super) fn eval_array_literal_expression(
                 }
 
                 let ((part_expr, part_sources), p_bounds) =
-                    eval_expression(module, store, default_expr, arena, None)?;
+                    eval_expression_in_context(module, store, default_expr, arena, None)?;
                 all_bounds = merge_boundaries(all_bounds, p_bounds);
                 total_sources.extend(part_sources);
                 let width = get_width(part_expr, arena);
@@ -1879,11 +1911,11 @@ pub(super) fn eval_function_body_return(
 
 fn eval_function_call_expression(
     module: &Module,
-    store: &SymbolicStore<VarId>,
+    store: &mut ExpressionStore<'_>,
     call: &veryl_analyzer::ir::FunctionCall,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
-    if !call.outputs.is_empty() {
+    if !call.outputs.is_empty() && store.effectful_mut().is_none() {
         return Err(ParserError::unsupported(
             60,
             LoweringPhase::CombLowering,
@@ -1925,18 +1957,17 @@ fn eval_function_call_expression(
         ));
     };
 
-    let mut local_store = store.clone();
     let mut arg_bounds = BoundaryMap::default();
-    for (arg_path, arg_id) in &function_body.arg_map {
-        let Some(arg_expr) = call.inputs.get(arg_path) else {
+    let mut evaluated_inputs = Vec::with_capacity(call.inputs.len());
+    for (arg_path, arg_expr) in &call.inputs {
+        let Some(arg_id) = function_body.arg_map.get(arg_path) else {
             return Err(super::invalid_function_call_argument_error(
                 function,
                 arg_path,
-                "formal argument has neither an input expression nor an output destination",
+                "input argument does not match any formal argument",
                 call,
             ));
         };
-
         let Some(arg_var) = module.variables.get(arg_id) else {
             return Err(ParserError::unsupported(
                 67,
@@ -1948,24 +1979,62 @@ fn eval_function_call_expression(
         };
         let arg_width = resolve_total_width(module, arg_var)?;
         let ((arg_node, sources), bounds) =
-            eval_assignment_expression(module, store, arg_expr, arena, arg_width)?;
+            eval_assignment_expression_in_store(module, store, arg_expr, arena, arg_width)?;
         let arg_node = if arg_var.r#type.is_2state() && !arg_expr.comptime().r#type.is_2state() {
             arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, arg_node))?
         } else {
             arg_node
         };
         arg_bounds = merge_boundaries(arg_bounds, bounds);
+        evaluated_inputs.push((*arg_id, arg_node, sources, arg_width));
+    }
+
+    for arg_path in function_body.arg_map.keys() {
+        if !call.inputs.contains_key(arg_path) && !call.outputs.contains_key(arg_path) {
+            return Err(super::invalid_function_call_argument_error(
+                function,
+                arg_path,
+                "formal argument has neither an input expression nor an output destination",
+                call,
+            ));
+        }
+    }
+
+    let mut local_store = store.current().clone();
+    for (arg_id, arg_node, sources, arg_width) in evaluated_inputs {
         local_store.insert(
-            *arg_id,
+            arg_id,
             RangeStore::new(Some((arg_node, sources)), arg_width),
         );
     }
 
-    let ((ret_node, ret_sources), ret_bounds, _) =
+    let ((ret_node, ret_sources), ret_bounds, final_local_store) =
         eval_function_body_return(module, &local_store, &function_body, ret_id, arena)?;
+
+    let output_bounds = if call.outputs.is_empty() {
+        BoundaryMap::default()
+    } else {
+        let caller_store = store
+            .effectful_mut()
+            .expect("output calls require effectful store");
+        let current_store = std::mem::take(caller_store);
+        let (next_store, bounds) = super::apply_function_call_outputs(
+            module,
+            current_store,
+            BoundaryMap::default(),
+            call,
+            &function_body,
+            &final_local_store,
+            arena,
+            LoweringPhase::CombLowering,
+        )?;
+        *caller_store = next_store;
+        bounds
+    };
+
     Ok((
         (ret_node, ret_sources),
-        merge_boundaries(arg_bounds, ret_bounds),
+        merge_boundaries(arg_bounds, merge_boundaries(ret_bounds, output_bounds)),
     ))
 }
 
@@ -1980,12 +2049,13 @@ pub fn eval_expression(
         width,
         signed: expression_signed(expr),
     });
-    eval_expression_in_context(module, store, expr, arena, context)
+    let mut store = ExpressionStore::ReadOnly(store);
+    eval_expression_in_context(module, &mut store, expr, arena, context)
 }
 
 fn eval_expression_in_context(
     module: &Module,
-    store: &SymbolicStore<VarId>,
+    store: &mut ExpressionStore<'_>,
     expr: &Expression,
     arena: &mut SLTNodeArena<VarId>,
     context: Option<ValueContext>,
@@ -2128,7 +2198,38 @@ fn eval_expression_in_context(
             let ((l_expr, l_sources), l_bounds) =
                 eval_expression_in_context(module, store, lhs, arena, semantics.lhs_context)?;
             let ((r_expr, r_sources), r_bounds) =
-                eval_expression_in_context(module, store, rhs, arena, semantics.rhs_context)?;
+                if store.effectful_mut().is_some() && matches!(op, Op::LogicAnd | Op::LogicOr) {
+                    let base_store = store.current().clone();
+                    let mut rhs_store = base_store.clone();
+                    let mut rhs_state = ExpressionStore::Effectful(&mut rhs_store);
+                    let rhs_value = eval_expression_in_context(
+                        module,
+                        &mut rhs_state,
+                        rhs,
+                        arena,
+                        semantics.rhs_context,
+                    )?;
+                    let execute_rhs = if matches!(op, Op::LogicAnd) {
+                        l_expr
+                    } else {
+                        arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, l_expr))?
+                    };
+                    let merged_store = super::merge_symbolic_stores(
+                        module,
+                        &rhs_store,
+                        &base_store,
+                        execute_rhs,
+                        &l_sources,
+                        arena,
+                    )?;
+                    *store
+                        .effectful_mut()
+                        .expect("effectful binary expression must retain a mutable store") =
+                        merged_store;
+                    rhs_value
+                } else {
+                    eval_expression_in_context(module, store, rhs, arena, semantics.rhs_context)?
+                };
 
             let mut sources = l_sources;
             sources.extend(r_sources);
@@ -2288,10 +2389,49 @@ fn eval_expression_in_context(
             });
             let ((cond_expr, cond_sources), cond_bounds) =
                 eval_expression_in_context(module, store, cond, arena, None)?;
-            let ((then_expr, then_sources), then_bounds) =
-                eval_expression_in_context(module, store, then_expr, arena, branch_context)?;
-            let ((else_expr, else_sources), else_bounds) =
-                eval_expression_in_context(module, store, else_expr, arena, branch_context)?;
+            let (
+                ((then_expr, then_sources), then_bounds),
+                ((else_expr, else_sources), else_bounds),
+            ) = if store.effectful_mut().is_some() {
+                let base_store = store.current().clone();
+                let mut then_store = base_store.clone();
+                let mut then_state = ExpressionStore::Effectful(&mut then_store);
+                let then_value = eval_expression_in_context(
+                    module,
+                    &mut then_state,
+                    then_expr,
+                    arena,
+                    branch_context,
+                )?;
+
+                let mut else_store = base_store;
+                let mut else_state = ExpressionStore::Effectful(&mut else_store);
+                let else_value = eval_expression_in_context(
+                    module,
+                    &mut else_state,
+                    else_expr,
+                    arena,
+                    branch_context,
+                )?;
+
+                let merged_store = super::merge_symbolic_stores(
+                    module,
+                    &then_store,
+                    &else_store,
+                    cond_expr,
+                    &cond_sources,
+                    arena,
+                )?;
+                *store
+                    .effectful_mut()
+                    .expect("effectful ternary must retain a mutable store") = merged_store;
+                (then_value, else_value)
+            } else {
+                (
+                    eval_expression_in_context(module, store, then_expr, arena, branch_context)?,
+                    eval_expression_in_context(module, store, else_expr, arena, branch_context)?,
+                )
+            };
 
             let mut sources = cond_sources;
             sources.extend(then_sources);
@@ -2373,7 +2513,7 @@ fn eval_expression_in_context(
         }
         Expression::ArrayLiteral(items, _) => {
             let ((result, sources), bounds) =
-                eval_array_literal_expression(module, store, items, context_width, arena)?;
+                eval_array_literal_expression_in_store(module, store, items, context_width, arena)?;
             let result = coerce_node_width(
                 arena,
                 result,
@@ -2408,8 +2548,50 @@ pub fn eval_assignment_expression(
         ));
     }
 
-    let ((node, sources), boundaries) =
-        eval_expression(module, store, expr, arena, Some(target_width))?;
+    let value = eval_expression(module, store, expr, arena, Some(target_width))?;
+    finish_assignment_expression(expr, arena, target_width, value)
+}
+
+pub(super) fn eval_assignment_expression_effectful(
+    module: &Module,
+    store: &mut SymbolicStore<VarId>,
+    expr: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+    target_width: usize,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    if target_width == 0 {
+        return Err(ParserError::illegal_context(
+            "assignment expression",
+            "target width must be nonzero",
+            Some(&expr.token_range()),
+        ));
+    }
+
+    let mut store = ExpressionStore::Effectful(store);
+    eval_assignment_expression_in_store(module, &mut store, expr, arena, target_width)
+}
+
+fn eval_assignment_expression_in_store(
+    module: &Module,
+    store: &mut ExpressionStore<'_>,
+    expr: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+    target_width: usize,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let context = Some(ValueContext {
+        width: target_width,
+        signed: expression_signed(expr),
+    });
+    let value = eval_expression_in_context(module, store, expr, arena, context)?;
+    finish_assignment_expression(expr, arena, target_width, value)
+}
+
+fn finish_assignment_expression(
+    expr: &Expression,
+    arena: &mut SLTNodeArena<VarId>,
+    target_width: usize,
+    ((node, sources), boundaries): ((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>),
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
     let source_width = get_width(node, arena);
     if source_width == 0 {
         return Err(ParserError::illegal_context(
@@ -2429,7 +2611,7 @@ pub fn eval_assignment_expression(
 
 fn eval_factor(
     module: &Module,
-    store: &SymbolicStore<VarId>,
+    store: &mut ExpressionStore<'_>,
     factor: &Factor,
     arena: &mut SLTNodeArena<VarId>,
     context: Option<ValueContext>,
@@ -2492,7 +2674,7 @@ fn eval_factor(
                 var_bounds.insert(access.lsb);
                 var_bounds.insert(access_end);
 
-                let range_store = store.get(var_id).ok_or_else(|| {
+                let range_store = store.current().get(var_id).ok_or_else(|| {
                     ParserError::illegal_context(
                         "static variable read",
                         "source variable is absent from the symbolic store",
@@ -2536,7 +2718,7 @@ fn eval_factor(
                     boundaries: all_bounds,
                 } = super::eval_dynamic_select_offset(
                     module,
-                    store,
+                    store.current(),
                     *var_id,
                     index,
                     select,
@@ -2546,7 +2728,7 @@ fn eval_factor(
                 all_sources.extend(offset_sources);
 
                 // 2. Check SymbolicStore to determine if "already written"
-                let range_store = store.get(var_id).ok_or_else(|| {
+                let range_store = store.current().get(var_id).ok_or_else(|| {
                     ParserError::illegal_context(
                         "dynamic variable read",
                         "source variable is absent from the symbolic store",
@@ -2625,7 +2807,7 @@ fn eval_factor(
             Ok(((node, HashSet::default()), BoundaryMap::default()))
         }
         Factor::SystemFunctionCall(call) => {
-            eval_system_function_call(module, store, call, arena, context)
+            eval_system_function_call(module, store.current(), call, arena, context)
         }
         Factor::FunctionCall(call) => {
             let ((node, sources), bounds) =

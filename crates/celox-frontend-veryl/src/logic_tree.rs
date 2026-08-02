@@ -45,7 +45,10 @@ use effect::{
     subtract_written_sensitivity,
 };
 pub use expr::coerce_node_width;
-use expr::{eval_array_literal_expression, eval_function_body_return, merge_boundaries};
+use expr::{
+    eval_array_literal_expression_effectful, eval_assignment_expression_effectful,
+    eval_function_body_return, merge_boundaries,
+};
 pub use expr::{eval_assignment_expression, eval_expression, get_width};
 use state::{FunctionControlState, LoopControlState};
 
@@ -1307,6 +1310,7 @@ fn collect_written_accesses(
     for stmt in statements {
         match stmt {
             Statement::Assign(assign) => {
+                collect_written_expression(module, &assign.expr, out)?;
                 for dst in &assign.dst {
                     collect_written_destination(module, out, dst)?;
                 }
@@ -1341,6 +1345,106 @@ fn collect_written_accesses(
         }
     }
     Ok(())
+}
+
+fn collect_written_expression(
+    module: &Module,
+    expression: &Expression,
+    out: &mut HashMap<VarId, Vec<BitAccess>>,
+) -> Result<(), ParserError> {
+    match expression {
+        Expression::Term(factor) => match factor.as_ref() {
+            Factor::FunctionCall(call) => {
+                for input in call.inputs.values() {
+                    collect_written_expression(module, input, out)?;
+                }
+                for destinations in call.outputs.values() {
+                    for destination in destinations {
+                        collect_written_destination(module, out, destination)?;
+                    }
+                }
+                Ok(())
+            }
+            Factor::Variable(_, index, select, _) => {
+                for expression in index.0.iter().chain(select.0.iter()) {
+                    collect_written_expression(module, expression, out)?;
+                }
+                if let Some((_, expression)) = &select.1 {
+                    collect_written_expression(module, expression, out)?;
+                }
+                Ok(())
+            }
+            Factor::SystemFunctionCall(call) => {
+                let mut collect_input =
+                    |input: &SystemFunctionInput| collect_written_expression(module, &input.0, out);
+                match &call.kind {
+                    SystemFunctionKind::Bits(input)
+                    | SystemFunctionKind::Size(input)
+                    | SystemFunctionKind::Clog2(input)
+                    | SystemFunctionKind::Onehot(input)
+                    | SystemFunctionKind::Signed(input)
+                    | SystemFunctionKind::Unsigned(input) => collect_input(input),
+                    SystemFunctionKind::Readmemh(input, _) => collect_input(input),
+                    SystemFunctionKind::Display(inputs) | SystemFunctionKind::Write(inputs) => {
+                        for input in inputs {
+                            collect_input(input)?;
+                        }
+                        Ok(())
+                    }
+                    SystemFunctionKind::Assert { cond, args, .. } => {
+                        collect_input(cond)?;
+                        for input in args {
+                            collect_input(input)?;
+                        }
+                        Ok(())
+                    }
+                    SystemFunctionKind::Finish => Ok(()),
+                }
+            }
+            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+        },
+        Expression::Unary(_, inner, _) => collect_written_expression(module, inner, out),
+        Expression::Binary(lhs, _, rhs, _) => {
+            collect_written_expression(module, lhs, out)?;
+            collect_written_expression(module, rhs, out)
+        }
+        Expression::Ternary(cond, then_expr, else_expr, _) => {
+            collect_written_expression(module, cond, out)?;
+            collect_written_expression(module, then_expr, out)?;
+            collect_written_expression(module, else_expr, out)
+        }
+        Expression::Concatenation(parts, _) => {
+            for (part, repeat) in parts {
+                collect_written_expression(module, part, out)?;
+                if let Some(repeat) = repeat {
+                    collect_written_expression(module, repeat, out)?;
+                }
+            }
+            Ok(())
+        }
+        Expression::ArrayLiteral(items, _) => {
+            for item in items {
+                match item {
+                    ArrayLiteralItem::Value(expression, repeat) => {
+                        collect_written_expression(module, expression, out)?;
+                        if let Some(repeat) = repeat {
+                            collect_written_expression(module, repeat, out)?;
+                        }
+                    }
+                    ArrayLiteralItem::Defaul(expression) => {
+                        collect_written_expression(module, expression, out)?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        Expression::StructConstructor(_, fields, _) => {
+            for (_, field) in fields {
+                collect_written_expression(module, field, out)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 fn collect_written_destination(
@@ -1848,28 +1952,38 @@ fn eval_assign(
         "assignment destination",
         Some(&stmt.expr.token_range()),
     )?;
-    let ((rhs_expr, rhs_sources), rhs_bounds) = if let Expression::ArrayLiteral(items, _) =
-        &stmt.expr
-    {
-        let ((node, sources), bounds) =
-            eval_array_literal_expression(module, &store, items, Some(rhs_expected_width), arena)?;
-        if get_width(node, arena) == 0 {
-            return Err(ParserError::illegal_context(
-                "assignment expression",
-                "a zero-width array literal cannot be assigned",
-                Some(&stmt.expr.token_range()),
-            ));
-        }
-        (
+    let ((rhs_expr, rhs_sources), rhs_bounds) =
+        if let Expression::ArrayLiteral(items, _) = &stmt.expr {
+            let ((node, sources), bounds) = eval_array_literal_expression_effectful(
+                module,
+                &mut store,
+                items,
+                Some(rhs_expected_width),
+                arena,
+            )?;
+            if get_width(node, arena) == 0 {
+                return Err(ParserError::illegal_context(
+                    "assignment expression",
+                    "a zero-width array literal cannot be assigned",
+                    Some(&stmt.expr.token_range()),
+                ));
+            }
             (
-                coerce_node_width(arena, node, Some(rhs_expected_width), false)?,
-                sources,
-            ),
-            bounds,
-        )
-    } else {
-        eval_assignment_expression(module, &store, &stmt.expr, arena, rhs_expected_width)?
-    };
+                (
+                    coerce_node_width(arena, node, Some(rhs_expected_width), false)?,
+                    sources,
+                ),
+                bounds,
+            )
+        } else {
+            eval_assignment_expression_effectful(
+                module,
+                &mut store,
+                &stmt.expr,
+                arena,
+                rhs_expected_width,
+            )?
+        };
     let mut boundaries = merge_boundaries(boundaries, rhs_bounds);
 
     if stmt.dst.len() == 1 {
@@ -2076,7 +2190,7 @@ fn assign_node_to_dsts(
 
 fn eval_statement_form_function_call(
     module: &Module,
-    mut store: SymbolicStore<VarId>,
+    store: SymbolicStore<VarId>,
     mut boundaries: BoundaryMap<VarId>,
     call: &veryl_analyzer::ir::FunctionCall,
     arena: &mut SLTNodeArena<VarId>,
@@ -2157,6 +2271,28 @@ fn eval_statement_form_function_call(
     };
     boundaries = merge_boundaries(boundaries, local_boundaries);
 
+    apply_function_call_outputs(
+        module,
+        store,
+        boundaries,
+        call,
+        &function_body,
+        &final_local_store,
+        arena,
+        phase,
+    )
+}
+
+fn apply_function_call_outputs(
+    module: &Module,
+    mut store: SymbolicStore<VarId>,
+    mut boundaries: BoundaryMap<VarId>,
+    call: &veryl_analyzer::ir::FunctionCall,
+    function_body: &veryl_analyzer::ir::FunctionBody,
+    final_local_store: &SymbolicStore<VarId>,
+    arena: &mut SLTNodeArena<VarId>,
+    phase: LoweringPhase,
+) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     for (arg_path, dsts) in &call.outputs {
         let Some(arg_id) = function_body.arg_map.get(arg_path) else {
             return Err(invalid_function_call_argument_error(
@@ -3053,6 +3189,46 @@ mod tests {
 
         let q_id = var_id_of(&module, &["q"]);
         assert_eq!(written[&q_id], vec![BitAccess::new(0, 3)]);
+    }
+
+    #[test]
+    fn test_collect_written_accesses_includes_expression_function_call_outputs() {
+        let code = r#"
+            module Top (
+                d: input logic<8>,
+                q_return: output logic<8>,
+                q_output: output logic<8>,
+            ) {
+                function f (
+                    x: input logic<8>,
+                    y: output logic<8>,
+                ) -> logic<8> {
+                    y = x + 8'd1;
+                    return x + 8'd2;
+                }
+
+                always_comb {
+                    q_return = f(d, q_output);
+                }
+            }
+        "#;
+        let module = parse_top_module(code);
+        let comb_decl = module
+            .declarations
+            .iter()
+            .find_map(|declaration| {
+                if let Declaration::Comb(comb) = declaration {
+                    Some(comb)
+                } else {
+                    None
+                }
+            })
+            .expect("No always_comb found in Top");
+        let mut written = HashMap::default();
+        collect_written_accesses(&module, &comb_decl.statements, &mut written).unwrap();
+
+        let q_output = var_id_of(&module, &["q_output"]);
+        assert_eq!(written[&q_output], vec![BitAccess::new(0, 7)]);
     }
 
     #[test]

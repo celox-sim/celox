@@ -474,6 +474,177 @@ module Top (
 
     }
 
+    fn test_comb_function_call_expression_with_output_argument(sim) {
+        @setup { let code = r#"
+module Top (
+    d: input logic<8>,
+    q_return: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    always_comb {
+        q_return = f(d, q_output);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let d = sim.signal("d");
+    let q_return = sim.signal("q_return");
+    let q_output = sim.signal("q_output");
+
+    sim.modify(|io| io.set(d, 10u8)).unwrap();
+    assert_eq!(sim.get(q_return), 12u32.into());
+    assert_eq!(sim.get(q_output), 11u32.into());
+
+    }
+
+    fn test_comb_function_call_expression_output_is_visible_to_later_operand(sim) {
+        @setup { let code = r#"
+module Top (
+    d: input logic<8>,
+    q: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    var tmp: logic<8>;
+    always_comb {
+        q = f(d, tmp) + tmp;
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 10u8)).unwrap();
+    assert_eq!(sim.get(q), 23u32.into());
+
+    }
+
+    fn test_comb_function_call_expression_with_constant_input_keeps_output_write(sim) {
+        @setup { let code = r#"
+module Top (
+    q_return: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    always_comb {
+        q_return = f(8'd10, q_output) + 8'd1;
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let q_return = sim.signal("q_return");
+    let q_output = sim.signal("q_output");
+
+    assert_eq!(sim.get(q_return), 13u32.into());
+    assert_eq!(sim.get(q_output), 11u32.into());
+
+    }
+
+    fn test_comb_function_call_expression_output_is_guarded_by_ternary(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    sel: input logic,
+    d: input logic<8>,
+    q_return: output logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x + 8'd2;
+    }
+
+    always_comb {
+        q_output = d;
+        q_return = if sel ? f(d, q_output) : 8'd7;
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let sel = sim.signal("sel");
+    let d = sim.signal("d");
+    let q_return = sim.signal("q_return");
+    let q_output = sim.signal("q_output");
+
+    sim.modify(|io| {
+        io.set(sel, 0u8);
+        io.set(d, 10u8);
+    }).unwrap();
+    assert_eq!(sim.get(q_return), 7u32.into());
+    assert_eq!(sim.get(q_output), 10u32.into());
+
+    sim.modify(|io| io.set(sel, 1u8)).unwrap();
+    assert_eq!(sim.get(q_return), 12u32.into());
+    assert_eq!(sim.get(q_output), 11u32.into());
+
+    }
+
+    fn test_comb_function_call_expression_output_respects_short_circuit(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    d: input logic<8>,
+    and_result: output logic,
+    or_result: output logic,
+    and_output: output logic<8>,
+    or_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic {
+        y = x + 8'd1;
+        return 1'b1;
+    }
+
+    always_comb {
+        and_output = 8'd0;
+        or_output = 8'd0;
+        and_result = 1'b0 && f(d, and_output);
+        or_result = 1'b1 || f(d, or_output);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let d = sim.signal("d");
+    let and_result = sim.signal("and_result");
+    let or_result = sim.signal("or_result");
+    let and_output = sim.signal("and_output");
+    let or_output = sim.signal("or_output");
+
+    sim.modify(|io| io.set(d, 10u8)).unwrap();
+    assert_eq!(sim.get(and_result), 0u32.into());
+    assert_eq!(sim.get(or_result), 1u32.into());
+    assert_eq!(sim.get(and_output), 0u32.into());
+    assert_eq!(sim.get(or_output), 0u32.into());
+
+    }
+
     fn test_comb_function_call_statement_ignores_return_value(sim) {
         @ignore_on(veryl);
         @setup { let code = r#"
