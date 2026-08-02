@@ -63,6 +63,35 @@ impl fmt::Display for ScheduleError {
 impl std::error::Error for ScheduleError {}
 
 #[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScheduleBlockError {
+    ConstraintShapeMismatch,
+    DependencyCycle,
+    MissingLiveInState,
+}
+
+#[cfg(test)]
+impl ScheduleBlockError {
+    fn message(self) -> &'static str {
+        match self {
+            Self::ConstraintShapeMismatch => "instruction constraint model shape mismatch",
+            Self::DependencyCycle => "candidate order violates the instruction dependency DAG",
+            Self::MissingLiveInState => "candidate schedule did not produce a live-in state",
+        }
+    }
+}
+
+#[cfg(test)]
+impl fmt::Display for ScheduleBlockError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+#[cfg(test)]
+impl std::error::Error for ScheduleBlockError {}
+
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct RegionWork {
     ready_insertions: usize,
@@ -129,10 +158,10 @@ pub(super) fn schedule_for_pressure(
             &live_out,
             &mut stats,
         )
-        .map_err(|reason| ScheduleError {
+        .map_err(|error| ScheduleError {
             rule: "SCHEDULE.DEPENDENCY_ORDER",
             block: func.blocks[block_index].id,
-            reason,
+            reason: error.message(),
         })?;
         let scheduled_cost = pressure_cost(&scheduled, &live_out, super::NUM_REGS);
         // Peak pressure alone is not a sufficient spill-cost proxy. Two
@@ -162,9 +191,9 @@ fn schedule_block(
     constraints: &[super::constraints::InstructionConstraints],
     live_out: &BTreeSet<VReg>,
     stats: &mut ScheduleStats,
-) -> Result<Vec<MInst>, &'static str> {
+) -> Result<Vec<MInst>, ScheduleBlockError> {
     if instructions.len() != constraints.len() {
-        return Err("instruction constraint model shape mismatch");
+        return Err(ScheduleBlockError::ConstraintShapeMismatch);
     }
 
     enum ReverseChunk {
@@ -200,10 +229,10 @@ fn schedule_block(
         stats.backward_liveness_steps += end - start;
         stats.add_region_work(&scheduled.work);
         if !scheduled.dependency_verified {
-            return Err("candidate order violates the instruction dependency DAG");
+            return Err(ScheduleBlockError::DependencyCycle);
         }
         let Some(live_before) = scheduled.live_before else {
-            return Err("candidate schedule did not produce a live-in state");
+            return Err(ScheduleBlockError::MissingLiveInState);
         };
         live = live_before;
         reverse_chunks.push(ReverseChunk::Region(scheduled.instructions));
@@ -2295,7 +2324,7 @@ mod tests {
         let error = schedule_block(&region, &constraints, &BTreeSet::new(), &mut stats)
             .expect_err("cyclic producer input must not silently keep the original order");
 
-        assert!(error.contains("dependency DAG"));
+        assert!(error.to_string().contains("dependency DAG"));
     }
 
     #[test]

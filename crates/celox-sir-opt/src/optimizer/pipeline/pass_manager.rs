@@ -85,7 +85,7 @@ impl ExecutionUnitPassManager {
 pub(super) fn verify_unpacked_element_boundaries(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
-) -> Result<(), String> {
+) -> Result<(), crate::OptimizationError> {
     for block in eu.blocks.values() {
         for (instruction_index, instruction) in block.instructions.iter().enumerate() {
             let (address, offset, width, operation) = match instruction {
@@ -104,15 +104,21 @@ pub(super) fn verify_unpacked_element_boundaries(
                 continue;
             };
             let end = start.checked_add(width).ok_or_else(|| {
-                format!(
+                crate::OptimizationError::invariant(
+                    "unpacked element boundary verification",
+                    format!(
                     "{operation} at b{}/{instruction_index} overflows its unpacked range: address={address:?}, start={start}, width={width}, element_width={element_width}",
                     block.id.0
+                    ),
                 )
             })?;
             if width != 0 && *start / element_width != end.saturating_sub(1) / element_width {
-                return Err(format!(
-                    "{operation} at b{}/{instruction_index} crosses an unpacked element: address={address:?}, start={start}, width={width}, element_width={element_width}",
-                    block.id.0
+                return Err(crate::OptimizationError::invariant(
+                    "unpacked element boundary verification",
+                    format!(
+                        "{operation} at b{}/{instruction_index} crosses an unpacked element: address={address:?}, start={start}, width={width}, element_width={element_width}",
+                        block.id.0
+                    ),
                 ));
             }
         }
