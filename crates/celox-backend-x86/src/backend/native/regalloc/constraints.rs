@@ -1,15 +1,12 @@
 //! Stable machine-constraint facts after legalization.
 
 use crate::native::mir::{BlockId, MFunction, VReg};
+use celox_backend_common::regalloc::InstructionConstraints as CommonInstructionConstraints;
 
 use super::assignment::{PhysReg, RegConstraint, clobbers, use_constraints};
 use super::cfg::NormalizedCfg;
 
-#[derive(Debug, Clone, Default)]
-pub(super) struct InstructionConstraints {
-    pub fixed_uses: Vec<(VReg, PhysReg)>,
-    pub clobbers: Vec<PhysReg>,
-}
+pub(super) type InstructionConstraints = CommonInstructionConstraints<VReg, PhysReg>;
 
 #[derive(Debug)]
 pub(super) struct ConstraintModel {

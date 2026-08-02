@@ -450,6 +450,18 @@ name = "celox-analysis"
 version = "0.0.0"
 
 [[package]]
+name = "celox-backend-arm64"
+version = "0.0.0"
+dependencies = [
+ "celox-backend-common",
+ "libc",
+]
+
+[[package]]
+name = "celox-backend-common"
+version = "0.0.0"
+
+[[package]]
 name = "celox-backend-cranelift"
 version = "0.0.0"
 dependencies = [
@@ -486,6 +498,7 @@ name = "celox-backend-x86"
 version = "0.0.0"
 dependencies = [
  "celox-analysis",
+ "celox-backend-common",
  "celox-design",
  "celox-sir",
  "celox-sir-opt",

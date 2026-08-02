@@ -36,7 +36,14 @@ celox-frontend-veryl ──► SymbolicRtl ──► ScheduledRtl
 
 The `celox` crate is the public facade and compiler driver. It wires these phases
 together, selects a backend, and exposes the simulator API. Lower-level crates do
-not depend on the facade.
+not depend on the facade. `celox-backend-x86` and `celox-backend-arm64` depend on
+`celox-backend-common` for allocation machinery; that crate is a compile-time
+library, not another pipeline artifact.
+
+`celox-backend-arm64` is currently a bootstrap backend. It verifies AAPCS64
+calling-convention handling, allocation, and executable instruction emission for
+a small integer MIR, but does not yet lower a complete `LaidOutProgram` or plug
+into the facade's backend selection.
 
 The facade's default `host-runtime` feature owns host execution, Cranelift,
 Wasmtime, the x86 backend, and the test macro. WebAssembly bindings disable that
@@ -56,7 +63,9 @@ for.
 | `celox-sir` | Backend-independent simulator IR and control-flow structures | Target instructions or runtime scheduling |
 | `celox-sir-opt` | Backend-independent SIR analyses and transformation passes | Veryl ASTs or target MIR |
 | `celox-state-layout` | Semantic-to-physical state mapping and layout validation | Optimization policy or executable memory |
-| `celox-backend-x86` | x86 MIR, instruction selection, register allocation, and machine-code emission | Frontend or runtime policy |
+| `celox-backend-common` | Target-independent register sets, constraints, locations, and allocation mechanisms | Target registers, ABI rules, or instruction encodings |
+| `celox-backend-arm64` | AArch64 MIR, register policy, AAPCS64 lowering, and machine-code emission | x86 constraints or frontend policy |
+| `celox-backend-x86` | x86 MIR, instruction selection, target allocation policy, and machine-code emission | Frontend or runtime policy |
 | `celox-backend-cranelift` | Cranelift translation and JIT construction | Frontend or x86-specific MIR |
 | `celox-backend-wasm` | WebAssembly module generation | Host runtime behavior |
 | `celox-testbench` | Source-independent testbench bytecode and values | Veryl AST traversal or simulator memory ownership |
@@ -112,7 +121,9 @@ The following rules define the intended architecture:
 2. Semantic state identities remain distinct from physical memory offsets until
    layout finalization.
 3. SIR optimizations are independent of any concrete backend.
-4. Target MIR, register allocation, and emission remain private to their backend.
+4. Target MIR, allocation policy, ABI handling, and emission remain private to
+   their backend; target-independent allocation mechanisms belong in
+   `celox-backend-common`.
 5. Runtime code depends on backend contracts, not concrete compiler pipelines.
 6. Testbench execution uses source-independent bytecode; only the frontend parses
    Veryl testbench syntax.
@@ -130,6 +141,10 @@ is therefore an architectural change, not a convenient shortcut.
 - A backend-independent instruction or CFG rule belongs in `celox-sir`.
 - A backend-independent transformation belongs in `celox-sir-opt`.
 - A memory-region or address-placement rule belongs in `celox-state-layout`.
+- A target-independent register-allocation mechanism or constraint data type
+  belongs in `celox-backend-common`.
+- An AArch64 instruction, register constraint, or emission rule belongs in
+  `celox-backend-arm64`.
 - An x86 instruction, register constraint, or emission rule belongs in
   `celox-backend-x86`.
 - Event ordering, timed execution, or VCD behavior belongs in `celox-runtime`.

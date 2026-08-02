@@ -1,0 +1,17 @@
+[package]
+name = "celox-backend-arm64"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Celox AArch64 machine-code backend"
+edition.workspace = true
+
+[dependencies]
+celox-backend-common = { path = "../celox-backend-common" }
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "linux"))'.dev-dependencies]
+libc = { workspace = true }
+
+[lints]
+workspace = true
