@@ -39,10 +39,10 @@ impl ExecutionUnitPassManager {
         eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
         options: &PassOptions,
     ) {
-        let timing = std::env::var("CELOX_PASS_TIMING").is_ok();
-        let verify_boundaries =
-            cfg!(debug_assertions) || std::env::var_os("CELOX_SIR_VERIFY").is_some();
-        let verify_passes = std::env::var_os("CELOX_SIR_VERIFY_PASSES").is_some();
+        let diagnostics = &options.optimize_options.diagnostics;
+        let timing = diagnostics.pass_timing;
+        let verify_boundaries = cfg!(debug_assertions) || diagnostics.verify_boundaries;
+        let verify_passes = diagnostics.verify_passes;
         if verify_boundaries {
             if let Err(error) = eu.verify_result() {
                 panic!("before SIR pass pipeline: {error}");
@@ -70,7 +70,7 @@ impl ExecutionUnitPassManager {
             if let Some(start) = start {
                 let elapsed = start.elapsed();
                 if elapsed.as_millis() > 0 {
-                    eprintln!("[pass-timing] {:>40}: {:?}", pass.name(), elapsed);
+                    tracing::debug!("[pass-timing] {:>40}: {:?}", pass.name(), elapsed);
                 }
             }
         }

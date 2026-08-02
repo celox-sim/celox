@@ -65,7 +65,6 @@ mod tests {
         let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
         // CARGO_MANIFEST_DIR is crates/celox-macros
         let target_dir = PathBuf::from(manifest_dir).join("../celox/tests/macro_project");
-        dbg!(&target_dir);
         let metadata_path = std::fs::canonicalize(target_dir.join("Veryl.toml")).unwrap();
         let mut metadata = Metadata::load(&metadata_path).unwrap();
 

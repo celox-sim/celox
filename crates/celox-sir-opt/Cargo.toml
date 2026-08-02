@@ -8,6 +8,7 @@ description = "Backend-independent SIR optimization policy and passes for Celox"
 edition.workspace = true
 
 [dependencies]
+tracing = { workspace = true }
 bit-set             = { workspace = true }
 celox-analysis      = { path = "../celox-analysis" }
 celox-design        = { path = "../celox-design" }

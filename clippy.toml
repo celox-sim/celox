@@ -1,0 +1,10 @@
+disallowed-macros = [
+    { path = "std::eprintln", reason = "library diagnostics must use tracing or a caller-provided writer" },
+]
+
+disallowed-methods = [
+    { path = "std::env::var", reason = "read CELOX diagnostics through DiagnosticsOptions::from_env at the application boundary" },
+    { path = "std::env::var_os", reason = "read CELOX diagnostics through DiagnosticsOptions::from_env at the application boundary" },
+    { path = "std::env::vars", reason = "read CELOX diagnostics through DiagnosticsOptions::from_env at the application boundary" },
+    { path = "std::env::vars_os", reason = "read CELOX diagnostics through DiagnosticsOptions::from_env at the application boundary" },
+]

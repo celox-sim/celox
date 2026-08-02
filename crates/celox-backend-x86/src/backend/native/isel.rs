@@ -38,19 +38,6 @@ impl RegMap {
     }
 }
 
-fn parse_trace_sir_regs() -> HashSet<RegisterId> {
-    std::env::var_os("CELOX_ISEL_TRACE_REGS")
-        .or_else(|| std::env::var_os("CELOX_ISEL_TRACE_REG"))
-        .map(|raw| {
-            raw.to_string_lossy()
-                .split(',')
-                .filter_map(|part| part.trim().parse::<usize>().ok())
-                .map(RegisterId)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn find_sparse_worklist_run(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Option<(crate::BlockId, usize, usize)> {
@@ -1189,7 +1176,21 @@ pub fn lower_execution_unit(
     layout: &MemoryLayout,
     four_state: bool,
 ) -> MFunction {
-    if cfg!(debug_assertions) || std::env::var_os("CELOX_SIR_VERIFY").is_some() {
+    lower_execution_unit_with_diagnostics(
+        eu,
+        layout,
+        four_state,
+        &crate::NativeDiagnostics::default(),
+    )
+}
+
+pub fn lower_execution_unit_with_diagnostics(
+    eu: &ExecutionUnit<RegionedAbsoluteAddr>,
+    layout: &MemoryLayout,
+    four_state: bool,
+    diagnostics: &crate::NativeDiagnostics,
+) -> MFunction {
+    if cfg!(debug_assertions) || diagnostics.verify_sir {
         if let Err(error) = eu.verify_result() {
             panic!("before native ISel: {error}");
         }
@@ -1198,7 +1199,12 @@ pub fn lower_execution_unit(
     let mut spill_descs: Vec<SpillDesc> = Vec::new();
     let max_sir_regs = eu.register_map.keys().map(|r| r.0).max().unwrap_or(0) + 1;
     let mut reg_map = RegMap::new(max_sir_regs);
-    let trace_regs = parse_trace_sir_regs();
+    let trace_regs = diagnostics
+        .isel_trace_regs
+        .iter()
+        .copied()
+        .map(RegisterId)
+        .collect::<HashSet<_>>();
     let mut sir_registers = eu.register_map.keys().copied().collect::<Vec<_>>();
     sir_registers.sort_unstable_by_key(|register| register.0);
 
@@ -1207,7 +1213,7 @@ pub fn lower_execution_unit(
         let vreg = vregs.alloc();
         reg_map.set(*sir_reg_id, vreg);
         if trace_regs.contains(sir_reg_id) {
-            eprintln!("[isel-trace] prealloc r{} -> {}", sir_reg_id.0, vreg);
+            tracing::debug!("[isel-trace] prealloc r{} -> {}", sir_reg_id.0, vreg);
         }
         // Spill desc will be filled during instruction lowering.
         // For now, default to transient.
@@ -1465,9 +1471,12 @@ pub fn lower_execution_unit(
             if let Some(dst) = sir_def_reg(inst)
                 && ctx.trace_regs.contains(&dst)
             {
-                eprintln!(
+                tracing::debug!(
                     "[isel-trace] b{} inst {} lowering r{}: {}",
-                    sir_block.id.0, inst_idx, dst.0, inst
+                    sir_block.id.0,
+                    inst_idx,
+                    dst.0,
+                    inst
                 );
             }
             if packed_field_compare_plans.skip_indices.contains(&inst_idx) {
@@ -1531,7 +1540,7 @@ pub fn lower_execution_unit(
             if lookup_plans.skip_indices.contains(&inst_idx) {
                 if let Some(plan) = lookup_plans.roots.get(&inst_idx) {
                     if ctx.trace_regs.contains(&plan.dst) {
-                        eprintln!(
+                        tracing::debug!(
                             "[isel-trace] b{} inst {} dense-lookup root r{} selector=r{} entries={}",
                             sir_block.id.0,
                             inst_idx,
@@ -1547,7 +1556,7 @@ pub fn lower_execution_unit(
             if priority_plans.skip_indices.contains(&inst_idx) {
                 if let Some(plan) = priority_plans.roots.get(&inst_idx) {
                     if ctx.trace_regs.contains(&plan.dst) {
-                        eprintln!(
+                        tracing::debug!(
                             "[isel-trace] b{} inst {} priority-encode root r{} -> {}",
                             sir_block.id.0,
                             inst_idx,
@@ -1559,9 +1568,11 @@ pub fn lower_execution_unit(
                 } else if let Some(dst) = sir_def_reg(inst)
                     && ctx.trace_regs.contains(&dst)
                 {
-                    eprintln!(
+                    tracing::debug!(
                         "[isel-trace] b{} inst {} skipped r{} without root",
-                        sir_block.id.0, inst_idx, dst.0
+                        sir_block.id.0,
+                        inst_idx,
+                        dst.0
                     );
                 }
                 continue;
@@ -1675,9 +1686,13 @@ pub fn lower_execution_unit(
                     let vreg = ctx.reg_map.get(dr);
                     ctx.known_bits.insert(vreg, w);
                     if ctx.trace_regs.contains(&dr) {
-                        eprintln!(
+                        tracing::debug!(
                             "[isel-trace] b{} inst {} after r{} -> {} known_bits={}",
-                            sir_block.id.0, inst_idx, dr.0, vreg, w
+                            sir_block.id.0,
+                            inst_idx,
+                            dr.0,
+                            vreg,
+                            w
                         );
                     }
                 }
@@ -12480,9 +12495,10 @@ fn lower_terminator(ctx: &mut ISelContext, block: &mut MBlock, term: &SIRTermina
         } => {
             let cond_vreg = lower_branch_condition(ctx, block, *cond);
             if ctx.trace_regs.contains(cond) {
-                eprintln!(
+                tracing::debug!(
                     "[isel-trace] terminator branch cond r{} -> {}",
-                    cond.0, cond_vreg
+                    cond.0,
+                    cond_vreg
                 );
             }
             block.push(MInst::Branch {

@@ -13,6 +13,7 @@ pub fn optimize_merged_chain(
     packed_range_is_contiguous: impl Fn(RegionedAbsoluteAddr, usize, usize) -> bool,
     four_state: bool,
     recover_merged_effect_regions: bool,
+    diagnostics: &crate::SirDiagnostics,
 ) -> Result<(), (&'static str, crate::ir::verify::SirVerifyError)> {
     let mut changed = false;
     if crate::ir::inline_single_predecessor_jumps(eu)
@@ -102,7 +103,7 @@ pub fn optimize_merged_chain(
             .map_err(|error| ("after native fixed bit-map recovery", error))?;
     }
     if !four_state
-        && std::env::var_os("CELOX_EFFECT_CASE_DISPATCH").is_some()
+        && diagnostics.effect_case_dispatch
         && let Some(result) = pass_effect_case_dispatch::run(eu)
     {
         changed = true;
@@ -118,7 +119,7 @@ pub fn optimize_merged_chain(
             },
         );
         let cfg_cleanup_ns = cfg_cleanup_start.elapsed().as_nanos();
-        eprintln!(
+        tracing::debug!(
             "[effect-case-dispatch] origin=b{} selector=r{} cases={} sinks={} \
              path_local_exits={} estimated_saving={} planning_ms={:.3} rewrite_ms={:.3} \
              dead_control_ms={:.3} cfg_cleanup_ms={:.3}",

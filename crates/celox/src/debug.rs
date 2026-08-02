@@ -72,8 +72,12 @@ pub struct CompilationTrace {
 }
 
 impl TraceOptions {
-    pub(crate) fn frontend(&self) -> celox_frontend_veryl::FrontendTraceOptions {
+    pub(crate) fn frontend(
+        &self,
+        diagnostics: &crate::RuntimeDiagnostics,
+    ) -> celox_frontend_veryl::FrontendTraceOptions {
         celox_frontend_veryl::FrontendTraceOptions {
+            phase_timing: diagnostics.phase_timing,
             sim_modules: self.sim_modules,
             pre_atomized_comb_blocks: self.pre_atomized_comb_blocks,
             atomized_comb_blocks: self.atomized_comb_blocks,

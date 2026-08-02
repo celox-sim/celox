@@ -92,4 +92,4 @@ pub fn optimize(
 }
 
 mod policy;
-pub use policy::{OptLevel, OptimizeOptions, PassOptions, SirPass};
+pub use policy::{OptLevel, OptimizeOptions, PassOptions, SirDiagnostics, SirPass};

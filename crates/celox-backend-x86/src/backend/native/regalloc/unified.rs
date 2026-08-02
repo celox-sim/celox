@@ -190,7 +190,7 @@ struct RegallocTrace {
 
 impl RegallocTrace {
     fn new_if_enabled(label: &str, func: &MFunction) -> Option<Self> {
-        std::env::var_os("CELOX_REGALLOC_TRACE").map(|_| {
+        tracing::enabled!(tracing::Level::TRACE).then(|| {
             let mut def_opcodes = vec![None; func.vregs.count() as usize];
             for block in &func.blocks {
                 for inst in &block.insts {
@@ -296,14 +296,14 @@ impl RegallocTrace {
         let mut rows = self.rows.into_iter().collect::<Vec<_>>();
         rows.sort_by_key(|(_, count)| std::cmp::Reverse(count.count));
         let total: usize = rows.iter().map(|(_, count)| count.count).sum();
-        eprintln!(
+        tracing::debug!(
             "[regalloc-trace] label={} total_events={} groups={}",
             self.label,
             total,
             rows.len()
         );
         for (rank, (key, count)) in rows.into_iter().take(40).enumerate() {
-            eprintln!(
+            tracing::debug!(
                 "[regalloc-trace] label={} rank={} event={} reason={} kind={} def={} next={} count={} stack_mem={} sim_mem={} remat={} no_store={}",
                 self.label,
                 rank + 1,
@@ -464,6 +464,20 @@ pub fn unified_alloc_with_label(
     analysis: &AnalysisResult,
     label: &str,
 ) -> (AssignmentMap, u32) {
+    unified_alloc_with_label_and_diagnostics(
+        func,
+        analysis,
+        label,
+        &crate::NativeDiagnostics::default(),
+    )
+}
+
+pub fn unified_alloc_with_label_and_diagnostics(
+    func: &mut MFunction,
+    analysis: &AnalysisResult,
+    label: &str,
+    diagnostics: &crate::NativeDiagnostics,
+) -> (AssignmentMap, u32) {
     let num_blocks = func.blocks.len();
     let k = func.target_features.allocatable_register_count();
     let mut result = AssignmentMap::default();
@@ -520,6 +534,7 @@ pub fn unified_alloc_with_label(
             &mut slots,
             &mut result,
             trace.as_mut(),
+            diagnostics.verify_regalloc,
         );
 
         func.blocks[bi].insts = new_insts;
@@ -853,6 +868,7 @@ fn process_block(
     slots: &mut SpillSlotAllocator,
     result: &mut AssignmentMap,
     mut trace: Option<&mut RegallocTrace>,
+    verify_each_instruction: bool,
 ) -> (RegFile, HashSet<VReg>, Vec<MInst>) {
     let block = func.blocks[block_idx].clone();
     let mut new_insts: Vec<MInst> = Vec::with_capacity(block.insts.len());
@@ -1279,7 +1295,7 @@ fn process_block(
             }
         }
 
-        if cfg!(debug_assertions) || std::env::var_os("CELOX_REGALLOC_VERIFY").is_some() {
+        if cfg!(debug_assertions) || verify_each_instruction {
             rf.verify_instruction(
                 &rewritten_inst,
                 result,

@@ -1,7 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::backend::RuntimeEventBuffer;
@@ -23,43 +23,6 @@ use num_bigint::BigUint;
 
 mod builder;
 mod error;
-
-#[cfg(not(target_arch = "wasm32"))]
-fn tick_timing_every() -> Option<u64> {
-    static VALUE: OnceLock<Option<u64>> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("CELOX_TICK_TIMING")
-            .ok()
-            .and_then(|value| value.parse().ok())
-    })
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn record_tick_timing(eval_apply_ns: u64, eval_comb_ns: u64) {
-    static TICKS: AtomicU64 = AtomicU64::new(0);
-    static EVAL_APPLY_NS: AtomicU64 = AtomicU64::new(0);
-    static EVAL_COMB_NS: AtomicU64 = AtomicU64::new(0);
-
-    let Some(every) = tick_timing_every() else {
-        return;
-    };
-    if every == 0 {
-        return;
-    }
-
-    let ticks = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-    let apply_total = EVAL_APPLY_NS.fetch_add(eval_apply_ns, Ordering::Relaxed) + eval_apply_ns;
-    let comb_total = EVAL_COMB_NS.fetch_add(eval_comb_ns, Ordering::Relaxed) + eval_comb_ns;
-    if ticks.is_multiple_of(every) {
-        eprintln!(
-            "[tick-timing] ticks={ticks} eval_apply_ms={:.3} eval_comb_ms={:.3} avg_apply_us={:.3} avg_comb_us={:.3}",
-            apply_total as f64 / 1_000_000.0,
-            comb_total as f64 / 1_000_000.0,
-            apply_total as f64 / ticks as f64 / 1_000.0,
-            comb_total as f64 / ticks as f64 / 1_000.0,
-        );
-    }
-}
 
 pub use builder::compile_to_sir;
 #[cfg(not(target_arch = "wasm32"))]
@@ -114,6 +77,10 @@ pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
     runtime_event_drain_active: Arc<AtomicBool>,
     comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
     comb_observer_initial_eval: bool,
+    pub(crate) diagnostics: crate::RuntimeDiagnostics,
+    tick_timing_ticks: u64,
+    tick_timing_eval_apply_ns: u64,
+    tick_timing_eval_comb_ns: u64,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -563,9 +530,36 @@ impl<B: SimBackend> Simulator<B> {
             runtime_event_drain_active: Arc::new(AtomicBool::new(false)),
             comb_observer_snapshots: Vec::new(),
             comb_observer_initial_eval: true,
+            diagnostics: crate::RuntimeDiagnostics::default(),
+            tick_timing_ticks: 0,
+            tick_timing_eval_apply_ns: 0,
+            tick_timing_eval_comb_ns: 0,
         };
         sim.comb_observer_snapshots = sim.snapshot_all_comb_observers();
         sim
+    }
+
+    fn record_tick_timing(&mut self, eval_apply_ns: u64, eval_comb_ns: u64) {
+        let Some(every) = self.diagnostics.tick_timing_every else {
+            return;
+        };
+        if every == 0 {
+            return;
+        }
+        self.tick_timing_ticks = self.tick_timing_ticks.saturating_add(1);
+        self.tick_timing_eval_apply_ns =
+            self.tick_timing_eval_apply_ns.saturating_add(eval_apply_ns);
+        self.tick_timing_eval_comb_ns = self.tick_timing_eval_comb_ns.saturating_add(eval_comb_ns);
+        if self.tick_timing_ticks.is_multiple_of(every) {
+            tracing::debug!(
+                "[tick-timing] ticks={} eval_apply_ms={:.3} eval_comb_ms={:.3} avg_apply_us={:.3} avg_comb_us={:.3}",
+                self.tick_timing_ticks,
+                self.tick_timing_eval_apply_ns as f64 / 1_000_000.0,
+                self.tick_timing_eval_comb_ns as f64 / 1_000_000.0,
+                self.tick_timing_eval_apply_ns as f64 / self.tick_timing_ticks as f64 / 1_000.0,
+                self.tick_timing_eval_comb_ns as f64 / self.tick_timing_ticks as f64 / 1_000.0,
+            );
+        }
     }
 
     pub(crate) fn apply_initial_values(&mut self) {
@@ -1010,7 +1004,7 @@ impl<B: SimBackend> Simulator<B> {
 
     /// Manually triggers a clock or event to process sequential logic.
     pub fn tick(&mut self, event: B::Event) -> Result<(), RuntimeErrorCode> {
-        let timing_enabled = tick_timing_every().is_some();
+        let timing_enabled = self.diagnostics.tick_timing_every.is_some();
         let mut eval_comb_ns = 0u64;
         let mut eval_apply_ns = 0u64;
         if self.dirty {
@@ -1039,7 +1033,7 @@ impl<B: SimBackend> Simulator<B> {
             let start = crate::timing::now();
             self.eval_comb_checked()?;
             eval_comb_ns = eval_comb_ns.saturating_add(start.elapsed().as_nanos() as u64);
-            record_tick_timing(eval_apply_ns, eval_comb_ns);
+            self.record_tick_timing(eval_apply_ns, eval_comb_ns);
         } else {
             self.eval_comb_checked()?;
         }

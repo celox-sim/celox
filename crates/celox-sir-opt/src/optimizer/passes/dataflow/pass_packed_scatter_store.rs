@@ -1230,8 +1230,8 @@ fn apply_plan(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: ScatterPlan) {
         block.instructions = instructions;
     }
 
-    if std::env::var_os("CELOX_PASS_TIMING").is_some() {
-        eprintln!(
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        tracing::debug!(
             "[packed-scatter-store] block={} dead={} benefit={}",
             plan.block.0,
             plan.dead.len(),

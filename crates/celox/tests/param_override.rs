@@ -142,7 +142,7 @@ fn test_param_in_always_ff(sim) {
         sim.modify(|io| io.set(clk, 0u8)).unwrap();
         sim.modify(|io| io.set(clk, 1u8)).unwrap();
         let c: u64 = sim.get(counter).try_into().unwrap();
-        eprintln!("cycle {i}: counter={c}, done={:?}", sim.get(done));
+        println!("cycle {i}: counter={c}, done={:?}", sim.get(done));
     }
 
     // After 8 total rising edges (1 start + 7 more), counter should have hit N-1=7
@@ -458,7 +458,7 @@ fn test_param_in_always_ff_override_n4() {
         sim.modify(|io| io.set(clk, 0u8)).unwrap();
         sim.modify(|io| io.set(clk, 1u8)).unwrap();
         let c: u64 = sim.get(counter).try_into().unwrap();
-        eprintln!("override cycle {i}: counter={c}, done={:?}", sim.get(done));
+        println!("override cycle {i}: counter={c}, done={:?}", sim.get(done));
     }
 
     let done_val: u64 = sim.get(done).try_into().unwrap();

@@ -17,7 +17,7 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(4);
 
-    eprintln!("=== Building SorterTreeDistEntry N={n} ===");
+    println!("=== Building SorterTreeDistEntry N={n} ===");
     let build_start = Instant::now();
     let mut sim = Simulator::builder(&code, "SorterTreeDistEntry")
         .param("N", n)
@@ -25,7 +25,7 @@ fn main() {
         .param("OUT_DEPTH", 16)
         .build()
         .unwrap();
-    eprintln!("=== Build: {:?} ===", build_start.elapsed());
+    println!("=== Build: {:?} ===", build_start.elapsed());
 
     let clk = sim.signal("clk");
     let rst = sim.signal("rst");
@@ -46,7 +46,7 @@ fn main() {
     let elapsed = run_start.elapsed();
     let ns_per_cycle = elapsed.as_nanos() as f64 / cycles as f64;
     let khz = 1e6 / ns_per_cycle;
-    eprintln!(
+    println!(
         "=== Runtime: {cycles} cycles in {elapsed:?} ({ns_per_cycle:.0} ns/cycle, {khz:.0} kHz) ==="
     );
 }

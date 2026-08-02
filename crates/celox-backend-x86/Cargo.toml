@@ -8,6 +8,7 @@ description = "Celox x86-64 machine-code backend"
 edition.workspace = true
 
 [dependencies]
+tracing = { workspace = true }
 celox-analysis = { path = "../celox-analysis" }
 celox-design = { path = "../celox-design" }
 celox-sir = { path = "../celox-sir" }

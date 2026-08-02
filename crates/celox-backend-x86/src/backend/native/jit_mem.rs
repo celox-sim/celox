@@ -28,10 +28,17 @@ impl JitCode {
 
     /// Load named machine code bytes into executable memory.
     ///
-    /// When `CELOX_PERF_MAP=1` is set, this also writes a Linux perf JIT map
-    /// entry so `perf report` can attribute samples to generated functions.
     pub fn new_named(code: &[u8], name: &str) -> Result<Self, std::io::Error> {
         Self::new_named_with_symbols(code, name, &[])
+    }
+
+    /// Load named machine code and optionally emit Linux perf-map entries.
+    pub fn new_named_profiled(
+        code: &[u8],
+        name: &str,
+        perf_map: bool,
+    ) -> Result<Self, std::io::Error> {
+        Self::new_named_with_symbols_profiled(code, name, &[], perf_map)
     }
 
     /// Load named machine code bytes with optional subrange symbols.
@@ -39,6 +46,16 @@ impl JitCode {
         code: &[u8],
         name: &str,
         symbols: &[JitSymbol],
+    ) -> Result<Self, std::io::Error> {
+        Self::new_named_with_symbols_profiled(code, name, symbols, false)
+    }
+
+    /// Load named machine code with optional subrange symbols and perf maps.
+    pub fn new_named_with_symbols_profiled(
+        code: &[u8],
+        name: &str,
+        symbols: &[JitSymbol],
+        perf_map: bool,
     ) -> Result<Self, std::io::Error> {
         // Allocate writable memory, copy code, then make executable
         let mut mmap = MmapMut::map_anon(code.len().max(1))?;
@@ -49,7 +66,9 @@ impl JitCode {
         let fn_ptr: unsafe extern "sysv64" fn(*mut u8) -> i64 =
             unsafe { std::mem::transmute(mmap.as_ptr()) };
 
-        write_perf_map_entries(mmap.as_ptr() as usize, code.len().max(1), name, symbols)?;
+        if perf_map {
+            write_perf_map_entries(mmap.as_ptr() as usize, code.len().max(1), name, symbols)?;
+        }
 
         Ok(Self {
             _mmap: mmap,
@@ -90,10 +109,6 @@ fn write_perf_map_entries(
     name: &str,
     symbols: &[JitSymbol],
 ) -> Result<(), std::io::Error> {
-    if std::env::var_os("CELOX_PERF_MAP").is_none() {
-        return Ok(());
-    }
-
     let path = format!("/tmp/perf-{}.map", std::process::id());
     // Containerized runs can reuse a PID while the previous process's map is
     // still present in /tmp.  Retaining those entries makes perf resolve an

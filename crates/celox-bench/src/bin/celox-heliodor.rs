@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_macros)] // CLI errors and progress intentionally use stderr
+
 use std::{
     error::Error,
     fs,

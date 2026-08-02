@@ -371,7 +371,7 @@ fn test_shift_with_pressure() {
     // Dump
     for (ii, inst) in func.blocks[0].insts.iter().enumerate() {
         let r = inst.def().and_then(|d| assignment.get(d));
-        eprintln!("  [{ii:3}] {inst}  => {r:?}");
+        tracing::debug!("  [{ii:3}] {inst}  => {r:?}");
     }
 
     // Verify

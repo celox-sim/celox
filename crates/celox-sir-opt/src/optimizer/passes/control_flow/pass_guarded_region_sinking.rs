@@ -224,7 +224,7 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
             return;
         }
         let verify_stage = |eu: &ExecutionUnit<RegionedAbsoluteAddr>, stage: &'static str| {
-            if std::env::var_os("CELOX_SIR_VERIFY_PASSES").is_some()
+            if options.optimize_options.diagnostics.verify_passes
                 && let Err(error) = eu.verify_result()
             {
                 panic!("after guarded-region substage {stage}: {error}");
@@ -288,13 +288,13 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
             if last_new_block > u32::MAX as usize {
                 return;
             }
-            if std::env::var_os("CELOX_PASS_TIMING").is_some() {
+            if options.optimize_options.diagnostics.pass_timing {
                 let moved = plans.iter().map(|plan| plan.moved.len()).sum::<usize>();
                 let stores = plans
                     .iter()
                     .map(|plan| plan.distributed.len())
                     .sum::<usize>();
-                eprintln!(
+                tracing::debug!(
                     "[guarded-region-sinking] regions={} moved_instructions={moved} distributed_stores={stores}",
                     plans.len(),
                 );
@@ -2085,9 +2085,9 @@ fn form_coupled_store_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
         return;
     }
 
-    if std::env::var_os("CELOX_PASS_TIMING").is_some() {
+    if tracing::enabled!(tracing::Level::DEBUG) {
         for plan in &plans {
-            eprintln!(
+            tracing::debug!(
                 "[coupled-store-region] block={} depth={} stores={} owned={} benefit_scaled={}",
                 plan.block_id.0,
                 plan.conditions.len(),
@@ -2743,7 +2743,7 @@ fn form_same_predicate_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
         return;
     }
 
-    if std::env::var_os("CELOX_PASS_TIMING").is_some() {
+    if tracing::enabled!(tracing::Level::DEBUG) {
         let muxes = plans.iter().map(|plan| plan.muxes.len()).sum::<usize>();
         let true_owned = plans
             .iter()
@@ -2754,12 +2754,12 @@ fn form_same_predicate_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
             .map(|plan| plan.false_owned.len())
             .sum::<usize>();
         let live_outs = plans.iter().map(|plan| plan.live_outs.len()).sum::<usize>();
-        eprintln!(
+        tracing::debug!(
             "[same-predicate-regions] regions={} muxes={muxes} true_owned={true_owned} false_owned={false_owned} live_outs={live_outs}",
             plans.len(),
         );
         for plan in &plans {
-            eprintln!(
+            tracing::debug!(
                 "[same-predicate-region] block={} cond=r{} segment={}..{} muxes={} true_owned={} false_owned={} true_cofactor={} false_cofactor={} live_outs={} benefit_scaled={}",
                 plan.block_id.0,
                 plan.condition.0,

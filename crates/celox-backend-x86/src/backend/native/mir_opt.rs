@@ -10,7 +10,7 @@ use super::mir::*;
 use super::regalloc::assignment::{AssignmentMap, PhysReg, clobbers};
 
 mod pipeline;
-pub use pipeline::optimize;
+pub use pipeline::{optimize, optimize_with_diagnostics};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct VRegCompaction {

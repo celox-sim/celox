@@ -16,5 +16,8 @@ wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"
 serde_json = { workspace = true }
 
+[lints]
+workspace = true
+
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-O", "--enable-bulk-memory"]

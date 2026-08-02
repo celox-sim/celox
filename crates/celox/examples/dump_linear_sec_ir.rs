@@ -52,12 +52,12 @@ fn main() {
 
     if let Some(sir) = trace.format_post_optimized_sir() {
         std::fs::write("linear_sec_p6_sir.txt", &sir).unwrap();
-        eprintln!("SIR: {} bytes → linear_sec_p6_sir.txt", sir.len());
+        println!("SIR: {} bytes → linear_sec_p6_sir.txt", sir.len());
     }
 
     if let Some(ref clif) = trace.pre_optimized_clif {
         std::fs::write("linear_sec_p6_clif_pre.txt", clif).unwrap();
-        eprintln!(
+        println!(
             "CLIF pre-opt: {} bytes → linear_sec_p6_clif_pre.txt",
             clif.len()
         );
@@ -65,7 +65,7 @@ fn main() {
 
     if let Some(ref clif) = trace.post_optimized_clif {
         std::fs::write("linear_sec_p6_clif_post.txt", clif).unwrap();
-        eprintln!(
+        println!(
             "CLIF post-opt: {} bytes → linear_sec_p6_clif_post.txt",
             clif.len()
         );
@@ -73,7 +73,7 @@ fn main() {
 
     if let Some(ref native) = trace.native {
         std::fs::write("linear_sec_p6_native.txt", native).unwrap();
-        eprintln!("Native: {} bytes → linear_sec_p6_native.txt", native.len());
+        println!("Native: {} bytes → linear_sec_p6_native.txt", native.len());
     }
 
     // Sanity check
@@ -82,5 +82,5 @@ fn main() {
     let o_word = sim.signal("o_word");
     sim.modify(|io| io.set(i_word, 42u64)).unwrap();
     let out: u64 = sim.get_as(o_word);
-    eprintln!("Sanity check: input=42, output={}", out);
+    println!("Sanity check: input=42, output={}", out);
 }

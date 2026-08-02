@@ -80,9 +80,9 @@ fn linear_sec_scaling_p5_to_p6() {
     let median_p6 = times_p6[SAMPLES / 2].as_secs_f64();
     let ratio = median_p6 / median_p5;
 
-    eprintln!("[scaling] linear_sec P=5 median: {median_p5:.3}s");
-    eprintln!("[scaling] linear_sec P=6 median: {median_p6:.3}s");
-    eprintln!("[scaling] ratio P6/P5: {ratio:.2}x");
+    println!("[scaling] linear_sec P=5 median: {median_p5:.3}s");
+    println!("[scaling] linear_sec P=6 median: {median_p6:.3}s");
+    println!("[scaling] ratio P6/P5: {ratio:.2}x");
 
     // Circuit size roughly doubles (P=5→P=6).
     // O(n log n) → ~2.2x, O(n²) → ~4x.
@@ -149,9 +149,9 @@ fn counter_scaling_n500_to_n1000() {
     let median_large = times_large[SAMPLES / 2].as_secs_f64();
     let ratio = median_large / median_small;
 
-    eprintln!("[scaling] counter N=500  median: {median_small:.3}s");
-    eprintln!("[scaling] counter N=1000 median: {median_large:.3}s");
-    eprintln!("[scaling] ratio N1000/N500: {ratio:.2}x");
+    println!("[scaling] counter N=500  median: {median_small:.3}s");
+    println!("[scaling] counter N=1000 median: {median_large:.3}s");
+    println!("[scaling] ratio N1000/N500: {ratio:.2}x");
 
     // N doubles → expect ~2x for linear, ~4x for quadratic.
     // Allow up to 6x as margin (these are independent EUs so should be ~linear).

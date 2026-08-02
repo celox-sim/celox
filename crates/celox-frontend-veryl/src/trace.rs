@@ -8,6 +8,7 @@ use crate::{AbsoluteAddr, HashMap, RegionedAbsoluteAddr, SimModule};
 /// intentionally absent from this contract.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FrontendTraceOptions {
+    pub phase_timing: bool,
     pub sim_modules: bool,
     pub pre_atomized_comb_blocks: bool,
     pub atomized_comb_blocks: bool,

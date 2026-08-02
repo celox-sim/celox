@@ -21,10 +21,7 @@ use celox_testbench::{
 };
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
-use std::sync::{
-    OnceLock,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ── Public types ───────────────────────────────────────────────────────
 
@@ -969,7 +966,7 @@ fn exec_one_detailed<B: SimBackend>(
         GenericTestbenchStatement::ClockNext { clock_event, count } => {
             match eval_clock_count(sim, count) {
                 Ok(n) => {
-                    let progress_every = testbench_progress_every();
+                    let progress_every = sim.diagnostics.testbench_progress_every;
                     let mut remaining = n;
                     while remaining != 0 {
                         if tick_limit_reached(ctx) {
@@ -1001,7 +998,7 @@ fn exec_one_detailed<B: SimBackend>(
                             && every != 0
                             && ctx.current_time.is_multiple_of(every)
                         {
-                            eprintln!("[testbench-progress] tick={}", ctx.current_time);
+                            tracing::debug!("[testbench-progress] tick={}", ctx.current_time);
                         }
                         drain_runtime_assertions(sim, ctx, None);
                     }
@@ -1141,15 +1138,6 @@ fn exec_one_detailed<B: SimBackend>(
         GenericTestbenchStatement::Break => ExecResult::Break,
         GenericTestbenchStatement::Finish => ExecResult::Finished,
     }
-}
-
-fn testbench_progress_every() -> Option<u64> {
-    static VALUE: OnceLock<Option<u64>> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("CELOX_TESTBENCH_PROGRESS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-    })
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

@@ -162,7 +162,7 @@ out[3:0] = data;
     })
     .unwrap();
     let val: u64 = sim.get(out).try_into().unwrap();
-    eprintln!("  sel=00, a=0, b=0 → out=0x{:08x}", val);
+    println!("  sel=00, a=0, b=0 → out=0x{:08x}", val);
     assert_eq!(
         val, 0xFFFF_FFFC,
         "sel=00: upper bits should be 1, got 0x{:08x}",
@@ -178,7 +178,7 @@ out[3:0] = data;
     })
     .unwrap();
     let val: u64 = sim.get(out).try_into().unwrap();
-    eprintln!("  sel=10, data=0b0101 → out=0x{:08x}", val);
+    println!("  sel=10, data=0b0101 → out=0x{:08x}", val);
     assert_eq!(val, 0xFFFF_FFF5, "sel=10: got 0x{:08x}", val);
 
     }
@@ -195,7 +195,7 @@ fn axi_lite_reg_file_req_last_vec() {
         // Check the register directly (bypasses the comb read path)
         let reg_val: u64 = sim.get(reg_req_last_vec).try_into().unwrap();
         let got = axl_read(&mut sim, ADDR_REQ_LAST);
-        eprintln!(
+        println!(
             "  wrote: 0b{:04b}, reg_req_last_vec: 0b{:04b}, read_mux: 0b{:04b}",
             p,
             reg_val & 0xf,
@@ -264,7 +264,7 @@ fn parametric_bitslice_multi_branch() {
     })
     .unwrap();
     let val: u64 = sim.get(out).try_into().unwrap();
-    eprintln!("  sel=00, a=1, b=0 → out=0b{:08b}", val & 0xff);
+    println!("  sel=00, a=1, b=0 → out=0b{:08b}", val & 0xff);
 
     sim.modify(|io| {
         io.set(sel, 1u8);
@@ -273,7 +273,7 @@ fn parametric_bitslice_multi_branch() {
     })
     .unwrap();
     let val: u64 = sim.get(out).try_into().unwrap();
-    eprintln!("  sel=01, a=1, b=0 → out=0b{:08b}", val & 0xff);
+    println!("  sel=01, a=1, b=0 → out=0b{:08b}", val & 0xff);
 
     // Test sel=2'b10: out[3:0] should = data
     for pattern in [0b0001u8, 0b0010, 0b0100, 0b1000, 0b1111, 0b1010] {
@@ -285,7 +285,7 @@ fn parametric_bitslice_multi_branch() {
         })
         .unwrap();
         let val: u64 = sim.get(out).try_into().unwrap();
-        eprintln!("  sel=10, data=0b{:04b}, out=0b{:04b}", pattern, val & 0xf);
+        println!("  sel=10, data=0b{:04b}, out=0b{:04b}", pattern, val & 0xf);
         assert_eq!(
             val & 0xf,
             pattern as u64,
@@ -342,7 +342,7 @@ fn hardcoded_bitslice_multi_branch() {
         })
         .unwrap();
         let val: u64 = sim.get(out).try_into().unwrap();
-        eprintln!(
+        println!(
             "  [hardcoded] sel=0, data=0b{:04b}, out=0b{:04b}",
             pattern,
             val & 0xf
@@ -387,5 +387,5 @@ fn hardcoded_bitslice_trace() {
         .trace_post_optimized_sir()
         .build_with_trace();
     let output = trace.trace.format_program().unwrap();
-    eprintln!("{}", output);
+    println!("{}", output);
 }

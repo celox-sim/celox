@@ -21,7 +21,9 @@ pub mod tail_call_split;
 mod translator;
 mod wide_ops;
 
-pub use cranelift_options::{CraneliftOptLevel, CraneliftOptions, RegallocAlgorithm};
+pub use cranelift_options::{
+    CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, RegallocAlgorithm,
+};
 pub use jit_engine::JitEngine;
 pub use translator::SIRTranslator;
 

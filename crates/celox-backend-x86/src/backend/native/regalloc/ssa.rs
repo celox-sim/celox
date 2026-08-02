@@ -24,9 +24,8 @@ pub(super) fn allocate(
     planning_recipes: &PlanningRecipes,
     constraints: &super::constraints::ConstraintModel,
     trace: Option<&mut super::RegallocTrace>,
+    timing: bool,
 ) -> Result<Allocation, super::RegallocError> {
-    let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
-        || std::env::var_os("CELOX_PHASE_TIMING").is_some();
     let register_count = func.target_features.allocatable_register_count();
     let phase = timing.then(crate::timing::now);
     let mut plan = super::spill_plan::plan_with_integrated_schedule(
@@ -61,7 +60,7 @@ pub(super) fn allocate(
         )
     })?;
     if let Some(start) = phase {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] ssa spill_plan elapsed={:?}",
             start.elapsed()
         );
@@ -89,7 +88,7 @@ pub(super) fn allocate(
         )
     })?;
     if let Some(start) = phase {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] ssa packed_state_homes homes={} reloads={} elapsed={:?}",
             plan.state_homes.len(),
             plan.state_reload_recipes.len(),
@@ -169,7 +168,7 @@ pub(super) fn allocate(
         ));
     }
     if let Some(start) = phase {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] ssa planner_reload_recipe_analyze_verify queries={} elapsed={:?}",
             requested_points.len(),
             start.elapsed()
@@ -191,7 +190,7 @@ pub(super) fn allocate(
             },
         )?;
     if let Some(start) = phase {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] ssa reconstruct vregs={} insts={} frame={} shared_reload_blocks={} elapsed={:?}",
             func.vregs.count(),
             func.blocks
@@ -277,7 +276,7 @@ pub(super) fn allocate(
         ));
     }
     if let Some(start) = phase {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] ssa reconstructed_pressure_verify elapsed={:?}",
             start.elapsed()
         );
@@ -300,7 +299,7 @@ pub(super) fn allocate(
     func.verify_result()
         .map_err(|error| super::RegallocError::mir("Perm structural verification", error))?;
     if let Some(start) = phase {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] ssa constraint_perms boundaries={} vregs={} elapsed={:?}",
             perms.boundaries.len(),
             func.vregs.count(),
@@ -335,7 +334,7 @@ pub(super) fn allocate(
         }
     }
     if let Some(start) = phase {
-        eprintln!("[regalloc-timing] ssa color elapsed={:?}", start.elapsed());
+        tracing::debug!("[regalloc-timing] ssa color elapsed={:?}", start.elapsed());
     }
 
     Ok(Allocation {

@@ -431,6 +431,7 @@ fn parse_options(options: &Option<NapiOptions>) -> Result<ParsedOptions> {
                 enable_alias_analysis: o.enable_alias_analysis.unwrap_or(true),
                 enable_verifier: o.enable_verifier.unwrap_or(true),
                 tail_call_split: true,
+                diagnostics: celox::CraneliftDiagnostics::default(),
             };
             Ok(ParsedOptions {
                 common,

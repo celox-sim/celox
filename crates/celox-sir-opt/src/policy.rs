@@ -117,6 +117,22 @@ define_sir_passes! {
     /// This is not a SIR transform and is consumed at the backend boundary.
     TailCallSplit => "tail_call_split",
 }
+/// Diagnostics and additional verification for the SIR optimizer.
+///
+/// These switches are explicit so optimizer behavior is independent of the
+/// process environment and multiple compilations can use different settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SirDiagnostics {
+    pub pass_timing: bool,
+    pub branchify_stats: bool,
+    pub mux_chain_stats: bool,
+    pub verify_boundaries: bool,
+    pub verify_passes: bool,
+    pub branchify_verify: bool,
+    pub branchify_trace_reg: Option<usize>,
+    pub effect_case_dispatch: bool,
+}
+
 /// Controls which SIR optimization passes are enabled.
 ///
 /// Built from an [`OptLevel`] preset, with optional per-pass overrides.
@@ -143,6 +159,7 @@ pub struct OptimizeOptions {
     enabled: HashSet<SirPass>,
     disabled: HashSet<SirPass>,
     max_native_memory_width: usize,
+    pub diagnostics: SirDiagnostics,
 }
 
 impl Default for OptimizeOptions {
@@ -163,6 +180,7 @@ impl OptimizeOptions {
             } else {
                 64
             },
+            diagnostics: SirDiagnostics::default(),
         }
     }
 

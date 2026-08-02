@@ -7,7 +7,7 @@ pub(super) fn optimize_unit_groups_cached(
     passes: &ExecutionUnitPassManager,
     options: &PassOptions,
 ) {
-    let timing = std::env::var_os("CELOX_PASS_TIMING").is_some();
+    let timing = options.optimize_options.diagnostics.pass_timing;
     let total_start = timing.then(crate::timing::now);
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     struct UnitShape {
@@ -97,7 +97,7 @@ pub(super) fn optimize_unit_groups_cached(
         .map(|class| class.aliases.len())
         .sum::<usize>();
     if let Some(start) = total_start {
-        eprintln!(
+        tracing::debug!(
             "[group-cache-timing] classify groups={} classes={} aliases={} elapsed={:?}",
             groups.len(),
             classes.len(),
@@ -126,7 +126,7 @@ pub(super) fn optimize_unit_groups_cached(
         }
     }
     if let Some(start) = total_start {
-        eprintln!(
+        tracing::debug!(
             "[group-cache-timing] total groups={} elapsed={:?}",
             groups.len(),
             start.elapsed()

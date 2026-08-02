@@ -54,7 +54,7 @@ fn sorter_tree_compilation_scales() {
     let ratio_4_8 = t8.as_secs_f64() / t4.as_secs_f64();
     let ratio_16_64 = t64.as_secs_f64() / t16.as_secs_f64();
     let ratio_32_128 = t128.as_secs_f64() / t32.as_secs_f64();
-    eprintln!(
+    println!(
         "SorterTreeDistEntry compile times: N=4 {t4:?}, N=8 {t8:?}, N=16 {t16:?}, \
          N=32 {t32:?}, N=64 {t64:?}, N=128 {t128:?}; ratios: \
          N=8/N=4 {ratio_4_8:.2}x, N=64/N=16 {ratio_16_64:.2}x, \

@@ -1,5 +1,6 @@
 mod backend;
 mod debug;
+mod diagnostics;
 mod ir;
 mod optimizer;
 mod parser;
@@ -54,6 +55,7 @@ pub use celox_macros::veryl_test;
 #[cfg(not(target_arch = "wasm32"))]
 pub use debug::CompilationTraceResult;
 pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
+pub use diagnostics::{DiagnosticsOptions, RuntimeDiagnostics};
 pub(crate) use fxhash::FxHashMap as HashMap;
 pub(crate) use fxhash::FxHashSet as HashSet;
 pub use ir::{
@@ -77,16 +79,21 @@ pub type DefaultBackend = NativeBackend;
 #[cfg(all(not(target_arch = "wasm32"), not(target_arch = "x86_64")))]
 pub type DefaultBackend = backend::JitBackend;
 #[cfg(not(target_arch = "wasm32"))]
+pub use backend::CraneliftDiagnostics;
+#[cfg(not(target_arch = "wasm32"))]
 pub use backend::CraneliftOptLevel;
 #[cfg(not(target_arch = "wasm32"))]
 pub use backend::CraneliftOptions;
 #[cfg(not(target_arch = "wasm32"))]
 pub use backend::RegallocAlgorithm;
+#[cfg(target_arch = "x86_64")]
+pub use backend::{NativeDiagnostics, NativeDumpOptions};
 pub use celox_frontend_veryl::{LoweringPhase, ParserError};
 pub use celox_slt::scheduler::SchedulerError;
 pub use num_bigint::BigUint;
 pub use optimizer::OptLevel;
 pub use optimizer::OptimizeOptions;
+pub use optimizer::SirDiagnostics;
 pub use optimizer::SirPass;
 #[cfg(not(target_arch = "wasm32"))]
 pub use simulation::Simulation;
