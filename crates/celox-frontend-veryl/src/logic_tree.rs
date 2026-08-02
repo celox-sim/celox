@@ -1071,18 +1071,15 @@ fn eval_loop_statement(
             Some(&ir.token),
         )),
         Statement::SystemFunctionCall(call) => {
-            let (store, boundaries) = eval_system_function_call_side_effects(
+            let guard_state = state.clone();
+            let (next_store, next_boundaries) = eval_system_function_call_side_effects(
                 module,
                 state.store,
                 state.boundaries,
                 call,
                 arena,
             )?;
-            Ok(LoopControlState {
-                store,
-                boundaries,
-                ..state
-            })
+            apply_loop_continue_guard(module, guard_state, next_store, next_boundaries, arena)
         }
         Statement::FunctionCall(fc) => {
             let guard_state = state.clone();
@@ -2455,25 +2452,25 @@ fn eval_statement_form_function_call(
 
     apply_function_call_outputs(
         module,
+        function,
         store,
         boundaries,
         call,
         &function_body,
         &final_local_store,
         arena,
-        phase,
     )
 }
 
 fn apply_function_call_outputs(
     module: &Module,
+    function: &Function,
     mut store: SymbolicStore<VarId>,
     mut boundaries: BoundaryMap<VarId>,
     call: &veryl_analyzer::ir::FunctionCall,
     function_body: &veryl_analyzer::ir::FunctionBody,
     final_local_store: &SymbolicStore<VarId>,
     arena: &mut SLTNodeArena<VarId>,
-    phase: LoweringPhase,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     for (arg_path, dsts) in &call.outputs {
         let Some(arg_id) = function_body.arg_map.get(arg_path) else {

@@ -1036,6 +1036,53 @@ module Top (
     assert_eq!(sim.get(q_output), 11u32.into());
     }
 
+    fn test_comb_value_system_function_after_dynamic_break_stays_inactive(sim) {
+        // Veryl simulator 0.20.2 rejects value-returning system functions in
+        // statement position even though the analyzer accepts the source.
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Top (
+    stop: input logic,
+    d: input logic<8>,
+    count: input logic<8>,
+    q_output: output logic<8>,
+) {
+    function f (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic<8> {
+        y = x + 8'd1;
+        return x;
+    }
+
+    always_comb {
+        q_output = 8'd0;
+        for i in 0..count {
+            if stop && i == 0 {
+                break;
+            }
+            $unsigned(f(d, q_output));
+        }
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let stop = sim.signal("stop");
+    let d = sim.signal("d");
+    let count = sim.signal("count");
+    let q_output = sim.signal("q_output");
+
+    sim.modify(|io| {
+        io.set(stop, 1u8);
+        io.set(d, 10u8);
+        io.set(count, 2u8);
+    }).unwrap();
+    assert_eq!(sim.get(q_output), 0u32.into());
+
+    sim.modify(|io| io.set(stop, 0u8)).unwrap();
+    assert_eq!(sim.get(q_output), 11u32.into());
+    }
+
     fn test_comb_function_condition_output_is_guarded_after_early_return(sim) {
         // Veryl simulator 0.20.2 does not preserve this nested early-return
         // behavior when the later condition contains an output call.

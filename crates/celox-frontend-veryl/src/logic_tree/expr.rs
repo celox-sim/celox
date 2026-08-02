@@ -2122,13 +2122,13 @@ fn eval_function_call_expression(
         let current_store = std::mem::take(caller_store);
         let (next_store, bounds) = super::apply_function_call_outputs(
             module,
+            function,
             current_store,
             BoundaryMap::default(),
             call,
             &function_body,
             &final_local_store,
             arena,
-            LoweringPhase::CombLowering,
         )?;
         *caller_store = next_store;
         bounds
@@ -2765,7 +2765,24 @@ pub(super) fn eval_expression_in_context(
                     branch_context,
                 )?;
 
-                let mut else_store = base_store;
+                // A known condition evaluates only its selected arm. An X/Z
+                // condition evaluates both arms in order, so the else arm must
+                // observe writes made by the then arm.
+                let not_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_expr))?;
+                let known_false = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, not_cond))?;
+                let true_truth = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, not_cond))?;
+                let known_true = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, true_truth))?;
+                let execute_then = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, known_false))?;
+                let after_then = super::merge_symbolic_stores(
+                    module,
+                    &then_store,
+                    &base_store,
+                    execute_then,
+                    &cond_sources,
+                    arena,
+                )?;
+
+                let mut else_store = after_then.clone();
                 let mut else_state = ExpressionStore::Effectful(&mut else_store);
                 let else_value = eval_expression_in_context(
                     module,
@@ -2775,17 +2792,18 @@ pub(super) fn eval_expression_in_context(
                     branch_context,
                 )?;
 
-                let merged_store = super::merge_symbolic_stores(
+                let execute_else = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, known_true))?;
+                let final_store = super::merge_symbolic_stores(
                     module,
-                    &then_store,
                     &else_store,
-                    cond_expr,
+                    &after_then,
+                    execute_else,
                     &cond_sources,
                     arena,
                 )?;
                 *store
                     .effectful_mut()
-                    .expect("effectful ternary must retain a mutable store") = merged_store;
+                    .expect("effectful ternary must retain a mutable store") = final_store;
                 (then_value, else_value)
             } else {
                 (
