@@ -452,7 +452,7 @@ pub fn parse_sv(
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
     let frontend_trace_options = trace_opts.frontend(diagnostics);
     let mut frontend_trace = celox_frontend_veryl::FrontendTrace::default();
-    let scheduled = celox_frontend_sv::schedule_sources(
+    let scheduled = crate::frontend_sv::schedule_sources(
         sources,
         top,
         config,
@@ -463,8 +463,8 @@ pub fn parse_sv(
         trace.is_some().then_some(&mut frontend_trace),
     )
     .map_err(|error| match error {
-        celox_frontend_sv::FrontendError::Lowering(error) => error,
-        celox_frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
+        crate::frontend_sv::FrontendError::Lowering(error) => error,
+        crate::frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
             64,
             celox_frontend_veryl::LoweringPhase::SimulatorParser,
             "systemverilog analysis",
@@ -510,16 +510,18 @@ pub fn parse_mixed(
     preserve_element_storage_layout: bool,
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
     let external =
-        celox_frontend_sv::prepare_external_hierarchy(sv_sources).map_err(|error| match error {
-            celox_frontend_sv::FrontendError::Lowering(error) => error,
-            celox_frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
-                64,
-                celox_frontend_veryl::LoweringPhase::SimulatorParser,
-                "systemverilog analysis",
-                error.to_string(),
-                None,
-            ),
-        })?;
+        crate::frontend_sv::prepare_external_hierarchy(sv_sources).map_err(
+            |error| match error {
+                crate::frontend_sv::FrontendError::Lowering(error) => error,
+                crate::frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
+                    64,
+                    celox_frontend_veryl::LoweringPhase::SimulatorParser,
+                    "systemverilog analysis",
+                    error.to_string(),
+                    None,
+                ),
+            },
+        )?;
     let symbolic = celox_frontend_veryl::parse_ir_with_external_hierarchy(
         ir,
         loop_provenance,

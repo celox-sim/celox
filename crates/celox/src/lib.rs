@@ -1,6 +1,7 @@
 mod backend;
 mod debug;
 mod diagnostics;
+mod frontend_sv;
 mod ir;
 mod optimizer;
 mod parser;

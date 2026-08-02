@@ -17,12 +17,12 @@ veryl-path            = { workspace = true }
 celox-analysis        = { path = "../celox-analysis" }
 celox-backend-wasm    = { path = "../celox-backend-wasm" }
 celox-design          = { path = "../celox-design" }
-celox-frontend-sv     = { path = "../celox-frontend-sv" }
 celox-frontend-veryl  = { path = "../celox-frontend-veryl" }
 celox-sir             = { path = "../celox-sir" }
 celox-sir-opt         = { path = "../celox-sir-opt" }
 celox-slt             = { path = "../celox-slt" }
 celox-state-layout    = { path = "../celox-state-layout" }
+celox-sv-analyzer     = { path = "../celox-sv-analyzer" }
 celox-runtime         = { path = "../celox-runtime" }
 celox-testbench       = { path = "../celox-testbench" }
 fxhash                = { workspace = true }

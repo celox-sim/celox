@@ -1,12 +1,10 @@
-//! SystemVerilog lowering boundary.
+//! SystemVerilog integration adapter.
 //!
 //! SystemVerilog syntax and semantic analysis belongs in the
-//! `celox-sv-analyzer` crate. This module lowers that analyzer IR directly
-//! into Celox `SimModule`/SLT structures. It does not translate SV text into
-//! Veryl text or synthesize Veryl expressions. The shared symbolic pipeline
-//! currently keys module-local state by Veryl's compact `VarId`, so this
-//! frontend supplies only the minimal variable metadata required at that
-//! boundary.
+//! `celox-sv-analyzer` crate. The current symbolic assembly pipeline still
+//! uses Veryl-owned module identities and metadata, so the adapter that joins
+//! those two frontends belongs at the top-level `celox` integration boundary,
+//! not in a purportedly independent SystemVerilog frontend crate.
 
 use std::path::{Path, PathBuf};
 
