@@ -126,7 +126,8 @@ impl ExecutionUnitPass for SparseCaseDispatchPass {
         // strictly decreasing number of SIR Mux instructions; there is no
         // iteration or function-size cap.
         let mut changed = false;
-        let stats = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
+        let diagnostics = &options.optimize_options.diagnostics;
+        let stats = diagnostics.branchify_stats;
         let mut applied = 0usize;
         loop {
             let plans = find_sparse_case_plans(eu, &self.stable_alias_class);
@@ -138,12 +139,12 @@ impl ExecutionUnitPass for SparseCaseDispatchPass {
                 changed = true;
                 applied += 1;
                 if stats && applied.is_multiple_of(100) {
-                    eprintln!("[branchify-stats] sparse_case applied={applied}");
+                    tracing::debug!("[branchify-stats] sparse_case applied={applied}");
                 }
             }
         }
-        if stats || std::env::var_os("CELOX_PASS_TIMING").is_some() {
-            eprintln!("[branchify-stats] sparse_case done applied={applied}");
+        if stats || diagnostics.pass_timing {
+            tracing::debug!("[branchify-stats] sparse_case done applied={applied}");
         }
         if changed {
             // A condition can be defined in a dominating predecessor left by

@@ -16,11 +16,11 @@ pub(super) fn optimize_late_comb(
     unpacked_element_widths: &crate::HashMap<AbsoluteAddr, usize>,
 ) {
     let on = |pass: SirPass| opt.is_enabled(pass);
-    let trace = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
-    let timing = std::env::var_os("CELOX_PASS_TIMING").is_some();
+    let trace = opt.diagnostics.branchify_stats;
+    let timing = opt.diagnostics.pass_timing;
     let mut checkpoint = crate::timing::now();
     let verify_stage = |program: &OptimizationContext, stage: &'static str| {
-        if std::env::var_os("CELOX_SIR_VERIFY_PASSES").is_none() {
+        if !opt.diagnostics.verify_passes {
             return;
         }
         for (unit, eu) in program.sir.eval_comb.iter().enumerate() {
@@ -37,7 +37,7 @@ pub(super) fn optimize_late_comb(
     macro_rules! checkpoint {
         ($name:literal) => {
             if timing {
-                eprintln!("[late-comb-timing] {}: {:?}", $name, checkpoint.elapsed());
+                tracing::debug!("[late-comb-timing] {}: {:?}", $name, checkpoint.elapsed());
                 checkpoint = crate::timing::now();
             }
         };
@@ -66,7 +66,7 @@ pub(super) fn optimize_late_comb(
     verify_stage(program, "identity-store bypass");
     checkpoint!("identity-store bypass");
     if trace {
-        eprintln!("[branchify-stats] late identity");
+        tracing::debug!("[branchify-stats] late identity");
     }
 
     // Identity-store bypass can make an entire expression DAG dead.
@@ -78,7 +78,7 @@ pub(super) fn optimize_late_comb(
     verify_stage(program, "loop idiom");
     checkpoint!("loop idiom");
     if trace {
-        eprintln!("[branchify-stats] late loop");
+        tracing::debug!("[branchify-stats] late loop");
     }
     if on(SirPass::PackedScatterStore) {
         let packed_scatter_store = PackedScatterStorePass::for_program(program);
@@ -89,7 +89,7 @@ pub(super) fn optimize_late_comb(
     verify_stage(program, "packed scatter");
     checkpoint!("packed scatter");
     if trace {
-        eprintln!("[branchify-stats] late scatter");
+        tracing::debug!("[branchify-stats] late scatter");
     }
     if on(SirPass::IndexedStoreRecovery) {
         let indexed_store_recovery = IndexedStoreRecoveryPass::for_program(program);
@@ -100,7 +100,7 @@ pub(super) fn optimize_late_comb(
     verify_stage(program, "indexed-store recovery");
     checkpoint!("indexed-store recovery");
     if trace {
-        eprintln!("[branchify-stats] late indexed");
+        tracing::debug!("[branchify-stats] late indexed");
     }
     if on(SirPass::GuardedRegionSinking) {
         for eu in &mut program.sir.eval_comb {
@@ -110,13 +110,13 @@ pub(super) fn optimize_late_comb(
     verify_stage(program, "guarded-region sinking");
     checkpoint!("guarded-region sinking");
     if trace {
-        eprintln!("[branchify-stats] late guarded");
+        tracing::debug!("[branchify-stats] late guarded");
     }
     if on(SirPass::SparseCaseDispatch) {
         let sparse_case_pass =
             SparseCaseDispatchPass::new(program.layout_requirements.state_aliases());
         if trace {
-            eprintln!("[branchify-stats] late sparse constructed");
+            tracing::debug!("[branchify-stats] late sparse constructed");
         }
         for eu in &mut program.sir.eval_comb {
             pass_manager::ExecutionUnitPass::run(&sparse_case_pass, eu, options);
@@ -125,7 +125,7 @@ pub(super) fn optimize_late_comb(
     verify_stage(program, "sparse-case dispatch");
     checkpoint!("sparse-case dispatch");
     if trace {
-        eprintln!("[branchify-stats] late sparse");
+        tracing::debug!("[branchify-stats] late sparse");
     }
 
     // Recover control dependence created by the program-wide transforms, then

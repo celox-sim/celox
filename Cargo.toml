@@ -58,6 +58,7 @@ serde_json      = "1.0"
 tempfile        = "3.26"
 thiserror       = "2.0"
 toml            = "1.0.3"
+tracing         = "0.1"
 
 [patch.crates-io]
 # Disable veryl-metadata's default gitoxide feature to avoid pulling aws-lc-sys
@@ -69,6 +70,8 @@ warnings = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
+disallowed_macros = "deny"
+disallowed_methods = "deny"
 type_complexity = "allow"
 too_many_arguments = "allow"
 collapsible_if = "allow"

@@ -8,10 +8,10 @@ struct PassRunner<'a> {
 }
 
 impl<'a> PassRunner<'a> {
-    fn new(func: &'a mut MFunction) -> Self {
+    fn new(func: &'a mut MFunction, diagnostics: &crate::NativeDiagnostics) -> Self {
         Self {
             func,
-            verify_each: std::env::var_os("CELOX_MIR_VERIFY_PASSES").is_some(),
+            verify_each: diagnostics.verify_mir_passes,
         }
     }
 
@@ -35,7 +35,11 @@ impl<'a> PassRunner<'a> {
 
 /// Run all MIR optimization passes.
 pub fn optimize(func: &mut MFunction) {
-    let mut runner = PassRunner::new(func);
+    optimize_with_diagnostics(func, &crate::NativeDiagnostics::default());
+}
+
+pub fn optimize_with_diagnostics(func: &mut MFunction, diagnostics: &crate::NativeDiagnostics) {
+    let mut runner = PassRunner::new(func, diagnostics);
     if runner.has_high_pressure() {
         run_high_pressure_pipeline(&mut runner);
     } else {
@@ -43,7 +47,7 @@ pub fn optimize(func: &mut MFunction) {
     }
     run_final_pipeline(&mut runner);
 
-    if cfg!(debug_assertions) || std::env::var_os("CELOX_MIR_VERIFY").is_some() {
+    if cfg!(debug_assertions) || diagnostics.verify_mir {
         if let Err(error) = runner.func.verify_result() {
             panic!("after MIR optimizer: {error}");
         }

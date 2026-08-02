@@ -49,12 +49,12 @@ fn apply_fused_optimization_hints(
     Ok(())
 }
 
-fn dump_addr_map_if_requested(program: &RuntimeProgram) {
-    if std::env::var_os("CELOX_ADDR_MAP_DUMP").is_none() {
+fn dump_addr_map_if_requested(program: &RuntimeProgram, diagnostics: &crate::RuntimeDiagnostics) {
+    let Some(raw_filter) = diagnostics.address_map_filter.as_deref() else {
         return;
-    }
+    };
 
-    let filter = parse_addr_map_filter();
+    let filter = parse_addr_map_filter(raw_filter);
     let mut entries = Vec::new();
     for (&instance_id, &module_id) in &program.frontend.instance_module {
         let Some(vars) = program.frontend.module_variables.get(&module_id) else {
@@ -86,7 +86,7 @@ fn dump_addr_map_if_requested(program: &RuntimeProgram) {
         let Some(addr) = program.state_address_for_source(instance_id, var_id) else {
             continue;
         };
-        eprintln!(
+        tracing::debug!(
             "[addr-map] inst={} var={} module={} path={} width={} array_dims={:?} 4state={} kind={:?} var_kind={}",
             instance_id,
             var_id,
@@ -101,9 +101,10 @@ fn dump_addr_map_if_requested(program: &RuntimeProgram) {
     }
 }
 
-fn parse_addr_map_filter() -> Option<HashSet<(String, String)>> {
-    let raw = std::env::var_os("CELOX_ADDR_MAP_FILTER")?;
-    let raw = raw.to_string_lossy();
+fn parse_addr_map_filter(raw: &str) -> Option<HashSet<(String, String)>> {
+    if raw.is_empty() {
+        return None;
+    }
     let mut filter = HashSet::default();
     for item in raw
         .split(',')
@@ -115,7 +116,7 @@ fn parse_addr_map_filter() -> Option<HashSet<(String, String)>> {
         };
         filter.insert((normalized_addr_id(inst), normalized_addr_id(var)));
     }
-    Some(filter)
+    (!filter.is_empty()).then_some(filter)
 }
 
 fn normalized_addr_id(raw: &str) -> String {
@@ -300,20 +301,21 @@ pub fn parse(
     trace_opts: &crate::debug::TraceOptions,
     mut trace: Option<&mut crate::debug::CompilationTrace>,
     optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
     debug_assert!(
         loop_provenance.is_consistent_with(ir),
         "loop provenance must describe the analyzer IR passed to the parser"
     );
-    let phase_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
+    let phase_timing = diagnostics.phase_timing;
 
     macro_rules! timed_phase {
         ($label:expr, $body:expr) => {{
             if phase_timing {
                 let start = crate::timing::now();
                 let result = $body;
-                eprintln!("[phase-timing] {}: {:?}", $label, start.elapsed());
+                tracing::debug!("[phase-timing] {}: {:?}", $label, start.elapsed());
                 result
             } else {
                 $body
@@ -330,7 +332,7 @@ pub fn parse(
     {
         t.analyzer_ir = Some(ir.to_string());
     }
-    let frontend_trace_options = trace_opts.frontend();
+    let frontend_trace_options = trace_opts.frontend(diagnostics);
     let mut frontend_trace = celox_frontend_veryl::FrontendTrace::default();
     let scheduled = timed_phase!(
         "flatten",
@@ -355,7 +357,7 @@ pub fn parse(
     crate::testbench_compile::project_observability(&mut runtime, &testbench_source);
     runtime.testbench =
         crate::testbench_compile::compile_semantic_testbench(&runtime, &testbench_source);
-    dump_addr_map_if_requested(&runtime);
+    dump_addr_map_if_requested(&runtime, diagnostics);
     let mut program = UnoptimizedSir::new(sir, runtime);
     if let Some(t) = trace.as_deref_mut()
         && trace_opts.pre_optimized_sir

@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)] // proc-macro build context is an application boundary
+
 mod generator;
 
 use proc_macro::TokenStream;

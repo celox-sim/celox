@@ -62,19 +62,19 @@ fn compile_and_run_inner(
     let mut mfunc = isel::lower_execution_unit(eu, &layout, false);
 
     if debug {
-        eprintln!("=== MIR ===\n{mfunc}");
+        println!("=== MIR ===\n{mfunc}");
     }
 
     let ra = regalloc::run_regalloc(&mut mfunc).unwrap();
 
     if debug {
-        eprintln!("=== Assignment ===\n{:?}", ra.assignment);
+        println!("=== Assignment ===\n{:?}", ra.assignment);
     }
 
     let emit_result = emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size).expect("emit failed");
 
     if debug {
-        eprintln!(
+        println!(
             "=== Disassembly ===\n{}",
             emit::disassemble(&emit_result.code[..emit_result.text_size], 0)
         );
@@ -475,7 +475,7 @@ fn test_debug_let_bitslice_write() {
         .trace_post_optimized_sir()
         .build_with_trace();
     let sir_text = trace.trace.format_program().unwrap();
-    eprintln!("{sir_text}");
+    println!("{sir_text}");
     let sir = trace.trace.post_optimized_sir.unwrap();
 
     use celox::native_backend::{emit, isel, regalloc};
@@ -483,12 +483,12 @@ fn test_debug_let_bitslice_write() {
 
     for (eu_idx, eu) in sir.sir.eval_comb.iter().enumerate() {
         let mut mfunc = isel::lower_execution_unit(eu, &layout, false);
-        eprintln!("=== EU {eu_idx} MIR ===\n{mfunc}");
+        println!("=== EU {eu_idx} MIR ===\n{mfunc}");
         let ra = regalloc::run_regalloc(&mut mfunc).unwrap();
-        eprintln!("=== EU {eu_idx} Assignment ===\n{:?}", ra.assignment);
+        println!("=== EU {eu_idx} Assignment ===\n{:?}", ra.assignment);
         let emit_result =
             emit::emit(&mfunc, &ra.assignment, ra.spill_frame_size).expect("emit failed");
-        eprintln!(
+        println!(
             "=== EU {eu_idx} Disassembly ===\n{}",
             emit::disassemble(&emit_result.code[..emit_result.text_size], 0)
         );
@@ -498,7 +498,7 @@ fn test_debug_let_bitslice_write() {
     let mut sim = SimulatorBuilder::new(code, "Top").build_native().unwrap();
     let o_hi = sim.signal("o_hi");
     let o_lo = sim.signal("o_lo");
-    eprintln!("Native: o_hi={:?}, o_lo={:?}", sim.get(o_hi), sim.get(o_lo));
+    println!("Native: o_hi={:?}, o_lo={:?}", sim.get(o_hi), sim.get(o_lo));
     assert_eq!(sim.get(o_hi), 2u64.into());
     assert_eq!(sim.get(o_lo), 102u64.into());
 }

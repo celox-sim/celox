@@ -51,6 +51,13 @@ impl RegallocAlgorithm {
 
 /// Fine-grained Cranelift backend options beyond the optimization level.
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CraneliftDiagnostics {
+    pub pass_timing: bool,
+}
+
+/// Fine-grained Cranelift backend options beyond the optimization level.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy)]
 pub struct CraneliftOptions {
     /// Optimization level (default: Speed).
@@ -65,6 +72,7 @@ pub struct CraneliftOptions {
     pub enable_verifier: bool,
     /// Enable backend-owned splitting for oversized functions.
     pub tail_call_split: bool,
+    pub diagnostics: CraneliftDiagnostics,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -76,6 +84,7 @@ impl Default for CraneliftOptions {
             enable_alias_analysis: true,
             enable_verifier: true,
             tail_call_split: true,
+            diagnostics: CraneliftDiagnostics::default(),
         }
     }
 }
@@ -90,6 +99,7 @@ impl CraneliftOptions {
             enable_alias_analysis: false,
             enable_verifier: false,
             tail_call_split: true,
+            diagnostics: CraneliftDiagnostics::default(),
         }
     }
 

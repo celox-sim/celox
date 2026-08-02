@@ -5177,16 +5177,15 @@ pub fn emit_prepared_eu(
     layout: &crate::MemoryLayout,
     four_state: bool,
     label: &str,
-    enable_x86_slp: bool,
+    options: &crate::X86BackendOptions,
     mut trace: Option<&mut NativeFunctionTrace>,
 ) -> Result<EmitResult, ChainedEmitError> {
     use super::{isel, regalloc};
-    let timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
-    let mir_stats = std::env::var_os("CELOX_MIR_STATS").is_some();
-    let copy_stats = timing
-        || mir_stats
-        || std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
-        || std::env::var_os("CELOX_REGALLOC_STATS").is_some();
+    let diagnostics = &options.diagnostics;
+    let timing = diagnostics.phase_timing;
+    let mir_stats = diagnostics.mir_stats;
+    let copy_stats =
+        timing || mir_stats || diagnostics.regalloc_timing || diagnostics.regalloc_stats;
     let total_start = timing.then(crate::timing::now);
 
     sir_eu
@@ -5204,9 +5203,10 @@ pub fn emit_prepared_eu(
 
     // Single ISel + optimize + regalloc + emit
     let isel_start = timing.then(crate::timing::now);
-    let mut mfunc = isel::lower_execution_unit(sir_eu, layout, four_state);
+    let mut mfunc =
+        isel::lower_execution_unit_with_diagnostics(sir_eu, layout, four_state, diagnostics);
     if let Some(start) = isel_start {
-        eprintln!(
+        tracing::debug!(
             "[native-timing] emit_chained isel mir_blocks={} mir_insts={} vregs={} elapsed={:?}",
             mfunc.blocks.len(),
             mir_inst_count(&mfunc),
@@ -5214,9 +5214,9 @@ pub fn emit_prepared_eu(
             start.elapsed()
         );
     }
-    dump_native_block_context(label, "after_isel", sir_eu, &mfunc);
+    dump_native_block_context(label, "after_isel", sir_eu, &mfunc, diagnostics);
     if timing {
-        eprintln!("[native-timing] emit_chained verify after_isel label={label}");
+        tracing::debug!("[native-timing] emit_chained verify after_isel label={label}");
     }
     mfunc
         .verify_result()
@@ -5227,7 +5227,7 @@ pub fn emit_prepared_eu(
     let legalize_start = timing.then(crate::timing::now);
     super::mir_legalize::legalize(&mut mfunc);
     if let Some(start) = legalize_start {
-        eprintln!(
+        tracing::debug!(
             "[native-timing] emit_chained legalize mir_blocks={} mir_insts={} vregs={} elapsed={:?}",
             mfunc.blocks.len(),
             mir_inst_count(&mfunc),
@@ -5235,9 +5235,9 @@ pub fn emit_prepared_eu(
             start.elapsed()
         );
     }
-    dump_native_block_context(label, "after_legalize", sir_eu, &mfunc);
+    dump_native_block_context(label, "after_legalize", sir_eu, &mfunc, diagnostics);
     if timing {
-        eprintln!("[native-timing] emit_chained verify after_legalize label={label}");
+        tracing::debug!("[native-timing] emit_chained verify after_legalize label={label}");
     }
     mfunc
         .verify_result()
@@ -5246,9 +5246,9 @@ pub fn emit_prepared_eu(
             error,
         })?;
     let opt_start = timing.then(crate::timing::now);
-    super::mir_opt::optimize(&mut mfunc);
+    super::mir_opt::optimize_with_diagnostics(&mut mfunc, diagnostics);
     if let Some(start) = opt_start {
-        eprintln!(
+        tracing::debug!(
             "[native-timing] emit_chained mir_opt label={label} mir_blocks={} mir_insts={} vregs={} elapsed={:?}",
             mfunc.blocks.len(),
             mir_inst_count(&mfunc),
@@ -5262,7 +5262,7 @@ pub fn emit_prepared_eu(
             phase: "after MIR optimization before x86 SLP",
             error,
         })?;
-    let slp_stats = if enable_x86_slp {
+    let slp_stats = if options.slp {
         super::x86_slp::select(&mut mfunc)
     } else {
         super::x86_slp::SlpStats::default()
@@ -5274,7 +5274,7 @@ pub fn emit_prepared_eu(
             error,
         })?;
     if timing {
-        eprintln!(
+        tracing::debug!(
             "[native-timing] emit_chained x86_slp vector_zeroes={} vector_packs={} vector_loads={} vector_binary_ops={} vector_stores={} scalar_instructions_removed={}",
             slp_stats.vector_zeroes,
             slp_stats.vector_packs,
@@ -5287,7 +5287,7 @@ pub fn emit_prepared_eu(
     let compact_start = timing.then(crate::timing::now);
     let compacted = super::mir_opt::compact_vregs(&mut mfunc);
     if let Some(start) = compact_start {
-        eprintln!(
+        tracing::debug!(
             "[native-timing] emit_chained compact_vregs before={} after={} removed={} elapsed={:?}",
             compacted.before,
             compacted.after,
@@ -5298,12 +5298,12 @@ pub fn emit_prepared_eu(
     if mir_stats {
         log_mir_stats(label, "after_mir_opt", &mfunc);
     }
-    if std::env::var_os("CELOX_MIR_BLOCK_STATS").is_some() {
+    if diagnostics.mir_block_stats {
         log_mir_block_stats(label, "after_mir_opt", &mfunc);
     }
-    dump_native_block_context(label, "after_mir_opt", sir_eu, &mfunc);
+    dump_native_block_context(label, "after_mir_opt", sir_eu, &mfunc, diagnostics);
     if timing {
-        eprintln!("[native-timing] emit_chained verify after_mir_opt label={label}");
+        tracing::debug!("[native-timing] emit_chained verify after_mir_opt label={label}");
     }
     mfunc
         .verify_result()
@@ -5316,15 +5316,20 @@ pub fn emit_prepared_eu(
     }
     let regalloc_start = timing.then(crate::timing::now);
     let mut regalloc_trace = trace.as_ref().map(|_| regalloc::RegallocTrace::default());
-    let ra =
-        regalloc::run_regalloc_with_label_and_trace(&mut mfunc, label, regalloc_trace.as_mut())?;
+    let ra = regalloc::run_regalloc_with_label_and_trace_and_diagnostics(
+        &mut mfunc,
+        label,
+        regalloc_trace.as_mut(),
+        diagnostics,
+        options.native_tick_loop,
+    )?;
     if let (Some(trace), Some(regalloc_trace)) = (trace.as_deref_mut(), regalloc_trace.as_mut()) {
         trace.mir_after_late_memory_folds =
             std::mem::take(&mut regalloc_trace.mir_after_late_memory_folds);
         trace.mir_after_scheduling = std::mem::take(&mut regalloc_trace.mir_after_scheduling);
     }
     if let Some(start) = regalloc_start {
-        eprintln!(
+        tracing::debug!(
             "[native-timing] emit_chained regalloc mir_blocks={} mir_insts={} vregs={} spill_frame={} elapsed={:?}",
             mfunc.blocks.len(),
             mir_inst_count(&mfunc),
@@ -5339,7 +5344,7 @@ pub fn emit_prepared_eu(
     super::mir_opt::post_regalloc_direct_load_cse(&mut mfunc, &ra.assignment);
     regalloc::verify_assignment(&mfunc, &ra.assignment)?;
     if let Some(start) = post_regalloc_start {
-        eprintln!(
+        tracing::debug!(
             "[native-timing] emit_chained post_regalloc_cleanup mir_blocks={} mir_insts={} vregs={} elapsed={:?}",
             mfunc.blocks.len(),
             mir_inst_count(&mfunc),
@@ -5366,10 +5371,10 @@ pub fn emit_prepared_eu(
     if mir_stats {
         log_mir_stats(label, "after_regalloc", &mfunc);
     }
-    if std::env::var_os("CELOX_MIR_BLOCK_STATS").is_some() {
+    if diagnostics.mir_block_stats {
         log_mir_block_stats(label, "after_regalloc", &mfunc);
     }
-    dump_native_block_context(label, "after_regalloc", sir_eu, &mfunc);
+    dump_native_block_context(label, "after_regalloc", sir_eu, &mfunc, diagnostics);
     // Post-allocation peepholes and CFG cleanup can change the physical value
     // present on a phi edge. Build the edge-copy plan from this final MIR, not
     // from the pre-cleanup allocation input.
@@ -5377,7 +5382,7 @@ pub fn emit_prepared_eu(
     ssa_destruction.verify(&mfunc, &ra.assignment, ra.spill_frame_size)?;
     if copy_stats {
         let stats = ssa_destruction.stats();
-        eprintln!(
+        tracing::debug!(
             "[native-edge-copy-stats] label={label} edges={} rows={} identity_rows={} effective_copies={} identity_only_edges={} direct_moves={} register_swaps={} cycle_breaks={} temporary_cycle_breaks={} ready_pops={} dependency_releases={} max_effective_per_edge={}",
             stats.edges,
             stats.rows,
@@ -5398,7 +5403,7 @@ pub fn emit_prepared_eu(
         .merged_total_size
         .checked_add(layout.triggered_bits_total_size)
         .expect("native simulation-state size overflow");
-    let result = if label == "eval_comb_apply_ff" && super::native_tick_loop_enabled() {
+    let result = if label == "eval_comb_apply_ff" && options.native_tick_loop {
         let check_runtime_events = sir_eu.blocks.values().any(|block| {
             block.instructions.iter().any(|instruction| {
                 matches!(
@@ -5433,14 +5438,14 @@ pub fn emit_prepared_eu(
         );
     }
     if let Some(start) = emit_start {
-        eprintln!(
+        tracing::debug!(
             "[native-timing] emit_chained emit bytes={} elapsed={:?}",
             result.code.len(),
             start.elapsed()
         );
     }
     if let Some(start) = total_start {
-        eprintln!(
+        tracing::debug!(
             "[native-timing] emit_chained total elapsed={:?}",
             start.elapsed()
         );
@@ -5591,7 +5596,7 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
         }
     }
 
-    eprintln!(
+    tracing::debug!(
         "[native-mir-stats] label={label} stage={stage} phi={phi} mov={mov} imm={imm} load_sim={load_sim} load_stack={load_stack} load_ptr={load_ptr} store_sim={store_sim} store_stack={store_stack} store_ptr={store_ptr} indexed_load={indexed_load} indexed_store={indexed_store} memcopy={memcopy} alu={alu} alu_imm={alu_imm} cmp={cmp} div_rem={div_rem} bit_ops={bit_ops} select={select} branch={branch} jump={jump} ret={ret}"
     );
 }
@@ -5723,7 +5728,7 @@ fn log_mir_block_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
         ),
     ) in blocks.into_iter().take(10).enumerate()
     {
-        eprintln!(
+        tracing::debug!(
             "[native-mir-block-stats] label={label} stage={stage} rank={} block={} total={} phis={} insts={} load_sim={} load_stack={} store_sim={} store_stack={} indexed_mem={} memcopy={} imm={} alu={} alu_imm={} cmp={} bit_ops={} select={} control={}",
             rank + 1,
             block_id,
@@ -5752,37 +5757,34 @@ fn dump_native_block_context(
     stage: &str,
     eu: &crate::ExecutionUnit<crate::RegionedAbsoluteAddr>,
     func: &super::mir::MFunction,
+    diagnostics: &crate::NativeDiagnostics,
 ) {
-    let Some(raw) = std::env::var_os("CELOX_NATIVE_DUMP_BLOCK") else {
+    let Some(options) = diagnostics.dump.as_ref() else {
         return;
     };
-    if let Some(raw_label) = std::env::var_os("CELOX_NATIVE_DUMP_LABEL")
-        && raw_label != label
+    if let Some(configured_label) = options.label.as_deref()
+        && configured_label != label
     {
         return;
     }
-    if let Some(raw_stage) = std::env::var_os("CELOX_NATIVE_DUMP_STAGE") {
-        if raw_stage != stage {
+    if let Some(configured_stage) = options.stage.as_deref() {
+        if configured_stage != stage {
             return;
         }
     } else if stage != "after_isel" {
         return;
     }
-    let Some(block_id) = raw.to_string_lossy().parse::<u32>().ok() else {
+    let Ok(block_id) = u32::try_from(options.block) else {
         return;
     };
-    let dump_sir = std::env::var_os("CELOX_NATIVE_DUMP_SIR").is_none_or(|raw| raw != "0");
-    let mir_limit = std::env::var_os("CELOX_NATIVE_DUMP_MIR_LIMIT")
-        .and_then(|raw| raw.to_string_lossy().parse::<usize>().ok())
-        .unwrap_or(64);
     let sir_id = crate::BlockId(block_id as usize);
-    eprintln!("[native-dump] label={label} stage={stage} block={block_id}");
-    if dump_sir {
+    tracing::debug!("[native-dump] label={label} stage={stage} block={block_id}");
+    if options.dump_sir {
         if let Some(block) = eu.blocks.get(&sir_id) {
-            eprintln!("[native-dump] SIR:\n{block}");
+            tracing::debug!("[native-dump] SIR:\n{block}");
             dump_sir_operand_defs(eu, block);
         } else {
-            eprintln!("[native-dump] SIR block b{block_id} not found");
+            tracing::debug!("[native-dump] SIR block b{block_id} not found");
         }
     }
     if let Some(block) = func
@@ -5790,7 +5792,7 @@ fn dump_native_block_context(
         .iter()
         .find(|block| block.id == super::mir::BlockId(block_id))
     {
-        eprintln!(
+        tracing::debug!(
             "[native-dump] MIR b{} phis={} insts={}",
             block.id.0,
             block.phis.len(),
@@ -5803,16 +5805,16 @@ fn dump_native_block_context(
                 .map(|(pred, src)| format!("b{}:{}", pred.0, src))
                 .collect::<Vec<_>>()
                 .join(", ");
-            eprintln!("  {} = phi({sources})", phi.dst);
+            tracing::debug!("  {} = phi({sources})", phi.dst);
         }
-        for (idx, inst) in block.insts.iter().enumerate().take(mir_limit) {
-            eprintln!("  {idx}: {inst}");
+        for (idx, inst) in block.insts.iter().enumerate().take(options.mir_limit) {
+            tracing::debug!("  {idx}: {inst}");
         }
-        if block.insts.len() > mir_limit {
-            eprintln!("  ... {} more insts", block.insts.len() - mir_limit);
+        if block.insts.len() > options.mir_limit {
+            tracing::debug!("  ... {} more insts", block.insts.len() - options.mir_limit);
         }
     } else {
-        eprintln!("[native-dump] MIR block b{block_id} not found");
+        tracing::debug!("[native-dump] MIR block b{block_id} not found");
     }
 }
 
@@ -5830,21 +5832,24 @@ fn dump_sir_operand_defs(
         let mut found = false;
         for other in eu.blocks.values() {
             if other.params.contains(&reg) {
-                eprintln!("  [sir-def] r{} is param of b{}", reg.0, other.id.0);
+                tracing::debug!("  [sir-def] r{} is param of b{}", reg.0, other.id.0);
                 found = true;
             }
             for (idx, inst) in other.instructions.iter().enumerate() {
                 if sir_inst_def(inst) == Some(reg) {
-                    eprintln!(
+                    tracing::debug!(
                         "  [sir-def] r{} defined at b{} inst {}: {}",
-                        reg.0, other.id.0, idx, inst
+                        reg.0,
+                        other.id.0,
+                        idx,
+                        inst
                     );
                     found = true;
                 }
             }
         }
         if !found {
-            eprintln!("  [sir-def] r{} has no SIR definition", reg.0);
+            tracing::debug!("  [sir-def] r{} has no SIR definition", reg.0);
         }
     }
 }
@@ -5980,7 +5985,7 @@ fn log_sir_width_stats(eu: &crate::ExecutionUnit<crate::RegionedAbsoluteAddr>) {
         }
     }
 
-    eprintln!(
+    tracing::debug!(
         "[native-timing] sir_width_stats regs={} regs_gt_1024={} max_reg_width={} max_inst_width={} wide_loads={} wide_stores={} wide_commits={} wide_slices={} est_width_chunks={}",
         eu.register_map.len(),
         regs_gt_1024,
@@ -5993,7 +5998,7 @@ fn log_sir_width_stats(eu: &crate::ExecutionUnit<crate::RegionedAbsoluteAddr>) {
         est_chunks
     );
     for example in examples {
-        eprintln!("[native-timing] sir_width_example {example}");
+        tracing::debug!("[native-timing] sir_width_example {example}");
     }
 }
 

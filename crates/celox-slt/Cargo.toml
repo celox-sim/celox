@@ -8,6 +8,7 @@ description           = "Source-independent symbolic logic tree core for Celox"
 edition.workspace     = true
 
 [dependencies]
+tracing = { workspace = true }
 celox-analysis = { path = "../celox-analysis" }
 celox-design = { path = "../celox-design" }
 celox-sir    = { path = "../celox-sir" }

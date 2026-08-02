@@ -77,7 +77,7 @@ pub(super) fn dump_mux_chain_stats(units: &[ExecutionUnit<RegionedAbsoluteAddr>]
     for (rank, (len, direct_case, acc_guarded_priority, eu_idx, block_id, root)) in
         rows.into_iter().take(20).enumerate()
     {
-        eprintln!(
+        tracing::debug!(
             "[mux-chain-stats] rank={} eu={} block={} root=r{} len={} direct_case={} acc_guarded_priority={}",
             rank + 1,
             eu_idx,

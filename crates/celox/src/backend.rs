@@ -10,9 +10,11 @@ pub mod wasm_runtime;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use celox_backend_cranelift::JitEngine;
 #[cfg(not(target_arch = "wasm32"))]
-pub use celox_backend_cranelift::{CraneliftOptLevel, CraneliftOptions, RegallocAlgorithm};
+pub use celox_backend_cranelift::{
+    CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, RegallocAlgorithm,
+};
 #[cfg(target_arch = "x86_64")]
-pub use celox_backend_x86::X86BackendOptions;
+pub use celox_backend_x86::{NativeDiagnostics, NativeDumpOptions, X86BackendOptions};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use celox_runtime::RuntimeEventBuffer;
 #[cfg(not(target_arch = "wasm32"))]

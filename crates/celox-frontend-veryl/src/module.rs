@@ -922,7 +922,7 @@ impl<'a> ModuleParser<'a> {
         let timing = readmem_timing_enabled();
         let total_start = timing.then(Instant::now);
         if timing {
-            eprintln!(
+            tracing::debug!(
                 "[readmem-timing] start file={} depth={} element_width={} start_addr={} radix={}",
                 path.display(),
                 depth,
@@ -943,7 +943,7 @@ impl<'a> ModuleParser<'a> {
             )
         })?;
         if let Some(start) = read_start {
-            eprintln!(
+            tracing::debug!(
                 "[readmem-timing] read file={} bytes={} elapsed={:?}",
                 path.display(),
                 content.len(),
@@ -961,7 +961,7 @@ impl<'a> ModuleParser<'a> {
             &dst.token,
         )?;
         if let Some(start) = parse_start {
-            eprintln!(
+            tracing::debug!(
                 "[readmem-timing] parse file={} words={} runs={} elapsed={:?}",
                 path.display(),
                 writes.words,
@@ -970,7 +970,7 @@ impl<'a> ModuleParser<'a> {
             );
         }
         if let Some(start) = total_start {
-            eprintln!(
+            tracing::debug!(
                 "[readmem-timing] done file={} elapsed={:?}",
                 path.display(),
                 start.elapsed()
@@ -1344,8 +1344,7 @@ fn collect_glue_sources(
 }
 
 fn readmem_timing_enabled() -> bool {
-    std::env::var_os("CELOX_READMEM_TIMING").is_some()
-        || std::env::var_os("CELOX_PHASE_TIMING").is_some()
+    tracing::enabled!(tracing::Level::DEBUG)
 }
 
 fn collect_glue_sources_with_window(

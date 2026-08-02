@@ -7,14 +7,57 @@
 pub type HashMap<K, V> = fxhash::FxHashMap<K, V>;
 pub type HashSet<K> = fxhash::FxHashSet<K>;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeDumpOptions {
+    pub block: usize,
+    pub label: Option<String>,
+    pub stage: Option<String>,
+    pub dump_sir: bool,
+    pub mir_limit: usize,
+}
+
+impl Default for NativeDumpOptions {
+    fn default() -> Self {
+        Self {
+            block: 0,
+            label: None,
+            stage: None,
+            dump_sir: true,
+            mir_limit: 64,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeDiagnostics {
+    pub phase_timing: bool,
+    pub regalloc_timing: bool,
+    pub regalloc_stats: bool,
+    pub mir_stats: bool,
+    pub mir_block_stats: bool,
+    pub verify_sir: bool,
+    pub verify_mir: bool,
+    pub verify_mir_passes: bool,
+    pub verify_regalloc: bool,
+    pub isel_trace_regs: Vec<usize>,
+    pub dump: Option<NativeDumpOptions>,
+    pub perf_map: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct X86BackendOptions {
     pub slp: bool,
+    pub native_tick_loop: bool,
+    pub diagnostics: NativeDiagnostics,
 }
 
 impl Default for X86BackendOptions {
     fn default() -> Self {
-        Self { slp: true }
+        Self {
+            slp: true,
+            native_tick_loop: true,
+            diagnostics: NativeDiagnostics::default(),
+        }
     }
 }
 

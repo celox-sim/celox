@@ -1,4 +1,4 @@
-pub use celox_sir_opt::{OptLevel, OptimizeOptions, SirPass};
+pub use celox_sir_opt::{OptLevel, OptimizeOptions, SirDiagnostics, SirPass};
 
 pub mod sir;
 

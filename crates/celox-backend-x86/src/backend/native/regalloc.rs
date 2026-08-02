@@ -231,10 +231,27 @@ pub(crate) fn run_regalloc_with_label_and_trace(
     label: &str,
     trace: Option<&mut RegallocTrace>,
 ) -> Result<RegallocResult, RegallocError> {
+    run_regalloc_with_label_and_trace_and_diagnostics(
+        func,
+        label,
+        trace,
+        &crate::NativeDiagnostics::default(),
+        true,
+    )
+}
+
+pub(crate) fn run_regalloc_with_label_and_trace_and_diagnostics(
+    func: &mut MFunction,
+    label: &str,
+    trace: Option<&mut RegallocTrace>,
+    diagnostics: &crate::NativeDiagnostics,
+    native_tick_loop: bool,
+) -> Result<RegallocResult, RegallocError> {
     // Build the complete result privately. A structured error cannot expose
     // CFG/scheduling/SSA mutations from a failed phase to the caller.
     let mut working = func.clone();
-    let allocation = run_regalloc_in_place(&mut working, label, trace)?;
+    let allocation =
+        run_regalloc_in_place(&mut working, label, trace, diagnostics, native_tick_loop)?;
     *func = working;
     Ok(allocation)
 }
@@ -243,9 +260,10 @@ fn run_regalloc_in_place(
     func: &mut MFunction,
     label: &str,
     mut trace: Option<&mut RegallocTrace>,
+    diagnostics: &crate::NativeDiagnostics,
+    native_tick_loop: bool,
 ) -> Result<RegallocResult, RegallocError> {
-    let timing = std::env::var_os("CELOX_REGALLOC_TIMING").is_some()
-        || std::env::var_os("CELOX_PHASE_TIMING").is_some();
+    let timing = diagnostics.regalloc_timing || diagnostics.phase_timing;
     // Allocation must never depend on callers having run the optional MIR
     // optimization pipeline. Select flag-consuming register branches at the
     // allocation boundary so their unmaterialized boolean result cannot
@@ -262,7 +280,7 @@ fn run_regalloc_in_place(
     func.verify_result()
         .map_err(|error| RegallocError::mir("CFG normalization verification", error))?;
     if let Some(start) = cfg_start {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] label={label} cfg_normalize blocks={} elapsed={:?}",
             func.blocks.len(),
             start.elapsed()
@@ -270,11 +288,11 @@ fn run_regalloc_in_place(
     }
     let total_start = timing.then(crate::timing::now);
     let stats_start = timing.then(crate::timing::now);
-    let before_stats = std::env::var_os("CELOX_REGALLOC_STATS")
-        .is_some()
+    let before_stats = diagnostics
+        .regalloc_stats
         .then(|| collect_regalloc_block_stats(func));
     if let Some(start) = stats_start {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] label={label} collect_before_stats elapsed={:?}",
             start.elapsed()
         );
@@ -292,7 +310,7 @@ fn run_regalloc_in_place(
         trace.mir_after_late_memory_folds = func.to_string();
     }
     if let Some(start) = late_memory_fold_start {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] label={label} late_memory_fold folded_direct_immediate_stores={folded_direct_immediate_stores} folded_memory_branches={folded_memory_branches} elapsed={:?}",
             start.elapsed()
         );
@@ -310,7 +328,7 @@ fn run_regalloc_in_place(
     let planning_recipes = reload::analyze_for_planning(func, &normalized_cfg)
         .map_err(|error| reload_recipe_error("reload-recipe planning analysis", error))?;
     if let Some(start) = reload_recipe_start {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] label={label} reload_recipe_plan_analyze elapsed={:?}",
             start.elapsed()
         );
@@ -319,7 +337,7 @@ fn run_regalloc_in_place(
     let next_use = next_use::analyze(func, &normalized_cfg)
         .map_err(|error| next_use_error("next-use analysis", error))?;
     if let Some(start) = next_use_start {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] label={label} next_use_analyze elapsed={:?}",
             start.elapsed()
         );
@@ -329,7 +347,7 @@ fn run_regalloc_in_place(
         .verify(func, &normalized_cfg)
         .map_err(|error| next_use_error("next-use verification", error))?;
     if let Some(start) = next_use_verify_start {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] label={label} next_use_verify elapsed={:?}",
             start.elapsed()
         );
@@ -342,10 +360,11 @@ fn run_regalloc_in_place(
         &planning_recipes,
         &allocation_constraints,
         trace,
+        timing,
     )?;
     let mut assignment = allocation.assignment;
     let mut spill_frame_size = allocation.spill_frame_size;
-    let tick_loop = label == "eval_comb_apply_ff" && super::native_tick_loop_enabled();
+    let tick_loop = label == "eval_comb_apply_ff" && native_tick_loop;
     let vector_allocation = super::x86_slp::allocate(func, spill_frame_size, tick_loop);
     for (value, location) in vector_allocation.assignments {
         assignment.set_x86_vector(value, location);
@@ -367,13 +386,14 @@ fn run_regalloc_in_place(
             })?;
     }
     if timing && vector_allocation.spilled_values != 0 {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] label={label} x86_vector_spills={} spill_bytes={}",
-            vector_allocation.spilled_values, vector_allocation.spill_bytes
+            vector_allocation.spilled_values,
+            vector_allocation.spill_bytes
         );
     }
     if let Some(start) = alloc_start {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] label={label} implementation=ssa-split-color blocks={} insts={} vregs={} spill_frame={} elapsed={:?}",
             func.blocks.len(),
             func.blocks
@@ -389,7 +409,7 @@ fn run_regalloc_in_place(
     let verify_start = timing.then(crate::timing::now);
     verify_assignment(func, &assignment)?;
     if let Some(start) = verify_start {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] label={label} verify elapsed={:?}",
             start.elapsed()
         );
@@ -399,14 +419,14 @@ fn run_regalloc_in_place(
         let stats_start = timing.then(crate::timing::now);
         log_regalloc_stats(label, func, &before, spill_frame_size);
         if let Some(start) = stats_start {
-            eprintln!(
+            tracing::debug!(
                 "[regalloc-timing] label={label} log_stats elapsed={:?}",
                 start.elapsed()
             );
         }
     }
     if let Some(start) = total_start {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-timing] label={label} total elapsed={:?}",
             start.elapsed()
         );
@@ -570,7 +590,7 @@ fn log_regalloc_stats(
         ));
     }
 
-    eprintln!(
+    tracing::debug!(
         "[regalloc-stats] label={label} spill_frame={spill_frame_size} total_insts={} delta_insts={} total_mov={} delta_mov={} total_load_stack={} delta_load_stack={} total_store_stack={} delta_store_stack={} total_load_imm={} delta_load_imm={}",
         total.insts,
         total_delta.insts,
@@ -588,7 +608,7 @@ fn log_regalloc_stats(
     for (rank, (_score, block_id, before_stats, after_stats, delta)) in
         rows.into_iter().take(12).enumerate()
     {
-        eprintln!(
+        tracing::debug!(
             "[regalloc-block-stats] label={label} rank={} block={} before_insts={} after_insts={} delta_insts={} delta_mov={} delta_load_stack={} delta_store_stack={} delta_load_imm={}",
             rank + 1,
             block_id.0,

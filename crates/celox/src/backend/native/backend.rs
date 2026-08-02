@@ -139,6 +139,7 @@ fn prepare_merged_sir(
     four_state: bool,
     label: &str,
     first_ff_unit: Option<usize>,
+    diagnostics: &crate::optimizer::SirDiagnostics,
 ) -> Result<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, SimulatorError> {
     for (unit_index, unit) in units.iter().enumerate() {
         if let Err(error) = unit.verify_result() {
@@ -193,6 +194,7 @@ fn prepare_merged_sir(
         layout,
         four_state,
         label == "eval_comb_apply_ff",
+        diagnostics,
     )
     .map_err(|(phase, error)| codegen_err(format!("{phase}: {error}")))?;
     verify(&sir_eu, "after x86 merged-chain cleanup")?;
@@ -204,8 +206,9 @@ fn compile_units(
     layout: &MemoryLayout,
     four_state: bool,
     label: &str,
-    enable_x86_slp: bool,
+    x86_options: &crate::backend::X86BackendOptions,
     capture_trace: bool,
+    diagnostics: &crate::optimizer::SirDiagnostics,
 ) -> Result<CompiledNativeFunction, SimulatorError> {
     let units = units.iter().collect::<Vec<_>>();
     compile_unit_refs(
@@ -214,8 +217,9 @@ fn compile_units(
         four_state,
         label,
         None,
-        enable_x86_slp,
+        x86_options,
         capture_trace,
+        diagnostics,
     )
 }
 
@@ -225,10 +229,11 @@ fn compile_unit_refs(
     four_state: bool,
     label: &str,
     first_ff_unit: Option<usize>,
-    enable_x86_slp: bool,
+    x86_options: &crate::backend::X86BackendOptions,
     capture_trace: bool,
+    diagnostics: &crate::optimizer::SirDiagnostics,
 ) -> Result<CompiledNativeFunction, SimulatorError> {
-    let timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
+    let timing = x86_options.diagnostics.phase_timing;
     if units.is_empty() {
         // Empty function: just return 0
         let mut empty_func = super::mir::MFunction::new(super::mir::VRegAllocator::new(), vec![]);
@@ -249,8 +254,12 @@ fn compile_unit_refs(
             spill_frame_size: 0,
             disassembly: emit::disassemble(&empty_result.code[..empty_result.text_size], 0),
         });
-        let code = jit_mem::JitCode::new_named(&empty_result.code, label)
-            .map_err(|e| codegen_err(format!("mmap error: {e}")))?;
+        let code = jit_mem::JitCode::new_named_profiled(
+            &empty_result.code,
+            label,
+            x86_options.diagnostics.perf_map,
+        )
+        .map_err(|e| codegen_err(format!("mmap error: {e}")))?;
         return Ok(CompiledNativeFunction {
             code,
             trace,
@@ -260,25 +269,25 @@ fn compile_unit_refs(
 
     // Merge all EUs and compile the exact SIR/MIR function used at runtime.
     if timing {
-        eprintln!(
+        tracing::debug!(
             "[native-timing] compile_units start label={label} eus={}",
             units.len()
         );
     }
     let start = timing.then(crate::timing::now);
-    let sir_eu = prepare_merged_sir(units, layout, four_state, label, first_ff_unit)?;
+    let sir_eu = prepare_merged_sir(units, layout, four_state, label, first_ff_unit, diagnostics)?;
     let mut trace = capture_trace.then(emit::NativeFunctionTrace::default);
     let emit_result = emit::emit_prepared_eu(
         &sir_eu,
         layout,
         four_state,
         label,
-        enable_x86_slp,
+        x86_options,
         trace.as_mut(),
     )
     .map_err(|e| codegen_err(format!("emit error: {e}")))?;
     if let Some(start) = start {
-        eprintln!(
+        tracing::debug!(
             "[native-timing] compile_units done label={label} bytes={} elapsed={:?}",
             emit_result.code.len(),
             start.elapsed()
@@ -286,8 +295,13 @@ fn compile_unit_refs(
     }
     let symbols = perf_symbols_for_emit_result(label, &emit_result);
     let required_state_size = emit_result.required_state_size as usize;
-    let code = jit_mem::JitCode::new_named_with_symbols(&emit_result.code, label, &symbols)
-        .map_err(|e| codegen_err(format!("mmap error: {e}")))?;
+    let code = jit_mem::JitCode::new_named_with_symbols_profiled(
+        &emit_result.code,
+        label,
+        &symbols,
+        x86_options.diagnostics.perf_map,
+    )
+    .map_err(|e| codegen_err(format!("mmap error: {e}")))?;
     Ok(CompiledNativeFunction {
         code,
         trace,
@@ -603,15 +617,16 @@ fn compile_program(
     let next_task = AtomicUsize::new(0);
     let (comb_jit, mut compiled_ff_codes) = std::thread::scope(|scope| {
         let four_state = options.four_state;
-        let enable_x86_slp = options.x86_options.slp;
+        let x86_options = &options.x86_options;
         let comb_handle = scope.spawn(move || {
             compile_units(
                 &sir.sir.eval_comb,
                 layout,
                 four_state,
                 "eval_comb",
-                enable_x86_slp,
+                x86_options,
                 capture_trace,
+                &options.optimize_options.diagnostics,
             )
         });
         let task_worker_count = compile_tasks
@@ -634,8 +649,9 @@ fn compile_program(
                             four_state,
                             task.label,
                             task.first_ff_unit,
-                            enable_x86_slp,
+                            x86_options,
                             capture_trace,
+                            &options.optimize_options.diagnostics,
                         )?;
                         compiled.push((task_id, code));
                     }
@@ -1091,7 +1107,7 @@ impl super::super::SimBackend for NativeBackend {
         event: NativeEventRef,
         count: u64,
     ) -> (u64, Result<(), SimulatorErrorCode>) {
-        if super::native_tick_loop_enabled() {
+        if self.compiled.options.x86_options.native_tick_loop {
             self.call_func_many_timed(event.comb_apply_func, count)
         } else if count == 0 {
             (0, Ok(()))

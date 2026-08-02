@@ -57,6 +57,7 @@ pub(crate) fn optimize_native_merged_chain(
     layout: &crate::backend::MemoryLayout,
     four_state: bool,
     recover_merged_effect_regions: bool,
+    diagnostics: &crate::optimizer::SirDiagnostics,
 ) -> Result<(), (&'static str, celox_sir::verify::SirVerifyError)> {
     let element_widths = Arc::new(
         layout
@@ -85,6 +86,7 @@ pub(crate) fn optimize_native_merged_chain(
         },
         four_state,
         recover_merged_effect_regions,
+        diagnostics,
     )
 }
 

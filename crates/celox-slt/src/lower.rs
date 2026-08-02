@@ -1875,8 +1875,7 @@ impl SLTToSIRLowerer {
             unpacked_input_element_widths: crate::HashMap::default(),
             cost_cache: RefCell::new(LoweringCostCache::default()),
             cache_insert_log: RefCell::new(Vec::new()),
-            mux_stats: std::env::var_os("CELOX_MUX_LOWER_STATS")
-                .is_some()
+            mux_stats: tracing::enabled!(tracing::Level::DEBUG)
                 .then(|| RefCell::new(MuxLowerStats::default())),
         }
     }
@@ -6042,7 +6041,7 @@ impl Drop for SLTToSIRLowerer {
             return;
         };
         let stats = stats.borrow();
-        eprintln!(
+        tracing::debug!(
             "[mux-lower-stats] normal_seen={} slice_seen={} constant_folded={} cfg_cost={} cfg_div_rem={} cfg_slice_cost={} cfg_slice_div_rem={} shared_nodes_hoisted={} kept_four_state={} kept_impure={} kept_dynamic_env={} kept_unprofitable={} kept_deep_shared={} biased_conditions={} owned_cost_sum={} owned_cost_max={} unprofitable_buckets_0_7_15_31_63_127_255_inf={:?}",
             stats.normal_seen,
             stats.slice_seen,

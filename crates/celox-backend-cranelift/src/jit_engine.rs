@@ -194,7 +194,7 @@ impl JitEngine {
             total_inst_cost += estimate_eu_cost(eu, four_state);
             total_value_count += estimate_eu_value_count(eu, four_state);
         }
-        if std::env::var("CELOX_PASS_TIMING").is_ok() {
+        if self.translator.options.cranelift.diagnostics.pass_timing {
             let sir_insts: usize = units
                 .iter()
                 .map(|eu| {
@@ -204,7 +204,7 @@ impl JitEngine {
                         .sum::<usize>()
                 })
                 .sum();
-            eprintln!(
+            tracing::debug!(
                 "[compile_units] {} EUs, {} SIR insts, clif_cost={total_inst_cost}/{CLIF_INST_THRESHOLD} values={total_value_count}/{VREG_VALUE_THRESHOLD}",
                 units.len(),
                 sir_insts,
@@ -234,11 +234,11 @@ impl JitEngine {
             self.translator.translate_units(units, builder);
         }
 
-        if std::env::var("CELOX_PASS_TIMING").is_ok() {
+        if self.translator.options.cranelift.diagnostics.pass_timing {
             let num_values = ctx.func.dfg.num_values();
             let num_insts = ctx.func.dfg.num_insts();
             let num_blocks = ctx.func.dfg.num_blocks();
-            eprintln!(
+            tracing::debug!(
                 "[compile_units_single] after translation: blocks={num_blocks} insts={num_insts} values={num_values}"
             );
         }
@@ -273,7 +273,7 @@ impl JitEngine {
         mut post_clif_out: Option<&mut String>,
         mut native_out: Option<&mut String>,
     ) -> Result<*const u8, String> {
-        let timing = std::env::var("CELOX_PASS_TIMING").is_ok();
+        let timing = self.translator.options.cranelift.diagnostics.pass_timing;
         let four_state = self.translator.options.four_state;
 
         // 1. Partition units into batches, each under both thresholds
@@ -324,7 +324,7 @@ impl JitEngine {
         if timing {
             let total_inst: usize = eu_metrics.iter().map(|m| m.0).sum();
             let total_val: usize = eu_metrics.iter().map(|m| m.1).sum();
-            eprintln!(
+            tracing::debug!(
                 "[jit-split] Splitting {} EUs (est. {} CLIF insts, {} values) into {} batches",
                 units.len(),
                 total_inst,
@@ -369,7 +369,7 @@ impl JitEngine {
 
             if let Some(s) = batch_start {
                 let batch_cost: usize = batch.iter().map(|&i| eu_metrics[i].0).sum();
-                eprintln!(
+                tracing::debug!(
                     "[jit-split]   batch[{batch_idx}]: {} EUs, est. {} CLIF insts, {:?}",
                     batch.len(),
                     batch_cost,

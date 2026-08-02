@@ -87,7 +87,7 @@ pub(super) fn optimize_with_options(
     preserve_element_storage_layout: bool,
 ) {
     #[cfg(not(target_arch = "wasm32"))]
-    let timing = std::env::var("CELOX_PASS_TIMING").is_ok();
+    let timing = opt.diagnostics.pass_timing;
     #[cfg(target_arch = "wasm32")]
     let timing = false;
     let options = PassOptions {
@@ -149,7 +149,7 @@ pub(super) fn optimize_with_options(
                     .values()
                     .map(|block| block.instructions.len())
                     .sum();
-                eprintln!(
+                tracing::debug!(
                     "[phase] eval_apply_ffs trigger={trigger} eu[{index}]: blocks={} insts={} regs={}",
                     eu.blocks.len(),
                     instruction_count,
@@ -207,7 +207,7 @@ pub(super) fn optimize_with_options(
         &options,
     );
     if let Some(s) = phase_start {
-        eprintln!("[phase] eval_apply_ffs ({eu_count} EUs): {:?}", s.elapsed());
+        tracing::debug!("[phase] eval_apply_ffs ({eu_count} EUs): {:?}", s.elapsed());
     }
 
     // 2. Logic-Only Cache (Split Path Phase 1):
@@ -218,7 +218,7 @@ pub(super) fn optimize_with_options(
     let eu_count: usize = program.sir.eval_only_ffs.values().map(|v| v.len()).sum();
     optimize_unit_groups_cached(&mut program.sir.eval_only_ffs, &eval_only_passes, &options);
     if let Some(s) = phase_start {
-        eprintln!("[phase] eval_only_ffs ({eu_count} EUs): {:?}", s.elapsed());
+        tracing::debug!("[phase] eval_only_ffs ({eu_count} EUs): {:?}", s.elapsed());
     }
 
     // 3. Commit-Only Cache (Split Path Phase 2):
@@ -232,7 +232,7 @@ pub(super) fn optimize_with_options(
         }
     }
     if let Some(s) = phase_start {
-        eprintln!("[phase] apply_ffs ({eu_count} EUs): {:?}", s.elapsed());
+        tracing::debug!("[phase] apply_ffs ({eu_count} EUs): {:?}", s.elapsed());
     }
 
     // 4. Combinational Blocks:
@@ -244,16 +244,16 @@ pub(super) fn optimize_with_options(
         if timing {
             let inst_count: usize = eu.blocks.values().map(|b| b.instructions.len()).sum();
             let block_count = eu.blocks.len();
-            eprintln!("[phase] eval_comb eu[{i}]: blocks={block_count} insts={inst_count}");
+            tracing::debug!("[phase] eval_comb eu[{i}]: blocks={block_count} insts={inst_count}");
         }
         comb_passes.run(eu, &options);
     }
     if let Some(s) = phase_start {
-        eprintln!("[phase] eval_comb ({eu_count} EUs): {:?}", s.elapsed());
+        tracing::debug!("[phase] eval_comb ({eu_count} EUs): {:?}", s.elapsed());
     }
 
     super::late::optimize_late_comb(program, opt, &options, &unpacked_element_widths);
-    if std::env::var_os("CELOX_MUX_CHAIN_STATS").is_some() {
+    if opt.diagnostics.mux_chain_stats {
         super::diagnostics::dump_mux_chain_stats(&program.sir.eval_comb);
     }
 }

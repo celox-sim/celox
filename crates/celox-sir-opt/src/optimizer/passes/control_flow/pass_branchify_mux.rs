@@ -307,17 +307,17 @@ fn run_branchify_mux(
     recover_controlled_joins: bool,
     enable_whole_function_rewrites: bool,
 ) {
-    let stage_timing = std::env::var_os("CELOX_PASS_TIMING").is_some()
-        || std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
+    let diagnostics = &options.optimize_options.diagnostics;
+    let stage_timing = diagnostics.pass_timing || diagnostics.branchify_stats;
     let mut previous_stage = stage_timing.then(crate::timing::now);
     let mut report_stage = |stage: &'static str| {
         if let Some(previous) = previous_stage.as_mut() {
-            eprintln!("[branchify-timing] {stage}: {:?}", previous.elapsed());
+            tracing::debug!("[branchify-timing] {stage}: {:?}", previous.elapsed());
             *previous = crate::timing::now();
         }
     };
     let verify_stage = |eu: &ExecutionUnit<RegionedAbsoluteAddr>, stage: &'static str| {
-        if std::env::var_os("CELOX_SIR_VERIFY_PASSES").is_some()
+        if diagnostics.verify_passes
             && let Err(error) = eu.verify_result()
         {
             panic!("during branchify_mux {stage}: {error}");
@@ -341,12 +341,9 @@ fn run_branchify_mux(
     verify_stage(eu, "controlled-join elimination");
     report_stage("controlled-join elimination");
 
-    let stats = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
+    let stats = diagnostics.branchify_stats;
     let stats_start = stats.then(crate::timing::now);
-    let trace_reg = std::env::var("CELOX_BRANCHIFY_TRACE_REG")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .map(RegisterId);
+    let trace_reg = diagnostics.branchify_trace_reg.map(RegisterId);
     let mut next_block_id = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0) + 1;
     let mut reg_counter = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
     let mut applied = 0usize;
@@ -374,7 +371,7 @@ fn run_branchify_mux(
             &mut reg_counter,
         );
         if let Some(start) = priority_start {
-            eprintln!(
+            tracing::debug!(
                 "[branchify-timing] coupled priority chains: {:?}",
                 start.elapsed()
             );
@@ -383,7 +380,7 @@ fn run_branchify_mux(
         applied +=
             branchify_coupled_state_updates(eu, &use_counts, &mut next_block_id, &mut reg_counter);
         if let Some(start) = state_start {
-            eprintln!(
+            tracing::debug!(
                 "[branchify-timing] coupled state updates: {:?}",
                 start.elapsed()
             );
@@ -402,7 +399,7 @@ fn run_branchify_mux(
         && let Some(plan) = find_cross_block_priority_chain_plan(eu, &use_counts)
     {
         if let Some(register) = trace_reg {
-            eprintln!(
+            tracing::debug!(
                 "[branchify-trace] selected cross-block priority plan source=b{} first_mux={} muxes={} r{} uses={}",
                 plan.block_id.0,
                 plan.first_mux_idx,
@@ -426,9 +423,11 @@ fn run_branchify_mux(
                     if def_reg(&definition.instruction) == Some(register)
                         || inst_uses(&definition.instruction).contains(&register)
                     {
-                        eprintln!(
+                        tracing::debug!(
                             "[branchify-trace] plan {kind}[{group}] b{} i{}: {}",
-                            definition.block.0, definition.index, definition.instruction
+                            definition.block.0,
+                            definition.index,
+                            definition.instruction
                         );
                     }
                 }
@@ -449,9 +448,11 @@ fn run_branchify_mux(
         if let Some((register, block, first_mux, muxes)) = trace_plan
             && let Err(error) = eu.verify_result()
         {
-            eprintln!(
+            tracing::debug!(
                 "[branchify-trace] invalid cross-block priority plan source=b{} first_mux={} muxes={}: {error}",
-                block.0, first_mux, muxes
+                block.0,
+                first_mux,
+                muxes
             );
             for candidate in eu.blocks.values() {
                 trace_reg_in_new_block(candidate, register);
@@ -519,7 +520,7 @@ fn run_branchify_mux(
                     .values()
                     .map(|block| block.instructions.len())
                     .sum::<usize>();
-                eprintln!(
+                tracing::debug!(
                     "[branchify-stats] applied={applied} blocks={} insts={} worklist={} elapsed={:?}",
                     eu.blocks.len(),
                     insts,
@@ -584,7 +585,7 @@ fn run_branchify_mux(
     report_stage("selector predicates");
 
     if stats {
-        eprintln!(
+        tracing::debug!(
             "[branchify-stats] before_pre_repair_inline applied={applied} blocks={} elapsed={:?}",
             eu.blocks.len(),
             stats_start.unwrap().elapsed()
@@ -602,14 +603,14 @@ fn run_branchify_mux(
             .values()
             .map(|block| block.instructions.len())
             .sum::<usize>();
-        eprintln!(
+        tracing::debug!(
             "[branchify-stats] done applied={applied} blocks={} insts={} elapsed={:?}",
             eu.blocks.len(),
             insts,
             stats_start.unwrap().elapsed()
         );
     }
-    if std::env::var_os("CELOX_BRANCHIFY_VERIFY").is_some() {
+    if diagnostics.branchify_verify {
         verify_all_uses_have_defs(eu);
     }
 }
@@ -4910,25 +4911,25 @@ fn resolve_boolean_alias(
 
 impl CfgAnalysis {
     fn compute(eu: &ExecutionUnit<RegionedAbsoluteAddr>) -> Option<Self> {
-        let stats = std::env::var_os("CELOX_BRANCHIFY_STATS").is_some();
+        let stats = tracing::enabled!(tracing::Level::DEBUG);
         // Controlled-join recovery needs predecessor, dominance, and
         // post-dominance queries, but not the potentially dense dominance
         // frontiers or control-dependence tables of the full analysis.
         let graph = SirCfg::analyze_structure(eu).ok()?;
         if stats {
-            eprintln!("[branchify-stats] controlled_join cfg");
+            tracing::debug!("[branchify-stats] controlled_join cfg");
         }
         let def_locations = instruction_def_locations(eu);
         if stats {
-            eprintln!("[branchify-stats] controlled_join defs");
+            tracing::debug!("[branchify-stats] controlled_join defs");
         }
         let incoming_edges = indexed_incoming_edges(eu, &graph);
         if stats {
-            eprintln!("[branchify-stats] controlled_join incoming");
+            tracing::debug!("[branchify-stats] controlled_join incoming");
         }
         let path_facts = PathFacts::compute(eu, &def_locations, &graph, &incoming_edges);
         if stats {
-            eprintln!("[branchify-stats] controlled_join path_facts");
+            tracing::debug!("[branchify-stats] controlled_join path_facts");
         }
 
         Some(Self {
@@ -6018,7 +6019,7 @@ fn trace_reg_in_original(
     if defines.is_empty() && inst_uses.is_empty() && !term_uses && !block.params.contains(&reg) {
         return;
     }
-    eprintln!(
+    tracing::debug!(
         "[branchify-trace] original block=b{} mux_idx={} dst=r{} cond=r{} true=r{} false=r{} params={} term_uses={} true_defs={:?} false_defs={:?}",
         block.id.0,
         plan.mux_idx,
@@ -6032,21 +6033,22 @@ fn trace_reg_in_original(
         plan.false_defs
     );
     for (idx, inst) in defines {
-        eprintln!(
+        tracing::debug!(
             "[branchify-trace] original defines r{} at inst {idx}: {inst}",
             reg.0
         );
     }
     for (idx, inst) in inst_uses {
-        eprintln!(
+        tracing::debug!(
             "[branchify-trace] original uses r{} at inst {idx}: {inst}",
             reg.0
         );
     }
     if term_uses {
-        eprintln!(
+        tracing::debug!(
             "[branchify-trace] original terminator uses r{}: {}",
-            reg.0, block.terminator
+            reg.0,
+            block.terminator
         );
     }
 }
@@ -6059,7 +6061,7 @@ fn trace_reg_branchify_plan(
 ) {
     for (idx, inst) in block.instructions.iter().enumerate() {
         if def_reg(inst) == Some(reg) {
-            eprintln!(
+            tracing::debug!(
                 "[branchify-trace] after restore decision block=b{} r{} def_idx={idx} removed={} inst={inst}",
                 block.id.0,
                 reg.0,
@@ -6068,7 +6070,7 @@ fn trace_reg_branchify_plan(
         }
     }
     if plan.cond == reg || plan.true_val == reg || plan.false_val == reg || plan.dst == reg {
-        eprintln!(
+        tracing::debug!(
             "[branchify-trace] plan directly references r{} block=b{} mux_idx={} dst=r{} cond=r{} true=r{} false=r{}",
             reg.0,
             block.id.0,
@@ -6098,7 +6100,7 @@ fn trace_reg_in_new_block(block: &BasicBlock<RegionedAbsoluteAddr>, reg: Registe
     if !block.params.contains(&reg) && !term_uses && inst_uses.is_empty() && defines.is_empty() {
         return;
     }
-    eprintln!(
+    tracing::debug!(
         "[branchify-trace] new block=b{} params={} term_uses={} insts={} defs={}",
         block.id.0,
         block.params.contains(&reg),
@@ -6107,21 +6109,22 @@ fn trace_reg_in_new_block(block: &BasicBlock<RegionedAbsoluteAddr>, reg: Registe
         defines.len()
     );
     for (idx, inst) in defines {
-        eprintln!(
+        tracing::debug!(
             "[branchify-trace] new defines r{} at inst {idx}: {inst}",
             reg.0
         );
     }
     for (idx, inst) in inst_uses {
-        eprintln!(
+        tracing::debug!(
             "[branchify-trace] new uses r{} at inst {idx}: {inst}",
             reg.0
         );
     }
     if term_uses {
-        eprintln!(
+        tracing::debug!(
             "[branchify-trace] new terminator uses r{}: {}",
-            reg.0, block.terminator
+            reg.0,
+            block.terminator
         );
     }
 }

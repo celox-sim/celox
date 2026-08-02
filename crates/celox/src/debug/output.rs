@@ -43,34 +43,42 @@ impl CompilationTrace {
         self.sim_modules.as_ref().map(format_slt)
     }
 
-    pub fn print(&self) {
+    /// Write every captured artifact to a caller-provided destination.
+    pub fn write_to(&self, mut output: impl std::io::Write) -> std::io::Result<()> {
         if let Some(slt) = self.format_slt() {
-            println!("{}", slt);
+            writeln!(output, "{slt}")?;
         }
         if let Some(sir) = self.format_pre_optimized_sir() {
-            println!("=== Pre-optimized SIR ===\n{}", sir);
+            writeln!(output, "=== Pre-optimized SIR ===\n{sir}")?;
         }
         if let Some(sir) = self.format_post_optimized_sir() {
-            println!("=== Post-optimized SIR ===\n{}", sir);
+            writeln!(output, "=== Post-optimized SIR ===\n{sir}")?;
         }
         if let Some(sir) = self.format_native_optimized_sir() {
-            println!("=== Native optimized merged SIR ===\n{}", sir);
+            writeln!(output, "=== Native optimized merged SIR ===\n{sir}")?;
         }
         if let Some(ir) = self.format_analyzer_ir() {
-            println!("=== Analyzer IR ===\n{}", ir);
+            writeln!(output, "=== Analyzer IR ===\n{ir}")?;
         }
         if let Some(clif) = &self.pre_optimized_clif {
-            println!("=== Pre-optimized CLIF ===\n{}", clif);
+            writeln!(output, "=== Pre-optimized CLIF ===\n{clif}")?;
         }
         if let Some(clif) = &self.post_optimized_clif {
-            println!("=== Post-optimized CLIF ===\n{}", clif);
+            writeln!(output, "=== Post-optimized CLIF ===\n{clif}")?;
         }
         if let Some(native) = &self.native {
-            println!("=== Native Machine Code ===\n{}", native);
+            writeln!(output, "=== Native Machine Code ===\n{native}")?;
         }
         if let Some(mir) = &self.mir {
-            println!("=== MIR (Native Backend) ===\n{}", mir);
+            writeln!(output, "=== MIR (Native Backend) ===\n{mir}")?;
         }
+        Ok(())
+    }
+
+    /// Print every captured artifact to standard output.
+    pub fn print(&self) {
+        self.write_to(std::io::stdout())
+            .expect("failed to write compilation trace");
     }
 }
 
@@ -399,4 +407,25 @@ pub fn format_slt(sim_modules: &HashMap<ModuleId, SimModule>) -> String {
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CompilationTrace;
+
+    #[test]
+    fn writes_captured_artifacts_to_the_supplied_writer() {
+        let trace = CompilationTrace {
+            analyzer_ir: Some("analyzer contents".to_owned()),
+            ..CompilationTrace::default()
+        };
+        let mut output = Vec::new();
+
+        trace.write_to(&mut output).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "=== Analyzer IR ===\nanalyzer contents\n"
+        );
+    }
 }

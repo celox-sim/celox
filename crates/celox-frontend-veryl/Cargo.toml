@@ -8,6 +8,7 @@ description           = "Veryl frontend artifacts and source lookup for Celox"
 edition.workspace     = true
 
 [dependencies]
+tracing = { workspace = true }
 bit-set        = { workspace = true }
 celox-design   = { path = "../celox-design" }
 celox-sir      = { path = "../celox-sir" }

@@ -32,6 +32,7 @@ fn analyze(
     reset_type: Option<ResetType>,
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
 ) -> (Result<OptimizedSir, ParserError>, Vec<AnalyzerError>) {
     symbol_table::clear();
@@ -103,6 +104,7 @@ fn analyze(
         trace_opts,
         trace_out,
         optimize_options,
+        diagnostics,
         preserve_element_storage_layout,
     );
     (sir, errors)
@@ -146,6 +148,7 @@ pub fn compile_to_sir(
         reset_type,
         param_overrides,
         optimize_options,
+        &crate::RuntimeDiagnostics::default(),
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
     )
 }
@@ -170,6 +173,7 @@ fn compile_to_sir_with_layout_mode(
     reset_type: Option<ResetType>,
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostics: &crate::RuntimeDiagnostics,
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
 ) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
     let (sir, errors) = analyze(
@@ -185,6 +189,7 @@ fn compile_to_sir_with_layout_mode(
         reset_type,
         param_overrides,
         optimize_options,
+        diagnostics,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
     );
     let (real_errors, warnings): (Vec<_>, Vec<_>) = errors.into_iter().partition(|e| e.is_error());
@@ -233,6 +238,7 @@ pub struct SimulatorOptions {
     #[cfg(target_arch = "x86_64")]
     pub x86_options: crate::backend::X86BackendOptions,
     pub trace: crate::debug::TraceOptions,
+    pub diagnostics: crate::RuntimeDiagnostics,
     /// When true, JIT-compiled functions emit trigger detection code for
     /// edge-based event discovery. Only needed by [`crate::Simulation`].
     pub emit_triggers: bool,
@@ -251,6 +257,7 @@ impl Default for SimulatorOptions {
             #[cfg(target_arch = "x86_64")]
             x86_options: crate::backend::X86BackendOptions::default(),
             trace: Default::default(),
+            diagnostics: Default::default(),
             emit_triggers: false,
             dead_store_policy: DeadStorePolicy::Off,
         }
@@ -438,6 +445,26 @@ impl<'a, Target> SimulatorBuilder<'a, Target> {
         self
     }
 
+    /// Configure diagnostics explicitly for this build.
+    pub fn diagnostics(mut self, diagnostics: crate::DiagnosticsOptions) -> Self {
+        self.options.diagnostics = diagnostics.runtime;
+        self.options.optimize_options.diagnostics = diagnostics.sir;
+        self.options.cranelift_options.diagnostics = diagnostics.cranelift;
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.options.x86_options.diagnostics = diagnostics.native;
+            if let Some(enabled) = diagnostics.native_tick_loop {
+                self.options.x86_options.native_tick_loop = enabled;
+            }
+        }
+        self
+    }
+
+    /// Import legacy `CELOX_*` diagnostics switches once at the API boundary.
+    pub fn diagnostics_from_env(self) -> Self {
+        self.diagnostics(crate::DiagnosticsOptions::from_env())
+    }
+
     pub fn trace_sim_modules(mut self) -> Self {
         self.options.trace.sim_modules = true;
         self
@@ -596,7 +623,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         ),
         SimulatorError,
     > {
-        let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
+        let phase_timing = self.options.diagnostics.phase_timing;
         let compile_start = phase_timing.then(crate::timing::now);
         let (program, warnings) = compile_to_sir_with_layout_mode(
             &self.sources,
@@ -611,24 +638,25 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             self.reset_type,
             &self.param_overrides,
             &self.options.optimize_options,
+            &self.options.diagnostics,
             layout_mode,
         )?;
         if let Some(start) = compile_start {
-            eprintln!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
+            tracing::debug!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
         }
 
         // Build memory layout (consumes semantic layout requirements).
         let layout_start = phase_timing.then(crate::timing::now);
         let mut laid_out = program.into_laid_out_with_mode(self.options.four_state, layout_mode);
         if let Some(start) = layout_start {
-            eprintln!("[phase-timing] build_layout: {:?}", start.elapsed());
+            tracing::debug!("[phase-timing] build_layout: {:?}", start.elapsed());
         }
 
         if self.options.dead_store_policy != DeadStorePolicy::Off {
             let dse_start = phase_timing.then(crate::timing::now);
             run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
             if let Some(start) = dse_start {
-                eprintln!(
+                tracing::debug!(
                     "[phase-timing] dead_store_elimination: {:?}",
                     start.elapsed()
                 );
@@ -653,14 +681,14 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
     /// Compiles using the Cranelift JIT backend.
     pub fn build_cranelift(self) -> Result<Simulator<JitBackend>, SimulatorError> {
-        let phase_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
+        let phase_timing = self.options.diagnostics.phase_timing;
         let phase_start = phase_timing.then(crate::timing::now);
 
         let (laid_out, warnings, options, vcd_path) =
             self.into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
 
         if let Some(s) = phase_start {
-            eprintln!(
+            tracing::debug!(
                 "[phase-timing] compile_and_layout (total): {:?}",
                 s.elapsed()
             );
@@ -680,11 +708,12 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             trace.print();
         }
         if let Some(s) = jit_start {
-            eprintln!("[phase-timing] jit_backend: {:?}", s.elapsed());
+            tracing::debug!("[phase-timing] jit_backend: {:?}", s.elapsed());
         }
 
         let mut sim =
             Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+        sim.diagnostics = options.diagnostics.clone();
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
@@ -701,13 +730,13 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
     pub fn build_native(
         self,
     ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
-        let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
+        let phase_timing = self.options.diagnostics.phase_timing;
         let sir_start = phase_timing.then(crate::timing::now);
         let (laid_out, warnings, options, vcd_path) = self.into_laid_out_program(
             crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         )?;
         if let Some(start) = sir_start {
-            eprintln!(
+            tracing::debug!(
                 "[phase-timing] into_laid_out_program total: {:?}",
                 start.elapsed()
             );
@@ -715,10 +744,11 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         let backend_start = phase_timing.then(crate::timing::now);
         let backend = crate::backend::native::NativeBackend::new(&laid_out, &options)?;
         if let Some(start) = backend_start {
-            eprintln!("[phase-timing] native_backend: {:?}", start.elapsed());
+            tracing::debug!("[phase-timing] native_backend: {:?}", start.elapsed());
         }
         let mut sim =
             Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+        sim.diagnostics = options.diagnostics.clone();
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
@@ -728,12 +758,12 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         let apply_initial_start = phase_timing.then(crate::timing::now);
         sim.apply_initial_values();
         if let Some(start) = apply_initial_start {
-            eprintln!("[phase-timing] apply_initial_values: {:?}", start.elapsed());
+            tracing::debug!("[phase-timing] apply_initial_values: {:?}", start.elapsed());
         }
         let settle_start = phase_timing.then(crate::timing::now);
         sim.modify(|_| {}).map_err(SimulatorError::from)?;
         if let Some(start) = settle_start {
-            eprintln!("[phase-timing] initial_settle: {:?}", start.elapsed());
+            tracing::debug!("[phase-timing] initial_settle: {:?}", start.elapsed());
         }
         Ok(sim)
     }
@@ -747,6 +777,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
         let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)?;
         let mut sim =
             Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+        sim.diagnostics = options.diagnostics.clone();
         if let Some(path) = vcd_path {
             let descs = sim.build_vcd_descs(options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)
@@ -810,6 +841,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
             self.reset_type,
             &self.param_overrides,
             &self.options.optimize_options,
+            &self.options.diagnostics,
             layout_mode,
         );
 
@@ -842,6 +874,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 
             let mut sim =
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+            sim.diagnostics = self.options.diagnostics.clone();
             sim.apply_initial_values();
             sim.modify(|_| {}).map_err(SimulatorError::from)?;
             Ok(sim)
@@ -862,7 +895,7 @@ impl<'a> SimulatorBuilder<'a, Simulator> {
 fn run_test_with_sim<B: crate::backend::SimBackend>(
     mut sim: Simulator<B>,
 ) -> Result<crate::testbench::TestResult, SimulatorError> {
-    let phase_timing = std::env::var_os("CELOX_PHASE_TIMING").is_some();
+    let phase_timing = sim.diagnostics.phase_timing;
     let testbench_start = phase_timing.then(crate::timing::now);
     let testbench = crate::testbench::compile_initial_testbench(&sim).ok_or_else(|| {
         SimulatorError::new(SimulatorErrorKind::Codegen(
@@ -871,7 +904,7 @@ fn run_test_with_sim<B: crate::backend::SimBackend>(
     })?;
     let result = crate::testbench::run_testbench(&mut sim, testbench.statements());
     if let Some(start) = testbench_start {
-        eprintln!("[phase-timing] testbench: {:?}", start.elapsed());
+        tracing::debug!("[phase-timing] testbench: {:?}", start.elapsed());
     }
     Ok(result)
 }
@@ -932,6 +965,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
             self.reset_type,
             &self.param_overrides,
             &self.options.optimize_options,
+            &self.options.diagnostics,
             layout_mode,
         )?;
         let mut laid_out = program.into_laid_out_with_mode(self.options.four_state, layout_mode);
@@ -946,6 +980,7 @@ impl<'a> SimulatorBuilder<'a, crate::Simulation> {
 
         let mut sim =
             Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+        sim.diagnostics = self.options.diagnostics.clone();
         if let Some(path) = self.vcd_path {
             let descs = sim.build_vcd_descs(self.options.four_state);
             let vcd_writer = crate::vcd::VcdWriter::new(path, &descs)

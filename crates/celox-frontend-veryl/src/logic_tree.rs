@@ -239,16 +239,11 @@ fn dump_comb_path_stats_if_requested(
     paths: &[LogicPath<VarId>],
     arena: &SLTNodeArena<VarId>,
 ) {
-    if std::env::var_os("CELOX_COMB_PATH_STATS").is_none() {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
         return;
     }
 
     let module_name = resource_table::get_str_value(module.name).unwrap_or_default();
-    if let Some(filter) = std::env::var_os("CELOX_COMB_PATH_MODULE")
-        && !module_name.contains(filter.to_string_lossy().as_ref())
-    {
-        return;
-    }
 
     let mut entries = Vec::new();
     let mut total_nodes = 0usize;
@@ -282,7 +277,7 @@ fn dump_comb_path_stats_if_requested(
     }
     entries.sort_by(|a, b| b.cmp(a));
 
-    eprintln!(
+    tracing::debug!(
         "[comb-path-summary] module={} paths={} total_nodes={} total_for_folds={} total_muxes={} total_inputs={}",
         module_name,
         paths.len(),
@@ -292,14 +287,11 @@ fn dump_comb_path_stats_if_requested(
         total_inputs,
     );
 
-    let limit = std::env::var("CELOX_COMB_PATH_STATS_LIMIT")
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
-        .unwrap_or(20);
+    let limit = 20;
     for (rank, (nodes, for_folds, muxes, inputs, target)) in
         entries.into_iter().take(limit).enumerate()
     {
-        eprintln!(
+        tracing::debug!(
             "[comb-path-stats] module={} rank={} target={} nodes={} for_folds={} muxes={} inputs={}",
             module_name,
             rank + 1,

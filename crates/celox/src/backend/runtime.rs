@@ -105,7 +105,7 @@ impl CraneliftEvalCombPlan {
             return Self::Unsplit;
         }
 
-        let timing = std::env::var_os("CELOX_OPT_TIMING").is_some();
+        let timing = options.diagnostics.optimizer_timing;
         if timing {
             use celox_backend_cranelift::cost_model::{
                 CLIF_INST_THRESHOLD, VREG_VALUE_THRESHOLD, estimate_eu_cost,
@@ -114,7 +114,7 @@ impl CraneliftEvalCombPlan {
             for (i, eu) in sir.sir.eval_comb.iter().enumerate() {
                 let inst_cost = estimate_eu_cost(eu, options.four_state);
                 let value_count = estimate_eu_value_count(eu, options.four_state);
-                eprintln!(
+                tracing::debug!(
                     "[split-check] eval_comb eu[{i}]: blocks={} insts={} clif_cost={inst_cost}/{CLIF_INST_THRESHOLD} values={value_count}/{VREG_VALUE_THRESHOLD}",
                     eu.blocks.len(),
                     eu.blocks
@@ -131,7 +131,7 @@ impl CraneliftEvalCombPlan {
             tail_call_split::split_if_needed(&sir.sir.eval_comb, options.four_state)
         {
             if let Some(start) = split_start {
-                eprintln!(
+                tracing::debug!(
                     "[split] TailCallChunks: {} chunks, took {:?}",
                     chunks.len(),
                     start.elapsed()
@@ -142,7 +142,7 @@ impl CraneliftEvalCombPlan {
             tail_call_split::split_if_needed_spilled(&sir.sir.eval_comb, options.four_state)
         {
             if let Some(start) = split_start {
-                eprintln!(
+                tracing::debug!(
                     "[split] MemorySpilled: {} chunks, scratch={}B, took {:?}",
                     plan.chunks.len(),
                     plan.scratch_bytes,

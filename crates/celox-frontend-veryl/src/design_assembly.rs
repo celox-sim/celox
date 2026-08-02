@@ -239,13 +239,13 @@ pub fn schedule_symbolic_rtl(
         module_names,
         root_id,
     } = symbolic;
-    let flatten_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
+    let flatten_timing = trace_opts.phase_timing;
     macro_rules! timed_sub {
         ($label:expr, $body:expr) => {{
             if flatten_timing {
                 let start = std::time::Instant::now();
                 let result = $body;
-                eprintln!("[flatten] {}: {:?}", $label, start.elapsed());
+                tracing::debug!("[flatten] {}: {:?}", $label, start.elapsed());
                 result
             } else {
                 $body
@@ -542,7 +542,7 @@ pub fn schedule_symbolic_rtl(
         }
     };
     if let Some(s) = sched_start {
-        eprintln!("[flatten] scheduler::sort: {:?}", s.elapsed());
+        tracing::debug!("[flatten] scheduler::sort: {:?}", s.elapsed());
     }
     runtime_errors.extend(schedule.runtime_errors);
     let schduled: Vec<ExecutionUnit<RegionedAbsoluteAddr>> = schedule
@@ -618,7 +618,7 @@ pub fn schedule_symbolic_rtl(
             }
         };
         if let Some(start) = fused_start {
-            eprintln!("[flatten] scheduler::sort_clock: {:?}", start.elapsed());
+            tracing::debug!("[flatten] scheduler::sort_clock: {:?}", start.elapsed());
         }
         let direct_ff_writes = fused.direct_ff_writes;
         let units = fused.execution_units;
@@ -2193,7 +2193,7 @@ fn analyze_clock_dependencies(
     }
 
     // 2. Build combinational dependency graph (target -> sources)
-    let acd_timing = std::env::var("CELOX_PHASE_TIMING").is_ok();
+    let acd_timing = tracing::enabled!(tracing::Level::DEBUG);
     let acd_start = acd_timing.then(std::time::Instant::now);
     let mut comb_deps: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
     for path in comb_blocks {
@@ -2208,7 +2208,7 @@ fn analyze_clock_dependencies(
         }
     }
     if let Some(s) = acd_start {
-        eprintln!(
+        tracing::debug!(
             "[acd] comb_deps build ({} blocks): {:?}",
             comb_deps.len(),
             s.elapsed()
@@ -2234,7 +2234,7 @@ fn analyze_clock_dependencies(
         }
     }
     if let Some(s) = fp_start {
-        eprintln!(
+        tracing::debug!(
             "[acd] fixpoint: {fp_rounds} rounds, {} entries, {:?}",
             comb_deps.len(),
             s.elapsed()
