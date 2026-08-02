@@ -1,24 +1,4 @@
-/// Cross-platform timing helper.
-///
-/// On native targets, delegates to `std::time::Instant`.
-/// On wasm32, provides a no-op implementation (always returns zero duration).
-#[cfg(not(target_arch = "wasm32"))]
-pub fn now() -> std::time::Instant {
-    std::time::Instant::now()
-}
+//! Timing policy is owned by `celox-sir-opt`'s `timing` feature so compiler
+//! crates do not inspect the target architecture independently.
 
-#[cfg(target_arch = "wasm32")]
-pub fn now() -> WasmInstant {
-    WasmInstant
-}
-
-#[cfg(target_arch = "wasm32")]
-#[derive(Clone, Copy)]
-pub struct WasmInstant;
-
-#[cfg(target_arch = "wasm32")]
-impl WasmInstant {
-    pub fn elapsed(&self) -> std::time::Duration {
-        std::time::Duration::ZERO
-    }
-}
+pub use celox_sir_opt::timing::now;

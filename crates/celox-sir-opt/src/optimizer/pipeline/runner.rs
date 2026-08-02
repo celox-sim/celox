@@ -86,10 +86,7 @@ pub(super) fn optimize_with_options(
     opt: &crate::OptimizeOptions,
     preserve_element_storage_layout: bool,
 ) {
-    #[cfg(not(target_arch = "wasm32"))]
     let timing = opt.diagnostics.pass_timing;
-    #[cfg(target_arch = "wasm32")]
-    let timing = false;
     let options = PassOptions {
         max_inflight_loads,
         four_state,

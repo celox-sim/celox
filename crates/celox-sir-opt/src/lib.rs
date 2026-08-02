@@ -45,26 +45,32 @@ impl OptimizationContext<'_> {
 }
 
 pub mod timing {
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn now() -> std::time::Instant {
-        std::time::Instant::now()
-    }
+    #[cfg(feature = "timing")]
+    mod imp {
+        pub type Instant = std::time::Instant;
 
-    #[cfg(target_arch = "wasm32")]
-    pub fn now() -> WasmInstant {
-        WasmInstant
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    #[derive(Clone, Copy)]
-    pub struct WasmInstant;
-
-    #[cfg(target_arch = "wasm32")]
-    impl WasmInstant {
-        pub fn elapsed(&self) -> std::time::Duration {
-            std::time::Duration::ZERO
+        pub fn now() -> Instant {
+            Instant::now()
         }
     }
+
+    #[cfg(not(feature = "timing"))]
+    mod imp {
+        #[derive(Clone, Copy)]
+        pub struct Instant;
+
+        pub fn now() -> Instant {
+            Instant
+        }
+
+        impl Instant {
+            pub fn elapsed(&self) -> std::time::Duration {
+                std::time::Duration::ZERO
+            }
+        }
+    }
+
+    pub use imp::now;
 }
 
 /// Cost-model threshold for preferring chunked memory shifts.

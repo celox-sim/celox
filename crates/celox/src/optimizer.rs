@@ -70,7 +70,7 @@ pub(crate) fn with_optimized_program<R>(
     operation(&mut unit)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "host-runtime")]
 pub(crate) fn with_laid_out_program<R>(
     program: &mut crate::ir::LaidOutProgram,
     operation: impl FnOnce(&mut celox_sir_opt::OptimizationContext<'_>) -> R,
