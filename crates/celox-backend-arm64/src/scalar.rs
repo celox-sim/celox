@@ -261,11 +261,21 @@ fn emit_function(
     let tick_success = tick_loop.then(|| ops.new_dynamic_label());
     let tick_entry = tick_loop.then(|| block_labels[&function.blocks[0].id]);
     let mut block_offsets = Vec::with_capacity(function.blocks.len());
+    let mut callee_saved = assignment
+        .iter()
+        .map(|(_, register)| register.number())
+        .filter(|register| (19..=28).contains(register))
+        .collect::<Vec<_>>();
+    callee_saved.sort_unstable();
+    callee_saved.dedup();
 
     dynasm!(ops
         ; .arch aarch64
         ; str x30, [sp, #-16]!
     );
+    for &register in &callee_saved {
+        dynasm!(ops ; .arch aarch64 ; str X(register), [sp, #-16]!);
+    }
     if tick_loop {
         // d29 retains the simulator-state pointer across success/error return
         // values. d31 carries the remaining tick count between body entries.
@@ -347,6 +357,9 @@ fn emit_function(
             STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET as u64,
         );
         dynasm!(ops ; .arch aarch64 ; add x17, x17, x30 ; str x16, [x17]);
+    }
+    for &register in callee_saved.iter().rev() {
+        dynasm!(ops ; .arch aarch64 ; ldr X(register), [sp], #16);
     }
     dynasm!(ops ; .arch aarch64 ; ldr x30, [sp], #16 ; ret);
     let text_size = ops.offset().0;

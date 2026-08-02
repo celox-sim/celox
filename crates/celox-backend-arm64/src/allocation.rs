@@ -30,6 +30,10 @@ where
     pub(crate) fn set(&mut self, value: V, register: Arm64Reg) {
         self.registers.insert(value, register);
     }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&V, &Arm64Reg)> {
+        self.registers.iter()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

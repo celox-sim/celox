@@ -8,14 +8,11 @@ use std::fmt;
 
 use celox_backend_x86::native::mir as legacy_mir;
 use celox_backend_x86::native::regalloc::AssignmentMap as LegacyAssignment;
-use celox_backend_x86::native::regalloc::assignment::PhysReg;
-use celox_backend_x86::native::ssa_destroy::{
-    ParallelCopyDestination, ParallelCopyOperation, ParallelCopySource, SsaDestructionError,
-    SsaDestructionPlan,
-};
+use celox_backend_x86::native::regalloc::assignment::EdgeLocation;
+use celox_backend_x86::native::ssa_destroy::{SsaDestructionError, SsaDestructionPlan};
 
 use crate::Arm64Reg;
-use crate::allocation::{Assignment, CopyDestination, CopyOperation, CopySource, EdgeCopyPlan};
+use crate::allocation::{CopyDestination, CopyOperation, CopySource, EdgeCopyPlan};
 use crate::mir::{self, AllocatedFunction};
 
 #[derive(Debug)]
@@ -59,24 +56,8 @@ pub(crate) fn adapt(
     let legacy_plan = SsaDestructionPlan::build(function, assignment)?;
     legacy_plan.verify(function, assignment, spill_frame_size)?;
 
-    let mut target_assignment = Assignment::default();
-    for (value, register) in assignment.sorted_entries() {
-        target_assignment.set(adapt_vreg(value), adapt_register(register));
-    }
-
-    let mut target_plan = EdgeCopyPlan::default();
-    for block in &function.blocks {
-        for successor in block.successors() {
-            let Some(edge) = legacy_plan.edge(block.id, successor) else {
-                continue;
-            };
-            target_plan.insert(
-                adapt_block(block.id),
-                adapt_block(successor),
-                edge.operations.iter().copied().map(adapt_copy).collect(),
-            );
-        }
-    }
+    // The legacy plan proves that every pre-existing spill home and phi source
+    // is complete. Physical register colors are deliberately discarded below.
     let blocks = function
         .blocks
         .iter()
@@ -105,13 +86,146 @@ pub(crate) fn adapt(
             })
         })
         .collect::<Result<_, LegacyLoweringError>>()?;
-    let allocated = AllocatedFunction {
-        function: mir::MFunction::new(blocks, function.constant_tables().to_vec()),
-        assignment: target_assignment,
-        edge_copies: target_plan,
-    };
-    crate::regalloc::verify_allocated(&allocated)?;
-    Ok(allocated)
+    let mut target = crate::regalloc::allocate_without_spills(mir::MFunction::new(
+        blocks,
+        function.constant_tables().to_vec(),
+    ))?;
+    target.edge_copies = rebuild_legacy_home_copies(function, assignment, &target)?;
+    Ok(target)
+}
+
+fn rebuild_legacy_home_copies(
+    function: &legacy_mir::MFunction,
+    legacy_assignment: &LegacyAssignment,
+    target: &AllocatedFunction,
+) -> Result<EdgeCopyPlan<mir::BlockId>, LegacyLoweringError> {
+    use celox_backend_common::regalloc as common;
+
+    let mut plan = EdgeCopyPlan::default();
+    for successor in &function.blocks {
+        let mut rows_by_predecessor = std::collections::BTreeMap::<
+            legacy_mir::BlockId,
+            Vec<common::ParallelCopy<Arm64Reg>>,
+        >::new();
+        for phi in &successor.phis {
+            if legacy_assignment.is_semantic_phi_definition(phi.dst) {
+                continue;
+            }
+            let destination = if let Some(offset) = legacy_assignment.edge_spill_slot(phi.dst) {
+                common::CopyDestination::Stack(offset)
+            } else {
+                common::CopyDestination::Register(
+                    target.assignment.get(&adapt_vreg(phi.dst)).ok_or(
+                        crate::regalloc::TargetRegallocError::MissingAssignment {
+                            block: adapt_block(successor.id),
+                            instruction: 0,
+                            value: adapt_vreg(phi.dst),
+                        },
+                    )?,
+                )
+            };
+            for &(predecessor, source_value) in &phi.sources {
+                let source = match legacy_assignment.resolved_phi_source_location(
+                    predecessor,
+                    successor.id,
+                    phi.dst,
+                    source_value,
+                ) {
+                    Some(EdgeLocation::Stack(offset)) => common::CopySource::Stack(offset),
+                    Some(EdgeLocation::Immediate(value)) => common::CopySource::Immediate(value),
+                    Some(EdgeLocation::Register(_)) => common::CopySource::Register(
+                        target.assignment.get(&adapt_vreg(source_value)).ok_or(
+                            crate::regalloc::TargetRegallocError::MissingAssignment {
+                                block: adapt_block(predecessor),
+                                instruction: 0,
+                                value: adapt_vreg(source_value),
+                            },
+                        )?,
+                    ),
+                    None => {
+                        return Err(SsaDestructionError {
+                            rule: "SSA_DEST.MISSING_PHI_SOURCE_LOCATION",
+                            predecessor: Some(predecessor),
+                            successor: Some(successor.id),
+                            phi_destination: Some(phi.dst),
+                            source_value: Some(source_value),
+                            message: "phi source has no completed legacy edge location".into(),
+                        }
+                        .into());
+                    }
+                };
+                rows_by_predecessor
+                    .entry(predecessor)
+                    .or_default()
+                    .push(common::ParallelCopy {
+                        destination,
+                        source,
+                    });
+            }
+        }
+        for (predecessor, rows) in rows_by_predecessor {
+            let resolution = common::resolve_parallel_copies(&rows).map_err(|error| {
+                crate::regalloc::TargetRegallocError::ParallelCopy {
+                    predecessor: adapt_block(predecessor),
+                    successor: adapt_block(successor.id),
+                    message: error.to_string(),
+                }
+            })?;
+            let operations = resolution
+                .operations
+                .into_iter()
+                .map(|operation| match operation {
+                    common::CopyOperation::Move {
+                        destination,
+                        source,
+                    } => CopyOperation::Move {
+                        destination: adapt_common_destination(destination),
+                        source: adapt_common_source(source),
+                    },
+                    common::CopyOperation::SwapRegisters { left, right } => {
+                        CopyOperation::SwapRegisters { left, right }
+                    }
+                    common::CopyOperation::SaveTemporary(destination) => {
+                        CopyOperation::SaveTemporary(adapt_common_destination(destination))
+                    }
+                    common::CopyOperation::RestoreTemporary(destination) => {
+                        CopyOperation::RestoreTemporary(adapt_common_destination(destination))
+                    }
+                })
+                .collect();
+            plan.insert(
+                adapt_block(predecessor),
+                adapt_block(successor.id),
+                operations,
+            );
+        }
+    }
+    Ok(plan)
+}
+
+fn adapt_common_destination(
+    destination: celox_backend_common::regalloc::CopyDestination<Arm64Reg>,
+) -> CopyDestination {
+    match destination {
+        celox_backend_common::regalloc::CopyDestination::Register(register) => {
+            CopyDestination::Register(register)
+        }
+        celox_backend_common::regalloc::CopyDestination::Stack(offset) => {
+            CopyDestination::Stack(offset)
+        }
+    }
+}
+
+fn adapt_common_source(source: celox_backend_common::regalloc::CopySource<Arm64Reg>) -> CopySource {
+    match source {
+        celox_backend_common::regalloc::CopySource::Register(register) => {
+            CopySource::Register(register)
+        }
+        celox_backend_common::regalloc::CopySource::Stack(offset) => CopySource::Stack(offset),
+        celox_backend_common::regalloc::CopySource::Immediate(value) => {
+            CopySource::Immediate(value)
+        }
+    }
 }
 
 fn adapt_vreg(value: legacy_mir::VReg) -> mir::VReg {
@@ -713,65 +827,6 @@ fn adapt_unary(
     make(adapt_vreg(dst), adapt_vreg(src))
 }
 
-fn adapt_register(register: PhysReg) -> Arm64Reg {
-    match register {
-        PhysReg::RAX => Arm64Reg::new(1),
-        PhysReg::RCX => Arm64Reg::new(2),
-        PhysReg::RDX => Arm64Reg::new(3),
-        PhysReg::RBX => Arm64Reg::new(4),
-        PhysReg::RBP => Arm64Reg::new(5),
-        PhysReg::RSI => Arm64Reg::new(6),
-        PhysReg::RDI => Arm64Reg::new(7),
-        PhysReg::R8 => Arm64Reg::new(8),
-        PhysReg::R9 => Arm64Reg::new(9),
-        PhysReg::R10 => Arm64Reg::new(10),
-        PhysReg::R11 => Arm64Reg::new(11),
-        PhysReg::R12 => Arm64Reg::new(12),
-        PhysReg::R13 => Arm64Reg::new(13),
-        PhysReg::R14 => Arm64Reg::new(14),
-        PhysReg::R15 => Arm64Reg::new(15),
-    }
-}
-
-fn adapt_copy(operation: ParallelCopyOperation) -> CopyOperation {
-    match operation {
-        ParallelCopyOperation::Move {
-            destination,
-            source,
-        } => CopyOperation::Move {
-            destination: adapt_destination(destination),
-            source: adapt_source(source),
-        },
-        ParallelCopyOperation::SwapRegisters { left, right } => CopyOperation::SwapRegisters {
-            left: adapt_register(left),
-            right: adapt_register(right),
-        },
-        ParallelCopyOperation::SaveTemporary(destination) => {
-            CopyOperation::SaveTemporary(adapt_destination(destination))
-        }
-        ParallelCopyOperation::RestoreTemporary(destination) => {
-            CopyOperation::RestoreTemporary(adapt_destination(destination))
-        }
-    }
-}
-
-fn adapt_destination(destination: ParallelCopyDestination) -> CopyDestination {
-    match destination {
-        ParallelCopyDestination::Register(register) => {
-            CopyDestination::Register(adapt_register(register))
-        }
-        ParallelCopyDestination::Stack(offset) => CopyDestination::Stack(offset),
-    }
-}
-
-fn adapt_source(source: ParallelCopySource) -> CopySource {
-    match source {
-        ParallelCopySource::Register(register) => CopySource::Register(adapt_register(register)),
-        ParallelCopySource::Stack(offset) => CopySource::Stack(offset),
-        ParallelCopySource::Immediate(value) => CopySource::Immediate(value),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -818,42 +873,34 @@ mod tests {
     }
 
     #[test]
-    fn legacy_colors_map_to_distinct_non_reserved_aarch64_registers() {
-        let colors = [
-            PhysReg::RAX,
-            PhysReg::RCX,
-            PhysReg::RDX,
-            PhysReg::RBX,
-            PhysReg::RBP,
-            PhysReg::RSI,
-            PhysReg::RDI,
-            PhysReg::R8,
-            PhysReg::R9,
-            PhysReg::R10,
-            PhysReg::R11,
-            PhysReg::R12,
-            PhysReg::R13,
-            PhysReg::R14,
-            PhysReg::R15,
-        ];
-        let mut registers = colors.map(adapt_register).map(Arm64Reg::number);
-        registers.sort_unstable();
+    fn recolors_legacy_mir_with_the_aarch64_register_file() {
+        use celox_backend_x86::native::regalloc::assignment::PhysReg;
 
-        assert_eq!(
-            registers,
-            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-        );
-        assert!(
-            !registers.contains(&0),
-            "x0 is the simulator-state register"
-        );
-        assert!(
-            !registers.contains(&16),
-            "x16 is an emitter scratch register"
-        );
-        assert!(
-            !registers.contains(&17),
-            "x17 is an emitter scratch register"
-        );
+        let mut values = legacy_mir::VRegAllocator::new();
+        let lhs = values.alloc();
+        let rhs = values.alloc();
+        let result = values.alloc();
+        let mut function =
+            legacy_mir::MFunction::new(values, vec![legacy_mir::SpillDesc::transient(); 3]);
+        let mut block = legacy_mir::MBlock::new(legacy_mir::BlockId(0));
+        block.push(legacy_mir::MInst::LoadImm { dst: lhs, value: 2 });
+        block.push(legacy_mir::MInst::LoadImm { dst: rhs, value: 3 });
+        block.push(legacy_mir::MInst::Add {
+            dst: result,
+            lhs,
+            rhs,
+        });
+        block.push(legacy_mir::MInst::Return);
+        function.push_block(block);
+        let mut legacy_assignment = LegacyAssignment::default();
+        legacy_assignment.set(lhs, PhysReg::R13);
+        legacy_assignment.set(rhs, PhysReg::R14);
+        legacy_assignment.set(result, PhysReg::R15);
+
+        let target = adapt(&function, &legacy_assignment, 0).unwrap();
+        let target_registers = [lhs, rhs, result]
+            .map(|value| target.assignment.get(&adapt_vreg(value)).unwrap().number());
+
+        assert!(target_registers.into_iter().all(|register| register <= 2));
     }
 }

@@ -1,11 +1,12 @@
 //! AArch64 register-allocation boundary.
 //!
-//! Target MIR is projected into opcode-free facts consumed by shared analyses.
-//! The production pipeline still imports a mature allocation through the
-//! legacy bridge, but that result is independently checked here against the
-//! AArch64 MIR and register file before emission.
+//! Target MIR is projected into opcode-free facts consumed by shared analyses,
+//! then colored against the AArch64 register file. The legacy bridge still
+//! supplies spill placement while target-native spill insertion is developed;
+//! it no longer supplies physical register colors.
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 use celox_backend_common::regalloc::{
@@ -14,6 +15,7 @@ use celox_backend_common::regalloc::{
 };
 
 use crate::Arm64Reg;
+use crate::allocation::{Assignment, CopyDestination, CopyOperation, CopySource, EdgeCopyPlan};
 use crate::mir::{AllocatedFunction, BlockId, MFunction, VReg};
 
 pub(crate) type AllocationFacts = FunctionAllocationFacts<VReg, Arm64Reg>;
@@ -43,6 +45,14 @@ pub(crate) enum TargetRegallocError {
         left: VReg,
         right: VReg,
         register: Arm64Reg,
+    },
+    RegisterPressure {
+        value: VReg,
+    },
+    ParallelCopy {
+        predecessor: BlockId,
+        successor: BlockId,
+        message: String,
     },
 }
 
@@ -87,6 +97,18 @@ impl fmt::Display for TargetRegallocError {
                 formatter,
                 "AArch64 {block} point {instruction} keeps {left} and {right} live in x{}",
                 register.number()
+            ),
+            Self::RegisterPressure { value } => write!(
+                formatter,
+                "AArch64 register pressure cannot assign {value} without spilling"
+            ),
+            Self::ParallelCopy {
+                predecessor,
+                successor,
+                message,
+            } => write!(
+                formatter,
+                "AArch64 parallel copy on {predecessor} -> {successor}: {message}"
             ),
         }
     }
@@ -180,7 +202,8 @@ pub(crate) fn verify_allocated(function: &AllocatedFunction) -> Result<(), Targe
                         value,
                     });
                 };
-                if !(1..=15).contains(&register.number()) {
+                if !(1..=15).contains(&register.number()) && !(19..=28).contains(&register.number())
+                {
                     return Err(TargetRegallocError::ReservedAssignment {
                         block: block.id,
                         instruction: instruction_index,
@@ -192,6 +215,222 @@ pub(crate) fn verify_allocated(function: &AllocatedFunction) -> Result<(), Targe
         }
     }
     verify_interval_registers(function, &intervals)
+}
+
+const ALLOCATABLE_REGISTERS: [Arm64Reg; 25] = [
+    Arm64Reg::new(1),
+    Arm64Reg::new(2),
+    Arm64Reg::new(3),
+    Arm64Reg::new(4),
+    Arm64Reg::new(5),
+    Arm64Reg::new(6),
+    Arm64Reg::new(7),
+    Arm64Reg::new(8),
+    Arm64Reg::new(9),
+    Arm64Reg::new(10),
+    Arm64Reg::new(11),
+    Arm64Reg::new(12),
+    Arm64Reg::new(13),
+    Arm64Reg::new(14),
+    Arm64Reg::new(15),
+    Arm64Reg::new(19),
+    Arm64Reg::new(20),
+    Arm64Reg::new(21),
+    Arm64Reg::new(22),
+    Arm64Reg::new(23),
+    Arm64Reg::new(24),
+    Arm64Reg::new(25),
+    Arm64Reg::new(26),
+    Arm64Reg::new(27),
+    Arm64Reg::new(28),
+];
+
+/// Allocate AArch64-owned target MIR without importing x86 register colors.
+///
+/// This first target-native path intentionally reports pressure instead of
+/// hiding a spill policy. Spill/reload insertion is the next AArch64-owned
+/// layer and can preserve this coloring and edge-copy boundary.
+pub(crate) fn allocate_without_spills(
+    function: MFunction,
+) -> Result<AllocatedFunction, TargetRegallocError> {
+    let facts = build_facts(&function)?;
+    let intervals = analyze_live_intervals(&facts)
+        .map_err(|error| TargetRegallocError::InvalidFacts(error.to_string()))?;
+    let assignment = color_intervals(&function, &intervals)?;
+    let edge_copies = build_edge_copies(&function, &assignment)?;
+    let allocated = AllocatedFunction {
+        function,
+        assignment,
+        edge_copies,
+    };
+    verify_allocated(&allocated)?;
+    Ok(allocated)
+}
+
+fn color_intervals(
+    function: &MFunction,
+    intervals: &celox_backend_common::regalloc::LiveIntervals<VReg>,
+) -> Result<Assignment<VReg>, TargetRegallocError> {
+    let mut interference = intervals
+        .iter()
+        .map(|(&value, _)| (value, BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    for block in 0..function.blocks.len() {
+        let mut segments = intervals
+            .iter()
+            .filter_map(|(&value, interval)| {
+                interval
+                    .segment_in_block(block)
+                    .map(|segment| (segment.start, segment.end, value))
+            })
+            .collect::<Vec<_>>();
+        segments.sort_unstable();
+        let mut active = Vec::<(u64, VReg)>::new();
+        for (start, end, value) in segments {
+            active.retain(|(active_end, _)| *active_end > start);
+            for &(_, other) in &active {
+                interference.entry(value).or_default().insert(other);
+                interference.entry(other).or_default().insert(value);
+            }
+            active.push((end, value));
+        }
+    }
+
+    let mut affinities = BTreeMap::<VReg, BTreeSet<VReg>>::new();
+    for block in &function.blocks {
+        for phi in &block.phis {
+            for &(_, source) in &phi.sources {
+                affinities.entry(phi.dst).or_default().insert(source);
+                affinities.entry(source).or_default().insert(phi.dst);
+            }
+        }
+    }
+    let mut order = interference
+        .iter()
+        .map(|(&value, neighbors)| (Reverse(neighbors.len()), value))
+        .collect::<Vec<_>>();
+    order.sort_unstable();
+
+    let mut assignment = Assignment::default();
+    for (_, value) in order {
+        let used = interference[&value]
+            .iter()
+            .filter_map(|neighbor| assignment.get(neighbor))
+            .collect::<BTreeSet<_>>();
+        let preferred = affinities
+            .get(&value)
+            .into_iter()
+            .flatten()
+            .filter_map(|neighbor| assignment.get(neighbor))
+            .find(|register| !used.contains(register));
+        let register = preferred
+            .or_else(|| {
+                ALLOCATABLE_REGISTERS
+                    .iter()
+                    .copied()
+                    .find(|register| !used.contains(register))
+            })
+            .ok_or(TargetRegallocError::RegisterPressure { value })?;
+        assignment.set(value, register);
+    }
+    Ok(assignment)
+}
+
+fn build_edge_copies(
+    function: &MFunction,
+    assignment: &Assignment<VReg>,
+) -> Result<EdgeCopyPlan<BlockId>, TargetRegallocError> {
+    use celox_backend_common::regalloc as common;
+
+    let mut plan = EdgeCopyPlan::default();
+    for successor in &function.blocks {
+        let mut rows_by_predecessor =
+            BTreeMap::<BlockId, Vec<common::ParallelCopy<Arm64Reg>>>::new();
+        for phi in &successor.phis {
+            let destination =
+                assignment
+                    .get(&phi.dst)
+                    .ok_or(TargetRegallocError::MissingAssignment {
+                        block: successor.id,
+                        instruction: 0,
+                        value: phi.dst,
+                    })?;
+            for &(predecessor, source_value) in &phi.sources {
+                let source = assignment.get(&source_value).ok_or(
+                    TargetRegallocError::MissingAssignment {
+                        block: predecessor,
+                        instruction: 0,
+                        value: source_value,
+                    },
+                )?;
+                rows_by_predecessor
+                    .entry(predecessor)
+                    .or_default()
+                    .push(common::ParallelCopy {
+                        destination: common::CopyDestination::Register(destination),
+                        source: common::CopySource::Register(source),
+                    });
+            }
+        }
+        for (predecessor, rows) in rows_by_predecessor {
+            let resolution = common::resolve_parallel_copies(&rows).map_err(|error| {
+                TargetRegallocError::ParallelCopy {
+                    predecessor,
+                    successor: successor.id,
+                    message: error.to_string(),
+                }
+            })?;
+            let operations = resolution
+                .operations
+                .into_iter()
+                .map(|operation| match operation {
+                    common::CopyOperation::Move {
+                        destination,
+                        source,
+                    } => CopyOperation::Move {
+                        destination: adapt_copy_destination(destination),
+                        source: adapt_copy_source(source),
+                    },
+                    common::CopyOperation::SwapRegisters { left, right } => {
+                        CopyOperation::SwapRegisters { left, right }
+                    }
+                    common::CopyOperation::SaveTemporary(destination) => {
+                        CopyOperation::SaveTemporary(adapt_copy_destination(destination))
+                    }
+                    common::CopyOperation::RestoreTemporary(destination) => {
+                        CopyOperation::RestoreTemporary(adapt_copy_destination(destination))
+                    }
+                })
+                .collect();
+            plan.insert(predecessor, successor.id, operations);
+        }
+    }
+    Ok(plan)
+}
+
+fn adapt_copy_destination(
+    destination: celox_backend_common::regalloc::CopyDestination<Arm64Reg>,
+) -> CopyDestination {
+    match destination {
+        celox_backend_common::regalloc::CopyDestination::Register(register) => {
+            CopyDestination::Register(register)
+        }
+        celox_backend_common::regalloc::CopyDestination::Stack(offset) => {
+            CopyDestination::Stack(offset)
+        }
+    }
+}
+
+fn adapt_copy_source(source: celox_backend_common::regalloc::CopySource<Arm64Reg>) -> CopySource {
+    match source {
+        celox_backend_common::regalloc::CopySource::Register(register) => {
+            CopySource::Register(register)
+        }
+        celox_backend_common::regalloc::CopySource::Stack(offset) => CopySource::Stack(offset),
+        celox_backend_common::regalloc::CopySource::Immediate(value) => {
+            CopySource::Immediate(value)
+        }
+    }
 }
 
 fn verify_interval_registers(
@@ -239,7 +478,7 @@ fn verify_interval_registers(
 mod tests {
     use super::*;
     use crate::allocation::{Assignment, EdgeCopyPlan};
-    use crate::mir::{MBlock, MInst, PhiNode};
+    use crate::mir::{BaseReg, MBlock, MInst, OpSize, PhiNode};
 
     fn diamond_function() -> MFunction {
         let entry = MBlock {
@@ -376,5 +615,121 @@ mod tests {
                 ..
             }) if register == Arm64Reg::new(1)
         ));
+    }
+
+    #[test]
+    fn allocates_target_owned_mir_without_legacy_colors() {
+        let allocated = allocate_without_spills(diamond_function()).unwrap();
+
+        for value in [VReg(0), VReg(1), VReg(2), VReg(3)] {
+            let register = allocated.assignment.get(&value).unwrap();
+            assert!(
+                (1..=15).contains(&register.number()) || (19..=28).contains(&register.number())
+            );
+        }
+        verify_allocated(&allocated).unwrap();
+    }
+
+    #[test]
+    fn lowers_target_phi_rows_with_the_common_copy_resolver() {
+        let predecessor = MBlock {
+            id: BlockId(0),
+            phis: Vec::new(),
+            insts: vec![
+                MInst::LoadImm {
+                    dst: VReg(0),
+                    value: 7,
+                },
+                MInst::Jump { target: BlockId(1) },
+            ],
+        };
+        let successor = MBlock {
+            id: BlockId(1),
+            phis: vec![PhiNode {
+                dst: VReg(1),
+                sources: vec![(BlockId(0), VReg(0))],
+            }],
+            insts: vec![MInst::Return],
+        };
+        let function = MFunction::new(vec![predecessor, successor], Vec::new());
+        let mut assignment = Assignment::default();
+        assignment.set(VReg(0), Arm64Reg::new(1));
+        assignment.set(VReg(1), Arm64Reg::new(2));
+
+        let copies = build_edge_copies(&function, &assignment).unwrap();
+
+        assert_eq!(
+            copies.edge(BlockId(0), BlockId(1)),
+            Some(
+                [CopyOperation::Move {
+                    destination: CopyDestination::Register(Arm64Reg::new(2)),
+                    source: CopySource::Register(Arm64Reg::new(1)),
+                }]
+                .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn reports_pressure_before_spill_support_is_enabled() {
+        let mut instructions = (0..26)
+            .map(|value| MInst::LoadImm {
+                dst: VReg(value),
+                value: u64::from(value),
+            })
+            .collect::<Vec<_>>();
+        instructions.extend((0..26).map(|value| MInst::Store {
+            base: BaseReg::SimState,
+            offset: value * 8,
+            src: VReg(value as u32),
+            size: OpSize::S64,
+        }));
+        instructions.push(MInst::Return);
+        let function = MFunction::new(
+            vec![MBlock {
+                id: BlockId(0),
+                phis: Vec::new(),
+                insts: instructions,
+            }],
+            Vec::new(),
+        );
+
+        assert!(matches!(
+            allocate_without_spills(function),
+            Err(TargetRegallocError::RegisterPressure { .. })
+        ));
+    }
+
+    #[test]
+    fn uses_preserved_registers_above_caller_saved_pressure() {
+        let mut instructions = (0..16)
+            .map(|value| MInst::LoadImm {
+                dst: VReg(value),
+                value: u64::from(value),
+            })
+            .collect::<Vec<_>>();
+        instructions.extend((0..16).map(|value| MInst::Store {
+            base: BaseReg::SimState,
+            offset: value * 8,
+            src: VReg(value as u32),
+            size: OpSize::S64,
+        }));
+        instructions.push(MInst::Return);
+        let allocated = allocate_without_spills(MFunction::new(
+            vec![MBlock {
+                id: BlockId(0),
+                phis: Vec::new(),
+                insts: instructions,
+            }],
+            Vec::new(),
+        ))
+        .unwrap();
+
+        assert!(
+            allocated
+                .assignment
+                .iter()
+                .any(|(_, register)| (19..=28).contains(&register.number()))
+        );
     }
 }

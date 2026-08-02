@@ -1,6 +1,6 @@
 //! Verified destruction of MIR SSA phi nodes into edge-local parallel copies.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use super::mir::{BlockId, MFunction, MInst, VReg};
@@ -25,24 +25,6 @@ pub(crate) struct ParallelCopy {
     pub source_value: VReg,
     pub destination: ParallelCopyDestination,
     pub source: ParallelCopySource,
-}
-
-impl ParallelCopy {
-    pub(crate) fn is_identity(self) -> bool {
-        matches!(
-            (self.destination, self.source),
-            (
-                ParallelCopyDestination::Register(destination),
-                ParallelCopySource::Register(source)
-            ) if destination == source
-        ) || matches!(
-            (self.destination, self.source),
-            (
-                ParallelCopyDestination::Stack(destination),
-                ParallelCopySource::Stack(source)
-            ) if destination == source
-        )
-    }
 }
 
 /// A dependency-ordered lowering step for one edge's parallel assignment.
@@ -615,66 +597,6 @@ fn exit_register_values(
     result
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PendingSource {
-    Value(ParallelCopySource),
-    Temporary,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PendingCopy {
-    phi_destination: VReg,
-    source_value: VReg,
-    destination: ParallelCopyDestination,
-    source: PendingSource,
-    pending: bool,
-}
-
-fn source_as_destination(source: ParallelCopySource) -> Option<ParallelCopyDestination> {
-    match source {
-        ParallelCopySource::Register(register) => Some(ParallelCopyDestination::Register(register)),
-        ParallelCopySource::Stack(slot) => Some(ParallelCopyDestination::Stack(slot)),
-        ParallelCopySource::Immediate(_) => None,
-    }
-}
-
-/// Return a register-only cycle starting at `start`, together with the
-/// exchanges which realize its parallel assignment.  For
-/// `A <- B, B <- C, C <- A`, the result is `xchg A, B; xchg B, C`.
-fn register_cycle(
-    copies: &[PendingCopy],
-    destination_index: &BTreeMap<ParallelCopyDestination, usize>,
-    start: usize,
-) -> Option<(Vec<usize>, Vec<(PhysReg, PhysReg)>)> {
-    let ParallelCopyDestination::Register(start_register) = copies.get(start)?.destination else {
-        return None;
-    };
-    let mut current = start_register;
-    let mut members = Vec::new();
-    let mut swaps = Vec::new();
-    let mut visited = BTreeSet::new();
-    loop {
-        if !visited.insert(current) {
-            return None;
-        }
-        let destination = ParallelCopyDestination::Register(current);
-        let &index = destination_index.get(&destination)?;
-        let copy = copies.get(index)?;
-        if !copy.pending {
-            return None;
-        }
-        let PendingSource::Value(ParallelCopySource::Register(source)) = copy.source else {
-            return None;
-        };
-        members.push(index);
-        if source == start_register {
-            return (members.len() >= 2).then_some((members, swaps));
-        }
-        swaps.push((current, source));
-        current = source;
-    }
-}
-
 /// Schedule one parallel assignment without snapshotting acyclic rows.
 ///
 /// A row is ready once overwriting its destination cannot destroy a source of
@@ -701,214 +623,76 @@ fn resolve_parallel_copies(
         }
     }
 
-    let mut copies = rows
+    use celox_backend_common::regalloc as common;
+
+    let common_destination = |destination| match destination {
+        ParallelCopyDestination::Register(register) => common::CopyDestination::Register(register),
+        ParallelCopyDestination::Stack(offset) => common::CopyDestination::Stack(offset),
+    };
+    let common_source = |source| match source {
+        ParallelCopySource::Register(register) => common::CopySource::Register(register),
+        ParallelCopySource::Stack(offset) => common::CopySource::Stack(offset),
+        ParallelCopySource::Immediate(value) => common::CopySource::Immediate(value),
+    };
+    let common_rows = rows
         .iter()
-        .copied()
-        .filter(|row| !row.is_identity())
-        .map(|row| PendingCopy {
-            phi_destination: row.phi_destination,
-            source_value: row.source_value,
-            destination: row.destination,
-            source: PendingSource::Value(row.source),
-            pending: true,
+        .map(|row| common::ParallelCopy {
+            destination: common_destination(row.destination),
+            source: common_source(row.source),
         })
         .collect::<Vec<_>>();
-    let mut work = ParallelCopyWork {
-        effective_copies: copies.len(),
-        ..ParallelCopyWork::default()
+    let resolution = common::resolve_parallel_copies(&common_rows).map_err(|error| {
+        SsaDestructionError::new(error.rule, error.message).edge(predecessor, successor)
+    })?;
+    let local_destination = |destination| match destination {
+        common::CopyDestination::Register(register) => ParallelCopyDestination::Register(register),
+        common::CopyDestination::Stack(offset) => ParallelCopyDestination::Stack(offset),
     };
-    if copies.is_empty() {
-        return Ok((Vec::new(), work));
-    }
-
-    let destination_index = copies
-        .iter()
-        .enumerate()
-        .map(|(index, copy)| (copy.destination, index))
-        .collect::<BTreeMap<_, _>>();
-    let mut readers = BTreeMap::<ParallelCopyDestination, BTreeSet<usize>>::new();
-    for (index, copy) in copies.iter().enumerate() {
-        let PendingSource::Value(source) = copy.source else {
-            continue;
-        };
-        if let Some(location) = source_as_destination(source) {
-            readers.entry(location).or_default().insert(index);
-        }
-    }
-
-    let mut ready = VecDeque::new();
-    let mut queued = vec![false; copies.len()];
-    for (index, copy) in copies.iter().enumerate() {
-        if !readers.contains_key(&copy.destination) {
-            ready.push_back(index);
-            queued[index] = true;
-        }
-    }
-
-    let mut operations = Vec::with_capacity(copies.len());
-    let mut remaining = copies.len();
-    let mut temporary_live = false;
-    // Each completed cycle contains the lowest still-pending row selected
-    // below. Resume after it so disjoint cycles do not repeatedly rescan an
-    // already completed prefix.
-    let mut cycle_search_start = 0usize;
-    while remaining != 0 {
-        while let Some(index) = ready.pop_front() {
-            queued[index] = false;
-            if !copies[index].pending {
-                continue;
+    let local_source = |source| match source {
+        common::CopySource::Register(register) => ParallelCopySource::Register(register),
+        common::CopySource::Stack(offset) => ParallelCopySource::Stack(offset),
+        common::CopySource::Immediate(value) => ParallelCopySource::Immediate(value),
+    };
+    let operations = resolution
+        .operations
+        .into_iter()
+        .map(|operation| match operation {
+            common::CopyOperation::Move {
+                destination,
+                source,
+            } => ParallelCopyOperation::Move {
+                destination: local_destination(destination),
+                source: local_source(source),
+            },
+            common::CopyOperation::SwapRegisters { left, right } => {
+                ParallelCopyOperation::SwapRegisters { left, right }
             }
-            work.ready_queue_pops += 1;
-            match copies[index].source {
-                PendingSource::Value(source) => {
-                    operations.push(ParallelCopyOperation::Move {
-                        destination: copies[index].destination,
-                        source,
-                    });
-                    work.direct_moves += 1;
-                    if let Some(location) = source_as_destination(source) {
-                        let released = if let Some(location_readers) = readers.get_mut(&location) {
-                            location_readers.remove(&index);
-                            location_readers.is_empty()
-                        } else {
-                            false
-                        };
-                        if released {
-                            readers.remove(&location);
-                            work.dependency_releases += 1;
-                            if let Some(&writer) = destination_index.get(&location)
-                                && copies[writer].pending
-                                && !queued[writer]
-                            {
-                                ready.push_back(writer);
-                                queued[writer] = true;
-                            }
-                        }
-                    }
-                }
-                PendingSource::Temporary => {
-                    if !temporary_live {
-                        return Err(SsaDestructionError::new(
-                            "SSA_DEST.RESOLVER_TEMPORARY_STATE",
-                            "parallel-copy resolver attempted to restore an inactive temporary",
-                        )
-                        .edge(predecessor, successor)
-                        .values(
-                            copies[index].phi_destination,
-                            Some(copies[index].source_value),
-                        ));
-                    }
-                    operations.push(ParallelCopyOperation::RestoreTemporary(
-                        copies[index].destination,
-                    ));
-                    temporary_live = false;
-                }
+            common::CopyOperation::SaveTemporary(destination) => {
+                ParallelCopyOperation::SaveTemporary(local_destination(destination))
             }
-            copies[index].pending = false;
-            remaining -= 1;
-        }
-
-        if remaining == 0 {
-            break;
-        }
-        if temporary_live {
-            let Some(copy) = copies.iter().find(|copy| copy.pending).copied() else {
-                return Err(SsaDestructionError::new(
-                    "SSA_DEST.RESOLVER_TEMPORARY_STATE",
-                    "parallel-copy resolver lost its pending temporary consumer",
-                )
-                .edge(predecessor, successor));
-            };
-            return Err(SsaDestructionError::new(
-                "SSA_DEST.RESOLVER_TEMPORARY_STATE",
-                "parallel-copy resolver stalled while a temporary was live",
-            )
-            .edge(predecessor, successor)
-            .values(copy.phi_destination, Some(copy.source_value)));
-        }
-
-        let Some(cycle) = copies
-            .iter()
-            .enumerate()
-            .skip(cycle_search_start)
-            .find_map(|(index, copy)| copy.pending.then_some(index))
-        else {
-            return Err(SsaDestructionError::new(
-                "SSA_DEST.RESOLVER_STATE",
-                "parallel-copy resolver has a nonzero pending count without a pending row",
-            )
-            .edge(predecessor, successor));
-        };
-        cycle_search_start = cycle + 1;
-
-        // One xchg is the compact lowering for a two-cycle. Longer cycles use
-        // the ordinary temporary path below: K+1 simple moves are fewer x86
-        // uops than K-1 register exchanges.
-        if let Some((members, swaps)) = register_cycle(&copies, &destination_index, cycle)
-            && members.len() == 2
-        {
-            for (left, right) in swaps.iter().copied() {
-                operations.push(ParallelCopyOperation::SwapRegisters { left, right });
+            common::CopyOperation::RestoreTemporary(destination) => {
+                ParallelCopyOperation::RestoreTemporary(local_destination(destination))
             }
-            for &member in &members {
-                readers.remove(&copies[member].destination);
-                copies[member].pending = false;
-                queued[member] = false;
-            }
-            remaining -= members.len();
-            work.register_swaps += swaps.len();
-            work.cycle_breaks += 1;
-            work.dependency_releases += members.len();
-            continue;
-        }
-
-        let saved = copies[cycle].destination;
-        let saved_readers = readers.remove(&saved).unwrap_or_default();
-        if saved_readers.len() != 1 {
-            return Err(SsaDestructionError::new(
-                "SSA_DEST.RESOLVER_CYCLE_SHAPE",
-                format!(
-                    "stalled parallel-copy graph has {} readers of cycle location {:?}",
-                    saved_readers.len(),
-                    saved
-                ),
-            )
-            .edge(predecessor, successor)
-            .values(
-                copies[cycle].phi_destination,
-                Some(copies[cycle].source_value),
-            ));
-        }
-        let Some(&reader) = saved_readers.iter().next() else {
-            return Err(SsaDestructionError::new(
-                "SSA_DEST.RESOLVER_CYCLE_SHAPE",
-                "stalled parallel-copy cycle has no reader",
-            )
-            .edge(predecessor, successor)
-            .values(
-                copies[cycle].phi_destination,
-                Some(copies[cycle].source_value),
-            ));
-        };
-        copies[reader].source = PendingSource::Temporary;
-        operations.push(ParallelCopyOperation::SaveTemporary(saved));
-        work.cycle_breaks += 1;
-        work.temporary_cycle_breaks += 1;
-        work.dependency_releases += 1;
-        temporary_live = true;
-        if !queued[cycle] {
-            ready.push_back(cycle);
-            queued[cycle] = true;
-        }
-    }
-
-    if temporary_live {
-        return Err(SsaDestructionError::new(
-            "SSA_DEST.RESOLVER_TEMPORARY_STATE",
-            "parallel-copy resolver left its temporary live",
-        )
-        .edge(predecessor, successor));
-    }
+        })
+        .collect();
+    let common::CopyResolutionWork {
+        effective_copies,
+        direct_moves,
+        register_swaps,
+        cycle_breaks,
+        temporary_cycle_breaks,
+        ready_queue_pops,
+        dependency_releases,
+    } = resolution.work;
+    let work = ParallelCopyWork {
+        effective_copies,
+        direct_moves,
+        register_swaps,
+        cycle_breaks,
+        temporary_cycle_breaks,
+        ready_queue_pops,
+        dependency_releases,
+    };
     Ok((operations, work))
 }
 
