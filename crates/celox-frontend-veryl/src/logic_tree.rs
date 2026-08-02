@@ -31,9 +31,9 @@ use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssignStatement, CasePattern, CaseStatement, CombDeclaration, Expression,
-    Factor, ForBound, ForRange, ForStatement, Function, FunctionCall, IfStatement, Module, Op,
-    Statement, SystemFunctionCall, SystemFunctionInput, SystemFunctionKind, VarId, VarIndex,
-    VarPath, VarSelect,
+    Factor, ForBound, ForRange, ForStatement, Function, FunctionBody, FunctionCall, IfStatement,
+    Module, Op, Statement, SystemFunctionCall, SystemFunctionInput, SystemFunctionKind, VarId,
+    VarIndex, VarPath, VarSelect,
 };
 use veryl_analyzer::value::{Value, byte_value_to_string};
 use veryl_parser::resource_table;
@@ -84,6 +84,58 @@ pub(super) fn invalid_function_call_argument_error(
         detail,
         Some(&call.comptime.token),
     )
+}
+
+/// Returns input expressions in formal declaration order.
+///
+/// Veryl's AIR stores call connections in a hash map, so iterating
+/// `FunctionCall::inputs` directly makes side-effect ordering depend on the hash
+/// layout. `Function::args`, in contrast, preserves the declared port order.
+pub(super) fn ordered_function_inputs<'a>(
+    function: &Function,
+    function_body: &FunctionBody,
+    call: &'a FunctionCall,
+) -> Result<Vec<(VarId, &'a Expression)>, ParserError> {
+    let mut inputs = Vec::with_capacity(call.inputs.len());
+    let mut ordered_ids = HashSet::default();
+    for arg in &function.args {
+        for (arg_path, _, _) in &arg.members {
+            let Some(arg_expr) = call.inputs.get(arg_path) else {
+                continue;
+            };
+            let Some(arg_id) = function_body.arg_map.get(arg_path) else {
+                return Err(invalid_function_call_argument_error(
+                    function,
+                    arg_path,
+                    "input argument does not match any formal argument",
+                    call,
+                ));
+            };
+            inputs.push((*arg_id, arg_expr));
+            ordered_ids.insert(*arg_id);
+        }
+    }
+
+    for arg_path in call.inputs.keys() {
+        let Some(arg_id) = function_body.arg_map.get(arg_path) else {
+            return Err(invalid_function_call_argument_error(
+                function,
+                arg_path,
+                "input argument does not match any formal argument",
+                call,
+            ));
+        };
+        if !ordered_ids.contains(arg_id) {
+            return Err(invalid_function_call_argument_error(
+                function,
+                arg_path,
+                "input argument is absent from the function declaration",
+                call,
+            ));
+        }
+    }
+
+    Ok(inputs)
 }
 
 #[cfg(test)]
@@ -1132,16 +1184,18 @@ fn eval_loop_case(
                 .try_fold(state, |s, step| eval_loop_statement(module, s, step, arena));
         };
 
+        let mut cond_store = state.store.clone();
         let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
             module,
-            &mut state.store,
+            &mut cond_store,
             &case_stmt.case_target,
             target,
             &arm.patterns,
             arena,
         )?;
+        state = apply_loop_continue_guard(module, state, cond_store, cond_bounds, arena)?;
         let cond_expr = procedural_condition(arena, cond_expr)?;
-        let boundaries = merge_boundaries(state.boundaries, cond_bounds);
+        let boundaries = state.boundaries.clone();
 
         if let Some(cond_val) = constant_bool(arena, cond_expr) {
             let state = LoopControlState {
@@ -1204,9 +1258,10 @@ fn eval_loop_case(
         })
     }
 
+    let mut target_store = state.store.clone();
     let (target, target_boundaries) =
-        eval_case_target_effectful(module, &mut state.store, &case_stmt.case_target, arena)?;
-    state.boundaries = merge_boundaries(state.boundaries, target_boundaries);
+        eval_case_target_effectful(module, &mut target_store, &case_stmt.case_target, arena)?;
+    state = apply_loop_continue_guard(module, state, target_store, target_boundaries, arena)?;
     eval_from_arm(module, state, case_stmt, &target, 0, arena)
 }
 
@@ -1216,10 +1271,12 @@ fn eval_loop_if(
     stmt: &IfStatement,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<LoopControlState, ParserError> {
+    let mut cond_store = state.store.clone();
     let ((cond_expr, cond_sources), cond_bounds) =
-        eval_expression_effectful(module, &mut state.store, &stmt.cond, arena, None)?;
+        eval_expression_effectful(module, &mut cond_store, &stmt.cond, arena, None)?;
+    state = apply_loop_continue_guard(module, state, cond_store, cond_bounds, arena)?;
     let cond_expr = procedural_condition(arena, cond_expr)?;
-    let boundaries = merge_boundaries(state.boundaries, cond_bounds);
+    let boundaries = state.boundaries.clone();
 
     if let Some(cond_val) = constant_bool(arena, cond_expr) {
         let side = if cond_val {

@@ -37,6 +37,7 @@ pub(super) fn eval_statements(
             let guarded_matches = matching_candidates(module, &if_stmt.true_side, candidates);
             if guarded_matches.len() == 1 {
                 let candidate = guarded_matches[0];
+                let store_before_probe = store.clone();
                 let ((guard, guard_sources), guard_boundaries) =
                     eval_expression_effectful(module, &mut store, &if_stmt.cond, arena, None)?;
                 let guard = procedural_condition(arena, guard)?;
@@ -57,6 +58,7 @@ pub(super) fn eval_statements(
                     index += 1;
                     continue;
                 }
+                store = store_before_probe;
             }
         }
 
@@ -4456,6 +4458,71 @@ mod tests {
         candidates[0].unrolled.iterations[2].value = 9;
         let (_, arena) = parse_with_candidates(&module, &candidates);
         assert_eq!(group_count(&arena), 0);
+    }
+
+    #[test]
+    fn failed_guarded_probe_restores_effectful_guard_store() {
+        let (module, provenance) = analyze(
+            r#"
+                module Top (
+                    en         : input  logic,
+                    bits       : input  logic<4>,
+                    guard_calls: output logic<8>,
+                ) {
+                    function guard (
+                        enabled : input  logic,
+                        previous: input  logic<8>,
+                        next    : output logic<8>,
+                    ) -> logic {
+                        next = previous + 8'd1;
+                        return enabled;
+                    }
+
+                    var state: logic<4>;
+                    var calls: logic<8>;
+                    always_comb {
+                        state = 4'd0;
+                        calls = 8'd0;
+                        if guard(en, calls, calls) {
+                            for i in 0..4 {
+                                state[i] = bits[i];
+                            }
+                        }
+                        guard_calls = calls;
+                    }
+                }
+            "#,
+        );
+        let mut candidates = provenance.candidates_for_module(&module);
+        assert_eq!(candidates.len(), 1);
+        // Keep the source-range match intact while making recovery decline
+        // the candidate after the speculative guard evaluation.
+        candidates[0].unrolled.iterations[2].value = 9;
+
+        let (paths, arena) = parse_with_candidates(&module, &candidates);
+        assert_eq!(group_count(&arena), 0);
+        let guard_calls = variable(&module, "guard_calls");
+        let path = paths
+            .iter()
+            .find(|path| {
+                path.target
+                    .var()
+                    .is_some_and(|target| target.id == guard_calls)
+            })
+            .expect("guard_calls path must exist");
+        let SLTNode::Binary(lhs, BinaryOp::Add, rhs) = arena.get(path.expr) else {
+            panic!("guard_calls expression: {:?}", arena.get(path.expr));
+        };
+        assert!(matches!(
+            arena.get(*lhs),
+            SLTNode::Constant(value, mask, 8, false)
+                if value.is_zero() && mask.is_zero()
+        ));
+        assert!(matches!(
+            arena.get(*rhs),
+            SLTNode::Constant(value, mask, 8, false)
+                if value == &BigUint::from(1u8) && mask.is_zero()
+        ));
     }
 
     #[test]

@@ -335,26 +335,29 @@ fn collect_function_call_effects(
         ));
     };
 
+    let mut actual_store = store.clone();
     let mut local_store = store.clone();
-    for (arg_path, arg_id) in &function_body.arg_map {
-        let Some(arg_expr) = call.inputs.get(arg_path) else {
-            continue;
-        };
-        collect_expression_effects(module, store, arg_expr, arena, collector)?;
+    for (arg_id, arg_expr) in super::ordered_function_inputs(function, &function_body, call)? {
+        collect_expression_effects(module, &actual_store, arg_expr, arena, collector)?;
         let mut actual_inputs = HashSet::default();
         collect_expression_position_inputs(module, arg_expr, &mut actual_inputs)?;
         collector.sensitivity.extend(actual_inputs);
 
-        let formal = &module.variables[arg_id];
+        let formal = &module.variables[&arg_id];
         let arg_width = resolve_total_width(module, formal)?;
-        let ((arg_node, arg_sources), _) =
-            eval_expression(module, store, arg_expr, arena, Some(arg_width))?;
+        let ((arg_node, arg_sources), _) = eval_assignment_expression_effectful(
+            module,
+            &mut actual_store,
+            arg_expr,
+            arena,
+            arg_width,
+        )?;
         // A runtime effect inside the callee executes as part of the caller's
         // always_comb process.  Its formal is only a local symbolic binding;
         // sensitivity must therefore retain the actual argument's sources.
         collector.sensitivity.extend(arg_sources.iter().copied());
         local_store.insert(
-            *arg_id,
+            arg_id,
             RangeStore::new(Some((arg_node, arg_sources)), arg_width),
         );
     }
@@ -400,17 +403,27 @@ fn statement_contains_runtime_effect(module: &Module, stmt: &Statement) -> bool 
                 | SystemFunctionKind::Assert { .. }
         ),
         Statement::If(if_stmt) => {
-            statements_contain_runtime_effect(module, &if_stmt.true_side)
+            expression_contains_runtime_effect(module, &if_stmt.cond)
+                || statements_contain_runtime_effect(module, &if_stmt.true_side)
                 || statements_contain_runtime_effect(module, &if_stmt.false_side)
         }
         Statement::Case(case_stmt) => {
-            case_stmt
-                .arms
-                .iter()
-                .any(|arm| statements_contain_runtime_effect(module, &arm.body))
+            expression_contains_runtime_effect(module, &case_stmt.case_target)
+                || case_stmt.arms.iter().any(|arm| {
+                    arm.patterns
+                        .iter()
+                        .any(|pattern| case_pattern_contains_runtime_effect(module, pattern))
+                })
+                || case_stmt
+                    .arms
+                    .iter()
+                    .any(|arm| statements_contain_runtime_effect(module, &arm.body))
                 || statements_contain_runtime_effect(module, &case_stmt.default)
         }
-        Statement::For(for_stmt) => statements_contain_runtime_effect(module, &for_stmt.body),
+        Statement::For(for_stmt) => {
+            for_range_contains_runtime_effect(module, &for_stmt.range)
+                || statements_contain_runtime_effect(module, &for_stmt.body)
+        }
         Statement::FunctionCall(call) => module
             .functions
             .get(&call.id)
@@ -428,6 +441,32 @@ fn statement_contains_runtime_effect(module: &Module, stmt: &Statement) -> bool 
         | Statement::Unsupported(_)
         | Statement::Null => false,
     }
+}
+
+fn case_pattern_contains_runtime_effect(module: &Module, pattern: &CasePattern) -> bool {
+    match pattern {
+        CasePattern::Eq(expression) => expression_contains_runtime_effect(module, expression),
+        CasePattern::Range { lo, hi, .. } => {
+            expression_contains_runtime_effect(module, lo)
+                || expression_contains_runtime_effect(module, hi)
+        }
+    }
+}
+
+fn for_range_bounds(range: &ForRange) -> (&ForBound, &ForBound) {
+    match range {
+        ForRange::Forward { start, end, .. }
+        | ForRange::Reverse { start, end, .. }
+        | ForRange::Stepped { start, end, .. } => (start, end),
+    }
+}
+
+fn for_range_contains_runtime_effect(module: &Module, range: &ForRange) -> bool {
+    let (start, end) = for_range_bounds(range);
+    [start, end].into_iter().any(|bound| match bound {
+        ForBound::Const(_) => false,
+        ForBound::Expression(expression) => expression_contains_runtime_effect(module, expression),
+    })
 }
 
 fn expression_contains_runtime_effect(module: &Module, expression: &Expression) -> bool {
@@ -1651,6 +1690,16 @@ fn collect_comb_effects_for(
 ) -> Result<SymbolicStore<VarId>, ParserError> {
     let loop_width = for_stmt.var_type.total_width().unwrap_or(32);
     let original_store = store.clone();
+    let (start_bound, end_bound) = for_range_bounds(&for_stmt.range);
+    for bound in [start_bound, end_bound] {
+        let ForBound::Expression(expression) = bound else {
+            continue;
+        };
+        collect_expression_effects(module, &store, expression, arena, collector)?;
+        let ((_, sources), _) =
+            eval_expression_effectful(module, &mut store, expression, arena, None)?;
+        collector.sensitivity.extend(sources);
+    }
     let ForRange::Forward {
         start,
         end,
@@ -1662,7 +1711,7 @@ fn collect_comb_effects_for(
             collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
         let (store, _, runner) = eval_for_with_effects(
             module,
-            store,
+            original_store.clone(),
             BoundaryMap::default(),
             for_stmt,
             arena,
@@ -1676,7 +1725,7 @@ fn collect_comb_effects_for(
             collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
         let (store, _, runner) = eval_for_with_effects(
             module,
-            store,
+            original_store.clone(),
             BoundaryMap::default(),
             for_stmt,
             arena,
@@ -1690,7 +1739,7 @@ fn collect_comb_effects_for(
             collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
         let (store, _, runner) = eval_for_with_effects(
             module,
-            store,
+            original_store.clone(),
             BoundaryMap::default(),
             for_stmt,
             arena,

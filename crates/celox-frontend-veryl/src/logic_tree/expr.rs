@@ -2066,16 +2066,8 @@ fn eval_function_call_expression(
 
     let mut arg_bounds = BoundaryMap::default();
     let mut evaluated_inputs = Vec::with_capacity(call.inputs.len());
-    for (arg_path, arg_expr) in &call.inputs {
-        let Some(arg_id) = function_body.arg_map.get(arg_path) else {
-            return Err(super::invalid_function_call_argument_error(
-                function,
-                arg_path,
-                "input argument does not match any formal argument",
-                call,
-            ));
-        };
-        let Some(arg_var) = module.variables.get(arg_id) else {
+    for (arg_id, arg_expr) in super::ordered_function_inputs(function, &function_body, call)? {
+        let Some(arg_var) = module.variables.get(&arg_id) else {
             return Err(ParserError::unsupported(
                 67,
                 LoweringPhase::CombLowering,
@@ -2093,7 +2085,7 @@ fn eval_function_call_expression(
             arg_node
         };
         arg_bounds = merge_boundaries(arg_bounds, bounds);
-        evaluated_inputs.push((*arg_id, arg_node, sources, arg_width));
+        evaluated_inputs.push((arg_id, arg_node, sources, arg_width));
     }
 
     for arg_path in function_body.arg_map.keys() {
