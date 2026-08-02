@@ -1,8 +1,9 @@
-//! Transitional lowering from the established x86 MIR and allocator result.
+//! Transitional lowering from the established x86 MIR.
 //!
 //! No AArch64 emitter code should interpret x86 opcodes or register colors
-//! directly. This module is deleted once AArch64 instruction selection and
-//! allocation produce the target-owned MIR without a legacy input.
+//! directly. The production path lowers pre-allocation MIR and delegates all
+//! allocation to the AArch64 backend. This module is deleted once AArch64
+//! instruction selection produces the target-owned MIR without a legacy input.
 
 use std::fmt;
 
@@ -58,6 +59,15 @@ pub(crate) fn adapt(
 
     // The legacy plan proves that every pre-existing spill home and phi source
     // is complete. Physical register colors are deliberately discarded below.
+    let mut target = crate::regalloc::allocate_without_spills(lower(function)?)?;
+    target.edge_copies = rebuild_legacy_home_copies(function, assignment, &target)?;
+    Ok(target)
+}
+
+/// Lower optimized scalar MIR before any legacy allocation has modified it.
+pub(crate) fn lower(
+    function: &legacy_mir::MFunction,
+) -> Result<mir::MFunction, LegacyLoweringError> {
     let blocks = function
         .blocks
         .iter()
@@ -86,12 +96,10 @@ pub(crate) fn adapt(
             })
         })
         .collect::<Result<_, LegacyLoweringError>>()?;
-    let mut target = crate::regalloc::allocate_without_spills(mir::MFunction::new(
+    Ok(mir::MFunction::new(
         blocks,
         function.constant_tables().to_vec(),
-    ))?;
-    target.edge_copies = rebuild_legacy_home_copies(function, assignment, &target)?;
-    Ok(target)
+    ))
 }
 
 fn rebuild_legacy_home_copies(

@@ -1,9 +1,9 @@
 //! AArch64 register-allocation boundary.
 //!
 //! Target MIR is projected into opcode-free facts consumed by shared analyses,
-//! then colored against the AArch64 register file. The legacy bridge still
-//! supplies spill placement while target-native spill insertion is developed;
-//! it no longer supplies physical register colors.
+//! then spilled and colored against the AArch64 register file. Phi lowering and
+//! edge-copy scheduling also remain target-owned; only opcode-free allocation
+//! analyses and algorithms are shared.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -16,7 +16,7 @@ use celox_backend_common::regalloc::{
 
 use crate::Arm64Reg;
 use crate::allocation::{Assignment, CopyDestination, CopyOperation, CopySource, EdgeCopyPlan};
-use crate::mir::{AllocatedFunction, BlockId, MFunction, VReg};
+use crate::mir::{AllocatedFunction, BlockId, MFunction, MInst, VReg};
 
 pub(crate) type AllocationFacts = FunctionAllocationFacts<VReg, Arm64Reg>;
 
@@ -54,6 +54,10 @@ pub(crate) enum TargetRegallocError {
         successor: BlockId,
         message: String,
     },
+    UnspillablePressure {
+        value: VReg,
+    },
+    SpillFrameOverflow,
 }
 
 impl fmt::Display for TargetRegallocError {
@@ -110,6 +114,13 @@ impl fmt::Display for TargetRegallocError {
                 formatter,
                 "AArch64 parallel copy on {predecessor} -> {successor}: {message}"
             ),
+            Self::UnspillablePressure { value } => write!(
+                formatter,
+                "AArch64 register pressure at {value} involves only unspillable scratch values"
+            ),
+            Self::SpillFrameOverflow => {
+                formatter.write_str("AArch64 spill frame exceeds the supported i32 offset range")
+            }
         }
     }
 }
@@ -245,6 +256,370 @@ const ALLOCATABLE_REGISTERS: [Arm64Reg; 25] = [
     Arm64Reg::new(28),
 ];
 
+pub(crate) struct TargetAllocation {
+    pub(crate) allocated: AllocatedFunction,
+    pub(crate) spill_frame_size: u32,
+}
+
+/// Allocate target MIR, inserting simple AArch64-owned stack spills when the
+/// interference graph does not fit the register file.
+///
+/// SSA values are split into one stack home, short definition temporaries, and
+/// per-instruction reload temporaries. Spilled phis become target edge copies
+/// whose sources and destinations may be stack slots; register sources receive
+/// allocation-only edge uses to keep them live until the copy. This keeps spill
+/// policy and rewriting on the target side.
+pub(crate) fn allocate_with_spills(
+    mut function: MFunction,
+) -> Result<TargetAllocation, TargetRegallocError> {
+    let initial_facts = build_facts(&function)?;
+    let mut candidates = initial_facts
+        .blocks
+        .iter()
+        .flat_map(|block| {
+            block.phis.iter().map(|phi| phi.destination).chain(
+                block
+                    .instructions
+                    .iter()
+                    .flat_map(|instruction| instruction.defs.iter().copied()),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    for block in &function.blocks {
+        for instruction in &block.insts {
+            if let MInst::Scratch { dst } = instruction {
+                candidates.remove(dst);
+            }
+        }
+    }
+
+    let mut next_value = function
+        .blocks
+        .iter()
+        .flat_map(|block| {
+            block
+                .phis
+                .iter()
+                .flat_map(|phi| std::iter::once(phi.dst).chain(phi.sources.iter().map(|row| row.1)))
+                .chain(block.insts.iter().flat_map(|instruction| {
+                    instruction.uses().into_iter().chain(instruction.def())
+                }))
+        })
+        .map(|value| value.0)
+        .max()
+        .map_or(0, |value| value.saturating_add(1));
+    let mut spill_frame_size = 0_u32;
+
+    loop {
+        let facts = build_facts(&function)?;
+        let intervals = analyze_live_intervals(&facts)
+            .map_err(|error| TargetRegallocError::InvalidFacts(error.to_string()))?;
+        let proactive = close_phi_spill_set(
+            &function,
+            select_spill_batch(&function, &intervals, &candidates, false),
+        );
+        if !proactive.is_empty() {
+            insert_spill_batch(
+                &mut function,
+                &mut candidates,
+                proactive,
+                &mut spill_frame_size,
+                &mut next_value,
+            )?;
+            continue;
+        }
+        match allocate_without_spills(function.clone()) {
+            Ok(allocated) => {
+                return Ok(TargetAllocation {
+                    allocated,
+                    spill_frame_size,
+                });
+            }
+            Err(TargetRegallocError::RegisterPressure { value }) => {
+                let spilled = close_phi_spill_set(
+                    &function,
+                    select_spill_batch(&function, &intervals, &candidates, true),
+                );
+                if spilled.is_empty() {
+                    return Err(TargetRegallocError::UnspillablePressure { value });
+                }
+                insert_spill_batch(
+                    &mut function,
+                    &mut candidates,
+                    spilled,
+                    &mut spill_frame_size,
+                    &mut next_value,
+                )?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn close_phi_spill_set(function: &MFunction, spilled: Vec<VReg>) -> Vec<VReg> {
+    let mut all_spilled = function
+        .spill_homes
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut newly_spilled = spilled.into_iter().collect::<BTreeSet<_>>();
+    all_spilled.extend(newly_spilled.iter().copied());
+    loop {
+        let mut changed = false;
+        for block in &function.blocks {
+            for phi in &block.phis {
+                let touches_spill = all_spilled.contains(&phi.dst)
+                    || phi
+                        .sources
+                        .iter()
+                        .any(|&(_, source)| all_spilled.contains(&source));
+                if touches_spill && all_spilled.insert(phi.dst) {
+                    newly_spilled.insert(phi.dst);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    newly_spilled.into_iter().collect()
+}
+
+fn select_spill_batch(
+    function: &MFunction,
+    intervals: &celox_backend_common::regalloc::LiveIntervals<VReg>,
+    candidates: &BTreeSet<VReg>,
+    force: bool,
+) -> Vec<VReg> {
+    let live_lengths = intervals
+        .iter()
+        .map(|(&value, interval)| {
+            let length = interval
+                .segments
+                .iter()
+                .map(|segment| segment.end.saturating_sub(segment.start))
+                .sum::<u64>();
+            (value, length)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let live_length = |value: VReg| live_lengths.get(&value).copied().unwrap_or(0);
+    // The widest target instruction has five uses and one definition. Keep
+    // that many registers free so a spilled row's local reload/definition
+    // temporaries do not immediately create a second pressure wave.
+    let target_capacity = ALLOCATABLE_REGISTERS.len().saturating_sub(6);
+    let mut selected = BTreeSet::new();
+    let mut peak = Vec::new();
+    for block in 0..function.blocks.len() {
+        let mut segments = intervals
+            .iter()
+            .filter_map(|(&value, interval)| {
+                interval
+                    .segment_in_block(block)
+                    .map(|segment| (segment.start, segment.end, value))
+            })
+            .collect::<Vec<_>>();
+        segments.sort_unstable();
+        let mut active = Vec::<(u64, VReg)>::new();
+        for (start, end, value) in segments {
+            active.retain(|(active_end, active_value)| {
+                *active_end > start && !selected.contains(active_value)
+            });
+            if !selected.contains(&value) {
+                active.push((end, value));
+            }
+            if active.len() > peak.len() {
+                peak = active.iter().map(|&(_, value)| value).collect();
+            }
+            while active.len() > target_capacity {
+                let Some(spilled) = active
+                    .iter()
+                    .filter(|(_, value)| candidates.contains(value))
+                    .max_by_key(|(_, value)| (live_length(*value), Reverse(*value)))
+                    .map(|&(_, value)| value)
+                else {
+                    break;
+                };
+                selected.insert(spilled);
+                active.retain(|&(_, value)| value != spilled);
+            }
+        }
+    }
+
+    if !selected.is_empty() {
+        return selected.into_iter().collect();
+    }
+    if !force {
+        return Vec::new();
+    }
+    peak.into_iter()
+        .filter(|value| candidates.contains(value))
+        .max_by_key(|value| (live_length(*value), Reverse(*value)))
+        .into_iter()
+        .collect()
+}
+
+fn insert_spill_batch(
+    function: &mut MFunction,
+    candidates: &mut BTreeSet<VReg>,
+    spilled: Vec<VReg>,
+    spill_frame_size: &mut u32,
+    next_value: &mut u32,
+) -> Result<(), TargetRegallocError> {
+    let mut homes = BTreeMap::new();
+    for spilled in spilled {
+        candidates.remove(&spilled);
+        let offset = i32::try_from(*spill_frame_size)
+            .map_err(|_| TargetRegallocError::SpillFrameOverflow)?;
+        homes.insert(spilled, offset);
+        *spill_frame_size = spill_frame_size
+            .checked_add(8)
+            .ok_or(TargetRegallocError::SpillFrameOverflow)?;
+    }
+    function
+        .spill_homes
+        .extend(homes.iter().map(|(&value, &offset)| (value, offset)));
+    spill_values(function, &homes, next_value)
+}
+
+fn spill_values(
+    function: &mut MFunction,
+    homes: &BTreeMap<VReg, i32>,
+    next_value: &mut u32,
+) -> Result<(), TargetRegallocError> {
+    let fresh = |next_value: &mut u32| {
+        let value = VReg(*next_value);
+        *next_value = next_value
+            .checked_add(1)
+            .ok_or(TargetRegallocError::SpillFrameOverflow)?;
+        Ok(value)
+    };
+    let mut rewritten_definitions = BTreeSet::new();
+    let all_homes = function.spill_homes.clone();
+    let mut external_phis = Vec::new();
+    let mut edge_keep_alives = BTreeMap::<BlockId, BTreeSet<VReg>>::new();
+    for block in &mut function.blocks {
+        let mut retained = Vec::with_capacity(block.phis.len());
+        for phi in std::mem::take(&mut block.phis) {
+            if let Some(&destination) = all_homes.get(&phi.dst) {
+                let spilled = phi.dst;
+                external_phis.push(crate::mir::SpilledPhiNode {
+                    successor: block.id,
+                    destination,
+                    sources: phi
+                        .sources
+                        .into_iter()
+                        .map(|(predecessor, source)| {
+                            let source = if let Some(&offset) = all_homes.get(&source) {
+                                crate::mir::SpilledPhiSource::Stack(offset)
+                            } else {
+                                edge_keep_alives
+                                    .entry(predecessor)
+                                    .or_default()
+                                    .insert(source);
+                                crate::mir::SpilledPhiSource::Value(source)
+                            };
+                            (predecessor, source)
+                        })
+                        .collect(),
+                });
+                rewritten_definitions.insert(spilled);
+            } else {
+                debug_assert!(
+                    phi.sources
+                        .iter()
+                        .all(|&(_, source)| !all_homes.contains_key(&source)),
+                    "phi spill closure must externalize a destination with a spilled source"
+                );
+                retained.push(phi);
+            }
+        }
+        block.phis = retained;
+    }
+    for phi in &mut function.spilled_phis {
+        for (_, source) in &mut phi.sources {
+            if let crate::mir::SpilledPhiSource::Value(value) = *source
+                && let Some(&offset) = all_homes.get(&value)
+            {
+                *source = crate::mir::SpilledPhiSource::Stack(offset);
+            }
+        }
+    }
+    function.spilled_phis.extend(external_phis);
+    for block in &mut function.blocks {
+        let original = std::mem::take(&mut block.insts);
+        let existing_keep_alives = original
+            .iter()
+            .filter_map(|instruction| match instruction {
+                MInst::KeepAlive { src } if !homes.contains_key(src) => Some(*src),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let new_keep_alives = edge_keep_alives
+            .remove(&block.id)
+            .unwrap_or_default()
+            .difference(&existing_keep_alives)
+            .copied()
+            .collect::<Vec<_>>();
+        let terminator_index = original.len().saturating_sub(1);
+        let mut rewritten = Vec::with_capacity(original.len() + new_keep_alives.len());
+        for (index, mut instruction) in original.into_iter().enumerate() {
+            if matches!(instruction, MInst::KeepAlive { src } if homes.contains_key(&src)) {
+                continue;
+            }
+            if index == terminator_index {
+                rewritten.extend(
+                    new_keep_alives
+                        .iter()
+                        .copied()
+                        .map(|src| MInst::KeepAlive { src }),
+                );
+            }
+            let spilled_uses = instruction
+                .uses()
+                .into_iter()
+                .filter(|value| homes.contains_key(value))
+                .collect::<BTreeSet<_>>();
+            for spilled in spilled_uses {
+                let reload = fresh(next_value)?;
+                rewritten.push(MInst::Load {
+                    dst: reload,
+                    base: crate::mir::BaseReg::StackFrame,
+                    offset: homes[&spilled],
+                    size: crate::mir::OpSize::S64,
+                });
+                instruction.rewrite_use(spilled, reload);
+            }
+            if let Some(spilled) = instruction.def().filter(|value| homes.contains_key(value)) {
+                let temporary = fresh(next_value)?;
+                *instruction
+                    .def_mut()
+                    .expect("the matching spill definition has a mutable destination") = temporary;
+                rewritten.push(instruction);
+                rewritten.push(MInst::Store {
+                    base: crate::mir::BaseReg::StackFrame,
+                    offset: homes[&spilled],
+                    src: temporary,
+                    size: crate::mir::OpSize::S64,
+                });
+                rewritten_definitions.insert(spilled);
+            } else {
+                rewritten.push(instruction);
+            }
+        }
+        block.insts = rewritten;
+    }
+    if let Some(spilled) = homes
+        .keys()
+        .find(|value| !rewritten_definitions.contains(value))
+    {
+        return Err(TargetRegallocError::InvalidFacts(format!(
+            "spill candidate {spilled} has no instruction definition"
+        )));
+    }
+    Ok(())
+}
+
 /// Allocate AArch64-owned target MIR without importing x86 register colors.
 ///
 /// This first target-native path intentionally reports pressure instead of
@@ -369,6 +744,35 @@ fn build_edge_copies(
                     .push(common::ParallelCopy {
                         destination: common::CopyDestination::Register(destination),
                         source: common::CopySource::Register(source),
+                    });
+            }
+        }
+        for phi in function
+            .spilled_phis
+            .iter()
+            .filter(|phi| phi.successor == successor.id)
+        {
+            for &(predecessor, source) in &phi.sources {
+                let source = match source {
+                    crate::mir::SpilledPhiSource::Value(value) => {
+                        common::CopySource::Register(assignment.get(&value).ok_or(
+                            TargetRegallocError::MissingAssignment {
+                                block: predecessor,
+                                instruction: 0,
+                                value,
+                            },
+                        )?)
+                    }
+                    crate::mir::SpilledPhiSource::Stack(offset) => {
+                        common::CopySource::Stack(offset)
+                    }
+                };
+                rows_by_predecessor
+                    .entry(predecessor)
+                    .or_default()
+                    .push(common::ParallelCopy {
+                        destination: common::CopyDestination::Stack(phi.destination),
+                        source,
                     });
             }
         }
@@ -698,6 +1102,139 @@ mod tests {
             allocate_without_spills(function),
             Err(TargetRegallocError::RegisterPressure { .. })
         ));
+    }
+
+    #[test]
+    fn inserts_target_owned_spill_and_reload_instructions() {
+        let mut instructions = (0..26)
+            .map(|value| MInst::LoadImm {
+                dst: VReg(value),
+                value: u64::from(value),
+            })
+            .collect::<Vec<_>>();
+        instructions.extend((0..26).map(|value| MInst::Store {
+            base: BaseReg::SimState,
+            offset: value * 8,
+            src: VReg(value as u32),
+            size: OpSize::S64,
+        }));
+        instructions.push(MInst::Return);
+        let allocation = allocate_with_spills(MFunction::new(
+            vec![MBlock {
+                id: BlockId(0),
+                phis: Vec::new(),
+                insts: instructions,
+            }],
+            Vec::new(),
+        ))
+        .unwrap();
+
+        assert!(allocation.spill_frame_size >= 8);
+        assert_eq!(allocation.spill_frame_size % 8, 0);
+        assert!(
+            allocation.allocated.function.blocks[0]
+                .insts
+                .iter()
+                .any(|instruction| matches!(
+                    instruction,
+                    MInst::Load {
+                        base: BaseReg::StackFrame,
+                        offset: 0,
+                        size: OpSize::S64,
+                        ..
+                    }
+                ))
+        );
+        assert!(
+            allocation.allocated.function.blocks[0]
+                .insts
+                .iter()
+                .any(|instruction| matches!(
+                    instruction,
+                    MInst::Store {
+                        base: BaseReg::StackFrame,
+                        offset: 0,
+                        size: OpSize::S64,
+                        ..
+                    }
+                ))
+        );
+        verify_allocated(&allocation.allocated).unwrap();
+    }
+
+    #[test]
+    fn keeps_external_phi_register_sources_live_to_the_edge() {
+        let mut function = MFunction::new(
+            vec![
+                MBlock {
+                    id: BlockId(0),
+                    phis: Vec::new(),
+                    insts: vec![
+                        MInst::LoadImm {
+                            dst: VReg(0),
+                            value: 42,
+                        },
+                        MInst::Jump { target: BlockId(1) },
+                    ],
+                },
+                MBlock {
+                    id: BlockId(1),
+                    phis: vec![PhiNode {
+                        dst: VReg(1),
+                        sources: vec![(BlockId(0), VReg(0))],
+                    }],
+                    insts: vec![
+                        MInst::Store {
+                            base: BaseReg::SimState,
+                            offset: 0,
+                            src: VReg(1),
+                            size: OpSize::S64,
+                        },
+                        MInst::Return,
+                    ],
+                },
+            ],
+            Vec::new(),
+        );
+        let homes = [(VReg(1), 8)].into_iter().collect();
+        let mut next_value = 2;
+        function.spill_homes.insert(VReg(1), 8);
+
+        spill_values(&mut function, &homes, &mut next_value).unwrap();
+
+        let facts = build_facts(&function).unwrap();
+        let intervals = analyze_live_intervals(&facts).unwrap();
+        assert!(intervals.get(&VReg(0)).is_some());
+        assert!(intervals.get(&VReg(1)).is_none());
+        assert!(matches!(
+            function.blocks[0].insts.as_slice(),
+            [
+                MInst::LoadImm { .. },
+                MInst::KeepAlive { src: VReg(0) },
+                MInst::Jump { .. }
+            ]
+        ));
+        assert!(matches!(
+            function.blocks[1].insts.first(),
+            Some(MInst::Load {
+                base: BaseReg::StackFrame,
+                offset: 8,
+                ..
+            })
+        ));
+        assert_eq!(function.spilled_phis.len(), 1);
+        let allocated = allocate_without_spills(function).unwrap();
+        let source = allocated.assignment.get(&VReg(0)).unwrap();
+        assert_eq!(
+            allocated.edge_copies.edge(BlockId(0), BlockId(1)),
+            Some(
+                [CopyOperation::Move {
+                    destination: CopyDestination::Stack(8),
+                    source: CopySource::Register(source),
+                }]
+                .as_slice()
+            )
+        );
     }
 
     #[test]

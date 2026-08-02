@@ -1,10 +1,12 @@
 //! AArch64 scalar machine IR.
 //!
-//! This is deliberately owned by the AArch64 backend.  The current production
-//! pipeline lowers the established x86 scalar MIR into this form after
-//! allocation; future AArch64 selection, optimization, and allocation can
-//! target the same boundary without teaching the emitter about x86 opcodes.
+//! This is deliberately owned by the AArch64 backend. The current production
+//! pipeline lowers optimized x86 scalar MIR into this form before allocation,
+//! then performs spilling, coloring, and SSA destruction here. Future AArch64
+//! instruction selection can target the same boundary without teaching the
+//! emitter about x86 opcodes.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -112,6 +114,10 @@ pub(crate) enum MInst {
     },
     Scratch {
         dst: VReg,
+    },
+    /// Allocation-only edge use. Emission intentionally produces no code.
+    KeepAlive {
+        src: VReg,
     },
     LoadConstantTableAddr {
         dst: VReg,
@@ -546,6 +552,86 @@ impl MInst {
             | Self::CmpImmSelect { dst, .. }
             | Self::GuardedCmpSelect { dst, .. } => Some(*dst),
             Self::Store { .. }
+            | Self::KeepAlive { .. }
+            | Self::AndStoreImm { .. }
+            | Self::OrStoreImm { .. }
+            | Self::StorePtr { .. }
+            | Self::ReleaseStorePtr { .. }
+            | Self::StoreIndexed { .. }
+            | Self::OrStoreIndexed { .. }
+            | Self::StorePtrIndexed { .. }
+            | Self::ReleaseStorePtrIndexed { .. }
+            | Self::MemCopy { .. }
+            | Self::MemFill { .. }
+            | Self::SparseCommit { .. }
+            | Self::SparseMarkActive { .. }
+            | Self::SparseCommitWorklist { .. }
+            | Self::Branch { .. }
+            | Self::BranchPred { .. }
+            | Self::JumpTable { .. }
+            | Self::Jump { .. }
+            | Self::Return
+            | Self::ReturnError { .. } => None,
+        }
+    }
+
+    pub(crate) fn def_mut(&mut self) -> Option<&mut VReg> {
+        match self {
+            Self::Mov { dst, .. }
+            | Self::Mov32 { dst, .. }
+            | Self::LoadImm { dst, .. }
+            | Self::Scratch { dst }
+            | Self::LoadConstantTableAddr { dst, .. }
+            | Self::Load { dst, .. }
+            | Self::LoadPtr { dst, .. }
+            | Self::LoadIndexed { dst, .. }
+            | Self::PackedLaneCompare { dst, .. }
+            | Self::PackedByteAffineCompare { dst, .. }
+            | Self::LoadPtrIndexed { dst, .. }
+            | Self::Add { dst, .. }
+            | Self::Add32 { dst, .. }
+            | Self::Sub { dst, .. }
+            | Self::Sub32 { dst, .. }
+            | Self::Mul { dst, .. }
+            | Self::Mul32 { dst, .. }
+            | Self::UMulHi { dst, .. }
+            | Self::And { dst, .. }
+            | Self::And32 { dst, .. }
+            | Self::Or { dst, .. }
+            | Self::Or32 { dst, .. }
+            | Self::Xor { dst, .. }
+            | Self::Xor32 { dst, .. }
+            | Self::Shr { dst, .. }
+            | Self::Shl { dst, .. }
+            | Self::Sar { dst, .. }
+            | Self::AndImm { dst, .. }
+            | Self::AndImm32 { dst, .. }
+            | Self::OrImm { dst, .. }
+            | Self::ShrImm { dst, .. }
+            | Self::ShlImm { dst, .. }
+            | Self::SarImm { dst, .. }
+            | Self::AddImm { dst, .. }
+            | Self::SubImm { dst, .. }
+            | Self::Cmp { dst, .. }
+            | Self::CmpImm { dst, .. }
+            | Self::UDiv { dst, .. }
+            | Self::URem { dst, .. }
+            | Self::SDiv { dst, .. }
+            | Self::SRem { dst, .. }
+            | Self::BitNot { dst, .. }
+            | Self::Neg { dst, .. }
+            | Self::Popcnt { dst, .. }
+            | Self::Bsf { dst, .. }
+            | Self::Bsr { dst, .. }
+            | Self::BsrOr { dst, .. }
+            | Self::Pext { dst, .. }
+            | Self::Pdep { dst, .. }
+            | Self::Select { dst, .. }
+            | Self::CmpSelect { dst, .. }
+            | Self::CmpImmSelect { dst, .. }
+            | Self::GuardedCmpSelect { dst, .. } => Some(dst),
+            Self::Store { .. }
+            | Self::KeepAlive { .. }
             | Self::AndStoreImm { .. }
             | Self::OrStoreImm { .. }
             | Self::StorePtr { .. }
@@ -570,7 +656,7 @@ impl MInst {
 
     pub(crate) fn uses(&self) -> Vec<VReg> {
         match self {
-            Self::Mov { src, .. } | Self::Mov32 { src, .. } => vec![*src],
+            Self::Mov { src, .. } | Self::Mov32 { src, .. } | Self::KeepAlive { src } => vec![*src],
             Self::LoadImm { .. }
             | Self::Scratch { .. }
             | Self::LoadConstantTableAddr { .. }
@@ -689,6 +775,178 @@ impl MInst {
         }
     }
 
+    pub(crate) fn rewrite_use(&mut self, old: VReg, new: VReg) {
+        let rewrite = |value: &mut VReg| {
+            if *value == old {
+                *value = new;
+            }
+        };
+        match self {
+            Self::Mov { src, .. }
+            | Self::Mov32 { src, .. }
+            | Self::KeepAlive { src }
+            | Self::Store { src, .. } => {
+                rewrite(src);
+            }
+            Self::LoadPtr { ptr, .. } => rewrite(ptr),
+            Self::StorePtr { ptr, src, .. } | Self::ReleaseStorePtr { ptr, src, .. } => {
+                rewrite(ptr);
+                rewrite(src);
+            }
+            Self::LoadIndexed { index, .. } => rewrite(index),
+            Self::PackedLaneCompare {
+                rhs: PackedLaneCompareRhs::Scalar(value),
+                ..
+            } => rewrite(value),
+            Self::PackedByteAffineCompare { base, rhs, .. } => {
+                rewrite(base);
+                rewrite(rhs);
+            }
+            Self::StoreIndexed { index, src, .. } | Self::OrStoreIndexed { index, src, .. } => {
+                rewrite(index);
+                rewrite(src);
+            }
+            Self::LoadPtrIndexed { ptr, index, .. } => {
+                rewrite(ptr);
+                rewrite(index);
+            }
+            Self::StorePtrIndexed {
+                ptr, index, src, ..
+            }
+            | Self::ReleaseStorePtrIndexed {
+                ptr, index, src, ..
+            } => {
+                rewrite(ptr);
+                rewrite(index);
+                rewrite(src);
+            }
+            Self::Add { lhs, rhs, .. }
+            | Self::Add32 { lhs, rhs, .. }
+            | Self::Sub { lhs, rhs, .. }
+            | Self::Sub32 { lhs, rhs, .. }
+            | Self::Mul { lhs, rhs, .. }
+            | Self::Mul32 { lhs, rhs, .. }
+            | Self::UMulHi { lhs, rhs, .. }
+            | Self::And { lhs, rhs, .. }
+            | Self::And32 { lhs, rhs, .. }
+            | Self::Or { lhs, rhs, .. }
+            | Self::Or32 { lhs, rhs, .. }
+            | Self::Xor { lhs, rhs, .. }
+            | Self::Xor32 { lhs, rhs, .. }
+            | Self::Shr { lhs, rhs, .. }
+            | Self::Shl { lhs, rhs, .. }
+            | Self::Sar { lhs, rhs, .. }
+            | Self::Cmp { lhs, rhs, .. }
+            | Self::UDiv { lhs, rhs, .. }
+            | Self::URem { lhs, rhs, .. }
+            | Self::SDiv { lhs, rhs, .. }
+            | Self::SRem { lhs, rhs, .. } => {
+                rewrite(lhs);
+                rewrite(rhs);
+            }
+            Self::AndImm { src, .. }
+            | Self::AndImm32 { src, .. }
+            | Self::OrImm { src, .. }
+            | Self::ShrImm { src, .. }
+            | Self::ShlImm { src, .. }
+            | Self::SarImm { src, .. }
+            | Self::AddImm { src, .. }
+            | Self::SubImm { src, .. }
+            | Self::BitNot { src, .. }
+            | Self::Neg { src, .. }
+            | Self::Popcnt { src, .. }
+            | Self::Bsf { src, .. }
+            | Self::Bsr { src, .. }
+            | Self::BsrOr { src, .. } => rewrite(src),
+            Self::CmpImm { lhs, .. } => rewrite(lhs),
+            Self::Pext { src, mask, .. } | Self::Pdep { src, mask, .. } => {
+                rewrite(src);
+                rewrite(mask);
+            }
+            Self::Select {
+                cond,
+                true_val,
+                false_val,
+                ..
+            } => {
+                rewrite(cond);
+                rewrite(true_val);
+                rewrite(false_val);
+            }
+            Self::CmpSelect {
+                lhs,
+                rhs,
+                true_val,
+                false_val,
+                ..
+            } => {
+                rewrite(lhs);
+                rewrite(rhs);
+                rewrite(true_val);
+                rewrite(false_val);
+            }
+            Self::CmpImmSelect {
+                lhs,
+                true_val,
+                false_val,
+                ..
+            } => {
+                rewrite(lhs);
+                rewrite(true_val);
+                rewrite(false_val);
+            }
+            Self::GuardedCmpSelect {
+                guard,
+                lhs,
+                rhs,
+                true_val,
+                false_val,
+                ..
+            } => {
+                rewrite(guard);
+                rewrite(lhs);
+                rewrite(rhs);
+                rewrite(true_val);
+                rewrite(false_val);
+            }
+            Self::Branch { cond, .. } => rewrite(cond),
+            Self::BranchPred {
+                predicate: BranchPredicate::Compare { lhs, rhs, .. },
+                ..
+            } => {
+                rewrite(lhs);
+                rewrite(rhs);
+            }
+            Self::BranchPred {
+                predicate: BranchPredicate::CompareImm { lhs, .. },
+                ..
+            } => rewrite(lhs),
+            Self::JumpTable { index, .. } => rewrite(index),
+            Self::LoadImm { .. }
+            | Self::Scratch { .. }
+            | Self::LoadConstantTableAddr { .. }
+            | Self::Load { .. }
+            | Self::AndStoreImm { .. }
+            | Self::OrStoreImm { .. }
+            | Self::PackedLaneCompare {
+                rhs: PackedLaneCompareRhs::Memory { .. },
+                ..
+            }
+            | Self::MemCopy { .. }
+            | Self::MemFill { .. }
+            | Self::SparseCommit { .. }
+            | Self::SparseMarkActive { .. }
+            | Self::SparseCommitWorklist { .. }
+            | Self::BranchPred {
+                predicate: BranchPredicate::MemoryNonZero { .. },
+                ..
+            }
+            | Self::Jump { .. }
+            | Self::Return
+            | Self::ReturnError { .. } => {}
+        }
+    }
+
     pub(crate) fn is_copy(&self) -> bool {
         matches!(self, Self::Mov { .. })
     }
@@ -698,6 +956,19 @@ impl MInst {
 pub(crate) struct PhiNode {
     pub(crate) dst: VReg,
     pub(crate) sources: Vec<(BlockId, VReg)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SpilledPhiSource {
+    Value(VReg),
+    Stack(i32),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SpilledPhiNode {
+    pub(crate) successor: BlockId,
+    pub(crate) destination: i32,
+    pub(crate) sources: Vec<(BlockId, SpilledPhiSource)>,
 }
 
 #[derive(Debug, Clone)]
@@ -727,6 +998,8 @@ impl MBlock {
 pub(crate) struct MFunction {
     pub(crate) blocks: Vec<MBlock>,
     constant_tables: Vec<Vec<u64>>,
+    pub(crate) spill_homes: BTreeMap<VReg, i32>,
+    pub(crate) spilled_phis: Vec<SpilledPhiNode>,
 }
 
 impl MFunction {
@@ -734,6 +1007,8 @@ impl MFunction {
         Self {
             blocks,
             constant_tables,
+            spill_homes: BTreeMap::new(),
+            spilled_phis: Vec::new(),
         }
     }
 

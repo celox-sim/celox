@@ -6,7 +6,7 @@ use std::fmt;
 use celox_backend_x86::native::mir::MFunction as LegacyFunction;
 use celox_backend_x86::native::regalloc::AssignmentMap as LegacyAssignment;
 use celox_backend_x86::native::scalar_pipeline::{
-    PreparedScalarFunction, ScalarPrepareError as PrepareError, prepare_scalar_eu,
+    ScalarPrepareError as PrepareError, prepare_scalar_mir,
 };
 use celox_state_layout::{
     STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET, STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET,
@@ -154,18 +154,36 @@ pub fn emit_prepared_eu(
     if let Some(trace) = trace.as_deref_mut() {
         trace.optimized_sir = sir_eu.to_string();
     }
-    let prepared = prepare_scalar_eu(sir_eu, layout, four_state, label)?;
+    let prepared = prepare_scalar_mir(sir_eu, layout, four_state)?;
+    let state_size = prepared.state_size();
+    let function = crate::legacy_allocation::lower(&prepared.function).map_err(EmitError::from)?;
+    let allocation = crate::regalloc::allocate_with_spills(function)
+        .map_err(|error| EmitError::LegacyLowering(error.to_string()))?;
     if let Some(trace) = trace.as_deref_mut() {
-        trace.mir_after_regalloc = prepared.function.to_string();
-        trace.register_assignment = prepared
-            .allocation
-            .sorted_entries()
+        trace.mir_before_regalloc = prepared.function.to_string();
+        trace.mir_after_regalloc = format!("{:#?}", allocation.allocated.function);
+        let mut assignments = allocation
+            .allocated
+            .assignment
+            .iter()
+            .map(|(&value, register)| (value, register.number()))
+            .collect::<Vec<_>>();
+        assignments.sort_unstable();
+        trace.register_assignment = assignments
             .into_iter()
-            .map(|(value, register)| format!("  {value} -> {register}\n"))
+            .map(|(value, register)| format!("  {value} -> x{register}\n"))
             .collect();
-        trace.spill_frame_size = prepared.spill_frame_size;
+        trace.spill_frame_size = allocation.spill_frame_size;
     }
-    let result = emit_prepared(&prepared, tick_loop, check_runtime_events)?;
+    let result = emit_function(
+        &allocation.allocated.function,
+        &allocation.allocated.assignment,
+        allocation.spill_frame_size,
+        state_size,
+        &allocation.allocated.edge_copies,
+        tick_loop,
+        check_runtime_events,
+    )?;
     if let Some(trace) = trace {
         trace.disassembly = disassemble(&result.code[..result.text_size], 0);
     }
@@ -187,27 +205,6 @@ pub fn emit(
         &allocated.edge_copies,
         false,
         false,
-    )
-}
-
-fn emit_prepared(
-    prepared: &PreparedScalarFunction,
-    tick_loop: bool,
-    check_runtime_events: bool,
-) -> Result<EmitResult, EmitError> {
-    let allocated = crate::legacy_allocation::adapt(
-        &prepared.function,
-        &prepared.allocation,
-        prepared.spill_frame_size,
-    )?;
-    emit_function(
-        &allocated.function,
-        &allocated.assignment,
-        prepared.spill_frame_size,
-        prepared.state_size(),
-        &allocated.edge_copies,
-        tick_loop,
-        check_runtime_events,
     )
 }
 
@@ -414,7 +411,7 @@ fn emit_instruction(
             dynasm!(ops ; .arch aarch64 ; mov W(dst), W(src));
         }
         MInst::LoadImm { dst, value } => emit_load_imm(ops, resolve(assignment, *dst)?, *value),
-        MInst::Scratch { .. } => {}
+        MInst::Scratch { .. } | MInst::KeepAlive { .. } => {}
         MInst::LoadConstantTableAddr { dst, table } => {
             let dst = resolve(assignment, *dst)?;
             let label = *table_labels
@@ -1903,6 +1900,8 @@ pub fn disassemble(code: &[u8], base_addr: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_arch = "aarch64")]
+    use crate::mir as arm_mir;
     use celox_backend_x86::native::mir::{
         BaseReg, BlockId, MBlock, MFunction, MInst, OpSize, SpillDesc, VRegAllocator,
     };
@@ -2048,6 +2047,54 @@ mod tests {
         state[..8].copy_from_slice(&37_u64.to_le_bytes());
         assert_eq!(unsafe { code.call(&mut state) }, 0);
         assert_eq!(u64::from_le_bytes(state[8..].try_into().unwrap()), 42);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn executes_target_owned_spills_and_reloads() {
+        let mut instructions = (0..26)
+            .map(|value| arm_mir::MInst::LoadImm {
+                dst: arm_mir::VReg(value),
+                value: u64::from(value) + 100,
+            })
+            .collect::<Vec<_>>();
+        instructions.extend((0..26).map(|value| arm_mir::MInst::Store {
+            base: arm_mir::BaseReg::SimState,
+            offset: value * 8,
+            src: arm_mir::VReg(value as u32),
+            size: arm_mir::OpSize::S64,
+        }));
+        instructions.push(arm_mir::MInst::Return);
+        let allocation = crate::regalloc::allocate_with_spills(arm_mir::MFunction::new(
+            vec![arm_mir::MBlock {
+                id: arm_mir::BlockId(0),
+                phis: Vec::new(),
+                insts: instructions,
+            }],
+            Vec::new(),
+        ))
+        .unwrap();
+        assert!(allocation.spill_frame_size > 0);
+        let emitted = emit_function(
+            &allocation.allocated.function,
+            &allocation.allocated.assignment,
+            allocation.spill_frame_size,
+            26 * 8,
+            &allocation.allocated.edge_copies,
+            false,
+            false,
+        )
+        .unwrap();
+        let code = crate::jit_mem::JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0_u8; 512];
+
+        assert_eq!(unsafe { code.call(&mut state) }, 0);
+        for value in 0..26_usize {
+            assert_eq!(
+                u64::from_le_bytes(state[value * 8..value * 8 + 8].try_into().unwrap()),
+                value as u64 + 100
+            );
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
