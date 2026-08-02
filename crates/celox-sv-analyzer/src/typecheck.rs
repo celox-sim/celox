@@ -59,6 +59,15 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
             }
         }
         ConstExpr::Binary { left, op, right } => {
+            if matches!(op, BinaryOp::EqCase | BinaryOp::NeCase)
+                && let Some(equal) = eval_literal_case_equality(left, right)
+            {
+                return Some(if matches!(op, BinaryOp::EqCase) {
+                    equal as i128
+                } else {
+                    (!equal) as i128
+                });
+            }
             let left = eval_const_expr(left, constants)?;
             let right = eval_const_expr(right, constants)?;
             match op {
@@ -98,6 +107,32 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
             }
         }
     }
+}
+
+fn eval_literal_case_equality(left: &ConstExpr, right: &ConstExpr) -> Option<bool> {
+    let ConstExpr::Literal(left) = left else {
+        return None;
+    };
+    let ConstExpr::Literal(right) = right else {
+        return None;
+    };
+    let mut left = parse_integral_literal(left)?;
+    let mut right = parse_integral_literal(right)?;
+    let width = left.width.max(right.width);
+    let signed = left.signed && right.signed;
+    let left_extension = signed_extension(&left, signed);
+    let right_extension = signed_extension(&right, signed);
+    left = resize_integral_literal(left, width, signed, left_extension);
+    right = resize_integral_literal(right, width, signed, right_extension);
+    Some(left.value == right.value && left.mask == right.mask)
+}
+
+fn signed_extension(literal: &IntegralLiteral, signed: bool) -> (bool, bool) {
+    if !signed || literal.width == 0 {
+        return (false, false);
+    }
+    let sign_bit = (literal.width - 1) as u64;
+    (literal.value.bit(sign_bit), literal.mask.bit(sign_bit))
 }
 
 fn eval_const_function(
@@ -397,5 +432,22 @@ mod literal_tests {
     fn rejects_invalid_digits_for_base() {
         assert!(parse_integral_literal("4'b102").is_none());
         assert!(parse_integral_literal("4'o8").is_none());
+    }
+
+    #[test]
+    fn evaluates_unknown_literals_in_constant_case_equality() {
+        let eq = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Literal("1'bx".to_string())),
+            op: BinaryOp::EqCase,
+            right: Box::new(ConstExpr::Literal("1'bx".to_string())),
+        };
+        let ne = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Literal("1'bx".to_string())),
+            op: BinaryOp::NeCase,
+            right: Box::new(ConstExpr::Literal("1'bz".to_string())),
+        };
+
+        assert_eq!(eval_const_expr(&eq, &HashMap::new()), Some(1));
+        assert_eq!(eval_const_expr(&ne, &HashMap::new()), Some(1));
     }
 }

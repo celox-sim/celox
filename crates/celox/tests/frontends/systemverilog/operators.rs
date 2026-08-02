@@ -974,10 +974,17 @@ sv_backends! {
             output logic [7:0] q_parameter_expr,
             output logic [7:0] q_function_width,
             output logic [7:0] q_function_signed,
-            output logic [7:0] q_function_param
+            output logic [7:0] q_function_param,
+            output logic [7:0] q_parameter_x_fill,
+            output logic [7:0] q_parameter_z_fill,
+            output logic [7:0] q_function_integer,
+            output logic q_const_case_equality
         );
             localparam logic [1:0] X_LABEL = 2'b1x;
             localparam EXPR_LABEL = 2'b11 + 2'b00;
+            localparam logic [3:0] X_FILL = 'x;
+            localparam logic [3:0] Z_FILL = 'z;
+            localparam MATCH_X = 1'bx === 1'bx;
 
             function automatic logic [1:0] decode(input logic [1:0] value);
                 return value;
@@ -997,6 +1004,10 @@ sv_backends! {
 
             function automatic logic is_zero(input logic [1:0] value);
                 return value === 0;
+            endfunction
+
+            function automatic integer decode_integer(input logic ignored);
+                return 2;
             endfunction
 
             always_ff @(posedge clk) begin
@@ -1025,6 +1036,13 @@ sv_backends! {
                     1'b1: q_function_param <= 8'hd8;
                     default: q_function_param <= 0;
                 endcase
+                q_parameter_x_fill <= X_FILL;
+                q_parameter_z_fill <= Z_FILL;
+                case (decode_integer(mode[0]))
+                    2: q_function_integer <= 8'he9;
+                    default: q_function_integer <= 0;
+                endcase
+                q_const_case_equality <= MATCH_X;
             end
         endmodule
     "#;
@@ -1052,6 +1070,16 @@ sv_backends! {
     assert_eq!(sim.get(sim.signal("q_function_width")), 0xb6u8.into());
     assert_eq!(sim.get(sim.signal("q_function_signed")), 0xc7u8.into());
     assert_eq!(sim.get(sim.signal("q_function_param")), 0xd8u8.into());
+    assert_eq!(
+        sim.get_four_state(sim.signal("q_parameter_x_fill")),
+        (BigUint::from(0x0fu8), BigUint::from(0x0fu8)),
+    );
+    assert_eq!(
+        sim.get_four_state(sim.signal("q_parameter_z_fill")),
+        (BigUint::from(0u8), BigUint::from(0x0fu8)),
+    );
+    assert_eq!(sim.get(sim.signal("q_function_integer")), 0xe9u8.into());
+    assert_eq!(sim.get(sim.signal("q_const_case_equality")), 1u8.into());
 
     sim.modify(|io| {
         io.set_four_state(mode, BigUint::from(0b11u8), BigUint::from(0b01u8));
@@ -1065,6 +1093,16 @@ sv_backends! {
     assert_eq!(sim.get(sim.signal("q_function_width")), 0xb6u8.into());
     assert_eq!(sim.get(sim.signal("q_function_signed")), 0xc7u8.into());
     assert_eq!(sim.get(sim.signal("q_function_param")), 0xd8u8.into());
+    assert_eq!(
+        sim.get_four_state(sim.signal("q_parameter_x_fill")),
+        (BigUint::from(0x0fu8), BigUint::from(0x0fu8)),
+    );
+    assert_eq!(
+        sim.get_four_state(sim.signal("q_parameter_z_fill")),
+        (BigUint::from(0u8), BigUint::from(0x0fu8)),
+    );
+    assert_eq!(sim.get(sim.signal("q_function_integer")), 0xe9u8.into());
+    assert_eq!(sim.get(sim.signal("q_const_case_equality")), 1u8.into());
     }
 
     fn simulates_systemverilog_repeat_concat(sim) {

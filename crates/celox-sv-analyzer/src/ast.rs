@@ -1184,8 +1184,11 @@ fn parameters_from_ref_node(
     parameters: &mut Vec<Parameter>,
 ) -> Result<(), AnalyzerError> {
     let parameter_width = parameter_declared_width(node.clone(), syntax_tree, parameters);
-    let parameter_signed =
-        parameter_width.map(|_| is_signed_from_ref_node(node.clone()).unwrap_or(false));
+    let parameter_signed = parameter_width.map(|_| {
+        integer_atom_expr_type(node.clone())
+            .map(|r#type| r#type.signed)
+            .unwrap_or_else(|| is_signed_from_ref_node(node.clone()).unwrap_or(false))
+    });
     for child in node {
         if let RefNode::ParamAssignment(param) = child {
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
@@ -1194,7 +1197,8 @@ fn parameters_from_ref_node(
                 .2
                 .as_ref()
                 .and_then(|(_, expr)| const_expr_from_constant_param(expr, syntax_tree));
-            value = normalize_unbased_unsized_parameter_value(value, parameter_width);
+            value =
+                normalize_unbased_unsized_parameter_value(value, parameter_width, parameter_signed);
             parameters.push(Parameter::new(
                 name,
                 value,
@@ -1213,6 +1217,9 @@ fn parameter_declared_width(
 ) -> Option<usize> {
     let ranges = packed_ranges_from_ref_node(node.clone(), syntax_tree);
     if ranges.is_empty() {
+        if let Some(r#type) = integer_atom_expr_type(node.clone()) {
+            return Some(r#type.width);
+        }
         return unwrap_node!(node, IntegerVectorType).is_some().then_some(1);
     }
     let env = const_env_from_parameters(parameters);
@@ -1226,7 +1233,9 @@ fn parameter_declared_width(
 fn normalize_unbased_unsized_parameter_value(
     value: Option<ConstExpr>,
     width: Option<usize>,
+    signed: Option<bool>,
 ) -> Option<ConstExpr> {
+    let signing = if signed.unwrap_or(false) { "s" } else { "" };
     match (value, width) {
         (Some(ConstExpr::Literal(value)), Some(width)) if value == "'1" && width <= 128 => {
             let bits = if width == 128 {
@@ -1234,10 +1243,16 @@ fn normalize_unbased_unsized_parameter_value(
             } else {
                 (1u128 << width) - 1
             };
-            Some(ConstExpr::Literal(format!("{width}'d{bits}")))
+            Some(ConstExpr::Literal(format!("{width}'{signing}d{bits}")))
         }
         (Some(ConstExpr::Literal(value)), Some(width)) if value == "'0" => {
-            Some(ConstExpr::Literal(format!("{width}'d0")))
+            Some(ConstExpr::Literal(format!("{width}'{signing}d0")))
+        }
+        (Some(ConstExpr::Literal(value)), Some(width))
+            if matches!(value.as_str(), "'x" | "'X" | "'z" | "'Z" | "'?") =>
+        {
+            let fill = value.chars().nth(1)?;
+            Some(ConstExpr::Literal(format!("{width}'{signing}b{fill}")))
         }
         (value, _) => value,
     }
@@ -1866,6 +1881,9 @@ fn function_return_type(
     if alias.is_some() || unwrap_node!(node.clone(), TypeIdentifier).is_some() {
         return None;
     }
+    if let Some(r#type) = integer_atom_expr_type(node.clone()) {
+        return Some(r#type);
+    }
     let ranges = packed_ranges_from_ref_node(node.clone(), syntax_tree);
     let width = if ranges.is_empty() {
         1
@@ -1917,6 +1935,11 @@ fn value_type_from_ref_node(
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
     let alias = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases);
+    if alias.is_none()
+        && let Some(r#type) = integer_atom_expr_type(node.clone())
+    {
+        return Some(r#type);
+    }
     let direct_ranges;
     let ranges = if let Some(alias) = &alias {
         alias.packed_ranges()
@@ -1939,6 +1962,24 @@ fn value_type_from_ref_node(
             .as_ref()
             .map(|r#type| r#type.is_signed())
             .unwrap_or_else(|| is_signed_from_ref_node(node).unwrap_or(false)),
+    })
+}
+
+fn integer_atom_expr_type(node: RefNode<'_>) -> Option<ExprType> {
+    let atom = unwrap_node!(node.clone(), IntegerAtomType)?;
+    let RefNode::IntegerAtomType(atom) = atom else {
+        return None;
+    };
+    let (width, default_signed) = match atom {
+        sv_parser::IntegerAtomType::Byte(_) => (8, true),
+        sv_parser::IntegerAtomType::Shortint(_) => (16, true),
+        sv_parser::IntegerAtomType::Int(_) | sv_parser::IntegerAtomType::Integer(_) => (32, true),
+        sv_parser::IntegerAtomType::Longint(_) => (64, true),
+        sv_parser::IntegerAtomType::Time(_) => (64, false),
+    };
+    Some(ExprType {
+        width,
+        signed: is_signed_from_ref_node(node).unwrap_or(default_signed),
     })
 }
 
