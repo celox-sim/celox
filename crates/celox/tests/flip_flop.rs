@@ -869,6 +869,40 @@ fn test_ff_runtime_reverse_step_matches_emitted_sv_order(sim) {
     assert_eq!(sim.get(q), 1u32.into());
 }
 
+fn test_ff_runtime_reverse_min_i32_end_wraps_before_range_check(sim) {
+    // The upstream Veryl simulator currently skips this wrapped reverse range.
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            start: input signed logic<64>,
+            end_bound: input signed logic<64>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in rev start..end_bound {
+                    q = i as 32;
+                    break;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let end_bound = sim.signal("end_bound");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(start, (-2147483648i64) as u64);
+        io.set(end_bound, (-2147483648i64) as u64);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0x7fff_ffffu32.into());
+}
+
 fn test_ff_runtime_reverse_i32_step_truncation_reports_true_loop(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
@@ -2214,6 +2248,40 @@ fn test_ff_runtime_for_wide_dynamic_end_errors_before_iteration() {
 
     sim.modify(|io| io.set_wide(count, BigUint::from(1u64) << 40))
         .unwrap();
+    assert_eq!(
+        sim.tick(clk).unwrap_err().to_string(),
+        "For loop value exceeds loop variable range in always_ff (loop variable `i`): i"
+    );
+}
+
+#[test]
+fn test_ff_runtime_for_wide_dynamic_reverse_end_errors_before_iteration() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            start: input signed logic<64>,
+            end_bound: input signed logic<128>,
+            q_hits: output logic<8>
+        ) {
+            always_ff (clk) {
+                q_hits = 0;
+                for i in rev start..end_bound {
+                    q_hits += 1;
+                }
+            }
+        }
+    "#;
+
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let end_bound = sim.signal("end_bound");
+
+    sim.modify(|io| {
+        io.set(start, 0u64);
+        io.set_wide(end_bound, BigUint::from(1u64) << 40);
+    })
+    .unwrap();
     assert_eq!(
         sim.tick(clk).unwrap_err().to_string(),
         "For loop value exceeds loop variable range in always_ff (loop variable `i`): i"

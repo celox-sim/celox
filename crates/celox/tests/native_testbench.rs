@@ -730,6 +730,37 @@ fn test_for_loop_static_bounds_use_signed_i32_progress() {
 }
 
 #[test]
+fn test_for_loop_unsigned_dynamic_bounds_use_signed_i32_progress() {
+    for (start, end, step) in [
+        ("2147483647", "2147483648", "+= 1"),
+        ("1500000000", "1600000000", "*= 2"),
+        ("1073741824", "1500000000", "<<= 1"),
+        ("1", "100", "|= 2147483648"),
+        ("1", "100", "^= 2147483648"),
+    ] {
+        let code = format!(
+            r#"
+            #[test(t)]
+            module t {{
+                var start: logic<64>;
+                var end_bound: logic<64>;
+                initial {{
+                    start = {start};
+                    end_bound = {end};
+                    for _i in start..end_bound step {step} {{}}
+                    $finish();
+                }}
+            }}
+        "#
+        );
+        let TestResult::Fail(message) = Simulator::builder(&code, "t").run_test().unwrap() else {
+            panic!("expected signed i32 loop failure for dynamic step {step}");
+        };
+        assert!(message.contains("non-progressing stepped for loop"));
+    }
+}
+
+#[test]
 fn test_for_loop_large_multiplier_preserves_low_i32_bits() {
     let code = r#"
         #[test(t)]
@@ -746,6 +777,25 @@ fn test_for_loop_large_multiplier_preserves_low_i32_bits() {
     "#;
     let TestResult::Fail(message) = Simulator::builder(code, "t").run_test().unwrap() else {
         panic!("expected fixed-width multiplication failure");
+    };
+    assert!(message.contains("non-progressing stepped for loop"));
+}
+
+#[test]
+fn test_for_loop_wide_singleton_still_checks_fixed_width_progress() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var bound: logic<128>;
+            initial {
+                bound = (128'd1 << 100);
+                for _i in bound..=bound step *= 2 {}
+                $finish();
+            }
+        }
+    "#;
+    let TestResult::Fail(message) = Simulator::builder(code, "t").run_test().unwrap() else {
+        panic!("expected fixed-width progress failure for wide singleton bound");
     };
     assert!(message.contains("non-progressing stepped for loop"));
 }

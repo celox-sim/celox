@@ -1426,9 +1426,10 @@ impl<'a> FfParser<'a> {
         };
 
         let init_reg = if reverse && !inclusive {
-            let reg = ir_builder.alloc_bit(compare_width, loop_signed);
-            ir_builder.emit(SIRInstruction::Binary(reg, end_reg, BinaryOp::Sub, one_reg));
-            reg
+            let raw = ir_builder.alloc_bit(compare_width, loop_signed);
+            ir_builder.emit(SIRInstruction::Binary(raw, end_reg, BinaryOp::Sub, one_reg));
+            let visible = self.cast_reg_width_ext(ir_builder, raw, loop_width, loop_signed);
+            self.cast_reg_width_ext(ir_builder, visible, compare_width, loop_signed)
         } else if reverse {
             end_reg
         } else {
@@ -1440,6 +1441,7 @@ impl<'a> FfParser<'a> {
         let body_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let needs_range_check = compare_width != loop_width;
         let precheck_bb = (!reverse && needs_range_check).then(|| ir_builder.new_block());
+        let reverse_precheck_bb = (reverse && needs_range_check).then(|| ir_builder.new_block());
         let empty_exit_counter = ir_builder.alloc_bit(compare_width, loop_signed);
         let empty_exit_check_bb =
             needs_range_check.then(|| ir_builder.new_block_with(vec![empty_exit_counter]));
@@ -1450,6 +1452,8 @@ impl<'a> FfParser<'a> {
         let exit_bb = ir_builder.new_block();
         if let Some(precheck_bb) = precheck_bb {
             ir_builder.seal_block(SIRTerminator::Jump(precheck_bb, vec![]));
+        } else if let Some(reverse_precheck_bb) = reverse_precheck_bb {
+            ir_builder.seal_block(SIRTerminator::Jump(reverse_precheck_bb, vec![]));
         } else {
             ir_builder.seal_block(SIRTerminator::Jump(header_bb, vec![init_reg]));
         }
@@ -1540,6 +1544,40 @@ impl<'a> FfParser<'a> {
                 cond: cond_reg,
                 true_block: (fitcheck_bb, vec![start_reg]),
                 false_block: (empty_exit_check_bb, vec![start_reg]),
+            });
+        }
+
+        if let (Some(reverse_precheck_bb), Some(range_error_bb)) =
+            (reverse_precheck_bb, range_error_bb)
+        {
+            ir_builder.switch_to_block(reverse_precheck_bb);
+            let start_fits = Self::emit_loop_value_fits(
+                ir_builder,
+                start_reg,
+                compare_width,
+                loop_width,
+                loop_signed,
+                false,
+            );
+            let end_fits = Self::emit_loop_value_fits(
+                ir_builder,
+                end_reg,
+                compare_width,
+                loop_width,
+                loop_signed,
+                false,
+            );
+            let bounds_fit = ir_builder.alloc_bit(1, false);
+            ir_builder.emit(SIRInstruction::Binary(
+                bounds_fit,
+                start_fits,
+                BinaryOp::LogicAnd,
+                end_fits,
+            ));
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: bounds_fit,
+                true_block: (header_bb, vec![init_reg]),
+                false_block: (range_error_bb, vec![]),
             });
         }
 
