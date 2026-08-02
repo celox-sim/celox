@@ -222,6 +222,59 @@ impl<'a> FfParser<'a> {
         })
     }
 
+    fn statement_is_function_return(statement: &Statement, ret_id: Option<VarId>) -> bool {
+        let Some(ret_id) = ret_id else {
+            return false;
+        };
+        let Statement::Assign(assign) = statement else {
+            return false;
+        };
+        assign.dst.len() == 1
+            && assign.dst[0].id == ret_id
+            && assign.dst[0].index.0.is_empty()
+            && assign.dst[0].select.0.is_empty()
+            && assign.dst[0].select.1.is_none()
+    }
+
+    fn statements_contain_function_return(statements: &[Statement], ret_id: Option<VarId>) -> bool {
+        statements.iter().any(|statement| {
+            Self::statement_is_function_return(statement, ret_id)
+                || match statement {
+                    Statement::If(statement) => {
+                        Self::statements_contain_function_return(&statement.true_side, ret_id)
+                            || Self::statements_contain_function_return(
+                                &statement.false_side,
+                                ret_id,
+                            )
+                    }
+                    Statement::Case(statement) => {
+                        statement
+                            .arms
+                            .iter()
+                            .any(|arm| Self::statements_contain_function_return(&arm.body, ret_id))
+                            || Self::statements_contain_function_return(&statement.default, ret_id)
+                    }
+                    Statement::For(statement) => {
+                        Self::statements_contain_function_return(&statement.body, ret_id)
+                    }
+                    Statement::IfReset(statement) => {
+                        Self::statements_contain_function_return(&statement.true_side, ret_id)
+                            || Self::statements_contain_function_return(
+                                &statement.false_side,
+                                ret_id,
+                            )
+                    }
+                    Statement::Assign(_)
+                    | Statement::FunctionCall(_)
+                    | Statement::SystemFunctionCall(_)
+                    | Statement::TbMethodCall(_)
+                    | Statement::Break
+                    | Statement::Unsupported(_)
+                    | Statement::Null => false,
+                }
+        })
+    }
+
     fn state_value_expr(id: VarId, state: &HashMap<VarId, Expression>) -> Expression {
         state.get(&id).cloned().unwrap_or_else(|| {
             Expression::Term(Box::new(Factor::Variable(
@@ -277,7 +330,11 @@ impl<'a> FfParser<'a> {
     ) -> Result<Expression, ParserError> {
         Ok(match expr {
             Expression::Term(factor) => match factor.as_ref() {
-                Factor::Variable(_, _, _, _) => Self::substitute_function_expr(expr, state),
+                // Keep the formal access intact. Runtime-event lowering binds it
+                // against the state captured for this argument, which both
+                // preserves left-to-right snapshots and applies the formal's
+                // declared width, signedness, and state kind.
+                Factor::Variable(_, _, _, _) => expr.clone(),
                 Factor::FunctionCall(call) => {
                     let mut call = call.clone();
                     for input in call.inputs.values_mut() {
@@ -288,7 +345,7 @@ impl<'a> FfParser<'a> {
                     Expression::Term(Box::new(Factor::FunctionCall(call)))
                 }
                 Factor::SystemFunctionCall(call) => {
-                    let (call, next) = self.prepare_system_function_call(call, state)?;
+                    let (call, next, _) = self.prepare_system_function_call(call, state)?;
                     *state = next;
                     Expression::Term(Box::new(Factor::SystemFunctionCall(call)))
                 }
@@ -364,19 +421,36 @@ impl<'a> FfParser<'a> {
         &self,
         call: &SystemFunctionCall,
         initial: &HashMap<VarId, Expression>,
-    ) -> Result<(SystemFunctionCall, HashMap<VarId, Expression>), ParserError> {
+    ) -> Result<
+        (
+            SystemFunctionCall,
+            HashMap<VarId, Expression>,
+            HashMap<TokenRange, HashMap<VarId, Expression>>,
+        ),
+        ParserError,
+    > {
         let mut call = call.clone();
         let mut state = initial.clone();
+        let mut arg_states = HashMap::default();
+        let capture = |parser: &Self,
+                       input: &mut veryl_analyzer::ir::SystemFunctionInput,
+                       state: &mut HashMap<VarId, Expression>,
+                       arg_states: &mut HashMap<TokenRange, HashMap<VarId, Expression>>|
+         -> Result<(), ParserError> {
+            input.0 = parser.capture_nested_function_outputs(&input.0, state)?;
+            arg_states.insert(input.0.token_range(), state.clone());
+            Ok(())
+        };
         match &mut call.kind {
             SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
                 for input in args {
-                    input.0 = self.capture_nested_function_outputs(&input.0, &mut state)?;
+                    capture(self, input, &mut state, &mut arg_states)?;
                 }
             }
             SystemFunctionKind::Assert { cond, args, .. } => {
-                cond.0 = self.capture_nested_function_outputs(&cond.0, &mut state)?;
+                capture(self, cond, &mut state, &mut arg_states)?;
                 for input in args {
-                    input.0 = self.capture_nested_function_outputs(&input.0, &mut state)?;
+                    capture(self, input, &mut state, &mut arg_states)?;
                 }
             }
             SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => {}
@@ -386,10 +460,10 @@ impl<'a> FfParser<'a> {
             | SystemFunctionKind::Onehot(input)
             | SystemFunctionKind::Signed(input)
             | SystemFunctionKind::Unsigned(input) => {
-                input.0 = self.capture_nested_function_outputs(&input.0, &mut state)?;
+                capture(self, input, &mut state, &mut arg_states)?;
             }
         }
-        Ok((call, state))
+        Ok((call, state, arg_states))
     }
 
     fn apply_statements_to_function_state(
@@ -460,7 +534,7 @@ impl<'a> FfParser<'a> {
             Statement::Case(statement) => self.apply_case_to_function_state(statement, 0, state),
             Statement::FunctionCall(call) => self.apply_function_call_to_state(call, state),
             Statement::SystemFunctionCall(call) => {
-                let (_, next) = self.prepare_system_function_call(call, state)?;
+                let (_, next, _) = self.prepare_system_function_call(call, state)?;
                 Ok(next)
             }
             Statement::Null => Ok(state.clone()),
@@ -516,6 +590,7 @@ impl<'a> FfParser<'a> {
     fn emit_function_runtime_effects<A>(
         &mut self,
         statements: &[Statement],
+        ret_id: Option<VarId>,
         bindings: &HashMap<VarId, Expression>,
         targets: &mut Vec<VarAtomBase<A>>,
         domain: &Domain,
@@ -524,7 +599,25 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
         let mut state = bindings.clone();
+        let mut conditional_return_seen = false;
         for statement in statements {
+            if Self::statement_is_function_return(statement, ret_id) {
+                break;
+            }
+            if conditional_return_seen
+                && self.statements_have_runtime_effect(
+                    std::slice::from_ref(statement),
+                    &mut HashSet::default(),
+                )
+            {
+                return Err(ParserError::unsupported(
+                    66,
+                    LoweringPhase::FfLowering,
+                    "runtime effect after conditional function return",
+                    format!("{statement}"),
+                    None,
+                ));
+            }
             match statement {
                 Statement::Assign(assign) => {
                     if self.expression_has_runtime_effect(&assign.expr) {
@@ -539,17 +632,14 @@ impl<'a> FfParser<'a> {
                     state = self.apply_statement_to_function_state(statement, &state)?;
                 }
                 Statement::SystemFunctionCall(call) => {
-                    let (call, next_state) = self.prepare_system_function_call(call, &state)?;
+                    let (call, next_state, arg_states) =
+                        self.prepare_system_function_call(call, &state)?;
                     state = next_state;
-                    // Keep the current symbolic state available while parsing
-                    // selected/indexed formals in event arguments. Whole-value
-                    // substitution alone cannot apply an access to a rewritten
-                    // expression such as `written[3:0]`.
-                    self.function_arg_stack.push(state.clone());
+                    self.function_event_arg_state_stack.push(arg_states);
                     let result = self.parse_system_task_statement(
                         &call, targets, domain, convert, sources, ir_builder,
                     );
-                    self.function_arg_stack.pop();
+                    self.function_event_arg_state_stack.pop();
                     result?;
                 }
                 Statement::Null => {}
@@ -594,6 +684,12 @@ impl<'a> FfParser<'a> {
                         self.apply_statements_to_function_state(&statement.false_side, &state)?;
                     state =
                         Self::merge_expression_states(&condition, &state, &then_state, &else_state);
+                    conditional_return_seen |=
+                        Self::statements_contain_function_return(&statement.true_side, ret_id)
+                            || Self::statements_contain_function_return(
+                                &statement.false_side,
+                                ret_id,
+                            );
                 }
                 Statement::Case(statement) => {
                     let mut visiting = HashSet::default();
@@ -612,6 +708,11 @@ impl<'a> FfParser<'a> {
                         ));
                     }
                     state = self.apply_case_to_function_state(statement, 0, &state)?;
+                    conditional_return_seen |= statement
+                        .arms
+                        .iter()
+                        .any(|arm| Self::statements_contain_function_return(&arm.body, ret_id))
+                        || Self::statements_contain_function_return(&statement.default, ret_id);
                 }
                 Statement::For(statement) => {
                     return Err(ParserError::unsupported(
@@ -933,6 +1034,16 @@ impl<'a> FfParser<'a> {
             .find_map(|bindings| bindings.get(&token))
     }
 
+    pub(super) fn get_bound_function_event_arg_state(
+        &self,
+        token: TokenRange,
+    ) -> Option<&HashMap<VarId, Expression>> {
+        self.function_event_arg_state_stack
+            .iter()
+            .rev()
+            .find_map(|states| states.get(&token))
+    }
+
     fn expression_references_any(expr: &Expression, candidates: &HashSet<VarId>) -> bool {
         let input_references = |input: &veryl_analyzer::ir::SystemFunctionInput| {
             Self::expression_references_any(&input.0, candidates)
@@ -1022,17 +1133,21 @@ impl<'a> FfParser<'a> {
             .values()
             .flat_map(|destinations| destinations.iter().map(|dst| dst.id))
             .collect();
-        for arg_path in ordered_arg_paths {
+        let last_effectful_arg = ordered_arg_paths.iter().rposition(|arg_path| {
+            call.inputs.get(arg_path).is_some_and(|actual| {
+                super::expression::expression_has_side_effect(actual)
+                    || self.expression_has_runtime_effect(actual)
+            })
+        });
+        for (arg_index, arg_path) in ordered_arg_paths.iter().enumerate() {
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
                 continue;
             };
             let Some(actual) = call.inputs.get(arg_path) else {
                 continue;
             };
-            if !super::expression::expression_has_side_effect(actual)
-                && !self.expression_has_runtime_effect(actual)
-                && !Self::expression_references_any(actual, &output_ids)
-            {
+            let must_snapshot_for_order = last_effectful_arg.is_some_and(|last| arg_index <= last);
+            if !must_snapshot_for_order && !Self::expression_references_any(actual, &output_ids) {
                 continue;
             }
 
@@ -1275,7 +1390,7 @@ impl<'a> FfParser<'a> {
                     Some(&ir.token),
                 )),
                 Statement::SystemFunctionCall(call) => {
-                    let (_, next_state) = parser.prepare_system_function_call(call, state)?;
+                    let (_, next_state, _) = parser.prepare_system_function_call(call, state)?;
                     Ok(next_state)
                 }
                 Statement::FunctionCall(call) => parser.apply_function_call_to_state(call, state),
@@ -1454,7 +1569,7 @@ impl<'a> FfParser<'a> {
                     Some(&ir.token),
                 )),
                 Statement::SystemFunctionCall(call) => {
-                    let (_, next_defs) = parser.prepare_system_function_call(call, defs)?;
+                    let (_, next_defs, _) = parser.prepare_system_function_call(call, defs)?;
                     resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
                 }
                 Statement::FunctionCall(call) => {
@@ -1624,6 +1739,7 @@ impl<'a> FfParser<'a> {
             {
                 self.emit_function_runtime_effects(
                     &function_body.statements,
+                    function_body.ret,
                     &symbolic_bindings,
                     targets,
                     domain,
@@ -1753,6 +1869,7 @@ impl<'a> FfParser<'a> {
             if has_runtime_effect {
                 self.emit_function_runtime_effects(
                     &function_body.statements,
+                    function_body.ret,
                     &symbolic_bindings,
                     targets,
                     domain,

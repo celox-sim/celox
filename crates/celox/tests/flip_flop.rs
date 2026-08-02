@@ -804,6 +804,128 @@ fn test_ff_effectful_function_inputs_follow_declaration_order(sim) {
     );
 }
 
+fn test_ff_pure_input_is_snapshotted_before_later_effectful_input(sim) {
+    @omit_veryl;
+    @setup { let code = r#"
+        module Top (clk: input clock, effect: output logic<8>, q: output logic<8>) {
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x + 8'd1;
+            }
+
+            function combine (
+                first: input logic<8>,
+                second: input logic<8>
+            ) -> logic<8> {
+                return first;
+            }
+
+            always_ff (clk) {
+                q = combine(effect, update(effect, effect));
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(effect, 5u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 6u8.into());
+    assert_eq!(sim.get(q), 5u8.into());
+}
+
+fn test_ff_runtime_event_arguments_use_per_argument_state(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x + 8'd2;
+            }
+
+            function observed (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x;
+                $display("args=%0d %0d", written[3:0], update(x, written));
+                return written;
+            }
+
+            always_ff (clk) {
+                q = observed(d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 10u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 11u8.into());
+    assert_eq!(sim.get(q), 11u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "args=10 12".to_string(),
+        }],
+    );
+}
+
+fn test_ff_runtime_event_formal_uses_declared_type(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<16>,
+            q: output signed logic<8>
+        ) {
+            function observed (
+                x: input signed logic<8>
+            ) -> signed logic<8> {
+                $display("formal=%0d", x);
+                return x;
+            }
+
+            always_ff (clk) {
+                q = observed(d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 0x01ffu16)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0xffu8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "formal=-1".to_string(),
+        }],
+    );
+}
+
 fn test_ff_rewritten_runtime_event_argument_preserves_signedness(sim) {
     @omit_veryl;
     @ignore_on(wasm);

@@ -925,6 +925,44 @@ fn test_ff_void_function_call_in_expression_is_illegal_context() {
 }
 
 #[test]
+fn test_ff_runtime_effect_after_conditional_return_is_rejected() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            skip: input logic,
+            d: input logic<8>,
+            q: output logic<8>
+        ) {
+            function observed (
+                skip: input logic,
+                x: input logic<8>
+            ) -> logic<8> {
+                if skip {
+                    return x;
+                }
+                $display("x=%0d", x);
+                return x;
+            }
+
+            always_ff (clk) {
+                q = observed(skip, d);
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("runtime effect after a conditional return must be rejected");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 66);
+            assert_eq!(*feature, "runtime effect after conditional function return");
+        }
+        other => panic!("expected conditional return runtime-effect error, got: {other:?}"),
+    }
+}
+
+#[test]
 fn test_ff_array_literal_multiple_default_is_illegal_context() {
     let code = r#"
         module Top (

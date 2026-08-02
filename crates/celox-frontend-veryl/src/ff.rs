@@ -280,6 +280,7 @@ pub struct FfParser<'a> {
     function_arg_stack: Vec<HashMap<VarId, Expression>>,
     function_arg_value_stack: Vec<HashMap<VarId, RegisterId>>,
     function_expression_value_stack: Vec<HashMap<TokenRange, RegisterId>>,
+    function_event_arg_state_stack: Vec<HashMap<TokenRange, HashMap<VarId, Expression>>>,
     runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     runtime_event_sites: Vec<RuntimeEventSite>,
     next_runtime_error_code: i64,
@@ -319,6 +320,7 @@ impl<'a> FfParser<'a> {
             function_arg_stack: Vec::new(),
             function_arg_value_stack: Vec::new(),
             function_expression_value_stack: Vec::new(),
+            function_event_arg_state_stack: Vec::new(),
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
             next_runtime_error_code: 2000,
@@ -419,6 +421,30 @@ impl<'a> FfParser<'a> {
         id
     }
 
+    fn parse_runtime_event_expression<A>(
+        &mut self,
+        expr: &Expression,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        let state = self
+            .get_bound_function_event_arg_state(expr.token_range())
+            .cloned();
+        let has_state = state.is_some();
+        if let Some(state) = state {
+            self.function_arg_stack.push(state);
+        }
+        let result =
+            self.parse_expression(expr, targets, domain, convert, sources, ir_builder, None);
+        if has_state {
+            self.function_arg_stack.pop();
+        }
+        result
+    }
+
     fn emit_runtime_event<A>(
         &mut self,
         site_id: u32,
@@ -440,7 +466,9 @@ impl<'a> FfParser<'a> {
         };
         let mut regs = Vec::new();
         for arg in value_args {
-            self.parse_expression(&arg.0, targets, domain, convert, sources, ir_builder, None)?;
+            self.parse_runtime_event_expression(
+                &arg.0, targets, domain, convert, sources, ir_builder,
+            )?;
             regs.push(self.stack.pop_back().unwrap());
         }
         ir_builder.emit(SIRInstruction::RuntimeEvent {
@@ -482,7 +510,9 @@ impl<'a> FfParser<'a> {
         value_args
             .iter()
             .map(|arg| {
-                self.parse_expression(&arg.0, targets, domain, convert, sources, ir_builder, None)?;
+                self.parse_runtime_event_expression(
+                    &arg.0, targets, domain, convert, sources, ir_builder,
+                )?;
                 Ok(Some(self.stack.pop_back().unwrap()))
             })
             .collect()
@@ -514,7 +544,9 @@ impl<'a> FfParser<'a> {
             if let Some(reg) = prepared {
                 regs.push(reg);
             } else {
-                self.parse_expression(&arg.0, targets, domain, convert, sources, ir_builder, None)?;
+                self.parse_runtime_event_expression(
+                    &arg.0, targets, domain, convert, sources, ir_builder,
+                )?;
                 regs.push(self.stack.pop_back().unwrap());
             }
         }
@@ -543,8 +575,8 @@ impl<'a> FfParser<'a> {
                 Ok(ControlFlow::Continue)
             }
             SystemFunctionKind::Assert { kind, cond, args } => {
-                self.parse_expression(
-                    &cond.0, targets, domain, convert, sources, ir_builder, None,
+                self.parse_runtime_event_expression(
+                    &cond.0, targets, domain, convert, sources, ir_builder,
                 )?;
                 let cond_reg = self.stack.pop_back().unwrap();
                 let cond_reg = self.lower_procedural_condition(cond_reg, ir_builder);
