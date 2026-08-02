@@ -1627,11 +1627,11 @@ fn collect_written_accesses(
 }
 
 fn eval_fully_known_constexpr(expression: &Expression) -> Option<BigUint> {
-    let (_, mask, _, _) = celox_value_from_comptime(expression.comptime())?;
+    let (value, mask, _, _) = celox_value_from_comptime(expression.comptime())?;
     if !mask.is_zero() {
         return None;
     }
-    eval_constexpr(expression)
+    Some(value)
 }
 
 pub(super) fn collect_written_expression(
@@ -3696,6 +3696,9 @@ mod tests {
                 ternary_then: output logic,
                 ternary_else: output logic,
                 short_circuit_rhs: output logic,
+                z_ternary_then: output logic,
+                z_ternary_else: output logic,
+                z_short_circuit_rhs: output logic,
             ) {
                 function write (
                     x: input logic,
@@ -3708,6 +3711,8 @@ mod tests {
                 always_comb {
                     q = if 1'bx ? write(d, ternary_then) : write(d, ternary_else);
                     q = 1'bx && write(d, short_circuit_rhs);
+                    q = if 1'bz ? write(d, z_ternary_then) : write(d, z_ternary_else);
+                    q = 1'bz && write(d, z_short_circuit_rhs);
                 }
             }
         "#;
@@ -3726,7 +3731,14 @@ mod tests {
         let mut written = HashMap::default();
         collect_written_accesses(&module, &comb_decl.statements, &mut written).unwrap();
 
-        for name in ["ternary_then", "ternary_else", "short_circuit_rhs"] {
+        for name in [
+            "ternary_then",
+            "ternary_else",
+            "short_circuit_rhs",
+            "z_ternary_then",
+            "z_ternary_else",
+            "z_short_circuit_rhs",
+        ] {
             let id = var_id_of(&module, &[name]);
             assert_eq!(written[&id], vec![BitAccess::new(0, 0)], "{name}");
         }
