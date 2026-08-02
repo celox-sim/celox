@@ -176,6 +176,46 @@ assign tmp_o = tmp;
 
     }
 
+    fn test_inactive_instance_input_output_call_adds_no_parent_driver(sim) {
+        @setup { let code = r#"
+module Child (
+i: input logic,
+o: output logic
+) {
+assign o = i;
+}
+module Top (
+a: input logic,
+child_o: output logic,
+seen_o: output logic
+) {
+function write_seen (
+x: input logic,
+seen: output logic
+) -> logic {
+seen = !x;
+return x;
+}
+var seen: logic;
+inst child: Child (
+i: if 1'b0 ? write_seen(a, seen) : a,
+o: child_o
+);
+assign seen = a;
+assign seen_o = seen;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let a = sim.signal("a");
+    let child_o = sim.signal("child_o");
+    let seen_o = sim.signal("seen_o");
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(child_o), 1u8.into());
+    assert_eq!(sim.get(seen_o), 1u8.into());
+
+    }
+
     fn test_unconnected_child_output_needs_no_parent_glue(sim) {
         @setup { let code = r#"
 module Child (

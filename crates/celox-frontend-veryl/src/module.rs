@@ -297,6 +297,7 @@ fn build_dynamic_output_glue(
 }
 
 fn build_parent_effect_glue(
+    initial_store: &SymbolicStore<VarId>,
     store: &SymbolicStore<VarId>,
     written_accesses: &HashMap<VarId, Vec<BitAccess>>,
     parent_arena: &SLTNodeArena<VarId>,
@@ -333,6 +334,30 @@ fn build_parent_effect_glue(
                     continue;
                 }
 
+                let target_access = BitAccess::new(target_lsb, target_msb);
+                if let Some(initial_range_store) = initial_store.get(id) {
+                    let final_parts = range_store.get_parts(target_access).map_err(|error| {
+                        ParserError::illegal_context(
+                            "instance input function output",
+                            error.to_string(),
+                            None,
+                        )
+                    })?;
+                    let initial_parts =
+                        initial_range_store
+                            .get_parts(target_access)
+                            .map_err(|error| {
+                                ParserError::illegal_context(
+                                    "instance input function output",
+                                    error.to_string(),
+                                    None,
+                                )
+                            })?;
+                    if final_parts == initial_parts {
+                        continue;
+                    }
+                }
+
                 let target_width = target_msb - target_lsb + 1;
                 let relative_lsb = target_lsb.checked_sub(*origin).ok_or_else(|| {
                     ParserError::illegal_context(
@@ -359,7 +384,8 @@ fn build_parent_effect_glue(
                     })?
                 };
                 let sources = collect_glue_sources(mapped, glue_arena);
-                let target = VarAtomBase::new(GlueAddr::Parent(*id), target_lsb, target_msb);
+                let target =
+                    VarAtomBase::new(GlueAddr::Parent(*id), target_access.lsb, target_access.msb);
                 let previous_sources = sources
                     .iter()
                     .copied()
@@ -691,6 +717,7 @@ impl<'a> ModuleParser<'a> {
             let parent_vars: Vec<_> = expr_sources.iter().map(|s| s.id).collect();
             input_ports.push((parent_vars, path));
             output_ports.extend(build_parent_effect_glue(
+                &parent_store,
                 &connection_store,
                 &written_accesses,
                 &self.arena,

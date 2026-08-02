@@ -1655,12 +1655,32 @@ pub(super) fn collect_written_expression(
             Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
         },
         Expression::Unary(_, inner, _) => collect_written_expression(module, inner, out),
-        Expression::Binary(lhs, _, rhs, _) => {
+        Expression::Binary(lhs, op, rhs, _) => {
             collect_written_expression(module, lhs, out)?;
+            let lhs_value = eval_constexpr(lhs);
+            let skips_rhs = match op {
+                Op::LogicAnd => lhs_value
+                    .as_ref()
+                    .is_some_and(|value| value == &BigUint::from(0u8)),
+                Op::LogicOr => lhs_value
+                    .as_ref()
+                    .is_some_and(|value| value != &BigUint::from(0u8)),
+                _ => false,
+            };
+            if skips_rhs {
+                return Ok(());
+            }
             collect_written_expression(module, rhs, out)
         }
         Expression::Ternary(cond, then_expr, else_expr, _) => {
             collect_written_expression(module, cond, out)?;
+            if let Some(value) = eval_constexpr(cond) {
+                return if value == BigUint::from(0u8) {
+                    collect_written_expression(module, else_expr, out)
+                } else {
+                    collect_written_expression(module, then_expr, out)
+                };
+            }
             collect_written_expression(module, then_expr, out)?;
             collect_written_expression(module, else_expr, out)
         }
