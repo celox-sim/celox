@@ -1,0 +1,1 @@
+import{n as e,t}from"./typescript-k3GREMgS.js";export{t as conf,e as language};

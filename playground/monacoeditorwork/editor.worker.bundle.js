@@ -1,5 +1,5 @@
 (() => {
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/errors.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/errors.js
   var ErrorHandler = class {
     constructor() {
       this.listeners = [];
@@ -33,6 +33,12 @@
   function onUnexpectedError(e) {
     if (!isCancellationError(e)) {
       errorHandler.onUnexpectedError(e);
+    }
+    return void 0;
+  }
+  function onUnexpectedExternalError(e) {
+    if (!isCancellationError(e)) {
+      errorHandler.onUnexpectedExternalError(e);
     }
     return void 0;
   }
@@ -90,7 +96,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/assert.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/assert.js
   function assertNever(value, message = "Unreachable") {
     throw new Error(message);
   }
@@ -120,7 +126,7 @@
     return true;
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/types.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/types.js
   function isString(str) {
     return typeof str === "string";
   }
@@ -128,7 +134,7 @@
     return !!obj && typeof obj[Symbol.iterator] === "function";
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/iterator.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/iterator.js
   var Iterable;
   (function(Iterable2) {
     function is(thing) {
@@ -153,7 +159,7 @@
     }
     Iterable2.wrap = wrap;
     function from(iterable) {
-      return iterable || _empty2;
+      return iterable ?? _empty2;
     }
     Iterable2.from = from;
     function* reverse(array) {
@@ -300,7 +306,7 @@
     Iterable2.asyncToArrayFlat = asyncToArrayFlat;
   })(Iterable || (Iterable = {}));
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/lifecycle.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/lifecycle.js
   function setParentOfDisposable(child, parent) {
   }
   function dispose(arg) {
@@ -445,7 +451,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/linkedList.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/linkedList.js
   var Node = class _Node {
     static {
       this.Undefined = new _Node(void 0);
@@ -555,7 +561,216 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/stopwatch.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/nls.js
+  function getNLSMessages() {
+    return globalThis._VSCODE_NLS_MESSAGES;
+  }
+  function getNLSLanguage() {
+    return globalThis._VSCODE_NLS_LANGUAGE;
+  }
+  var isPseudo = getNLSLanguage() === "pseudo" || typeof document !== "undefined" && document.location && typeof document.location.hash === "string" && document.location.hash.indexOf("pseudo=true") >= 0;
+  function _format(message, args) {
+    let result;
+    if (args.length === 0) {
+      result = message;
+    } else {
+      result = message.replace(/\{(\d+)\}/g, (match, rest) => {
+        const index = rest[0];
+        const arg = args[index];
+        let result2 = match;
+        if (typeof arg === "string") {
+          result2 = arg;
+        } else if (typeof arg === "number" || typeof arg === "boolean" || arg === void 0 || arg === null) {
+          result2 = String(arg);
+        }
+        return result2;
+      });
+    }
+    if (isPseudo) {
+      result = "\uFF3B" + result.replace(/[aouei]/g, "$&$&") + "\uFF3D";
+    }
+    return result;
+  }
+  function localize(data, message, ...args) {
+    if (typeof data === "number") {
+      return _format(lookupMessage(data, message), args);
+    }
+    return _format(message, args);
+  }
+  function lookupMessage(index, fallback) {
+    const message = getNLSMessages()?.[index];
+    if (typeof message !== "string") {
+      if (typeof fallback === "string") {
+        return fallback;
+      }
+      throw new Error(`!!! NLS MISSING: ${index} !!!`);
+    }
+    return message;
+  }
+
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/platform.js
+  var LANGUAGE_DEFAULT = "en";
+  var _isWindows = false;
+  var _isMacintosh = false;
+  var _isLinux = false;
+  var _isNative = false;
+  var _isWeb = false;
+  var _isIOS = false;
+  var _isMobile = false;
+  var _locale = void 0;
+  var _language = LANGUAGE_DEFAULT;
+  var _platformLocale = LANGUAGE_DEFAULT;
+  var _translationsConfigFile = void 0;
+  var _userAgent = void 0;
+  var $globalThis = globalThis;
+  var nodeProcess = void 0;
+  if (typeof $globalThis.vscode !== "undefined" && typeof $globalThis.vscode.process !== "undefined") {
+    nodeProcess = $globalThis.vscode.process;
+  } else if (typeof process !== "undefined" && typeof process?.versions?.node === "string") {
+    nodeProcess = process;
+  }
+  var isElectronProcess = typeof nodeProcess?.versions?.electron === "string";
+  var isElectronRenderer = isElectronProcess && nodeProcess?.type === "renderer";
+  if (typeof nodeProcess === "object") {
+    _isWindows = nodeProcess.platform === "win32";
+    _isMacintosh = nodeProcess.platform === "darwin";
+    _isLinux = nodeProcess.platform === "linux";
+    _isLinux && !!nodeProcess.env["SNAP"] && !!nodeProcess.env["SNAP_REVISION"];
+    !!nodeProcess.env["CI"] || !!nodeProcess.env["BUILD_ARTIFACTSTAGINGDIRECTORY"] || !!nodeProcess.env["GITHUB_WORKSPACE"];
+    _locale = LANGUAGE_DEFAULT;
+    _language = LANGUAGE_DEFAULT;
+    const rawNlsConfig = nodeProcess.env["VSCODE_NLS_CONFIG"];
+    if (rawNlsConfig) {
+      try {
+        const nlsConfig = JSON.parse(rawNlsConfig);
+        _locale = nlsConfig.userLocale;
+        _platformLocale = nlsConfig.osLocale;
+        _language = nlsConfig.resolvedLanguage || LANGUAGE_DEFAULT;
+        _translationsConfigFile = nlsConfig.languagePack?.translationsConfigFile;
+      } catch (e) {
+      }
+    }
+    _isNative = true;
+  } else if (typeof navigator === "object" && !isElectronRenderer) {
+    _userAgent = navigator.userAgent;
+    _isWindows = _userAgent.indexOf("Windows") >= 0;
+    _isMacintosh = _userAgent.indexOf("Macintosh") >= 0;
+    _isIOS = (_userAgent.indexOf("Macintosh") >= 0 || _userAgent.indexOf("iPad") >= 0 || _userAgent.indexOf("iPhone") >= 0) && !!navigator.maxTouchPoints && navigator.maxTouchPoints > 0;
+    _isLinux = _userAgent.indexOf("Linux") >= 0;
+    _isMobile = _userAgent?.indexOf("Mobi") >= 0;
+    _isWeb = true;
+    _language = getNLSLanguage() || LANGUAGE_DEFAULT;
+    _locale = navigator.language.toLowerCase();
+    _platformLocale = _locale;
+  } else {
+    console.error("Unable to resolve platform.");
+  }
+  var _platform = 0;
+  if (_isMacintosh) {
+    _platform = 1;
+  } else if (_isWindows) {
+    _platform = 3;
+  } else if (_isLinux) {
+    _platform = 2;
+  }
+  var isWindows = _isWindows;
+  var isMacintosh = _isMacintosh;
+  var isNative = _isNative;
+  var isWeb = _isWeb;
+  var isWebWorker = _isWeb && typeof $globalThis.importScripts === "function";
+  var webWorkerOrigin = isWebWorker ? $globalThis.origin : void 0;
+  var userAgent = _userAgent;
+  var setTimeout0IsFaster = typeof $globalThis.postMessage === "function" && !$globalThis.importScripts;
+  var setTimeout0 = (() => {
+    if (setTimeout0IsFaster) {
+      const pending = [];
+      $globalThis.addEventListener("message", (e) => {
+        if (e.data && e.data.vscodeScheduleAsyncWork) {
+          for (let i = 0, len = pending.length; i < len; i++) {
+            const candidate = pending[i];
+            if (candidate.id === e.data.vscodeScheduleAsyncWork) {
+              pending.splice(i, 1);
+              candidate.callback();
+              return;
+            }
+          }
+        }
+      });
+      let lastId = 0;
+      return (callback) => {
+        const myId = ++lastId;
+        pending.push({
+          id: myId,
+          callback
+        });
+        $globalThis.postMessage({ vscodeScheduleAsyncWork: myId }, "*");
+      };
+    }
+    return (callback) => setTimeout(callback);
+  })();
+  var isChrome = !!(userAgent && userAgent.indexOf("Chrome") >= 0);
+  var isFirefox = !!(userAgent && userAgent.indexOf("Firefox") >= 0);
+  var isSafari = !!(!isChrome && (userAgent && userAgent.indexOf("Safari") >= 0));
+  var isEdge = !!(userAgent && userAgent.indexOf("Edg/") >= 0);
+  var isAndroid = !!(userAgent && userAgent.indexOf("Android") >= 0);
+
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/process.js
+  var safeProcess;
+  var vscodeGlobal = globalThis.vscode;
+  if (typeof vscodeGlobal !== "undefined" && typeof vscodeGlobal.process !== "undefined") {
+    const sandboxProcess = vscodeGlobal.process;
+    safeProcess = {
+      get platform() {
+        return sandboxProcess.platform;
+      },
+      get arch() {
+        return sandboxProcess.arch;
+      },
+      get env() {
+        return sandboxProcess.env;
+      },
+      cwd() {
+        return sandboxProcess.cwd();
+      }
+    };
+  } else if (typeof process !== "undefined" && typeof process?.versions?.node === "string") {
+    safeProcess = {
+      get platform() {
+        return process.platform;
+      },
+      get arch() {
+        return process.arch;
+      },
+      get env() {
+        return process.env;
+      },
+      cwd() {
+        return process.env["VSCODE_CWD"] || process.cwd();
+      }
+    };
+  } else {
+    safeProcess = {
+      // Supported
+      get platform() {
+        return isWindows ? "win32" : isMacintosh ? "darwin" : "linux";
+      },
+      get arch() {
+        return void 0;
+      },
+      // Unsupported
+      get env() {
+        return {};
+      },
+      cwd() {
+        return "/";
+      }
+    };
+  }
+  var cwd = safeProcess.cwd;
+  var env = safeProcess.env;
+  var platform = safeProcess.platform;
+
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/stopwatch.js
   var performanceNow = globalThis.performance.now.bind(globalThis.performance);
   var StopWatch = class _StopWatch {
     static create(highResolution) {
@@ -581,12 +796,17 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/event.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/event.js
+  var _bufferLeakWarnCountThreshold = 100;
+  var _bufferLeakWarnTimeThreshold = 6e4;
+  function _isBufferLeakWarningEnabled() {
+    return !!env["VSCODE_DEV"];
+  }
   var Event;
   (function(Event2) {
     Event2.None = () => Disposable.None;
-    function defer(event, disposable) {
-      return debounce(event, () => void 0, 0, void 0, true, void 0, disposable);
+    function defer(event, flushOnListenerRemove, disposable) {
+      return debounce(event, () => void 0, 0, void 0, flushOnListenerRemove ?? true, void 0, disposable);
     }
     Event2.defer = defer;
     function once(event) {
@@ -723,16 +943,65 @@
       return emitter.event;
     }
     Event2.debounce = debounce;
-    function accumulate(event, delay = 0, disposable) {
+    function accumulate(event, delay = 0, flushOnListenerRemove, disposable) {
       return Event2.debounce(event, (last, e) => {
         if (!last) {
           return [e];
         }
         last.push(e);
         return last;
-      }, delay, void 0, true, void 0, disposable);
+      }, delay, void 0, flushOnListenerRemove ?? true, void 0, disposable);
     }
     Event2.accumulate = accumulate;
+    function throttle(event, merge, delay = 100, leading = true, trailing = true, leakWarningThreshold, disposable) {
+      let subscription;
+      let output = void 0;
+      let handle = void 0;
+      let numThrottledCalls = 0;
+      const options = {
+        leakWarningThreshold,
+        onWillAddFirstListener() {
+          subscription = event((cur) => {
+            numThrottledCalls++;
+            output = merge(output, cur);
+            if (handle === void 0) {
+              if (leading) {
+                emitter.fire(output);
+                output = void 0;
+                numThrottledCalls = 0;
+              }
+              if (typeof delay === "number") {
+                handle = setTimeout(() => {
+                  if (trailing && numThrottledCalls > 0) {
+                    emitter.fire(output);
+                  }
+                  output = void 0;
+                  handle = void 0;
+                  numThrottledCalls = 0;
+                }, delay);
+              } else {
+                handle = 0;
+                queueMicrotask(() => {
+                  if (trailing && numThrottledCalls > 0) {
+                    emitter.fire(output);
+                  }
+                  output = void 0;
+                  handle = void 0;
+                  numThrottledCalls = 0;
+                });
+              }
+            }
+          });
+        },
+        onDidRemoveLastListener() {
+          subscription.dispose();
+        }
+      };
+      const emitter = new Emitter(options);
+      disposable?.add(emitter);
+      return emitter.event;
+    }
+    Event2.throttle = throttle;
     function latch(event, equals3 = (a, b) => a === b, disposable) {
       let firstCall = true;
       let cache;
@@ -751,11 +1020,38 @@
       ];
     }
     Event2.split = split;
-    function buffer(event, flushAfterTimeout = false, _buffer = [], disposable) {
+    function buffer(event, debugName, flushAfterTimeout = false, _buffer = [], disposable) {
       let buffer2 = _buffer.slice();
+      let bufferLeakWarningData;
+      if (_isBufferLeakWarningEnabled()) {
+        bufferLeakWarningData = {
+          stack: Stacktrace.create(),
+          timerId: setTimeout(() => {
+            if (buffer2 && buffer2.length > 0 && bufferLeakWarningData && !bufferLeakWarningData.warned) {
+              bufferLeakWarningData.warned = true;
+              console.warn(`[Event.buffer][${debugName}] potential LEAK detected: ${buffer2.length} events buffered for ${_bufferLeakWarnTimeThreshold / 1e3}s without being consumed. Buffered here:`);
+              bufferLeakWarningData.stack.print();
+            }
+          }, _bufferLeakWarnTimeThreshold),
+          warned: false
+        };
+        if (disposable) {
+          disposable.add(toDisposable(() => clearTimeout(bufferLeakWarningData.timerId)));
+        }
+      }
+      const clearLeakWarningTimer = () => {
+        if (bufferLeakWarningData) {
+          clearTimeout(bufferLeakWarningData.timerId);
+        }
+      };
       let listener = event((e) => {
         if (buffer2) {
           buffer2.push(e);
+          if (_isBufferLeakWarningEnabled() && bufferLeakWarningData && !bufferLeakWarningData.warned && buffer2.length >= _bufferLeakWarnCountThreshold) {
+            bufferLeakWarningData.warned = true;
+            console.warn(`[Event.buffer][${debugName}] potential LEAK detected: ${buffer2.length} events buffered without being consumed. Buffered here:`);
+            bufferLeakWarningData.stack.print();
+          }
         } else {
           emitter.fire(e);
         }
@@ -766,6 +1062,7 @@
       const flush = () => {
         buffer2?.forEach((e) => emitter.fire(e));
         buffer2 = null;
+        clearLeakWarningTimer();
       };
       const emitter = new Emitter({
         onWillAddFirstListener() {
@@ -790,6 +1087,7 @@
             listener.dispose();
           }
           listener = null;
+          clearLeakWarningTimer();
         }
       });
       if (disposable) {
@@ -878,11 +1176,18 @@
     Event2.fromDOMEventEmitter = fromDOMEventEmitter;
     function toPromise(event, disposables) {
       let cancelRef;
-      const promise = new Promise((resolve2, reject) => {
-        const listener = once(event)(resolve2, null, disposables);
-        cancelRef = () => listener.dispose();
+      let listener;
+      const promise = new Promise((resolve2) => {
+        listener = once(event)(resolve2);
+        addToDisposables(listener, disposables);
+        cancelRef = () => {
+          disposeAndRemove(listener, disposables);
+        };
       });
       promise.cancel = cancelRef;
+      if (disposables) {
+        promise.finally(() => disposeAndRemove(listener, disposables));
+      }
       return promise;
     }
     Event2.toPromise = toPromise;
@@ -969,11 +1274,7 @@
             observable.removeObserver(observer);
           }
         };
-        if (disposables instanceof DisposableStore) {
-          disposables.add(disposable);
-        } else if (Array.isArray(disposables)) {
-          disposables.push(disposable);
-        }
+        addToDisposables(disposable, disposables);
         return disposable;
       };
     }
@@ -1036,10 +1337,12 @@
       if (this._warnCountdown <= 0) {
         this._warnCountdown = threshold * 0.5;
         const [topStack, topCount] = this.getMostFrequentStack();
+        const emitterName = /^[0-9a-f]+$/i.test(this.name) ? void 0 : this.name;
         const message = `[${this.name}] potential listener LEAK detected, having ${listenerCount} listeners already. MOST frequent listener (${topCount}):`;
         console.warn(message);
         console.warn(topStack);
-        const error = new ListenerLeakError(message, topStack);
+        const kind = topCount / listenerCount > 0.3 ? "dominated" : "popular";
+        const error = new ListenerLeakError(kind, message, topStack, listenerCount, emitterName);
         this._errorHandler(error);
       }
       return () => {
@@ -1074,18 +1377,23 @@
       console.warn(this.value.split("\n").slice(2).join("\n"));
     }
   };
-  var ListenerLeakError = class extends Error {
-    constructor(message, stack) {
-      super(message);
+  var ListenerLeakError = class _ListenerLeakError extends Error {
+    constructor(kind, details, stack, listenerCount, emitterName) {
+      super(emitterName ? `[${emitterName}] potential listener LEAK detected, ${kind}` : `potential listener LEAK detected, ${kind}`);
       this.name = "ListenerLeakError";
+      this.kind = kind;
+      this.listenerCount = listenerCount;
+      this.details = details;
       this.stack = stack;
     }
+    static is(err) {
+      return err instanceof _ListenerLeakError || err instanceof Error && typeof err.kind === "string" && typeof err.listenerCount === "number";
+    }
   };
-  var ListenerRefusalError = class extends Error {
-    constructor(message, stack) {
-      super(message);
+  var ListenerRefusalError = class extends ListenerLeakError {
+    constructor(kind, details, stack, listenerCount, emitterName) {
+      super(kind, details, stack, listenerCount, emitterName);
       this.name = "ListenerRefusalError";
-      this.stack = stack;
     }
   };
   var UniqueContainer = class {
@@ -1098,7 +1406,7 @@
     constructor(options) {
       this._size = 0;
       this._options = options;
-      this._leakageMon = this._options?.leakWarningThreshold ? new LeakageMonitor(options?.onListenerError ?? onUnexpectedError, this._options?.leakWarningThreshold ?? _globalLeakWarningThreshold) : void 0;
+      this._leakageMon = this._options?.leakWarningThreshold ? new LeakageMonitor(options?.onListenerError ?? onUnexpectedError, this._options?.leakWarningThreshold ?? _globalLeakWarningThreshold, this._options?.leakWarningName) : void 0;
       this._perfMon = this._options?._profName ? new EventProfiling(this._options._profName) : void 0;
       this._deliveryQueue = this._options?.deliveryQueue;
     }
@@ -1126,7 +1434,8 @@
           const message = `[${this._leakageMon.name}] REFUSES to accept new listeners because it exceeded its threshold by far (${this._size} vs ${this._leakageMon.threshold})`;
           console.warn(message);
           const tuple = this._leakageMon.getMostFrequentStack() ?? ["UNKNOWN stack", -1];
-          const error = new ListenerRefusalError(`${message}. HINT: Stack shows most frequent listener (${tuple[1]}-times)`, tuple[0]);
+          const kind = tuple[1] / this._size > 0.3 ? "dominated" : "popular";
+          const error = new ListenerRefusalError(kind, `${message}. HINT: Stack shows most frequent listener (${tuple[1]}-times)`, tuple[0], this._size, this._options?.leakWarningName);
           const errorHandler2 = this._options?.onListenerError || onUnexpectedError;
           errorHandler2(error);
           return Disposable.None;
@@ -1159,11 +1468,7 @@
           removeMonitor?.();
           this._removeListener(contained);
         });
-        if (disposables instanceof DisposableStore) {
-          disposables.add(result);
-        } else if (Array.isArray(disposables)) {
-          disposables.push(result);
-        }
+        addToDisposables(result, disposables);
         return result;
       };
       return this._event;
@@ -1269,161 +1574,26 @@
       this.value = void 0;
     }
   };
-
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/nls.messages.js
-  function getNLSMessages() {
-    return globalThis._VSCODE_NLS_MESSAGES;
-  }
-  function getNLSLanguage() {
-    return globalThis._VSCODE_NLS_LANGUAGE;
-  }
-
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/nls.js
-  var isPseudo = getNLSLanguage() === "pseudo" || typeof document !== "undefined" && document.location && typeof document.location.hash === "string" && document.location.hash.indexOf("pseudo=true") >= 0;
-  function _format(message, args) {
-    let result;
-    if (args.length === 0) {
-      result = message;
-    } else {
-      result = message.replace(/\{(\d+)\}/g, (match, rest) => {
-        const index = rest[0];
-        const arg = args[index];
-        let result2 = match;
-        if (typeof arg === "string") {
-          result2 = arg;
-        } else if (typeof arg === "number" || typeof arg === "boolean" || arg === void 0 || arg === null) {
-          result2 = String(arg);
-        }
-        return result2;
-      });
+  function addToDisposables(result, disposables) {
+    if (disposables instanceof DisposableStore) {
+      disposables.add(result);
+    } else if (Array.isArray(disposables)) {
+      disposables.push(result);
     }
-    if (isPseudo) {
-      result = "\uFF3B" + result.replace(/[aouei]/g, "$&$&") + "\uFF3D";
-    }
-    return result;
   }
-  function localize(data, message, ...args) {
-    if (typeof data === "number") {
-      return _format(lookupMessage(data, message), args);
-    }
-    return _format(message, args);
-  }
-  function lookupMessage(index, fallback) {
-    const message = getNLSMessages()?.[index];
-    if (typeof message !== "string") {
-      if (typeof fallback === "string") {
-        return fallback;
-      }
-      throw new Error(`!!! NLS MISSING: ${index} !!!`);
-    }
-    return message;
-  }
-
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/platform.js
-  var LANGUAGE_DEFAULT = "en";
-  var _isWindows = false;
-  var _isMacintosh = false;
-  var _isLinux = false;
-  var _isNative = false;
-  var _isWeb = false;
-  var _isIOS = false;
-  var _isMobile = false;
-  var _locale = void 0;
-  var _language = LANGUAGE_DEFAULT;
-  var _platformLocale = LANGUAGE_DEFAULT;
-  var _translationsConfigFile = void 0;
-  var _userAgent = void 0;
-  var $globalThis = globalThis;
-  var nodeProcess = void 0;
-  if (typeof $globalThis.vscode !== "undefined" && typeof $globalThis.vscode.process !== "undefined") {
-    nodeProcess = $globalThis.vscode.process;
-  } else if (typeof process !== "undefined" && typeof process?.versions?.node === "string") {
-    nodeProcess = process;
-  }
-  var isElectronProcess = typeof nodeProcess?.versions?.electron === "string";
-  var isElectronRenderer = isElectronProcess && nodeProcess?.type === "renderer";
-  if (typeof nodeProcess === "object") {
-    _isWindows = nodeProcess.platform === "win32";
-    _isMacintosh = nodeProcess.platform === "darwin";
-    _isLinux = nodeProcess.platform === "linux";
-    _isLinux && !!nodeProcess.env["SNAP"] && !!nodeProcess.env["SNAP_REVISION"];
-    !!nodeProcess.env["CI"] || !!nodeProcess.env["BUILD_ARTIFACTSTAGINGDIRECTORY"] || !!nodeProcess.env["GITHUB_WORKSPACE"];
-    _locale = LANGUAGE_DEFAULT;
-    _language = LANGUAGE_DEFAULT;
-    const rawNlsConfig = nodeProcess.env["VSCODE_NLS_CONFIG"];
-    if (rawNlsConfig) {
-      try {
-        const nlsConfig = JSON.parse(rawNlsConfig);
-        _locale = nlsConfig.userLocale;
-        _platformLocale = nlsConfig.osLocale;
-        _language = nlsConfig.resolvedLanguage || LANGUAGE_DEFAULT;
-        _translationsConfigFile = nlsConfig.languagePack?.translationsConfigFile;
-      } catch (e) {
+  function disposeAndRemove(result, disposables) {
+    if (disposables instanceof DisposableStore) {
+      disposables.delete(result);
+    } else if (Array.isArray(disposables)) {
+      const index = disposables.indexOf(result);
+      if (index !== -1) {
+        disposables.splice(index, 1);
       }
     }
-    _isNative = true;
-  } else if (typeof navigator === "object" && !isElectronRenderer) {
-    _userAgent = navigator.userAgent;
-    _isWindows = _userAgent.indexOf("Windows") >= 0;
-    _isMacintosh = _userAgent.indexOf("Macintosh") >= 0;
-    _isIOS = (_userAgent.indexOf("Macintosh") >= 0 || _userAgent.indexOf("iPad") >= 0 || _userAgent.indexOf("iPhone") >= 0) && !!navigator.maxTouchPoints && navigator.maxTouchPoints > 0;
-    _isLinux = _userAgent.indexOf("Linux") >= 0;
-    _isMobile = _userAgent?.indexOf("Mobi") >= 0;
-    _isWeb = true;
-    _language = getNLSLanguage() || LANGUAGE_DEFAULT;
-    _locale = navigator.language.toLowerCase();
-    _platformLocale = _locale;
-  } else {
-    console.error("Unable to resolve platform.");
+    result.dispose();
   }
-  var _platform = 0;
-  if (_isMacintosh) {
-    _platform = 1;
-  } else if (_isWindows) {
-    _platform = 3;
-  } else if (_isLinux) {
-    _platform = 2;
-  }
-  var isWindows = _isWindows;
-  var isMacintosh = _isMacintosh;
-  var isWebWorker = _isWeb && typeof $globalThis.importScripts === "function";
-  var webWorkerOrigin = isWebWorker ? $globalThis.origin : void 0;
-  var userAgent = _userAgent;
-  var setTimeout0IsFaster = typeof $globalThis.postMessage === "function" && !$globalThis.importScripts;
-  var setTimeout0 = (() => {
-    if (setTimeout0IsFaster) {
-      const pending = [];
-      $globalThis.addEventListener("message", (e) => {
-        if (e.data && e.data.vscodeScheduleAsyncWork) {
-          for (let i = 0, len = pending.length; i < len; i++) {
-            const candidate = pending[i];
-            if (candidate.id === e.data.vscodeScheduleAsyncWork) {
-              pending.splice(i, 1);
-              candidate.callback();
-              return;
-            }
-          }
-        }
-      });
-      let lastId = 0;
-      return (callback) => {
-        const myId = ++lastId;
-        pending.push({
-          id: myId,
-          callback
-        });
-        $globalThis.postMessage({ vscodeScheduleAsyncWork: myId }, "*");
-      };
-    }
-    return (callback) => setTimeout(callback);
-  })();
-  var isChrome = !!(userAgent && userAgent.indexOf("Chrome") >= 0);
-  var isFirefox = !!(userAgent && userAgent.indexOf("Firefox") >= 0);
-  var isSafari = !!(!isChrome && (userAgent && userAgent.indexOf("Safari") >= 0));
-  var isEdge = !!(userAgent && userAgent.indexOf("Edg/") >= 0);
-  var isAndroid = !!(userAgent && userAgent.indexOf("Android") >= 0);
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/cache.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/cache.js
   function identity(t) {
     return t;
   }
@@ -1449,7 +1619,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/lazy.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/lazy.js
   var LazyValueState;
   (function(LazyValueState2) {
     LazyValueState2[LazyValueState2["Uninitialized"] = 0] = "Uninitialized";
@@ -1493,7 +1663,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/strings.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/strings.js
   function escapeRegExpCharacters(value) {
     return value.replace(/[\\\{\}\*\+\?\|\^\$\.\[\]\(\)]/g, "\\$&");
   }
@@ -1628,7 +1798,8 @@
       });
     }
     static {
-      this.cache = new LRUCachedFunction({ getCacheKey: JSON.stringify }, (locales) => {
+      this.cache = new LRUCachedFunction((localesStr) => {
+        const locales = localesStr.split(",");
         function arrayToMap(arr) {
           const result = /* @__PURE__ */ new Map();
           for (let i = 0; i < arr.length; i += 2) {
@@ -1671,7 +1842,7 @@
       });
     }
     static getInstance(locales) {
-      return _AmbiguousCharacters.cache.get(Array.from(locales));
+      return _AmbiguousCharacters.cache.get(Array.from(locales).join(","));
     }
     static {
       this._locales = new Lazy(() => Object.keys(_AmbiguousCharacters.ambiguousCharacterData.value).filter((k) => !k.startsWith("_")));
@@ -1717,7 +1888,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/worker/webWorker.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/worker/webWorker.js
   var DEFAULT_CHANNEL = "default";
   var INITIALIZE = "$initialize";
   var RequestMessage = class {
@@ -1888,18 +2059,20 @@
       this._pendingEvents.set(req, disposable);
     }
     _handleEventMessage(msg) {
-      if (!this._pendingEmitters.has(msg.req)) {
+      const emitter = this._pendingEmitters.get(msg.req);
+      if (emitter === void 0) {
         console.warn("Got event for unknown req");
         return;
       }
-      this._pendingEmitters.get(msg.req).fire(msg.event);
+      emitter.fire(msg.event);
     }
     _handleUnsubscribeEventMessage(msg) {
-      if (!this._pendingEvents.has(msg.req)) {
+      const event = this._pendingEvents.get(msg.req);
+      if (event === void 0) {
         console.warn("Got unsubscribe for unknown req");
         return;
       }
-      this._pendingEvents.get(msg.req).dispose();
+      event.dispose();
       this._pendingEvents.delete(msg.req);
     }
     _send(msg) {
@@ -1985,18 +2158,19 @@
       throw new Error(`Malformed event name ${eventName}`);
     }
     getChannel(channel) {
-      if (!this._remoteChannels.has(channel)) {
-        const inst = this._protocol.createProxyToRemoteChannel(channel);
+      let inst = this._remoteChannels.get(channel);
+      if (inst === void 0) {
+        inst = this._protocol.createProxyToRemoteChannel(channel);
         this._remoteChannels.set(channel, inst);
       }
-      return this._remoteChannels.get(channel);
+      return inst;
     }
     async initialize(workerId) {
       this._protocol.setWorkerId(workerId);
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/worker/webWorkerBootstrap.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/worker/webWorkerBootstrap.js
   var initialized = false;
   function initialize(factory) {
     if (initialized) {
@@ -2010,7 +2184,7 @@
     return webWorkerServer;
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/diff/diffChange.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/diff/diffChange.js
   var DiffChange = class {
     /**
      * Constructs a new DiffChange with the given sequence information
@@ -2036,7 +2210,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/buffer.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/buffer.js
   var hasBuffer = typeof Buffer !== "undefined";
   new Lazy(() => new Uint8Array(256));
   var textDecoder;
@@ -2061,7 +2235,7 @@
         return this.buffer.toString();
       } else {
         if (!textDecoder) {
-          textDecoder = new TextDecoder();
+          textDecoder = new TextDecoder(void 0, { ignoreBOM: true });
         }
         return textDecoder.decode(this.buffer);
       }
@@ -2078,7 +2252,7 @@
     return result;
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/hash.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/hash.js
   function numberHash(val, initialHashVal) {
     return (initialHashVal << 5) - initialHashVal + val | 0;
   }
@@ -2268,7 +2442,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/diff/diff.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/diff/diff.js
   var StringDiffSequence = class {
     constructor(source) {
       this.source = source;
@@ -3005,7 +3179,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/core/position.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/core/position.js
   var Position = class _Position {
     constructor(lineNumber, column) {
       this.lineNumber = lineNumber;
@@ -3134,7 +3308,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/core/range.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/core/range.js
   var Range = class _Range {
     constructor(startLineNumber, startColumn, endLineNumber, endColumn) {
       if (startLineNumber > endLineNumber || startLineNumber === endLineNumber && startColumn > endColumn) {
@@ -3409,6 +3583,9 @@
     delta(lineCount) {
       return new _Range(this.startLineNumber + lineCount, this.startColumn, this.endLineNumber + lineCount, this.endColumn);
     }
+    /**
+     * Test if this range starts and ends on the same line.
+     */
     isSingleLine() {
       return this.startLineNumber === this.endLineNumber;
     }
@@ -3520,7 +3697,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/uint.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/uint.js
   function toUint8(v) {
     if (v < 0) {
       return 0;
@@ -3540,7 +3717,7 @@
     return v | 0;
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/core/characterClassifier.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/core/characterClassifier.js
   var CharacterClassifier = class _CharacterClassifier {
     constructor(_defaultValue) {
       const defaultValue = toUint8(_defaultValue);
@@ -3574,7 +3751,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/languages/linkComputer.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/languages/linkComputer.js
   var Uint8Matrix = class {
     constructor(rows, cols, defaultValue) {
       const data = new Uint8Array(rows * cols);
@@ -3934,7 +4111,7 @@
     return LinkComputer.computeLinks(model);
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/languages/supports/inplaceReplaceSupport.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/languages/supports/inplaceReplaceSupport.js
   var BasicInplaceReplace = class _BasicInplaceReplace {
     constructor() {
       this._defaultValueSet = [
@@ -4015,7 +4192,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/cancellation.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/cancellation.js
   var shortcutEvent = Object.freeze(function(callback, context) {
     const handle = setTimeout(callback.bind(context), 0);
     return { dispose() {
@@ -4111,7 +4288,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/keyCodes.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/keyCodes.js
   var KeyCodeStrMap = class {
     constructor() {
       this._keyCodeToStr = [];
@@ -4225,7 +4402,7 @@
       [1, 79, "Insert", 19, "Insert", 45, "VK_INSERT", empty, empty],
       [1, 80, "Home", 14, "Home", 36, "VK_HOME", empty, empty],
       [1, 81, "PageUp", 11, "PageUp", 33, "VK_PRIOR", empty, empty],
-      [1, 82, "Delete", 20, "Delete", 46, "VK_DELETE", empty, empty],
+      [1, 82, "Delete", 20, "Del", 46, "VK_DELETE", "Delete", empty],
       [1, 83, "End", 13, "End", 35, "VK_END", empty, empty],
       [1, 84, "PageDown", 12, "PageDown", 34, "VK_NEXT", empty, empty],
       [1, 85, "ArrowRight", 17, "RightArrow", 39, "VK_RIGHT", "Right", empty],
@@ -4436,6 +4613,8 @@
           return "Left";
         case 17:
           return "Right";
+        case 20:
+          return "Delete";
       }
       return uiMap.keyCodeToStr(keyCode);
     }
@@ -4446,63 +4625,7 @@
     return (firstPart | chordPart) >>> 0;
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/process.js
-  var safeProcess;
-  var vscodeGlobal = globalThis.vscode;
-  if (typeof vscodeGlobal !== "undefined" && typeof vscodeGlobal.process !== "undefined") {
-    const sandboxProcess = vscodeGlobal.process;
-    safeProcess = {
-      get platform() {
-        return sandboxProcess.platform;
-      },
-      get arch() {
-        return sandboxProcess.arch;
-      },
-      get env() {
-        return sandboxProcess.env;
-      },
-      cwd() {
-        return sandboxProcess.cwd();
-      }
-    };
-  } else if (typeof process !== "undefined" && typeof process?.versions?.node === "string") {
-    safeProcess = {
-      get platform() {
-        return process.platform;
-      },
-      get arch() {
-        return process.arch;
-      },
-      get env() {
-        return process.env;
-      },
-      cwd() {
-        return process.env["VSCODE_CWD"] || process.cwd();
-      }
-    };
-  } else {
-    safeProcess = {
-      // Supported
-      get platform() {
-        return isWindows ? "win32" : isMacintosh ? "darwin" : "linux";
-      },
-      get arch() {
-        return void 0;
-      },
-      // Unsupported
-      get env() {
-        return {};
-      },
-      cwd() {
-        return "/";
-      }
-    };
-  }
-  var cwd = safeProcess.cwd;
-  var env = safeProcess.env;
-  var platform = safeProcess.platform;
-
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/path.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/path.js
   var CHAR_UPPERCASE_A = 65;
   var CHAR_LOWERCASE_A = 97;
   var CHAR_UPPERCASE_Z = 90;
@@ -5589,6 +5712,7 @@
   posix.win32 = win32.win32 = win32;
   posix.posix = win32.posix = posix;
   var normalize = platformIsWin32 ? win32.normalize : posix.normalize;
+  var join = platformIsWin32 ? win32.join : posix.join;
   var resolve = platformIsWin32 ? win32.resolve : posix.resolve;
   var relative = platformIsWin32 ? win32.relative : posix.relative;
   var dirname = platformIsWin32 ? win32.dirname : posix.dirname;
@@ -5596,7 +5720,7 @@
   var extname = platformIsWin32 ? win32.extname : posix.extname;
   var sep = platformIsWin32 ? win32.sep : posix.sep;
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/uri.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/uri.js
   var _schemePattern = /^\w[\w\d+.-]*$/;
   var _singleSlashStart = /^\//;
   var _doubleSlashStart = /^\/\//;
@@ -5605,7 +5729,9 @@
       throw new Error(`[UriError]: Scheme is missing: {scheme: "", authority: "${ret.authority}", path: "${ret.path}", query: "${ret.query}", fragment: "${ret.fragment}"}`);
     }
     if (ret.scheme && !_schemePattern.test(ret.scheme)) {
-      throw new Error("[UriError]: Scheme contains illegal characters.");
+      const matches = [...ret.scheme.matchAll(/[^\w\d+.-]/gu)];
+      const detail = matches.length > 0 ? ` Found '${matches[0][0]}' at index ${matches[0].index} (${matches.length} total)` : "";
+      throw new Error(`[UriError]: Scheme contains illegal characters.${detail} (len:${ret.scheme.length})`);
     }
     if (ret.path) {
       if (ret.authority) {
@@ -5807,7 +5933,7 @@
      */
     static joinPath(uri, ...pathFragment) {
       if (!uri.path) {
-        throw new Error(`[UriError]: cannot call joinPath on URI without path`);
+        throw new Error(`[UriError]: cannot call joinPath on URI without path: ${uri.toString()}`);
       }
       let newPath;
       if (isWindows && uri.scheme === "file") {
@@ -6129,7 +6255,7 @@
     return str.replace(_rEncodedAsHex, (match) => decodeURIComponentGraceful(match));
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/core/selection.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/core/selection.js
   var Selection = class _Selection extends Range {
     constructor(selectionStartLineNumber, selectionStartColumn, positionLineNumber, positionColumn) {
       super(selectionStartLineNumber, selectionStartColumn, positionLineNumber, positionColumn);
@@ -6255,7 +6381,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/codiconsUtil.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/codiconsUtil.js
   var _codiconFontCharacters = /* @__PURE__ */ Object.create(null);
   function register(id, fontCharacter) {
     if (isString(fontCharacter)) {
@@ -6269,7 +6395,7 @@
     return { id };
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/codiconsLibrary.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/codiconsLibrary.js
   var codiconsLibrary = {
     add: register("add", 6e4),
     plus: register("plus", 6e4),
@@ -6522,6 +6648,7 @@
     italic: register("italic", 60173),
     jersey: register("jersey", 60174),
     json: register("json", 60175),
+    bracket: register("bracket", 60175),
     kebabVertical: register("kebab-vertical", 60176),
     key: register("key", 60177),
     law: register("law", 60178),
@@ -6748,7 +6875,6 @@
     graphLine: register("graph-line", 60386),
     graphScatter: register("graph-scatter", 60387),
     pieChart: register("pie-chart", 60388),
-    bracket: register("bracket", 60175),
     bracketDot: register("bracket-dot", 60389),
     bracketError: register("bracket-error", 60390),
     lockSmall: register("lock-small", 60391),
@@ -6879,7 +7005,6 @@
     cursor: register("cursor", 60508),
     eraser: register("eraser", 60509),
     fileText: register("file-text", 60510),
-    gitLens: register("git-lens", 60511),
     quotes: register("quotes", 60512),
     rename: register("rename", 60513),
     runWithDeps: register("run-with-deps", 60514),
@@ -6899,10 +7024,101 @@
     gitBranchCreate: register("git-branch-create", 60527),
     gitBranchDelete: register("git-branch-delete", 60527),
     searchLarge: register("search-large", 60528),
-    terminalGitBash: register("terminal-git-bash", 60529)
+    terminalGitBash: register("terminal-git-bash", 60529),
+    windowActive: register("window-active", 60530),
+    forward: register("forward", 60531),
+    download: register("download", 60532),
+    clockface: register("clockface", 60533),
+    unarchive: register("unarchive", 60534),
+    sessionInProgress: register("session-in-progress", 60535),
+    collectionSmall: register("collection-small", 60536),
+    vmSmall: register("vm-small", 60537),
+    cloudSmall: register("cloud-small", 60538),
+    addSmall: register("add-small", 60539),
+    removeSmall: register("remove-small", 60540),
+    worktreeSmall: register("worktree-small", 60541),
+    worktree: register("worktree", 60542),
+    screenCut: register("screen-cut", 60543),
+    ask: register("ask", 60544),
+    openai: register("openai", 60545),
+    claude: register("claude", 60546),
+    openInWindow: register("open-in-window", 60547),
+    newSession: register("new-session", 60548),
+    terminalSecure: register("terminal-secure", 60549),
+    chatImport: register("chat-import", 60550),
+    chatExport: register("chat-export", 60551),
+    shareWindow: register("share-window", 60552),
+    circleSlashCompact: register("circle-slash-compact", 60553),
+    copilotCompact: register("copilot-compact", 60554),
+    folderOpenedCompact: register("folder-opened-compact", 60555),
+    folderCompact: register("folder-compact", 60556),
+    gearCompact: register("gear-compact", 60557),
+    gitBranchCompact: register("git-branch-compact", 60558),
+    libraryCompact: register("library-compact", 60559),
+    recordKeysCompact: register("record-keys-compact", 60560),
+    remoteCompact: register("remote-compact", 60561),
+    repoForkedCompact: register("repo-forked-compact", 60562),
+    repoCompact: register("repo-compact", 60563),
+    shieldCompact: register("shield-compact", 60564),
+    sparkleCompact: register("sparkle-compact", 60565),
+    symbolColorCompact: register("symbol-color-compact", 60566),
+    windowCompact: register("window-compact", 60567),
+    errorCompact: register("error-compact", 60568),
+    warningCompact: register("warning-compact", 60569),
+    passCompact: register("pass-compact", 60570),
+    important: register("important", 60571),
+    importantCompact: register("important-compact", 60572),
+    rocketCompact: register("rocket-compact", 60573),
+    unpin: register("unpin", 60574),
+    addCompact: register("add-compact", 60575),
+    attachCompact: register("attach-compact", 60576),
+    beakerCompact: register("beaker-compact", 60577),
+    checkCompact: register("check-compact", 60578),
+    checklistCompact: register("checklist-compact", 60579),
+    chevronDownCompact: register("chevron-down-compact", 60580),
+    chevronLeftCompact: register("chevron-left-compact", 60581),
+    chevronRightCompact: register("chevron-right-compact", 60582),
+    chevronUpCompact: register("chevron-up-compact", 60583),
+    circleFilledCompact: register("circle-filled-compact", 60584),
+    circleSmallFilledCompact: register("circle-small-filled-compact", 60585),
+    closeCompact: register("close-compact", 60586),
+    collapseAllCompact: register("collapse-all-compact", 60587),
+    commentCompact: register("comment-compact", 60588),
+    commentUnresolvedCompact: register("comment-unresolved-compact", 60589),
+    debugConnectedCompact: register("debug-connected-compact", 60590),
+    debugDisconnectCompact: register("debug-disconnect-compact", 60591),
+    editCompact: register("edit-compact", 60592),
+    fileMediaCompact: register("file-media-compact", 60593),
+    gitFetch: register("git-fetch", 60594),
+    lightbulbCompact: register("lightbulb-compact", 60595),
+    loadingCompact: register("loading-compact", 60596),
+    passFilledCompact: register("pass-filled-compact", 60597),
+    projectCompact: register("project-compact", 60598),
+    refreshCompact: register("refresh-compact", 60599),
+    searchCompact: register("search-compact", 60600),
+    sessionInProgressCompact: register("session-in-progress-compact", 60601),
+    syncCompact: register("sync-compact", 60602),
+    terminalCompact: register("terminal-compact", 60603),
+    vmPending: register("vm-pending", 60604),
+    worktreeCompact: register("worktree-compact", 60605),
+    developerTools: register("developer-tools", 60606),
+    cloudCompact: register("cloud-compact", 60607),
+    agentCompact: register("agent-compact", 60608),
+    askCompact: register("ask-compact", 60609),
+    settingsCompact: register("settings-compact", 60610),
+    vmCompact: register("vm-compact", 60611),
+    runCompact: register("run-compact", 60612),
+    gitPullRequestComment: register("git-pull-request-comment", 60613),
+    gitPullRequestError: register("git-pull-request-error", 60614),
+    rightPanelHide: register("right-panel-hide", 60615),
+    rightPanelShow: register("right-panel-show", 60616),
+    vscodeInsidersOutline: register("vscode-insiders-outline", 60617),
+    vscodeOutline: register("vscode-outline", 60618),
+    voiceMode: register("voice-mode", 60619),
+    voiceModeCompact: register("voice-mode-compact", 60620)
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/codicons.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/codicons.js
   var codiconsDerived = {
     dialogError: register("dialog-error", "error"),
     dialogWarning: register("dialog-warning", "warning"),
@@ -6932,14 +7148,16 @@
     thumbsUpFilled: register("thumbsup-filled", 60436),
     gitFetch: register("git-fetch", 60445),
     lightbulbSparkleAutofix: register("lightbulb-sparkle-autofix", 60447),
-    debugBreakpointPending: register("debug-breakpoint-pending", 60377)
+    debugBreakpointPending: register("debug-breakpoint-pending", 60377),
+    chatImport: register("chat-import", 60550),
+    chatExport: register("chat-export", 60551)
   };
   var Codicon = {
     ...codiconsLibrary,
     ...codiconsDerived
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/tokenizationRegistry.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/tokenizationRegistry.js
   var TokenizationRegistry = class {
     constructor() {
       this._tokenizationSupports = /* @__PURE__ */ new Map();
@@ -7056,7 +7274,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/languages.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/languages.js
   var Token = class {
     constructor(offset, type, language) {
       this.offset = offset;
@@ -7118,63 +7336,63 @@
     function toLabel(kind) {
       switch (kind) {
         case 0:
-          return localize(728, "Method");
+          return localize(763, "Method");
         case 1:
-          return localize(729, "Function");
+          return localize(764, "Function");
         case 2:
-          return localize(730, "Constructor");
+          return localize(765, "Constructor");
         case 3:
-          return localize(731, "Field");
+          return localize(766, "Field");
         case 4:
-          return localize(732, "Variable");
+          return localize(767, "Variable");
         case 5:
-          return localize(733, "Class");
+          return localize(768, "Class");
         case 6:
-          return localize(734, "Struct");
+          return localize(769, "Struct");
         case 7:
-          return localize(735, "Interface");
+          return localize(770, "Interface");
         case 8:
-          return localize(736, "Module");
+          return localize(771, "Module");
         case 9:
-          return localize(737, "Property");
+          return localize(772, "Property");
         case 10:
-          return localize(738, "Event");
+          return localize(773, "Event");
         case 11:
-          return localize(739, "Operator");
+          return localize(774, "Operator");
         case 12:
-          return localize(740, "Unit");
+          return localize(775, "Unit");
         case 13:
-          return localize(741, "Value");
+          return localize(776, "Value");
         case 14:
-          return localize(742, "Constant");
+          return localize(777, "Constant");
         case 15:
-          return localize(743, "Enum");
+          return localize(778, "Enum");
         case 16:
-          return localize(744, "Enum Member");
+          return localize(779, "Enum Member");
         case 17:
-          return localize(745, "Keyword");
+          return localize(780, "Keyword");
         case 18:
-          return localize(746, "Text");
+          return localize(781, "Text");
         case 19:
-          return localize(747, "Color");
+          return localize(782, "Color");
         case 20:
-          return localize(748, "File");
+          return localize(783, "File");
         case 21:
-          return localize(749, "Reference");
+          return localize(784, "Reference");
         case 22:
-          return localize(750, "Custom Color");
+          return localize(785, "Custom Color");
         case 23:
-          return localize(751, "Folder");
+          return localize(786, "Folder");
         case 24:
-          return localize(752, "Type Parameter");
+          return localize(787, "Type Parameter");
         case 25:
-          return localize(753, "User");
+          return localize(788, "User");
         case 26:
-          return localize(754, "Issue");
+          return localize(789, "Issue");
         case 27:
-          return localize(755, "Tool");
+          return localize(790, "Tool");
         case 28:
-          return localize(756, "Snippet");
+          return localize(791, "Snippet");
         default:
           return "";
       }
@@ -7382,107 +7600,107 @@
     [
       17
       /* SymbolKind.Array */
-    ]: localize(757, "array"),
+    ]: localize(792, "array"),
     [
       16
       /* SymbolKind.Boolean */
-    ]: localize(758, "boolean"),
+    ]: localize(793, "boolean"),
     [
       4
       /* SymbolKind.Class */
-    ]: localize(759, "class"),
+    ]: localize(794, "class"),
     [
       13
       /* SymbolKind.Constant */
-    ]: localize(760, "constant"),
+    ]: localize(795, "constant"),
     [
       8
       /* SymbolKind.Constructor */
-    ]: localize(761, "constructor"),
+    ]: localize(796, "constructor"),
     [
       9
       /* SymbolKind.Enum */
-    ]: localize(762, "enumeration"),
+    ]: localize(797, "enumeration"),
     [
       21
       /* SymbolKind.EnumMember */
-    ]: localize(763, "enumeration member"),
+    ]: localize(798, "enumeration member"),
     [
       23
       /* SymbolKind.Event */
-    ]: localize(764, "event"),
+    ]: localize(799, "event"),
     [
       7
       /* SymbolKind.Field */
-    ]: localize(765, "field"),
+    ]: localize(800, "field"),
     [
       0
       /* SymbolKind.File */
-    ]: localize(766, "file"),
+    ]: localize(801, "file"),
     [
       11
       /* SymbolKind.Function */
-    ]: localize(767, "function"),
+    ]: localize(802, "function"),
     [
       10
       /* SymbolKind.Interface */
-    ]: localize(768, "interface"),
+    ]: localize(803, "interface"),
     [
       19
       /* SymbolKind.Key */
-    ]: localize(769, "key"),
+    ]: localize(804, "key"),
     [
       5
       /* SymbolKind.Method */
-    ]: localize(770, "method"),
+    ]: localize(805, "method"),
     [
       1
       /* SymbolKind.Module */
-    ]: localize(771, "module"),
+    ]: localize(806, "module"),
     [
       2
       /* SymbolKind.Namespace */
-    ]: localize(772, "namespace"),
+    ]: localize(807, "namespace"),
     [
       20
       /* SymbolKind.Null */
-    ]: localize(773, "null"),
+    ]: localize(808, "null"),
     [
       15
       /* SymbolKind.Number */
-    ]: localize(774, "number"),
+    ]: localize(809, "number"),
     [
       18
       /* SymbolKind.Object */
-    ]: localize(775, "object"),
+    ]: localize(810, "object"),
     [
       24
       /* SymbolKind.Operator */
-    ]: localize(776, "operator"),
+    ]: localize(811, "operator"),
     [
       3
       /* SymbolKind.Package */
-    ]: localize(777, "package"),
+    ]: localize(812, "package"),
     [
       6
       /* SymbolKind.Property */
-    ]: localize(778, "property"),
+    ]: localize(813, "property"),
     [
       14
       /* SymbolKind.String */
-    ]: localize(779, "string"),
+    ]: localize(814, "string"),
     [
       22
       /* SymbolKind.Struct */
-    ]: localize(780, "struct"),
+    ]: localize(815, "struct"),
     [
       25
       /* SymbolKind.TypeParameter */
-    ]: localize(781, "type parameter"),
+    ]: localize(816, "type parameter"),
     [
       12
       /* SymbolKind.Variable */
-    ]: localize(782, "variable")
+    ]: localize(817, "variable")
   };
   var SymbolKinds;
   (function(SymbolKinds2) {
@@ -7724,7 +7942,7 @@
   })(InlayHintKind || (InlayHintKind = {}));
   var TokenizationRegistry2 = new TokenizationRegistry();
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/standalone/standaloneEnums.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/standalone/standaloneEnums.js
   var AccessibilitySupport;
   (function(AccessibilitySupport2) {
     AccessibilitySupport2[AccessibilitySupport2["Unknown"] = 0] = "Unknown";
@@ -7994,6 +8212,7 @@
     EditorOption2[EditorOption2["effectiveEditContext"] = 170] = "effectiveEditContext";
     EditorOption2[EditorOption2["scrollOnMiddleClick"] = 171] = "scrollOnMiddleClick";
     EditorOption2[EditorOption2["effectiveAllowVariableFonts"] = 172] = "effectiveAllowVariableFonts";
+    EditorOption2[EditorOption2["doubleClickSelectsBlock"] = 173] = "doubleClickSelectsBlock";
   })(EditorOption || (EditorOption = {}));
   var EndOfLinePreference;
   (function(EndOfLinePreference2) {
@@ -8377,7 +8596,7 @@
     WrappingIndent2[WrappingIndent2["DeepIndent"] = 3] = "DeepIndent";
   })(WrappingIndent || (WrappingIndent = {}));
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/services/editorBaseApi.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/services/editorBaseApi.js
   var KeyMod = class {
     static {
       this.CtrlCmd = 2048;
@@ -8416,7 +8635,7 @@
     };
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/map.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/map.js
   var _a;
   var _b;
   var _c;
@@ -8657,6 +8876,8 @@
         [Symbol.iterator]() {
           return iterator;
         },
+        [Symbol.dispose]() {
+        },
         next() {
           if (map._state !== state) {
             throw new Error(`LinkedMap got modified during iteration.`);
@@ -8680,6 +8901,8 @@
         [Symbol.iterator]() {
           return iterator;
         },
+        [Symbol.dispose]() {
+        },
         next() {
           if (map._state !== state) {
             throw new Error(`LinkedMap got modified during iteration.`);
@@ -8702,6 +8925,8 @@
       const iterator = {
         [Symbol.iterator]() {
           return iterator;
+        },
+        [Symbol.dispose]() {
         },
         next() {
           if (map._state !== state) {
@@ -8959,10 +9184,10 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/core/wordCharacterClassifier.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/core/wordCharacterClassifier.js
   var wordClassifierCache = new LRUCache(10);
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/model.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/model.js
   var OverviewRulerLane2;
   (function(OverviewRulerLane3) {
     OverviewRulerLane3[OverviewRulerLane3["Left"] = 1] = "Left";
@@ -8989,7 +9214,7 @@
     InjectedTextCursorStops3[InjectedTextCursorStops3["None"] = 3] = "None";
   })(InjectedTextCursorStops2 || (InjectedTextCursorStops2 = {}));
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/model/textModelSearch.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/model/textModelSearch.js
   function isMultilineRegexSource(searchString) {
     if (!searchString || searchString.length === 0) {
       return false;
@@ -9099,7 +9324,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/core/wordHelper.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/core/wordHelper.js
   var USUAL_WORD_SEPARATORS = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
   function createWordRegExp(allowInWords = "") {
     let source = "(-?\\d*\\.\\d\\w*)|([^";
@@ -9200,7 +9425,7 @@
     return null;
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/services/unicodeTextModelHighlighter.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/services/unicodeTextModelHighlighter.js
   var UnicodeTextModelHighlighter = class {
     static computeUnicodeHighlights(model, options, range) {
       const startLine = range ? range.startLineNumber : 1;
@@ -9376,7 +9601,7 @@
     return character === " " || character === "\n" || character === "	";
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/diff/linesDiffComputer.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/diff/linesDiffComputer.js
   var LinesDiff = class {
     constructor(changes, moves, hitTimeout) {
       this.changes = changes;
@@ -9391,7 +9616,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/arrays.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/arrays.js
   function equals2(one, other, itemEquals = (a, b) => a === b) {
     if (one === other) {
       return true;
@@ -9517,7 +9742,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/core/ranges/offsetRange.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/core/ranges/offsetRange.js
   var OffsetRange = class _OffsetRange {
     static fromTo(start2, endExclusive) {
       return new _OffsetRange(start2, endExclusive);
@@ -9582,6 +9807,9 @@
     equals(other) {
       return this.start === other.start && this.endExclusive === other.endExclusive;
     }
+    containsRange(other) {
+      return this.start <= other.start && other.endExclusive <= this.endExclusive;
+    }
     contains(offset) {
       return this.start <= offset && offset < this.endExclusive;
     }
@@ -9611,6 +9839,10 @@
       const end = Math.min(this.endExclusive, range.endExclusive);
       return Math.max(0, end - start2);
     }
+    /**
+     * `a.intersects(b)` iff there exists a number n so that `a.contains(n)` and `b.contains(n)`.
+     * Warning: If one range is empty, this method returns always false.
+    */
     intersects(other) {
       const start2 = Math.max(this.start, other.start);
       const end = Math.min(this.endExclusive, other.endExclusive);
@@ -9676,9 +9908,15 @@
       }
       return new _OffsetRange(this.start, range.endExclusive);
     }
+    withMargin(marginStart, marginEnd) {
+      if (marginEnd === void 0) {
+        marginEnd = marginStart;
+      }
+      return new _OffsetRange(this.start - marginStart, this.endExclusive + marginEnd);
+    }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/arraysFind.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/arraysFind.js
   function findLastMonotonous(array, predicate) {
     const idx = findLastIdxMonotonous(array, predicate);
     return idx === -1 ? void 0 : array[idx];
@@ -9742,7 +9980,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/core/ranges/lineRange.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/core/ranges/lineRange.js
   var LineRange = class _LineRange {
     static ofLength(startLineNumber, length) {
       return new _LineRange(startLineNumber, startLineNumber + length);
@@ -10019,7 +10257,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/core/text/textLength.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/core/text/textLength.js
   var TextLength = class _TextLength {
     static {
       this.zero = new _TextLength(0, 0);
@@ -10092,7 +10330,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/core/text/positionToOffsetImpl.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/core/text/positionToOffsetImpl.js
   var PositionOffsetTransformerBase = class {
     getOffsetRange(range) {
       return new OffsetRange(this.getOffset(range.getStartPosition()), this.getOffset(range.getEndPosition()));
@@ -10122,24 +10360,41 @@
       return this._deps;
     }
   };
+  function _setPositionOffsetTransformerDependencies(deps) {
+    Deps._deps = deps;
+  }
   var PositionOffsetTransformer = class extends PositionOffsetTransformerBase {
     constructor(text) {
       super();
       this.text = text;
-      this.lineStartOffsetByLineIdx = [];
-      this.lineEndOffsetByLineIdx = [];
-      this.lineStartOffsetByLineIdx.push(0);
-      for (let i = 0; i < text.length; i++) {
-        if (text.charAt(i) === "\n") {
-          this.lineStartOffsetByLineIdx.push(i + 1);
-          if (i > 0 && text.charAt(i - 1) === "\r") {
-            this.lineEndOffsetByLineIdx.push(i - 1);
+    }
+    get lineStartOffsetByLineIdx() {
+      if (!this._lineStartOffsetByLineIdx) {
+        this._computeLineOffsets();
+      }
+      return this._lineStartOffsetByLineIdx;
+    }
+    get lineEndOffsetByLineIdx() {
+      if (!this._lineEndOffsetByLineIdx) {
+        this._computeLineOffsets();
+      }
+      return this._lineEndOffsetByLineIdx;
+    }
+    _computeLineOffsets() {
+      this._lineStartOffsetByLineIdx = [];
+      this._lineEndOffsetByLineIdx = [];
+      this._lineStartOffsetByLineIdx.push(0);
+      for (let i = 0; i < this.text.length; i++) {
+        if (this.text.charAt(i) === "\n") {
+          this._lineStartOffsetByLineIdx.push(i + 1);
+          if (i > 0 && this.text.charAt(i - 1) === "\r") {
+            this._lineEndOffsetByLineIdx.push(i - 1);
           } else {
-            this.lineEndOffsetByLineIdx.push(i);
+            this._lineEndOffsetByLineIdx.push(i);
           }
         }
       }
-      this.lineEndOffsetByLineIdx.push(text.length);
+      this._lineEndOffsetByLineIdx.push(this.text.length);
     }
     getOffset(position) {
       const valPos = this._validatePosition(position);
@@ -10178,7 +10433,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/core/text/abstractText.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/core/text/abstractText.js
   var AbstractText = class {
     constructor() {
       this._transformer = void 0;
@@ -10239,8 +10494,187 @@
       super((lineNumber) => lines[lineNumber - 1], lines.length);
     }
   };
+  var StringText = class extends AbstractText {
+    constructor(value) {
+      super();
+      this.value = value;
+      this._t = new PositionOffsetTransformer(this.value);
+    }
+    getValueOfRange(range) {
+      return this._t.getOffsetRange(range).substring(this.value);
+    }
+    get length() {
+      return this._t.textLength;
+    }
+    // Override the getTransformer method to return the cached transformer
+    getTransformer() {
+      return this._t;
+    }
+  };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/core/edits/textEdit.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/core/edits/textEdit.js
+  var TextEdit = class _TextEdit {
+    static fromStringEdit(edit, initialState) {
+      const edits = edit.replacements.map((e) => TextReplacement.fromStringReplacement(e, initialState));
+      return new _TextEdit(edits);
+    }
+    static fromParallelReplacementsUnsorted(replacements) {
+      const r = replacements.slice().sort(compareBy((i) => i.range, Range.compareRangesUsingStarts));
+      return new _TextEdit(r);
+    }
+    constructor(replacements) {
+      this.replacements = replacements;
+      assertFn(() => checkAdjacentItems(replacements, (a, b) => a.range.getEndPosition().isBeforeOrEqual(b.range.getStartPosition())));
+    }
+    mapPosition(position) {
+      let lineDelta = 0;
+      let curLine = 0;
+      let columnDeltaInCurLine = 0;
+      for (const replacement of this.replacements) {
+        const start2 = replacement.range.getStartPosition();
+        if (position.isBeforeOrEqual(start2)) {
+          break;
+        }
+        const end = replacement.range.getEndPosition();
+        const len = TextLength.ofText(replacement.text);
+        if (position.isBefore(end)) {
+          const startPos = new Position(start2.lineNumber + lineDelta, start2.column + (start2.lineNumber + lineDelta === curLine ? columnDeltaInCurLine : 0));
+          const endPos = len.addToPosition(startPos);
+          return rangeFromPositions(startPos, endPos);
+        }
+        if (start2.lineNumber + lineDelta !== curLine) {
+          columnDeltaInCurLine = 0;
+        }
+        lineDelta += len.lineCount - (replacement.range.endLineNumber - replacement.range.startLineNumber);
+        if (len.lineCount === 0) {
+          if (end.lineNumber !== start2.lineNumber) {
+            columnDeltaInCurLine += len.columnCount - (end.column - 1);
+          } else {
+            columnDeltaInCurLine += len.columnCount - (end.column - start2.column);
+          }
+        } else {
+          columnDeltaInCurLine = len.columnCount;
+        }
+        curLine = end.lineNumber + lineDelta;
+      }
+      return new Position(position.lineNumber + lineDelta, position.column + (position.lineNumber + lineDelta === curLine ? columnDeltaInCurLine : 0));
+    }
+    mapRange(range) {
+      function getStart(p) {
+        return p instanceof Position ? p : p.getStartPosition();
+      }
+      function getEnd(p) {
+        return p instanceof Position ? p : p.getEndPosition();
+      }
+      const start2 = getStart(this.mapPosition(range.getStartPosition()));
+      const end = getEnd(this.mapPosition(range.getEndPosition()));
+      return rangeFromPositions(start2, end);
+    }
+    apply(text) {
+      let result = "";
+      let lastEditEnd = new Position(1, 1);
+      for (const replacement of this.replacements) {
+        const editRange = replacement.range;
+        const editStart = editRange.getStartPosition();
+        const editEnd = editRange.getEndPosition();
+        const r2 = rangeFromPositions(lastEditEnd, editStart);
+        if (!r2.isEmpty()) {
+          result += text.getValueOfRange(r2);
+        }
+        result += replacement.text;
+        lastEditEnd = editEnd;
+      }
+      const r = rangeFromPositions(lastEditEnd, text.endPositionExclusive);
+      if (!r.isEmpty()) {
+        result += text.getValueOfRange(r);
+      }
+      return result;
+    }
+    applyToString(str) {
+      const strText = new StringText(str);
+      return this.apply(strText);
+    }
+    getNewRanges() {
+      const newRanges = [];
+      let previousEditEndLineNumber = 0;
+      let lineOffset = 0;
+      let columnOffset = 0;
+      for (const replacement of this.replacements) {
+        const textLength = TextLength.ofText(replacement.text);
+        const newRangeStart = Position.lift({
+          lineNumber: replacement.range.startLineNumber + lineOffset,
+          column: replacement.range.startColumn + (replacement.range.startLineNumber === previousEditEndLineNumber ? columnOffset : 0)
+        });
+        const newRange = textLength.createRange(newRangeStart);
+        newRanges.push(newRange);
+        lineOffset = newRange.endLineNumber - replacement.range.endLineNumber;
+        columnOffset = newRange.endColumn - replacement.range.endColumn;
+        previousEditEndLineNumber = replacement.range.endLineNumber;
+      }
+      return newRanges;
+    }
+    toReplacement(text) {
+      if (this.replacements.length === 0) {
+        throw new BugIndicatingError();
+      }
+      if (this.replacements.length === 1) {
+        return this.replacements[0];
+      }
+      const startPos = this.replacements[0].range.getStartPosition();
+      const endPos = this.replacements[this.replacements.length - 1].range.getEndPosition();
+      let newText = "";
+      for (let i = 0; i < this.replacements.length; i++) {
+        const curEdit = this.replacements[i];
+        newText += curEdit.text;
+        if (i < this.replacements.length - 1) {
+          const nextEdit = this.replacements[i + 1];
+          const gapRange = Range.fromPositions(curEdit.range.getEndPosition(), nextEdit.range.getStartPosition());
+          const gapText = text.getValueOfRange(gapRange);
+          newText += gapText;
+        }
+      }
+      return new TextReplacement(Range.fromPositions(startPos, endPos), newText);
+    }
+    toString(text) {
+      if (text === void 0) {
+        return this.replacements.map((edit) => edit.toString()).join("\n");
+      }
+      if (typeof text === "string") {
+        return this.toString(new StringText(text));
+      }
+      if (this.replacements.length === 0) {
+        return "";
+      }
+      return this.replacements.map((r) => {
+        const maxLength = 10;
+        const originalText = text.getValueOfRange(r.range);
+        const beforeRange = Range.fromPositions(new Position(Math.max(1, r.range.startLineNumber - 1), 1), r.range.getStartPosition());
+        let beforeText = text.getValueOfRange(beforeRange);
+        if (beforeText.length > maxLength) {
+          beforeText = "..." + beforeText.substring(beforeText.length - maxLength);
+        }
+        const afterRange = Range.fromPositions(r.range.getEndPosition(), new Position(r.range.endLineNumber + 1, 1));
+        let afterText = text.getValueOfRange(afterRange);
+        if (afterText.length > maxLength) {
+          afterText = afterText.substring(0, maxLength) + "...";
+        }
+        let replacedText = originalText;
+        if (replacedText.length > maxLength) {
+          const halfMax = Math.floor(maxLength / 2);
+          replacedText = replacedText.substring(0, halfMax) + "..." + replacedText.substring(replacedText.length - halfMax);
+        }
+        let newText = r.text;
+        if (newText.length > maxLength) {
+          const halfMax = Math.floor(maxLength / 2);
+          newText = newText.substring(0, halfMax) + "..." + newText.substring(newText.length - halfMax);
+        }
+        if (replacedText.length === 0) {
+          return `${beforeText}\u2770${newText}\u2771${afterText}`;
+        }
+        return `${beforeText}\u2770${replacedText}\u21A6${newText}\u2771${afterText}`;
+      }).join("\n");
+    }
+  };
   var TextReplacement = class _TextReplacement {
     static joinReplacements(replacements, initialValue) {
       if (replacements.length === 0) {
@@ -10312,8 +10746,16 @@
       return `(${start2.lineNumber},${start2.column} -> ${end.lineNumber},${end.column}): "${this.text}"`;
     }
   };
+  function rangeFromPositions(start2, end) {
+    if (start2.lineNumber === end.lineNumber && start2.column === Number.MAX_SAFE_INTEGER) {
+      return Range.fromPositions(end, end);
+    } else if (!start2.isBeforeOrEqual(end)) {
+      throw new BugIndicatingError("start must be before end");
+    }
+    return new Range(start2.lineNumber, start2.column, end.lineNumber, end.column);
+  }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/diff/rangeMapping.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/diff/rangeMapping.js
   var LineRangeMapping = class _LineRangeMapping {
     static inverse(mapping, originalLineCount, modifiedLineCount) {
       const result = [];
@@ -10495,7 +10937,7 @@
     return new DetailedLineRangeMapping(originalLineRange, modifiedLineRange, [rangeMapping]);
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/diff/legacyLinesDiffComputer.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/diff/legacyLinesDiffComputer.js
   var MINIMUM_MATCHING_CHARACTER_LENGTH = 3;
   var LegacyLinesDiffComputer = class {
     computeDiff(originalLines, modifiedLines, options) {
@@ -10914,7 +11356,7 @@
     };
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/algorithms/diffAlgorithm.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/algorithms/diffAlgorithm.js
   var DiffAlgorithmResult = class _DiffAlgorithmResult {
     static trivial(seq1, seq2) {
       return new _DiffAlgorithmResult([new SequenceDiff(OffsetRange.ofLength(seq1.length), OffsetRange.ofLength(seq2.length))], false);
@@ -11046,7 +11488,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/utils.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/utils.js
   var Array2D = class {
     constructor(width, height) {
       this.width = width;
@@ -11106,7 +11548,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/algorithms/dynamicProgrammingDiffing.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/algorithms/dynamicProgrammingDiffing.js
   var DynamicProgrammingDiffing = class {
     compute(sequence1, sequence2, timeout = InfiniteTimeout.instance, equalityScore) {
       if (sequence1.length === 0 || sequence2.length === 0) {
@@ -11182,7 +11624,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/algorithms/myersDiffAlgorithm.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/algorithms/myersDiffAlgorithm.js
   var MyersDiffAlgorithm = class {
     compute(seq1, seq2, timeout = InfiniteTimeout.instance) {
       if (seq1.length === 0 || seq2.length === 0) {
@@ -11311,7 +11753,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/linesSliceCharSequence.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/linesSliceCharSequence.js
   var LinesSliceCharSequence = class {
     constructor(lines, range, considerWhitespaceChanges) {
       this.lines = lines;
@@ -11514,7 +11956,7 @@
     }
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/computeMovedLines.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/computeMovedLines.js
   function computeMovedLines(changes, originalLines, modifiedLines, hashedOriginalLines, hashedModifiedLines, timeout) {
     let { moves, excludedChanges } = computeMovesFromSimpleDeletionsToSimpleInsertions(changes, originalLines, modifiedLines, timeout);
     if (!timeout.isValid()) {
@@ -11740,7 +12182,7 @@
     return moves;
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/heuristicSequenceOptimizations.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/heuristicSequenceOptimizations.js
   function optimizeSequenceDiffs(sequence1, sequence2, sequenceDiffs) {
     let result = sequenceDiffs;
     result = joinSequenceDiffsByShifting(sequence1, sequence2, result);
@@ -12048,7 +12490,7 @@
     return newDiffs;
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/lineSequence.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/lineSequence.js
   var LineSequence2 = class {
     constructor(trimmedHash, lines) {
       this.trimmedHash = trimmedHash;
@@ -12080,7 +12522,7 @@
     return i;
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/diff/defaultLinesDiffComputer/defaultLinesDiffComputer.js
   var DefaultLinesDiffComputer = class {
     constructor() {
       this.dynamicProgrammingDiffing = new DynamicProgrammingDiffing();
@@ -12237,13 +12679,611 @@
     return new LineRangeMapping(new LineRange(sequenceDiff.seq1Range.start + 1, sequenceDiff.seq1Range.endExclusive + 1), new LineRange(sequenceDiff.seq2Range.start + 1, sequenceDiff.seq2Range.endExclusive + 1));
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/diff/linesDiffComputers.js
-  var linesDiffComputers = {
-    getLegacy: () => new LegacyLinesDiffComputer(),
-    getDefault: () => new DefaultLinesDiffComputer()
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/network.js
+  var Schemas;
+  (function(Schemas2) {
+    Schemas2.inMemory = "inmemory";
+    Schemas2.vscode = "vscode";
+    Schemas2.internal = "private";
+    Schemas2.walkThrough = "walkThrough";
+    Schemas2.walkThroughSnippet = "walkThroughSnippet";
+    Schemas2.http = "http";
+    Schemas2.https = "https";
+    Schemas2.file = "file";
+    Schemas2.mailto = "mailto";
+    Schemas2.untitled = "untitled";
+    Schemas2.data = "data";
+    Schemas2.command = "command";
+    Schemas2.vscodeRemote = "vscode-remote";
+    Schemas2.vscodeRemoteResource = "vscode-remote-resource";
+    Schemas2.vscodeManagedRemoteResource = "vscode-managed-remote-resource";
+    Schemas2.vscodeUserData = "vscode-userdata";
+    Schemas2.vscodeCustomEditor = "vscode-custom-editor";
+    Schemas2.vscodeNotebookCell = "vscode-notebook-cell";
+    Schemas2.vscodeNotebookCellMetadata = "vscode-notebook-cell-metadata";
+    Schemas2.vscodeNotebookCellMetadataDiff = "vscode-notebook-cell-metadata-diff";
+    Schemas2.vscodeNotebookCellOutput = "vscode-notebook-cell-output";
+    Schemas2.vscodeNotebookCellOutputDiff = "vscode-notebook-cell-output-diff";
+    Schemas2.vscodeNotebookMetadata = "vscode-notebook-metadata";
+    Schemas2.vscodeInteractiveInput = "vscode-interactive-input";
+    Schemas2.vscodeSettings = "vscode-settings";
+    Schemas2.vscodeWorkspaceTrust = "vscode-workspace-trust";
+    Schemas2.vscodeTerminal = "vscode-terminal";
+    Schemas2.vscodeImageCarousel = "vscode-image-carousel";
+    Schemas2.vscodeChatCodeBlock = "vscode-chat-code-block";
+    Schemas2.vscodeChatCodeCompareBlock = "vscode-chat-code-compare-block";
+    Schemas2.vscodeChatEditor = "vscode-chat-editor";
+    Schemas2.vscodeChatInput = "chatSessionInput";
+    Schemas2.vscodeLocalChatSession = "vscode-chat-session";
+    Schemas2.webviewPanel = "webview-panel";
+    Schemas2.vscodeWebview = "vscode-webview";
+    Schemas2.vscodeBrowser = "vscode-browser";
+    Schemas2.extension = "extension";
+    Schemas2.vscodeFileResource = "vscode-file";
+    Schemas2.tmp = "tmp";
+    Schemas2.vsls = "vsls";
+    Schemas2.vscodeSourceControl = "vscode-scm";
+    Schemas2.commentsInput = "comment";
+    Schemas2.codeSetting = "code-setting";
+    Schemas2.outputChannel = "output";
+    Schemas2.accessibleView = "accessible-view";
+    Schemas2.chatEditingSnapshotScheme = "chat-editing-snapshot-text-model";
+    Schemas2.chatEditingModel = "chat-editing-text-model";
+    Schemas2.copilotPr = "copilot-pr";
+  })(Schemas || (Schemas = {}));
+  var connectionTokenQueryName = "tkn";
+  var RemoteAuthoritiesImpl = class {
+    constructor() {
+      this._hosts = /* @__PURE__ */ Object.create(null);
+      this._ports = /* @__PURE__ */ Object.create(null);
+      this._connectionTokens = /* @__PURE__ */ Object.create(null);
+      this._preferredWebSchema = "http";
+      this._delegate = null;
+      this._serverRootPath = "/";
+    }
+    setPreferredWebSchema(schema) {
+      this._preferredWebSchema = schema;
+    }
+    get _remoteResourcesPath() {
+      return posix.join(this._serverRootPath, Schemas.vscodeRemoteResource);
+    }
+    rewrite(uri) {
+      if (this._delegate) {
+        try {
+          return this._delegate(uri);
+        } catch (err) {
+          onUnexpectedExternalError(err);
+          return uri;
+        }
+      }
+      const authority = uri.authority;
+      let host = this._hosts[authority];
+      if (host && host.indexOf(":") !== -1 && host.indexOf("[") === -1) {
+        host = `[${host}]`;
+      }
+      const port = this._ports[authority];
+      const connectionToken = this._connectionTokens[authority];
+      let query = `path=${encodeURIComponent(uri.path)}`;
+      if (typeof connectionToken === "string") {
+        query += `&${connectionTokenQueryName}=${encodeURIComponent(connectionToken)}`;
+      }
+      return URI.from({
+        scheme: isWeb ? this._preferredWebSchema : Schemas.vscodeRemoteResource,
+        authority: `${host}:${port}`,
+        path: this._remoteResourcesPath,
+        query
+      });
+    }
+  };
+  var RemoteAuthorities = new RemoteAuthoritiesImpl();
+  var nodeModulesPath = "vs/../../node_modules";
+  var VSCODE_AUTHORITY = "vscode-app";
+  var FileAccessImpl = class _FileAccessImpl {
+    static {
+      this.FALLBACK_AUTHORITY = VSCODE_AUTHORITY;
+    }
+    /**
+     * Returns a URI to use in contexts where the browser is responsible
+     * for loading (e.g. fetch()) or when used within the DOM.
+     *
+     * **Note:** use `dom.ts#asCSSUrl` whenever the URL is to be used in CSS context.
+     */
+    asBrowserUri(resourcePath) {
+      const uri = this.toUri(resourcePath);
+      return this.uriToBrowserUri(uri);
+    }
+    /**
+     * Returns a URI to use in contexts where the browser is responsible
+     * for loading (e.g. fetch()) or when used within the DOM.
+     *
+     * **Note:** use `dom.ts#asCSSUrl` whenever the URL is to be used in CSS context.
+     */
+    uriToBrowserUri(uri) {
+      if (uri.scheme === Schemas.vscodeRemote) {
+        return RemoteAuthorities.rewrite(uri);
+      }
+      if (
+        // ...only ever for `file` resources
+        uri.scheme === Schemas.file && // ...and we run in native environments
+        (isNative || // ...or web worker extensions on desktop
+        webWorkerOrigin === `${Schemas.vscodeFileResource}://${_FileAccessImpl.FALLBACK_AUTHORITY}`)
+      ) {
+        return uri.with({
+          scheme: Schemas.vscodeFileResource,
+          // We need to provide an authority here so that it can serve
+          // as origin for network and loading matters in chromium.
+          // If the URI is not coming with an authority already, we
+          // add our own
+          authority: uri.authority || _FileAccessImpl.FALLBACK_AUTHORITY,
+          query: null,
+          fragment: null
+        });
+      }
+      return uri;
+    }
+    toUri(uriOrModule) {
+      if (URI.isUri(uriOrModule)) {
+        return uriOrModule;
+      }
+      if (globalThis._VSCODE_FILE_ROOT) {
+        const rootUriOrPath = globalThis._VSCODE_FILE_ROOT;
+        if (/^\w[\w\d+.-]*:\/\//.test(rootUriOrPath)) {
+          return URI.joinPath(URI.parse(rootUriOrPath, true), uriOrModule);
+        }
+        const modulePath = join(rootUriOrPath, uriOrModule);
+        return URI.file(modulePath);
+      }
+      throw new Error("Cannot determine URI for module id!");
+    }
+  };
+  var FileAccess = new FileAccessImpl();
+  var COI;
+  (function(COI2) {
+    const coiHeaders = /* @__PURE__ */ new Map([
+      ["1", { "Cross-Origin-Opener-Policy": "same-origin" }],
+      ["2", { "Cross-Origin-Embedder-Policy": "require-corp" }],
+      ["3", { "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp" }]
+    ]);
+    COI2.CoopAndCoep = Object.freeze(coiHeaders.get("3"));
+    const coiSearchParamName = "vscode-coi";
+    function getHeadersFromQuery(url) {
+      let params;
+      if (typeof url === "string") {
+        params = new URL(url).searchParams;
+      } else if (url instanceof URL) {
+        params = url.searchParams;
+      } else if (URI.isUri(url)) {
+        params = new URL(url.toString(true)).searchParams;
+      }
+      const value = params?.get(coiSearchParamName);
+      if (!value) {
+        return void 0;
+      }
+      return coiHeaders.get(value);
+    }
+    COI2.getHeadersFromQuery = getHeadersFromQuery;
+    function addSearchParam(urlOrSearch, coop, coep) {
+      if (!globalThis.crossOriginIsolated) {
+        return;
+      }
+      const value = coop && coep ? "3" : coep ? "2" : "1";
+      if (urlOrSearch instanceof URLSearchParams) {
+        urlOrSearch.set(coiSearchParamName, value);
+      } else {
+        urlOrSearch[coiSearchParamName] = value;
+      }
+    }
+    COI2.addSearchParam = addSearchParam;
+  })(COI || (COI = {}));
+
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/amdX.js
+  function resolveAmdNodeModulePath(nodeModuleName, pathInsideNodeModule) {
+    const product = globalThis._VSCODE_PRODUCT_JSON;
+    Boolean((product ?? globalThis.vscode?.context?.configuration()?.product)?.commit);
+    const nodeModulePath = `${nodeModuleName}/${pathInsideNodeModule}`;
+    const actualNodeModulesPath = nodeModulesPath;
+    const resourcePath = `${actualNodeModulesPath}/${nodeModulePath}`;
+    return FileAccess.asBrowserUri(resourcePath).toString(true);
+  }
+
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/core/edits/edit.js
+  var BaseEdit = class {
+    constructor(replacements) {
+      this.replacements = replacements;
+      let lastEndEx = -1;
+      for (const replacement of replacements) {
+        if (!(replacement.replaceRange.start >= lastEndEx)) {
+          throw new BugIndicatingError(`Edits must be disjoint and sorted. Found ${replacement} after ${lastEndEx}`);
+        }
+        lastEndEx = replacement.replaceRange.endExclusive;
+      }
+    }
+    toString() {
+      const edits = this.replacements.map((e) => e.toString()).join(", ");
+      return `[${edits}]`;
+    }
+    /**
+     * Normalizes the edit by removing empty replacements and joining touching replacements (if the replacements allow joining).
+     * Two edits have an equal normalized edit if and only if they have the same effect on any input.
+     *
+     * ![](https://raw.githubusercontent.com/microsoft/vscode/refs/heads/main/src/vs/editor/common/core/edits/docs/BaseEdit_normalize.drawio.png)
+     *
+     * Invariant:
+     * ```
+     * (forall base: TEdit.apply(base).equals(other.apply(base))) <-> this.normalize().equals(other.normalize())
+     * ```
+     * and
+     * ```
+     * forall base: TEdit.apply(base).equals(this.normalize().apply(base))
+     * ```
+     *
+     */
+    normalize() {
+      const newReplacements = [];
+      let lastReplacement;
+      for (const r of this.replacements) {
+        if (r.getNewLength() === 0 && r.replaceRange.length === 0) {
+          continue;
+        }
+        if (lastReplacement && lastReplacement.replaceRange.endExclusive === r.replaceRange.start) {
+          const joined = lastReplacement.tryJoinTouching(r);
+          if (joined) {
+            lastReplacement = joined;
+            continue;
+          }
+        }
+        if (lastReplacement) {
+          newReplacements.push(lastReplacement);
+        }
+        lastReplacement = r;
+      }
+      if (lastReplacement) {
+        newReplacements.push(lastReplacement);
+      }
+      return this._createNew(newReplacements);
+    }
+    /**
+     * Combines two edits into one with the same effect.
+     *
+     * ![](https://raw.githubusercontent.com/microsoft/vscode/refs/heads/main/src/vs/editor/common/core/edits/docs/BaseEdit_compose.drawio.png)
+     *
+     * Invariant:
+     * ```
+     * other.apply(this.apply(s0)) = this.compose(other).apply(s0)
+     * ```
+     */
+    compose(other) {
+      const edits1 = this.normalize();
+      const edits2 = other.normalize();
+      if (edits1.isEmpty()) {
+        return edits2;
+      }
+      if (edits2.isEmpty()) {
+        return edits1;
+      }
+      const edit1Queue = [...edits1.replacements];
+      const result = [];
+      let edit1ToEdit2 = 0;
+      for (const r2 of edits2.replacements) {
+        while (true) {
+          const r1 = edit1Queue[0];
+          if (!r1 || r1.replaceRange.start + edit1ToEdit2 + r1.getNewLength() >= r2.replaceRange.start) {
+            break;
+          }
+          edit1Queue.shift();
+          result.push(r1);
+          edit1ToEdit2 += r1.getNewLength() - r1.replaceRange.length;
+        }
+        const firstEdit1ToEdit2 = edit1ToEdit2;
+        let firstIntersecting;
+        let lastIntersecting;
+        while (true) {
+          const r1 = edit1Queue[0];
+          if (!r1 || r1.replaceRange.start + edit1ToEdit2 > r2.replaceRange.endExclusive) {
+            break;
+          }
+          if (!firstIntersecting) {
+            firstIntersecting = r1;
+          }
+          lastIntersecting = r1;
+          edit1Queue.shift();
+          edit1ToEdit2 += r1.getNewLength() - r1.replaceRange.length;
+        }
+        if (!firstIntersecting) {
+          result.push(r2.delta(-edit1ToEdit2));
+        } else {
+          const newReplaceRangeStart = Math.min(firstIntersecting.replaceRange.start, r2.replaceRange.start - firstEdit1ToEdit2);
+          const prefixLength = r2.replaceRange.start - (firstIntersecting.replaceRange.start + firstEdit1ToEdit2);
+          if (prefixLength > 0) {
+            const prefix = firstIntersecting.slice(OffsetRange.emptyAt(newReplaceRangeStart), new OffsetRange(0, prefixLength));
+            result.push(prefix);
+          }
+          if (!lastIntersecting) {
+            throw new BugIndicatingError(`Invariant violation: lastIntersecting is undefined`);
+          }
+          const suffixLength = lastIntersecting.replaceRange.endExclusive + edit1ToEdit2 - r2.replaceRange.endExclusive;
+          if (suffixLength > 0) {
+            const e = lastIntersecting.slice(OffsetRange.ofStartAndLength(lastIntersecting.replaceRange.endExclusive, 0), new OffsetRange(lastIntersecting.getNewLength() - suffixLength, lastIntersecting.getNewLength()));
+            edit1Queue.unshift(e);
+            edit1ToEdit2 -= e.getNewLength() - e.replaceRange.length;
+          }
+          const newReplaceRange = new OffsetRange(newReplaceRangeStart, r2.replaceRange.endExclusive - edit1ToEdit2);
+          const middle = r2.slice(newReplaceRange, new OffsetRange(0, r2.getNewLength()));
+          result.push(middle);
+        }
+      }
+      while (true) {
+        const item = edit1Queue.shift();
+        if (!item) {
+          break;
+        }
+        result.push(item);
+      }
+      return this._createNew(result).normalize();
+    }
+    /**
+     * Returns the range of each replacement in the applied value.
+    */
+    getNewRanges() {
+      const ranges = [];
+      let offset = 0;
+      for (const e of this.replacements) {
+        ranges.push(OffsetRange.ofStartAndLength(e.replaceRange.start + offset, e.getNewLength()));
+        offset += e.getLengthDelta();
+      }
+      return ranges;
+    }
+    isEmpty() {
+      return this.replacements.length === 0;
+    }
+    /**
+     * Return undefined if the originalOffset is within an edit
+     */
+    applyToOffsetOrUndefined(originalOffset) {
+      let accumulatedDelta = 0;
+      for (const edit of this.replacements) {
+        if (edit.replaceRange.start <= originalOffset) {
+          if (originalOffset < edit.replaceRange.endExclusive) {
+            return void 0;
+          }
+          accumulatedDelta += edit.getNewLength() - edit.replaceRange.length;
+        } else {
+          break;
+        }
+      }
+      return originalOffset + accumulatedDelta;
+    }
+  };
+  var BaseReplacement = class {
+    constructor(replaceRange) {
+      this.replaceRange = replaceRange;
+    }
+    delta(offset) {
+      return this.slice(this.replaceRange.delta(offset), new OffsetRange(0, this.getNewLength()));
+    }
+    getLengthDelta() {
+      return this.getNewLength() - this.replaceRange.length;
+    }
+    toString() {
+      return `{ ${this.replaceRange.toString()} -> ${this.getNewLength()} }`;
+    }
+    get isEmpty() {
+      return this.getNewLength() === 0 && this.replaceRange.length === 0;
+    }
+    getRangeAfterReplace() {
+      return new OffsetRange(this.replaceRange.start, this.replaceRange.start + this.getNewLength());
+    }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/color.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/core/edits/stringEdit.js
+  var BaseStringEdit = class extends BaseEdit {
+    apply(base) {
+      const resultText = [];
+      let pos = 0;
+      for (const edit of this.replacements) {
+        resultText.push(base.substring(pos, edit.replaceRange.start));
+        resultText.push(edit.newText);
+        pos = edit.replaceRange.endExclusive;
+      }
+      resultText.push(base.substring(pos));
+      return resultText.join("");
+    }
+    removeCommonSuffixPrefix(originalText) {
+      const edits = [];
+      for (const e of this.replacements) {
+        const edit = e.removeCommonSuffixPrefix(originalText);
+        if (!edit.isEmpty) {
+          edits.push(edit);
+        }
+      }
+      return new StringEdit(edits);
+    }
+  };
+  var BaseStringReplacement = class extends BaseReplacement {
+    constructor(range, newText) {
+      super(range);
+      this.newText = newText;
+    }
+    getNewLength() {
+      return this.newText.length;
+    }
+    toString() {
+      return `${this.replaceRange} -> ${JSON.stringify(this.newText)}`;
+    }
+    replace(str) {
+      return str.substring(0, this.replaceRange.start) + this.newText + str.substring(this.replaceRange.endExclusive);
+    }
+    removeCommonSuffixPrefix(originalText) {
+      const oldText = originalText.substring(this.replaceRange.start, this.replaceRange.endExclusive);
+      const prefixLen = commonPrefixLength(oldText, this.newText);
+      const suffixLen = Math.min(oldText.length - prefixLen, this.newText.length - prefixLen, commonSuffixLength(oldText, this.newText));
+      const replaceRange = new OffsetRange(this.replaceRange.start + prefixLen, this.replaceRange.endExclusive - suffixLen);
+      const newText = this.newText.substring(prefixLen, this.newText.length - suffixLen);
+      return new StringReplacement(replaceRange, newText);
+    }
+    removeCommonSuffixAndPrefix(source) {
+      return this.removeCommonSuffix(source).removeCommonPrefix(source);
+    }
+    removeCommonPrefix(source) {
+      const oldText = this.replaceRange.substring(source);
+      const prefixLen = commonPrefixLength(oldText, this.newText);
+      if (prefixLen === 0) {
+        return this;
+      }
+      return this.slice(this.replaceRange.deltaStart(prefixLen), new OffsetRange(prefixLen, this.newText.length));
+    }
+    removeCommonSuffix(source) {
+      const oldText = this.replaceRange.substring(source);
+      const suffixLen = commonSuffixLength(oldText, this.newText);
+      if (suffixLen === 0) {
+        return this;
+      }
+      return this.slice(this.replaceRange.deltaEnd(-suffixLen), new OffsetRange(0, this.newText.length - suffixLen));
+    }
+    toJson() {
+      return {
+        txt: this.newText,
+        pos: this.replaceRange.start,
+        len: this.replaceRange.length
+      };
+    }
+  };
+  var StringEdit = class _StringEdit extends BaseStringEdit {
+    static {
+      this.empty = new _StringEdit([]);
+    }
+    static replace(range, replacement) {
+      return new _StringEdit([new StringReplacement(range, replacement)]);
+    }
+    static compose(edits) {
+      if (edits.length === 0) {
+        return _StringEdit.empty;
+      }
+      let result = edits[0];
+      for (let i = 1; i < edits.length; i++) {
+        result = result.compose(edits[i]);
+      }
+      return result;
+    }
+    constructor(replacements) {
+      super(replacements);
+    }
+    _createNew(replacements) {
+      return new _StringEdit(replacements);
+    }
+  };
+  var StringReplacement = class _StringReplacement extends BaseStringReplacement {
+    static insert(offset, text) {
+      return new _StringReplacement(OffsetRange.emptyAt(offset), text);
+    }
+    static replace(range, text) {
+      return new _StringReplacement(range, text);
+    }
+    equals(other) {
+      return this.replaceRange.equals(other.replaceRange) && this.newText === other.newText;
+    }
+    tryJoinTouching(other) {
+      return new _StringReplacement(this.replaceRange.joinRightTouching(other.replaceRange), this.newText + other.newText);
+    }
+    slice(range, rangeInReplacement) {
+      return new _StringReplacement(range, rangeInReplacement ? rangeInReplacement.substring(this.newText) : this.newText);
+    }
+  };
+
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/core/text/positionToOffset.js
+  _setPositionOffsetTransformerDependencies({
+    StringEdit,
+    StringReplacement,
+    TextReplacement,
+    TextEdit,
+    TextLength
+  });
+
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/diff/externalLinesDiffComputer.js
+  var externalModulePromise;
+  var externalDiffComputerPromise;
+  var externalWasmDiffComputerPromise;
+  function loadExternalModule() {
+    if (!externalModulePromise) {
+      const url = resolveAmdNodeModulePath("@vscode/diff", "dist/index.js");
+      externalModulePromise = import(
+        /* webpackIgnore: true */
+        /* @vite-ignore */
+        `${url}`
+      );
+    }
+    return externalModulePromise;
+  }
+  function loadExternalComputer(useWasm) {
+    if (useWasm) {
+      if (!externalWasmDiffComputerPromise) {
+        externalWasmDiffComputerPromise = loadExternalModule().then((m) => m.createDiffComputer({ useWasm: true }));
+      }
+      return externalWasmDiffComputerPromise;
+    }
+    if (!externalDiffComputerPromise) {
+      externalDiffComputerPromise = loadExternalModule().then((m) => m.createDiffComputer({ useWasm: false }));
+    }
+    return externalDiffComputerPromise;
+  }
+  async function getExternalLinesDiffComputer(useWasm) {
+    const computer = await loadExternalComputer(useWasm);
+    return new ExternalLinesDiffComputer(computer);
+  }
+  var ExternalLinesDiffComputer = class {
+    constructor(_computer) {
+      this._computer = _computer;
+    }
+    computeDiff(originalLines, modifiedLines, options) {
+      const originalText = new StringText(originalLines.join("\n"));
+      const modifiedText = new StringText(modifiedLines.join("\n"));
+      const result = this._computer.computeDiff(originalText.value, modifiedText.value, {
+        // TODO: this currently throws
+        ignoreTrimWhitespace: true,
+        // ignoreTrimWhitespace: options.ignoreTrimWhitespace,
+        // TODO: support this. Currently throws with "Time is not implemented in this environment."
+        // maxComputationTimeMs: options.maxComputationTimeMs,
+        computeMoves: options.computeMoves,
+        extendToSubwords: options.extendToSubwords
+      });
+      const originalTransformer = originalText.getTransformer();
+      const modifiedTransformer = modifiedText.getTransformer();
+      const rangeMappings = [];
+      let delta = 0;
+      for (const r of result.edits.replacements) {
+        const modifiedStart = r.range.start + delta;
+        const modifiedEndExclusive = modifiedStart + r.newText.length;
+        const originalRange = originalTransformer.getRange(new OffsetRange(r.range.start, r.range.endExclusive));
+        const modifiedRange = modifiedTransformer.getRange(new OffsetRange(modifiedStart, modifiedEndExclusive));
+        rangeMappings.push(new RangeMapping(originalRange, modifiedRange));
+        delta += r.newText.length - (r.range.endExclusive - r.range.start);
+      }
+      const changes = lineRangeMappingFromRangeMappings(rangeMappings, originalText, modifiedText);
+      const moves = [];
+      if (options.computeMoves) {
+        for (const move of result.moves) {
+          const originalStartPos = originalTransformer.getPosition(move.range.original.start);
+          const originalEndPos = originalTransformer.getPosition(move.range.original.endExclusive);
+          const modifiedStartPos = modifiedTransformer.getPosition(move.range.modified.start);
+          const modifiedEndPos = modifiedTransformer.getPosition(move.range.modified.endExclusive);
+          const originalLineRange = new LineRange(originalStartPos.lineNumber, originalEndPos.lineNumber);
+          const modifiedLineRange = new LineRange(modifiedStartPos.lineNumber, modifiedEndPos.lineNumber);
+          moves.push(new MovedText(new LineRangeMapping(originalLineRange, modifiedLineRange), []));
+        }
+      }
+      return new LinesDiff(changes, moves, result.hitTimeout);
+    }
+  };
+
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/diff/linesDiffComputers.js
+  var linesDiffComputers = {
+    getLegacy: () => new LegacyLinesDiffComputer(),
+    getDefault: () => new DefaultLinesDiffComputer(),
+    getAdvancedExternal: () => getExternalLinesDiffComputer(false),
+    getAdvancedWasm: () => getExternalLinesDiffComputer(true)
+  };
+
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/color.js
   function roundFloat(number, decimalPoints) {
     const decimal = Math.pow(10, decimalPoints);
     return Math.round(number * decimal) / decimal;
@@ -13056,7 +14096,7 @@
     })(Color2.Format || (Color2.Format = {}));
   })(Color || (Color = {}));
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/languages/defaultDocumentColorsComputer.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/languages/defaultDocumentColorsComputer.js
   function _parseCaptureGroups(captureGroups) {
     const values = [];
     for (const captureGroup of captureGroups) {
@@ -13137,7 +14177,7 @@
   }
   function computeColors(model) {
     const result = [];
-    const initialValidationRegex = /\b(rgb|rgba|hsl|hsla)(\([0-9\s,.\%]*\))|^(#)([A-Fa-f0-9]{3})\b|^(#)([A-Fa-f0-9]{4})\b|^(#)([A-Fa-f0-9]{6})\b|^(#)([A-Fa-f0-9]{8})\b|(?<=['"\s])(#)([A-Fa-f0-9]{3})\b|(?<=['"\s])(#)([A-Fa-f0-9]{4})\b|(?<=['"\s])(#)([A-Fa-f0-9]{6})\b|(?<=['"\s])(#)([A-Fa-f0-9]{8})\b/gm;
+    const initialValidationRegex = /\b(rgb|rgba|hsl|hsla)(\([0-9\s,.\%\/]*\))|^(#)([A-Fa-f0-9]{3})\b|^(#)([A-Fa-f0-9]{4})\b|^(#)([A-Fa-f0-9]{6})\b|^(#)([A-Fa-f0-9]{8})\b|(?<=['"\s])(#)([A-Fa-f0-9]{3})\b|(?<=['"\s])(#)([A-Fa-f0-9]{4})\b|(?<=['"\s])(#)([A-Fa-f0-9]{6})\b|(?<=['"\s])(#)([A-Fa-f0-9]{8})\b/gm;
     const initialValidationMatches = _findMatches(model, initialValidationRegex);
     if (initialValidationMatches.length > 0) {
       for (const initialMatch of initialValidationMatches) {
@@ -13149,16 +14189,16 @@
         }
         let colorInformation;
         if (colorScheme === "rgb") {
-          const regexParameters = /^\(\s*(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\s*,\s*(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\s*,\s*(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\s*\)$/gm;
+          const regexParameters = /^\(\s*(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\s*[\s,]\s*(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\s*[\s,]\s*(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\s*\)$/gm;
           colorInformation = _findRGBColorInformation(_findRange(model, initialMatch), _findMatches(colorParameters, regexParameters), false);
         } else if (colorScheme === "rgba") {
-          const regexParameters = /^\(\s*(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\s*,\s*(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\s*,\s*(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\s*,\s*(0[.][0-9]+|[.][0-9]+|[01][.]|[01])\s*\)$/gm;
+          const regexParameters = /^\(\s*(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\s*[\s,]\s*(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\s*[\s,]\s*(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9][0-9]|[0-9])\s*(?:[\s,]|[\s]*\/)\s*(0[.][0-9]+|[.][0-9]+|[01][.]|[01])\s*\)$/gm;
           colorInformation = _findRGBColorInformation(_findRange(model, initialMatch), _findMatches(colorParameters, regexParameters), true);
         } else if (colorScheme === "hsl") {
-          const regexParameters = /^\(\s*((?:360(?:\.0+)?|(?:36[0]|3[0-5][0-9]|[12][0-9][0-9]|[1-9]?[0-9])(?:\.\d+)?))\s*[\s,]\s*(100|\d{1,2}[.]\d*|\d{1,2})%\s*[\s,]\s*(100|\d{1,2}[.]\d*|\d{1,2})%\s*\)$/gm;
+          const regexParameters = /^\(\s*((?:360(?:\.0+)?|(?:36[0]|3[0-5][0-9]|[12][0-9][0-9]|[1-9]?[0-9])(?:\.\d+)?))\s*[\s,]\s*(100(?:\.0+)?|\d{1,2}[.]\d*|\d{1,2})%\s*[\s,]\s*(100(?:\.0+)?|\d{1,2}[.]\d*|\d{1,2})%\s*\)$/gm;
           colorInformation = _findHSLColorInformation(_findRange(model, initialMatch), _findMatches(colorParameters, regexParameters), false);
         } else if (colorScheme === "hsla") {
-          const regexParameters = /^\(\s*((?:360(?:\.0+)?|(?:36[0]|3[0-5][0-9]|[12][0-9][0-9]|[1-9]?[0-9])(?:\.\d+)?))\s*[\s,]\s*(100|\d{1,2}[.]\d*|\d{1,2})%\s*[\s,]\s*(100|\d{1,2}[.]\d*|\d{1,2})%\s*[\s,]\s*(0[.][0-9]+|[.][0-9]+|[01][.]0*|[01])\s*\)$/gm;
+          const regexParameters = /^\(\s*((?:360(?:\.0+)?|(?:36[0]|3[0-5][0-9]|[12][0-9][0-9]|[1-9]?[0-9])(?:\.\d+)?))\s*[\s,]\s*(100(?:\.0+)?|\d{1,2}[.]\d*|\d{1,2})%\s*[\s,]\s*(100(?:\.0+)?|\d{1,2}[.]\d*|\d{1,2})%\s*(?:[\s,]|[\s]*\/)\s*(0[.][0-9]+|[.][0-9]+|[01][.]0*|[01])\s*\)$/gm;
           colorInformation = _findHSLColorInformation(_findRange(model, initialMatch), _findMatches(colorParameters, regexParameters), true);
         } else if (colorScheme === "#") {
           colorInformation = _findHexColorInformation(_findRange(model, initialMatch), colorScheme + colorParameters);
@@ -13177,7 +14217,7 @@
     return computeColors(model);
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/services/findSectionHeaders.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/services/findSectionHeaders.js
   var trimDashesRegex = /^-+|-+$/g;
   var CHUNK_SIZE = 100;
   var MAX_SECTION_LINES = 5;
@@ -13277,10 +14317,10 @@
     return { text, hasSeparatorLine };
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/symbols.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/symbols.js
   var MicrotaskDelay = Symbol("MicrotaskDelay");
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/base/common/async.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/base/common/async.js
   var runWhenGlobalIdle;
   var _runWhenIdle;
   (function() {
@@ -13512,6 +14552,38 @@
         }
       });
     }
+    static tee(iterable) {
+      let emitter1;
+      let emitter2;
+      const defer = new DeferredPromise();
+      const start2 = async () => {
+        if (!emitter1 || !emitter2) {
+          return;
+        }
+        try {
+          for await (const item of iterable) {
+            emitter1.emitOne(item);
+            emitter2.emitOne(item);
+          }
+        } catch (err) {
+          emitter1.reject(err);
+          emitter2.reject(err);
+        } finally {
+          defer.complete();
+        }
+      };
+      const p1 = new _AsyncIterableProducer(async (emitter) => {
+        emitter1 = emitter;
+        start2();
+        return defer.p;
+      });
+      const p2 = new _AsyncIterableProducer(async (emitter) => {
+        emitter2 = emitter;
+        start2();
+        return defer.p;
+      });
+      return [p1, p2];
+    }
     map(mapFn) {
       return _AsyncIterableProducer.map(this, mapFn);
     }
@@ -13548,7 +14620,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/model/prefixSumComputer.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/model/prefixSumComputer.js
   var PrefixSumComputer = class {
     constructor(values) {
       this.values = values;
@@ -13684,7 +14756,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/model/mirrorTextModel.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/model/mirrorTextModel.js
   var MirrorTextModel = class {
     constructor(uri, lines, eol, versionId) {
       this._uri = uri;
@@ -13775,7 +14847,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/services/textModelSync/textModelSync.impl.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/services/textModelSync/textModelSync.impl.js
   var STOP_SYNC_MODEL_DELTA_TIME_MS = 60 * 1e3;
   var WorkerTextModelSyncServer = class {
     constructor() {
@@ -13977,7 +15049,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/services/editorWebWorker.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/services/editorWebWorker.js
   var EditorWorker = class _EditorWorker {
     constructor(_foreignModule = null) {
       this._foreignModule = _foreignModule;
@@ -14025,11 +15097,11 @@
       if (!original || !modified) {
         return null;
       }
-      const result = _EditorWorker.computeDiff(original, modified, options, algorithm);
+      const diffAlgorithm = await resolveLinesDiffComputer(algorithm);
+      const result = _EditorWorker.computeDiff(original, modified, options, diffAlgorithm);
       return result;
     }
-    static computeDiff(originalTextModel, modifiedTextModel, options, algorithm) {
-      const diffAlgorithm = algorithm === "advanced" ? linesDiffComputers.getDefault() : linesDiffComputers.getLegacy();
+    static computeDiff(originalTextModel, modifiedTextModel, options, diffAlgorithm) {
       const originalLines = originalTextModel.getLinesContent();
       const modifiedLines = modifiedTextModel.getLinesContent();
       const result = diffAlgorithm.computeDiff(originalLines, modifiedLines, options);
@@ -14248,8 +15320,20 @@
   if (typeof importScripts === "function") {
     globalThis.monaco = createMonacoBaseAPI();
   }
+  function resolveLinesDiffComputer(algorithm) {
+    switch (algorithm) {
+      case "legacy":
+        return linesDiffComputers.getLegacy();
+      case "advanced":
+        return linesDiffComputers.getDefault();
+      case "advanced-external":
+        return linesDiffComputers.getAdvancedExternal();
+      case "advanced-wasm":
+        return linesDiffComputers.getAdvancedWasm();
+    }
+  }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/common/services/editorWorkerHost.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/common/services/editorWorkerHost.js
   var EditorWorkerHost = class _EditorWorkerHost {
     static {
       this.CHANNEL_NAME = "editorWorkerHost";
@@ -14262,7 +15346,7 @@
     }
   };
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/editor.worker.start.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/editor.worker.start.js
   function start(createClient) {
     let client;
     const webWorkerServer = initialize((workerServer) => {
@@ -14292,7 +15376,7 @@
     return client;
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/common/initialize.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/internal/common/initialize.js
   var initialized2 = false;
   function isWorkerInitialized() {
     return initialized2;
@@ -14306,7 +15390,7 @@
     };
   }
 
-  // ../../node_modules/.pnpm/monaco-editor@0.55.1/node_modules/monaco-editor/esm/vs/editor/editor.worker.js
+  // ../../node_modules/.pnpm/monaco-editor@0.56.0/node_modules/monaco-editor/esm/vs/editor/editor.worker.js
   self.onmessage = () => {
     if (!isWorkerInitialized()) {
       start(() => {
