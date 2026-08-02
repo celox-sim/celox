@@ -8,6 +8,9 @@ overrides:
   '@celox-sim/celox': workspace:*
   '@celox-sim/celox-napi': workspace:*
   '@celox-sim/vite-plugin': workspace:*
+  '@emnapi/core': 2.0.0-alpha.3
+  '@emnapi/runtime': 2.0.0-alpha.3
+  emnapi: 2.0.0-alpha.3
 
 importers:
 
@@ -17,14 +20,14 @@ importers:
         specifier: ^2.4.5
         version: 2.5.5
       '@emnapi/core':
-        specifier: ^1.9.1
-        version: 1.11.3
+        specifier: 2.0.0-alpha.3
+        version: 2.0.0-alpha.3
       '@emnapi/runtime':
-        specifier: ^1.9.1
-        version: 1.11.3
+        specifier: 2.0.0-alpha.3
+        version: 2.0.0-alpha.3
       '@napi-rs/wasm-runtime':
-        specifier: ^1.1.1
-        version: 1.1.6(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)
+        specifier: 1.1.6
+        version: 1.1.6(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)
       '@tybys/wasm-util':
         specifier: ^0.10.1
         version: 0.10.3
@@ -32,8 +35,8 @@ importers:
         specifier: ^4.4.0
         version: 4.5.1
       emnapi:
-        specifier: ^1.9.1
-        version: 1.11.3
+        specifier: 2.0.0-alpha.3
+        version: 2.0.0-alpha.3
       lefthook:
         specifier: ^2.1.2
         version: 2.1.10
@@ -56,8 +59,8 @@ importers:
   crates/celox-napi:
     devDependencies:
       '@napi-rs/cli':
-        specifier: ^3.2.0
-        version: 3.7.4(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@types/node@25.9.5)
+        specifier: 3.8.2
+        version: 3.8.2(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)(@types/node@25.9.5)
 
   packages/celox:
     dependencies:
@@ -306,29 +309,14 @@ packages:
       search-insights:
         optional: true
 
-  '@emnapi/core@1.11.1':
-    resolution: {integrity: sha512-RSvbQmHzdKzNsLYa/wHrbc3KN4sYLKAdPZxqiM2HATqv/SBk2/ENSHpvXGaLOMcsAyz0poEGqkmmKYG3OWiJEQ==}
+  '@emnapi/core@2.0.0-alpha.3':
+    resolution: {integrity: sha512-AZypUeJ/yByuxyS7BlSNRDOMLMlROYtjYdIAuBmJssVz1UJDSeYxLrdizhXCFYhedC5bqd/ASy8EuNXbVVXp9g==}
 
-  '@emnapi/core@1.11.2':
-    resolution: {integrity: sha512-TC8MkTuZUtcTSiFeuC0ksCh9QIJ5+F21MvZ4Wn4ORfYaFJ/0dsiudv5tVkejgwZlwQ39jL9WWDe2lz8x0WglOA==}
+  '@emnapi/runtime@2.0.0-alpha.3':
+    resolution: {integrity: sha512-hFPAhMUjJD9BSyCANEISPOogeXC9Zo9ZQl7L6vKnaVsMkCtzznaW/naYypeyl0Gv5rYfWYsZbpixTMpjDJzQeA==}
 
-  '@emnapi/core@1.11.3':
-    resolution: {integrity: sha512-zLpS5asjEb7lq8jYLq37N6XKaE41DIexlY1rF/z4/tIl3wo13Sqm28fRyfIsKZD+NZ8mM5RoKkpW/rBcuoSZSg==}
-
-  '@emnapi/runtime@1.11.1':
-    resolution: {integrity: sha512-vgj7R3y3Wgx24IQaGPA/R6YFXLHVMOZ0uVEyIQPaWs+rd1AzfEMXlAC22FYwO1XkKR6NPsq7mUandH8oIRdZFw==}
-
-  '@emnapi/runtime@1.11.2':
-    resolution: {integrity: sha512-kyOl3X0DuTiT1h2ft8r2fYO8JYtU9a9Xis/zBSiGArNaagCOWx90N1k2wxp18czFDH+OgcWGb5ZP/XMt3dcyPA==}
-
-  '@emnapi/runtime@1.11.3':
-    resolution: {integrity: sha512-Xz4Tpyki7XyrpbUK1jR1AhdAdaXyhhY4lZ3neLodmhpuWfy2PAQN5B46sAiU4liOXGLkHypn/qU+jvfWSCYYLA==}
-
-  '@emnapi/wasi-threads@1.2.2':
-    resolution: {integrity: sha512-c95qOXkHdydNKhscBTebqEC1CVAZpyqOfVfBzQ1qgzyl3gfeldUjIggDbIZgDKsHLgnsM+igH7TJ/eAasaVuMA==}
-
-  '@emnapi/wasi-threads@1.2.3':
-    resolution: {integrity: sha512-ELEBe8PsLvvJ6QMr0zLt8ffvOHW/dc1m3CEzNMg7aJUv3bMaoDtw2TXyDAwkYBuroxxuHEwhRTLJSe5sya547g==}
+  '@emnapi/wasi-threads@2.0.1':
+    resolution: {integrity: sha512-9DsSk+o5NBX0CCJT8s0EROGSGxjR/tKu6aBTaVyq+SjAEQH4XcdcRxPBRzsBLizTTJ49MJjF+jgu3qnO9GLQcQ==}
 
   '@esbuild/aix-ppc64@0.21.5':
     resolution: {integrity: sha512-1SDgH6ZSPTlggy1yI6+Dbkiz8xzpHJEVAlF/AM1tHPLsf5STom9rwtjE4hKAF20FfXXNTFqEYXyJNWh1GiZedQ==}
@@ -627,12 +615,12 @@ packages:
   '@kurkle/color@0.3.4':
     resolution: {integrity: sha512-M5UknZPHRu3DEDWoipU6sE8PdkZ6Z/S+v4dD+Ke8IaNlpdSQah50lz1KtcFBa2vsdOnwbbnxJwVM4wty6udA5w==}
 
-  '@napi-rs/cli@3.7.4':
-    resolution: {integrity: sha512-idELIUceJ9zPgx/shcMt1fSSsteFG68v56RIXi4qUm7OYuJOt7CoMj2KnHVmbOqXgUHWQU1lCULrtQdZDG4F5A==}
-    engines: {node: '>= 16'}
+  '@napi-rs/cli@3.8.2':
+    resolution: {integrity: sha512-iFmp3Lo/ipXoJI1I/6V/xU4hQV42bXS3A7j8C+Wt3LOtYY7HFCilkhyUkN1igLJFXWMICq95kNxhNcwzNRd+Kw==}
+    engines: {node: ^20.17.0 || ^22.13.0 || >= 23.5.0}
     hasBin: true
     peerDependencies:
-      '@emnapi/runtime': ^1.7.1
+      '@emnapi/runtime': 2.0.0-alpha.3
     peerDependenciesMeta:
       '@emnapi/runtime':
         optional: true
@@ -892,8 +880,8 @@ packages:
   '@napi-rs/wasm-runtime@1.1.6':
     resolution: {integrity: sha512-ZLv/JdUfkvOy9eCnnBaGfiO+XimbjebAeO+MRQqD/B+FR1tnRN0tpKSJHRbE8sFfS6aqsXZ67TQjfwfsxULVbg==}
     peerDependencies:
-      '@emnapi/core': ^1.7.1
-      '@emnapi/runtime': ^1.7.1
+      '@emnapi/core': 2.0.0-alpha.3
+      '@emnapi/runtime': 2.0.0-alpha.3
 
   '@napi-rs/wasm-tools-android-arm-eabi@1.0.1':
     resolution: {integrity: sha512-lr07E/l571Gft5v4aA1dI8koJEmF1F0UigBbsqg9OWNzg80H3lDPO+auv85y3T/NHE3GirDk7x/D3sLO57vayw==}
@@ -1712,16 +1700,8 @@ packages:
   dompurify@3.4.8:
     resolution: {integrity: sha512-yb1cEmaOum7wFvOCSQxyfgVlv5D47Rc30iZWoMpbDIWTnJ6grDDQyu2KFJzB2k7u0pMuJcQ1zphH//fFnw2tjQ==}
 
-  emnapi@1.11.2:
-    resolution: {integrity: sha512-iMt/XQc69fFn2EvcU6tm14HmXKwyy0lnABugsQlqp6xFuZIUuO+ONVSg2mz+MTVF8WbC+bic65AvRXdoldALKg==}
-    peerDependencies:
-      node-addon-api: '>= 6.1.0'
-    peerDependenciesMeta:
-      node-addon-api:
-        optional: true
-
-  emnapi@1.11.3:
-    resolution: {integrity: sha512-+/ZS90YK/rYfVOHtGLHkGffVsnmD/MAKaBHio+Y4XAtg75RLr4cveV/w0jTkUdLM1CcAlaRgG76mpIemWAlk0A==}
+  emnapi@2.0.0-alpha.3:
+    resolution: {integrity: sha512-K9bc9Xx4OwSfhJpdSOpcfIKzn7/6emuubaIorf6I5e7WBAM79665rf6iHr9y50NL4qYMUP/AheTpD1Z4yU1EBw==}
     peerDependencies:
       node-addon-api: '>= 6.1.0'
     peerDependenciesMeta:
@@ -2604,43 +2584,16 @@ snapshots:
     transitivePeerDependencies:
       - '@algolia/client-search'
 
-  '@emnapi/core@1.11.1':
+  '@emnapi/core@2.0.0-alpha.3':
     dependencies:
-      '@emnapi/wasi-threads': 1.2.2
-      tslib: 2.8.1
-    optional: true
-
-  '@emnapi/core@1.11.2':
-    dependencies:
-      '@emnapi/wasi-threads': 1.2.2
-      tslib: 2.8.1
-    optional: true
-
-  '@emnapi/core@1.11.3':
-    dependencies:
-      '@emnapi/wasi-threads': 1.2.3
+      '@emnapi/wasi-threads': 2.0.1
       tslib: 2.8.1
 
-  '@emnapi/runtime@1.11.1':
-    dependencies:
-      tslib: 2.8.1
-    optional: true
-
-  '@emnapi/runtime@1.11.2':
-    dependencies:
-      tslib: 2.8.1
-    optional: true
-
-  '@emnapi/runtime@1.11.3':
+  '@emnapi/runtime@2.0.0-alpha.3':
     dependencies:
       tslib: 2.8.1
 
-  '@emnapi/wasi-threads@1.2.2':
-    dependencies:
-      tslib: 2.8.1
-    optional: true
-
-  '@emnapi/wasi-threads@1.2.3':
+  '@emnapi/wasi-threads@2.0.1':
     dependencies:
       tslib: 2.8.1
 
@@ -2862,22 +2815,23 @@ snapshots:
 
   '@kurkle/color@0.3.4': {}
 
-  '@napi-rs/cli@3.7.4(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)(@types/node@25.9.5)':
+  '@napi-rs/cli@3.8.2(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)(@types/node@25.9.5)':
     dependencies:
       '@inquirer/prompts': 8.5.2(@types/node@25.9.5)
       '@napi-rs/cross-toolchain': 1.0.3
-      '@napi-rs/wasm-tools': 1.0.1(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)
+      '@napi-rs/wasm-tools': 1.0.1(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)
       '@octokit/rest': 22.0.1
       clipanion: 4.0.0-rc.4(typanion@3.14.0)
       colorette: 2.0.20
-      emnapi: 1.11.2
+      emnapi: 2.0.0-alpha.3
       es-toolkit: 1.49.0
       js-yaml: 4.3.0
       obug: 2.1.4
       semver: 7.8.5
       typanion: 3.14.0
+      typescript: 6.0.3
     optionalDependencies:
-      '@emnapi/runtime': 1.11.3
+      '@emnapi/runtime': 2.0.0-alpha.3
     transitivePeerDependencies:
       - '@emnapi/core'
       - '@napi-rs/cross-toolchain-arm64-target-aarch64'
@@ -2943,9 +2897,9 @@ snapshots:
 
   '@napi-rs/lzma-wasm32-wasi@1.5.1':
     dependencies:
-      '@emnapi/core': 1.11.2
-      '@emnapi/runtime': 1.11.2
-      '@napi-rs/wasm-runtime': 1.1.6(@emnapi/core@1.11.2)(@emnapi/runtime@1.11.2)
+      '@emnapi/core': 2.0.0-alpha.3
+      '@emnapi/runtime': 2.0.0-alpha.3
+      '@napi-rs/wasm-runtime': 1.1.6(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)
     optional: true
 
   '@napi-rs/lzma-win32-arm64-msvc@1.5.1':
@@ -3015,9 +2969,9 @@ snapshots:
 
   '@napi-rs/tar-wasm32-wasi@1.1.1':
     dependencies:
-      '@emnapi/core': 1.11.2
-      '@emnapi/runtime': 1.11.2
-      '@napi-rs/wasm-runtime': 1.1.6(@emnapi/core@1.11.2)(@emnapi/runtime@1.11.2)
+      '@emnapi/core': 2.0.0-alpha.3
+      '@emnapi/runtime': 2.0.0-alpha.3
+      '@napi-rs/wasm-runtime': 1.1.6(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)
     optional: true
 
   '@napi-rs/tar-win32-arm64-msvc@1.1.1':
@@ -3048,24 +3002,10 @@ snapshots:
       '@napi-rs/tar-win32-ia32-msvc': 1.1.1
       '@napi-rs/tar-win32-x64-msvc': 1.1.1
 
-  '@napi-rs/wasm-runtime@1.1.6(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.1)':
+  '@napi-rs/wasm-runtime@1.1.6(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)':
     dependencies:
-      '@emnapi/core': 1.11.1
-      '@emnapi/runtime': 1.11.1
-      '@tybys/wasm-util': 0.10.3
-    optional: true
-
-  '@napi-rs/wasm-runtime@1.1.6(@emnapi/core@1.11.2)(@emnapi/runtime@1.11.2)':
-    dependencies:
-      '@emnapi/core': 1.11.2
-      '@emnapi/runtime': 1.11.2
-      '@tybys/wasm-util': 0.10.3
-    optional: true
-
-  '@napi-rs/wasm-runtime@1.1.6(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)':
-    dependencies:
-      '@emnapi/core': 1.11.3
-      '@emnapi/runtime': 1.11.3
+      '@emnapi/core': 2.0.0-alpha.3
+      '@emnapi/runtime': 2.0.0-alpha.3
       '@tybys/wasm-util': 0.10.3
 
   '@napi-rs/wasm-tools-android-arm-eabi@1.0.1':
@@ -3095,9 +3035,9 @@ snapshots:
   '@napi-rs/wasm-tools-linux-x64-musl@1.0.1':
     optional: true
 
-  '@napi-rs/wasm-tools-wasm32-wasi@1.0.1(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)':
+  '@napi-rs/wasm-tools-wasm32-wasi@1.0.1(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)':
     dependencies:
-      '@napi-rs/wasm-runtime': 1.1.6(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)
+      '@napi-rs/wasm-runtime': 1.1.6(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)
     transitivePeerDependencies:
       - '@emnapi/core'
       - '@emnapi/runtime'
@@ -3112,7 +3052,7 @@ snapshots:
   '@napi-rs/wasm-tools-win32-x64-msvc@1.0.1':
     optional: true
 
-  '@napi-rs/wasm-tools@1.0.1(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)':
+  '@napi-rs/wasm-tools@1.0.1(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)':
     optionalDependencies:
       '@napi-rs/wasm-tools-android-arm-eabi': 1.0.1
       '@napi-rs/wasm-tools-android-arm64': 1.0.1
@@ -3123,7 +3063,7 @@ snapshots:
       '@napi-rs/wasm-tools-linux-arm64-musl': 1.0.1
       '@napi-rs/wasm-tools-linux-x64-gnu': 1.0.1
       '@napi-rs/wasm-tools-linux-x64-musl': 1.0.1
-      '@napi-rs/wasm-tools-wasm32-wasi': 1.0.1(@emnapi/core@1.11.3)(@emnapi/runtime@1.11.3)
+      '@napi-rs/wasm-tools-wasm32-wasi': 1.0.1(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)
       '@napi-rs/wasm-tools-win32-arm64-msvc': 1.0.1
       '@napi-rs/wasm-tools-win32-ia32-msvc': 1.0.1
       '@napi-rs/wasm-tools-win32-x64-msvc': 1.0.1
@@ -3238,9 +3178,9 @@ snapshots:
 
   '@rolldown/binding-wasm32-wasi@1.1.5':
     dependencies:
-      '@emnapi/core': 1.11.1
-      '@emnapi/runtime': 1.11.1
-      '@napi-rs/wasm-runtime': 1.1.6(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.1)
+      '@emnapi/core': 2.0.0-alpha.3
+      '@emnapi/runtime': 2.0.0-alpha.3
+      '@napi-rs/wasm-runtime': 1.1.6(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)
     optional: true
 
   '@rolldown/binding-win32-arm64-msvc@1.1.5':
@@ -3723,9 +3663,7 @@ snapshots:
     optionalDependencies:
       '@types/trusted-types': 2.0.7
 
-  emnapi@1.11.2: {}
-
-  emnapi@1.11.3: {}
+  emnapi@2.0.0-alpha.3: {}
 
   emoji-regex-xs@1.0.0: {}
 

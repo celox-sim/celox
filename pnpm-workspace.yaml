@@ -5,6 +5,9 @@ overrides:
   "@celox-sim/celox": "workspace:*"
   "@celox-sim/celox-napi": "workspace:*"
   "@celox-sim/vite-plugin": "workspace:*"
+  "@emnapi/core": "2.0.0-alpha.3"
+  "@emnapi/runtime": "2.0.0-alpha.3"
+  emnapi: "2.0.0-alpha.3"
 allowBuilds:
   esbuild: true
   lefthook: true
@@ -12,3 +15,5 @@ minimumReleaseAge: 10080
 minimumReleaseAgeExclude:
   # Renovate security update: vite@6.4.2
   - vite@6.4.2
+  # napi 3.12 requires emnapi 2 support from this CLI release.
+  - "@napi-rs/cli@3.8.2"

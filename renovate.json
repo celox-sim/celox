@@ -34,17 +34,6 @@
   "packageRules": [
     {
       "matchManagers": [
-        "npm"
-      ],
-      "matchPackageNames": [
-        "emnapi",
-        "@emnapi/core",
-        "@emnapi/runtime"
-      ],
-      "groupName": "emnapi packages"
-    },
-    {
-      "matchManagers": [
         "cargo"
       ],
       "matchPackageNames": [
@@ -71,16 +60,6 @@
         "/^veryl-/"
       ],
       "groupName": "veryl crates"
-    },
-    {
-      "matchManagers": [
-        "cargo"
-      ],
-      "matchPackageNames": [
-        "napi",
-        "napi-derive"
-      ],
-      "groupName": "napi-rs crates"
     },
     {
       "matchManagers": [
@@ -171,6 +150,30 @@
       "automerge": true,
       "automergeType": "pr",
       "platformAutomerge": true
+    },
+    {
+      "matchManagers": [
+        "cargo",
+        "npm"
+      ],
+      "matchPackageNames": [
+        "napi",
+        "napi-build",
+        "napi-derive",
+        "@napi-rs/cli",
+        "@napi-rs/wasm-runtime",
+        "emnapi",
+        "@emnapi/core",
+        "@emnapi/runtime"
+      ],
+      "groupName": "napi-rs and emnapi compatibility",
+      "groupSlug": "napi-rs-emnapi-compatibility",
+      "separateMajorMinor": false,
+      "rangeStrategy": "pin",
+      "automerge": false,
+      "labels": [
+        "dependencies"
+      ]
     }
   ]
 }
