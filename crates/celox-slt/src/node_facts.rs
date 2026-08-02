@@ -596,11 +596,18 @@ where
             };
 
             for effect in effects {
-                if let Some(guard) = effect.guard {
-                    require_nonzero_child(guard, "ForFold effect guard")?;
-                }
-                for &arg in &effect.args {
-                    require_nonzero_child(arg, "ForFold effect argument")?;
+                match effect {
+                    crate::SLTForEffect::Event { guard, args, .. } => {
+                        if let Some(guard) = guard {
+                            require_nonzero_child(*guard, "ForFold effect guard")?;
+                        }
+                        for &arg in args {
+                            require_nonzero_child(arg, "ForFold effect argument")?;
+                        }
+                    }
+                    crate::SLTForEffect::Runner(runner) => {
+                        require_nonzero_child(*runner, "ForFold effect runner")?;
+                    }
                 }
             }
             require_nonzero_child(*continue_cond, "ForFold continue condition")?;
@@ -858,11 +865,16 @@ where
                 visit(update.expr)?;
             }
             for effect in effects {
-                if let Some(guard) = effect.guard {
-                    visit(guard)?;
-                }
-                for &arg in &effect.args {
-                    visit(arg)?;
+                match effect {
+                    crate::SLTForEffect::Event { guard, args, .. } => {
+                        if let Some(guard) = guard {
+                            visit(*guard)?;
+                        }
+                        for &arg in args {
+                            visit(arg)?;
+                        }
+                    }
+                    crate::SLTForEffect::Runner(runner) => visit(*runner)?,
                 }
             }
             visit(*continue_cond)?;
@@ -1208,7 +1220,7 @@ mod tests {
         let SLTNode::ForFold { effects, .. } = &mut node else {
             unreachable!()
         };
-        effects.push(SLTForEffect {
+        effects.push(SLTForEffect::Event {
             site_id: 0,
             guard: Some(NodeId(2)),
             emit_on_true: true,
@@ -1400,7 +1412,7 @@ mod tests {
         let SLTNode::ForFold { effects, .. } = &mut effectful else {
             unreachable!()
         };
-        effects.push(SLTForEffect {
+        effects.push(SLTForEffect::Event {
             site_id: 7,
             guard: None,
             emit_on_true: true,

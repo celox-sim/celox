@@ -1702,6 +1702,214 @@ module Top (
     );
 }
 
+fn test_return_before_dynamic_loop_suppresses_loop_effects(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    stop_before: input logic,
+    stop_in_loop: input logic,
+    count: input logic<2>,
+    out: output logic<8>,
+) {
+    function pass (
+        x: input logic<8>,
+        stop_before: input logic,
+        stop_in_loop: input logic,
+        count: input logic<2>,
+    ) -> logic<8> {
+        if stop_before {
+            return x;
+        }
+        for i in 0..count {
+            $display("loop=%0d", i);
+            $assert(1'd0, "loop must stay inactive");
+            if stop_in_loop && i == 1 {
+                return x + i;
+            }
+        }
+        return x;
+    }
+
+    always_comb {
+        out = pass(a, stop_before, stop_in_loop, count);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let stop_before = sim.signal("stop_before");
+    let stop_in_loop = sim.signal("stop_in_loop");
+    let count = sim.signal("count");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(a, 7u8);
+        io.set(stop_before, 1u8);
+        io.set(stop_in_loop, 1u8);
+        io.set(count, 3u8);
+    }).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 7);
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+}
+
+fn test_function_loop_with_return_and_break_preserves_effects(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    stop: input logic,
+    out: output logic<8>,
+) {
+    function pass (
+        x: input logic<8>,
+        stop: input logic,
+    ) -> logic<8> {
+        for i in 0..4 {
+            if i == 2 {
+                break;
+            }
+            $display("loop=%0d", i);
+            if stop && i == 1 {
+                return x + i;
+            }
+        }
+        return x;
+    }
+
+    always_comb {
+        out = pass(a, stop);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let stop = sim.signal("stop");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(a, 9u8);
+        io.set(stop, 0u8);
+    }).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 9);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "loop=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "loop=1".to_string(),
+            },
+        ],
+    );
+
+}
+
+fn test_nested_dynamic_function_loops_preserve_effect_runners(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    a: input logic<8>,
+    stop: input logic,
+    outer_count: input logic<2>,
+    inner_count: input logic<2>,
+    out: output logic<8>,
+) {
+    function pass (
+        x: input logic<8>,
+        stop: input logic,
+        outer_count: input logic<2>,
+        inner_count: input logic<2>,
+    ) -> logic<8> {
+        for i in 0..outer_count {
+            for j in 0..inner_count {
+                $display("inner=%0d,%0d", i, j);
+                if stop && i == 1 && j == 1 {
+                    return x + i + j;
+                }
+            }
+            $display("outer=%0d", i);
+        }
+        return x;
+    }
+
+    always_comb {
+        out = pass(a, stop, outer_count, inner_count);
+    }
+}
+"#, "Top");
+
+    let a = sim.signal("a");
+    let stop = sim.signal("stop");
+    let outer_count = sim.signal("outer_count");
+    let inner_count = sim.signal("inner_count");
+    let out = sim.signal("out");
+
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(a, 11u8);
+        io.set(stop, 0u8);
+        io.set(outer_count, 2u8);
+        io.set(inner_count, 2u8);
+    }).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 11);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "inner=0,0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "inner=0,1".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "outer=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "inner=1,0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "inner=1,1".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "outer=1".to_string(),
+            },
+        ],
+    );
+
+    sim.modify(|io| io.set(stop, 1u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 13);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "inner=0,0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "inner=0,1".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "outer=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "inner=1,0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "inner=1,1".to_string(),
+            },
+        ],
+    );
+}
+
 fn test_comb_display_inside_expression_function_call(sim) {
     @omit_veryl;
     @ignore_on(wasm);

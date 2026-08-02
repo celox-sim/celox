@@ -161,14 +161,17 @@ fn collect_system_function_effect(
         }
         (RuntimeEventKind::Display, _, Some(_)) => unreachable!("display has no explicit guard"),
     };
-    let loop_effect = collector.loop_effects.as_ref().map(|_| SLTForEffect {
-        site_id,
-        guard,
-        emit_on_true: matches!(kind, RuntimeEventKind::Display),
-        args: observer_args.clone(),
-        fatal_error_code: matches!(kind, RuntimeEventKind::AssertFatal)
-            .then_some(1_000_000 + site_id as i64),
-    });
+    let loop_effect = collector
+        .loop_effects
+        .as_ref()
+        .map(|_| SLTForEffect::Event {
+            site_id,
+            guard,
+            emit_on_true: matches!(kind, RuntimeEventKind::Display),
+            args: observer_args.clone(),
+            fatal_error_code: matches!(kind, RuntimeEventKind::AssertFatal)
+                .then_some(1_000_000 + site_id as i64),
+        });
     let observed_ids: HashSet<_> = observed_inputs.iter().map(|atom| atom.id).collect();
     let position_ids: HashSet<_> = position_inputs.iter().map(|atom| atom.id).collect();
     let preceding_writes: Vec<_> = store
@@ -890,18 +893,26 @@ fn collect_function_body_effects(
         let observer_start = collector.observers.len();
         let saved_loop_effects = collector.loop_effects.take();
         collector.loop_effects = Some(Vec::new());
-        let iter_state = collect_statements(
-            module,
-            FunctionControlState {
-                store: iter_store,
-                boundaries: state.boundaries.clone(),
-                live_expr: bool_node(arena, true)?,
-                live_sources: HashSet::default(),
-            },
-            &for_stmt.body,
-            ret_id,
-            arena,
+        let iter_state = with_collector_guard(
             collector,
+            arena,
+            state.live_expr,
+            state.live_sources.clone(),
+            |collector, arena| {
+                collect_statements(
+                    module,
+                    FunctionControlState {
+                        store: iter_store,
+                        boundaries: state.boundaries.clone(),
+                        live_expr: bool_node(arena, true)?,
+                        live_sources: HashSet::default(),
+                    },
+                    &for_stmt.body,
+                    ret_id,
+                    arena,
+                    collector,
+                )
+            },
         )?;
         let loop_effects = collector.loop_effects.take().unwrap_or_default();
         collector.loop_effects = saved_loop_effects;
@@ -976,7 +987,11 @@ fn collect_function_body_effects(
                 effects: loop_effects,
                 continue_cond: effective_continue,
             })?;
-            attach_loop_runner_to_first_observer(collector, observer_start, Some(runner));
+            if let Some(parent_effects) = &mut collector.loop_effects {
+                parent_effects.push(SLTForEffect::Runner(runner));
+            } else {
+                attach_loop_runner_to_first_observer(collector, observer_start, Some(runner));
+            }
         }
 
         let initial = bool_node(arena, true)?;

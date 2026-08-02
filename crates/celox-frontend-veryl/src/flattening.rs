@@ -444,11 +444,18 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
                     collect_inputs_with_window(update.expr, None, arena, set, visited);
                 }
                 for effect in effects {
-                    if let Some(guard) = effect.guard {
-                        collect_inputs_with_window(guard, None, arena, set, visited);
-                    }
-                    for arg in &effect.args {
-                        collect_inputs_with_window(*arg, None, arena, set, visited);
+                    match effect {
+                        celox_slt::SLTForEffect::Event { guard, args, .. } => {
+                            if let Some(guard) = guard {
+                                collect_inputs_with_window(*guard, None, arena, set, visited);
+                            }
+                            for arg in args {
+                                collect_inputs_with_window(*arg, None, arena, set, visited);
+                            }
+                        }
+                        celox_slt::SLTForEffect::Runner(runner) => {
+                            collect_inputs_with_window(*runner, None, arena, set, visited);
+                        }
                     }
                 }
                 collect_inputs_with_window(*continue_cond, None, arena, set, visited);

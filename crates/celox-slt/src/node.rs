@@ -209,13 +209,26 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
                 continue;
             };
             for (effect_index, effect) in effects.iter().enumerate() {
-                let Some((site_id, fatal_error_code)) =
-                    remap(effect.site_id, effect.fatal_error_code)?
+                let SLTForEffect::Event {
+                    site_id,
+                    fatal_error_code,
+                    ..
+                } = effect
                 else {
                     continue;
                 };
-                if effect.site_id != site_id || effect.fatal_error_code != fatal_error_code {
-                    edits.push((node_index, effect_index, site_id, fatal_error_code));
+                let Some((mapped_site_id, mapped_fatal_error_code)) =
+                    remap(*site_id, *fatal_error_code)?
+                else {
+                    continue;
+                };
+                if *site_id != mapped_site_id || *fatal_error_code != mapped_fatal_error_code {
+                    edits.push((
+                        node_index,
+                        effect_index,
+                        mapped_site_id,
+                        mapped_fatal_error_code,
+                    ));
                 }
             }
         }
@@ -241,8 +254,16 @@ impl<A: Hash + Eq + Clone> SLTNodeArena<A> {
             if let Some(SLTNode::ForFold { effects, .. }) = nodes.get_mut(node_index)
                 && let Some(effect) = effects.get_mut(effect_index)
             {
-                effect.site_id = site_id;
-                effect.fatal_error_code = fatal_error_code;
+                let SLTForEffect::Event {
+                    site_id: current_site_id,
+                    fatal_error_code: current_fatal_error_code,
+                    ..
+                } = effect
+                else {
+                    return Err(SLTNodeArenaEditError::EditPlanMismatch);
+                };
+                *current_site_id = site_id;
+                *current_fatal_error_code = fatal_error_code;
             }
         }
         self.rebuild_cache();
@@ -612,12 +633,17 @@ pub struct SLTForFoldGroupState<A: Hash + Eq + Clone> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SLTForEffect {
-    pub site_id: u32,
-    pub guard: Option<NodeId>,
-    pub emit_on_true: bool,
-    pub args: Vec<NodeId>,
-    pub fatal_error_code: Option<i64>,
+pub enum SLTForEffect {
+    /// Emit one runtime event for the current loop iteration.
+    Event {
+        site_id: u32,
+        guard: Option<NodeId>,
+        emit_on_true: bool,
+        args: Vec<NodeId>,
+        fatal_error_code: Option<i64>,
+    },
+    /// Evaluate a nested loop runner at this position in the effect sequence.
+    Runner(NodeId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -976,8 +1002,13 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                         children.extend(initials.iter().map(|update| update.expr));
                         children.extend(updates.iter().map(|update| update.expr));
                         for effect in effects {
-                            children.extend(effect.guard);
-                            children.extend(effect.args.iter().copied());
+                            match effect {
+                                SLTForEffect::Event { guard, args, .. } => {
+                                    children.extend(*guard);
+                                    children.extend(args.iter().copied());
+                                }
+                                SLTForEffect::Runner(runner) => children.push(*runner),
+                            }
                         }
                         if let SLTForFoldResult::Transient { initial, update } = result {
                             children.extend([*initial, *update]);
@@ -1104,16 +1135,21 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                         .collect();
                     let mapped_effects = effects
                         .iter()
-                        .map(|effect| {
-                            let guard = effect.guard.map(mapped);
-                            let args = effect.args.iter().map(|arg| mapped(*arg)).collect();
-                            SLTForEffect {
-                                site_id: effect.site_id,
+                        .map(|effect| match effect {
+                            SLTForEffect::Event {
+                                site_id,
                                 guard,
-                                emit_on_true: effect.emit_on_true,
+                                emit_on_true,
                                 args,
-                                fatal_error_code: effect.fatal_error_code,
-                            }
+                                fatal_error_code,
+                            } => SLTForEffect::Event {
+                                site_id: *site_id,
+                                guard: guard.map(mapped),
+                                emit_on_true: *emit_on_true,
+                                args: args.iter().map(|arg| mapped(*arg)).collect(),
+                                fatal_error_code: *fatal_error_code,
+                            },
+                            SLTForEffect::Runner(runner) => SLTForEffect::Runner(mapped(*runner)),
                         })
                         .collect();
                     let mapped_result = match result {
@@ -1343,16 +1379,29 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                     writeln!(f)?;
                 }
                 for effect in effects {
-                    writeln!(f, "{}effect site={}:", child_indent, effect.site_id)?;
-                    if let Some(guard) = effect.guard {
-                        writeln!(f, "{}guard:", child_indent)?;
-                        arena.get(guard).fmt_recursive(f, depth + 2, arena)?;
-                        writeln!(f)?;
-                    }
-                    for arg in &effect.args {
-                        writeln!(f, "{}arg:", child_indent)?;
-                        arena.get(*arg).fmt_recursive(f, depth + 2, arena)?;
-                        writeln!(f)?;
+                    match effect {
+                        SLTForEffect::Event {
+                            site_id,
+                            guard,
+                            args,
+                            ..
+                        } => {
+                            writeln!(f, "{}effect site={}:", child_indent, site_id)?;
+                            if let Some(guard) = guard {
+                                writeln!(f, "{}guard:", child_indent)?;
+                                arena.get(*guard).fmt_recursive(f, depth + 2, arena)?;
+                                writeln!(f)?;
+                            }
+                            for arg in args {
+                                writeln!(f, "{}arg:", child_indent)?;
+                                arena.get(*arg).fmt_recursive(f, depth + 2, arena)?;
+                                writeln!(f)?;
+                            }
+                        }
+                        SLTForEffect::Runner(runner) => {
+                            writeln!(f, "{}effect runner:", child_indent)?;
+                            arena.get(*runner).fmt_recursive(f, depth + 2, arena)?;
+                        }
                     }
                 }
                 writeln!(f, "{}continue:", child_indent)?;
@@ -1799,7 +1848,7 @@ mod tests {
                 result: SLTForFoldResult::State(VarAtomBase::new(2, 0, 7)),
                 initials: Vec::new(),
                 updates: Vec::new(),
-                effects: vec![SLTForEffect {
+                effects: vec![SLTForEffect::Event {
                     site_id: 3,
                     guard: None,
                     emit_on_true: true,
@@ -1823,7 +1872,7 @@ mod tests {
                 result: SLTForFoldResult::State(VarAtomBase::new(2, 0, 7)),
                 initials: Vec::new(),
                 updates: Vec::new(),
-                effects: vec![SLTForEffect {
+                effects: vec![SLTForEffect::Event {
                     site_id: 4,
                     guard: None,
                     emit_on_true: true,
@@ -1843,15 +1892,31 @@ mod tests {
         let SLTNode::ForFold { effects, .. } = arena.get(first_fold) else {
             panic!("expected first ForFold");
         };
-        assert_eq!(effects[0].site_id, 13);
-        assert_eq!(effects[0].fatal_error_code, Some(99));
+        let SLTForEffect::Event {
+            site_id,
+            fatal_error_code,
+            ..
+        } = effects[0]
+        else {
+            panic!("expected event effect");
+        };
+        assert_eq!(site_id, 13);
+        assert_eq!(fatal_error_code, Some(99));
         let remapped_first = arena.get(first_fold).clone();
         assert_eq!(arena.alloc(remapped_first).unwrap(), first_fold);
         let SLTNode::ForFold { effects, .. } = arena.get(second_fold) else {
             panic!("expected second ForFold");
         };
-        assert_eq!(effects[0].site_id, 4);
-        assert_eq!(effects[0].fatal_error_code, None);
+        let SLTForEffect::Event {
+            site_id,
+            fatal_error_code,
+            ..
+        } = effects[0]
+        else {
+            panic!("expected event effect");
+        };
+        assert_eq!(site_id, 4);
+        assert_eq!(fatal_error_code, None);
 
         let error = arena
             .remap_for_fold_effect_sites(first_fold.0..second_fold.0 + 1, |site, fatal| {
@@ -1872,7 +1937,10 @@ mod tests {
         let SLTNode::ForFold { effects, .. } = arena.get(first_fold) else {
             panic!("expected first ForFold");
         };
-        assert_eq!(effects[0].site_id, 13, "failed remap must be atomic");
+        let SLTForEffect::Event { site_id, .. } = effects[0] else {
+            panic!("expected event effect");
+        };
+        assert_eq!(site_id, 13, "failed remap must be atomic");
 
         let error = arena
             .remap_for_fold_effect_sites(0..arena.len() + 1, |site, fatal| Ok(Some((site, fatal))))

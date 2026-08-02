@@ -1431,11 +1431,18 @@ fn collect_glue_sources_with_window(
                 collect_glue_sources_with_window(update.expr, None, arena, set);
             }
             for effect in effects {
-                if let Some(guard) = effect.guard {
-                    collect_glue_sources_with_window(guard, None, arena, set);
-                }
-                for arg in &effect.args {
-                    collect_glue_sources_with_window(*arg, None, arena, set);
+                match effect {
+                    celox_slt::SLTForEffect::Event { guard, args, .. } => {
+                        if let Some(guard) = guard {
+                            collect_glue_sources_with_window(*guard, None, arena, set);
+                        }
+                        for arg in args {
+                            collect_glue_sources_with_window(*arg, None, arena, set);
+                        }
+                    }
+                    celox_slt::SLTForEffect::Runner(runner) => {
+                        collect_glue_sources_with_window(*runner, None, arena, set);
+                    }
                 }
             }
             collect_glue_sources_with_window(*continue_cond, None, arena, set);

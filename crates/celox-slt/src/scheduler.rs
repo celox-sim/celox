@@ -228,8 +228,13 @@ fn node_reads_only_covered_ranges<Addr: Clone + Eq + Hash>(
                 work.extend(initials.iter().map(|state| state.expr));
                 work.extend(updates.iter().map(|state| state.expr));
                 for effect in effects {
-                    work.extend(effect.guard);
-                    work.extend(effect.args.iter().copied());
+                    match effect {
+                        crate::SLTForEffect::Event { guard, args, .. } => {
+                            work.extend(*guard);
+                            work.extend(args.iter().copied());
+                        }
+                        crate::SLTForEffect::Runner(runner) => work.push(*runner),
+                    }
                 }
                 work.push(*continue_cond);
             }
@@ -353,11 +358,18 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
                 ));
             }
             for effect in effects {
-                if let Some(guard) = effect.guard {
-                    set.extend(collect_node_input_deps(guard, arena, memo, inverse_memo));
-                }
-                for arg in &effect.args {
-                    set.extend(collect_node_input_deps(*arg, arena, memo, inverse_memo));
+                match effect {
+                    crate::SLTForEffect::Event { guard, args, .. } => {
+                        if let Some(guard) = guard {
+                            set.extend(collect_node_input_deps(*guard, arena, memo, inverse_memo));
+                        }
+                        for arg in args {
+                            set.extend(collect_node_input_deps(*arg, arena, memo, inverse_memo));
+                        }
+                    }
+                    crate::SLTForEffect::Runner(runner) => {
+                        set.extend(collect_node_input_deps(*runner, arena, memo, inverse_memo));
+                    }
                 }
             }
             set.remove(loop_var);
@@ -1188,8 +1200,13 @@ fn push_scheduler_node_children<Addr: Clone + Eq + Hash>(
             work.extend(initials.iter().map(|state| state.expr));
             work.extend(updates.iter().map(|state| state.expr));
             for effect in effects {
-                work.extend(effect.guard);
-                work.extend(effect.args.iter().copied());
+                match effect {
+                    crate::SLTForEffect::Event { guard, args, .. } => {
+                        work.extend(*guard);
+                        work.extend(args.iter().copied());
+                    }
+                    crate::SLTForEffect::Runner(runner) => work.push(*runner),
+                }
             }
             work.push(*continue_cond);
         }

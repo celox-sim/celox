@@ -366,11 +366,18 @@ fn collect_comb_path_stats(
                 collect_comb_path_stats(update.expr, arena, visited, stats);
             }
             for effect in effects {
-                if let Some(guard) = effect.guard {
-                    collect_comb_path_stats(guard, arena, visited, stats);
-                }
-                for arg in &effect.args {
-                    collect_comb_path_stats(*arg, arena, visited, stats);
+                match effect {
+                    SLTForEffect::Event { guard, args, .. } => {
+                        if let Some(guard) = guard {
+                            collect_comb_path_stats(*guard, arena, visited, stats);
+                        }
+                        for arg in args {
+                            collect_comb_path_stats(*arg, arena, visited, stats);
+                        }
+                    }
+                    SLTForEffect::Runner(runner) => {
+                        collect_comb_path_stats(*runner, arena, visited, stats);
+                    }
                 }
             }
             collect_comb_path_stats(*continue_cond, arena, visited, stats);
