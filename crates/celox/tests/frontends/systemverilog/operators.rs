@@ -1462,4 +1462,70 @@ sv_backends! {
         (BigUint::from(0xffu8), BigUint::from(0xffu8))
     );
     }
+
+    fn zero_extends_mixed_signed_arithmetic_operands(sim) {
+        @setup {
+    let sv = r#"
+        module Top(
+            input logic clk,
+            input logic signed [7:0] a,
+            input logic [15:0] b,
+            output logic [15:0] comb,
+            output logic [15:0] q
+        );
+            assign comb = a + b;
+            always_ff @(posedge clk) q <= a + b;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("mixed_signed_width.sv"))], "Top");
+
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    sim.modify(|io| {
+        io.set(a, 0xffu8);
+        io.set(b, 0u16);
+    })
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("comb")), 0x00ffu16.into());
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 0x00ffu16.into());
+    }
+
+    fn propagates_child_input_width_into_connection_expressions(sim) {
+        @setup {
+    let sv = r#"
+        module Child(input logic [15:0] value, output logic [15:0] y);
+            assign y = value;
+        endmodule
+        module Top(input logic [7:0] a, output logic [15:0] y);
+            Child child(.value(a << 8), .y(y));
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("connection_context.sv"))], "Top");
+
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0x0100u16.into());
+    }
+
+    fn preserves_signed_parameter_types_in_hierarchy_connections(sim) {
+        @setup {
+    let sv = r#"
+        module Child(input logic signed [63:0] value, output logic [63:0] y);
+            assign y = value;
+        endmodule
+        module Top #(
+            parameter logic signed [7:0] P = -1
+        ) (output logic [63:0] y);
+            Child child(.value(P), .y(y));
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("parameter_connection_type.sv"))], "Top");
+
+    assert_eq!(sim.get(sim.signal("y")), u64::MAX.into());
+    }
 }

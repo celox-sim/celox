@@ -1011,6 +1011,19 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "always_ff case selector lowering",
+            r#"
+            module Top(input logic clk, input logic [3:0] a, b, d, output logic [3:0] q);
+                always_ff @(posedge clk) begin
+                    case (a ** b)
+                        0: q <= d;
+                        default: q <= '0;
+                    endcase
+                end
+            endmodule
+        "#,
+        ),
+        (
             "always_ff assignment lowering",
             r#"
             module Top(input logic clk, input logic [3:0] a, b, output logic [3:0] q);

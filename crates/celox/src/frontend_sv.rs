@@ -96,6 +96,7 @@ pub(crate) struct LoweredSvModule {
     pub port_order: Vec<VarId>,
     pub signal_names: HashMap<String, VarId>,
     constants: std::collections::HashMap<String, i128>,
+    parameter_types: HashMap<String, (usize, bool)>,
     pub instances: Vec<LoweredSvInstance>,
 }
 
@@ -589,6 +590,19 @@ fn lower_module_with_overrides(
     let mut name_to_id = HashMap::default();
     let mut port_order = Vec::new();
     let constants = module_constants_with_overrides(module, parameter_overrides);
+    let parameter_types = module
+        .parameters()
+        .iter()
+        .filter_map(|parameter| {
+            Some((
+                parameter.name().to_string(),
+                (
+                    parameter.declared_width()?,
+                    parameter.declared_signed().unwrap_or(false),
+                ),
+            ))
+        })
+        .collect();
 
     for port in module.ports() {
         let id = next_var_id(&mut next_id);
@@ -723,6 +737,7 @@ fn lower_module_with_overrides(
         port_order,
         signal_names: name_to_id,
         constants: constants.clone(),
+        parameter_types,
         instances,
     })
 }
@@ -848,6 +863,7 @@ pub(crate) fn attach_instance_glue(
             &parent_variables,
             &signal_names,
             &lowered.constants,
+            &lowered.parameter_types,
             child,
             &instance.port_connections,
         )?;
@@ -928,6 +944,7 @@ fn build_instance_glue(
     parent_variables: &HashMap<VarId, SvVariable>,
     parent_signal_names: &HashMap<String, VarId>,
     parent_constants: &std::collections::HashMap<String, i128>,
+    parent_parameter_types: &HashMap<String, (usize, bool)>,
     child: &LoweredSvModule,
     connections: &[LoweredSvPortConnection],
 ) -> Result<SvGlue, ParserError> {
@@ -971,7 +988,15 @@ fn build_instance_glue(
                         parent_variables,
                         parent_signal_names,
                         parent_constants,
+                        parent_parameter_types,
                         &mut arena,
+                        Some(width),
+                        Some(sv_glue_expr_is_signed(
+                            actual_expr,
+                            parent_variables,
+                            parent_signal_names,
+                            parent_parameter_types,
+                        )),
                     )
                     .ok_or_else(|| {
                         ParserError::unsupported(
@@ -986,7 +1011,12 @@ fn build_instance_glue(
                         &mut arena,
                         expr,
                         Some(width),
-                        sv_expr_is_signed(actual_expr, parent_variables, parent_signal_names),
+                        sv_glue_expr_is_signed(
+                            actual_expr,
+                            parent_variables,
+                            parent_signal_names,
+                            parent_parameter_types,
+                        ),
                     )?;
                     (expr, sources, source_ids)
                 } else {
@@ -1113,7 +1143,10 @@ fn lower_glue_parent_expr(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
     arena: &mut SLTNodeArena<GlueAddr>,
+    context_width: Option<usize>,
+    context_signed: Option<bool>,
 ) -> Option<(
     celox_slt::NodeId,
     HashSet<VarAtomBase<GlueAddr>>,
@@ -1123,14 +1156,18 @@ fn lower_glue_parent_expr(
         sv::ir::Expr::Ident(name) => {
             let Some(id) = name_to_id.get(name).copied() else {
                 let value = constants.get(name)?;
+                let (width, signed) = parameter_types.get(name).copied().unwrap_or((32, false));
+                let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+                let node = arena
+                    .alloc(SLTNode::Constant(
+                        BigUint::from(*value as u128) & width_mask,
+                        BigUint::from(0u32),
+                        width,
+                        signed,
+                    ))
+                    .ok()?;
                 return Some((
-                    arena
-                        .alloc(SLTNode::Constant(
-                            BigUint::from(*value as u128),
-                            BigUint::from(0u32),
-                            32,
-                            false,
-                        ))
+                    coerce_node_width(arena, node, context_width, context_signed.unwrap_or(signed))
                         .ok()?,
                     HashSet::default(),
                     Vec::new(),
@@ -1148,11 +1185,29 @@ fn lower_glue_parent_expr(
                 .ok()?;
             let mut sources = HashSet::default();
             sources.insert(VarAtomBase::new(GlueAddr::Parent(id), 0, width - 1));
-            Some((node, sources, vec![id]))
+            Some((
+                coerce_node_width(
+                    arena,
+                    node,
+                    context_width,
+                    context_signed.unwrap_or(var.signed),
+                )
+                .ok()?,
+                sources,
+                vec![id],
+            ))
         }
         sv::ir::Expr::Select { expr, msb, lsb } => {
-            let (inner, sources, source_ids) =
-                lower_glue_parent_expr(expr, variables, name_to_id, constants, arena)?;
+            let (inner, sources, source_ids) = lower_glue_parent_expr(
+                expr,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                arena,
+                None,
+                None,
+            )?;
             let msb_value = sv::typecheck::eval_const_expr(msb, constants)?;
             let lsb_value = sv::typecheck::eval_const_expr(lsb, constants)?;
             let (msb, lsb) =
@@ -1168,7 +1223,12 @@ fn lower_glue_parent_expr(
                 .into_iter()
                 .map(|source| VarAtomBase::new(source.id, access.lsb, access.msb))
                 .collect();
-            Some((node, sources, source_ids))
+            Some((
+                coerce_node_width(arena, node, context_width, context_signed.unwrap_or(false))
+                    .ok()?,
+                sources,
+                source_ids,
+            ))
         }
         sv::ir::Expr::Concat(parts) => {
             let mut nodes = Vec::new();
@@ -1183,7 +1243,16 @@ fn lower_glue_parent_expr(
                             Vec::new(),
                         )
                     } else {
-                        lower_glue_parent_expr(part, variables, name_to_id, constants, arena)?
+                        lower_glue_parent_expr(
+                            part,
+                            variables,
+                            name_to_id,
+                            constants,
+                            parameter_types,
+                            arena,
+                            None,
+                            None,
+                        )?
                     };
                 let width = celox_slt::get_width(node, arena);
                 nodes.push((node, width));
@@ -1192,8 +1261,10 @@ fn lower_glue_parent_expr(
             }
             source_ids.sort();
             source_ids.dedup();
+            let node = arena.alloc(SLTNode::Concat(nodes)).ok()?;
             Some((
-                arena.alloc(SLTNode::Concat(nodes)).ok()?,
+                coerce_node_width(arena, node, context_width, context_signed.unwrap_or(false))
+                    .ok()?,
                 sources,
                 source_ids,
             ))
@@ -1214,7 +1285,16 @@ fn lower_glue_parent_expr(
                                 Vec::new(),
                             )
                         } else {
-                            lower_glue_parent_expr(part, variables, name_to_id, constants, arena)?
+                            lower_glue_parent_expr(
+                                part,
+                                variables,
+                                name_to_id,
+                                constants,
+                                parameter_types,
+                                arena,
+                                None,
+                                None,
+                            )?
                         };
                     let width = celox_slt::get_width(node, arena);
                     nodes.push((node, width));
@@ -1224,8 +1304,10 @@ fn lower_glue_parent_expr(
             }
             source_ids.sort();
             source_ids.dedup();
+            let node = arena.alloc(SLTNode::Concat(nodes)).ok()?;
             Some((
-                arena.alloc(SLTNode::Concat(nodes)).ok()?,
+                coerce_node_width(arena, node, context_width, context_signed.unwrap_or(false))
+                    .ok()?,
                 sources,
                 source_ids,
             ))
@@ -1235,29 +1317,83 @@ fn lower_glue_parent_expr(
             width,
             signed,
         } => {
-            let (inner, sources, source_ids) =
-                lower_glue_parent_expr(expr, variables, name_to_id, constants, arena)?;
+            let (inner, sources, source_ids) = lower_glue_parent_expr(
+                expr,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                arena,
+                Some(*width),
+                Some(*signed),
+            )?;
             let resized = coerce_node_width(arena, inner, Some(*width), *signed).ok()?;
-            Some((resized, sources, source_ids))
+            Some((
+                coerce_node_width(
+                    arena,
+                    resized,
+                    context_width,
+                    context_signed.unwrap_or(*signed),
+                )
+                .ok()?,
+                sources,
+                source_ids,
+            ))
         }
         sv::ir::Expr::Literal(literal) => {
+            if let Some(width) = context_width
+                && let Some(fill) = unbased_fill_literal(literal)
+            {
+                return Some((
+                    lower_unbased_fill_literal_slt(arena, fill, width)?,
+                    HashSet::default(),
+                    Vec::new(),
+                ));
+            }
             let literal = sv::typecheck::parse_integral_literal(literal)?;
+            let signed = literal.signed;
+            let node = arena
+                .alloc(SLTNode::Constant(
+                    literal.value,
+                    literal.mask,
+                    literal.width,
+                    signed,
+                ))
+                .ok()?;
             Some((
-                arena
-                    .alloc(SLTNode::Constant(
-                        literal.value,
-                        literal.mask,
-                        literal.width,
-                        literal.signed,
-                    ))
+                coerce_node_width(arena, node, context_width, context_signed.unwrap_or(signed))
                     .ok()?,
                 HashSet::default(),
                 Vec::new(),
             ))
         }
         sv::ir::Expr::Unary { op, expr } => {
-            let (inner, sources, source_ids) =
-                lower_glue_parent_expr(expr, variables, name_to_id, constants, arena)?;
+            let one_bit_result = matches!(
+                op,
+                sv::ir::UnaryOp::LogicNot
+                    | sv::ir::UnaryOp::RedAnd
+                    | sv::ir::UnaryOp::RedOr
+                    | sv::ir::UnaryOp::RedXor
+            );
+            let operand_context = (!one_bit_result).then_some(context_width).flatten();
+            let operand_signed = context_signed.or_else(|| {
+                Some(sv_glue_expr_is_signed(
+                    expr,
+                    variables,
+                    name_to_id,
+                    parameter_types,
+                ))
+            });
+            let (inner, sources, source_ids) = lower_glue_parent_expr(
+                expr,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                arena,
+                operand_context,
+                operand_signed,
+            )?;
             Some((
                 arena
                     .alloc(SLTNode::Unary(unary_op_from_sv(*op)?, inner))
@@ -1267,13 +1403,44 @@ fn lower_glue_parent_expr(
             ))
         }
         sv::ir::Expr::Binary { left, op, right } => {
-            let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
-                && sv_expr_is_signed(right, variables, name_to_id);
+            let operands_signed =
+                sv_glue_expr_is_signed(left, variables, name_to_id, parameter_types)
+                    && sv_glue_expr_is_signed(right, variables, name_to_id, parameter_types);
             let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
-                sv_expr_is_signed(left, variables, name_to_id)
+                sv_glue_expr_is_signed(left, variables, name_to_id, parameter_types)
             } else {
                 operands_signed
             };
+            let comparison = matches!(
+                op,
+                sv::ir::BinaryOp::Eq
+                    | sv::ir::BinaryOp::Ne
+                    | sv::ir::BinaryOp::EqCase
+                    | sv::ir::BinaryOp::NeCase
+                    | sv::ir::BinaryOp::EqWildcard
+                    | sv::ir::BinaryOp::NeWildcard
+                    | sv::ir::BinaryOp::Lt
+                    | sv::ir::BinaryOp::Le
+                    | sv::ir::BinaryOp::Gt
+                    | sv::ir::BinaryOp::Ge
+            );
+            let context_determined = !comparison
+                && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
+            let operation_context = context_width.map(|context_width| {
+                context_width.max(
+                    sv_expr_natural_width(expr, variables, name_to_id, constants)
+                        .unwrap_or(context_width),
+                )
+            });
+            let left_context = context_determined.then_some(operation_context).flatten();
+            let right_context = (context_determined
+                && !matches!(
+                    op,
+                    sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar
+                ))
+            .then_some(operation_context)
+            .flatten();
+            let operand_context_signed = Some(operands_signed);
             let context_sized_comparison = matches!(
                 op,
                 sv::ir::BinaryOp::EqCase
@@ -1304,8 +1471,16 @@ fn lower_glue_parent_expr(
                     ),
                 ),
                 (Some(fill), None) => {
-                    let right =
-                        lower_glue_parent_expr(right, variables, name_to_id, constants, arena)?;
+                    let right = lower_glue_parent_expr(
+                        right,
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
+                        arena,
+                        right_context,
+                        operand_context_signed,
+                    )?;
                     let width = celox_slt::get_width(right.0, arena);
                     (
                         (
@@ -1317,8 +1492,16 @@ fn lower_glue_parent_expr(
                     )
                 }
                 (None, Some(fill)) => {
-                    let left =
-                        lower_glue_parent_expr(left, variables, name_to_id, constants, arena)?;
+                    let left = lower_glue_parent_expr(
+                        left,
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
+                        arena,
+                        left_context,
+                        operand_context_signed,
+                    )?;
                     let width = celox_slt::get_width(left.0, arena);
                     (
                         left,
@@ -1330,8 +1513,26 @@ fn lower_glue_parent_expr(
                     )
                 }
                 (None, None) => (
-                    lower_glue_parent_expr(left, variables, name_to_id, constants, arena)?,
-                    lower_glue_parent_expr(right, variables, name_to_id, constants, arena)?,
+                    lower_glue_parent_expr(
+                        left,
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
+                        arena,
+                        left_context,
+                        operand_context_signed,
+                    )?,
+                    lower_glue_parent_expr(
+                        right,
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
+                        arena,
+                        right_context,
+                        operand_context_signed,
+                    )?,
                 ),
             };
             sources.extend(right_sources);
@@ -1655,6 +1856,7 @@ fn lower_assignment(
             constants,
             arena,
             Some(target_width),
+            Some(sv_expr_is_signed(assignment.rhs(), variables, name_to_id)),
         )
         .ok_or_else(|| {
             sv::AnalyzerError::Unsupported(format!(
@@ -1733,7 +1935,7 @@ fn lower_expr(
     constants: &std::collections::HashMap<String, i128>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Option<(celox_slt::NodeId, HashSet<VarAtomBase<VarId>>)> {
-    lower_expr_with_context(expr, variables, name_to_id, constants, arena, None)
+    lower_expr_with_context(expr, variables, name_to_id, constants, arena, None, None)
 }
 
 fn lower_expr_with_context(
@@ -1743,6 +1945,7 @@ fn lower_expr_with_context(
     constants: &std::collections::HashMap<String, i128>,
     arena: &mut SLTNodeArena<VarId>,
     context_width: Option<usize>,
+    context_signed: Option<bool>,
 ) -> Option<(celox_slt::NodeId, HashSet<VarAtomBase<VarId>>)> {
     match expr {
         sv::ir::Expr::Ident(name) => {
@@ -1757,7 +1960,8 @@ fn lower_expr_with_context(
                     ))
                     .ok()?;
                 return Some((
-                    coerce_node_width(arena, node, context_width, true).ok()?,
+                    coerce_node_width(arena, node, context_width, context_signed.unwrap_or(true))
+                        .ok()?,
                     HashSet::default(),
                 ));
             };
@@ -1774,7 +1978,13 @@ fn lower_expr_with_context(
             let mut sources = HashSet::default();
             sources.insert(VarAtomBase::new(id, 0, width - 1));
             Some((
-                coerce_node_width(arena, node, context_width, var.signed).ok()?,
+                coerce_node_width(
+                    arena,
+                    node,
+                    context_width,
+                    context_signed.unwrap_or(var.signed),
+                )
+                .ok()?,
                 sources,
             ))
         }
@@ -1824,6 +2034,7 @@ fn lower_expr_with_context(
                     constants,
                     arena,
                     expr_unbased_fill_literal(part).map(|_| 1),
+                    None,
                 )?;
                 let width = celox_slt::get_width(node, arena);
                 nodes.push((node, width));
@@ -1845,6 +2056,7 @@ fn lower_expr_with_context(
                         constants,
                         arena,
                         expr_unbased_fill_literal(part).map(|_| 1),
+                        None,
                     )?;
                     let width = celox_slt::get_width(node, arena);
                     repeated.push((node, width));
@@ -1873,7 +2085,8 @@ fn lower_expr_with_context(
                 ))
                 .ok()?;
             Some((
-                coerce_node_width(arena, node, context_width, signed).ok()?,
+                coerce_node_width(arena, node, context_width, context_signed.unwrap_or(signed))
+                    .ok()?,
                 HashSet::default(),
             ))
         }
@@ -1893,6 +2106,7 @@ fn lower_expr_with_context(
                 constants,
                 arena,
                 operand_context,
+                context_signed,
             )?;
             Some((
                 arena
@@ -1913,6 +2127,7 @@ fn lower_expr_with_context(
                 constants,
                 arena,
                 Some(*width),
+                Some(*signed),
             )?;
             let resized = coerce_node_width(arena, inner, Some(*width), *signed).ok()?;
             Some((resized, sources))
@@ -1980,6 +2195,7 @@ fn lower_expr_with_context(
                             constants,
                             arena,
                             right_context,
+                            Some(operands_signed),
                         )?;
                         let width = celox_slt::get_width(right.0, arena);
                         (
@@ -1998,6 +2214,7 @@ fn lower_expr_with_context(
                             constants,
                             arena,
                             left_context,
+                            Some(operands_signed),
                         )?;
                         let width = celox_slt::get_width(left.0, arena);
                         (
@@ -2016,6 +2233,7 @@ fn lower_expr_with_context(
                             constants,
                             arena,
                             left_context,
+                            Some(operands_signed),
                         )?,
                         lower_expr_with_context(
                             right,
@@ -2024,6 +2242,7 @@ fn lower_expr_with_context(
                             constants,
                             arena,
                             right_context,
+                            Some(operands_signed),
                         )?,
                     ),
                 };
@@ -2067,6 +2286,7 @@ fn lower_expr_with_context(
                 constants,
                 arena,
                 arm_context,
+                Some(arms_signed),
             )?;
             let (mut else_expr, else_sources) = lower_expr_with_context(
                 else_expr,
@@ -2075,6 +2295,7 @@ fn lower_expr_with_context(
                 constants,
                 arena,
                 arm_context,
+                Some(arms_signed),
             )?;
             sources.extend(then_sources);
             sources.extend(else_sources);
@@ -2429,6 +2650,7 @@ fn emit_ff_assignment_stores(
                             name_to_id,
                             constants,
                             Some(target_width),
+                            Some(sv_expr_is_signed(rhs_expr, variables, name_to_id)),
                         )?;
                         resize_sir_register(
                             builder,
@@ -2446,6 +2668,7 @@ fn emit_ff_assignment_stores(
                         name_to_id,
                         constants,
                         Some(target_width),
+                        Some(sv_expr_is_signed(rhs_expr, variables, name_to_id)),
                     )?;
                     resize_sir_register(
                         builder,
@@ -2583,6 +2806,61 @@ fn lvalue_atom(
             let high = msb.max(lsb);
             let low = msb.min(lsb);
             (low <= high && high < width).then(|| VarAtomBase::new(id, low, high))
+        }
+    }
+}
+
+fn sv_glue_expr_is_signed(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<VarId, SvVariable>,
+    name_to_id: &HashMap<String, VarId>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> bool {
+    match expr {
+        sv::ir::Expr::Ident(name) => name_to_id
+            .get(name)
+            .and_then(|id| variables.get(id))
+            .map(|variable| variable.signed)
+            .or_else(|| parameter_types.get(name).map(|(_, signed)| *signed))
+            .unwrap_or(false),
+        sv::ir::Expr::Literal(literal) => {
+            sv::typecheck::parse_integral_literal(literal).is_some_and(|literal| literal.signed)
+        }
+        sv::ir::Expr::Resize { signed, .. } => *signed,
+        sv::ir::Expr::Select { .. }
+        | sv::ir::Expr::Concat(_)
+        | sv::ir::Expr::RepeatConcat { .. }
+        | sv::ir::Expr::Call { .. } => false,
+        sv::ir::Expr::Unary { op, expr } => {
+            matches!(
+                op,
+                sv::ir::UnaryOp::Plus | sv::ir::UnaryOp::Minus | sv::ir::UnaryOp::BitNot
+            ) && sv_glue_expr_is_signed(expr, variables, name_to_id, parameter_types)
+        }
+        sv::ir::Expr::Binary { left, op, right } => match op {
+            sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar => {
+                sv_glue_expr_is_signed(left, variables, name_to_id, parameter_types)
+            }
+            sv::ir::BinaryOp::Add
+            | sv::ir::BinaryOp::Sub
+            | sv::ir::BinaryOp::Mul
+            | sv::ir::BinaryOp::Div
+            | sv::ir::BinaryOp::Mod
+            | sv::ir::BinaryOp::BitAnd
+            | sv::ir::BinaryOp::BitOr
+            | sv::ir::BinaryOp::BitXor => {
+                sv_glue_expr_is_signed(left, variables, name_to_id, parameter_types)
+                    && sv_glue_expr_is_signed(right, variables, name_to_id, parameter_types)
+            }
+            _ => false,
+        },
+        sv::ir::Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            sv_glue_expr_is_signed(then_expr, variables, name_to_id, parameter_types)
+                && sv_glue_expr_is_signed(else_expr, variables, name_to_id, parameter_types)
         }
     }
 }
@@ -2744,7 +3022,7 @@ fn lower_expr_to_sir(
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
 ) -> Option<celox_sir::RegisterId> {
-    lower_expr_to_sir_with_context(builder, expr, variables, name_to_id, constants, None)
+    lower_expr_to_sir_with_context(builder, expr, variables, name_to_id, constants, None, None)
 }
 
 fn sv_expr_natural_width(
@@ -2845,6 +3123,7 @@ fn lower_expr_to_sir_with_context(
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
     context_width: Option<usize>,
+    context_signed: Option<bool>,
 ) -> Option<celox_sir::RegisterId> {
     match expr {
         sv::ir::Expr::Ident(name) => {
@@ -2855,7 +3134,12 @@ fn lower_expr_to_sir_with_context(
                     reg,
                     SIRValue::new_four_state(*value as u128, 0u32),
                 ));
-                return resize_sir_register(builder, reg, context_width.unwrap_or(32), true);
+                return resize_sir_register(
+                    builder,
+                    reg,
+                    context_width.unwrap_or(32),
+                    context_signed.unwrap_or(true),
+                );
             };
             let var = variables.get(&id)?;
             let reg = if var.is_4state {
@@ -2872,7 +3156,12 @@ fn lower_expr_to_sir_with_context(
                 SIROffset::Static(0),
                 var.width,
             ));
-            resize_sir_register(builder, reg, context_width.unwrap_or(var.width), var.signed)
+            resize_sir_register(
+                builder,
+                reg,
+                context_width.unwrap_or(var.width),
+                context_signed.unwrap_or(var.signed),
+            )
         }
         sv::ir::Expr::Literal(literal) => {
             if let Some(width) = context_width
@@ -2888,11 +3177,16 @@ fn lower_expr_to_sir_with_context(
                 reg,
                 SIRValue::new_four_state(literal.value, literal.mask),
             ));
-            resize_sir_register(builder, reg, context_width.unwrap_or(width), signed)
+            resize_sir_register(
+                builder,
+                reg,
+                context_width.unwrap_or(width),
+                context_signed.unwrap_or(signed),
+            )
         }
         sv::ir::Expr::Select { expr, msb, lsb } => {
             let inner = lower_expr_to_sir_with_context(
-                builder, expr, variables, name_to_id, constants, None,
+                builder, expr, variables, name_to_id, constants, None, None,
             )?;
             let msb = sv::typecheck::eval_const_expr(msb, constants)?;
             let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
@@ -2916,6 +3210,7 @@ fn lower_expr_to_sir_with_context(
                 name_to_id,
                 constants,
                 Some(*width),
+                Some(*signed),
             )?;
             resize_sir_register(builder, inner, *width, *signed)
         }
@@ -2934,6 +3229,7 @@ fn lower_expr_to_sir_with_context(
                 name_to_id,
                 constants,
                 (!one_bit_result).then_some(context_width).flatten(),
+                context_signed,
             )?;
             let width = if one_bit_result {
                 1
@@ -3001,6 +3297,7 @@ fn lower_expr_to_sir_with_context(
                     name_to_id,
                     constants,
                     left_context,
+                    Some(operands_signed),
                 )?;
                 let width = builder.register(&left).width();
                 (left, lower_unbased_fill_literal(builder, fill, width)?)
@@ -3012,6 +3309,7 @@ fn lower_expr_to_sir_with_context(
                     name_to_id,
                     constants,
                     right_context,
+                    Some(operands_signed),
                 )?;
                 let width = builder.register(&right).width();
                 (lower_unbased_fill_literal(builder, fill, width)?, right)
@@ -3024,6 +3322,7 @@ fn lower_expr_to_sir_with_context(
                         name_to_id,
                         constants,
                         left_context,
+                        Some(operands_signed),
                     )?,
                     lower_expr_to_sir_with_context(
                         builder,
@@ -3032,6 +3331,7 @@ fn lower_expr_to_sir_with_context(
                         name_to_id,
                         constants,
                         right_context,
+                        Some(operands_signed),
                     )?,
                 )
             };
@@ -3087,6 +3387,7 @@ fn lower_expr_to_sir_with_context(
                     name_to_id,
                     constants,
                     expr_unbased_fill_literal(part).map(|_| 1),
+                    None,
                 )?);
             }
             let width = regs
@@ -3110,6 +3411,7 @@ fn lower_expr_to_sir_with_context(
                         name_to_id,
                         constants,
                         expr_unbased_fill_literal(part).map(|_| 1),
+                        None,
                     )?);
                 }
             }
@@ -3134,7 +3436,7 @@ fn lower_expr_to_sir_with_context(
                 })
                 .or(context_width);
             let condition = lower_expr_to_sir_with_context(
-                builder, condition, variables, name_to_id, constants, None,
+                builder, condition, variables, name_to_id, constants, None, None,
             )?;
             let mut then_expr = lower_expr_to_sir_with_context(
                 builder,
@@ -3143,6 +3445,7 @@ fn lower_expr_to_sir_with_context(
                 name_to_id,
                 constants,
                 arm_context,
+                Some(arms_signed),
             )?;
             let mut else_expr = lower_expr_to_sir_with_context(
                 builder,
@@ -3151,6 +3454,7 @@ fn lower_expr_to_sir_with_context(
                 name_to_id,
                 constants,
                 arm_context,
+                Some(arms_signed),
             )?;
             let width = builder
                 .register(&then_expr)

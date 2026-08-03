@@ -692,6 +692,14 @@ impl Parameter {
         }
         Some(value)
     }
+
+    pub(crate) fn declared_width(&self) -> Option<usize> {
+        self.declared_width
+    }
+
+    pub(crate) fn declared_signed(&self) -> Option<bool> {
+        self.declared_signed
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4686,13 +4694,12 @@ fn conditional_assignments_from_case_statement(
     if !matches!(&stmt.nodes.1, sv_parser::CaseKeyword::Case(_)) {
         return Ok(());
     }
-    let Some(case_expr) = expr_from_expression_with_types(
+    let case_expr = expr_from_expression_with_types(
         &stmt.nodes.2.nodes.1.nodes.0,
         syntax_tree,
         packed_dimensions,
-    ) else {
-        return Ok(());
-    };
+    )
+    .ok_or_else(|| AnalyzerError::Unsupported("always_ff case selector lowering".to_string()))?;
 
     let mut branches = Vec::new();
     let mut default_branch = None;

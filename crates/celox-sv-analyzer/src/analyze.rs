@@ -26,6 +26,8 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                 parameter.name().to_string(),
                 value,
                 resolved_value,
+                parameter.declared_width(),
+                parameter.declared_signed(),
             ));
         }
 
