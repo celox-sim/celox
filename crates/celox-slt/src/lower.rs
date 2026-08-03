@@ -1320,7 +1320,9 @@ fn slt_tree_reads_any_variable<A: Hash + Eq + Clone>(
             }
             SLTNode::Constant(..) => {}
             SLTNode::Binary(lhs, _, rhs) => work.extend([*lhs, *rhs]),
-            SLTNode::Unary(_, inner) | SLTNode::Slice { expr: inner, .. } => {
+            SLTNode::Unary(_, inner)
+            | SLTNode::Capture { expr: inner, .. }
+            | SLTNode::Slice { expr: inner, .. } => {
                 work.push(*inner);
             }
             SLTNode::Mux {
@@ -2171,7 +2173,9 @@ impl SLTToSIRLowerer {
                     work.push(*lhs);
                     work.push(*rhs);
                 }
-                SLTNode::Unary(_, inner) => work.push(*inner),
+                SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => {
+                    work.push(*inner)
+                }
                 SLTNode::Mux {
                     cond,
                     then_expr,
@@ -2601,6 +2605,9 @@ impl SLTToSIRLowerer {
                 };
                 builder.emit(SIRInstruction::Unary(dest, *op, i));
                 dest
+            }
+            SLTNode::Capture { expr, .. } => {
+                self.lower_inner(builder, *expr, arena, cache, env, allow_cache)
             }
             SLTNode::Slice { expr, access } => {
                 self.lower_slice_inner(builder, *expr, access, arena, cache, env, allow_cache)
@@ -3152,6 +3159,7 @@ impl SLTToSIRLowerer {
                 UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
                 inner,
             ) => self.get_bound_signed(*inner, arena),
+            SLTNode::Capture { expr, .. } => self.get_bound_signed(*expr, arena),
             SLTNode::Mux {
                 then_expr,
                 else_expr,
@@ -3493,6 +3501,7 @@ impl SLTToSIRLowerer {
                     | UnaryOp::CountLeadingZeros
                     | UnaryOp::CountTrailingZeros => ZeroControllerFacts::default(),
                 },
+                SLTNode::Capture { expr, .. } => child(*expr),
                 SLTNode::Slice { expr, .. } => child(*expr),
                 SLTNode::Concat(parts) => {
                     let mut combined = ZeroControllerFacts {
@@ -3923,6 +3932,7 @@ impl SLTToSIRLowerer {
             SLTNode::Constant(..) => Vec::new(),
             SLTNode::Binary(lhs, _, rhs) => vec![*lhs, *rhs],
             SLTNode::Unary(_, inner) => vec![*inner],
+            SLTNode::Capture { expr, .. } => vec![*expr],
             SLTNode::Mux {
                 cond,
                 then_expr,
@@ -4037,6 +4047,7 @@ impl SLTToSIRLowerer {
                     _ => 2 * chunks,
                 }
             }
+            SLTNode::Capture { .. } => 0,
             SLTNode::Mux {
                 then_expr,
                 else_expr,
@@ -4144,6 +4155,7 @@ impl SLTToSIRLowerer {
                 SLTNode::Slice { .. } => 0,
                 SLTNode::Binary(_, op, _) => Self::binary_operation_cost(*op, 1),
                 SLTNode::Unary(..) => 1,
+                SLTNode::Capture { .. } => 0,
                 SLTNode::ForFold { updates, .. } => 8 + 2 * updates.len() as u128,
                 SLTNode::ForFoldGroup { states, .. } => 6 + 2 * states.len() as u128,
                 SLTNode::Input { .. }
@@ -4302,7 +4314,9 @@ impl SLTToSIRLowerer {
                 Self::fold_node_is_invariant(*lhs, rebound_variables, arena, memo)
                     && Self::fold_node_is_invariant(*rhs, rebound_variables, arena, memo)
             }
-            SLTNode::Unary(_, inner) | SLTNode::Slice { expr: inner, .. } => {
+            SLTNode::Unary(_, inner)
+            | SLTNode::Capture { expr: inner, .. }
+            | SLTNode::Slice { expr: inner, .. } => {
                 Self::fold_node_is_invariant(*inner, rebound_variables, arena, memo)
             }
             SLTNode::Mux {

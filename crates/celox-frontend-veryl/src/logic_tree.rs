@@ -21,32 +21,39 @@ use std::{collections::BTreeSet, hash::Hash};
 
 use crate::{
     HashMap, HashSet, LoweringPhase, ParserError,
-    bitaccess::{PartSelectGeometry, eval_constexpr, eval_var_select, select_geometry},
-    case::case_arm_condition_expr,
+    bitaccess::{
+        PartSelectGeometry, celox_value_from_comptime, eval_constexpr, eval_var_select,
+        select_geometry,
+    },
     loop_provenance::LoopRecoveryCandidate,
     resolve_total_width,
 };
 use celox_design::{BinaryOp, BitAccess, RuntimeEventKind, RuntimeEventSite, UnaryOp, VarAtomBase};
 use celox_slt::{CombObserver, RangeStore, RangeStoreError};
 use num_bigint::{BigInt, BigUint, Sign};
-use num_traits::ToPrimitive as _;
+use num_traits::{ToPrimitive as _, Zero as _};
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, AssignStatement, CaseStatement, CombDeclaration, Expression, Factor,
-    ForBound, ForRange, ForStatement, Function, FunctionCall, IfStatement, Module, Op, Statement,
-    SystemFunctionCall, SystemFunctionInput, SystemFunctionKind, VarId, VarIndex, VarPath,
-    VarSelect,
+    ArrayLiteralItem, AssignStatement, CasePattern, CaseStatement, CombDeclaration, Expression,
+    Factor, ForBound, ForRange, ForStatement, Function, FunctionBody, FunctionCall, IfStatement,
+    Module, Op, Statement, SystemFunctionCall, SystemFunctionInput, SystemFunctionKind, VarId,
+    VarIndex, VarPath, VarSelect,
 };
-use veryl_analyzer::value::{Value, byte_value_to_string};
+use veryl_analyzer::value::{MaskCache, Value, byte_value_to_string};
 use veryl_parser::resource_table;
 use veryl_parser::token_range::TokenRange;
 
-use effect::{
-    CombEffectCollector, collect_comb_effects_statements, statements_contain_runtime_effect,
-    subtract_written_sensitivity,
+pub(crate) use effect::{
+    CombEffectCollector, collect_and_advance_expression, collect_expression_effects,
+    expression_contains_runtime_effect, subtract_written_sensitivity,
 };
+use effect::{collect_comb_effects_statements, statements_contain_runtime_effect};
 pub use expr::coerce_node_width;
-use expr::{eval_array_literal_expression, eval_function_body_return, merge_boundaries};
+use expr::{
+    eval_array_literal_expression_effectful, eval_case_arm_condition_effectful,
+    eval_case_target_effectful, eval_function_body_return, merge_boundaries,
+};
 pub use expr::{eval_assignment_expression, eval_expression, get_width};
+pub(crate) use expr::{eval_assignment_expression_effectful, eval_expression_effectful};
 use state::{FunctionControlState, LoopControlState};
 
 type ActiveGuard = (NodeId, HashSet<VarAtomBase<VarId>>);
@@ -83,6 +90,109 @@ pub(super) fn invalid_function_call_argument_error(
     )
 }
 
+/// Returns input expressions in formal declaration order.
+///
+/// Veryl's AIR stores call connections in a hash map, so iterating
+/// `FunctionCall::inputs` directly makes side-effect ordering depend on the hash
+/// layout. `Function::args`, in contrast, preserves the declared port order.
+pub(super) fn ordered_function_inputs<'a>(
+    function: &Function,
+    function_body: &FunctionBody,
+    call: &'a FunctionCall,
+) -> Result<Vec<(VarId, &'a Expression)>, ParserError> {
+    let mut inputs = Vec::with_capacity(call.inputs.len());
+    let mut ordered_ids = HashSet::default();
+    for arg in &function.args {
+        for (arg_path, _, _) in &arg.members {
+            let Some(arg_expr) = call.inputs.get(arg_path) else {
+                continue;
+            };
+            let Some(arg_id) = function_body.arg_map.get(arg_path) else {
+                return Err(invalid_function_call_argument_error(
+                    function,
+                    arg_path,
+                    "input argument does not match any formal argument",
+                    call,
+                ));
+            };
+            inputs.push((*arg_id, arg_expr));
+            ordered_ids.insert(*arg_id);
+        }
+    }
+
+    for arg_path in call.inputs.keys() {
+        let Some(arg_id) = function_body.arg_map.get(arg_path) else {
+            return Err(invalid_function_call_argument_error(
+                function,
+                arg_path,
+                "input argument does not match any formal argument",
+                call,
+            ));
+        };
+        if !ordered_ids.contains(arg_id) {
+            return Err(invalid_function_call_argument_error(
+                function,
+                arg_path,
+                "input argument is absent from the function declaration",
+                call,
+            ));
+        }
+    }
+
+    Ok(inputs)
+}
+
+/// Returns output destinations in formal declaration order.
+///
+/// Like inputs, output connections are stored in a hash map. Destination
+/// expressions may have effects, so their order must follow the declaration.
+pub(super) fn ordered_function_outputs<'a>(
+    function: &Function,
+    function_body: &FunctionBody,
+    call: &'a FunctionCall,
+) -> Result<Vec<(VarId, &'a [veryl_analyzer::ir::AssignDestination])>, ParserError> {
+    let mut outputs = Vec::with_capacity(call.outputs.len());
+    let mut ordered_ids = HashSet::default();
+    for arg in &function.args {
+        for (arg_path, _, _) in &arg.members {
+            let Some(destinations) = call.outputs.get(arg_path) else {
+                continue;
+            };
+            let Some(arg_id) = function_body.arg_map.get(arg_path) else {
+                return Err(invalid_function_call_argument_error(
+                    function,
+                    arg_path,
+                    "output argument does not match any formal argument",
+                    call,
+                ));
+            };
+            outputs.push((*arg_id, destinations.as_slice()));
+            ordered_ids.insert(*arg_id);
+        }
+    }
+
+    for arg_path in call.outputs.keys() {
+        let Some(arg_id) = function_body.arg_map.get(arg_path) else {
+            return Err(invalid_function_call_argument_error(
+                function,
+                arg_path,
+                "output argument does not match any formal argument",
+                call,
+            ));
+        };
+        if !ordered_ids.contains(arg_id) {
+            return Err(invalid_function_call_argument_error(
+                function,
+                arg_path,
+                "output argument is absent from the function declaration",
+                call,
+            ));
+        }
+    }
+
+    Ok(outputs)
+}
+
 #[cfg(test)]
 fn parse_comb(
     module: &Module,
@@ -98,7 +208,7 @@ fn parse_comb(
     ),
     ParserError,
 > {
-    parse_comb_with_loop_recovery(module, decl, arena, &[])
+    parse_comb_with_loop_recovery(module, decl, arena, &[], 0)
 }
 
 pub fn parse_comb_with_loop_recovery(
@@ -106,6 +216,7 @@ pub fn parse_comb_with_loop_recovery(
     decl: &CombDeclaration,
     arena: &mut SLTNodeArena<VarId>,
     loop_candidates: &[LoopRecoveryCandidate],
+    capture_namespace: u32,
 ) -> Result<
     (
         Vec<LogicPath<VarId>>,
@@ -147,7 +258,7 @@ pub fn parse_comb_with_loop_recovery(
         loop_candidates,
         None,
     )?;
-    let mut effects = CombEffectCollector::default();
+    let mut effects = CombEffectCollector::with_capture_namespace(capture_namespace);
     if let Some(effect_initial_store) = effect_initial_store {
         collect_comb_effects_statements(
             module,
@@ -203,6 +314,7 @@ pub fn parse_comb_with_loop_recovery(
                     local_inputs: Vec::new(),
                     order_before: HashSet::default(),
                     comb_capture_enable_sites: Vec::new(),
+                    comb_capture_enable_always: false,
                     pre_lower_nodes: Vec::new(),
                     expr: final_expr,
                 });
@@ -339,7 +451,9 @@ fn collect_comb_path_stats(
             collect_comb_path_stats(*lhs, arena, visited, stats);
             collect_comb_path_stats(*rhs, arena, visited, stats);
         }
-        SLTNode::Unary(_, inner) => collect_comb_path_stats(*inner, arena, visited, stats),
+        SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => {
+            collect_comb_path_stats(*inner, arena, visited, stats)
+        }
         SLTNode::Mux {
             cond,
             then_expr,
@@ -439,7 +553,9 @@ fn eval_statement(
             "if_reset".to_string(),
             Some(&ir.token),
         )),
-        Statement::SystemFunctionCall(_) => Ok((store, boundaries)),
+        Statement::SystemFunctionCall(call) => {
+            eval_system_function_call_side_effects(module, store, boundaries, call, arena)
+        }
         Statement::FunctionCall(fc) => eval_statement_form_function_call(
             module,
             store,
@@ -503,6 +619,53 @@ fn eval_statement_with_recovery(
     }
 }
 
+fn eval_system_function_call_side_effects(
+    module: &Module,
+    mut store: SymbolicStore<VarId>,
+    mut boundaries: BoundaryMap<VarId>,
+    call: &SystemFunctionCall,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    fn eval_input(
+        module: &Module,
+        store: &mut SymbolicStore<VarId>,
+        boundaries: &mut BoundaryMap<VarId>,
+        input: &SystemFunctionInput,
+        arena: &mut SLTNodeArena<VarId>,
+    ) -> Result<(), ParserError> {
+        let (_, input_boundaries) =
+            eval_expression_effectful(module, store, &input.0, arena, None)?;
+        *boundaries = merge_boundaries(std::mem::take(boundaries), input_boundaries);
+        Ok(())
+    }
+
+    match &call.kind {
+        SystemFunctionKind::Display(inputs) | SystemFunctionKind::Write(inputs) => {
+            for input in inputs {
+                eval_input(module, &mut store, &mut boundaries, input, arena)?;
+            }
+        }
+        SystemFunctionKind::Assert { cond, args, .. } => {
+            eval_input(module, &mut store, &mut boundaries, cond, arena)?;
+            for input in args {
+                eval_input(module, &mut store, &mut boundaries, input, arena)?;
+            }
+        }
+        SystemFunctionKind::Clog2(input)
+        | SystemFunctionKind::Onehot(input)
+        | SystemFunctionKind::Signed(input)
+        | SystemFunctionKind::Unsigned(input) => {
+            eval_input(module, &mut store, &mut boundaries, input, arena)?;
+        }
+        SystemFunctionKind::Bits(_)
+        | SystemFunctionKind::Size(_)
+        | SystemFunctionKind::Readmemh(_, _)
+        | SystemFunctionKind::Finish => {}
+    }
+
+    Ok((store, boundaries))
+}
+
 fn eval_statements(
     module: &Module,
     store: SymbolicStore<VarId>,
@@ -539,7 +702,7 @@ fn eval_statements_with_recovery(
 
 fn eval_case_with_recovery(
     module: &Module,
-    store: SymbolicStore<VarId>,
+    mut store: SymbolicStore<VarId>,
     boundaries: BoundaryMap<VarId>,
     case_stmt: &CaseStatement,
     arena: &mut SLTNodeArena<VarId>,
@@ -548,9 +711,10 @@ fn eval_case_with_recovery(
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     fn eval_from_arm(
         module: &Module,
-        store: SymbolicStore<VarId>,
+        mut store: SymbolicStore<VarId>,
         boundaries: BoundaryMap<VarId>,
         case_stmt: &CaseStatement,
+        target: &expr::EvaluatedCaseTarget,
         arm_index: usize,
         arena: &mut SLTNodeArena<VarId>,
         loop_candidates: &[LoopRecoveryCandidate],
@@ -568,9 +732,14 @@ fn eval_case_with_recovery(
             );
         };
 
-        let cond = case_arm_condition_expr(&case_stmt.case_target, &arm.patterns);
-        let ((cond_expr, cond_sources), cond_bounds) =
-            eval_expression(module, &store, &cond, arena, None)?;
+        let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
+            module,
+            &mut store,
+            &case_stmt.case_target,
+            target,
+            &arm.patterns,
+            arena,
+        )?;
         let cond_expr = procedural_condition(arena, cond_expr)?;
         let boundaries = merge_boundaries(boundaries, cond_bounds);
 
@@ -591,6 +760,7 @@ fn eval_case_with_recovery(
                     store,
                     boundaries,
                     case_stmt,
+                    target,
                     arm_index + 1,
                     arena,
                     loop_candidates,
@@ -617,6 +787,7 @@ fn eval_case_with_recovery(
             store,
             boundaries,
             case_stmt,
+            target,
             arm_index + 1,
             arena,
             loop_candidates,
@@ -636,11 +807,15 @@ fn eval_case_with_recovery(
         ))
     }
 
+    let (target, target_boundaries) =
+        eval_case_target_effectful(module, &mut store, &case_stmt.case_target, arena)?;
+    let boundaries = merge_boundaries(boundaries, target_boundaries);
     eval_from_arm(
         module,
         store,
         boundaries,
         case_stmt,
+        &target,
         0,
         arena,
         loop_candidates,
@@ -657,9 +832,10 @@ fn eval_case(
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     fn eval_from_arm(
         module: &Module,
-        store: SymbolicStore<VarId>,
+        mut store: SymbolicStore<VarId>,
         boundaries: BoundaryMap<VarId>,
         case_stmt: &CaseStatement,
+        target: &expr::EvaluatedCaseTarget,
         arm_index: usize,
         arena: &mut SLTNodeArena<VarId>,
     ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
@@ -667,9 +843,14 @@ fn eval_case(
             return eval_statements(module, store, boundaries, &case_stmt.default, arena);
         };
 
-        let cond = case_arm_condition_expr(&case_stmt.case_target, &arm.patterns);
-        let ((cond_expr, cond_sources), cond_bounds) =
-            eval_expression(module, &store, &cond, arena, None)?;
+        let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
+            module,
+            &mut store,
+            &case_stmt.case_target,
+            target,
+            &arm.patterns,
+            arena,
+        )?;
         let cond_expr = procedural_condition(arena, cond_expr)?;
         let boundaries = merge_boundaries(boundaries, cond_bounds);
 
@@ -677,14 +858,29 @@ fn eval_case(
             return if cond_val {
                 eval_statements(module, store, boundaries, &arm.body, arena)
             } else {
-                eval_from_arm(module, store, boundaries, case_stmt, arm_index + 1, arena)
+                eval_from_arm(
+                    module,
+                    store,
+                    boundaries,
+                    case_stmt,
+                    target,
+                    arm_index + 1,
+                    arena,
+                )
             };
         }
 
         let (then_store, then_boundaries) =
             eval_statements(module, store.clone(), boundaries.clone(), &arm.body, arena)?;
-        let (else_store, else_boundaries) =
-            eval_from_arm(module, store, boundaries, case_stmt, arm_index + 1, arena)?;
+        let (else_store, else_boundaries) = eval_from_arm(
+            module,
+            store,
+            boundaries,
+            case_stmt,
+            target,
+            arm_index + 1,
+            arena,
+        )?;
 
         Ok((
             merge_symbolic_stores(
@@ -699,7 +895,18 @@ fn eval_case(
         ))
     }
 
-    eval_from_arm(module, store, boundaries, case_stmt, 0, arena)
+    let mut store = store;
+    let (target, target_boundaries) =
+        eval_case_target_effectful(module, &mut store, &case_stmt.case_target, arena)?;
+    eval_from_arm(
+        module,
+        store,
+        merge_boundaries(boundaries, target_boundaries),
+        case_stmt,
+        &target,
+        0,
+        arena,
+    )
 }
 
 fn bool_node(arena: &mut SLTNodeArena<VarId>, value: bool) -> Result<NodeId, SLTNodeFactsError> {
@@ -974,7 +1181,17 @@ fn eval_loop_statement(
             "if_reset".to_string(),
             Some(&ir.token),
         )),
-        Statement::SystemFunctionCall(_) => Ok(state),
+        Statement::SystemFunctionCall(call) => {
+            let guard_state = state.clone();
+            let (next_store, next_boundaries) = eval_system_function_call_side_effects(
+                module,
+                state.store,
+                state.boundaries,
+                call,
+                arena,
+            )?;
+            apply_loop_continue_guard(module, guard_state, next_store, next_boundaries, arena)
+        }
         Statement::FunctionCall(fc) => {
             let guard_state = state.clone();
             let (next_store, next_boundaries) = eval_statement_form_function_call(
@@ -1007,14 +1224,15 @@ fn eval_loop_statement(
 
 fn eval_loop_case(
     module: &Module,
-    state: LoopControlState,
+    mut state: LoopControlState,
     case_stmt: &CaseStatement,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<LoopControlState, ParserError> {
     fn eval_from_arm(
         module: &Module,
-        state: LoopControlState,
+        mut state: LoopControlState,
         case_stmt: &CaseStatement,
+        target: &expr::EvaluatedCaseTarget,
         arm_index: usize,
         arena: &mut SLTNodeArena<VarId>,
     ) -> Result<LoopControlState, ParserError> {
@@ -1025,15 +1243,18 @@ fn eval_loop_case(
                 .try_fold(state, |s, step| eval_loop_statement(module, s, step, arena));
         };
 
-        let ((cond_expr, cond_sources), cond_bounds) = eval_expression(
+        let mut cond_store = state.store.clone();
+        let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
             module,
-            &state.store,
-            &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
+            &mut cond_store,
+            &case_stmt.case_target,
+            target,
+            &arm.patterns,
             arena,
-            None,
         )?;
+        state = apply_loop_continue_guard(module, state, cond_store, cond_bounds, arena)?;
         let cond_expr = procedural_condition(arena, cond_expr)?;
-        let boundaries = merge_boundaries(state.boundaries, cond_bounds);
+        let boundaries = state.boundaries.clone();
 
         if let Some(cond_val) = constant_bool(arena, cond_expr) {
             let state = LoopControlState {
@@ -1045,7 +1266,7 @@ fn eval_loop_case(
                     .iter()
                     .try_fold(state, |s, step| eval_loop_statement(module, s, step, arena))
             } else {
-                eval_from_arm(module, state, case_stmt, arm_index + 1, arena)
+                eval_from_arm(module, state, case_stmt, target, arm_index + 1, arena)
             };
         }
 
@@ -1067,6 +1288,7 @@ fn eval_loop_case(
                 continue_sources: state.continue_sources,
             },
             case_stmt,
+            target,
             arm_index + 1,
             arena,
         )?;
@@ -1095,19 +1317,25 @@ fn eval_loop_case(
         })
     }
 
-    eval_from_arm(module, state, case_stmt, 0, arena)
+    let mut target_store = state.store.clone();
+    let (target, target_boundaries) =
+        eval_case_target_effectful(module, &mut target_store, &case_stmt.case_target, arena)?;
+    state = apply_loop_continue_guard(module, state, target_store, target_boundaries, arena)?;
+    eval_from_arm(module, state, case_stmt, &target, 0, arena)
 }
 
 fn eval_loop_if(
     module: &Module,
-    state: LoopControlState,
+    mut state: LoopControlState,
     stmt: &IfStatement,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<LoopControlState, ParserError> {
+    let mut cond_store = state.store.clone();
     let ((cond_expr, cond_sources), cond_bounds) =
-        eval_expression(module, &state.store, &stmt.cond, arena, None)?;
+        eval_expression_effectful(module, &mut cond_store, &stmt.cond, arena, None)?;
+    state = apply_loop_continue_guard(module, state, cond_store, cond_bounds, arena)?;
     let cond_expr = procedural_condition(arena, cond_expr)?;
-    let boundaries = merge_boundaries(state.boundaries, cond_bounds);
+    let boundaries = state.boundaries.clone();
 
     if let Some(cond_val) = constant_bool(arena, cond_expr) {
         let side = if cond_val {
@@ -1234,6 +1462,33 @@ fn eval_for_bound(
     }
 }
 
+fn eval_for_bound_effectful(
+    module: &Module,
+    store: &mut SymbolicStore<VarId>,
+    bound: &ForBound,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<
+    (
+        SLTLoopBound,
+        HashSet<VarAtomBase<VarId>>,
+        BoundaryMap<VarId>,
+    ),
+    ParserError,
+> {
+    match bound {
+        ForBound::Const(value) => Ok((
+            SLTLoopBound::Const(*value),
+            HashSet::default(),
+            BoundaryMap::default(),
+        )),
+        ForBound::Expression(expression) => {
+            let ((node, sources), boundaries) =
+                eval_expression_effectful(module, store, expression, arena, None)?;
+            Ok((SLTLoopBound::Expr(node), sources, boundaries))
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LoopBoundStatus {
     FitsLoopType,
@@ -1299,6 +1554,41 @@ fn inclusive_of(range: &ForRange) -> bool {
     }
 }
 
+fn constant_case_pattern_matches(target: &Expression, pattern: &CasePattern) -> bool {
+    fn compare(op: Op, lhs: &Value, rhs: &Value) -> bool {
+        let signed = lhs.signed() && rhs.signed();
+        op.eval_value_binary(lhs, rhs, 1, signed, &mut MaskCache::default())
+            .to_u64()
+            == Some(1)
+    }
+
+    if !target.comptime().is_const {
+        return false;
+    }
+    let Ok(target) = target.comptime().get_value() else {
+        return false;
+    };
+    match pattern {
+        CasePattern::Eq(expression) => {
+            expression.comptime().is_const
+                && expression
+                    .comptime()
+                    .get_value()
+                    .is_ok_and(|pattern| compare(Op::EqWildcard, target, pattern))
+        }
+        CasePattern::Range { lo, hi, inclusive } => {
+            if !lo.comptime().is_const || !hi.comptime().is_const {
+                return false;
+            }
+            let (Ok(lo), Ok(hi)) = (lo.comptime().get_value(), hi.comptime().get_value()) else {
+                return false;
+            };
+            compare(Op::LessEq, lo, target)
+                && compare(if *inclusive { Op::LessEq } else { Op::Less }, target, hi)
+        }
+    }
+}
+
 fn collect_written_accesses(
     module: &Module,
     statements: &[Statement],
@@ -1307,34 +1597,77 @@ fn collect_written_accesses(
     for stmt in statements {
         match stmt {
             Statement::Assign(assign) => {
+                collect_written_expression(module, &assign.expr, out)?;
                 for dst in &assign.dst {
                     collect_written_destination(module, out, dst)?;
                 }
             }
             Statement::If(if_stmt) => {
+                collect_written_expression(module, &if_stmt.cond, out)?;
                 collect_written_accesses(module, &if_stmt.true_side, out)?;
                 collect_written_accesses(module, &if_stmt.false_side, out)?;
             }
             Statement::Case(case_stmt) => {
+                collect_written_expression(module, &case_stmt.case_target, out)?;
+                let mut known_match = false;
                 for arm in &case_stmt.arms {
+                    let mut arm_known_match = false;
+                    for pattern in &arm.patterns {
+                        match pattern {
+                            CasePattern::Eq(expression) => {
+                                collect_written_expression(module, expression, out)?;
+                            }
+                            CasePattern::Range { lo, hi, .. } => {
+                                collect_written_expression(module, lo, out)?;
+                                collect_written_expression(module, hi, out)?;
+                            }
+                        }
+                        if constant_case_pattern_matches(&case_stmt.case_target, pattern) {
+                            arm_known_match = true;
+                            break;
+                        }
+                    }
                     collect_written_accesses(module, &arm.body, out)?;
+                    if arm_known_match {
+                        known_match = true;
+                        break;
+                    }
                 }
-                collect_written_accesses(module, &case_stmt.default, out)?;
+                if !known_match {
+                    collect_written_accesses(module, &case_stmt.default, out)?;
+                }
             }
-            Statement::For(for_stmt) => collect_written_accesses(module, &for_stmt.body, out)?,
+            Statement::For(for_stmt) => {
+                let (start, end) = match &for_stmt.range {
+                    ForRange::Forward { start, end, .. }
+                    | ForRange::Reverse { start, end, .. }
+                    | ForRange::Stepped { start, end, .. } => (start, end),
+                };
+                for bound in [start, end] {
+                    if let ForBound::Expression(expression) = bound {
+                        collect_written_expression(module, expression, out)?;
+                    }
+                }
+                collect_written_accesses(module, &for_stmt.body, out)?;
+            }
             Statement::IfReset(if_reset) => {
                 collect_written_accesses(module, &if_reset.true_side, out)?;
                 collect_written_accesses(module, &if_reset.false_side, out)?;
             }
             Statement::FunctionCall(call) => {
+                for input in call.inputs.values() {
+                    collect_written_expression(module, input, out)?;
+                }
                 for dsts in call.outputs.values() {
                     for dst in dsts {
                         collect_written_destination(module, out, dst)?;
                     }
                 }
             }
-            Statement::SystemFunctionCall(_)
-            | Statement::TbMethodCall(_)
+            Statement::SystemFunctionCall(call) => {
+                collect_written_system_function_call(module, call, out)?;
+            }
+            Statement::TbMethodCall(_)
             | Statement::Break
             | Statement::Unsupported(_)
             | Statement::Null => {}
@@ -1343,11 +1676,145 @@ fn collect_written_accesses(
     Ok(())
 }
 
+fn eval_fully_known_constexpr(expression: &Expression) -> Option<BigUint> {
+    let (value, mask, _, _) = celox_value_from_comptime(expression.comptime())?;
+    if !mask.is_zero() {
+        return None;
+    }
+    Some(value)
+}
+
+pub(super) fn collect_written_expression(
+    module: &Module,
+    expression: &Expression,
+    out: &mut HashMap<VarId, Vec<BitAccess>>,
+) -> Result<(), ParserError> {
+    match expression {
+        Expression::Term(factor) => match factor.as_ref() {
+            Factor::FunctionCall(call) => {
+                for input in call.inputs.values() {
+                    collect_written_expression(module, input, out)?;
+                }
+                for destinations in call.outputs.values() {
+                    for destination in destinations {
+                        collect_written_destination(module, out, destination)?;
+                    }
+                }
+                Ok(())
+            }
+            Factor::Variable(_, index, select, _) => {
+                for expression in index.0.iter().chain(select.0.iter()) {
+                    collect_written_expression(module, expression, out)?;
+                }
+                Ok(())
+            }
+            Factor::SystemFunctionCall(call) => {
+                collect_written_system_function_call(module, call, out)
+            }
+            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+        },
+        Expression::Unary(_, inner, _) => collect_written_expression(module, inner, out),
+        Expression::Binary(lhs, op, rhs, _) => {
+            collect_written_expression(module, lhs, out)?;
+            if matches!(op, Op::Pow) {
+                return Ok(());
+            }
+            let lhs_value = eval_fully_known_constexpr(lhs);
+            let skips_rhs = match op {
+                Op::LogicAnd => lhs_value
+                    .as_ref()
+                    .is_some_and(|value| value == &BigUint::from(0u8)),
+                Op::LogicOr => lhs_value
+                    .as_ref()
+                    .is_some_and(|value| value != &BigUint::from(0u8)),
+                _ => false,
+            };
+            if skips_rhs {
+                return Ok(());
+            }
+            collect_written_expression(module, rhs, out)
+        }
+        Expression::Ternary(cond, then_expr, else_expr, _) => {
+            collect_written_expression(module, cond, out)?;
+            if let Some(value) = eval_fully_known_constexpr(cond) {
+                return if value == BigUint::from(0u8) {
+                    collect_written_expression(module, else_expr, out)
+                } else {
+                    collect_written_expression(module, then_expr, out)
+                };
+            }
+            collect_written_expression(module, then_expr, out)?;
+            collect_written_expression(module, else_expr, out)
+        }
+        Expression::Concatenation(parts, _) => {
+            for (part, _) in parts {
+                collect_written_expression(module, part, out)?;
+            }
+            Ok(())
+        }
+        Expression::ArrayLiteral(items, _) => {
+            for item in items {
+                match item {
+                    ArrayLiteralItem::Value(expression, _) => {
+                        collect_written_expression(module, expression, out)?;
+                    }
+                    ArrayLiteralItem::Defaul(expression) => {
+                        collect_written_expression(module, expression, out)?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        Expression::StructConstructor(_, fields, _) => {
+            for (_, field) in fields {
+                collect_written_expression(module, field, out)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn collect_written_system_function_call(
+    module: &Module,
+    call: &SystemFunctionCall,
+    out: &mut HashMap<VarId, Vec<BitAccess>>,
+) -> Result<(), ParserError> {
+    let mut collect_input =
+        |input: &SystemFunctionInput| collect_written_expression(module, &input.0, out);
+    match &call.kind {
+        // These operands are queried for shape only and are not evaluated at
+        // runtime, so nested output arguments are not writes of this process.
+        SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => Ok(()),
+        SystemFunctionKind::Clog2(input)
+        | SystemFunctionKind::Onehot(input)
+        | SystemFunctionKind::Signed(input)
+        | SystemFunctionKind::Unsigned(input) => collect_input(input),
+        SystemFunctionKind::Readmemh(input, _) => collect_input(input),
+        SystemFunctionKind::Display(inputs) | SystemFunctionKind::Write(inputs) => {
+            for input in inputs {
+                collect_input(input)?;
+            }
+            Ok(())
+        }
+        SystemFunctionKind::Assert { cond, args, .. } => {
+            collect_input(cond)?;
+            for input in args {
+                collect_input(input)?;
+            }
+            Ok(())
+        }
+        SystemFunctionKind::Finish => Ok(()),
+    }
+}
+
 fn collect_written_destination(
     module: &Module,
     out: &mut HashMap<VarId, Vec<BitAccess>>,
     dst: &veryl_analyzer::ir::AssignDestination,
 ) -> Result<(), ParserError> {
+    for expression in dst.index.0.iter().chain(dst.select.0.iter()) {
+        collect_written_expression(module, expression, out)?;
+    }
     let access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
     out.entry(dst.id).or_default().push(access);
     Ok(())
@@ -1366,8 +1833,8 @@ fn eval_for(
 
 fn eval_for_with_effects(
     module: &Module,
-    store: SymbolicStore<VarId>,
-    boundaries: HashMap<VarId, BTreeSet<usize>>,
+    mut store: SymbolicStore<VarId>,
+    mut boundaries: HashMap<VarId, BTreeSet<usize>>,
     for_stmt: &ForStatement,
     arena: &mut SLTNodeArena<VarId>,
     effects: &[SLTForEffect],
@@ -1403,6 +1870,96 @@ fn eval_for_with_effects(
             Some(&for_stmt.token),
         ));
     }
+
+    // Bounds are ordinary runtime expressions. Evaluate them once, from left
+    // to right, before constructing the loop state so output-argument writes
+    // are visible both inside the loop and after it.
+    let (start, end, start_sources, end_sources, inclusive, step, step_op, reverse) =
+        match &for_stmt.range {
+            ForRange::Forward {
+                start: range_start,
+                end: range_end,
+                inclusive,
+                step,
+            } => {
+                let (start, start_sources, start_bounds) =
+                    eval_for_bound_effectful(module, &mut store, range_start, arena)?;
+                boundaries = merge_boundaries(boundaries, start_bounds);
+                let (end, end_sources, end_bounds) =
+                    eval_for_bound_effectful(module, &mut store, range_end, arena)?;
+                boundaries = merge_boundaries(boundaries, end_bounds);
+                (
+                    start,
+                    end,
+                    start_sources,
+                    end_sources,
+                    *inclusive,
+                    *step,
+                    SLTStepOp::Add,
+                    false,
+                )
+            }
+            ForRange::Reverse {
+                start: range_start,
+                end: range_end,
+                inclusive,
+                step,
+            } => {
+                let (start, start_sources, start_bounds) =
+                    eval_for_bound_effectful(module, &mut store, range_start, arena)?;
+                boundaries = merge_boundaries(boundaries, start_bounds);
+                let (end, end_sources, end_bounds) =
+                    eval_for_bound_effectful(module, &mut store, range_end, arena)?;
+                boundaries = merge_boundaries(boundaries, end_bounds);
+                (
+                    start,
+                    end,
+                    start_sources,
+                    end_sources,
+                    *inclusive,
+                    *step,
+                    SLTStepOp::Add,
+                    true,
+                )
+            }
+            ForRange::Stepped {
+                start: range_start,
+                end: range_end,
+                inclusive,
+                step,
+                op,
+            } => {
+                let (start, start_sources, start_bounds) =
+                    eval_for_bound_effectful(module, &mut store, range_start, arena)?;
+                boundaries = merge_boundaries(boundaries, start_bounds);
+                let (end, end_sources, end_bounds) =
+                    eval_for_bound_effectful(module, &mut store, range_end, arena)?;
+                boundaries = merge_boundaries(boundaries, end_bounds);
+                let step_op = match op {
+                    Op::Mul => SLTStepOp::Mul,
+                    Op::LogicShiftL | Op::ArithShiftL => SLTStepOp::Shl,
+                    Op::BitOr => SLTStepOp::BitOr,
+                    Op::BitXor => SLTStepOp::BitXor,
+                    other => {
+                        return Err(ParserError::illegal_context(
+                            "for loop step operator",
+                            format!("{other:?}"),
+                            Some(&for_stmt.token),
+                        ));
+                    }
+                };
+                (
+                    start,
+                    end,
+                    start_sources,
+                    end_sources,
+                    *inclusive,
+                    *step,
+                    step_op,
+                    false,
+                )
+            }
+        };
 
     let mut symbolic_store = store.clone();
     let mut written_accesses = HashMap::default();
@@ -1455,104 +2012,7 @@ fn eval_for_with_effects(
         |state, stmt| eval_loop_statement(module, state, stmt, arena),
     )?;
     let iter_store_after = loop_state.store;
-    let mut merged_boundaries = loop_state.boundaries;
-
-    let (
-        start,
-        end,
-        start_sources,
-        end_sources,
-        start_bounds,
-        end_bounds,
-        inclusive,
-        step,
-        step_op,
-        reverse,
-    ) = match &for_stmt.range {
-        ForRange::Forward {
-            start: range_start,
-            end: range_end,
-            inclusive,
-            step,
-        } => {
-            let (start, start_sources, start_bounds) =
-                eval_for_bound(module, &store, range_start, arena)?;
-            let (end, end_sources, end_bounds) = eval_for_bound(module, &store, range_end, arena)?;
-            (
-                start,
-                end,
-                start_sources,
-                end_sources,
-                start_bounds,
-                end_bounds,
-                *inclusive,
-                *step,
-                SLTStepOp::Add,
-                false,
-            )
-        }
-        ForRange::Reverse {
-            start: range_start,
-            end: range_end,
-            inclusive,
-            step,
-        } => {
-            let (start, start_sources, start_bounds) =
-                eval_for_bound(module, &store, range_start, arena)?;
-            let (end, end_sources, end_bounds) = eval_for_bound(module, &store, range_end, arena)?;
-            (
-                start,
-                end,
-                start_sources,
-                end_sources,
-                start_bounds,
-                end_bounds,
-                *inclusive,
-                *step,
-                SLTStepOp::Add,
-                true,
-            )
-        }
-        ForRange::Stepped {
-            start: range_start,
-            end: range_end,
-            inclusive,
-            step,
-            op,
-        } => {
-            let (start, start_sources, start_bounds) =
-                eval_for_bound(module, &store, range_start, arena)?;
-            let (end, end_sources, end_bounds) = eval_for_bound(module, &store, range_end, arena)?;
-            let step_op = match op {
-                Op::Mul => SLTStepOp::Mul,
-                Op::LogicShiftL | Op::ArithShiftL => SLTStepOp::Shl,
-                Op::BitOr => SLTStepOp::BitOr,
-                Op::BitXor => SLTStepOp::BitXor,
-                other => {
-                    return Err(ParserError::illegal_context(
-                        "for loop step operator",
-                        format!("{other:?}"),
-                        Some(&for_stmt.token),
-                    ));
-                }
-            };
-            (
-                start,
-                end,
-                start_sources,
-                end_sources,
-                start_bounds,
-                end_bounds,
-                *inclusive,
-                *step,
-                step_op,
-                false,
-            )
-        }
-    };
-
-    merged_boundaries = merge_boundaries(merged_boundaries, start_bounds);
-    merged_boundaries = merge_boundaries(merged_boundaries, end_bounds);
+    let merged_boundaries = loop_state.boundaries;
 
     let updates = extract_store_updates(&iter_store_before, &iter_store_after, arena)?;
     if updates.is_empty() && effects.is_empty() {
@@ -1834,6 +2294,45 @@ fn update_assignment_range(
     Ok(())
 }
 
+fn eval_assignment_rhs_effectful(
+    module: &Module,
+    store: &mut SymbolicStore<VarId>,
+    stmt: &AssignStatement,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
+    let rhs_expected_width = checked_destination_width(
+        module,
+        &stmt.dst,
+        "assignment destination",
+        Some(&stmt.expr.token_range()),
+    )?;
+    if let Expression::ArrayLiteral(items, _) = &stmt.expr {
+        let ((node, sources), bounds) = eval_array_literal_expression_effectful(
+            module,
+            store,
+            items,
+            Some(rhs_expected_width),
+            arena,
+        )?;
+        if get_width(node, arena) == 0 {
+            return Err(ParserError::illegal_context(
+                "assignment expression",
+                "a zero-width array literal cannot be assigned",
+                Some(&stmt.expr.token_range()),
+            ));
+        }
+        Ok((
+            (
+                coerce_node_width(arena, node, Some(rhs_expected_width), false)?,
+                sources,
+            ),
+            bounds,
+        ))
+    } else {
+        eval_assignment_expression_effectful(module, store, &stmt.expr, arena, rhs_expected_width)
+    }
+}
+
 fn eval_assign(
     module: &Module,
     mut store: SymbolicStore<VarId>,
@@ -1848,28 +2347,8 @@ fn eval_assign(
         "assignment destination",
         Some(&stmt.expr.token_range()),
     )?;
-    let ((rhs_expr, rhs_sources), rhs_bounds) = if let Expression::ArrayLiteral(items, _) =
-        &stmt.expr
-    {
-        let ((node, sources), bounds) =
-            eval_array_literal_expression(module, &store, items, Some(rhs_expected_width), arena)?;
-        if get_width(node, arena) == 0 {
-            return Err(ParserError::illegal_context(
-                "assignment expression",
-                "a zero-width array literal cannot be assigned",
-                Some(&stmt.expr.token_range()),
-            ));
-        }
-        (
-            (
-                coerce_node_width(arena, node, Some(rhs_expected_width), false)?,
-                sources,
-            ),
-            bounds,
-        )
-    } else {
-        eval_assignment_expression(module, &store, &stmt.expr, arena, rhs_expected_width)?
-    };
+    let ((rhs_expr, rhs_sources), rhs_bounds) =
+        eval_assignment_rhs_effectful(module, &mut store, stmt, arena)?;
     let mut boundaries = merge_boundaries(boundaries, rhs_bounds);
 
     if stmt.dst.len() == 1 {
@@ -1960,6 +2439,48 @@ fn eval_assign(
         }
     }
     Ok((store, boundaries))
+}
+
+pub(super) fn apply_assignment_destination(
+    module: &Module,
+    mut store: SymbolicStore<VarId>,
+    mut boundaries: BoundaryMap<VarId>,
+    destination: &veryl_analyzer::ir::AssignDestination,
+    rhs_expr: NodeId,
+    rhs_sources: HashSet<VarAtomBase<VarId>>,
+    rhs_is_2state: bool,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    if crate::bitaccess::is_static_access(&destination.index, &destination.select) {
+        let access = eval_var_select(
+            module,
+            destination.id,
+            &destination.index,
+            &destination.select,
+        )?;
+        record_assignment_boundary(&mut boundaries, destination, access)?;
+        update_assignment_range(
+            module,
+            &mut store,
+            destination,
+            access,
+            (rhs_expr, rhs_sources),
+            rhs_is_2state,
+            arena,
+        )?;
+        Ok((store, boundaries))
+    } else {
+        eval_dynamic_assign(
+            module,
+            store,
+            boundaries,
+            destination,
+            rhs_expr,
+            rhs_sources,
+            rhs_is_2state,
+            arena,
+        )
+    }
 }
 
 fn assign_node_to_dsts(
@@ -2106,22 +2627,10 @@ fn eval_statement_form_function_call(
         ));
     };
 
-    let mut local_store = store.clone();
+    let mut evaluated_inputs = Vec::with_capacity(call.inputs.len());
 
-    for (arg_path, arg_id) in &function_body.arg_map {
-        let Some(arg_expr) = call.inputs.get(arg_path) else {
-            if call.outputs.contains_key(arg_path) {
-                continue;
-            }
-            return Err(invalid_function_call_argument_error(
-                function,
-                arg_path,
-                "formal argument has neither an input expression nor an output destination",
-                call,
-            ));
-        };
-
-        let formal = module.variables.get(arg_id).ok_or_else(|| {
+    for (arg_id, arg_expr) in ordered_function_inputs(function, &function_body, call)? {
+        let formal = module.variables.get(&arg_id).ok_or_else(|| {
             ParserError::illegal_context(
                 "function input argument",
                 "formal variable is absent from the semantic module",
@@ -2130,15 +2639,31 @@ fn eval_statement_form_function_call(
         })?;
         let arg_width = resolve_total_width(module, formal)?;
         let ((arg_node, arg_sources), arg_bounds) =
-            eval_assignment_expression(module, &store, arg_expr, arena, arg_width)?;
+            eval_assignment_expression_effectful(module, &mut store, arg_expr, arena, arg_width)?;
         let arg_node = if formal.r#type.is_2state() && !arg_expr.comptime().r#type.is_2state() {
             arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, arg_node))?
         } else {
             arg_node
         };
         boundaries = merge_boundaries(boundaries, arg_bounds);
+        evaluated_inputs.push((arg_id, arg_node, arg_sources, arg_width));
+    }
+
+    for arg_path in function_body.arg_map.keys() {
+        if !call.inputs.contains_key(arg_path) && !call.outputs.contains_key(arg_path) {
+            return Err(invalid_function_call_argument_error(
+                function,
+                arg_path,
+                "formal argument has neither an input expression nor an output destination",
+                call,
+            ));
+        }
+    }
+
+    let mut local_store = store.clone();
+    for (arg_id, arg_node, arg_sources, arg_width) in evaluated_inputs {
         local_store.insert(
-            *arg_id,
+            arg_id,
             RangeStore::new(Some((arg_node, arg_sources)), arg_width),
         );
     }
@@ -2157,58 +2682,103 @@ fn eval_statement_form_function_call(
     };
     boundaries = merge_boundaries(boundaries, local_boundaries);
 
-    for (arg_path, dsts) in &call.outputs {
-        let Some(arg_id) = function_body.arg_map.get(arg_path) else {
-            return Err(invalid_function_call_argument_error(
-                function,
-                arg_path,
-                "output argument does not match any formal argument",
-                call,
-            ));
-        };
+    apply_function_call_outputs(
+        module,
+        function,
+        store,
+        boundaries,
+        call,
+        &function_body,
+        &final_local_store,
+        arena,
+    )
+}
 
-        let formal = module.variables.get(arg_id).ok_or_else(|| {
-            ParserError::illegal_context(
-                "function output value",
-                "formal variable is absent from the semantic module",
-                Some(&call.comptime.token),
-            )
-        })?;
-        let formal_width = resolve_total_width(module, formal)?;
-        if formal_width == 0 {
-            return Err(ParserError::illegal_context(
-                "function output value",
-                "formal output has zero width",
-                Some(&call.comptime.token),
-            ));
-        }
-        let access = BitAccess::new(0, formal_width - 1);
-        let range_store = final_local_store.get(arg_id).ok_or_else(|| {
-            ParserError::illegal_context(
-                "function output value",
-                "formal output is absent from the final symbolic store",
-                Some(&call.comptime.token),
-            )
-        })?;
-        let parts = range_store.get_parts(access).map_err(|error| {
-            range_store_error("function output value", error, Some(&call.comptime.token))
-        })?;
-        let (output_expr, output_sources) = combine_parts_with_default(*arg_id, 0, parts, arena)?;
-        let (next_store, next_boundaries) = assign_node_to_dsts(
+fn apply_function_call_outputs(
+    module: &Module,
+    function: &Function,
+    mut store: SymbolicStore<VarId>,
+    mut boundaries: BoundaryMap<VarId>,
+    call: &veryl_analyzer::ir::FunctionCall,
+    function_body: &veryl_analyzer::ir::FunctionBody,
+    final_local_store: &SymbolicStore<VarId>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    for (arg_id, dsts) in ordered_function_outputs(function, function_body, call)? {
+        (store, boundaries) = apply_function_output(
             module,
             store,
             boundaries,
+            arg_id,
             dsts,
-            output_expr,
-            output_sources,
-            formal.r#type.is_2state(),
+            call,
+            final_local_store,
             arena,
         )?;
-        store = next_store;
-        boundaries = next_boundaries;
     }
 
     Ok((store, boundaries))
+}
+
+pub(super) fn apply_function_output(
+    module: &Module,
+    store: SymbolicStore<VarId>,
+    boundaries: BoundaryMap<VarId>,
+    arg_id: VarId,
+    dsts: &[veryl_analyzer::ir::AssignDestination],
+    call: &veryl_analyzer::ir::FunctionCall,
+    final_local_store: &SymbolicStore<VarId>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
+    let (output_expr, output_sources, output_is_2state) =
+        function_output_value(module, arg_id, call, final_local_store, arena)?;
+    assign_node_to_dsts(
+        module,
+        store,
+        boundaries,
+        dsts,
+        output_expr,
+        output_sources,
+        output_is_2state,
+        arena,
+    )
+}
+
+pub(super) fn function_output_value(
+    module: &Module,
+    arg_id: VarId,
+    call: &veryl_analyzer::ir::FunctionCall,
+    final_local_store: &SymbolicStore<VarId>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(NodeId, HashSet<VarAtomBase<VarId>>, bool), ParserError> {
+    let formal = module.variables.get(&arg_id).ok_or_else(|| {
+        ParserError::illegal_context(
+            "function output value",
+            "formal variable is absent from the semantic module",
+            Some(&call.comptime.token),
+        )
+    })?;
+    let formal_width = resolve_total_width(module, formal)?;
+    if formal_width == 0 {
+        return Err(ParserError::illegal_context(
+            "function output value",
+            "formal output has zero width",
+            Some(&call.comptime.token),
+        ));
+    }
+    let access = BitAccess::new(0, formal_width - 1);
+    let range_store = final_local_store.get(&arg_id).ok_or_else(|| {
+        ParserError::illegal_context(
+            "function output value",
+            "formal output is absent from the final symbolic store",
+            Some(&call.comptime.token),
+        )
+    })?;
+    let parts = range_store.get_parts(access).map_err(|error| {
+        range_store_error("function output value", error, Some(&call.comptime.token))
+    })?;
+    let (output_expr, output_sources) = combine_parts_with_default(arg_id, 0, parts, arena)?;
+    Ok((output_expr, output_sources, formal.r#type.is_2state()))
 }
 
 struct DynamicSelectOffset {
@@ -2223,7 +2793,7 @@ struct DynamicSelectOffset {
 /// offset so direct dynamic loads and read-modify-write paths cannot diverge.
 fn eval_dynamic_select_offset(
     module: &Module,
-    store: &SymbolicStore<VarId>,
+    store: &mut expr::ExpressionStore<'_>,
     var_id: VarId,
     index: &VarIndex,
     select: &VarSelect,
@@ -2251,7 +2821,7 @@ fn eval_dynamic_select_offset(
     expressions.extend(select.0.clone());
     for (dimension, expression) in expressions[..geometry.dimension_count].iter().enumerate() {
         let ((node, node_sources), node_boundaries) =
-            eval_expression(module, store, expression, arena, None)?;
+            expr::eval_expression_in_context(module, store, expression, arena, None)?;
         sources.extend(node_sources);
         boundaries = merge_boundaries(boundaries, node_boundaries);
         let stride = geometry.strides.get(dimension).copied().ok_or_else(|| {
@@ -2316,7 +2886,13 @@ fn eval_dynamic_select_offset(
                     )
                 })?;
                 let ((anchor, anchor_sources), anchor_boundaries) =
-                    eval_expression(module, store, anchor_expression, arena, None)?;
+                    expr::eval_expression_in_context(
+                        module,
+                        store,
+                        anchor_expression,
+                        arena,
+                        None,
+                    )?;
                 sources.extend(anchor_sources);
                 boundaries = merge_boundaries(boundaries, anchor_boundaries);
                 match part {
@@ -2390,15 +2966,18 @@ fn eval_dynamic_assign(
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, BoundaryMap<VarId>), ParserError> {
     let mut all_sources = rhs_sources;
-    let select_offset = eval_dynamic_select_offset(
-        module,
-        &store,
-        dst.id,
-        &dst.index,
-        &dst.select,
-        arena,
-        Some(&dst.token),
-    )?;
+    let select_offset = {
+        let mut expression_store = expr::ExpressionStore::Effectful(&mut store);
+        eval_dynamic_select_offset(
+            module,
+            &mut expression_store,
+            dst.id,
+            &dst.index,
+            &dst.select,
+            arena,
+            Some(&dst.token),
+        )?
+    };
     boundaries = merge_boundaries(boundaries, select_offset.boundaries);
     all_sources.extend(select_offset.sources);
     let offset_node = select_offset.node;
@@ -2495,7 +3074,7 @@ fn eval_dynamic_assign(
 }
 fn eval_if_with_recovery(
     module: &Module,
-    initial_store: SymbolicStore<VarId>,
+    mut initial_store: SymbolicStore<VarId>,
     mut boundaries: HashMap<VarId, BTreeSet<usize>>,
     stmt: &IfStatement,
     arena: &mut SLTNodeArena<VarId>,
@@ -2503,7 +3082,7 @@ fn eval_if_with_recovery(
     active_guard: Option<&ActiveGuard>,
 ) -> Result<(SymbolicStore<VarId>, HashMap<VarId, BTreeSet<usize>>), ParserError> {
     let ((cond_expr, cond_sources), cond_bounds) =
-        eval_expression(module, &initial_store, &stmt.cond, arena, None)?;
+        eval_expression_effectful(module, &mut initial_store, &stmt.cond, arena, None)?;
     let cond_expr = procedural_condition(arena, cond_expr)?;
     boundaries.extend(cond_bounds);
 
@@ -2563,13 +3142,13 @@ fn eval_if_with_recovery(
 
 fn eval_if(
     module: &Module,
-    initial_store: SymbolicStore<VarId>,
+    mut initial_store: SymbolicStore<VarId>,
     mut boundaries: HashMap<VarId, BTreeSet<usize>>,
     stmt: &IfStatement,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<(SymbolicStore<VarId>, HashMap<VarId, BTreeSet<usize>>), ParserError> {
     let ((cond_expr, cond_sources), cond_bounds) =
-        eval_expression(module, &initial_store, &stmt.cond, arena, None)?;
+        eval_expression_effectful(module, &mut initial_store, &stmt.cond, arena, None)?;
     let cond_expr = procedural_condition(arena, cond_expr)?;
     boundaries.extend(cond_bounds);
 
@@ -2610,7 +3189,7 @@ fn eval_if(
     ))
 }
 
-fn combine_parts_with_default<A: Clone + PartialEq + Eq + Hash>(
+pub(crate) fn combine_parts_with_default<A: Clone + PartialEq + Eq + Hash>(
     var_id: A,
     start_lsb: usize,
     parts: Vec<(Option<(NodeId, HashSet<VarAtomBase<A>>)>, BitAccess)>,
@@ -3053,6 +3632,495 @@ mod tests {
 
         let q_id = var_id_of(&module, &["q"]);
         assert_eq!(written[&q_id], vec![BitAccess::new(0, 3)]);
+    }
+
+    #[test]
+    fn test_collect_written_accesses_includes_expression_function_call_outputs() {
+        let code = r#"
+            module Top (
+                d: input logic<8>,
+                q_return: output logic<8>,
+                q_output: output logic<8>,
+            ) {
+                function f (
+                    x: input logic<8>,
+                    y: output logic<8>,
+                ) -> logic<8> {
+                    y = x + 8'd1;
+                    return x + 8'd2;
+                }
+
+                always_comb {
+                    q_return = f(d, q_output);
+                }
+            }
+        "#;
+        let module = parse_top_module(code);
+        let comb_decl = module
+            .declarations
+            .iter()
+            .find_map(|declaration| {
+                if let Declaration::Comb(comb) = declaration {
+                    Some(comb)
+                } else {
+                    None
+                }
+            })
+            .expect("No always_comb found in Top");
+        let mut written = HashMap::default();
+        collect_written_accesses(&module, &comb_decl.statements, &mut written).unwrap();
+
+        let q_output = var_id_of(&module, &["q_output"]);
+        assert_eq!(written[&q_output], vec![BitAccess::new(0, 7)]);
+    }
+
+    #[test]
+    fn test_collect_written_accesses_stops_after_known_case_match() {
+        let code = r#"
+            module Top (
+                d: input logic,
+                q: output logic,
+                unreachable_output: output logic,
+            ) {
+                function write_pattern (
+                    x: input logic,
+                    y: output logic,
+                ) -> logic {
+                    y = x;
+                    return x;
+                }
+
+                always_comb {
+                    q = write_pattern(d, unreachable_output);
+                    case 1'b0 {
+                        1'b0: q = d;
+                        1'b1: q = 1'b0;
+                        default: q = 1'b1;
+                    }
+                }
+            }
+        "#;
+        let mut module = parse_top_module(code);
+        let comb_decl = module
+            .declarations
+            .iter_mut()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .expect("No always_comb found in Top");
+        let Statement::Assign(seed) = &comb_decl.statements[0] else {
+            panic!("expected seed assignment");
+        };
+        let seed = seed.expr.clone();
+        let Statement::Case(case_stmt) = &mut comb_decl.statements[1] else {
+            panic!("expected case statement");
+        };
+        case_stmt.arms[1].patterns[0] = CasePattern::Eq(Box::new(seed));
+        let case_stmt = Statement::Case(case_stmt.clone());
+        let mut written = HashMap::default();
+        collect_written_accesses(&module, &[case_stmt], &mut written).unwrap();
+
+        let unreachable_output = var_id_of(&module, &["unreachable_output"]);
+        assert!(!written.contains_key(&unreachable_output));
+    }
+
+    #[test]
+    fn test_collect_written_accesses_excludes_unevaluated_shape_operands() {
+        let code = r#"
+            module Top (
+                d: input logic<8>,
+                q: output logic<32>,
+                q_output: output logic<8>,
+            ) {
+                function f (
+                    x: input logic<8>,
+                    y: output logic<8>,
+                ) -> logic<8> {
+                    y = x + 8'd1;
+                    return x;
+                }
+
+                always_comb {
+                    q_output = 8'd0;
+                    q = $bits(f(d, q_output)) + $size(f(d, q_output));
+                }
+            }
+        "#;
+        let module = parse_top_module(code);
+        let comb_decl = module
+            .declarations
+            .iter()
+            .find_map(|declaration| {
+                if let Declaration::Comb(comb) = declaration {
+                    Some(comb)
+                } else {
+                    None
+                }
+            })
+            .expect("No always_comb found in Top");
+        let q = var_id_of(&module, &["q"]);
+        let expression = comb_decl
+            .statements
+            .iter()
+            .filter_map(|statement| {
+                if let Statement::Assign(assign) = statement {
+                    Some(assign)
+                } else {
+                    None
+                }
+            })
+            .find(|assign| assign.dst.iter().any(|dst| dst.id == q))
+            .expect("No q assignment found in Top");
+        let mut written = HashMap::default();
+        collect_written_expression(&module, &expression.expr, &mut written).unwrap();
+
+        let q_output = var_id_of(&module, &["q_output"]);
+        assert!(!written.contains_key(&q_output));
+    }
+
+    #[test]
+    fn test_collect_written_accesses_excludes_repeat_and_pow_constexpr_operands() {
+        let code = r#"
+            module Top (
+                d: input logic<8>,
+                q_repeat: output logic<16>,
+                q_pow: output logic<8>,
+                repeat_output: output logic<8>,
+                pow_output: output logic<8>,
+                sink_repeat: output logic<8>,
+                sink_pow: output logic<8>,
+            ) {
+                function constant_with_output (
+                    x: input logic<8>,
+                    y: output logic<8>,
+                ) -> logic<8> {
+                    y = x;
+                    return x;
+                }
+
+                always_comb {
+                    q_repeat = {d repeat 2};
+                    q_pow = d ** 2;
+                    sink_repeat = constant_with_output(d, repeat_output);
+                    sink_pow = constant_with_output(d, pow_output);
+                }
+            }
+        "#;
+        let mut module = parse_top_module(code);
+        let q_repeat = var_id_of(&module, &["q_repeat"]);
+        let q_pow = var_id_of(&module, &["q_pow"]);
+        let sink_repeat = var_id_of(&module, &["sink_repeat"]);
+        let sink_pow = var_id_of(&module, &["sink_pow"]);
+        let comb_decl = module
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .expect("No always_comb found in Top");
+        let assignment_expression = |id| {
+            comb_decl
+                .statements
+                .iter()
+                .find_map(|statement| match statement {
+                    Statement::Assign(assign)
+                        if assign.dst.iter().any(|destination| destination.id == id) =>
+                    {
+                        Some(assign.expr.clone())
+                    }
+                    _ => None,
+                })
+                .expect("assignment expression should exist")
+        };
+        let repeat_operand = assignment_expression(sink_repeat);
+        let pow_operand = assignment_expression(sink_pow);
+
+        let comb_decl = module
+            .declarations
+            .iter_mut()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .expect("No always_comb found in Top");
+        for statement in &mut comb_decl.statements {
+            let Statement::Assign(assign) = statement else {
+                continue;
+            };
+            if assign
+                .dst
+                .iter()
+                .any(|destination| destination.id == q_repeat)
+            {
+                let Expression::Concatenation(parts, _) = &mut assign.expr else {
+                    panic!("q_repeat should be a concatenation");
+                };
+                parts[0].1 = Some(repeat_operand.clone());
+            } else if assign.dst.iter().any(|destination| destination.id == q_pow) {
+                let Expression::Binary(_, Op::Pow, rhs, _) = &mut assign.expr else {
+                    panic!("q_pow should be a power expression");
+                };
+                **rhs = pow_operand.clone();
+            }
+        }
+
+        let target_expressions = comb_decl
+            .statements
+            .iter()
+            .filter_map(|statement| match statement {
+                Statement::Assign(assign)
+                    if assign.dst.iter().any(
+                        |destination| matches!(destination.id, id if id == q_repeat || id == q_pow),
+                    ) =>
+                {
+                    Some(assign.expr.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut written = HashMap::default();
+        for expression in &target_expressions {
+            collect_written_expression(&module, expression, &mut written).unwrap();
+        }
+
+        assert!(!written.contains_key(&var_id_of(&module, &["repeat_output"])));
+        assert!(!written.contains_key(&var_id_of(&module, &["pow_output"])));
+    }
+
+    #[test]
+    fn test_destination_analysis_excludes_static_part_select_range_operand() {
+        let code = r#"
+            module Top (
+                d: input logic<2>,
+                anchor: input logic<3>,
+                data: output logic<8>,
+                range_output: output logic<3>,
+                sink: output logic<3>,
+            ) {
+                function range_with_output (
+                    x: input logic<3>,
+                    y: output logic<3>,
+                ) -> logic<3> {
+                    $display("range=%0d", x);
+                    y = x;
+                    return x;
+                }
+
+                always_comb {
+                    data[anchor +: 2] = d;
+                    sink = range_with_output(anchor, range_output);
+                    $display("outer");
+                }
+            }
+        "#;
+        let module = parse_top_module(code);
+        let data = var_id_of(&module, &["data"]);
+        let sink = var_id_of(&module, &["sink"]);
+        let range_output = var_id_of(&module, &["range_output"]);
+        let comb_decl = module
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .expect("No always_comb found in Top");
+        let mut range_operand = comb_decl
+            .statements
+            .iter()
+            .find_map(|statement| match statement {
+                Statement::Assign(assign)
+                    if assign.dst.iter().any(|destination| destination.id == sink) =>
+                {
+                    Some(assign.expr.clone())
+                }
+                _ => None,
+            })
+            .expect("range operand source should exist");
+        let mut destination = comb_decl
+            .statements
+            .iter()
+            .find_map(|statement| match statement {
+                Statement::Assign(assign)
+                    if assign.dst.iter().any(|destination| destination.id == data) =>
+                {
+                    assign.dst.first().cloned()
+                }
+                _ => None,
+            })
+            .expect("part-select destination should exist");
+        let static_range_value = destination
+            .select
+            .1
+            .as_ref()
+            .expect("part-select range should exist")
+            .1
+            .comptime()
+            .value
+            .clone();
+        // Output-bearing calls are non-constant in source Veryl today. Keep
+        // the call structure but model an IR producer retaining its known
+        // static width so the collector behavior is covered directly.
+        range_operand.comptime_mut().value = static_range_value;
+        range_operand.comptime_mut().is_const = true;
+        destination.select.1.as_mut().unwrap().1 = range_operand;
+
+        assert!(!effect::destination_contains_runtime_effect(
+            &module,
+            &destination
+        ));
+        let mut written = HashMap::default();
+        collect_written_destination(&module, &mut written, &destination).unwrap();
+        assert!(!written.contains_key(&range_output));
+
+        let mut synthetic_comb = comb_decl.clone();
+        let data_assignment = synthetic_comb
+            .statements
+            .iter_mut()
+            .find_map(|statement| match statement {
+                Statement::Assign(assign) if assign.dst.iter().any(|entry| entry.id == data) => {
+                    Some(assign)
+                }
+                _ => None,
+            })
+            .expect("data assignment should exist");
+        data_assignment.dst[0] = destination;
+        let mut arena = SLTNodeArena::new();
+        let (_, _, _, _, sites) = super::parse_comb(&module, &synthetic_comb, &mut arena).unwrap();
+        assert_eq!(
+            sites.len(),
+            2,
+            "the static range call must not duplicate the legitimate callee and outer events"
+        );
+    }
+
+    #[test]
+    fn test_static_event_template_effects_precede_value_argument_capture() {
+        let code = r#"
+            module Top (tmp_o: output logic<8>) {
+                function make_format (y: output logic<8>) -> string {
+                    $display("format evaluated");
+                    y = 8'd11;
+                    return "value=%0d";
+                }
+
+                var tmp: logic<8>;
+                always_comb {
+                    tmp = 8'd0;
+                    $display(make_format(tmp), tmp);
+                    $display("value=%0d", tmp);
+                }
+                assign tmp_o = tmp;
+            }
+        "#;
+        let mut module = parse_top_module(code);
+        let comb = module
+            .declarations
+            .iter_mut()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .expect("No always_comb found in Top");
+        let [
+            Statement::Assign(_),
+            Statement::SystemFunctionCall(first),
+            Statement::SystemFunctionCall(second),
+        ] = comb.statements.as_mut_slice()
+        else {
+            panic!("expected initialization followed by two display statements");
+        };
+        let SystemFunctionKind::Display(second_args) = &second.kind else {
+            panic!("expected second display");
+        };
+        let template_value = second_args[0].0.comptime().value.clone();
+        let SystemFunctionKind::Display(first_args) = &mut first.kind else {
+            panic!("expected first display");
+        };
+        // Output-bearing functions are currently marked non-constant by the
+        // analyzer. Model an IR producer that retains its known string value
+        // so this collector-level ordering remains covered.
+        first_args[0].0.comptime_mut().value = template_value;
+        let comb = comb.clone();
+
+        let mut arena = SLTNodeArena::new();
+        let (_, _, _, observers, sites) = super::parse_comb(&module, &comb, &mut arena).unwrap();
+        assert_eq!(
+            sites.len(),
+            3,
+            "template traversal must collect its nested event"
+        );
+        let outer = observers
+            .iter()
+            .find(|observer| observer.site_id == 0)
+            .expect("missing outer display observer");
+        let SLTNode::Capture { expr, .. } = arena.get(outer.args[0]) else {
+            panic!("outer value argument must be captured");
+        };
+        let SLTNode::Constant(value, unknown, 8, _) = arena.get(*expr) else {
+            panic!("template output must be visible to the following value argument");
+        };
+        assert_eq!(value, &num_bigint::BigUint::from(11u8));
+        assert_eq!(unknown, &num_bigint::BigUint::from(0u8));
+    }
+
+    #[test]
+    fn test_collect_written_accesses_preserves_indeterminate_expression_branches() {
+        let code = r#"
+            module Top (
+                d: input logic,
+                q: output logic,
+                ternary_then: output logic,
+                ternary_else: output logic,
+                short_circuit_rhs: output logic,
+                z_ternary_then: output logic,
+                z_ternary_else: output logic,
+                z_short_circuit_rhs: output logic,
+            ) {
+                function write (
+                    x: input logic,
+                    y: output logic,
+                ) -> logic {
+                    y = x;
+                    return x;
+                }
+
+                always_comb {
+                    q = if 1'bx ? write(d, ternary_then) : write(d, ternary_else);
+                    q = 1'bx && write(d, short_circuit_rhs);
+                    q = if 1'bz ? write(d, z_ternary_then) : write(d, z_ternary_else);
+                    q = 1'bz && write(d, z_short_circuit_rhs);
+                }
+            }
+        "#;
+        let module = parse_top_module(code);
+        let comb_decl = module
+            .declarations
+            .iter()
+            .find_map(|declaration| {
+                if let Declaration::Comb(comb) = declaration {
+                    Some(comb)
+                } else {
+                    None
+                }
+            })
+            .expect("No always_comb found in Top");
+        let mut written = HashMap::default();
+        collect_written_accesses(&module, &comb_decl.statements, &mut written).unwrap();
+
+        for name in [
+            "ternary_then",
+            "ternary_else",
+            "short_circuit_rhs",
+            "z_ternary_then",
+            "z_ternary_else",
+            "z_short_circuit_rhs",
+        ] {
+            let id = var_id_of(&module, &[name]);
+            assert_eq!(written[&id], vec![BitAccess::new(0, 0)], "{name}");
+        }
     }
 
     #[test]

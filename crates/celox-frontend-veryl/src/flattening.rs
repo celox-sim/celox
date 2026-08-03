@@ -233,6 +233,7 @@ fn atomize_logic_paths(
                     local_inputs: path.local_inputs.clone(),
                     order_before: path.order_before.clone(),
                     comb_capture_enable_sites: path.comb_capture_enable_sites.clone(),
+                    comb_capture_enable_always: path.comb_capture_enable_always,
                     pre_lower_nodes: path.pre_lower_nodes.clone(),
                     expr: merged_expr,
                 });
@@ -404,6 +405,10 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
                     .then(|| dependency_window(window, *inner, arena))
                     .flatten();
                 collect_inputs_with_window(*inner, inner_window, arena, set, visited);
+            }
+            SLTNode::Capture { expr, .. } => {
+                let inner_window = dependency_window(window, *expr, arena);
+                collect_inputs_with_window(*expr, inner_window, arena, set, visited);
             }
             SLTNode::Mux {
                 cond,
@@ -785,6 +790,66 @@ mod tests {
     }
 
     #[test]
+    fn distinct_comb_collectors_do_not_intern_event_captures_together() {
+        let (sim_modules, _, _) = setup(
+            r#"
+module Top (
+    x: input logic<8>,
+    a: output logic<8>,
+    b: output logic<8>,
+) {
+    function show (value: input logic<8>) -> logic<8> {
+        $display("value=%0d", value);
+        return value;
+    }
+    always_comb {
+        a = show(x);
+    }
+    always_comb {
+        b = show(x);
+    }
+}
+"#,
+        );
+        let module = sim_modules.values().next().expect("missing parsed module");
+        assert_eq!(module.comb_observers.len(), 2);
+        let first = module.comb_observers[0].args[0];
+        let second = module.comb_observers[1].args[0];
+        assert_ne!(first, second);
+        assert!(matches!(module.arena.get(first), SLTNode::Capture { .. }));
+        assert!(matches!(module.arena.get(second), SLTNode::Capture { .. }));
+    }
+
+    #[test]
+    fn generated_comb_collectors_do_not_intern_event_captures_together() {
+        let (sim_modules, _, _) = setup(
+            r#"
+module Top (
+    x: input logic<2>,
+    out: output logic<2>,
+) {
+    function show (value: input logic) -> logic {
+        $display("value=%0d", value);
+        return value;
+    }
+    for j in 0..2 :g_show {
+        always_comb {
+            out[j] = show(x[j]);
+        }
+    }
+}
+"#,
+        );
+        let module = sim_modules.values().next().expect("missing parsed module");
+        assert_eq!(module.comb_observers.len(), 2);
+        let first = module.comb_observers[0].args[0];
+        let second = module.comb_observers[1].args[0];
+        assert_ne!(first, second);
+        assert!(matches!(module.arena.get(first), SLTNode::Capture { .. }));
+        assert!(matches!(module.arena.get(second), SLTNode::Capture { .. }));
+    }
+
+    #[test]
     fn atomization_does_not_remerge_unpacked_elements() {
         let address = AbsoluteAddr {
             instance_id: InstanceId(0),
@@ -813,6 +878,7 @@ mod tests {
             local_inputs: Vec::new(),
             order_before: crate::HashSet::default(),
             comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
             pre_lower_nodes: Vec::new(),
             expr: expression,
         };
@@ -879,6 +945,7 @@ mod tests {
             local_inputs: Vec::new(),
             order_before: crate::HashSet::default(),
             comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
             pre_lower_nodes: Vec::new(),
             expr: expression,
         };
@@ -985,6 +1052,7 @@ mod tests {
             local_inputs: Vec::new(),
             order_before: crate::HashSet::default(),
             comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
             pre_lower_nodes: Vec::new(),
             expr: expression,
         };
@@ -1006,6 +1074,66 @@ mod tests {
             ]
             .into_iter()
             .collect()
+        );
+    }
+
+    #[test]
+    fn instance_input_output_preserves_dynamic_self_address_sources() {
+        let code = r#"
+            module child(i: input logic) {}
+
+            module top(seed: input logic<2>, mem_o: output logic<2>) {
+                function set_bit (dst: output logic) -> logic {
+                    dst = 1'b1;
+                    return 1'b0;
+                }
+                var mem: logic<2>;
+                always_comb {
+                    mem = seed;
+                }
+                inst c: child(i: set_bit(mem[mem[0]]));
+                assign mem_o = mem;
+            }
+        "#;
+
+        let (sim_modules, name_to_id, ir) = setup(code);
+        let top_module_ir = ir
+            .components
+            .iter()
+            .find_map(|component| match component {
+                Component::Module(module) if module.name.to_string() == "top" => Some(module),
+                _ => None,
+            })
+            .unwrap();
+        let top_module_sim = &sim_modules[&name_to_id[&top_module_ir.name]];
+        let glue = top_module_sim
+            .glue_blocks
+            .values()
+            .flatten()
+            .next()
+            .unwrap();
+        let parent_effect = glue
+            .output_ports
+            .iter()
+            .map(|(_, path)| path)
+            .find(|path| {
+                matches!(
+                    path.target.var(),
+                    Some(VarAtomBase {
+                        id: GlueAddr::Parent(_),
+                        ..
+                    })
+                )
+            })
+            .unwrap();
+
+        assert!(
+            parent_effect.address_sources.iter().any(|address| {
+                parent_effect.previous_sources.iter().any(|previous| {
+                    previous.id == address.id && previous.access.overlaps(&address.access)
+                })
+            }),
+            "the self-referential dynamic address must remain an address source"
         );
     }
 

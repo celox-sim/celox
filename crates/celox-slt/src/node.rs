@@ -414,6 +414,11 @@ impl<A: Hash + Eq + Clone> SLTNode<A> {
                 arena.get(*inner).fmt_expression(f, arena)?;
                 write!(f, ")")
             }
+            SLTNode::Capture { expr, key } => {
+                write!(f, "capture[{key}](n{}:", expr.0)?;
+                arena.get(*expr).fmt_expression(f, arena)?;
+                write!(f, ")")
+            }
             SLTNode::Mux {
                 cond,
                 then_expr,
@@ -705,6 +710,14 @@ pub enum SLTNode<A: Hash + Eq + Clone> {
         expr: NodeId,
         access: BitAccess,
     },
+    /// A value materialized at a specific semantic evaluation position.
+    ///
+    /// `key` keeps captures from distinct runtime-event operands separate even
+    /// when their expressions are structurally identical.
+    Capture {
+        expr: NodeId,
+        key: u64,
+    },
 }
 
 /// Serde-friendly mirror of [`SLTNode`] that replaces [`BigUint`] with `Vec<u8>` (little-endian).
@@ -763,6 +776,10 @@ enum SLTNodeSerde<A: Hash + Eq + Clone> {
         expr: NodeId,
         access: BitAccess,
     },
+    Capture {
+        expr: NodeId,
+        key: u64,
+    },
 }
 
 impl<A: Hash + Eq + Clone> From<SLTNode<A>> for SLTNodeSerde<A> {
@@ -787,6 +804,7 @@ impl<A: Hash + Eq + Clone> From<SLTNode<A>> for SLTNodeSerde<A> {
             },
             SLTNode::Binary(a, op, b) => SLTNodeSerde::Binary(a, op, b),
             SLTNode::Unary(op, a) => SLTNodeSerde::Unary(op, a),
+            SLTNode::Capture { expr, key } => SLTNodeSerde::Capture { expr, key },
             SLTNode::Mux {
                 cond,
                 then_expr,
@@ -879,6 +897,7 @@ impl<A: Hash + Eq + Clone> From<SLTNodeSerde<A>> for SLTNode<A> {
             ),
             SLTNodeSerde::Binary(a, op, b) => SLTNode::Binary(a, op, b),
             SLTNodeSerde::Unary(op, a) => SLTNode::Unary(op, a),
+            SLTNodeSerde::Capture { expr, key } => SLTNode::Capture { expr, key },
             SLTNodeSerde::Mux {
                 cond,
                 then_expr,
@@ -982,6 +1001,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                     SLTNode::Constant(..) => {}
                     SLTNode::Binary(lhs, _, rhs) => children.extend([*lhs, *rhs]),
                     SLTNode::Unary(_, inner) => children.push(*inner),
+                    SLTNode::Capture { expr, .. } => children.push(*expr),
                     SLTNode::Mux {
                         cond,
                         then_expr,
@@ -1078,6 +1098,10 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
                 SLTNode::Binary(lhs, op, rhs) => SLTNode::Binary(mapped(*lhs), *op, mapped(*rhs)),
 
                 SLTNode::Unary(op, inner) => SLTNode::Unary(*op, mapped(*inner)),
+                SLTNode::Capture { expr, key } => SLTNode::Capture {
+                    expr: mapped(*expr),
+                    key: *key,
+                },
 
                 SLTNode::Mux {
                     cond,
@@ -1323,6 +1347,10 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> SLTNode<A> {
             SLTNode::Unary(op, inner) => {
                 writeln!(f, "{}Unary({:?})", indent, op)?;
                 arena.get(*inner).fmt_recursive(f, depth + 1, arena)
+            }
+            SLTNode::Capture { expr, key } => {
+                writeln!(f, "{}Capture({key})", indent)?;
+                arena.get(*expr).fmt_recursive(f, depth + 1, arena)
             }
             SLTNode::Mux {
                 cond,
