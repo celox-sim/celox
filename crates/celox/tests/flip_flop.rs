@@ -1218,6 +1218,54 @@ fn test_ff_nested_runtime_event_output_updates_outer_function_state(sim) {
     );
 }
 
+fn test_ff_nested_output_to_module_variable_survives_runtime_function(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            global_value: output logic<8>,
+            q: output logic<8>
+        ) {
+            function update (
+                value: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = value + 8'd1;
+                return 0;
+            }
+
+            function outer (value: input logic<8>) -> logic<8> {
+                var temp: logic<8>;
+                temp = update(value, global_value);
+                $display("outer");
+                return temp;
+            }
+
+            always_ff (clk) {
+                q = outer(d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let global_value = sim.signal("global_value");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 7u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 8u8.into());
+    assert_eq!(sim.get(q), 0u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "outer".to_string(),
+        }],
+    );
+}
+
 fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
     @omit_veryl;
     @ignore_on(wasm);
@@ -5966,6 +6014,36 @@ fn test_ff_function_call_array_literal_view_preserves_source_order(sim) {
     sim.modify(|io| io.set(index, 0u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(side), 0x22u32.into());
+}
+
+fn test_ff_function_call_snapshots_pure_array_items_before_later_effect(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (clk: input clock, q: output logic<8>, changing: output logic<8>) {
+            function update (
+                value: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = value + 1;
+                return 0;
+            }
+            function pick (x: input logic<8>[2]) -> logic<8> {
+                return x[0];
+            }
+            always_ff (clk) {
+                q = pick('{changing, update(changing, changing)});
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let q = sim.signal("q");
+    let changing = sim.signal("changing");
+
+    sim.tick(clk).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 1u32.into());
+    assert_eq!(sim.get(changing), 2u32.into());
 }
 
 fn test_ff_function_call_converts_array_literal_view_for_wider_nested_formal(sim) {

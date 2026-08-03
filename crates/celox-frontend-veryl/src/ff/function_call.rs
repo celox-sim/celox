@@ -16,6 +16,7 @@ use veryl_analyzer::ir::{
     Expression, Factor, ForBound, ForRange, Op, Shape, Statement, SystemFunctionCall,
     SystemFunctionKind, Type, TypeKind, ValueVariant, VarId, VarIndex, VarSelect,
 };
+use veryl_analyzer::symbol::Affiliation;
 use veryl_parser::token_range::TokenRange;
 
 #[derive(Clone)]
@@ -1239,6 +1240,60 @@ impl<'a> FfParser<'a> {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn emit_nonlocal_function_state_writes<A>(
+        &mut self,
+        state: &HashMap<VarId, Expression>,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        // Function-local state is consumed while lowering the enclosing call.
+        // Any other entry was introduced by a nested output actual (or a
+        // direct write in the function body) and needs an actual store in the
+        // caller's FF region.
+        for (&var_id, expr) in state {
+            let variable = &self.module.variables[&var_id];
+            if variable.affiliation == Affiliation::Function {
+                continue;
+            }
+            let dst = AssignDestination {
+                id: var_id,
+                path: variable.path.clone(),
+                index: VarIndex::default(),
+                select: VarSelect::default(),
+                comptime: Comptime {
+                    r#type: variable.r#type.clone(),
+                    ..Default::default()
+                },
+                token: TokenRange::default(),
+            };
+            self.parse_expression(expr, targets, domain, convert, sources, ir_builder, None)?;
+            let value = self
+                .stack
+                .pop_back()
+                .expect("Nonlocal function state evaluation failed");
+            let value = self.coerce_register_to_variable_type(
+                value,
+                var_id,
+                expression_signed(expr),
+                ir_builder,
+            )?;
+            self.emit_multi_dst_assign(
+                value,
+                std::slice::from_ref(&dst),
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+            )?;
+        }
+        Ok(())
+    }
+
     fn materialize_function_runtime_expression<A>(
         &mut self,
         expr: &Expression,
@@ -2406,9 +2461,10 @@ impl<'a> FfParser<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn materialize_unobserved_array_actual_effects<A>(
+    fn materialize_array_actual_items<A>(
         &mut self,
         expr: &Expression,
+        force_materialization: bool,
         targets: &mut Vec<VarAtomBase<A>>,
         domain: &Domain,
         convert: &impl Fn(VarId, u32) -> A,
@@ -2416,23 +2472,38 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
         // Array views deliberately defer pure elements until the callee reads
-        // them.  An unused formal therefore never creates a view, but its
-        // effectful actual elements must still run at the call site.  Preserve
-        // the resulting register under the element's token range so a later
-        // view access reuses it instead of replaying the effect.
+        // them. An unused formal therefore never creates a view, but its
+        // effectful actual elements must still run at the call site. A pure
+        // item before an effectful one must also be snapshotted before that
+        // effect changes its dependencies. Preserve every materialized value
+        // under its token range so a later view access reuses it instead of
+        // replaying the effect or observing a newer value.
         if let Expression::ArrayLiteral(items, _) = expr {
-            for item in items {
+            let last_effectful_item = items.iter().rposition(|item| {
                 let item_expr = match item {
                     ArrayLiteralItem::Value(expr, _) | ArrayLiteralItem::Defaul(expr) => expr,
                 };
-                self.materialize_unobserved_array_actual_effects(
-                    item_expr, targets, domain, convert, sources, ir_builder,
+                self.expression_needs_eager_evaluation(item_expr)
+            });
+            for (item_index, item) in items.iter().enumerate() {
+                let item_expr = match item {
+                    ArrayLiteralItem::Value(expr, _) | ArrayLiteralItem::Defaul(expr) => expr,
+                };
+                self.materialize_array_actual_items(
+                    item_expr,
+                    force_materialization
+                        || last_effectful_item.is_some_and(|last| item_index <= last),
+                    targets,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
                 )?;
             }
             return Ok(());
         }
 
-        if !self.expression_needs_eager_evaluation(expr) {
+        if !force_materialization && !self.expression_needs_eager_evaluation(expr) {
             return Ok(());
         }
 
@@ -2440,7 +2511,7 @@ impl<'a> FfParser<'a> {
         let value = self
             .stack
             .pop_back()
-            .expect("Effectful array literal element evaluation failed");
+            .expect("Array literal item materialization failed");
         self.function_expression_value_stack
             .last_mut()
             .expect("Function expression value scope is active")
@@ -2510,8 +2581,8 @@ impl<'a> FfParser<'a> {
                         Some(&call.comptime.token),
                     ));
                 }
-                self.materialize_unobserved_array_actual_effects(
-                    actual, targets, domain, convert, sources, ir_builder,
+                self.materialize_array_actual_items(
+                    actual, false, targets, domain, convert, sources, ir_builder,
                 )?;
                 // Array arguments are represented by call-scoped views. The
                 // view snapshots each observed element in source order while
@@ -3186,6 +3257,12 @@ impl<'a> FfParser<'a> {
                 None
             };
 
+            if let Some(state) = runtime_state.as_ref() {
+                self.emit_nonlocal_function_state_writes(
+                    state, targets, domain, convert, sources, ir_builder,
+                )?;
+            }
+
             for arg_path in &ordered_arg_paths {
                 let Some(dsts) = call.outputs.get(arg_path) else {
                     continue;
@@ -3365,6 +3442,12 @@ impl<'a> FfParser<'a> {
             } else {
                 None
             };
+
+            if let Some(state) = runtime_state.as_ref() {
+                self.emit_nonlocal_function_state_writes(
+                    state, targets, domain, convert, sources, ir_builder,
+                )?;
+            }
 
             for arg_path in &ordered_arg_paths {
                 let Some(dsts) = call.outputs.get(arg_path) else {
