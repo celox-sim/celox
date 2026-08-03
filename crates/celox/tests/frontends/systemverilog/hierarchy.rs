@@ -259,23 +259,6 @@ sv_backends! {
     }
     }
 
-    fn simulates_veryl_generated_linear_sec_sv(sim) {
-        @setup {
-    let sv = include_str!("../../../../../benches/verilator/LinearSec.sv");
-        }
-        @build Simulator::from_sv_sources(vec![(sv, Path::new("LinearSec.sv"))], "Top");
-
-    let i_word = sim.signal("i_word");
-    let o_word = sim.signal("o_word");
-    let o_corrected = sim.signal("o_corrected");
-
-    for value in [0u64, 1, 0x678, 0x1234_5678, (1u64 << 57) - 1] {
-        sim.modify(|io| io.set(i_word, value)).unwrap();
-        assert_eq!(sim.get(o_word), value.into());
-        assert_eq!(sim.get(o_corrected), 0u8.into());
-    }
-    }
-
     fn simulates_veryl_generated_edge_detector_sv(sim) {
         @setup {
     let sv = include_str!("../../../../../benches/verilator/EdgeDetector.sv");
@@ -417,6 +400,30 @@ fn simulates_veryl_generated_gray_codec_sv_smoke() {
 }
 
 #[test]
+fn rejects_veryl_generated_sv_that_uses_unlowered_constructs() {
+    for (name, sv, expected) in [
+        (
+            "Fifo.sv",
+            include_str!("../../../../../benches/verilator/Fifo.sv"),
+            "control flow inside always_comb",
+        ),
+        (
+            "LinearSec.sv",
+            include_str!("../../../../../benches/verilator/LinearSec.sv"),
+            "combinational assignment target",
+        ),
+    ] {
+        let error = Simulator::from_sv_sources(vec![(sv, Path::new(name))], "Top")
+            .build_native()
+            .expect_err("unlowered SystemVerilog must be rejected");
+        assert!(
+            format!("{error:?}").contains(expected),
+            "unexpected error for {name}: {error:?}"
+        );
+    }
+}
+
+#[test]
 fn builds_veryl_generated_verilator_sv_smoke() {
     for (name, sv) in [
         (
@@ -426,10 +433,6 @@ fn builds_veryl_generated_verilator_sv_smoke() {
         (
             "EdgeDetector.sv",
             include_str!("../../../../../benches/verilator/EdgeDetector.sv"),
-        ),
-        (
-            "Fifo.sv",
-            include_str!("../../../../../benches/verilator/Fifo.sv"),
         ),
         (
             "GrayCodec.sv",
@@ -442,10 +445,6 @@ fn builds_veryl_generated_verilator_sv_smoke() {
         (
             "Lfsr.sv",
             include_str!("../../../../../benches/verilator/Lfsr.sv"),
-        ),
-        (
-            "LinearSec.sv",
-            include_str!("../../../../../benches/verilator/LinearSec.sv"),
         ),
         (
             "Onehot.sv",

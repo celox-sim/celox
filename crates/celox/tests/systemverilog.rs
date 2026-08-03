@@ -53,6 +53,8 @@ mod literals;
 mod mixed;
 #[path = "frontends/systemverilog/operators.rs"]
 mod operators;
+#[path = "frontends/systemverilog/review_regressions.rs"]
+mod review_regressions;
 #[path = "frontends/systemverilog/types.rs"]
 mod types;
 

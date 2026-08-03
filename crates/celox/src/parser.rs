@@ -434,6 +434,7 @@ pub fn parse(
 pub fn parse_sv(
     sources: &[(&str, &std::path::Path)],
     top: &str,
+    parameter_overrides: &[(String, u64)],
     config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -456,6 +457,7 @@ pub fn parse_sv(
     let scheduled = crate::frontend_sv::schedule_sources(
         sources,
         top,
+        parameter_overrides,
         config,
         ignored_loops,
         true_loops,

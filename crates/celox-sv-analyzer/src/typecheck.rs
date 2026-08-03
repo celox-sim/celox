@@ -46,6 +46,11 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
         }
         ConstExpr::Function { name, args } => eval_const_function(name, args, constants),
         ConstExpr::Unary { op, expr } => {
+            if let ConstExpr::Literal(literal) = &**expr
+                && let Some(result) = eval_literal_unary(*op, literal)
+            {
+                return Some(result);
+            }
             let value = eval_const_expr(expr, constants)?;
             match op {
                 UnaryOp::Plus => Some(value),
@@ -104,6 +109,37 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
                 eval_const_expr(else_expr, constants)
             }
         }
+    }
+}
+
+fn eval_literal_unary(op: UnaryOp, literal: &str) -> Option<i128> {
+    let literal = parse_integral_literal(literal)?;
+    if literal.mask != BigUint::default() {
+        return None;
+    }
+    let value = i128::try_from(&literal.value).ok()?;
+    match op {
+        UnaryOp::Plus => Some(value),
+        UnaryOp::Minus => value.checked_neg(),
+        UnaryOp::BitNot => {
+            let width_mask = (BigUint::from(1u8) << literal.width) - BigUint::from(1u8);
+            i128::try_from(width_mask ^ literal.value).ok()
+        }
+        UnaryOp::LogicNot => Some((literal.value == BigUint::default()) as i128),
+        UnaryOp::ToTwoState => Some(value),
+        UnaryOp::RedAnd => {
+            let width_mask = (BigUint::from(1u8) << literal.width) - BigUint::from(1u8);
+            Some((literal.value == width_mask) as i128)
+        }
+        UnaryOp::RedOr => Some((literal.value != BigUint::default()) as i128),
+        UnaryOp::RedXor => Some(
+            (literal
+                .value
+                .iter_u64_digits()
+                .map(u64::count_ones)
+                .sum::<u32>()
+                & 1) as i128,
+        ),
     }
 }
 

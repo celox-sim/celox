@@ -724,10 +724,6 @@ mod tests {
                 include_str!("../../../benches/verilator/GrayCounter.sv"),
             ),
             (
-                "Fifo.sv",
-                include_str!("../../../benches/verilator/Fifo.sv"),
-            ),
-            (
                 "GrayCodec.sv",
                 include_str!("../../../benches/verilator/GrayCodec.sv"),
             ),
@@ -753,6 +749,20 @@ mod tests {
                 "Veryl-emitted {name} should contain modules"
             );
         }
+    }
+
+    #[test]
+    fn rejects_veryl_emitted_fifo_control_flow_until_it_is_lowered() {
+        let error = analyze_source(
+            include_str!("../../../benches/verilator/Fifo.sv"),
+            Path::new("Fifo.sv"),
+        )
+        .expect_err("always_comb control flow must not be silently ignored");
+
+        assert!(matches!(
+            error,
+            AnalyzerError::Unsupported(detail) if detail == "control flow inside always_comb"
+        ));
     }
 
     #[test]

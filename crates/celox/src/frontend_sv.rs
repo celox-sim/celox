@@ -19,7 +19,7 @@ use celox_frontend_veryl::{
 };
 use celox_sir::{
     BlockId, ExecutionUnit, RegisterType, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
-    SIRValue,
+    SIRValue, merge_sir_eus,
 };
 use celox_slt::{
     CombObserver, GlueBlockBase, LogicPath, LogicPathTarget, SLTNode, SLTNodeArena, SymbolicStore,
@@ -51,6 +51,7 @@ struct SvVariable {
     width: usize,
     signed: bool,
     is_4state: bool,
+    packed_ranges: Vec<(i128, i128)>,
     domain_kind: DomainKind,
     kind: VarKind,
     type_kind: PortTypeKind,
@@ -150,7 +151,12 @@ pub(crate) fn analyze_sources(
         let ir = sv::analyze_source(code, path)?;
         for module in ir.modules() {
             let name = resource_table::insert_str(module.name());
-            modules.insert(name, lower_module(module, code, path));
+            if modules.contains_key(&name) {
+                return Err(sv::AnalyzerError::DuplicateModule {
+                    name: module.name().to_string(),
+                });
+            }
+            modules.insert(name, lower_module(module, code, path)?);
         }
     }
     Ok(modules)
@@ -248,6 +254,7 @@ fn metadata_module(module: &SimModule) -> Module {
 pub fn schedule_sources(
     sources: &[(&str, &Path)],
     top: &str,
+    parameter_overrides: &[(String, u64)],
     config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -264,7 +271,16 @@ pub fn schedule_sources(
 ) -> Result<ScheduledRtlOutput, FrontendError> {
     let analyzed = analyze_sources(sources)?;
     let top = resource_table::insert_str(top);
-    let root_key = LoweredSvModuleKey::base(top);
+    let root_key = LoweredSvModuleKey {
+        name: top,
+        parameter_overrides: parameter_overrides
+            .iter()
+            .map(|(name, value)| LoweredSvParameterOverride {
+                name: name.clone(),
+                value: Some(sv::ir::ConstExpr::Literal(value.to_string())),
+            })
+            .collect(),
+    };
     if !analyzed.contains_key(&top) {
         return Err(sv_top_not_found(top).into());
     }
@@ -362,15 +378,14 @@ pub(crate) fn specialize_module(
         .iter()
         .find(|candidate| candidate.name() == module.source.name())
         .unwrap_or(&module.source);
-    Ok(lower_module_with_overrides(
-        specialized,
-        &[],
-        &module.source_code,
-        &module.source_path,
-    ))
+    lower_module_with_overrides(specialized, &[], &module.source_code, &module.source_path)
 }
 
-fn lower_module(module: &sv::ir::Module, source_code: &str, source_path: &Path) -> LoweredSvModule {
+fn lower_module(
+    module: &sv::ir::Module,
+    source_code: &str,
+    source_path: &Path,
+) -> Result<LoweredSvModule, sv::AnalyzerError> {
     lower_module_with_overrides(module, &[], source_code, source_path)
 }
 
@@ -379,7 +394,7 @@ fn lower_module_with_overrides(
     parameter_overrides: &[LoweredSvParameterOverride],
     source_code: &str,
     source_path: &Path,
-) -> LoweredSvModule {
+) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let token = TokenRange::default();
     let name = resource_table::insert_str(module.name());
     let mut next_id = VarId::default();
@@ -399,6 +414,7 @@ fn lower_module_with_overrides(
             width: type_info.width,
             signed: type_info.signed,
             is_4state: type_info.is_4state,
+            packed_ranges: type_info.packed_ranges,
             domain_kind: DomainKind::Other,
             kind,
             type_kind: type_info.type_kind,
@@ -419,6 +435,7 @@ fn lower_module_with_overrides(
             width: type_info.width,
             signed: type_info.signed,
             is_4state: type_info.is_4state,
+            packed_ranges: type_info.packed_ranges,
             domain_kind: DomainKind::Other,
             kind: VarKind::Variable,
             type_kind: type_info.type_kind,
@@ -444,7 +461,7 @@ fn lower_module_with_overrides(
             &name_to_id,
             &constants,
             &mut arena,
-        ));
+        )?);
     }
     let (eval_only_ff_blocks, apply_ff_blocks, eval_apply_ff_blocks, reset_clock_map) =
         lower_ff_processes(module, &variables, &name_to_id, &constants);
@@ -455,7 +472,7 @@ fn lower_module_with_overrides(
         .map(|(&id, variable)| (id, variable.to_shared_variable()))
         .collect();
 
-    LoweredSvModule {
+    Ok(LoweredSvModule {
         source: module.clone(),
         source_code: source_code.to_string(),
         source_path: source_path.to_path_buf(),
@@ -504,7 +521,7 @@ fn lower_module_with_overrides(
                     .collect(),
             })
             .collect(),
-    }
+    })
 }
 
 fn mark_ff_event_domains(
@@ -513,12 +530,7 @@ fn mark_ff_event_domains(
     name_to_id: &HashMap<String, VarId>,
 ) {
     for process in module.ff_processes() {
-        let Some(clock) = process
-            .events()
-            .iter()
-            .find(|event| event.edge() == sv::ir::FfEdge::Pos)
-            .or_else(|| process.events().first())
-        else {
+        let Some(clock) = process.events().first() else {
             continue;
         };
         if let Some(id) = name_to_id.get(clock.signal()).copied()
@@ -654,11 +666,19 @@ fn ensure_parent_output_signals(
             continue;
         }
         let formal = child_var.path.to_string();
-        let actual = connections
+        let Some(connection) = connections
             .iter()
             .find(|connection| connection.formal == formal)
-            .map(|connection| connection.actual.as_str())
-            .unwrap_or(formal.as_str());
+        else {
+            continue;
+        };
+        let Some(actual) = connection
+            .actual_expr
+            .as_ref()
+            .and_then(simple_output_lvalue_ident)
+        else {
+            continue;
+        };
         if parent_signal_names.contains_key(actual) {
             continue;
         }
@@ -673,6 +693,7 @@ fn ensure_parent_output_signals(
             width: child_var.width,
             signed: child_var.signed,
             is_4state: child_var.is_4state,
+            packed_ranges: child_var.packed_ranges.clone(),
             domain_kind: DomainKind::Other,
             kind: VarKind::Variable,
             type_kind: child_var.type_kind,
@@ -707,18 +728,18 @@ fn build_instance_glue(
         let connection = connections
             .iter()
             .find(|connection| connection.formal == formal);
-        let actual = connection
-            .map(|connection| connection.actual.as_str())
-            .unwrap_or(formal.as_str());
+        let Some(connection) = connection else {
+            continue;
+        };
+        let actual = connection.actual.as_str();
         let width = child_var.width;
         match child_var.kind {
             VarKind::Input => {
-                let actual_expr = connection
-                    .and_then(|connection| connection.actual_expr.as_ref())
-                    .cloned()
-                    .unwrap_or_else(|| sv::ir::Expr::Ident(actual.to_string()));
+                let Some(actual_expr) = connection.actual_expr.as_ref() else {
+                    continue;
+                };
                 let (expr, sources, source_ids) = lower_glue_parent_expr(
-                    &actual_expr,
+                    actual_expr,
                     parent_variables,
                     parent_signal_names,
                     &std::collections::HashMap::new(),
@@ -733,15 +754,12 @@ fn build_instance_glue(
                         None,
                     )
                 })?;
-                let expr_width = celox_slt::get_width(expr, &arena);
-                let expr = if width == expr_width {
-                    expr
-                } else {
-                    arena.alloc(SLTNode::Slice {
-                        expr,
-                        access: BitAccess::new(0, width - 1),
-                    })?
-                };
+                let expr = coerce_node_width(
+                    &mut arena,
+                    expr,
+                    Some(width),
+                    sv_expr_is_signed(actual_expr, parent_variables, parent_signal_names),
+                )?;
                 input_ports.push((
                     source_ids,
                     LogicPath {
@@ -763,6 +781,18 @@ fn build_instance_glue(
                 ));
             }
             VarKind::Output => {
+                let Some(actual_expr) = connection.actual_expr.as_ref() else {
+                    continue;
+                };
+                let Some(actual) = simple_output_lvalue_ident(actual_expr) else {
+                    return Err(ParserError::unsupported(
+                        64,
+                        LoweringPhase::SimulatorParser,
+                        "systemverilog output port lvalue connection",
+                        format!("{formal} -> {actual}: {actual_expr:?}"),
+                        None,
+                    ));
+                };
                 let Some(parent_signal_id) = parent_signal_names.get(actual).copied() else {
                     continue;
                 };
@@ -773,14 +803,12 @@ fn build_instance_glue(
                     index: Vec::new(),
                     access: BitAccess::new(0, width - 1),
                 })?;
-                let expr = if width == parent_var.width {
-                    child_node
-                } else {
-                    arena.alloc(SLTNode::Slice {
-                        expr: child_node,
-                        access: BitAccess::new(0, parent_var.width - 1),
-                    })?
-                };
+                let expr = coerce_node_width(
+                    &mut arena,
+                    child_node,
+                    Some(parent_var.width),
+                    child_var.signed,
+                )?;
                 let mut sources = HashSet::default();
                 sources.insert(VarAtomBase::new(
                     GlueAddr::Child(*child_port_id),
@@ -818,6 +846,14 @@ fn build_instance_glue(
     }
 
     Ok((input_ports, output_ports, arena))
+}
+
+fn simple_output_lvalue_ident(expr: &sv::ir::Expr) -> Option<&str> {
+    match expr {
+        sv::ir::Expr::Ident(name) => Some(name),
+        sv::ir::Expr::Resize { expr, .. } => simple_output_lvalue_ident(expr),
+        _ => None,
+    }
 }
 
 fn lower_glue_parent_expr(
@@ -867,9 +903,9 @@ fn lower_glue_parent_expr(
                 lower_glue_parent_expr(expr, variables, name_to_id, constants, arena)?;
             let msb_value = sv::typecheck::eval_const_expr(msb, constants)?;
             let lsb_value = sv::typecheck::eval_const_expr(lsb, constants)?;
-            let msb = usize::try_from(msb_value.max(lsb_value)).ok()?;
-            let lsb = usize::try_from(msb_value.min(lsb_value)).ok()?;
-            let access = BitAccess::new(lsb, msb);
+            let (msb, lsb) =
+                packed_expr_select_offsets(expr, msb_value, lsb_value, variables, name_to_id)?;
+            let access = BitAccess::new(msb.min(lsb), msb.max(lsb));
             let node = arena
                 .alloc(SLTNode::Slice {
                     expr: inner,
@@ -1038,7 +1074,11 @@ fn lower_glue_parent_expr(
             }
             Some((
                 arena
-                    .alloc(SLTNode::Binary(left, binary_op_from_sv(*op), right))
+                    .alloc(SLTNode::Binary(
+                        left,
+                        binary_op_from_sv(*op, operands_signed),
+                        right,
+                    ))
                     .ok()?,
                 sources,
                 source_ids,
@@ -1067,6 +1107,7 @@ struct SvSignalType {
     width: usize,
     signed: bool,
     is_4state: bool,
+    packed_ranges: Vec<(i128, i128)>,
     type_kind: PortTypeKind,
 }
 
@@ -1080,6 +1121,16 @@ fn signal_type_from_sv(
         .max(1);
     let signed = typ.is_signed();
     let is_4state = !matches!(typ.kind(), sv::ir::TypeKind::Bit);
+    let packed_ranges = typ
+        .packed_ranges()
+        .iter()
+        .filter_map(|range| {
+            Some((
+                sv::typecheck::eval_const_expr(range.left(), constants)?,
+                sv::typecheck::eval_const_expr(range.right(), constants)?,
+            ))
+        })
+        .collect();
     let type_kind = match typ.kind() {
         sv::ir::TypeKind::Bit => PortTypeKind::Bit,
         sv::ir::TypeKind::Logic | sv::ir::TypeKind::Reg | sv::ir::TypeKind::Implicit => {
@@ -1090,6 +1141,7 @@ fn signal_type_from_sv(
         width,
         signed,
         is_4state,
+        packed_ranges,
         type_kind,
     }
 }
@@ -1100,13 +1152,11 @@ fn lower_comb_process(
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
     arena: &mut SLTNodeArena<VarId>,
-) -> Vec<LogicPath<VarId>> {
+) -> Result<Vec<LogicPath<VarId>>, sv::AnalyzerError> {
     process
         .assignments()
         .iter()
-        .filter_map(|assignment| {
-            lower_assignment(assignment, variables, name_to_id, constants, arena)
-        })
+        .map(|assignment| lower_assignment(assignment, variables, name_to_id, constants, arena))
         .collect()
 }
 
@@ -1116,14 +1166,53 @@ fn lower_assignment(
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
     arena: &mut SLTNodeArena<VarId>,
-) -> Option<LogicPath<VarId>> {
-    let target = lower_lvalue_target(assignment.lhs_value(), variables, name_to_id, constants)?;
-    let (expr, sources) = lower_expr(assignment.rhs(), variables, name_to_id, constants, arena)?;
+) -> Result<LogicPath<VarId>, sv::AnalyzerError> {
+    let target = lower_lvalue_target(assignment.lhs_value(), variables, name_to_id, constants)
+        .ok_or_else(|| {
+            sv::AnalyzerError::Unsupported(format!(
+                "combinational assignment target `{}`",
+                assignment.lhs()
+            ))
+        })?;
     let target_width = target
         .var()
-        .map(|target| target.access.msb - target.access.lsb + 1)?;
-    let expr = coerce_node_width(arena, expr, Some(target_width), false).ok()?;
-    Some(LogicPath {
+        .map(|target| target.access.msb - target.access.lsb + 1)
+        .ok_or_else(|| {
+            sv::AnalyzerError::Unsupported(format!(
+                "combinational assignment target `{}`",
+                assignment.lhs()
+            ))
+        })?;
+    let (expr, sources) = if let sv::ir::Expr::Literal(literal) = assignment.rhs()
+        && let Some(fill) = unbased_fill_literal(literal)
+    {
+        (
+            lower_unbased_fill_literal_slt(arena, fill, target_width).ok_or_else(|| {
+                sv::AnalyzerError::Unsupported(format!("combinational expression `{literal}`"))
+            })?,
+            HashSet::default(),
+        )
+    } else {
+        lower_expr(assignment.rhs(), variables, name_to_id, constants, arena).ok_or_else(|| {
+            sv::AnalyzerError::Unsupported(format!(
+                "combinational expression assigned to `{}`",
+                assignment.lhs()
+            ))
+        })?
+    };
+    let expr = coerce_node_width(
+        arena,
+        expr,
+        Some(target_width),
+        sv_expr_is_signed(assignment.rhs(), variables, name_to_id),
+    )
+    .map_err(|error| {
+        sv::AnalyzerError::Unsupported(format!(
+            "combinational assignment width coercion for `{}`: {error}",
+            assignment.lhs()
+        ))
+    })?;
+    Ok(LogicPath {
         target,
         expr,
         sources,
@@ -1150,9 +1239,10 @@ fn lower_lvalue_target(
         sv::ir::LValue::Select { msb, lsb, .. } => {
             let msb = sv::typecheck::eval_const_expr(msb, constants)?;
             let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
-            let msb = usize::try_from(msb).ok()?;
-            let lsb = usize::try_from(lsb).ok()?;
-            (lsb, msb)
+            let variable = variables.get(&target_id)?;
+            let msb = packed_index_offset(variable, msb)?;
+            let lsb = packed_index_offset(variable, lsb)?;
+            (lsb.min(msb), lsb.max(msb))
         }
     };
     (lsb <= msb && msb < target_width)
@@ -1200,9 +1290,19 @@ fn lower_expr(
             let (inner, mut sources) = lower_expr(expr, variables, name_to_id, constants, arena)?;
             let msb_value = sv::typecheck::eval_const_expr(msb, constants)?;
             let lsb_value = sv::typecheck::eval_const_expr(lsb, constants)?;
-            let msb = usize::try_from(msb_value.max(lsb_value)).ok()?;
-            let lsb = usize::try_from(msb_value.min(lsb_value)).ok()?;
-            let access = BitAccess::new(lsb, msb);
+            let (msb, lsb) = if let sv::ir::Expr::Ident(name) = &**expr {
+                let variable = name_to_id.get(name).and_then(|id| variables.get(id))?;
+                (
+                    packed_index_offset(variable, msb_value)?,
+                    packed_index_offset(variable, lsb_value)?,
+                )
+            } else {
+                (
+                    usize::try_from(msb_value).ok()?,
+                    usize::try_from(lsb_value).ok()?,
+                )
+            };
+            let access = BitAccess::new(msb.min(lsb), msb.max(lsb));
             let node = arena
                 .alloc(SLTNode::Slice {
                     expr: inner,
@@ -1340,7 +1440,11 @@ fn lower_expr(
             }
             Some((
                 arena
-                    .alloc(SLTNode::Binary(left, binary_op_from_sv(*op), right))
+                    .alloc(SLTNode::Binary(
+                        left,
+                        binary_op_from_sv(*op, operands_signed),
+                        right,
+                    ))
                     .ok()?,
                 sources,
             ))
@@ -1370,6 +1474,35 @@ fn lower_expr(
             ))
         }
         sv::ir::Expr::Call { .. } => None,
+    }
+}
+
+fn packed_index_offset(variable: &SvVariable, index: i128) -> Option<usize> {
+    let offset = match variable.packed_ranges.as_slice() {
+        [(left, right)] if left >= right => index.checked_sub(*right)?,
+        [(_, right)] => right.checked_sub(index)?,
+        _ => index,
+    };
+    usize::try_from(offset)
+        .ok()
+        .filter(|offset| *offset < variable.width)
+}
+
+fn packed_expr_select_offsets(
+    expr: &sv::ir::Expr,
+    msb: i128,
+    lsb: i128,
+    variables: &HashMap<VarId, SvVariable>,
+    name_to_id: &HashMap<String, VarId>,
+) -> Option<(usize, usize)> {
+    if let sv::ir::Expr::Ident(name) = expr {
+        let variable = name_to_id.get(name).and_then(|id| variables.get(id))?;
+        Some((
+            packed_index_offset(variable, msb)?,
+            packed_index_offset(variable, lsb)?,
+        ))
+    } else {
+        Some((usize::try_from(msb).ok()?, usize::try_from(lsb).ok()?))
     }
 }
 
@@ -1403,9 +1536,9 @@ fn lower_ff_processes(
         else {
             continue;
         };
-        eval_only_ff_blocks.insert(trigger_set.clone(), eval_only);
-        apply_ff_blocks.insert(trigger_set.clone(), apply);
-        eval_apply_ff_blocks.insert(trigger_set, eval_apply);
+        insert_or_merge_ff_unit(&mut eval_only_ff_blocks, trigger_set.clone(), eval_only);
+        insert_or_merge_ff_unit(&mut apply_ff_blocks, trigger_set.clone(), apply);
+        insert_or_merge_ff_unit(&mut eval_apply_ff_blocks, trigger_set, eval_apply);
     }
 
     (
@@ -1416,14 +1549,23 @@ fn lower_ff_processes(
     )
 }
 
+fn insert_or_merge_ff_unit(
+    blocks: &mut HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
+    trigger_set: TriggerSet<VarId>,
+    unit: ExecutionUnit<RegionedVarAddr>,
+) {
+    if let Some(existing) = blocks.remove(&trigger_set) {
+        blocks.insert(trigger_set, merge_sir_eus(&[existing, unit]).0);
+    } else {
+        blocks.insert(trigger_set, unit);
+    }
+}
+
 fn trigger_set_from_ff_events(
     events: &[sv::ir::FfEvent],
     name_to_id: &HashMap<String, VarId>,
 ) -> Option<TriggerSet<VarId>> {
-    let clock = events
-        .iter()
-        .find(|event| event.edge() == sv::ir::FfEdge::Pos)
-        .or_else(|| events.first())?;
+    let clock = events.first()?;
     let clock_id = *name_to_id.get(clock.signal())?;
     let resets = events
         .iter()
@@ -1630,8 +1772,9 @@ fn emit_ff_assignment_stores(
                 replace_sir_slice(builder, value, rhs, target.access.lsb, target_width, width)?;
             value = match assignment.condition() {
                 Some(condition) => {
-                    let condition =
-                        lower_expr_to_sir(builder, condition, variables, name_to_id, constants)?;
+                    let condition = lower_procedural_condition(
+                        builder, condition, variables, name_to_id, constants,
+                    )?;
                     let mux = builder.alloc_logic(width);
                     builder.emit(SIRInstruction::Mux(mux, condition, assigned, value));
                     mux
@@ -1652,6 +1795,29 @@ fn emit_ff_assignment_stores(
         ));
     }
     Some(())
+}
+
+fn lower_procedural_condition(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    condition: &sv::ir::Expr,
+    variables: &HashMap<VarId, SvVariable>,
+    name_to_id: &HashMap<String, VarId>,
+    constants: &std::collections::HashMap<String, i128>,
+) -> Option<celox_sir::RegisterId> {
+    let condition = lower_expr_to_sir(builder, condition, variables, name_to_id, constants)?;
+    let width = builder.register(&condition).width();
+    let two_state = builder.alloc_bit(width, false);
+    builder.emit(SIRInstruction::Unary(
+        two_state,
+        UnaryOp::ToTwoState,
+        condition,
+    ));
+    if width == 1 {
+        return Some(two_state);
+    }
+    let truth = builder.alloc_bit(1, false);
+    builder.emit(SIRInstruction::Unary(truth, UnaryOp::Or, two_state));
+    Some(truth)
 }
 
 fn replace_sir_slice(
@@ -1702,8 +1868,11 @@ fn lvalue_atom(
         sv::ir::LValue::Select { msb, lsb, .. } => {
             let msb = sv::typecheck::eval_const_expr(msb, constants)?;
             let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
-            let high = usize::try_from(msb.max(lsb)).ok()?;
-            let low = usize::try_from(msb.min(lsb)).ok()?;
+            let variable = variables.get(&id)?;
+            let msb = packed_index_offset(variable, msb)?;
+            let lsb = packed_index_offset(variable, lsb)?;
+            let high = msb.max(lsb);
+            let low = msb.min(lsb);
             (low <= high && high < width).then(|| VarAtomBase::new(id, low, high))
         }
     }
@@ -2013,8 +2182,9 @@ fn lower_expr_to_sir_with_context(
             )?;
             let msb = sv::typecheck::eval_const_expr(msb, constants)?;
             let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
-            let high = usize::try_from(msb.max(lsb)).ok()?;
-            let low = usize::try_from(msb.min(lsb)).ok()?;
+            let (msb, lsb) = packed_expr_select_offsets(expr, msb, lsb, variables, name_to_id)?;
+            let high = msb.max(lsb);
+            let low = msb.min(lsb);
             let width = high - low + 1;
             let reg = builder.alloc_logic(width);
             builder.emit(SIRInstruction::Slice(reg, inner, low, width));
@@ -2178,7 +2348,7 @@ fn lower_expr_to_sir_with_context(
             builder.emit(SIRInstruction::Binary(
                 reg,
                 left,
-                binary_op_from_sv(*op),
+                binary_op_from_sv(*op, operands_signed),
                 right,
             ));
             Some(reg)
@@ -2304,12 +2474,14 @@ fn unary_op_from_sv(op: sv::ir::UnaryOp) -> Option<UnaryOp> {
     }
 }
 
-fn binary_op_from_sv(op: sv::ir::BinaryOp) -> BinaryOp {
+fn binary_op_from_sv(op: sv::ir::BinaryOp, operands_signed: bool) -> BinaryOp {
     match op {
         sv::ir::BinaryOp::Add => BinaryOp::Add,
         sv::ir::BinaryOp::Sub => BinaryOp::Sub,
         sv::ir::BinaryOp::Mul => BinaryOp::Mul,
+        sv::ir::BinaryOp::Div if operands_signed => BinaryOp::DivS,
         sv::ir::BinaryOp::Div => BinaryOp::DivU,
+        sv::ir::BinaryOp::Mod if operands_signed => BinaryOp::RemS,
         sv::ir::BinaryOp::Mod => BinaryOp::RemU,
         sv::ir::BinaryOp::Shl => BinaryOp::Shl,
         sv::ir::BinaryOp::Shr => BinaryOp::Shr,
@@ -2324,9 +2496,13 @@ fn binary_op_from_sv(op: sv::ir::BinaryOp) -> BinaryOp {
         sv::ir::BinaryOp::NeCase => BinaryOp::NeCase,
         sv::ir::BinaryOp::EqWildcard => BinaryOp::EqWildcard,
         sv::ir::BinaryOp::NeWildcard => BinaryOp::NeWildcard,
+        sv::ir::BinaryOp::Lt if operands_signed => BinaryOp::LtS,
         sv::ir::BinaryOp::Lt => BinaryOp::LtU,
+        sv::ir::BinaryOp::Le if operands_signed => BinaryOp::LeS,
         sv::ir::BinaryOp::Le => BinaryOp::LeU,
+        sv::ir::BinaryOp::Gt if operands_signed => BinaryOp::GtS,
         sv::ir::BinaryOp::Gt => BinaryOp::GtU,
+        sv::ir::BinaryOp::Ge if operands_signed => BinaryOp::GeS,
         sv::ir::BinaryOp::Ge => BinaryOp::GeU,
     }
 }

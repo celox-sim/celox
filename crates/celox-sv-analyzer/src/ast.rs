@@ -87,6 +87,7 @@ impl Module {
                 AnalyzerError::Unsupported("invalid module identifier span".to_string())
             })?
             .to_string();
+        reject_silently_ignored_constructs(node.clone())?;
         let mut parameters = parameters_from_module_node(node.clone(), syntax_tree)?;
         if name == override_module_name {
             apply_parameter_overrides(&mut parameters, parameter_overrides);
@@ -167,6 +168,53 @@ impl Module {
     pub fn ff_processes(&self) -> &[FfProcess] {
         &self.ff_processes
     }
+}
+
+fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerError> {
+    for child in node {
+        match child {
+            RefNode::AlwaysConstruct(always) => {
+                let body = RefNode::Statement(&always.nodes.1);
+                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_))
+                    && body.clone().into_iter().any(|node| {
+                        matches!(
+                            node,
+                            RefNode::ConditionalStatement(_) | RefNode::CaseStatement(_)
+                        )
+                    })
+                {
+                    return Err(AnalyzerError::Unsupported(
+                        "control flow inside always_comb".to_string(),
+                    ));
+                }
+                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
+                    && body
+                        .into_iter()
+                        .any(|node| matches!(node, RefNode::BlockingAssignment(_)))
+                {
+                    return Err(AnalyzerError::Unsupported(
+                        "blocking assignment inside always_ff".to_string(),
+                    ));
+                }
+            }
+            RefNode::NetDeclAssignment(assignment) if assignment.nodes.2.is_some() => {
+                return Err(AnalyzerError::Unsupported(
+                    "net declaration assignment".to_string(),
+                ));
+            }
+            RefNode::LoopGenerateConstruct(generate)
+                if RefNode::LoopGenerateConstruct(generate)
+                    .into_iter()
+                    .any(|node| matches!(node, RefNode::ModuleInstantiation(_))) =>
+            {
+                return Err(AnalyzerError::Unsupported(
+                    "module instantiation inside loop-generate".to_string(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn apply_parameter_overrides(parameters: &mut [Parameter], overrides: &HashMap<String, i128>) {
@@ -730,53 +778,66 @@ fn ports_from_module_node(
 ) -> Result<Vec<Port>, AnalyzerError> {
     let mut ports = Vec::new();
     let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
+    let mut inherited_direction = PortDirection::Unspecified;
+    let mut inherited_type = Type::implicit();
     for child in node {
         match child {
             RefNode::AnsiPortDeclarationNet(port) => {
                 let header = port.nodes.0.as_ref();
                 let direction = header
                     .and_then(|header| direction_from_ref_node(header.into()))
-                    .unwrap_or(PortDirection::Unspecified);
-                let r#type = header
-                    .and_then(|header| {
+                    .unwrap_or(inherited_direction);
+                let r#type = header.map_or_else(
+                    || inherited_type.clone(),
+                    |header| {
                         type_from_net_port_header(header, syntax_tree, &type_aliases)
-                    })
-                    .unwrap_or_else(Type::implicit);
+                            .unwrap_or_else(Type::implicit)
+                    },
+                );
                 let r#type = type_with_fallback_ranges(
                     r#type,
                     RefNode::AnsiPortDeclarationNet(port),
                     syntax_tree,
                 );
                 let name = port_name(RefNode::PortIdentifier(&port.nodes.1), syntax_tree)?;
+                inherited_direction = direction;
+                inherited_type = r#type.clone();
                 ports.push(Port::new(name, direction, r#type));
             }
             RefNode::AnsiPortDeclarationVariable(port) => {
                 let header = port.nodes.0.as_ref();
                 let direction = header
                     .and_then(|header| direction_from_ref_node(header.into()))
-                    .unwrap_or(PortDirection::Unspecified);
-                let r#type = header
-                    .and_then(|header| {
+                    .unwrap_or(inherited_direction);
+                let r#type = header.map_or_else(
+                    || inherited_type.clone(),
+                    |header| {
                         type_from_variable_port_header(header, syntax_tree, &type_aliases)
-                    })
-                    .unwrap_or_else(Type::implicit);
+                            .unwrap_or_else(Type::implicit)
+                    },
+                );
                 let r#type = type_with_fallback_ranges(
                     r#type,
                     RefNode::AnsiPortDeclarationVariable(port),
                     syntax_tree,
                 );
                 let name = port_name(RefNode::PortIdentifier(&port.nodes.1), syntax_tree)?;
+                inherited_direction = direction;
+                inherited_type = r#type.clone();
                 ports.push(Port::new(name, direction, r#type));
             }
             RefNode::AnsiPortDeclarationParen(port) => {
-                let direction = port
-                    .nodes
-                    .0
-                    .as_ref()
-                    .map(direction_from_port_direction)
-                    .unwrap_or(PortDirection::Unspecified);
+                let explicit_direction = port.nodes.0.as_ref().map(direction_from_port_direction);
+                let direction = explicit_direction.unwrap_or(inherited_direction);
+                let r#type = if explicit_direction.is_some() {
+                    Type::implicit()
+                } else {
+                    inherited_type.clone()
+                };
                 let name = port_name(RefNode::PortIdentifier(&port.nodes.2), syntax_tree)?;
-                ports.push(Port::new(name, direction, Type::implicit()));
+                inherited_direction = direction;
+                inherited_type = r#type.clone();
+                ports.push(Port::new(name, direction, r#type));
             }
             _ => {}
         }
@@ -1753,7 +1814,7 @@ fn instances_from_module_instantiation(
         AnalyzerError::Unsupported("unsupported module instantiation identifier".to_string())
     })?;
     let parameter_overrides =
-        parameter_overrides_from_value_assignment(instantiation.nodes.1.as_ref(), syntax_tree);
+        parameter_overrides_from_value_assignment(instantiation.nodes.1.as_ref(), syntax_tree)?;
     let parameter_names: Vec<String> = parameter_overrides
         .iter()
         .map(|parameter| parameter.name().to_string())
@@ -1764,7 +1825,7 @@ fn instances_from_module_instantiation(
             syntax_tree,
         )
         .ok_or_else(|| AnalyzerError::Unsupported("unsupported instance identifier".to_string()))?;
-        let port_connections = port_connections_from_hierarchical_instance(instance, syntax_tree);
+        let port_connections = port_connections_from_hierarchical_instance(instance, syntax_tree)?;
         let port_names = port_connections
             .iter()
             .map(|connection| connection.formal().to_string())
@@ -1785,17 +1846,19 @@ fn instances_from_module_instantiation(
 fn parameter_overrides_from_value_assignment(
     assignment: Option<&sv_parser::ParameterValueAssignment>,
     syntax_tree: &SyntaxTree,
-) -> Vec<ParameterOverride> {
+) -> Result<Vec<ParameterOverride>, AnalyzerError> {
     let Some(assignment) = assignment else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(assignments) = assignment.nodes.1.nodes.1.as_ref() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let sv_parser::ListOfParameterAssignments::Named(assignments) = assignments else {
-        return Vec::new();
+        return Err(AnalyzerError::Unsupported(
+            "ordered parameter assignment".to_string(),
+        ));
     };
-    assignments
+    Ok(assignments
         .nodes
         .0
         .contents()
@@ -1814,20 +1877,22 @@ fn parameter_overrides_from_value_assignment(
                 .and_then(|expr| const_expr_from_param_expression(expr, syntax_tree));
             Some(ParameterOverride::new(name, value))
         })
-        .collect()
+        .collect())
 }
 
 fn port_connections_from_hierarchical_instance(
     instance: &sv_parser::HierarchicalInstance,
     syntax_tree: &SyntaxTree,
-) -> Vec<PortConnection> {
+) -> Result<Vec<PortConnection>, AnalyzerError> {
     let Some(connections) = instance.nodes.1.nodes.1.as_ref() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let sv_parser::ListOfPortConnections::Named(connections) = connections else {
-        return Vec::new();
+        return Err(AnalyzerError::Unsupported(
+            "ordered port connection".to_string(),
+        ));
     };
-    connections
+    Ok(connections
         .nodes
         .0
         .contents()
@@ -1836,19 +1901,21 @@ fn port_connections_from_hierarchical_instance(
             sv_parser::NamedPortConnection::Identifier(connection) => {
                 let formal =
                     identifier_text(RefNode::PortIdentifier(&connection.nodes.2), syntax_tree)?;
-                let actual_expr = connection
-                    .nodes
-                    .3
-                    .as_ref()
-                    .and_then(|paren| paren.nodes.1.as_ref())
-                    .and_then(|expr| expr_from_expression(expr, syntax_tree))
-                    .or_else(|| {
-                        primary_literal_text(
-                            RefNode::NamedPortConnectionIdentifier(connection),
-                            syntax_tree,
-                        )
-                        .map(Expr::Literal)
-                    });
+                let actual_expr = match connection.nodes.3.as_ref() {
+                    None => Some(Expr::Ident(formal.clone())),
+                    Some(paren) => paren
+                        .nodes
+                        .1
+                        .as_ref()
+                        .and_then(|expr| expr_from_expression(expr, syntax_tree))
+                        .or_else(|| {
+                            primary_literal_text(
+                                RefNode::NamedPortConnectionIdentifier(connection),
+                                syntax_tree,
+                            )
+                            .map(Expr::Literal)
+                        }),
+                };
                 let actual = actual_expr
                     .as_ref()
                     .and_then(expr_ident_name)
@@ -1857,7 +1924,7 @@ fn port_connections_from_hierarchical_instance(
             }
             sv_parser::NamedPortConnection::Asterisk(_) => None,
         })
-        .collect()
+        .collect())
 }
 
 fn expr_ident_name(expr: &Expr) -> Option<String> {
@@ -4488,7 +4555,7 @@ fn left_associate_expr_binary(expr: Expr) -> Expr {
             left: right_left,
             op: right_op,
             right: right_right,
-        } if binary_precedence(op) == binary_precedence(right_op) => {
+        } if binary_precedence(op) >= binary_precedence(right_op) => {
             left_associate_expr_binary(Expr::Binary {
                 left: Box::new(left_associate_expr_binary(Expr::Binary {
                     left,
@@ -4516,7 +4583,7 @@ fn left_associate_const_binary(expr: ConstExpr) -> ConstExpr {
             left: right_left,
             op: right_op,
             right: right_right,
-        } if binary_precedence(op) == binary_precedence(right_op) => {
+        } if binary_precedence(op) >= binary_precedence(right_op) => {
             left_associate_const_binary(ConstExpr::Binary {
                 left: Box::new(left_associate_const_binary(ConstExpr::Binary {
                     left,
@@ -4625,6 +4692,15 @@ fn direction_from_port_direction(direction: &sv_parser::PortDirection) -> PortDi
 }
 
 fn type_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<Type> {
+    if let Some(atom) = integer_atom_expr_type(node.clone()) {
+        let mut r#type = Type::new(TypeKind::Logic);
+        r#type.is_signed = atom.signed;
+        r#type.packed_ranges = vec![PackedRange::new(
+            ConstExpr::Literal((atom.width - 1).to_string()),
+            ConstExpr::Literal("0".to_string()),
+        )];
+        return Some(r#type);
+    }
     let integer_vector = unwrap_node!(node.clone(), IntegerVectorType)?;
     let kind = match integer_vector {
         RefNode::IntegerVectorType(integer_vector) => match integer_vector {
