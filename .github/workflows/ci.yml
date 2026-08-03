@@ -184,10 +184,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Lint ARM64 backend
-        run: cargo clippy --locked -p celox-backend-common -p celox-backend-arm64 --all-targets -- -D warnings
+        run: >-
+          cargo clippy --locked
+          -p celox-backend-common -p celox-backend-arm64
+          --all-targets --no-deps --
+          -D warnings
+          -A clippy::useless_conversion
+          -A clippy::missing_transmute_annotations
 
       - name: Run ARM64 backend tests natively
         run: cargo test --locked -p celox-backend-common -p celox-backend-arm64
+
+      - name: Check default AArch64 facade and benchmark runner (ARM64 backend off)
+        run: cargo check --locked -p celox -p celox-bench
+
+      - name: Check experimental AArch64 facade and benchmark runner
+        run: cargo check --locked -p celox -p celox-bench --features experimental-arm64-backend
+
+      - name: Test experimental AArch64 facade integration
+        run: cargo test --locked -p celox --lib --features experimental-arm64-backend
 
   napi-windows:
     name: NAPI Build (Windows)

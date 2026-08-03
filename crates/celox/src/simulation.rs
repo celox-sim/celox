@@ -10,8 +10,7 @@ use celox_runtime::{EventInfo, SimulationExecutor, SimulationState};
 ///
 /// Manages simulation time, periodic clocks, and an event queue.
 ///
-/// The default type parameter `B = NativeBackend` means that bare `Simulation`
-/// is equivalent to `Simulation<JitBackend>` for backward compatibility.
+/// The default type parameter uses the host's [`crate::DefaultBackend`].
 pub struct Simulation<B: SimBackend = crate::DefaultBackend> {
     pub(crate) simulator: Simulator<B>,
     pub(crate) state: SimulationState<B>,

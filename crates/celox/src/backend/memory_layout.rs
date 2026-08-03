@@ -5,7 +5,10 @@ use crate::ir::{
 };
 #[cfg(all(
     feature = "host-runtime",
-    any(target_arch = "x86_64", target_arch = "aarch64")
+    any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )
 ))]
 pub use celox_state_layout::STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET;
 pub use celox_state_layout::{

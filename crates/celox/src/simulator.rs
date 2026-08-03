@@ -14,7 +14,10 @@ mod host {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use crate::backend::RuntimeEventBuffer;
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     use crate::backend::native::{NativeBackend, SharedNativeCode};
     use crate::{
         IOContext, RuntimeErrorCode,
@@ -59,7 +62,7 @@ mod host {
     /// and an optional VCD writer. Provides low-level, event-driven control.
     ///
     /// The default type parameter `B = DefaultBackend` means that bare `Simulator`
-    /// uses the custom native backend on x86-64/AArch64 and Cranelift elsewhere.
+    /// uses the custom native backend on x86-64 and opt-in AArch64, and Cranelift elsewhere.
     pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
         pub(crate) backend: B,
         pub(crate) program: RuntimeProgram,
@@ -1450,7 +1453,10 @@ mod host {
         }
     }
 
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     impl Simulator<NativeBackend> {
         /// Returns the shared compiled native code, allowing it to be reused
         /// for creating additional simulator instances without recompilation.

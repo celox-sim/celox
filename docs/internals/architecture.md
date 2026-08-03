@@ -94,6 +94,10 @@ separate from x86. Both native backends may export opcode-free control-flow,
 use/def, and register-constraint facts to shared allocation algorithms; those
 facts are not a common machine IR.
 
+The backend is experimental and disabled by default. Enable the
+`experimental-arm64-backend` feature on the `celox` crate to select it as the
+default backend on AArch64; without the feature, AArch64 uses Cranelift.
+
 ### Cranelift
 
 The Cranelift backend translates SIR to Cranelift IR and uses Cranelift's JIT. It

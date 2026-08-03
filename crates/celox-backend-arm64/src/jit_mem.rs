@@ -25,6 +25,14 @@ impl JitCode {
         Self::new_named_with_symbols(code, name, &[])
     }
 
+    pub fn new_named_profiled(
+        code: &[u8],
+        name: &str,
+        _perf_map: bool,
+    ) -> Result<Self, std::io::Error> {
+        Self::new_named(code, name)
+    }
+
     pub fn new_named_with_symbols(
         code: &[u8],
         _name: &str,
@@ -37,6 +45,15 @@ impl JitCode {
         dynasmrt::cache_control::prepare_for_execution(&buffer);
         let fn_ptr = unsafe { std::mem::transmute(buffer.ptr(AssemblyOffset(0))) };
         Ok(Self { buffer, fn_ptr })
+    }
+
+    pub fn new_named_with_symbols_profiled(
+        code: &[u8],
+        name: &str,
+        symbols: &[JitSymbol],
+        _perf_map: bool,
+    ) -> Result<Self, std::io::Error> {
+        Self::new_named_with_symbols(code, name, symbols)
     }
 
     /// Execute standalone code with a private spill arena following state.

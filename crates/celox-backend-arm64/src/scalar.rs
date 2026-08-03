@@ -136,11 +136,10 @@ pub fn emit_prepared_eu(
     layout: &celox_backend_x86::MemoryLayout,
     four_state: bool,
     label: &str,
-    _x86_options: &celox_backend_x86::X86BackendOptions,
+    x86_options: &celox_backend_x86::X86BackendOptions,
     mut trace: Option<&mut NativeFunctionTrace>,
 ) -> Result<EmitResult, ChainedEmitError> {
-    let tick_loop =
-        label == "eval_comb_apply_ff" && celox_backend_x86::native::native_tick_loop_enabled();
+    let tick_loop = label == "eval_comb_apply_ff" && x86_options.native_tick_loop;
     let check_runtime_events = tick_loop
         && sir_eu.blocks.values().any(|block| {
             block.instructions.iter().any(|instruction| {

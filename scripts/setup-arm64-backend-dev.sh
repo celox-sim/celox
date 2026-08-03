@@ -37,9 +37,10 @@ Options:
 After setup:
   source target/arm64-dev/activate
   cargo test -p celox-backend-arm64
+  cargo test -p celox --features experimental-arm64-backend
 
-The ARM64 backend crate does not exist yet, so the final command becomes useful
-after it has been scaffolded. For real ARM64 Linux CI, use ubuntu-24.04-arm.
+The facade feature is disabled by default. For real ARM64 Linux CI, use
+ubuntu-24.04-arm.
 EOF
 }
 
@@ -272,7 +273,8 @@ fi
 
 log "current checkout is ready for ARM64 development"
 printf '\n  source %q\n' "$ACTIVATION"
-printf '  cargo test -p celox-backend-arm64\n\n'
+printf '  cargo test -p celox-backend-arm64\n'
+printf '  cargo test -p celox --features experimental-arm64-backend\n\n'
 if [[ "$TARGET" == aarch64-apple-darwin ]]; then
     log "note: this validates macOS ARM64; use ubuntu-24.04-arm for the Linux ABI"
 elif [[ "$EXECUTION" == qemu ]]; then

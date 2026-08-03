@@ -40,8 +40,9 @@ not depend on the facade. `celox-backend-x86` and `celox-backend-arm64` depend o
 `celox-backend-common` for allocation machinery; that crate is a compile-time
 library, not another pipeline artifact.
 
-`celox-backend-arm64` is wired into native backend selection and emits complete
-scalar simulation kernels. Its production path temporarily uses the established
+`celox-backend-arm64` is wired into native backend selection behind the
+default-off `experimental-arm64-backend` feature and emits complete scalar
+simulation kernels. Its production path temporarily uses the established
 x86-owned scalar lowering and allocation pipeline as a compatibility bridge.
 The migration target is separate x86 and AArch64 MIR pipelines which export only
 opcode-free allocation facts to `celox-backend-common`.

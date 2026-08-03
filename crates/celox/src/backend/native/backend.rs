@@ -25,7 +25,7 @@ use super::{emit, jit_mem, regalloc};
 /// JIT function type: `fn(state: *mut u8) -> i64`
 #[cfg(target_arch = "x86_64")]
 pub type NativeSimFunc = unsafe extern "sysv64" fn(*mut u8) -> i64;
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "experimental-arm64-backend"))]
 pub type NativeSimFunc = unsafe extern "C" fn(*mut u8) -> i64;
 
 /// Time spent inside generated native simulator functions.

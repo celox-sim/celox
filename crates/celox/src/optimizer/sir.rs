@@ -1,6 +1,9 @@
 #[cfg(all(
     feature = "host-runtime",
-    any(target_arch = "x86_64", target_arch = "aarch64")
+    any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )
 ))]
 use std::sync::Arc;
 
@@ -9,7 +12,10 @@ use crate::ir::LaidOutProgram;
 use crate::ir::{AbsoluteAddr, OptimizedSir};
 #[cfg(all(
     feature = "host-runtime",
-    any(target_arch = "x86_64", target_arch = "aarch64")
+    any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )
 ))]
 use crate::ir::{
     ExecutionUnit, RegionedAbsoluteAddr, SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION,
@@ -17,7 +23,10 @@ use crate::ir::{
 
 #[cfg(all(
     feature = "host-runtime",
-    any(target_arch = "x86_64", target_arch = "aarch64")
+    any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )
 ))]
 pub use celox_sir_opt::optimizer::pass_eliminate_working_round_trip;
 pub(crate) use celox_sir_opt::optimizer::{
@@ -26,7 +35,10 @@ pub(crate) use celox_sir_opt::optimizer::{
 };
 #[cfg(all(
     feature = "host-runtime",
-    any(target_arch = "x86_64", target_arch = "aarch64")
+    any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )
 ))]
 pub(crate) use celox_sir_opt::optimizer::{
     eliminate_unobserved_comb_state_stores, promote_eval_apply_working_round_trips,
@@ -65,7 +77,10 @@ pub(crate) fn optimize_rooted_comb_memory(
 
 #[cfg(all(
     feature = "host-runtime",
-    any(target_arch = "x86_64", target_arch = "aarch64")
+    any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )
 ))]
 pub(crate) fn optimize_native_merged_chain(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
@@ -107,7 +122,10 @@ pub(crate) fn optimize_native_merged_chain(
 
 #[cfg(all(
     feature = "host-runtime",
-    any(target_arch = "x86_64", target_arch = "aarch64")
+    any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )
 ))]
 fn packed_range_is_physically_contiguous(
     layout: &crate::backend::MemoryLayout,

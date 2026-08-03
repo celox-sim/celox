@@ -79,24 +79,45 @@ mod host_api {
         }
     }
 
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     pub mod native_backend {
         //! Re-exports for the custom native backend (for testing/integration).
         pub use crate::backend::native::*;
     }
 
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     pub use crate::backend::native::backend::NativeEventRef;
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     pub use crate::backend::native::{NativeBackend, SharedNativeCode};
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     pub use crate::backend::{NativeDiagnostics, NativeDumpOptions};
 
-    /// Default simulation backend: custom native on x86-64/AArch64, Cranelift elsewhere.
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    /// Default simulation backend: custom native on x86-64 and opt-in AArch64,
+    /// Cranelift elsewhere.
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     pub type DefaultBackend = NativeBackend;
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )))]
     pub type DefaultBackend = JitBackend;
+
+    pub type DefaultEventRef = <DefaultBackend as SimBackend>::Event;
 }
 
 #[cfg(feature = "host-runtime")]
