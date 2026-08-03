@@ -38,22 +38,25 @@ impl<'a> FfParser<'a> {
 
     fn expression_needs_runtime_materialization(&self, expr: &Expression) -> bool {
         self.expression_needs_eager_evaluation(expr)
-            || Self::expression_needs_assignment_snapshot(expr)
+            || self.expression_needs_assignment_snapshot(expr)
     }
 
-    fn expression_needs_assignment_snapshot(expr: &Expression) -> bool {
+    fn expression_needs_assignment_snapshot(&self, expr: &Expression) -> bool {
         let input_needs_snapshot = |input: &veryl_analyzer::ir::SystemFunctionInput| {
-            Self::expression_needs_assignment_snapshot(&input.0)
+            self.expression_needs_assignment_snapshot(&input.0)
         };
         match expr {
             Expression::Term(factor) => match factor.as_ref() {
-                Factor::Variable(_, index, select, _) => {
-                    !index.0.is_empty() || !select.0.is_empty() || select.1.is_some()
+                Factor::Variable(id, index, select, _) => {
+                    self.module.variables[id].affiliation != Affiliation::Function
+                        || !index.0.is_empty()
+                        || !select.0.is_empty()
+                        || select.1.is_some()
                 }
                 Factor::FunctionCall(call) => call
                     .inputs
                     .values()
-                    .any(Self::expression_needs_assignment_snapshot),
+                    .any(|expr| self.expression_needs_assignment_snapshot(expr)),
                 Factor::SystemFunctionCall(call) => match &call.kind {
                     SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
                         args.iter().any(input_needs_snapshot)
@@ -71,33 +74,33 @@ impl<'a> FfParser<'a> {
                 Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
             },
             Expression::Binary(lhs, _, rhs, _) => {
-                Self::expression_needs_assignment_snapshot(lhs)
-                    || Self::expression_needs_assignment_snapshot(rhs)
+                self.expression_needs_assignment_snapshot(lhs)
+                    || self.expression_needs_assignment_snapshot(rhs)
             }
-            Expression::Unary(_, inner, _) => Self::expression_needs_assignment_snapshot(inner),
+            Expression::Unary(_, inner, _) => self.expression_needs_assignment_snapshot(inner),
             Expression::Ternary(cond, then_expr, else_expr, _) => {
-                Self::expression_needs_assignment_snapshot(cond)
-                    || Self::expression_needs_assignment_snapshot(then_expr)
-                    || Self::expression_needs_assignment_snapshot(else_expr)
+                self.expression_needs_assignment_snapshot(cond)
+                    || self.expression_needs_assignment_snapshot(then_expr)
+                    || self.expression_needs_assignment_snapshot(else_expr)
             }
             Expression::Concatenation(items, _) => items.iter().any(|(expr, repeat)| {
-                Self::expression_needs_assignment_snapshot(expr)
+                self.expression_needs_assignment_snapshot(expr)
                     || repeat
                         .as_ref()
-                        .is_some_and(Self::expression_needs_assignment_snapshot)
+                        .is_some_and(|repeat| self.expression_needs_assignment_snapshot(repeat))
             }),
             Expression::ArrayLiteral(items, _) => items.iter().any(|item| match item {
                 ArrayLiteralItem::Value(expr, repeat) => {
-                    Self::expression_needs_assignment_snapshot(expr)
-                        || repeat.as_ref().is_some_and(|repeat| {
-                            Self::expression_needs_assignment_snapshot(repeat)
-                        })
+                    self.expression_needs_assignment_snapshot(expr)
+                        || repeat
+                            .as_ref()
+                            .is_some_and(|repeat| self.expression_needs_assignment_snapshot(repeat))
                 }
-                ArrayLiteralItem::Defaul(expr) => Self::expression_needs_assignment_snapshot(expr),
+                ArrayLiteralItem::Defaul(expr) => self.expression_needs_assignment_snapshot(expr),
             }),
             Expression::StructConstructor(_, fields, _) => fields
                 .iter()
-                .any(|(_, expr)| Self::expression_needs_assignment_snapshot(expr)),
+                .any(|(_, expr)| self.expression_needs_assignment_snapshot(expr)),
         }
     }
 
@@ -248,11 +251,16 @@ impl<'a> FfParser<'a> {
         statements.iter().any(|statement| match statement {
             Statement::SystemFunctionCall(_) => true,
             Statement::Assign(assign) => {
+                let writes_nonlocal = assign
+                    .dst
+                    .iter()
+                    .any(|dst| self.module.variables[&dst.id].affiliation != Affiliation::Function);
                 let destination_effect = assign
                     .dst
                     .iter()
                     .any(|dst| self.assignment_destination_has_runtime_effect(dst, visiting));
-                destination_effect
+                writes_nonlocal
+                    || destination_effect
                     || self.expression_has_runtime_effect_inner(&assign.expr, visiting)
             }
             Statement::If(statement) => {
@@ -824,7 +832,7 @@ impl<'a> FfParser<'a> {
                         &statement.cond,
                         &mut condition_base,
                     )?;
-                    let condition = Self::substitute_function_expr(&condition, &condition_base);
+                    let condition = self.substitute_function_expr(&condition, &condition_base);
                     let condition_base =
                         self.apply_state_transition_on_path(&active, &base, condition_base);
                     let true_active = Self::function_path_and(active.clone(), condition.clone());
@@ -855,7 +863,7 @@ impl<'a> FfParser<'a> {
                 Statement::Case(statement) => {
                     let control_base = state.clone();
                     let case_target =
-                        Self::substitute_function_expr(&statement.case_target, &control_base);
+                        self.substitute_function_expr(&statement.case_target, &control_base);
                     let mut evaluated_state = control_base.clone();
                     let (case_target, _) = self.capture_nested_function_outputs_with_states(
                         &case_target,
@@ -882,7 +890,7 @@ impl<'a> FfParser<'a> {
                             };
                             for expr in expressions {
                                 let pattern_base = state.clone();
-                                let frozen = Self::substitute_function_expr(expr, &pattern_base);
+                                let frozen = self.substitute_function_expr(expr, &pattern_base);
                                 let mut evaluated_state = pattern_base.clone();
                                 let (captured, _) = self
                                     .capture_nested_function_outputs_with_states(
@@ -1002,7 +1010,7 @@ impl<'a> FfParser<'a> {
                     &statement.cond,
                     &mut condition_state,
                 )?;
-                let condition = Self::substitute_function_expr(&condition, &condition_state);
+                let condition = self.substitute_function_expr(&condition, &condition_state);
                 let then_state = self
                     .apply_statements_to_function_state(&statement.true_side, &condition_state)?;
                 let else_state = self
@@ -1065,7 +1073,7 @@ impl<'a> FfParser<'a> {
             ));
         }
         let dst = &assign.dst[0];
-        let rhs = Self::substitute_function_expr(rhs, state);
+        let rhs = self.substitute_function_expr(rhs, state);
         let rhs = self.coerce_function_state_assignment(rhs, dst)?;
         let mut next = state.clone();
         let is_whole_var =
@@ -1099,7 +1107,7 @@ impl<'a> FfParser<'a> {
         let Some(arm) = statement.arms.get(arm_index) else {
             return self.apply_statements_to_function_state(&statement.default, state);
         };
-        let condition = Self::substitute_function_expr(
+        let condition = self.substitute_function_expr(
             &case_arm_condition_expr(&statement.case_target, &arm.patterns),
             state,
         );
@@ -1494,20 +1502,27 @@ impl<'a> FfParser<'a> {
                             Some(&assign.token),
                         ));
                     }
-                    if self.expression_needs_runtime_materialization(&assign.expr) {
-                        self.materialize_function_runtime_expression(
-                            &assign.expr,
-                            &mut state,
-                            &active,
-                            targets,
-                            domain,
-                            convert,
-                            sources,
-                            ir_builder,
-                        )?;
-                    }
+                    let materialized_rhs =
+                        if self.expression_needs_runtime_materialization(&assign.expr) {
+                            Some(self.materialize_function_runtime_expression(
+                                &assign.expr,
+                                &mut state,
+                                &active,
+                                targets,
+                                domain,
+                                convert,
+                                sources,
+                                ir_builder,
+                            )?)
+                        } else {
+                            None
+                        };
                     let base = state.clone();
-                    let transitioned = self.apply_statement_to_function_state(statement, &base)?;
+                    let transitioned = if let Some(rhs) = materialized_rhs.as_ref() {
+                        self.apply_assignment_to_function_state(assign, rhs, &base)?
+                    } else {
+                        self.apply_statement_to_function_state(statement, &base)?
+                    };
                     state = self.apply_state_transition_on_path(&active, &base, transitioned);
                     if is_return {
                         active = FunctionPathCondition::Never;
@@ -1533,7 +1548,7 @@ impl<'a> FfParser<'a> {
                                 ir_builder,
                             )?
                         } else {
-                            Self::substitute_function_expr(&statement.cond, &state)
+                            self.substitute_function_expr(&statement.cond, &state)
                         };
                     let base = state.clone();
                     let true_active = Self::function_path_and(active.clone(), condition.clone());
@@ -1636,7 +1651,7 @@ impl<'a> FfParser<'a> {
                                         if snapshot_for_later_effect
                                             || last_effectful_bound
                                                 .is_some_and(|last| bound_index <= last)
-                                            || Self::expression_needs_assignment_snapshot(expr)
+                                            || self.expression_needs_assignment_snapshot(expr)
                                         {
                                             self.materialize_function_runtime_expression(
                                                 expr,
@@ -1653,7 +1668,7 @@ impl<'a> FfParser<'a> {
                                 }
                             }
                             let pattern_base = state.clone();
-                            let condition = Self::substitute_function_expr(
+                            let condition = self.substitute_function_expr(
                                 &case_arm_condition_expr(
                                     &statement.case_target,
                                     std::slice::from_ref(pattern),
@@ -2045,7 +2060,7 @@ impl<'a> FfParser<'a> {
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
             if let Some(arg_expr) = call.inputs.get(arg_path) {
-                let arg_expr = Self::substitute_function_expr(arg_expr, state);
+                let arg_expr = self.substitute_function_expr(arg_expr, state);
                 bindings.insert(
                     *arg_id,
                     self.coerce_function_input_expression(arg_expr, *arg_id),
@@ -2116,7 +2131,7 @@ impl<'a> FfParser<'a> {
                         Some(&call.comptime.token),
                     )
                 })?;
-            let expr = Self::substitute_function_expr(&expr, state);
+            let expr = self.substitute_function_expr(&expr, state);
             let expr = self.coerce_function_state_assignment(expr, dst)?;
             output_values.push((dst, is_whole_var, expr));
         }
@@ -2644,17 +2659,25 @@ impl<'a> FfParser<'a> {
     }
 
     pub(super) fn substitute_function_expr(
+        &self,
         expr: &Expression,
         defs: &HashMap<VarId, Expression>,
     ) -> Expression {
-        Self::substitute_function_expr_inner(expr, defs, &mut HashSet::default())
+        self.substitute_function_expr_inner(expr, defs, &mut HashSet::default())
     }
 
     fn substitute_function_expr_inner(
+        &self,
         expr: &Expression,
         defs: &HashMap<VarId, Expression>,
         expanding: &mut HashSet<VarId>,
     ) -> Expression {
+        if self
+            .get_bound_function_expression_value(expr.token_range())
+            .is_some()
+        {
+            return expr.clone();
+        }
         match expr {
             Expression::Term(factor) => match factor.as_ref() {
                 Factor::Variable(var_id, index, select, _)
@@ -2663,7 +2686,7 @@ impl<'a> FfParser<'a> {
                     if let Some(bound) = defs.get(var_id) {
                         if expanding.insert(*var_id) {
                             let result =
-                                Self::substitute_function_expr_inner(bound, defs, expanding);
+                                self.substitute_function_expr_inner(bound, defs, expanding);
                             expanding.remove(var_id);
                             return result;
                         }
@@ -2674,7 +2697,7 @@ impl<'a> FfParser<'a> {
                     let mut call = call.clone();
                     for input_expr in call.inputs.values_mut() {
                         *input_expr =
-                            Self::substitute_function_expr_inner(input_expr, defs, expanding);
+                            self.substitute_function_expr_inner(input_expr, defs, expanding);
                     }
                     Expression::Term(Box::new(Factor::FunctionCall(call)))
                 }
@@ -2690,7 +2713,7 @@ impl<'a> FfParser<'a> {
                         | SystemFunctionKind::Signed(input)
                         | SystemFunctionKind::Unsigned(input) => {
                             input.0 =
-                                Self::substitute_function_expr_inner(&input.0, defs, expanding);
+                                self.substitute_function_expr_inner(&input.0, defs, expanding);
                         }
                         _ => {}
                     }
@@ -2699,24 +2722,20 @@ impl<'a> FfParser<'a> {
                 _ => expr.clone(),
             },
             Expression::Binary(lhs, op, rhs, comptime) => Expression::Binary(
-                Box::new(Self::substitute_function_expr_inner(lhs, defs, expanding)),
+                Box::new(self.substitute_function_expr_inner(lhs, defs, expanding)),
                 *op,
-                Box::new(Self::substitute_function_expr_inner(rhs, defs, expanding)),
+                Box::new(self.substitute_function_expr_inner(rhs, defs, expanding)),
                 comptime.clone(),
             ),
             Expression::Unary(op, inner, comptime) => Expression::Unary(
                 *op,
-                Box::new(Self::substitute_function_expr_inner(inner, defs, expanding)),
+                Box::new(self.substitute_function_expr_inner(inner, defs, expanding)),
                 comptime.clone(),
             ),
             Expression::Ternary(cond, then_expr, else_expr, comptime) => Expression::Ternary(
-                Box::new(Self::substitute_function_expr_inner(cond, defs, expanding)),
-                Box::new(Self::substitute_function_expr_inner(
-                    then_expr, defs, expanding,
-                )),
-                Box::new(Self::substitute_function_expr_inner(
-                    else_expr, defs, expanding,
-                )),
+                Box::new(self.substitute_function_expr_inner(cond, defs, expanding)),
+                Box::new(self.substitute_function_expr_inner(then_expr, defs, expanding)),
+                Box::new(self.substitute_function_expr_inner(else_expr, defs, expanding)),
                 comptime.clone(),
             ),
             Expression::Concatenation(parts, comptime) => Expression::Concatenation(
@@ -2724,9 +2743,9 @@ impl<'a> FfParser<'a> {
                     .iter()
                     .map(|(x, rep)| {
                         (
-                            Self::substitute_function_expr_inner(x, defs, expanding),
+                            self.substitute_function_expr_inner(x, defs, expanding),
                             rep.as_ref()
-                                .map(|r| Self::substitute_function_expr_inner(r, defs, expanding)),
+                                .map(|r| self.substitute_function_expr_inner(r, defs, expanding)),
                         )
                     })
                     .collect(),
@@ -2737,13 +2756,13 @@ impl<'a> FfParser<'a> {
                     .iter()
                     .map(|item| match item {
                         ArrayLiteralItem::Value(x, rep) => ArrayLiteralItem::Value(
-                            Box::new(Self::substitute_function_expr_inner(x, defs, expanding)),
+                            Box::new(self.substitute_function_expr_inner(x, defs, expanding)),
                             rep.as_ref().map(|r| {
-                                Box::new(Self::substitute_function_expr_inner(r, defs, expanding))
+                                Box::new(self.substitute_function_expr_inner(r, defs, expanding))
                             }),
                         ),
                         ArrayLiteralItem::Defaul(x) => ArrayLiteralItem::Defaul(Box::new(
-                            Self::substitute_function_expr_inner(x, defs, expanding),
+                            self.substitute_function_expr_inner(x, defs, expanding),
                         )),
                     })
                     .collect(),
@@ -2756,7 +2775,7 @@ impl<'a> FfParser<'a> {
                     .map(|(name, x)| {
                         (
                             *name,
-                            Self::substitute_function_expr_inner(x, defs, expanding),
+                            self.substitute_function_expr_inner(x, defs, expanding),
                         )
                     })
                     .collect(),
@@ -2937,7 +2956,7 @@ impl<'a> FfParser<'a> {
         }
 
         let state = build_state_from_statements(self, &body.statements, defs, &|expr, defs| {
-            Self::substitute_function_expr(expr, defs)
+            self.substitute_function_expr(expr, defs)
         })?;
         state.get(&target_id).cloned().ok_or_else(|| {
             ParserError::unsupported(
@@ -3160,7 +3179,7 @@ impl<'a> FfParser<'a> {
             &body.statements,
             ret_id,
             &HashMap::default(),
-            &|expr, defs| Self::substitute_function_expr(expr, defs),
+            &|expr, defs| self.substitute_function_expr(expr, defs),
         )?
         .ok_or_else(|| {
             ParserError::unsupported(
@@ -3266,12 +3285,6 @@ impl<'a> FfParser<'a> {
                 None
             };
 
-            if let Some(state) = runtime_state.as_ref() {
-                self.emit_nonlocal_function_state_writes(
-                    state, targets, domain, convert, sources, ir_builder,
-                )?;
-            }
-
             for arg_path in &ordered_arg_paths {
                 let Some(dsts) = call.outputs.get(arg_path) else {
                     continue;
@@ -3337,6 +3350,11 @@ impl<'a> FfParser<'a> {
                 ir_builder,
             )?;
             self.stack.push_back(ret_reg);
+            if let Some(state) = runtime_state.as_ref() {
+                self.emit_nonlocal_function_state_writes(
+                    state, targets, domain, convert, sources, ir_builder,
+                )?;
+            }
             Ok(())
         })();
         self.function_expression_value_stack.pop();
@@ -3452,12 +3470,6 @@ impl<'a> FfParser<'a> {
                 None
             };
 
-            if let Some(state) = runtime_state.as_ref() {
-                self.emit_nonlocal_function_state_writes(
-                    state, targets, domain, convert, sources, ir_builder,
-                )?;
-            }
-
             for arg_path in &ordered_arg_paths {
                 let Some(dsts) = call.outputs.get(arg_path) else {
                     continue;
@@ -3493,6 +3505,12 @@ impl<'a> FfParser<'a> {
                 )?;
                 self.emit_multi_dst_assign(
                     rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
+                )?;
+            }
+
+            if let Some(state) = runtime_state.as_ref() {
+                self.emit_nonlocal_function_state_writes(
+                    state, targets, domain, convert, sources, ir_builder,
                 )?;
             }
 

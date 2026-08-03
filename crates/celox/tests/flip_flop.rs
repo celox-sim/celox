@@ -1266,6 +1266,88 @@ fn test_ff_nested_output_to_module_variable_survives_runtime_function(sim) {
     );
 }
 
+fn test_ff_runtime_function_snapshots_nonlocal_read_before_later_write(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            global_value: output logic<8>,
+            q: output logic<8>
+        ) {
+            function update (
+                value: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = value;
+                return 0;
+            }
+
+            function outer (value: input logic<8>) -> logic<8> {
+                var captured: logic<8>;
+                var temp: logic<8>;
+                captured = global_value;
+                temp = update(value, global_value);
+                $display("captured=%0d", captured);
+                return captured;
+            }
+
+            always_ff (clk) {
+                q = outer(d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let global_value = sim.signal("global_value");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 7u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 7u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "captured=0".to_string(),
+        }],
+    );
+    assert_eq!(sim.get(q), 0u8.into());
+
+    sim.modify(|io| io.set(d, 8u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 8u8.into());
+    assert_eq!(sim.get(q), 7u8.into());
+}
+
+fn test_ff_statement_function_direct_nonlocal_assignment_is_observable(sim) {
+    @omit_veryl;
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            global_value: output logic<8>
+        ) {
+            function set_global (value: input logic<8>) {
+                global_value = value;
+            }
+
+            always_ff (clk) {
+                set_global(d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let global_value = sim.signal("global_value");
+
+    sim.modify(|io| io.set(d, 0x5au8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 0x5au8.into());
+}
+
 fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
     @omit_veryl;
     @ignore_on(wasm);
