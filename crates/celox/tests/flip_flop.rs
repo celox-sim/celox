@@ -2601,6 +2601,81 @@ fn test_ff_runtime_event_formal_uses_declared_type(sim) {
     );
 }
 
+fn test_ff_unpacked_input_before_runtime_effect_stays_symbolically_bound(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            samples: input logic<8>[2],
+            q: output logic<8>
+        ) {
+            function observed (x: input logic<8>) -> logic {
+                $display("observed=%0d", x);
+                return 1'b0;
+            }
+
+            function pick (
+                values: input logic<8>[2],
+                marker: input logic
+            ) -> logic<8> {
+                return if marker ? values[0] : values[1];
+            }
+
+            always_ff (clk) {
+                q = pick(samples, observed(samples[0]));
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let samples = sim.signal("samples");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set_wide(samples, BigUint::from(0xab11u32)))
+        .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0xabu8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "observed=17".to_string(),
+        }],
+    );
+}
+
+fn test_ff_symbolic_runtime_input_uses_declared_formal_type(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<16>,
+            q: output logic<8>
+        ) {
+            function observed (x: input logic<8>) -> logic<8> {
+                if x != 8'd0 {
+                    $display("nonzero");
+                }
+                return x;
+            }
+
+            always_ff (clk) {
+                q = observed(d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 0x0100u16)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0u8.into());
+    assert!(sim.drain_runtime_events().is_empty());
+}
+
 fn test_ff_runtime_effectful_return_uses_declared_signed_type(sim) {
     @omit_veryl;
     @ignore_on(wasm);
@@ -4840,6 +4915,51 @@ fn test_ff_function_call_bit_select_on_nonvariable_one_bit_formal(sim) {
 }
 
 // Tests that use setup_and_trace/snapshot/Simulation::builder stay as regular #[test]
+
+#[test]
+fn test_ff_effectful_output_destination_snapshots_input_first() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            index_state: output logic<2>,
+            entries: output logic<8>[4],
+            q: output logic<2>
+        ) {
+            function advance (written: output logic<2>) -> logic<2> {
+                $display("advance");
+                written = 2'd1;
+                return 2'd0;
+            }
+
+            function write_at (
+                original: input logic<2>,
+                written: output logic<8>
+            ) -> logic<2> {
+                written = 8'ha5;
+                return original;
+            }
+
+            always_ff (clk) {
+                q = write_at(index_state, entries[advance(index_state)]);
+            }
+        }
+    "#;
+    let result = SimulatorBuilder::new(code, "Top")
+        .optimize(false)
+        .trace_pre_optimized_sir()
+        .build_with_trace();
+    let sir = result.trace.format_pre_optimized_sir().unwrap();
+    let input_snapshot = sir
+        .find("Load(addr=index_state (region=0)")
+        .unwrap_or_else(|| panic!("call-time input snapshot:\n{sir}"));
+    let destination_effect = sir
+        .find("RuntimeEvent(")
+        .unwrap_or_else(|| panic!("effectful output destination:\n{sir}"));
+    assert!(
+        input_snapshot < destination_effect,
+        "the input must be snapshotted before output-destination effects:\n{sir}",
+    );
+}
 
 #[test]
 fn test_ff_case_target_is_snapshotted_before_effectful_pattern() {

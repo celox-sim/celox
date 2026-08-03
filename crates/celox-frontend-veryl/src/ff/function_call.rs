@@ -379,12 +379,16 @@ impl<'a> FfParser<'a> {
             ty
         };
 
+        Ok(Self::coerce_function_expression_to_type(expr, &target_type))
+    }
+
+    fn coerce_function_expression_to_type(expr: Expression, target_type: &Type) -> Expression {
         let source_type = &expr.comptime().r#type;
         if source_type.total_width() == target_type.total_width()
             && source_type.signed == target_type.signed
             && source_type.is_2state() == target_type.is_2state()
         {
-            return Ok(expr);
+            return expr;
         }
 
         let token = expr.token_range();
@@ -400,12 +404,21 @@ impl<'a> FfParser<'a> {
         comptime.r#type = target_type.clone();
         comptime.expr_context.width = target_type.total_width().unwrap_or_default();
         comptime.expr_context.signed = target_type.signed;
-        Ok(Expression::Binary(
+        Expression::Binary(
             Box::new(expr),
             Op::As,
             Box::new(cast_target),
             Box::new(comptime),
-        ))
+        )
+    }
+
+    fn coerce_function_input_expression(&self, expr: Expression, formal_id: VarId) -> Expression {
+        let formal = &self.module.variables[&formal_id];
+        if formal.r#type.array.is_empty() {
+            Self::coerce_function_expression_to_type(expr, &formal.r#type)
+        } else {
+            expr
+        }
     }
 
     fn merge_expression_states(
@@ -1956,7 +1969,11 @@ impl<'a> FfParser<'a> {
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
             if let Some(arg_expr) = call.inputs.get(arg_path) {
-                bindings.insert(*arg_id, Self::substitute_function_expr(arg_expr, state));
+                let arg_expr = Self::substitute_function_expr(arg_expr, state);
+                bindings.insert(
+                    *arg_id,
+                    self.coerce_function_input_expression(arg_expr, *arg_id),
+                );
             }
         }
         let function_state = if call.outputs.is_empty() {
@@ -2180,6 +2197,11 @@ impl<'a> FfParser<'a> {
             .values()
             .flat_map(|destinations| destinations.iter().map(|dst| dst.id))
             .collect();
+        let has_effectful_output_destination = call
+            .outputs
+            .values()
+            .flatten()
+            .any(|dst| self.assignment_destination_needs_eager_evaluation(dst));
         let last_effectful_arg = ordered_arg_paths.iter().rposition(|arg_path| {
             call.inputs.get(arg_path).is_some_and(|actual| {
                 super::expression::expression_has_side_effect(actual)
@@ -2194,19 +2216,36 @@ impl<'a> FfParser<'a> {
                 continue;
             };
             let must_snapshot_for_order = last_effectful_arg.is_some_and(|last| arg_index <= last);
-            if !must_snapshot_for_order && !Self::expression_references_any(actual, &output_ids) {
-                continue;
-            }
-
             let formal = &self.module.variables[arg_id];
             if !formal.r#type.array.is_empty() {
-                return Err(ParserError::unsupported(
-                    43,
-                    LoweringPhase::FfLowering,
-                    "materialized unpacked function argument",
-                    format!("{actual}"),
-                    Some(&call.comptime.token),
-                ));
+                let later_input_writes_state = ordered_arg_paths
+                    .iter()
+                    .skip(arg_index + 1)
+                    .filter_map(|path| call.inputs.get(path))
+                    .any(super::expression::expression_has_side_effect);
+                let requires_value_snapshot = self.expression_needs_eager_evaluation(actual)
+                    || Self::expression_references_any(actual, &output_ids)
+                    || later_input_writes_state
+                    || has_effectful_output_destination;
+                if requires_value_snapshot {
+                    return Err(ParserError::unsupported(
+                        43,
+                        LoweringPhase::FfLowering,
+                        "materialized unpacked function argument",
+                        format!("{actual}"),
+                        Some(&call.comptime.token),
+                    ));
+                }
+                // Runtime-only effects in later arguments cannot change this
+                // pure array value, so retaining its symbolic binding preserves
+                // call-time semantics without scalarizing the unpacked shape.
+                continue;
+            }
+            if !must_snapshot_for_order
+                && !has_effectful_output_destination
+                && !Self::expression_references_any(actual, &output_ids)
+            {
+                continue;
             }
             let formal_width = resolve_total_width(self.module, formal)?;
             self.parse_expression(
@@ -2805,7 +2844,8 @@ impl<'a> FfParser<'a> {
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
             if let Some(arg_expr) = call.inputs.get(arg_path) {
-                bindings.insert(*arg_id, arg_expr.clone());
+                let arg_expr = self.coerce_function_input_expression(arg_expr.clone(), *arg_id);
+                bindings.insert(*arg_id, arg_expr);
             }
         }
         let materialized = self.materialize_function_inputs(
@@ -2974,7 +3014,8 @@ impl<'a> FfParser<'a> {
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
             if let Some(arg_expr) = call.inputs.get(arg_path) {
-                bindings.insert(*arg_id, arg_expr.clone());
+                let arg_expr = self.coerce_function_input_expression(arg_expr.clone(), *arg_id);
+                bindings.insert(*arg_id, arg_expr);
             }
         }
         let materialized = self.materialize_function_inputs(
