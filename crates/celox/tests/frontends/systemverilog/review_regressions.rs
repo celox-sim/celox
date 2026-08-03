@@ -127,6 +127,63 @@ fn preserves_signed_operations_and_assignment_extension() {
 }
 
 #[test]
+fn propagates_assignment_width_into_combinational_expressions() {
+    let source = r#"
+        module Top(input logic [7:0] a, output logic [15:0] y);
+            assign y = a << 8;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("context_width.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 0x100u16.into());
+}
+
+#[test]
+fn preserves_last_write_order_inside_always_comb() {
+    let source = r#"
+        module Top(input logic a, b, output logic y);
+            always_comb begin
+                y = a;
+                y = b;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("comb_order.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(a, 1u8);
+        io.set(b, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+}
+
+#[test]
+fn resolves_parent_parameters_in_input_port_connections() {
+    let source = r#"
+        module Child(input logic [15:0] value, output logic [15:0] y);
+            assign y = value;
+        endmodule
+        module Top #(parameter WIDTH_VALUE = 9) (output logic [15:0] y);
+            Child child(.value(WIDTH_VALUE), .y(y));
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("parent_constant.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 9u16.into());
+}
+
+#[test]
 fn handles_fill_literals_ascending_ranges_atom_types_and_unary_constants() {
     let source = r#"
         module Top(input logic [0:7] ascending, input int a, b,
@@ -260,12 +317,128 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(input logic a, output logic y); assign y = unknown(a); endmodule
         "#,
         ),
+        (
+            "always_ff assignment lowering",
+            r#"
+            module Top(input logic clk, input logic i, d, output logic [1:0] q);
+                always_ff @(posedge clk) q[i] <= d;
+            endmodule
+        "#,
+        ),
+        (
+            "unpacked array dimension",
+            r#"
+            module Top(input logic [7:0] mem [0:1], output logic [7:0] y);
+                assign y = mem[0];
+            endmodule
+        "#,
+        ),
+        (
+            "local data declaration inside loop-generate",
+            r#"
+            module Top(input logic [1:0] a, output logic [1:0] y);
+                for (genvar i = 0; i < 2; i++) begin
+                    logic tmp;
+                    assign tmp = a[i];
+                    assign y[i] = tmp;
+                end
+            endmodule
+        "#,
+        ),
+        (
+            "initial construct",
+            r#"
+            module Top(output logic y); initial y = 1'b1; endmodule
+        "#,
+        ),
+        (
+            "non-ANSI module port declarations",
+            r#"
+            module Top(y); output y; assign y = 1'b1; endmodule
+        "#,
+        ),
+        (
+            "ref port direction",
+            r#"
+            module Top(ref logic value); endmodule
+        "#,
+        ),
+        (
+            "dependent repeated assignment inside always_comb",
+            r#"
+            module Top(input logic a, output logic y);
+                always_comb begin y = a; y = y + 1'b1; end
+            endmodule
+        "#,
+        ),
     ];
 
     for (expected, source) in cases {
         let error = cranelift_build_error(source);
         assert!(error.contains(expected), "{expected}: {error}");
     }
+}
+
+#[test]
+fn rejects_cycles_across_the_module_graph() {
+    let source = r#"
+        module A(); B child(); endmodule
+        module B(); A child(); endmodule
+    "#;
+    let error = match Simulator::from_sv_sources(vec![(source, Path::new("cycle.sv"))], "A")
+        .build_cranelift()
+    {
+        Ok(_) => panic!("recursive hierarchy unexpectedly compiled"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("recursive systemverilog module instantiation"),
+        "{error}"
+    );
+}
+
+#[test]
+fn ignores_unreachable_invalid_systemverilog_hierarchy_in_mixed_designs() {
+    let veryl = r#"
+        module Top (y: output logic) {
+            inst good: $sv::Good (y);
+        }
+    "#;
+    let sv = r#"
+        module Good(output logic y); assign y = 1'b1; endmodule
+        module Unused(output logic y); Missing child(.y(y)); endmodule
+    "#;
+    let mut sim = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("external.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn rejects_invalid_systemverilog_hierarchy_when_mixed_design_reaches_it() {
+    let veryl = r#"
+        module Top (y: output logic) {
+            inst broken: $sv::Broken (y);
+        }
+    "#;
+    let sv = r#"
+        module Broken(output logic y); Missing child(.y(y)); endmodule
+    "#;
+    let error = match Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("external.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    {
+        Ok(_) => panic!("reachable invalid hierarchy unexpectedly compiled"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("module \"Missing\""), "{error}");
 }
 
 #[test]

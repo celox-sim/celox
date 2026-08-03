@@ -706,11 +706,6 @@ mod tests {
     #[test]
     fn analyzes_veryl_emitted_benchmark_sv() {
         let cases = [
-            ("Top.sv", include_str!("../../../benches/verilator/Top.sv")),
-            (
-                "LinearSec.sv",
-                include_str!("../../../benches/verilator/LinearSec.sv"),
-            ),
             (
                 "Countones.sv",
                 include_str!("../../../benches/verilator/Countones.sv"),
@@ -752,16 +747,31 @@ mod tests {
     }
 
     #[test]
-    fn rejects_veryl_emitted_fifo_control_flow_until_it_is_lowered() {
-        let error = analyze_source(
-            include_str!("../../../benches/verilator/Fifo.sv"),
-            Path::new("Fifo.sv"),
-        )
-        .expect_err("always_comb control flow must not be silently ignored");
+    fn rejects_unlowered_constructs_in_veryl_emitted_sources() {
+        for (name, source) in [
+            ("Top.sv", include_str!("../../../benches/verilator/Top.sv")),
+            (
+                "Fifo.sv",
+                include_str!("../../../benches/verilator/Fifo.sv"),
+            ),
+        ] {
+            let error = analyze_source(source, Path::new(name))
+                .expect_err("unlowered constructs must not be silently ignored");
+            assert!(matches!(
+                error,
+                AnalyzerError::Unsupported(detail) if detail == "unpacked array dimension"
+            ));
+        }
 
+        let error = analyze_source(
+            include_str!("../../../benches/verilator/LinearSec.sv"),
+            Path::new("LinearSec.sv"),
+        )
+        .expect_err("loop-local declarations must not be silently ignored");
         assert!(matches!(
             error,
-            AnalyzerError::Unsupported(detail) if detail == "control flow inside always_comb"
+            AnalyzerError::Unsupported(detail)
+                if detail == "local data declaration inside loop-generate"
         ));
     }
 

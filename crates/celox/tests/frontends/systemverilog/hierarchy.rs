@@ -405,12 +405,12 @@ fn rejects_veryl_generated_sv_that_uses_unlowered_constructs() {
         (
             "Fifo.sv",
             include_str!("../../../../../benches/verilator/Fifo.sv"),
-            "control flow inside always_comb",
+            "unpacked array dimension",
         ),
         (
             "LinearSec.sv",
             include_str!("../../../../../benches/verilator/LinearSec.sv"),
-            "combinational assignment target",
+            "local data declaration inside loop-generate",
         ),
     ] {
         let error = Simulator::from_sv_sources(vec![(sv, Path::new(name))], "Top")

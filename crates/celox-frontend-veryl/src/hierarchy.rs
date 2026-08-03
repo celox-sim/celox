@@ -14,6 +14,7 @@ pub struct ExternalModule {
     pub metadata: Module,
     pub sim_module: SimModule,
     pub port_order: Vec<veryl_analyzer::ir::VarId>,
+    pub unresolved_instances: Vec<StrId>,
 }
 
 /// A module graph owned by another frontend. Module IDs are local to this
@@ -151,6 +152,7 @@ pub fn parse_ir_with_external_hierarchy<'a>(
 
     let mut worklist = vec![(root_id, *root_ir)];
     let mut inst_sequences = HashMap::default();
+    let mut validated_external = HashSet::default();
     let mut index = 0;
     while index < worklist.len() {
         let (module_id, ir_module) = worklist[index];
@@ -170,6 +172,12 @@ pub fn parse_ir_with_external_hierarchy<'a>(
                                 None,
                             )
                         })?;
+                        validate_external_module_graph(
+                            *local_id,
+                            external,
+                            &mut HashSet::default(),
+                            &mut validated_external,
+                        )?;
                         inst_ids.push(external_ids[local_id]);
                     }
                     Component::Module(child_module) => {
@@ -235,4 +243,48 @@ pub fn parse_ir_with_external_hierarchy<'a>(
         module_names,
         root_id,
     })
+}
+
+fn validate_external_module_graph(
+    module_id: ModuleId,
+    external: &ExternalHierarchy,
+    active: &mut HashSet<ModuleId>,
+    complete: &mut HashSet<ModuleId>,
+) -> Result<(), ParserError> {
+    if complete.contains(&module_id) {
+        return Ok(());
+    }
+    if !active.insert(module_id) {
+        return Err(ParserError::unsupported(
+            64,
+            LoweringPhase::SimulatorParser,
+            "recursive systemverilog module instantiation",
+            format!("cycle includes external module {module_id}"),
+            None,
+        ));
+    }
+    let module = external.modules.get(&module_id).ok_or_else(|| {
+        ParserError::illegal_context(
+            "external module hierarchy",
+            format!("unknown external module {module_id}"),
+            None,
+        )
+    })?;
+    if let Some(name) = module.unresolved_instances.first() {
+        return Err(ParserError::unsupported(
+            64,
+            LoweringPhase::SimulatorParser,
+            "systemverilog module instantiation",
+            format!("module \"{name}\" was not supplied"),
+            None,
+        ));
+    }
+    for blocks in module.sim_module.glue_blocks.values() {
+        for block in blocks {
+            validate_external_module_graph(block.module_id, external, active, complete)?;
+        }
+    }
+    active.remove(&module_id);
+    complete.insert(module_id);
+    Ok(())
 }

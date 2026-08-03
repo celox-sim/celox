@@ -95,6 +95,7 @@ pub(crate) struct LoweredSvModule {
     variables: HashMap<VarId, SvVariable>,
     pub port_order: Vec<VarId>,
     pub signal_names: HashMap<String, VarId>,
+    constants: std::collections::HashMap<String, i128>,
     pub instances: Vec<LoweredSvInstance>,
 }
 
@@ -191,7 +192,7 @@ pub fn prepare_external_hierarchy(
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name) {
-                return Err(unsupported_sv_instance(child_key.name).into());
+                continue;
             }
             if !module_ids.contains_key(&child_key) {
                 let child_id = ModuleId(module_ids.len());
@@ -210,18 +211,36 @@ pub fn prepare_external_hierarchy(
             Ok((module_id, specialize_module(base, key)?))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
-
     let mut modules = HashMap::default();
     for (key, &module_id) in &module_ids {
         let lowered = &lowered_modules[&module_id];
         let mut sim_module = lowered.sim_module.clone();
-        attach_instance_glue(&mut sim_module, lowered, key, &module_ids, &lowered_modules)?;
+        let unresolved_instances = lowered
+            .instances
+            .iter()
+            .filter_map(|instance| {
+                (!module_ids.contains_key(&LoweredSvModuleKey::instance_key(instance)))
+                    .then_some(instance.module_name)
+            })
+            .collect();
+        let mut resolved = lowered.clone();
+        resolved.instances.retain(|instance| {
+            module_ids.contains_key(&LoweredSvModuleKey::instance_key(instance))
+        });
+        attach_instance_glue(
+            &mut sim_module,
+            &resolved,
+            key,
+            &module_ids,
+            &lowered_modules,
+        )?;
         modules.insert(
             module_id,
             ExternalModule {
                 metadata: metadata_module(&sim_module),
                 sim_module,
                 port_order: lowered.port_order.clone(),
+                unresolved_instances,
             },
         );
     }
@@ -288,7 +307,7 @@ pub fn schedule_sources(
     let root_id = ModuleId(0);
     let mut module_ids = HashMap::default();
     module_ids.insert(root_key.clone(), root_id);
-    let mut queue = vec![root_key];
+    let mut queue = vec![root_key.clone()];
     let mut index = 0;
     while index < queue.len() {
         let key = queue[index].clone();
@@ -320,6 +339,13 @@ pub fn schedule_sources(
             Ok((module_id, lowered))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
+    validate_sv_module_graph(
+        &root_key,
+        &module_ids,
+        &lowered_modules,
+        &mut HashSet::default(),
+        &mut HashSet::default(),
+    )?;
 
     let mut modules = HashMap::default();
     let mut module_names = HashMap::default();
@@ -357,6 +383,46 @@ pub fn schedule_sources(
         trace,
     )
     .map_err(FrontendError::from)
+}
+
+fn validate_sv_module_graph(
+    key: &LoweredSvModuleKey,
+    module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
+    lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
+    active: &mut HashSet<LoweredSvModuleKey>,
+    complete: &mut HashSet<LoweredSvModuleKey>,
+) -> Result<(), ParserError> {
+    if complete.contains(key) {
+        return Ok(());
+    }
+    if !active.insert(key.clone()) {
+        return Err(ParserError::unsupported(
+            64,
+            LoweringPhase::SimulatorParser,
+            "recursive systemverilog module instantiation",
+            resource_table::get_str_value(key.name).unwrap_or_default(),
+            None,
+        ));
+    }
+    let module_id = module_ids
+        .get(key)
+        .copied()
+        .ok_or_else(|| unsupported_sv_instance(key.name))?;
+    let module = lowered_modules
+        .get(&module_id)
+        .ok_or_else(|| unsupported_sv_instance(key.name))?;
+    for instance in &module.instances {
+        validate_sv_module_graph(
+            &LoweredSvModuleKey::instance_key(instance),
+            module_ids,
+            lowered_modules,
+            active,
+            complete,
+        )?;
+    }
+    active.remove(key);
+    complete.insert(key.clone());
+    Ok(())
 }
 
 pub(crate) fn specialize_module(
@@ -464,7 +530,7 @@ fn lower_module_with_overrides(
         )?);
     }
     let (eval_only_ff_blocks, apply_ff_blocks, eval_apply_ff_blocks, reset_clock_map) =
-        lower_ff_processes(module, &variables, &name_to_id, &constants);
+        lower_ff_processes(module, &variables, &name_to_id, &constants)?;
     mark_ff_event_domains(module, &mut variables, &name_to_id);
 
     let shared_variables = variables
@@ -497,6 +563,7 @@ fn lower_module_with_overrides(
         variables,
         port_order,
         signal_names: name_to_id,
+        constants: constants.clone(),
         instances: module
             .instances()
             .iter()
@@ -636,6 +703,7 @@ pub(crate) fn attach_instance_glue(
         let glue = build_instance_glue(
             &parent_variables,
             &signal_names,
+            &lowered.constants,
             child,
             &instance.port_connections,
         )?;
@@ -715,6 +783,7 @@ type SvGlue = (
 fn build_instance_glue(
     parent_variables: &HashMap<VarId, SvVariable>,
     parent_signal_names: &HashMap<String, VarId>,
+    parent_constants: &std::collections::HashMap<String, i128>,
     child: &LoweredSvModule,
     connections: &[LoweredSvPortConnection],
 ) -> Result<SvGlue, ParserError> {
@@ -742,7 +811,7 @@ fn build_instance_glue(
                     actual_expr,
                     parent_variables,
                     parent_signal_names,
-                    &std::collections::HashMap::new(),
+                    parent_constants,
                     &mut arena,
                 )
                 .ok_or_else(|| {
@@ -1153,11 +1222,57 @@ fn lower_comb_process(
     constants: &std::collections::HashMap<String, i128>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<Vec<LogicPath<VarId>>, sv::AnalyzerError> {
-    process
-        .assignments()
+    let assignments = process.assignments();
+    if process.kind() == sv::ir::CombProcessKind::AlwaysComb {
+        for (index, assignment) in assignments.iter().enumerate() {
+            if assignments[index + 1..].iter().any(|later| {
+                later.lhs_value() == assignment.lhs_value()
+                    && expr_references_ident(later.rhs(), assignment.lhs())
+            }) {
+                return Err(sv::AnalyzerError::Unsupported(
+                    "dependent repeated assignment inside always_comb".to_string(),
+                ));
+            }
+        }
+    }
+    assignments
         .iter()
+        .enumerate()
+        .filter(|(index, assignment)| {
+            process.kind() != sv::ir::CombProcessKind::AlwaysComb
+                || !assignments[index + 1..]
+                    .iter()
+                    .any(|later| later.lhs_value() == assignment.lhs_value())
+        })
+        .map(|(_, assignment)| assignment)
         .map(|assignment| lower_assignment(assignment, variables, name_to_id, constants, arena))
         .collect()
+}
+
+fn expr_references_ident(expr: &sv::ir::Expr, name: &str) -> bool {
+    match expr {
+        sv::ir::Expr::Ident(ident) => ident == name,
+        sv::ir::Expr::Literal(_) => false,
+        sv::ir::Expr::Select { expr, .. }
+        | sv::ir::Expr::Resize { expr, .. }
+        | sv::ir::Expr::Unary { expr, .. } => expr_references_ident(expr, name),
+        sv::ir::Expr::Concat(parts) | sv::ir::Expr::RepeatConcat { parts, .. } => {
+            parts.iter().any(|part| expr_references_ident(part, name))
+        }
+        sv::ir::Expr::Binary { left, right, .. } => {
+            expr_references_ident(left, name) || expr_references_ident(right, name)
+        }
+        sv::ir::Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_references_ident(condition, name)
+                || expr_references_ident(then_expr, name)
+                || expr_references_ident(else_expr, name)
+        }
+        sv::ir::Expr::Call { args, .. } => args.iter().any(|arg| expr_references_ident(arg, name)),
+    }
 }
 
 fn lower_assignment(
@@ -1193,7 +1308,15 @@ fn lower_assignment(
             HashSet::default(),
         )
     } else {
-        lower_expr(assignment.rhs(), variables, name_to_id, constants, arena).ok_or_else(|| {
+        lower_expr_with_context(
+            assignment.rhs(),
+            variables,
+            name_to_id,
+            constants,
+            arena,
+            Some(target_width),
+        )
+        .ok_or_else(|| {
             sv::AnalyzerError::Unsupported(format!(
                 "combinational expression assigned to `{}`",
                 assignment.lhs()
@@ -1256,19 +1379,31 @@ fn lower_expr(
     constants: &std::collections::HashMap<String, i128>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Option<(celox_slt::NodeId, HashSet<VarAtomBase<VarId>>)> {
+    lower_expr_with_context(expr, variables, name_to_id, constants, arena, None)
+}
+
+fn lower_expr_with_context(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<VarId, SvVariable>,
+    name_to_id: &HashMap<String, VarId>,
+    constants: &std::collections::HashMap<String, i128>,
+    arena: &mut SLTNodeArena<VarId>,
+    context_width: Option<usize>,
+) -> Option<(celox_slt::NodeId, HashSet<VarAtomBase<VarId>>)> {
     match expr {
         sv::ir::Expr::Ident(name) => {
             let Some(id) = name_to_id.get(name).copied() else {
                 let value = constants.get(name)?;
+                let node = arena
+                    .alloc(SLTNode::Constant(
+                        BigUint::from(*value as u128),
+                        BigUint::from(0u32),
+                        32,
+                        false,
+                    ))
+                    .ok()?;
                 return Some((
-                    arena
-                        .alloc(SLTNode::Constant(
-                            BigUint::from(*value as u128),
-                            BigUint::from(0u32),
-                            32,
-                            false,
-                        ))
-                        .ok()?,
+                    coerce_node_width(arena, node, context_width, true).ok()?,
                     HashSet::default(),
                 ));
             };
@@ -1284,7 +1419,10 @@ fn lower_expr(
                 .ok()?;
             let mut sources = HashSet::default();
             sources.insert(VarAtomBase::new(id, 0, width - 1));
-            Some((node, sources))
+            Some((
+                coerce_node_width(arena, node, context_width, var.signed).ok()?,
+                sources,
+            ))
         }
         sv::ir::Expr::Select { expr, msb, lsb } => {
             let (inner, mut sources) = lower_expr(expr, variables, name_to_id, constants, arena)?;
@@ -1344,21 +1482,46 @@ fn lower_expr(
             Some((arena.alloc(SLTNode::Concat(repeated)).ok()?, sources))
         }
         sv::ir::Expr::Literal(literal) => {
+            if let Some(width) = context_width
+                && let Some(fill) = unbased_fill_literal(literal)
+            {
+                return Some((
+                    lower_unbased_fill_literal_slt(arena, fill, width)?,
+                    HashSet::default(),
+                ));
+            }
             let literal = sv::typecheck::parse_integral_literal(literal)?;
+            let signed = literal.signed;
+            let node = arena
+                .alloc(SLTNode::Constant(
+                    literal.value,
+                    literal.mask,
+                    literal.width,
+                    signed,
+                ))
+                .ok()?;
             Some((
-                arena
-                    .alloc(SLTNode::Constant(
-                        literal.value,
-                        literal.mask,
-                        literal.width,
-                        literal.signed,
-                    ))
-                    .ok()?,
+                coerce_node_width(arena, node, context_width, signed).ok()?,
                 HashSet::default(),
             ))
         }
         sv::ir::Expr::Unary { op, expr } => {
-            let (inner, sources) = lower_expr(expr, variables, name_to_id, constants, arena)?;
+            let one_bit_result = matches!(
+                op,
+                sv::ir::UnaryOp::LogicNot
+                    | sv::ir::UnaryOp::RedAnd
+                    | sv::ir::UnaryOp::RedOr
+                    | sv::ir::UnaryOp::RedXor
+            );
+            let operand_context = (!one_bit_result).then_some(context_width).flatten();
+            let (inner, sources) = lower_expr_with_context(
+                expr,
+                variables,
+                name_to_id,
+                constants,
+                arena,
+                operand_context,
+            )?;
             Some((
                 arena
                     .alloc(SLTNode::Unary(unary_op_from_sv(*op)?, inner))
@@ -1378,17 +1541,36 @@ fn lower_expr(
         sv::ir::Expr::Binary { left, op, right } => {
             let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
                 && sv_expr_is_signed(right, variables, name_to_id);
-            let context_sized_comparison = matches!(
+            let comparison = matches!(
                 op,
-                sv::ir::BinaryOp::EqCase
+                sv::ir::BinaryOp::Eq
+                    | sv::ir::BinaryOp::Ne
+                    | sv::ir::BinaryOp::EqCase
                     | sv::ir::BinaryOp::NeCase
                     | sv::ir::BinaryOp::EqWildcard
                     | sv::ir::BinaryOp::NeWildcard
+                    | sv::ir::BinaryOp::Lt
+                    | sv::ir::BinaryOp::Le
+                    | sv::ir::BinaryOp::Gt
+                    | sv::ir::BinaryOp::Ge
             );
-            let left_fill = context_sized_comparison
+            let context_determined = !comparison
+                && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
+            let operation_context = context_width.map(|context_width| {
+                context_width.max(
+                    sv_expr_natural_width(expr, variables, name_to_id, constants)
+                        .unwrap_or(context_width),
+                )
+            });
+            let left_context = context_determined.then_some(operation_context).flatten();
+            let right_context = (context_determined
+                && !matches!(op, sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr))
+            .then_some(operation_context)
+            .flatten();
+            let left_fill = comparison
                 .then(|| expr_unbased_fill_literal(left))
                 .flatten();
-            let right_fill = context_sized_comparison
+            let right_fill = comparison
                 .then(|| expr_unbased_fill_literal(right))
                 .flatten();
             let ((mut left, mut sources), (mut right, right_sources)) =
@@ -1404,7 +1586,14 @@ fn lower_expr(
                         ),
                     ),
                     (Some(fill), None) => {
-                        let right = lower_expr(right, variables, name_to_id, constants, arena)?;
+                        let right = lower_expr_with_context(
+                            right,
+                            variables,
+                            name_to_id,
+                            constants,
+                            arena,
+                            right_context,
+                        )?;
                         let width = celox_slt::get_width(right.0, arena);
                         (
                             (
@@ -1415,7 +1604,14 @@ fn lower_expr(
                         )
                     }
                     (None, Some(fill)) => {
-                        let left = lower_expr(left, variables, name_to_id, constants, arena)?;
+                        let left = lower_expr_with_context(
+                            left,
+                            variables,
+                            name_to_id,
+                            constants,
+                            arena,
+                            left_context,
+                        )?;
                         let width = celox_slt::get_width(left.0, arena);
                         (
                             left,
@@ -1426,12 +1622,26 @@ fn lower_expr(
                         )
                     }
                     (None, None) => (
-                        lower_expr(left, variables, name_to_id, constants, arena)?,
-                        lower_expr(right, variables, name_to_id, constants, arena)?,
+                        lower_expr_with_context(
+                            left,
+                            variables,
+                            name_to_id,
+                            constants,
+                            arena,
+                            left_context,
+                        )?,
+                        lower_expr_with_context(
+                            right,
+                            variables,
+                            name_to_id,
+                            constants,
+                            arena,
+                            right_context,
+                        )?,
                     ),
                 };
             sources.extend(right_sources);
-            if context_sized_comparison {
+            if comparison {
                 let common_width =
                     celox_slt::get_width(left, arena).max(celox_slt::get_width(right, arena));
                 left = coerce_node_width(arena, left, Some(common_width), operands_signed).ok()?;
@@ -1454,14 +1664,37 @@ fn lower_expr(
             then_expr,
             else_expr,
         } => {
+            let arms_signed = sv_expr_is_signed(then_expr, variables, name_to_id)
+                && sv_expr_is_signed(else_expr, variables, name_to_id);
+            let arm_context = sv_expr_natural_width(expr, variables, name_to_id, constants)
+                .map(|natural_width| {
+                    context_width.map_or(natural_width, |width| width.max(natural_width))
+                })
+                .or(context_width);
             let (condition, mut sources) =
                 lower_expr(condition, variables, name_to_id, constants, arena)?;
-            let (then_expr, then_sources) =
-                lower_expr(then_expr, variables, name_to_id, constants, arena)?;
-            let (else_expr, else_sources) =
-                lower_expr(else_expr, variables, name_to_id, constants, arena)?;
+            let (mut then_expr, then_sources) = lower_expr_with_context(
+                then_expr,
+                variables,
+                name_to_id,
+                constants,
+                arena,
+                arm_context,
+            )?;
+            let (mut else_expr, else_sources) = lower_expr_with_context(
+                else_expr,
+                variables,
+                name_to_id,
+                constants,
+                arena,
+                arm_context,
+            )?;
             sources.extend(then_sources);
             sources.extend(else_sources);
+            let width =
+                celox_slt::get_width(then_expr, arena).max(celox_slt::get_width(else_expr, arena));
+            then_expr = coerce_node_width(arena, then_expr, Some(width), arms_signed).ok()?;
+            else_expr = coerce_node_width(arena, else_expr, Some(width), arms_signed).ok()?;
             Some((
                 arena
                     .alloc(SLTNode::Mux {
@@ -1518,35 +1751,33 @@ fn lower_ff_processes(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
-) -> SvFfBlocks {
+) -> Result<SvFfBlocks, sv::AnalyzerError> {
     let mut eval_only_ff_blocks = HashMap::default();
     let mut apply_ff_blocks = HashMap::default();
     let mut eval_apply_ff_blocks = HashMap::default();
     let mut reset_clock_map = HashMap::default();
 
     for process in module.ff_processes() {
-        let Some(trigger_set) = trigger_set_from_ff_events(process.events(), name_to_id) else {
-            continue;
-        };
+        let trigger_set = trigger_set_from_ff_events(process.events(), name_to_id)
+            .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
         for reset in &trigger_set.resets {
             reset_clock_map.insert(*reset, trigger_set.clock);
         }
-        let Some((eval_only, apply, eval_apply)) =
-            lower_ff_process(process, &trigger_set, variables, name_to_id, constants)
-        else {
-            continue;
-        };
+        let (eval_only, apply, eval_apply) =
+            lower_ff_process(process, &trigger_set, variables, name_to_id, constants).ok_or_else(
+                || sv::AnalyzerError::Unsupported("always_ff assignment lowering".to_string()),
+            )?;
         insert_or_merge_ff_unit(&mut eval_only_ff_blocks, trigger_set.clone(), eval_only);
         insert_or_merge_ff_unit(&mut apply_ff_blocks, trigger_set.clone(), apply);
         insert_or_merge_ff_unit(&mut eval_apply_ff_blocks, trigger_set, eval_apply);
     }
 
-    (
+    Ok((
         eval_only_ff_blocks,
         apply_ff_blocks,
         eval_apply_ff_blocks,
         reset_clock_map,
-    )
+    ))
 }
 
 fn insert_or_merge_ff_unit(

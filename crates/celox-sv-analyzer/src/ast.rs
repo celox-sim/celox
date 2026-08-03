@@ -36,13 +36,10 @@ impl Source {
                         parameter_overrides,
                     )?);
                 }
-                RefNode::ModuleDeclarationNonansi(module) => {
-                    modules.push(Module::from_module_node_with_parameter_overrides(
-                        module,
-                        syntax_tree,
-                        module_name,
-                        parameter_overrides,
-                    )?);
+                RefNode::ModuleDeclarationNonansi(_) => {
+                    return Err(AnalyzerError::Unsupported(
+                        "non-ANSI module port declarations".to_string(),
+                    ));
                 }
                 _ => {}
             }
@@ -93,6 +90,12 @@ impl Module {
             apply_parameter_overrides(&mut parameters, parameter_overrides);
         }
         let ports = ports_from_module_node(node.clone(), syntax_tree)?;
+        if ports
+            .iter()
+            .any(|port| port.direction() == PortDirection::Ref)
+        {
+            return Err(AnalyzerError::Unsupported("ref port direction".to_string()));
+        }
         let signals = signals_from_module_node(node.clone(), syntax_tree)?;
         let instances = instances_from_module_node(node.clone(), syntax_tree)?;
         let const_env = const_env_from_parameters(&parameters);
@@ -202,14 +205,28 @@ fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerE
                     "net declaration assignment".to_string(),
                 ));
             }
-            RefNode::LoopGenerateConstruct(generate)
+            RefNode::LoopGenerateConstruct(generate) => {
                 if RefNode::LoopGenerateConstruct(generate)
                     .into_iter()
-                    .any(|node| matches!(node, RefNode::ModuleInstantiation(_))) =>
-            {
+                    .any(|node| matches!(node, RefNode::ModuleInstantiation(_)))
+                {
+                    return Err(AnalyzerError::Unsupported(
+                        "module instantiation inside loop-generate".to_string(),
+                    ));
+                }
+                if generate_block_has_data_declaration(&generate.nodes.2) {
+                    return Err(AnalyzerError::Unsupported(
+                        "local data declaration inside loop-generate".to_string(),
+                    ));
+                }
+            }
+            RefNode::UnpackedDimension(_) => {
                 return Err(AnalyzerError::Unsupported(
-                    "module instantiation inside loop-generate".to_string(),
+                    "unpacked array dimension".to_string(),
                 ));
+            }
+            RefNode::InitialConstruct(_) => {
+                return Err(AnalyzerError::Unsupported("initial construct".to_string()));
             }
             _ => {}
         }
@@ -1888,6 +1905,16 @@ fn port_connections_from_hierarchical_instance(
         return Ok(Vec::new());
     };
     let sv_parser::ListOfPortConnections::Named(connections) = connections else {
+        if let sv_parser::ListOfPortConnections::Ordered(connections) = connections
+            && connections
+                .nodes
+                .0
+                .contents()
+                .iter()
+                .all(|connection| connection.nodes.1.is_none())
+        {
+            return Ok(Vec::new());
+        }
         return Err(AnalyzerError::Unsupported(
             "ordered port connection".to_string(),
         ));
