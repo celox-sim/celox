@@ -217,6 +217,65 @@ fn test_ff_assert_message_runtime_effect_is_eager(sim) {
     );
 }
 
+fn test_ff_unknown_ternary_retains_then_arm_output_state(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            choose: input logic,
+            d: input logic<8>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x + 8'd2;
+            }
+
+            function observed (
+                choose: input logic,
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                var selected: logic<8>;
+                written = x;
+                selected = if choose ? update(x, written) : x;
+                $display("written=%0d", written);
+                return written;
+            }
+
+            always_ff (clk) {
+                q = observed(choose, d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top").four_state(true);
+    let clk = sim.event("clk");
+    let choose = sim.signal("choose");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set_four_state(choose, BigUint::from(0u8), BigUint::from(1u8));
+        io.set(d, 10u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 11u8.into());
+    assert_eq!(sim.get(q), 11u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "written=11".to_string(),
+        }],
+    );
+}
+
 fn test_ff_ternary_runtime_effect_only_evaluates_selected_arm(sim) {
     @omit_veryl;
     @ignore_on(wasm);
@@ -1204,7 +1263,7 @@ fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
             }
         }
     "#; }
-    @build Simulator::builder(code, "Top");
+    @build Simulator::builder(code, "Top").four_state(true);
     let clk = sim.event("clk");
     let gate = sim.signal("gate");
     let d = sim.signal("d");
@@ -1244,6 +1303,26 @@ fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
         vec![
             celox::RuntimeEvent::Display {
                 message: "and=1".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "or=1".to_string(),
+            },
+        ],
+    );
+
+    sim.modify(|io| {
+        io.set_four_state(gate, BigUint::from(0u8), BigUint::from(1u8));
+        io.set(d, 30u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(and_effect), 31u8.into());
+    assert_eq!(sim.get(or_effect), 31u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "and=x".to_string(),
             },
             celox::RuntimeEvent::Display {
                 message: "or=1".to_string(),

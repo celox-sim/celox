@@ -565,7 +565,10 @@ impl<'a> FfParser<'a> {
                     expression_states,
                 )?;
                 *state = match op {
-                    Op::LogicAnd => self.merge_expression_states(&lhs, &base, &rhs_state, &base),
+                    Op::LogicAnd => {
+                        let rhs_runs = Self::function_control_may_be_true(lhs.clone());
+                        self.merge_expression_states(&rhs_runs, &base, &rhs_state, &base)
+                    }
                     Op::LogicOr => self.merge_expression_states(&lhs, &base, &base, &rhs_state),
                     _ => rhs_state,
                 };
@@ -593,7 +596,13 @@ impl<'a> FfParser<'a> {
                     &mut then_state,
                     expression_states,
                 )?;
-                let mut else_state = base.clone();
+                // A true condition skips the else arm, a false condition starts
+                // it from `base`, and an unknown condition evaluates it after
+                // the then arm. The true-path entry is irrelevant because the
+                // final merge discards the hypothetical else transition there.
+                let then_may_run = Self::function_control_may_be_true(condition.clone());
+                let mut else_state =
+                    self.merge_expression_states(&then_may_run, &base, &then_state, &base);
                 let else_expr = self.capture_nested_function_outputs_inner(
                     else_expr,
                     &mut else_state,
@@ -1742,6 +1751,20 @@ impl<'a> FfParser<'a> {
             Box::new(truth),
             Op::As,
             Box::new(cast_target),
+            Box::new(Comptime::create_unknown(token)),
+        )
+    }
+
+    fn function_control_may_be_true(condition: Expression) -> Expression {
+        let token = TokenRange::default();
+        let definitely_false = Self::normalize_function_control_condition(Expression::Unary(
+            Op::LogicNot,
+            Box::new(condition),
+            Box::new(Comptime::create_unknown(token)),
+        ));
+        Expression::Unary(
+            Op::LogicNot,
+            Box::new(definitely_false),
             Box::new(Comptime::create_unknown(token)),
         )
     }
