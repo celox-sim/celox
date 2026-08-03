@@ -976,7 +976,7 @@ fn test_ff_array_literal_non_constant_repeat_is_illegal_context() {
 }
 
 #[test]
-fn test_ff_function_argument_array_literal_non_constant_repeat_is_rejected_by_shape_validation() {
+fn test_ff_function_argument_array_literal_non_constant_repeat_is_rejected_by_analyzer() {
     let code = r#"
         module Top (
             clk: input clock,
@@ -996,16 +996,18 @@ fn test_ff_function_argument_array_literal_non_constant_repeat_is_rejected_by_sh
         .build()
         .expect_err("non-constant repeat must be rejected");
     match err.kind() {
-        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
-            assert_eq!(*issue, 43);
-            assert_eq!(*feature, "function call argument shape");
-        }
-        other => panic!("expected function argument shape error, got: {other:?}"),
+        SimulatorErrorKind::Analyzer(errors) => assert!(
+            errors
+                .iter()
+                .any(|error| matches!(error, veryl_analyzer::AnalyzerError::InvalidOperand { .. })),
+            "expected analyzer InvalidOperand for non-constant repeat, got: {errors:?}"
+        ),
+        other => panic!("expected analyzer InvalidOperand for non-constant repeat, got: {other:?}"),
     }
 }
 
 #[test]
-fn test_ff_function_argument_array_literal_multiple_default_is_rejected_by_shape_validation() {
+fn test_ff_function_argument_array_literal_multiple_default_is_rejected_by_analyzer() {
     let code = r#"
         module Top (
             clk: input clock,
@@ -1024,11 +1026,14 @@ fn test_ff_function_argument_array_literal_multiple_default_is_rejected_by_shape
         .build()
         .expect_err("multiple defaults must be rejected");
     match err.kind() {
-        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
-            assert_eq!(*issue, 43);
-            assert_eq!(*feature, "function call argument shape");
-        }
-        other => panic!("expected function argument shape error, got: {other:?}"),
+        SimulatorErrorKind::Analyzer(errors) => assert!(
+            errors.iter().any(|error| matches!(
+                error,
+                veryl_analyzer::AnalyzerError::MultipleDefault { .. }
+            )),
+            "expected analyzer MultipleDefault for array literal, got: {errors:?}"
+        ),
+        other => panic!("expected analyzer MultipleDefault for array literal, got: {other:?}"),
     }
 }
 
