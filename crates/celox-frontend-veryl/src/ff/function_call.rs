@@ -35,6 +35,11 @@ impl<'a> FfParser<'a> {
             || self.expression_has_runtime_effect(expr)
     }
 
+    fn expression_needs_runtime_materialization(&self, expr: &Expression) -> bool {
+        self.expression_needs_eager_evaluation(expr)
+            || Self::expression_needs_assignment_snapshot(expr)
+    }
+
     fn expression_needs_assignment_snapshot(expr: &Expression) -> bool {
         let input_needs_snapshot = |input: &veryl_analyzer::ir::SystemFunctionInput| {
             Self::expression_needs_assignment_snapshot(&input.0)
@@ -55,9 +60,8 @@ impl<'a> FfParser<'a> {
                     SystemFunctionKind::Assert { cond, args, .. } => {
                         input_needs_snapshot(cond) || args.iter().any(input_needs_snapshot)
                     }
-                    SystemFunctionKind::Bits(input)
-                    | SystemFunctionKind::Size(input)
-                    | SystemFunctionKind::Clog2(input)
+                    SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => false,
+                    SystemFunctionKind::Clog2(input)
                     | SystemFunctionKind::Onehot(input)
                     | SystemFunctionKind::Signed(input)
                     | SystemFunctionKind::Unsigned(input) => input_needs_snapshot(input),
@@ -1300,9 +1304,7 @@ impl<'a> FfParser<'a> {
                             Some(&assign.token),
                         ));
                     }
-                    if self.expression_needs_eager_evaluation(&assign.expr)
-                        || Self::expression_needs_assignment_snapshot(&assign.expr)
-                    {
+                    if self.expression_needs_runtime_materialization(&assign.expr) {
                         self.materialize_function_runtime_expression(
                             &assign.expr,
                             &mut state,
@@ -1328,20 +1330,21 @@ impl<'a> FfParser<'a> {
                 }
                 Statement::Null => {}
                 Statement::If(statement) => {
-                    let condition = if self.expression_needs_eager_evaluation(&statement.cond) {
-                        self.materialize_function_runtime_expression(
-                            &statement.cond,
-                            &mut state,
-                            &active,
-                            targets,
-                            domain,
-                            convert,
-                            sources,
-                            ir_builder,
-                        )?
-                    } else {
-                        Self::substitute_function_expr(&statement.cond, &state)
-                    };
+                    let condition =
+                        if self.expression_needs_runtime_materialization(&statement.cond) {
+                            self.materialize_function_runtime_expression(
+                                &statement.cond,
+                                &mut state,
+                                &active,
+                                targets,
+                                domain,
+                                convert,
+                                sources,
+                                ir_builder,
+                            )?
+                        } else {
+                            Self::substitute_function_expr(&statement.cond, &state)
+                        };
                     let base = state.clone();
                     let true_active = Self::function_path_and(active.clone(), condition.clone());
                     let false_active =
@@ -1383,7 +1386,7 @@ impl<'a> FfParser<'a> {
                         })
                     });
                     if pattern_needs_eager_evaluation
-                        || self.expression_needs_eager_evaluation(&statement.case_target)
+                        || self.expression_needs_runtime_materialization(&statement.case_target)
                     {
                         self.materialize_function_runtime_expression(
                             &statement.case_target,
@@ -2121,6 +2124,24 @@ impl<'a> FfParser<'a> {
                             Self::substitute_function_expr_inner(input_expr, defs, expanding);
                     }
                     Expression::Term(Box::new(Factor::FunctionCall(call)))
+                }
+                Factor::SystemFunctionCall(call) => {
+                    let mut call = call.clone();
+                    match &mut call.kind {
+                        // These functions evaluate their operand, so carry the
+                        // assignment-time symbolic state through them. `$bits`
+                        // and `$size` inspect a type/shape and intentionally keep
+                        // their operand intact.
+                        SystemFunctionKind::Clog2(input)
+                        | SystemFunctionKind::Onehot(input)
+                        | SystemFunctionKind::Signed(input)
+                        | SystemFunctionKind::Unsigned(input) => {
+                            input.0 =
+                                Self::substitute_function_expr_inner(&input.0, defs, expanding);
+                        }
+                        _ => {}
+                    }
+                    Expression::Term(Box::new(Factor::SystemFunctionCall(call)))
                 }
                 _ => expr.clone(),
             },

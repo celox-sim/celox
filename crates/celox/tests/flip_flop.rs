@@ -527,6 +527,121 @@ fn test_ff_assignment_snapshots_dynamic_rhs_access(sim) {
     );
 }
 
+fn test_ff_assignment_substitutes_through_evaluating_system_function(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
+            function observed (value: input logic<8>) -> logic<8> {
+                var changing: logic<8>;
+                var captured: logic<8>;
+                changing = value;
+                captured = $unsigned(changing);
+                changing = 8'd9;
+                $display("captured=%0d", captured);
+                return captured;
+            }
+
+            always_ff (clk) {
+                q = observed(d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 5u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 5u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "captured=5".to_string(),
+        }],
+    );
+}
+
+fn test_ff_if_snapshots_dynamic_predicate_before_state_merge(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, d: input logic<2>, q: output logic) {
+            function observed (value: input logic<2>) -> logic {
+                var index: logic;
+                var result: logic;
+                index = 1'b0;
+                result = 1'b0;
+                if value[index] {
+                    result = 1'b1;
+                }
+                index = 1'b1;
+                $display("result=%0d", result);
+                return result;
+            }
+
+            always_ff (clk) {
+                q = observed(d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 0b01u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "result=1".to_string(),
+        }],
+    );
+}
+
+fn test_ff_case_snapshots_dynamic_target_before_state_merge(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, d: input logic<2>, q: output logic) {
+            function observed (value: input logic<2>) -> logic {
+                var index: logic;
+                var result: logic;
+                index = 1'b0;
+                result = 1'b0;
+                case value[index] {
+                    1'b1: result = 1'b1;
+                    default: {}
+                }
+                index = 1'b1;
+                $display("result=%0d", result);
+                return result;
+            }
+
+            always_ff (clk) {
+                q = observed(d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 0b01u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "result=1".to_string(),
+        }],
+    );
+}
+
 fn test_ff_case_merges_nested_output_state_from_selected_arm(sim) {
     @omit_veryl;
     @ignore_on(wasm);
