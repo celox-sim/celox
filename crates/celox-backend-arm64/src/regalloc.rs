@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 use celox_backend_common::regalloc::{
-    BlockAllocationFacts, FunctionAllocationFacts, InstructionAllocationFacts, PhiAllocationFacts,
-    PhiSource, analyze_live_intervals,
+    BlockAllocationFacts, FunctionAllocationFacts, InstructionAllocationFacts, LiveIntervals,
+    PhiAllocationFacts, PhiSource, analyze_live_intervals, color_stack_slots,
 };
 
 use crate::Arm64Reg;
@@ -265,9 +265,10 @@ pub(crate) struct TargetAllocation {
 /// interference graph does not fit the register file.
 ///
 /// SSA values are split into one stack home, short definition temporaries, and
-/// per-instruction reload temporaries. Spilled phis become target edge copies
-/// whose sources and destinations may be stack slots; register sources receive
-/// allocation-only edge uses to keep them live until the copy. This keeps spill
+/// reload ranges shared only across adjacent instructions. Spilled phis become
+/// target edge copies whose sources and destinations may be stack slots;
+/// register sources receive allocation-only edge uses to keep them live until
+/// the copy. Noninterfering homes share colored frame slots. This keeps spill
 /// policy and rewriting on the target side.
 pub(crate) fn allocate_with_spills(
     mut function: MFunction,
@@ -323,6 +324,7 @@ pub(crate) fn allocate_with_spills(
                 &mut function,
                 &mut candidates,
                 proactive,
+                &intervals,
                 &mut spill_frame_size,
                 &mut next_value,
             )?;
@@ -347,6 +349,7 @@ pub(crate) fn allocate_with_spills(
                     &mut function,
                     &mut candidates,
                     spilled,
+                    &intervals,
                     &mut spill_frame_size,
                     &mut next_value,
                 )?;
@@ -463,18 +466,46 @@ fn insert_spill_batch(
     function: &mut MFunction,
     candidates: &mut BTreeSet<VReg>,
     spilled: Vec<VReg>,
+    intervals: &LiveIntervals<VReg>,
     spill_frame_size: &mut u32,
     next_value: &mut u32,
 ) -> Result<(), TargetRegallocError> {
+    // Instruction insertion changes the numeric interval coordinate system
+    // between spill iterations. Color values selected from this one immutable
+    // analysis together, and keep separate batches in disjoint frame regions.
+    let batch_base = *spill_frame_size;
+    let spill_intervals = spilled
+        .iter()
+        .map(|value| {
+            intervals.get(value).ok_or_else(|| {
+                TargetRegallocError::InvalidFacts(format!(
+                    "spill candidate {value} has no exact live interval"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let stack_coloring = color_stack_slots(spill_intervals)
+        .map_err(|error| TargetRegallocError::InvalidFacts(error.to_string()))?;
     let mut homes = BTreeMap::new();
     for spilled in spilled {
         candidates.remove(&spilled);
-        let offset = i32::try_from(*spill_frame_size)
-            .map_err(|_| TargetRegallocError::SpillFrameOverflow)?;
-        homes.insert(spilled, offset);
-        *spill_frame_size = spill_frame_size
-            .checked_add(8)
+        let slot = stack_coloring
+            .get(&spilled)
+            .expect("each selected spill candidate has a colored stack slot");
+        let local_offset = slot
+            .checked_mul(8)
             .ok_or(TargetRegallocError::SpillFrameOverflow)?;
+        let offset = batch_base
+            .checked_add(local_offset)
+            .and_then(|offset| i32::try_from(offset).ok())
+            .ok_or(TargetRegallocError::SpillFrameOverflow)?;
+        homes.insert(spilled, offset);
+        *spill_frame_size = (*spill_frame_size).max(
+            batch_base
+                .checked_add(local_offset)
+                .and_then(|offset| offset.checked_add(8))
+                .ok_or(TargetRegallocError::SpillFrameOverflow)?,
+        );
     }
     function
         .spill_homes
@@ -548,6 +579,21 @@ fn spill_values(
     function.spilled_phis.extend(external_phis);
     for block in &mut function.blocks {
         let original = std::mem::take(&mut block.insts);
+        let spill_uses = original
+            .iter()
+            .map(|instruction| {
+                if matches!(instruction, MInst::KeepAlive { src } if homes.contains_key(src)) {
+                    BTreeSet::new()
+                } else {
+                    instruction
+                        .uses()
+                        .into_iter()
+                        .filter(|value| homes.contains_key(value))
+                        .collect()
+                }
+            })
+            .collect::<Vec<BTreeSet<_>>>();
+        let mut reload_cache = BTreeMap::<VReg, VReg>::new();
         let existing_keep_alives = original
             .iter()
             .filter_map(|instruction| match instruction {
@@ -575,21 +621,23 @@ fn spill_values(
                         .map(|src| MInst::KeepAlive { src }),
                 );
             }
-            let spilled_uses = instruction
-                .uses()
-                .into_iter()
-                .filter(|value| homes.contains_key(value))
-                .collect::<BTreeSet<_>>();
-            for spilled in spilled_uses {
-                let reload = fresh(next_value)?;
-                rewritten.push(MInst::Load {
-                    dst: reload,
-                    base: crate::mir::BaseReg::StackFrame,
-                    offset: homes[&spilled],
-                    size: crate::mir::OpSize::S64,
-                });
+            for spilled in spill_uses[index].iter().copied() {
+                let reload = if let Some(&reload) = reload_cache.get(&spilled) {
+                    reload
+                } else {
+                    let reload = fresh(next_value)?;
+                    rewritten.push(MInst::Load {
+                        dst: reload,
+                        base: crate::mir::BaseReg::StackFrame,
+                        offset: homes[&spilled],
+                        size: crate::mir::OpSize::S64,
+                    });
+                    reload_cache.insert(spilled, reload);
+                    reload
+                };
                 instruction.rewrite_use(spilled, reload);
             }
+            let mut definition_cache = None;
             if let Some(spilled) = instruction.def().filter(|value| homes.contains_key(value)) {
                 let temporary = fresh(next_value)?;
                 *instruction
@@ -603,8 +651,17 @@ fn spill_values(
                     size: crate::mir::OpSize::S64,
                 });
                 rewritten_definitions.insert(spilled);
+                definition_cache = Some((spilled, temporary));
             } else {
                 rewritten.push(instruction);
+            }
+            let next_uses = spill_uses.get(index + 1);
+            reload_cache
+                .retain(|value, _| next_uses.is_some_and(|next_uses| next_uses.contains(value)));
+            if let Some((spilled, temporary)) = definition_cache
+                && next_uses.is_some_and(|next_uses| next_uses.contains(&spilled))
+            {
+                reload_cache.insert(spilled, temporary);
             }
         }
         block.insts = rewritten;
@@ -1131,20 +1188,21 @@ mod tests {
 
         assert!(allocation.spill_frame_size >= 8);
         assert_eq!(allocation.spill_frame_size % 8, 0);
-        assert!(
-            allocation.allocated.function.blocks[0]
-                .insts
-                .iter()
-                .any(|instruction| matches!(
+        let reload_count = allocation.allocated.function.blocks[0]
+            .insts
+            .iter()
+            .filter(|instruction| {
+                matches!(
                     instruction,
                     MInst::Load {
                         base: BaseReg::StackFrame,
-                        offset: 0,
                         size: OpSize::S64,
                         ..
                     }
-                ))
-        );
+                )
+            })
+            .count();
+        assert!(reload_count > 0);
         assert!(
             allocation.allocated.function.blocks[0]
                 .insts
@@ -1159,6 +1217,90 @@ mod tests {
                     }
                 ))
         );
+        verify_allocated(&allocation.allocated).unwrap();
+    }
+
+    #[test]
+    fn reuses_one_reload_across_adjacent_uses() {
+        let mut function = MFunction::new(
+            vec![MBlock {
+                id: BlockId(0),
+                phis: Vec::new(),
+                insts: vec![
+                    MInst::LoadImm {
+                        dst: VReg(0),
+                        value: 42,
+                    },
+                    MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 0,
+                        src: VReg(0),
+                        size: OpSize::S64,
+                    },
+                    MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 8,
+                        src: VReg(0),
+                        size: OpSize::S64,
+                    },
+                    MInst::Return,
+                ],
+            }],
+            Vec::new(),
+        );
+        let homes = [(VReg(0), 0)].into_iter().collect();
+        function.spill_homes.insert(VReg(0), 0);
+        let mut next_value = 1;
+
+        spill_values(&mut function, &homes, &mut next_value).unwrap();
+
+        assert_eq!(
+            function.blocks[0]
+                .insts
+                .iter()
+                .filter(|instruction| matches!(
+                    instruction,
+                    MInst::Load {
+                        base: BaseReg::StackFrame,
+                        ..
+                    }
+                ))
+                .count(),
+            0
+        );
+        allocate_without_spills(function).unwrap();
+    }
+
+    #[test]
+    fn colors_disjoint_pressure_waves_into_shared_stack_slots() {
+        let mut instructions = Vec::new();
+        for wave in 0..2_u32 {
+            let first = wave * 26;
+            instructions.extend((0..26).map(|value| MInst::LoadImm {
+                dst: VReg(first + value),
+                value: u64::from(first + value),
+            }));
+            instructions.extend((0..26).map(|value| MInst::Store {
+                base: BaseReg::SimState,
+                offset: i32::try_from((first + value) * 8).unwrap(),
+                src: VReg(first + value),
+                size: OpSize::S64,
+            }));
+        }
+        instructions.push(MInst::Return);
+        let allocation = allocate_with_spills(MFunction::new(
+            vec![MBlock {
+                id: BlockId(0),
+                phis: Vec::new(),
+                insts: instructions,
+            }],
+            Vec::new(),
+        ))
+        .unwrap();
+
+        let spill_count = allocation.allocated.function.spill_homes.len();
+        let slot_count = allocation.spill_frame_size / 8;
+        assert!(spill_count > usize::try_from(slot_count).unwrap());
         verify_allocated(&allocation.allocated).unwrap();
     }
 
