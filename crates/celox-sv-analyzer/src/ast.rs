@@ -506,6 +506,15 @@ fn reject_silently_ignored_constructs(
                     "casez or casex inside function".to_string(),
                 ));
             }
+            RefNode::FunctionDeclaration(function)
+                if RefNode::FunctionDeclaration(function)
+                    .into_iter()
+                    .any(|node| matches!(node, RefNode::BlockingAssignment(assignment) if blocking_assignment_has_non_plain_lvalue(assignment))) =>
+            {
+                return Err(AnalyzerError::Unsupported(
+                    "selected or composite assignment inside function".to_string(),
+                ));
+            }
             RefNode::GateInstantiation(_) => {
                 return Err(AnalyzerError::Unsupported(
                     "gate primitive instantiation".to_string(),
@@ -514,6 +523,29 @@ fn reject_silently_ignored_constructs(
             RefNode::PackageImportDeclaration(_) | RefNode::PackageScope(_) => {
                 return Err(AnalyzerError::Unsupported(
                     "package-dependent systemverilog module".to_string(),
+                ));
+            }
+            RefNode::ParamAssignment(parameter)
+                if RefNode::ParamAssignment(parameter).into_iter().any(|node| {
+                    matches!(
+                        node,
+                        RefNode::ConstantExpression(
+                            sv_parser::ConstantExpression::Unary(unary)
+                        ) if syntax_tree
+                            .get_str(&unary.nodes.0.nodes.0.nodes.0)
+                            .is_some_and(|op| op == "~")
+                            && matches!(
+                                const_expr_from_ref_node(
+                                    RefNode::ConstantPrimary(&unary.nodes.2),
+                                    syntax_tree,
+                                ),
+                                Some(ConstExpr::Ident(_))
+                            )
+                    )
+                }) =>
+            {
+                return Err(AnalyzerError::Unsupported(
+                    "width-dependent complement in parameter expression".to_string(),
                 ));
             }
             RefNode::ParamAssignment(parameter)
@@ -535,6 +567,19 @@ fn reject_silently_ignored_constructs(
         }
     }
     Ok(())
+}
+
+fn blocking_assignment_has_non_plain_lvalue(assignment: &sv_parser::BlockingAssignment) -> bool {
+    let lvalue = match assignment {
+        sv_parser::BlockingAssignment::Variable(assignment) => &assignment.nodes.0,
+        sv_parser::BlockingAssignment::OperatorAssignment(assignment) => &assignment.nodes.0,
+        _ => return true,
+    };
+    let sv_parser::VariableLvalue::Identifier(identifier) = lvalue else {
+        return true;
+    };
+    let select = &identifier.nodes.2;
+    select.nodes.0.is_some() || !select.nodes.1.nodes.0.is_empty() || select.nodes.2.is_some()
 }
 
 fn non_input_function_port(node: RefNode<'_>) -> bool {
@@ -4366,10 +4411,7 @@ fn conditional_assignments_from_conditional_statement(
         packed_dimensions,
         assignments,
     )?;
-    prior_false.push(Expr::Unary {
-        op: UnaryOp::LogicNot,
-        expr: Box::new(if_condition),
-    });
+    prior_false.push(procedural_false_condition(if_condition));
 
     for (_, _, predicate, branch) in &stmt.nodes.4 {
         let Some(branch_condition) =
@@ -4388,10 +4430,7 @@ fn conditional_assignments_from_conditional_statement(
             packed_dimensions,
             assignments,
         )?;
-        prior_false.push(Expr::Unary {
-            op: UnaryOp::LogicNot,
-            expr: Box::new(branch_condition),
-        });
+        prior_false.push(procedural_false_condition(branch_condition));
     }
 
     if let Some((_, branch)) = &stmt.nodes.5 {
@@ -4406,6 +4445,16 @@ fn conditional_assignments_from_conditional_statement(
         )?;
     }
     Ok(())
+}
+
+fn procedural_false_condition(condition: Expr) -> Expr {
+    Expr::Unary {
+        op: UnaryOp::LogicNot,
+        expr: Box::new(Expr::Unary {
+            op: UnaryOp::ToTwoState,
+            expr: Box::new(condition),
+        }),
+    }
 }
 
 fn conditional_assignments_from_case_statement(

@@ -584,6 +584,51 @@ fn treats_unknown_procedural_conditions_as_false() {
 }
 
 #[test]
+fn takes_always_ff_else_branch_for_unknown_predicates() {
+    let source = r#"
+        module Top(input logic clk, input logic sel, output logic q);
+            always_ff @(posedge clk) begin
+                if (sel) q <= 1'b1;
+                else q <= 1'b0;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("unknown_else.sv"))], "Top")
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    let clk = sim.event("clk");
+    let sel = sim.signal("sel");
+    let q = sim.signal("q");
+    sim.modify(|io| io.set(sel, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 1u8.into());
+    sim.modify(|io| io.set_four_state(sel, BigUint::from(1u8), BigUint::from(1u8)))
+        .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.get_four_state(q),
+        (BigUint::from(0u8), BigUint::from(0u8))
+    );
+}
+
+#[test]
+fn discovers_implicit_output_nets_before_instance_glue() {
+    let source = r#"
+        module Sink(input logic a, output logic y); assign y = a; endmodule
+        module Source(output logic y); assign y = 1'b1; endmodule
+        module Top(output logic out);
+            Sink sink(.a(w), .y(out));
+            Source source(.y(w));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("implicit_order.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("out")), 1u8.into());
+}
+
+#[test]
 fn propagates_function_assignments_out_of_nested_blocks() {
     let source = r#"
         module Top(input logic a, output logic y);
@@ -1084,6 +1129,29 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "systemverilog inout port",
             r#"
             module Top(inout wire io); endmodule
+        "#,
+        ),
+        (
+            "selected or composite assignment inside function",
+            r#"
+            module Top(input logic [1:0] a, output logic [1:0] y);
+                function automatic logic [1:0] set_bit(input logic [1:0] value);
+                    value[0] = 1'b1;
+                    return value;
+                endfunction
+                assign y = set_bit(a);
+            endmodule
+        "#,
+        ),
+        (
+            "width-dependent complement in parameter expression",
+            r#"
+            module Top #(
+                parameter logic [7:0] P = 8'hff,
+                parameter FLAG = (~P == 0)
+            ) (output logic y);
+                assign y = FLAG;
+            endmodule
         "#,
         ),
     ];

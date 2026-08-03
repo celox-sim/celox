@@ -698,6 +698,7 @@ pub(crate) fn attach_instance_glue(
 ) -> Result<(), ParserError> {
     let mut signal_names = lowered.signal_names.clone();
     let mut parent_variables = lowered.variables.clone();
+    let mut resolved_instances = Vec::new();
     for instance in &lowered.instances {
         let child_key = LoweredSvModuleKey::instance_key(instance);
         let Some(child_id) = module_ids.get(&child_key).copied() else {
@@ -722,6 +723,9 @@ pub(crate) fn attach_instance_glue(
             child,
             &instance.port_connections,
         );
+        resolved_instances.push((instance, child_id, child));
+    }
+    for (instance, child_id, child) in resolved_instances {
         let glue = build_instance_glue(
             &parent_variables,
             &signal_names,
