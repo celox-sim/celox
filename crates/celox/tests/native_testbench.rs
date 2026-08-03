@@ -1,5 +1,6 @@
 use celox::{DeadStorePolicy, ResetType, Simulator, SimulatorErrorKind, TestResult};
 use veryl_analyzer::{AnalyzerError, analyzer_error::InvalidForRangeKind};
+use veryl_metadata::Metadata;
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -37,6 +38,27 @@ fn bench_native_tb_std_counter() -> String {
 }
 
 // ── Basic ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_native_testbench_uses_metadata_project_name() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $finish();
+            }
+        }
+    "#;
+    let metadata = Metadata::create_default("heliodor").unwrap();
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass,
+    );
+}
 
 #[test]
 fn test_counter_pass() {
