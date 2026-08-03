@@ -83,6 +83,15 @@ fn analyze(
         errors.append(&mut analyzer.analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir)));
     }
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
+
+    // Veryl reports combinational loops before Celox can apply its path-level
+    // false-loop and true-loop authorizations. When the caller supplied such
+    // an authorization, defer loop validation to the Celox scheduler: it will
+    // still reject every cycle that is not covered by the supplied paths.
+    if !ignored_loops.is_empty() || !true_loops.is_empty() {
+        errors.retain(|error| !matches!(error, AnalyzerError::CombinationalLoop { .. }));
+    }
+
     let mut frontend_diagnostics = if errors.iter().any(AnalyzerError::is_error) {
         Vec::new()
     } else {
