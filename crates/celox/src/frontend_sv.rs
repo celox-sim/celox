@@ -804,9 +804,15 @@ fn build_instance_glue(
         let width = child_var.width;
         match child_var.kind {
             VarKind::Input => {
-                let Some(actual_expr) = connection.actual_expr.as_ref() else {
-                    continue;
-                };
+                let actual_expr = connection.actual_expr.as_ref().ok_or_else(|| {
+                    ParserError::unsupported(
+                        64,
+                        LoweringPhase::SimulatorParser,
+                        "systemverilog open input port connection",
+                        formal.clone(),
+                        None,
+                    )
+                })?;
                 let (expr, sources, source_ids) = lower_glue_parent_expr(
                     actual_expr,
                     parent_variables,

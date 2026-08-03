@@ -262,6 +262,23 @@ fn preserves_ternary_parameter_values() {
 }
 
 #[test]
+fn sign_extends_signed_literals_in_constant_expressions() {
+    let source = r#"
+        module Top #(
+            parameter FLAG = (8'shff < 0)
+        ) (
+            output logic y
+        );
+            assign y = FLAG;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("signed_param.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
 fn preserves_typedef_function_return_width_in_ff_case() {
     let source = r#"
         module Top(input logic clk, output logic [7:0] q);
@@ -756,6 +773,47 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic [10000:0] a, output logic [10000:0] y);
                 for (genvar i = 0; i < 10001; i++) assign y[i] = a[i];
+            endmodule
+        "#,
+        ),
+        (
+            "open input port connection",
+            r#"
+            module Child(input wire a, output logic y); assign y = (a === 1'bz); endmodule
+            module Top(output logic y); Child child(.a(), .y(y)); endmodule
+        "#,
+        ),
+        (
+            "nonblocking assignment inside always_comb",
+            r#"
+            module Top(input logic a, output logic y); always_comb y <= a; endmodule
+        "#,
+        ),
+        (
+            "iff-qualified always_ff event",
+            r#"
+            module Top(input logic clk, enable, d, output logic q);
+                always_ff @(posedge clk iff enable) q <= d;
+            endmodule
+        "#,
+        ),
+        (
+            "concatenated always_ff assignment target",
+            r#"
+            module Top(input logic clk, input logic [1:0] d, output logic q1, q0);
+                always_ff @(posedge clk) {q1, q0} <= d;
+            endmodule
+        "#,
+        ),
+        (
+            "output or inout function argument",
+            r#"
+            module Top(input logic a, output logic y, side);
+                function automatic logic f(output logic out, input logic value);
+                    out = value;
+                    return value;
+                endfunction
+                assign y = f(side, a);
             endmodule
         "#,
         ),

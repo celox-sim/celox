@@ -275,11 +275,30 @@ fn shift_amount(value: i128) -> Option<u32> {
 }
 
 fn literal_as_i128(value: &str) -> Option<i128> {
+    let explicitly_signed = value
+        .split_once('\'')
+        .is_some_and(|(_, based)| matches!(based.trim_start().chars().next(), Some('s' | 'S')));
     parse_integral_literal(value).and_then(|literal| {
         if literal.mask != BigUint::default() {
             return None;
         }
-        i128::try_from(literal.value).ok()
+        let value = u128::try_from(literal.value).ok()?;
+        if !explicitly_signed || !literal.signed || literal.width == 0 {
+            return i128::try_from(value).ok();
+        }
+        if literal.width > 128 {
+            return None;
+        }
+        let sign_bit = 1u128 << (literal.width - 1);
+        if value & sign_bit == 0 {
+            i128::try_from(value).ok()
+        } else if literal.width == 128 {
+            Some(value as i128)
+        } else {
+            i128::try_from(value)
+                .ok()
+                .and_then(|value| value.checked_sub(1i128 << literal.width))
+        }
     })
 }
 

@@ -278,6 +278,39 @@ fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerE
                         "procedural loop inside always_ff".to_string(),
                     ));
                 }
+                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_))
+                    && body
+                        .clone()
+                        .into_iter()
+                        .any(|node| matches!(node, RefNode::NonblockingAssignment(_)))
+                {
+                    return Err(AnalyzerError::Unsupported(
+                        "nonblocking assignment inside always_comb".to_string(),
+                    ));
+                }
+                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
+                    && body.clone().into_iter().any(|node| {
+                        matches!(
+                            node,
+                            RefNode::EventExpressionExpression(event)
+                                if event.nodes.2.is_some()
+                        )
+                    })
+                {
+                    return Err(AnalyzerError::Unsupported(
+                        "iff-qualified always_ff event".to_string(),
+                    ));
+                }
+                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
+                    && body
+                        .clone()
+                        .into_iter()
+                        .any(|node| matches!(node, RefNode::VariableLvalueLvalue(_)))
+                {
+                    return Err(AnalyzerError::Unsupported(
+                        "concatenated always_ff assignment target".to_string(),
+                    ));
+                }
                 if body
                     .into_iter()
                     .any(|node| matches!(node, RefNode::DataDeclaration(_)))
@@ -406,10 +439,34 @@ fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerE
                     "conditional function return without else".to_string(),
                 ));
             }
+            RefNode::FunctionDeclaration(function)
+                if RefNode::FunctionDeclaration(function)
+                    .into_iter()
+                    .any(non_input_function_port) =>
+            {
+                return Err(AnalyzerError::Unsupported(
+                    "output or inout function argument".to_string(),
+                ));
+            }
             _ => {}
         }
     }
     Ok(())
+}
+
+fn non_input_function_port(node: RefNode<'_>) -> bool {
+    let direction = match node {
+        RefNode::TfPortItem(port) => port.nodes.1.as_ref(),
+        RefNode::TfPortDeclaration(port) => Some(&port.nodes.1),
+        _ => return false,
+    };
+    match direction {
+        None => false,
+        Some(sv_parser::TfPortDirection::PortDirection(direction)) => {
+            !matches!(&**direction, sv_parser::PortDirection::Input(_))
+        }
+        Some(sv_parser::TfPortDirection::ConstRef(_)) => true,
+    }
 }
 
 fn apply_parameter_overrides(parameters: &mut [Parameter], overrides: &HashMap<String, i128>) {
