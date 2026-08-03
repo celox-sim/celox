@@ -4905,7 +4905,7 @@ fn test_ff_function_call_array_literal_view_dominates_conditional_access(sim) {
     assert_eq!(sim.get(out_q), 0x33u32.into());
 }
 
-fn test_ff_function_call_array_literal_view_is_lazy_in_ternary_arm(sim) {
+fn test_ff_function_call_array_literal_effect_is_eager_in_ternary_arm(sim) {
     @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
@@ -4952,7 +4952,7 @@ fn test_ff_function_call_array_literal_view_is_lazy_in_ternary_arm(sim) {
     .unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_q), 0u32.into());
-    assert_eq!(sim.get(side), 0u32.into());
+    assert_eq!(sim.get(side), 0x5au32.into());
 
     sim.modify(|io| io.set(guard, 1u8)).unwrap();
     sim.tick(clk).unwrap();
@@ -4960,7 +4960,7 @@ fn test_ff_function_call_array_literal_view_is_lazy_in_ternary_arm(sim) {
     assert_eq!(sim.get(side), 0x5au32.into());
 }
 
-fn test_ff_function_call_array_literal_view_is_lazy_in_short_circuit_rhs(sim) {
+fn test_ff_function_call_array_literal_effect_is_eager_in_short_circuit_rhs(sim) {
     @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
@@ -5025,7 +5025,7 @@ fn test_ff_function_call_array_literal_view_is_lazy_in_short_circuit_rhs(sim) {
     .unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_and), 0u32.into());
-    assert_eq!(sim.get(and_side), 0u32.into());
+    assert_eq!(sim.get(and_side), 0x5au32.into());
     assert_eq!(sim.get(out_or), 1u32.into());
     assert_eq!(sim.get(or_side), 0x5au32.into());
 
@@ -5034,7 +5034,7 @@ fn test_ff_function_call_array_literal_view_is_lazy_in_short_circuit_rhs(sim) {
     assert_eq!(sim.get(out_and), 1u32.into());
     assert_eq!(sim.get(and_side), 0x5au32.into());
     assert_eq!(sim.get(out_or), 1u32.into());
-    assert_eq!(sim.get(or_side), 0u32.into());
+    assert_eq!(sim.get(or_side), 0x5au32.into());
 }
 
 fn test_ff_function_call_array_literal_view_preserves_expression_order(sim) {
@@ -5075,7 +5075,7 @@ fn test_ff_function_call_array_literal_view_preserves_expression_order(sim) {
 
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_q), 0x33u32.into());
-    assert_eq!(sim.get(side), 0x22u32.into());
+    assert_eq!(sim.get(side), 0x11u32.into());
 }
 
 fn test_ff_function_call_array_literal_branch_view_is_reused_after_merge(sim) {
@@ -5124,7 +5124,7 @@ fn test_ff_function_call_array_literal_branch_view_is_reused_after_merge(sim) {
     }
 }
 
-fn test_ff_function_call_static_array_item_stays_lazy_before_conditional_dynamic_access(sim) {
+fn test_ff_function_call_effectful_array_items_are_eager_before_conditional_access(sim) {
     @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
@@ -5174,7 +5174,7 @@ fn test_ff_function_call_static_array_item_stays_lazy_before_conditional_dynamic
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_q), 0u32.into());
     assert_eq!(sim.get(side0), 0x11u32.into());
-    assert_eq!(sim.get(side1), 0u32.into());
+    assert_eq!(sim.get(side1), 0x22u32.into());
 
     sim.modify(|io| io.set(guard, 1u8)).unwrap();
     sim.tick(clk).unwrap();
@@ -5489,14 +5489,14 @@ fn test_ff_function_call_merges_directly_forwarded_array_cache(sim) {
     sim.modify(|io| io.set(guard, 0u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_q), 0x66u32.into());
-    assert_eq!(sim.get(side), 0x11u32.into());
+    assert_eq!(sim.get(side), 0x55u32.into());
 
     sim.modify(|io| io.set(guard, 1u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_q), 0x77u32.into());
-    // The scalar effect is eager at call entry; the observed array element is
-    // evaluated later on first use and therefore supplies the final write.
-    assert_eq!(sim.get(side), 0x11u32.into());
+    // Both arguments are eager effects, so declaration order makes the
+    // later scalar actual supply the final write.
+    assert_eq!(sim.get(side), 0x55u32.into());
 }
 
 fn test_ff_function_call_tracks_array_reads_in_output_indices(sim) {
@@ -5548,12 +5548,12 @@ fn test_ff_function_call_tracks_array_reads_in_output_indices(sim) {
     sim.modify(|io| io.set(guard, 0u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_q), 0x56u32.into());
-    assert_eq!(sim.get(side), 0x01u32.into());
+    assert_eq!(sim.get(side), 0x55u32.into());
 
     sim.modify(|io| io.set(guard, 1u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_q), 0x56u32.into());
-    assert_eq!(sim.get(side), 0x01u32.into());
+    assert_eq!(sim.get(side), 0x55u32.into());
 }
 
 fn test_ff_function_call_tracks_nested_array_reads_in_output_indices(sim) {
@@ -5608,12 +5608,12 @@ fn test_ff_function_call_tracks_nested_array_reads_in_output_indices(sim) {
     sim.modify(|io| io.set(guard, 0u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_q), 0x56u32.into());
-    assert_eq!(sim.get(side), 0x01u32.into());
+    assert_eq!(sim.get(side), 0x55u32.into());
 
     sim.modify(|io| io.set(guard, 1u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_q), 0x56u32.into());
-    assert_eq!(sim.get(side), 0x01u32.into());
+    assert_eq!(sim.get(side), 0x55u32.into());
 }
 
 fn test_ff_function_call_restores_initialized_forwarded_alias_view(sim) {
@@ -5846,7 +5846,7 @@ fn test_ff_function_call_restores_nearest_array_view_after_deep_reentrant_call(s
     assert_eq!(sim.get(out_q), 0x11u32.into());
 }
 
-fn test_ff_function_call_bits_and_size_do_not_evaluate_array_argument(sim) {
+fn test_ff_function_call_bits_and_size_evaluate_effectful_array_argument(sim) {
     @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
@@ -5888,11 +5888,11 @@ fn test_ff_function_call_bits_and_size_do_not_evaluate_array_argument(sim) {
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_bits), 16u32.into());
     assert_eq!(sim.get(out_size), 2u32.into());
-    assert_eq!(sim.get(bits_side), 0u32.into());
-    assert_eq!(sim.get(size_side), 0u32.into());
+    assert_eq!(sim.get(bits_side), 0x5au32.into());
+    assert_eq!(sim.get(size_side), 0x5au32.into());
 }
 
-fn test_ff_function_call_nested_bits_does_not_evaluate_forwarded_array_argument(sim) {
+fn test_ff_function_call_nested_bits_evaluates_effectful_array_argument(sim) {
     @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
@@ -5928,7 +5928,7 @@ fn test_ff_function_call_nested_bits_does_not_evaluate_forwarded_array_argument(
     sim.modify(|io| io.set(in0, 0x5au8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_q), 16u32.into());
-    assert_eq!(sim.get(side), 0u32.into());
+    assert_eq!(sim.get(side), 0x5au32.into());
 }
 
 fn test_ff_function_call_array_literal_view_preserves_source_order(sim) {

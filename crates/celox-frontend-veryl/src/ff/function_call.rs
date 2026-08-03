@@ -2405,6 +2405,49 @@ impl<'a> FfParser<'a> {
                 .is_some_and(|(_, expr)| Self::expression_writes_any(expr, candidates))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_unobserved_array_actual_effects<A>(
+        &mut self,
+        expr: &Expression,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        // Array views deliberately defer pure elements until the callee reads
+        // them.  An unused formal therefore never creates a view, but its
+        // effectful actual elements must still run at the call site.  Preserve
+        // the resulting register under the element's token range so a later
+        // view access reuses it instead of replaying the effect.
+        if let Expression::ArrayLiteral(items, _) = expr {
+            for item in items {
+                let item_expr = match item {
+                    ArrayLiteralItem::Value(expr, _) | ArrayLiteralItem::Defaul(expr) => expr,
+                };
+                self.materialize_unobserved_array_actual_effects(
+                    item_expr, targets, domain, convert, sources, ir_builder,
+                )?;
+            }
+            return Ok(());
+        }
+
+        if !self.expression_needs_eager_evaluation(expr) {
+            return Ok(());
+        }
+
+        self.parse_expression(expr, targets, domain, convert, sources, ir_builder, None)?;
+        let value = self
+            .stack
+            .pop_back()
+            .expect("Effectful array literal element evaluation failed");
+        self.function_expression_value_stack
+            .last_mut()
+            .expect("Function expression value scope is active")
+            .insert(expr.token_range(), value);
+        Ok(())
+    }
+
     fn materialize_function_inputs<A>(
         &mut self,
         call: &veryl_analyzer::ir::FunctionCall,
@@ -2467,6 +2510,9 @@ impl<'a> FfParser<'a> {
                         Some(&call.comptime.token),
                     ));
                 }
+                self.materialize_unobserved_array_actual_effects(
+                    actual, targets, domain, convert, sources, ir_builder,
+                )?;
                 // Array arguments are represented by call-scoped views. The
                 // view snapshots each observed element in source order while
                 // leaving unobserved, side-effect-free elements lazy; a scalar
@@ -3094,7 +3140,9 @@ impl<'a> FfParser<'a> {
                 bindings.insert(*arg_id, arg_expr);
             }
         }
-        let materialized = self.materialize_function_inputs(
+        self.function_expression_value_stack
+            .push(HashMap::default());
+        let materialized = match self.materialize_function_inputs(
             call,
             &function_body,
             &ordered_arg_paths,
@@ -3103,7 +3151,13 @@ impl<'a> FfParser<'a> {
             convert,
             sources,
             ir_builder,
-        )?;
+        ) {
+            Ok(materialized) => materialized,
+            Err(err) => {
+                self.function_expression_value_stack.pop();
+                return Err(err);
+            }
+        };
         let mut symbolic_bindings = bindings.clone();
         for arg_id in materialized.keys() {
             symbolic_bindings.remove(arg_id);
@@ -3114,8 +3168,6 @@ impl<'a> FfParser<'a> {
         self.function_arg_value_stack.push(materialized);
         self.function_array_view_stack.push(HashMap::default());
         self.function_array_view_enabled_stack.push(true);
-        self.function_expression_value_stack
-            .push(HashMap::default());
         let result = (|| {
             let runtime_state = if self
                 .statements_have_runtime_effect(&function_body.statements, &mut HashSet::default())
@@ -3270,7 +3322,9 @@ impl<'a> FfParser<'a> {
                 bindings.insert(*arg_id, arg_expr);
             }
         }
-        let materialized = self.materialize_function_inputs(
+        self.function_expression_value_stack
+            .push(HashMap::default());
+        let materialized = match self.materialize_function_inputs(
             call,
             &function_body,
             &ordered_arg_paths,
@@ -3279,7 +3333,13 @@ impl<'a> FfParser<'a> {
             convert,
             sources,
             ir_builder,
-        )?;
+        ) {
+            Ok(materialized) => materialized,
+            Err(err) => {
+                self.function_expression_value_stack.pop();
+                return Err(err);
+            }
+        };
         let mut symbolic_bindings = bindings.clone();
         for arg_id in materialized.keys() {
             symbolic_bindings.remove(arg_id);
@@ -3290,8 +3350,6 @@ impl<'a> FfParser<'a> {
         self.function_arg_value_stack.push(materialized);
         self.function_array_view_stack.push(HashMap::default());
         self.function_array_view_enabled_stack.push(true);
-        self.function_expression_value_stack
-            .push(HashMap::default());
         let result = (|| {
             let runtime_state = if has_runtime_effect {
                 Some(self.emit_function_runtime_effects(
