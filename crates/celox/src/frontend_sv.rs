@@ -1729,8 +1729,14 @@ fn lower_expr_with_context(
                 .ok()?;
             sources = sources
                 .into_iter()
-                .map(|source| VarAtomBase::new(source.id, access.lsb, access.msb))
-                .collect();
+                .map(|source| {
+                    Some(VarAtomBase::new(
+                        source.id,
+                        source.access.lsb.checked_add(access.lsb)?,
+                        source.access.lsb.checked_add(access.msb)?,
+                    ))
+                })
+                .collect::<Option<HashSet<_>>>()?;
             Some((node, sources))
         }
         sv::ir::Expr::Concat(parts) => {

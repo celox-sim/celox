@@ -46,6 +46,21 @@ fn evaluates_sized_arithmetic_and_logical_right_shift_parameters() {
 }
 
 #[test]
+fn applies_unsigned_coercion_to_mixed_signed_constant_comparisons() {
+    let source = r#"
+        module Top(output logic y);
+            localparam FLAG = (8'shff < 8'h01);
+            assign y = FLAG;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("constant_compare.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0u8.into());
+}
+
+#[test]
 fn does_not_count_child_inputs_as_net_drivers() {
     let error = cranelift_build_error(
         r#"

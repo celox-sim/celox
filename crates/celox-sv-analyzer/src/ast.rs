@@ -1146,6 +1146,7 @@ struct Function {
     body: Expr,
     return_width: Option<usize>,
     return_signed: bool,
+    return_is_2state: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2471,12 +2472,15 @@ fn function_from_declaration(
             let expr = function_body_expr(&body.nodes.6, syntax_tree, packed_dimensions)?;
             let return_type =
                 function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
+            let return_is_2state =
+                function_return_is_2state(&body.nodes.0, syntax_tree, type_aliases);
             Some(Function {
                 name,
                 params,
                 body: expr,
                 return_width: return_type.map(|r#type| r#type.width),
                 return_signed: return_type.is_some_and(|r#type| r#type.signed),
+                return_is_2state,
             })
         }
         sv_parser::FunctionBodyDeclaration::WithoutPort(body) => {
@@ -2485,15 +2489,44 @@ fn function_from_declaration(
             let expr = function_body_expr(&body.nodes.5, syntax_tree, packed_dimensions)?;
             let return_type =
                 function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
+            let return_is_2state =
+                function_return_is_2state(&body.nodes.0, syntax_tree, type_aliases);
             Some(Function {
                 name,
                 params,
                 body: expr,
                 return_width: return_type.map(|r#type| r#type.width),
                 return_signed: return_type.is_some_and(|r#type| r#type.signed),
+                return_is_2state,
             })
         }
     }
+}
+
+fn function_return_is_2state(
+    node: &sv_parser::FunctionDataTypeOrImplicit,
+    syntax_tree: &SyntaxTree,
+    type_aliases: &HashMap<String, Type>,
+) -> bool {
+    let r#type = match node {
+        sv_parser::FunctionDataTypeOrImplicit::DataTypeOrVoid(data_type) => match &**data_type {
+            sv_parser::DataTypeOrVoid::DataType(data_type) => {
+                type_from_ref_node(RefNode::DataType(data_type), syntax_tree)
+                    .or_else(|| type_alias_from_data_type(data_type, syntax_tree, type_aliases))
+            }
+            sv_parser::DataTypeOrVoid::Void(_) => None,
+        },
+        sv_parser::FunctionDataTypeOrImplicit::ImplicitDataType(data_type) => {
+            type_from_ref_node(RefNode::ImplicitDataType(data_type), syntax_tree).or_else(|| {
+                type_alias_from_ref_node(
+                    RefNode::ImplicitDataType(data_type),
+                    syntax_tree,
+                    type_aliases,
+                )
+            })
+        }
+    };
+    r#type.is_some_and(|r#type| r#type.kind() == TypeKind::Bit)
 }
 
 fn function_return_type(
@@ -2885,7 +2918,10 @@ fn function_expr_from_conditional_statement(
         syntax_tree,
         packed_dimensions,
     )?;
-    branches.push((substitute_expr_idents(if_condition, locals), then_expr));
+    branches.push((
+        procedural_truth_condition(substitute_expr_idents(if_condition, locals)),
+        then_expr,
+    ));
 
     for (_, _, predicate, branch) in &statement.nodes.4 {
         let condition =
@@ -2897,7 +2933,10 @@ fn function_expr_from_conditional_statement(
             syntax_tree,
             packed_dimensions,
         )?;
-        branches.push((substitute_expr_idents(condition, locals), branch_expr));
+        branches.push((
+            procedural_truth_condition(substitute_expr_idents(condition, locals)),
+            branch_expr,
+        ));
     }
 
     let mut else_expr = if let Some((_, branch)) = &statement.nodes.5 {
@@ -2920,6 +2959,16 @@ fn function_expr_from_conditional_statement(
         };
     }
     Some(else_expr)
+}
+
+fn procedural_truth_condition(condition: Expr) -> Expr {
+    Expr::Unary {
+        op: UnaryOp::RedOr,
+        expr: Box::new(Expr::Unary {
+            op: UnaryOp::ToTwoState,
+            expr: Box::new(condition),
+        }),
+    }
 }
 
 fn function_expr_from_case_statement(
@@ -3884,7 +3933,7 @@ fn expand_expr_calls(
                 .collect::<HashMap<_, _>>();
             let body = substitute_expr_idents(function.body.clone(), &env);
             let expanded = expand_expr_calls(body, functions, depth + 1, apply_return_type);
-            if apply_return_type && let Some(width) = function.return_width {
+            let mut expanded = if apply_return_type && let Some(width) = function.return_width {
                 Expr::Resize {
                     expr: Box::new(expanded),
                     width,
@@ -3892,7 +3941,14 @@ fn expand_expr_calls(
                 }
             } else {
                 expanded
+            };
+            if function.return_is_2state {
+                expanded = Expr::Unary {
+                    op: UnaryOp::ToTwoState,
+                    expr: Box::new(expanded),
+                };
             }
+            expanded
         }
     }
 }

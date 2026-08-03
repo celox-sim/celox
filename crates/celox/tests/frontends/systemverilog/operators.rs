@@ -1271,4 +1271,55 @@ sv_backends! {
     assert_eq!(sim.get(sim.signal("complement_is_x")), 1u8.into());
     assert_eq!(sim.get(sim.signal("function_value")), 0u8.into());
     }
+
+    fn applies_procedural_truth_and_bit_conversion_to_function_results(sim) {
+        @setup {
+    let sv = r#"
+        module Top(input logic select, output logic if_value, output logic bit_value);
+            function automatic logic choose(input logic condition);
+                if (condition) return 1'b1;
+                else return 1'b0;
+            endfunction
+            function automatic bit to_bit();
+                return 1'bx;
+            endfunction
+            assign if_value = choose(select);
+            assign bit_value = to_bit();
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("function_state.sv"))], "Top")
+            .four_state(true);
+
+    let select = sim.signal("select");
+    sim.modify(|io| {
+        io.set_four_state(select, BigUint::from(1u8), BigUint::from(1u8));
+    }).unwrap();
+
+    assert_eq!(sim.get(sim.signal("if_value")), 0u8.into());
+    assert_eq!(sim.get(sim.signal("bit_value")), 0u8.into());
+    }
+
+    fn tracks_nested_function_slice_dependencies(sim) {
+        @setup {
+    let sv = r#"
+        module Top(input logic [3:0] value, output logic [1:0] y);
+            logic [7:0] intermediate;
+            function automatic logic [1:0] low2(input logic [3:0] v);
+                return v[1:0];
+            endfunction
+            assign intermediate[7:4] = value;
+            assign y = low2(intermediate[7:4]);
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("nested_slice_dependency.sv"))], "Top");
+
+    let value = sim.signal("value");
+    sim.modify(|io| io.set(value, 0b1011u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0b11u8.into());
+
+    sim.modify(|io| io.set(value, 0b0100u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0u8.into());
+    }
 }

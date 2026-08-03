@@ -168,6 +168,12 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
             | BinaryOp::BitAnd
             | BinaryOp::BitOr
             | BinaryOp::BitXor
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
     ) {
         return None;
     }
@@ -180,6 +186,26 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
         signed,
         signed_extension(&right, signed),
     );
+    if matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+    ) {
+        let ordering = if signed {
+            integral_literal_as_i128(&left, true)?.cmp(&integral_literal_as_i128(&right, true)?)
+        } else {
+            left.value.cmp(&right.value)
+        };
+        let result = match op {
+            BinaryOp::Eq => ordering.is_eq(),
+            BinaryOp::Ne => ordering.is_ne(),
+            BinaryOp::Lt => ordering.is_lt(),
+            BinaryOp::Le => ordering.is_le(),
+            BinaryOp::Gt => ordering.is_gt(),
+            BinaryOp::Ge => ordering.is_ge(),
+            _ => unreachable!(),
+        };
+        return Some(result as i128);
+    }
     let modulus = BigUint::from(1u8) << width;
     let width_mask = &modulus - BigUint::from(1u8);
     let value = match op {
@@ -772,5 +798,16 @@ mod literal_tests {
         };
 
         assert_eq!(eval_const_expr(&expr, &HashMap::new()), Some(0x7f));
+    }
+
+    #[test]
+    fn compares_mixed_signed_literals_as_unsigned() {
+        let expr = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Literal("8'shff".to_string())),
+            op: BinaryOp::Lt,
+            right: Box::new(ConstExpr::Literal("8'h01".to_string())),
+        };
+
+        assert_eq!(eval_const_expr(&expr, &HashMap::new()), Some(0));
     }
 }
