@@ -491,6 +491,62 @@ fn test_ff_case_skips_effectful_patterns_after_matching_arm(sim) {
     );
 }
 
+fn test_ff_variable_select_captures_nested_output(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            index: input logic<3>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function update (
+                selected: input logic<3>,
+                written: output logic<8>
+            ) -> logic<3> {
+                written = selected + 8'd1;
+                return selected;
+            }
+
+            function observed (
+                value: input logic<8>,
+                selected: input logic<3>,
+                written: output logic<8>
+            ) -> logic<8> {
+                $display("bit=%0d", value[update(selected, written)]);
+                return written;
+            }
+
+            always_ff (clk) {
+                q = observed(d, index, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let index = sim.signal("index");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(d, 0b0000_0100u8);
+        io.set(index, 2u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 3u8.into());
+    assert_eq!(sim.get(q), 3u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "bit=1".to_string(),
+        }],
+    );
+}
+
 fn test_ff_effectful_assignment_executes_only_on_selected_if_path(sim) {
     @omit_veryl;
     @ignore_on(wasm);
@@ -3840,6 +3896,78 @@ fn test_ff_function_call_bit_select_on_nonvariable_one_bit_formal(sim) {
 }
 
 // Tests that use setup_and_trace/snapshot/Simulation::builder stay as regular #[test]
+
+#[test]
+fn test_ff_case_target_is_snapshotted_before_effectful_pattern() {
+    let code = r#"
+        module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
+            function observed_pattern (x: input logic<8>) -> logic<8> {
+                $display("pattern=%0d", x);
+                return x;
+            }
+
+            function select (x: input logic<8>) -> logic<8> {
+                case x * 8'd13 {
+                    observed_pattern(8'd130): return 8'd1;
+                    default: return 8'd0;
+                }
+            }
+
+            always_ff (clk) {
+                q = select(d);
+            }
+        }
+    "#;
+    let result = SimulatorBuilder::new(code, "Top")
+        .optimize(false)
+        .trace_pre_optimized_sir()
+        .build_with_trace();
+    let sir = result.trace.format_pre_optimized_sir().unwrap();
+    let target = sir.find(" Mul ").expect("case target multiplication");
+    let pattern = sir.find("RuntimeEvent(").expect("effectful case pattern");
+
+    assert!(
+        target < pattern,
+        "the case target must be evaluated before an effectful pattern:\n{sir}",
+    );
+}
+
+#[test]
+fn test_ff_case_range_snapshots_pure_lower_bound() {
+    let code = r#"
+        module Top (clk: input clock, d: input logic<8>, q: output logic<8>) {
+            function observed_bound (x: input logic<8>) -> logic<8> {
+                $display("bound=%0d", x);
+                return x;
+            }
+
+            function select (x: input logic<8>) -> logic<8> {
+                case x {
+                    (8'd10 * 8'd13) ..= observed_bound(8'd132): return 8'd1;
+                    default: return 8'd0;
+                }
+            }
+
+            always_ff (clk) {
+                q = select(d);
+            }
+        }
+    "#;
+    let result = SimulatorBuilder::new(code, "Top")
+        .optimize(false)
+        .trace_pre_optimized_sir()
+        .build_with_trace();
+    let sir = result.trace.format_pre_optimized_sir().unwrap();
+    let lower = sir
+        .find("SIRValue(0x82)")
+        .unwrap_or_else(|| panic!("pure lower-bound value:\n{sir}"));
+    let upper = sir.find("RuntimeEvent(").expect("effectful upper bound");
+
+    assert!(
+        lower < upper,
+        "the pure lower bound must be evaluated before an effectful upper bound:\n{sir}",
+    );
+}
 
 #[test]
 fn test_ff_assert_pure_message_argument_stays_in_failure_block() {

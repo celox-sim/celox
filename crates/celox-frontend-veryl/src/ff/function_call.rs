@@ -312,7 +312,37 @@ impl<'a> FfParser<'a> {
                 // against the state captured for this argument, which both
                 // preserves left-to-right snapshots and applies the formal's
                 // declared width, signedness, and state kind.
-                Factor::Variable(_, _, _, _) => expr.clone(),
+                Factor::Variable(id, index, select, comptime) => {
+                    let mut index = index.clone();
+                    for expr in &mut index.0 {
+                        *expr = self.capture_nested_function_outputs_inner(
+                            expr,
+                            state,
+                            expression_states,
+                        )?;
+                    }
+                    let mut select = select.clone();
+                    for expr in &mut select.0 {
+                        *expr = self.capture_nested_function_outputs_inner(
+                            expr,
+                            state,
+                            expression_states,
+                        )?;
+                    }
+                    if let Some((_, expr)) = &mut select.1 {
+                        *expr = self.capture_nested_function_outputs_inner(
+                            expr,
+                            state,
+                            expression_states,
+                        )?;
+                    }
+                    Expression::Term(Box::new(Factor::Variable(
+                        *id,
+                        index,
+                        select,
+                        comptime.clone(),
+                    )))
+                }
                 Factor::FunctionCall(call) => {
                     let mut call = call.clone();
                     let Some(function) = self.module.functions.get(&call.id) else {
@@ -1131,7 +1161,18 @@ impl<'a> FfParser<'a> {
                     active = Self::function_path_or(then_active, else_active);
                 }
                 Statement::Case(statement) => {
-                    if self.expression_needs_eager_evaluation(&statement.case_target) {
+                    let pattern_needs_eager_evaluation = statement.arms.iter().any(|arm| {
+                        arm.patterns.iter().any(|pattern| match pattern {
+                            CasePattern::Eq(expr) => self.expression_needs_eager_evaluation(expr),
+                            CasePattern::Range { lo, hi, .. } => {
+                                self.expression_needs_eager_evaluation(lo)
+                                    || self.expression_needs_eager_evaluation(hi)
+                            }
+                        })
+                    });
+                    if pattern_needs_eager_evaluation
+                        || self.expression_needs_eager_evaluation(&statement.case_target)
+                    {
                         self.materialize_function_runtime_expression(
                             &statement.case_target,
                             &mut state,
@@ -1165,8 +1206,11 @@ impl<'a> FfParser<'a> {
                                     }
                                 }
                                 CasePattern::Range { lo, hi, .. } => {
-                                    for expr in [lo, hi] {
-                                        if self.expression_needs_eager_evaluation(expr) {
+                                    let bounds = [lo, hi];
+                                    if let Some(last_effectful) = bounds.iter().rposition(|expr| {
+                                        self.expression_needs_eager_evaluation(expr)
+                                    }) {
+                                        for expr in &bounds[..=last_effectful] {
                                             self.materialize_function_runtime_expression(
                                                 expr,
                                                 &mut state,
