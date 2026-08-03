@@ -1,8 +1,9 @@
 use super::{Domain, FfParser};
 use crate::{
     HashMap, HashSet, LoweringPhase, ParserError,
-    bitaccess::{build_partial_assign_expr, is_static_access},
+    bitaccess::{build_partial_assign_expr, get_access_width, is_static_access},
     case::case_arm_condition_expr,
+    context_width::expression_signed,
     resolve_total_width,
 };
 use celox_design::VarAtomBase;
@@ -324,18 +325,87 @@ impl<'a> FfParser<'a> {
             && assign.dst[0].select.1.is_none()
     }
 
-    fn state_value_expr(id: VarId, state: &HashMap<VarId, Expression>) -> Expression {
+    fn function_state_comptime(&self, id: VarId) -> Comptime {
+        let token = TokenRange::default();
+        let mut comptime = Comptime::create_unknown(token);
+        if let Some(variable) = self.module.variables.get(&id) {
+            comptime.r#type = variable.r#type.clone();
+            comptime.expr_context.width = variable.r#type.total_width().unwrap_or_default();
+            comptime.expr_context.signed = variable.r#type.signed;
+        }
+        comptime
+    }
+
+    fn state_value_expr(&self, id: VarId, state: &HashMap<VarId, Expression>) -> Expression {
         state.get(&id).cloned().unwrap_or_else(|| {
             Expression::Term(Box::new(Factor::Variable(
                 id,
                 VarIndex::default(),
                 VarSelect::default(),
-                Comptime::create_unknown(TokenRange::default()),
+                self.function_state_comptime(id),
             )))
         })
     }
 
+    fn coerce_function_state_assignment(
+        &self,
+        expr: Expression,
+        dst: &AssignDestination,
+    ) -> Result<Expression, ParserError> {
+        let variable = &self.module.variables[&dst.id];
+        // Unpacked arrays are shape-checked and lowered element-wise elsewhere;
+        // a scalar `as` cast cannot represent their assignment conversion.
+        if !variable.r#type.array.is_empty() {
+            return Ok(expr);
+        }
+
+        let is_whole_var =
+            dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
+        let target_type = if is_whole_var {
+            variable.r#type.clone()
+        } else {
+            let width = get_access_width(self.module, dst.id, &dst.index, &dst.select)?;
+            let mut ty = Type::new(if variable.r#type.is_2state() {
+                TypeKind::Bit
+            } else {
+                TypeKind::Logic
+            });
+            // Packed selections are unsigned even when their base is signed.
+            ty.set_concrete_width(Shape::new(vec![Some(width)]));
+            ty
+        };
+
+        let source_type = &expr.comptime().r#type;
+        if source_type.total_width() == target_type.total_width()
+            && source_type.signed == target_type.signed
+            && source_type.is_2state() == target_type.is_2state()
+        {
+            return Ok(expr);
+        }
+
+        let token = expr.token_range();
+        let cast_target = Expression::Term(Box::new(Factor::Value(Comptime {
+            value: ValueVariant::Type(target_type.clone()),
+            r#type: Type::new(TypeKind::Type),
+            is_const: true,
+            is_global: true,
+            token,
+            ..Default::default()
+        })));
+        let mut comptime = Comptime::create_unknown(token);
+        comptime.r#type = target_type.clone();
+        comptime.expr_context.width = target_type.total_width().unwrap_or_default();
+        comptime.expr_context.signed = target_type.signed;
+        Ok(Expression::Binary(
+            Box::new(expr),
+            Op::As,
+            Box::new(cast_target),
+            Box::new(comptime),
+        ))
+    }
+
     fn merge_expression_states(
+        &self,
         condition: &Expression,
         base: &HashMap<VarId, Expression>,
         then_state: &HashMap<VarId, Expression>,
@@ -352,11 +422,11 @@ impl<'a> FfParser<'a> {
                 let then_expr = then_state
                     .get(&id)
                     .cloned()
-                    .unwrap_or_else(|| Self::state_value_expr(id, base));
+                    .unwrap_or_else(|| self.state_value_expr(id, base));
                 let else_expr = else_state
                     .get(&id)
                     .cloned()
-                    .unwrap_or_else(|| Self::state_value_expr(id, base));
+                    .unwrap_or_else(|| self.state_value_expr(id, base));
                 (
                     id,
                     Expression::Ternary(
@@ -365,7 +435,7 @@ impl<'a> FfParser<'a> {
                         )),
                         Box::new(then_expr),
                         Box::new(else_expr),
-                        Box::new(Comptime::create_unknown(TokenRange::default())),
+                        Box::new(self.function_state_comptime(id)),
                     ),
                 )
             })
@@ -373,6 +443,7 @@ impl<'a> FfParser<'a> {
     }
 
     fn apply_state_transition_on_path(
+        &self,
         path: &FunctionPathCondition,
         base: &HashMap<VarId, Expression>,
         transitioned: HashMap<VarId, Expression>,
@@ -381,7 +452,7 @@ impl<'a> FfParser<'a> {
             FunctionPathCondition::Always => transitioned,
             FunctionPathCondition::Never => base.clone(),
             FunctionPathCondition::Conditional(condition) => {
-                Self::merge_expression_states(condition, base, &transitioned, base)
+                self.merge_expression_states(condition, base, &transitioned, base)
             }
         }
     }
@@ -490,8 +561,8 @@ impl<'a> FfParser<'a> {
                     expression_states,
                 )?;
                 *state = match op {
-                    Op::LogicAnd => Self::merge_expression_states(&lhs, &base, &rhs_state, &base),
-                    Op::LogicOr => Self::merge_expression_states(&lhs, &base, &base, &rhs_state),
+                    Op::LogicAnd => self.merge_expression_states(&lhs, &base, &rhs_state, &base),
+                    Op::LogicOr => self.merge_expression_states(&lhs, &base, &base, &rhs_state),
                     _ => rhs_state,
                 };
                 Expression::Binary(Box::new(lhs), *op, Box::new(rhs), comptime.clone())
@@ -524,7 +595,7 @@ impl<'a> FfParser<'a> {
                     &mut else_state,
                     expression_states,
                 )?;
-                *state = Self::merge_expression_states(&condition, &base, &then_state, &else_state);
+                *state = self.merge_expression_states(&condition, &base, &then_state, &else_state);
                 Expression::Ternary(
                     Box::new(condition),
                     Box::new(then_expr),
@@ -680,7 +751,7 @@ impl<'a> FfParser<'a> {
                     )?;
                     let transitioned =
                         self.apply_assignment_to_function_state(assign, &rhs, &transitioned_base)?;
-                    state = Self::apply_state_transition_on_path(&active, &base, transitioned);
+                    state = self.apply_state_transition_on_path(&active, &base, transitioned);
                     if Self::statement_is_function_return(statement, ret_id) {
                         active = FunctionPathCondition::Never;
                     }
@@ -696,7 +767,7 @@ impl<'a> FfParser<'a> {
                     )?;
                     let condition = Self::substitute_function_expr(&condition, &condition_base);
                     let condition_base =
-                        Self::apply_state_transition_on_path(&active, &base, condition_base);
+                        self.apply_state_transition_on_path(&active, &base, condition_base);
                     let true_active = Self::function_path_and(active.clone(), condition.clone());
                     let false_active =
                         Self::function_path_and_not(active.clone(), condition.clone());
@@ -714,7 +785,7 @@ impl<'a> FfParser<'a> {
                             &condition_base,
                             false_active,
                         )?;
-                    state = Self::merge_expression_states(
+                    state = self.merge_expression_states(
                         &condition,
                         &condition_base,
                         &then_state,
@@ -751,7 +822,7 @@ impl<'a> FfParser<'a> {
                         )?;
                     for (condition, arm_state) in arm_states.into_iter().rev() {
                         merged =
-                            Self::merge_expression_states(&condition, &base, &arm_state, &merged);
+                            self.merge_expression_states(&condition, &base, &arm_state, &merged);
                     }
                     state = merged;
                     active = Self::function_path_or(live_paths, default_live);
@@ -759,12 +830,12 @@ impl<'a> FfParser<'a> {
                 Statement::SystemFunctionCall(call) => {
                     let base = state.clone();
                     let (_, transitioned, _) = self.prepare_system_function_call(call, &base)?;
-                    state = Self::apply_state_transition_on_path(&active, &base, transitioned);
+                    state = self.apply_state_transition_on_path(&active, &base, transitioned);
                 }
                 Statement::FunctionCall(call) => {
                     let base = state.clone();
                     let transitioned = self.apply_function_call_to_state(call, &base)?;
-                    state = Self::apply_state_transition_on_path(&active, &base, transitioned);
+                    state = self.apply_state_transition_on_path(&active, &base, transitioned);
                 }
                 Statement::Null => {}
                 Statement::For(statement) => {
@@ -819,7 +890,7 @@ impl<'a> FfParser<'a> {
                     .apply_statements_to_function_state(&statement.true_side, &condition_state)?;
                 let else_state = self
                     .apply_statements_to_function_state(&statement.false_side, &condition_state)?;
-                Ok(Self::merge_expression_states(
+                Ok(self.merge_expression_states(
                     &condition,
                     &condition_state,
                     &then_state,
@@ -876,13 +947,14 @@ impl<'a> FfParser<'a> {
         }
         let dst = &assign.dst[0];
         let rhs = Self::substitute_function_expr(rhs, state);
+        let rhs = self.coerce_function_state_assignment(rhs, dst)?;
         let mut next = state.clone();
         let is_whole_var =
             dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
         if is_whole_var {
             next.insert(dst.id, rhs);
         } else if is_static_access(&dst.index, &dst.select) {
-            let old_value = Self::state_value_expr(dst.id, state);
+            let old_value = self.state_value_expr(dst.id, state);
             next.insert(
                 dst.id,
                 build_partial_assign_expr(self.module, dst, rhs, old_value)?,
@@ -914,12 +986,7 @@ impl<'a> FfParser<'a> {
         );
         let then_state = self.apply_statements_to_function_state(&arm.body, state)?;
         let else_state = self.apply_case_to_function_state(statement, arm_index + 1, state)?;
-        Ok(Self::merge_expression_states(
-            &condition,
-            state,
-            &then_state,
-            &else_state,
-        ))
+        Ok(self.merge_expression_states(&condition, state, &then_state, &else_state))
     }
 
     fn function_path_and(
@@ -1082,7 +1149,7 @@ impl<'a> FfParser<'a> {
                     .expect("Function runtime expression evaluation failed")
             }
             FunctionPathCondition::Conditional(condition) => {
-                *state = Self::merge_expression_states(
+                *state = self.merge_expression_states(
                     condition,
                     &guard_state,
                     &evaluated_state,
@@ -1098,7 +1165,7 @@ impl<'a> FfParser<'a> {
                     ir_builder,
                 )?;
                 let width = self.get_expression_width(&expr);
-                let signed = expr.comptime().expr_context.signed;
+                let signed = expression_signed(&expr);
                 let result = if expr.comptime().r#type.is_2state() {
                     ir_builder.alloc_bit(width, signed)
                 } else {
@@ -1162,7 +1229,7 @@ impl<'a> FfParser<'a> {
         }
         let guard_state = state.clone();
         let (call, next_state, arg_states) = self.prepare_system_function_call(call, state)?;
-        *state = Self::apply_state_transition_on_path(active, &guard_state, next_state);
+        *state = self.apply_state_transition_on_path(active, &guard_state, next_state);
         let merge_block = if let FunctionPathCondition::Conditional(condition) = active {
             let condition = self.parse_function_path_condition(
                 condition,
@@ -1249,7 +1316,7 @@ impl<'a> FfParser<'a> {
                     }
                     let base = state.clone();
                     let transitioned = self.apply_statement_to_function_state(statement, &base)?;
-                    state = Self::apply_state_transition_on_path(&active, &base, transitioned);
+                    state = self.apply_state_transition_on_path(&active, &base, transitioned);
                     if is_return {
                         active = FunctionPathCondition::Never;
                     }
@@ -1302,7 +1369,7 @@ impl<'a> FfParser<'a> {
                         ir_builder,
                     )?;
                     state =
-                        Self::merge_expression_states(&condition, &base, &then_state, &else_state);
+                        self.merge_expression_states(&condition, &base, &then_state, &else_state);
                     active = Self::function_path_or(then_active, else_active);
                 }
                 Statement::Case(statement) => {
@@ -1442,7 +1509,7 @@ impl<'a> FfParser<'a> {
                     state = arm_states.into_iter().rev().fold(
                         default_state,
                         |merged, (condition, arm_state)| {
-                            Self::merge_expression_states(
+                            self.merge_expression_states(
                                 &condition, &case_base, &arm_state, &merged,
                             )
                         },
@@ -1510,7 +1577,7 @@ impl<'a> FfParser<'a> {
                     }
                     let base = state.clone();
                     let transitioned = self.apply_function_call_to_state(call, &base)?;
-                    state = Self::apply_state_transition_on_path(&active, &base, transitioned);
+                    state = self.apply_state_transition_on_path(&active, &base, transitioned);
                 }
                 Statement::IfReset(statement) => {
                     return Err(ParserError::unsupported(
@@ -2131,6 +2198,7 @@ impl<'a> FfParser<'a> {
         defs: &HashMap<VarId, Expression>,
     ) -> Result<Expression, ParserError> {
         fn merge_branch_state(
+            parser: &FfParser,
             cond: &Expression,
             mut then_state: HashMap<VarId, Expression>,
             else_state: HashMap<VarId, Expression>,
@@ -2144,7 +2212,7 @@ impl<'a> FfParser<'a> {
                             Box::new(FfParser::normalize_function_control_condition(cond.clone())),
                             Box::new(then_expr),
                             Box::new(else_expr.clone()),
-                            Box::new(Comptime::create_unknown(TokenRange::default())),
+                            Box::new(parser.function_state_comptime(id)),
                         ),
                     );
                 }
@@ -2176,6 +2244,7 @@ impl<'a> FfParser<'a> {
 
                     let mut next = state.clone();
                     let rhs = substitute(&assign.expr, &next);
+                    let rhs = parser.coerce_function_state_assignment(rhs, dst)?;
 
                     if is_whole_var {
                         next.insert(dst.id, rhs);
@@ -2220,7 +2289,7 @@ impl<'a> FfParser<'a> {
                         substitute,
                     )?;
                     let cond = substitute(&cond, &condition_state);
-                    Ok(merge_branch_state(&cond, then_state, else_state))
+                    Ok(merge_branch_state(parser, &cond, then_state, else_state))
                 }
                 Statement::Case(case_stmt) => {
                     build_state_from_case(parser, case_stmt, 0, state, substitute)
@@ -2275,7 +2344,7 @@ impl<'a> FfParser<'a> {
                 &case_arm_condition_expr(&case_stmt.case_target, &arm.patterns),
                 state,
             );
-            Ok(merge_branch_state(&cond, then_state, else_state))
+            Ok(merge_branch_state(parser, &cond, then_state, else_state))
         }
 
         fn build_state_from_statements(
@@ -2341,6 +2410,7 @@ impl<'a> FfParser<'a> {
                         dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
 
                     let rhs = substitute(&assign.expr, defs);
+                    let rhs = parser.coerce_function_state_assignment(rhs, dst)?;
 
                     if is_whole_var {
                         if dst.id == ret_id {
@@ -2637,7 +2707,7 @@ impl<'a> FfParser<'a> {
                 let rhs_reg = self.coerce_register_to_variable_type(
                     rhs_reg,
                     *arg_id,
-                    expr.comptime().r#type.signed,
+                    expression_signed(&expr),
                     ir_builder,
                 )?;
                 self.emit_multi_dst_assign(
@@ -2668,7 +2738,7 @@ impl<'a> FfParser<'a> {
             let ret_reg = self.coerce_register_to_variable_type(
                 ret_reg,
                 ret_id,
-                ret_expr.comptime().r#type.signed,
+                expression_signed(&ret_expr),
                 ir_builder,
             )?;
             self.stack.push_back(ret_reg);
@@ -2801,7 +2871,7 @@ impl<'a> FfParser<'a> {
                 let rhs_reg = self.coerce_register_to_variable_type(
                     rhs_reg,
                     *arg_id,
-                    expr.comptime().r#type.signed,
+                    expression_signed(&expr),
                     ir_builder,
                 )?;
                 self.emit_multi_dst_assign(

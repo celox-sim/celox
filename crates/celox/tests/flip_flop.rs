@@ -2242,6 +2242,96 @@ fn test_ff_runtime_effectful_output_uses_declared_formal_type(sim) {
     );
 }
 
+fn test_ff_runtime_effectful_merge_preserves_signed_return_type(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            choose: input logic,
+            q: output signed logic<16>
+        ) {
+            function observed (choose: input logic) -> signed logic<16> {
+                $display("choose=%0d", choose);
+                if choose {
+                    return 8'sh80;
+                } else {
+                    return 8'sh81;
+                }
+            }
+
+            always_ff (clk) {
+                q = observed(choose);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let choose = sim.signal("choose");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(choose, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0xff80u16.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "choose=1".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(choose, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0xff81u16.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "choose=0".to_string(),
+        }],
+    );
+}
+
+fn test_ff_runtime_effectful_local_assignment_uses_declared_type(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic,
+            q: output logic
+        ) {
+            function observed (x: input logic) -> logic {
+                var temporary: signed logic<8>;
+                temporary = 16'h00ff + x;
+                $display("temporary=%0d", temporary);
+                if temporary <: 8'sd0 {
+                    return 1'b1;
+                } else {
+                    return 1'b0;
+                }
+            }
+
+            always_ff (clk) {
+                q = observed(d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "temporary=-1".to_string(),
+        }],
+    );
+}
+
 fn test_ff_rewritten_runtime_event_argument_preserves_signedness(sim) {
     @omit_veryl;
     @ignore_on(wasm);
