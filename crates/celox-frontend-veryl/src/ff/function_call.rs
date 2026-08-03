@@ -306,11 +306,10 @@ impl<'a> FfParser<'a> {
                 call.inputs
                     .values()
                     .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
-                    || call
-                        .outputs
-                        .values()
-                        .flatten()
-                        .any(|dst| self.assignment_destination_has_runtime_effect(dst, visiting))
+                    || call.outputs.values().flatten().any(|dst| {
+                        self.module.variables[&dst.id].affiliation != Affiliation::Function
+                            || self.assignment_destination_has_runtime_effect(dst, visiting)
+                    })
                     || self.function_call_has_runtime_effect(call, visiting)
             }
             Statement::IfReset(statement) => {
@@ -3285,6 +3284,7 @@ impl<'a> FfParser<'a> {
                 None
             };
 
+            let mut pending_outputs = Vec::new();
             for arg_path in &ordered_arg_paths {
                 let Some(dsts) = call.outputs.get(arg_path) else {
                     continue;
@@ -3318,9 +3318,7 @@ impl<'a> FfParser<'a> {
                     expression_signed(&expr),
                     ir_builder,
                 )?;
-                self.emit_multi_dst_assign(
-                    rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
-                )?;
+                pending_outputs.push((rhs_reg, dsts.clone()));
             }
 
             let Some(ret_id) = function_body.ret else {
@@ -3349,12 +3347,17 @@ impl<'a> FfParser<'a> {
                 expression_signed(&ret_expr),
                 ir_builder,
             )?;
-            self.stack.push_back(ret_reg);
             if let Some(state) = runtime_state.as_ref() {
                 self.emit_nonlocal_function_state_writes(
                     state, targets, domain, convert, sources, ir_builder,
                 )?;
             }
+            for (rhs_reg, dsts) in pending_outputs {
+                self.emit_multi_dst_assign(
+                    rhs_reg, &dsts, targets, domain, convert, sources, ir_builder,
+                )?;
+            }
+            self.stack.push_back(ret_reg);
             Ok(())
         })();
         self.function_expression_value_stack.pop();
@@ -3470,6 +3473,7 @@ impl<'a> FfParser<'a> {
                 None
             };
 
+            let mut pending_outputs = Vec::new();
             for arg_path in &ordered_arg_paths {
                 let Some(dsts) = call.outputs.get(arg_path) else {
                     continue;
@@ -3503,14 +3507,17 @@ impl<'a> FfParser<'a> {
                     expression_signed(&expr),
                     ir_builder,
                 )?;
-                self.emit_multi_dst_assign(
-                    rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
-                )?;
+                pending_outputs.push((rhs_reg, dsts.clone()));
             }
 
             if let Some(state) = runtime_state.as_ref() {
                 self.emit_nonlocal_function_state_writes(
                     state, targets, domain, convert, sources, ir_builder,
+                )?;
+            }
+            for (rhs_reg, dsts) in pending_outputs {
+                self.emit_multi_dst_assign(
+                    rhs_reg, &dsts, targets, domain, convert, sources, ir_builder,
                 )?;
             }
 

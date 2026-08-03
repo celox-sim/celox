@@ -1348,6 +1348,58 @@ fn test_ff_statement_function_direct_nonlocal_assignment_is_observable(sim) {
     assert_eq!(sim.get(global_value), 0x5au8.into());
 }
 
+fn test_ff_nonlocal_write_precedes_aliased_formal_output_copyout(sim) {
+    @omit_veryl;
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            global_value: output logic<8>,
+            q: output logic
+        ) {
+            function update (written: output logic<8>) -> logic {
+                global_value = 8'h01;
+                written = 8'h02;
+                return 0;
+            }
+
+            always_ff (clk) {
+                q = update(global_value);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let global_value = sim.signal("global_value");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 2u8.into());
+}
+
+fn test_ff_outputless_wrapper_nested_copyout_to_nonlocal_is_observable(sim) {
+    @omit_veryl;
+    @setup { let code = r#"
+        module Top (clk: input clock, global_value: output logic<8>) {
+            function set (written: output logic<8>) {
+                written = 8'h5a;
+            }
+
+            function outer () {
+                set(global_value);
+            }
+
+            always_ff (clk) {
+                outer();
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let global_value = sim.signal("global_value");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 0x5au8.into());
+}
+
 fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
     @omit_veryl;
     @ignore_on(wasm);
