@@ -1602,7 +1602,9 @@ impl<'a> FfParser<'a> {
             .filter(|view| view.owns_backing && !view.elements.is_empty())
             .map(|view| view.backing_var_id)
             .collect::<HashSet<_>>();
-        for frame in self.function_array_view_stack.iter().rev() {
+        // Older callers must be restored first so that the nearest active
+        // invocation is the final snapshot left in the shared formal region.
+        for frame in &self.function_array_view_stack {
             for view in frame.values() {
                 if !clobbered.contains(&view.backing_var_id) || view.elements.is_empty() {
                     continue;

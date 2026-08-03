@@ -2674,6 +2674,35 @@ fn test_ff_function_call_restores_array_literal_view_after_reentrant_call(sim) {
     assert_eq!(sim.get(out_q), 0x11u32.into());
 }
 
+fn test_ff_function_call_restores_nearest_array_view_after_deep_reentrant_call(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function pick (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return x[index];
+            }
+            always_ff (clk) {
+                out_q = pick(
+                    '{8'h11, 8'h22},
+                    pick(
+                        '{8'h00, 8'h00},
+                        pick('{8'h00, 8'h00}, 0)
+                    )
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x11u32.into());
+}
+
 fn test_ff_function_call_bits_and_size_do_not_evaluate_array_argument(sim) {
     @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
