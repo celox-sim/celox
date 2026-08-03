@@ -1,4 +1,5 @@
-use celox::{DeadStorePolicy, ResetType, Simulator, TestResult};
+use celox::{DeadStorePolicy, ResetType, Simulator, SimulatorErrorKind, TestResult};
+use veryl_analyzer::{AnalyzerError, analyzer_error::InvalidForRangeKind};
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -717,7 +718,6 @@ fn test_for_loop_i32_mul_and_shl_overflow_fail() {
 #[test]
 fn test_for_loop_static_bounds_use_signed_i32_progress() {
     for (start, end, step) in [
-        ("2147483647", "2147483648", "+= 1"),
         ("1500000000", "1600000000", "*= 2"),
         ("1073741824", "1500000000", "<<= 1"),
         ("1", "100", "|= 2147483648"),
@@ -739,6 +739,30 @@ fn test_for_loop_static_bounds_use_signed_i32_progress() {
         };
         assert!(message.contains("non-progressing stepped for loop"));
     }
+}
+
+#[test]
+fn test_for_loop_static_signed_i32_upper_bound_is_rejected() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                for _i in 2147483647..2147483648 step += 1 {}
+                $finish();
+            }
+        }
+    "#;
+    let error = Simulator::builder(code, "t").run_test().unwrap_err();
+    let SimulatorErrorKind::Analyzer(errors) = error.kind() else {
+        panic!("expected analyzer error, got {error:?}");
+    };
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        AnalyzerError::InvalidForRange {
+            kind: InvalidForRangeKind::NegativeBound,
+            ..
+        }
+    )));
 }
 
 #[test]
