@@ -5,6 +5,95 @@ use celox::{BigUint, Simulator};
 mod test_utils;
 
 all_backends! {
+    fn indeterminate_short_circuit_lhs_executes_effectful_rhs(sim) {
+        @omit_veryl;
+        @build Simulator::builder(r#"
+module Top (
+    u: input logic,
+    and_output: output logic,
+    or_output: output logic,
+    and_result: output logic,
+    or_result: output logic,
+) {
+    function set_output (y: output logic) -> logic {
+        y = 1'b1;
+        return 1'b1;
+    }
+
+    always_comb {
+        and_output = 1'b0;
+        or_output = 1'b0;
+        and_result = u && set_output(and_output);
+        or_result = u || set_output(or_output);
+    }
+}
+"#, "Top").four_state(true);
+
+        let u = sim.signal("u");
+        sim.modify(|io| {
+            io.set_four_state(u, BigUint::from(0u8), BigUint::from(1u8));
+        })
+        .unwrap();
+
+        assert_eq!(sim.get(sim.signal("and_output")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("or_output")), 1u8.into());
+    }
+
+    fn indeterminate_ternary_executes_effectful_arms_in_order(sim) {
+        @omit_veryl;
+        @build Simulator::builder(r#"
+module Top (
+    sel: input logic,
+    seed: input logic<8>,
+    q_output: output logic<8>,
+    result: output logic,
+) {
+    function set_two (y: output logic<8>) -> logic {
+        y = 8'd2;
+        return 1'b0;
+    }
+
+    function increment (
+        x: input logic<8>,
+        y: output logic<8>,
+    ) -> logic {
+        y = x + 8'd1;
+        return 1'b0;
+    }
+
+    always_comb {
+        q_output = seed;
+        result = if sel ? set_two(q_output) : increment(q_output, q_output);
+    }
+}
+"#, "Top").four_state(true);
+
+        let sel = sim.signal("sel");
+        let seed = sim.signal("seed");
+        let q_output = sim.signal("q_output");
+
+        sim.modify(|io| {
+            io.set(seed, 1u8);
+            io.set_four_state(sel, BigUint::from(1u8), BigUint::from(1u8));
+        })
+        .unwrap();
+        assert_eq!(sim.get_four_state(q_output), (3u8.into(), 0u8.into()));
+
+        sim.modify(|io| {
+            io.set_four_state(sel, BigUint::from(0u8), BigUint::from(1u8));
+        })
+        .unwrap();
+        assert_eq!(sim.get_four_state(q_output), (3u8.into(), 0u8.into()));
+
+        sim.modify(|io| io.set_four_state(sel, 1u8.into(), 0u8.into()))
+            .unwrap();
+        assert_eq!(sim.get_four_state(q_output), (2u8.into(), 0u8.into()));
+
+        sim.modify(|io| io.set_four_state(sel, 0u8.into(), 0u8.into()))
+            .unwrap();
+        assert_eq!(sim.get_four_state(q_output), (2u8.into(), 0u8.into()));
+    }
+
     fn logical_unknown_truth_table_matches_comb_and_ff(sim) {
         @omit_veryl;
         @build Simulator::builder(r#"

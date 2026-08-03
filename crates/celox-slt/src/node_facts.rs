@@ -200,6 +200,7 @@ where
             child_width(*rhs)?,
         )),
         SLTNode::Unary(op, inner) => Ok(node_rules::unary_width(*op, child_width(*inner)?)),
+        SLTNode::Capture { expr, .. } => child_width(*expr),
         SLTNode::Mux {
             cond,
             then_expr,
@@ -213,7 +214,25 @@ where
         }
         SLTNode::ForFold { result, .. } => {
             try_for_each_child(node, |child| child_width(child).map(|_| ()))?;
-            checked_access_width(node_id, result.access, "ForFold result")
+            match result {
+                crate::SLTForFoldResult::State(result) => {
+                    checked_access_width(node_id, result.access, "ForFold result")
+                }
+                crate::SLTForFoldResult::Transient { initial, update } => {
+                    let initial_width = child_width(*initial)?;
+                    let update_width = child_width(*update)?;
+                    if initial_width != update_width {
+                        return Err(SLTNodeFactsError::new(
+                            "FOR_FOLD.TRANSIENT_RESULT_WIDTH_MATCHES",
+                            node_id,
+                            format!(
+                                "ForFold transient result initial width {initial_width} does not equal update width {update_width}"
+                            ),
+                        ));
+                    }
+                    Ok(initial_width)
+                }
+            }
         }
         SLTNode::ForFoldGroup { states, .. } => {
             try_for_each_child(node, |child| child_width(child).map(|_| ()))?;
@@ -425,6 +444,7 @@ where
                 .map_err(|error| rule_error(node_id, error))
         }
         SLTNode::Unary(op, inner) => Ok(node_rules::unary_width(*op, child_width(*inner)?)),
+        SLTNode::Capture { expr, .. } => child_width(*expr),
         SLTNode::Mux {
             then_expr,
             else_expr,
@@ -542,29 +562,58 @@ where
                 }
             }
 
-            checked_access_width(node_id, result.access, "ForFold result")?;
-            let result_count = updates
-                .iter()
-                .filter(|update| update.target == *result)
-                .count();
-            if result_count != 1 {
-                return Err(SLTNodeFactsError::new(
-                    "FOR_FOLD.RESULT_TARGET_UNIQUE",
-                    node_id,
-                    format!("ForFold result occurs {result_count} times in its update targets"),
-                ));
-            }
+            let result_width = match result {
+                crate::SLTForFoldResult::State(result) => {
+                    let width = checked_access_width(node_id, result.access, "ForFold result")?;
+                    let result_count = updates
+                        .iter()
+                        .filter(|update| update.target == *result)
+                        .count();
+                    if result_count != 1 {
+                        return Err(SLTNodeFactsError::new(
+                            "FOR_FOLD.RESULT_TARGET_UNIQUE",
+                            node_id,
+                            format!(
+                                "ForFold result occurs {result_count} times in its update targets"
+                            ),
+                        ));
+                    }
+                    width
+                }
+                crate::SLTForFoldResult::Transient { initial, update } => {
+                    let initial_width =
+                        require_nonzero_child(*initial, "ForFold transient initial")?;
+                    let update_width = require_nonzero_child(*update, "ForFold transient update")?;
+                    if initial_width != update_width {
+                        return Err(SLTNodeFactsError::new(
+                            "FOR_FOLD.TRANSIENT_RESULT_WIDTH_MATCHES",
+                            node_id,
+                            format!(
+                                "ForFold transient result initial width {initial_width} does not equal update width {update_width}"
+                            ),
+                        ));
+                    }
+                    initial_width
+                }
+            };
 
             for effect in effects {
-                if let Some(guard) = effect.guard {
-                    require_nonzero_child(guard, "ForFold effect guard")?;
-                }
-                for &arg in &effect.args {
-                    require_nonzero_child(arg, "ForFold effect argument")?;
+                match effect {
+                    crate::SLTForEffect::Event { guard, args, .. } => {
+                        if let Some(guard) = guard {
+                            require_nonzero_child(*guard, "ForFold effect guard")?;
+                        }
+                        for &arg in args {
+                            require_nonzero_child(arg, "ForFold effect argument")?;
+                        }
+                    }
+                    crate::SLTForEffect::Runner(runner) => {
+                        require_nonzero_child(*runner, "ForFold effect runner")?;
+                    }
                 }
             }
             require_nonzero_child(*continue_cond, "ForFold continue condition")?;
-            checked_access_width(node_id, result.access, "ForFold result")
+            Ok(result_width)
         }
         SLTNode::ForFoldGroup {
             loop_var,
@@ -782,6 +831,7 @@ where
             visit(*rhs)?;
         }
         SLTNode::Unary(_, inner) => visit(*inner)?,
+        SLTNode::Capture { expr, .. } => visit(*expr)?,
         SLTNode::Mux {
             cond,
             then_expr,
@@ -794,6 +844,7 @@ where
         SLTNode::ForFold {
             start,
             end,
+            result,
             initials,
             updates,
             effects,
@@ -806,6 +857,10 @@ where
             if let SLTLoopBound::Expr(node) = end {
                 visit(*node)?;
             }
+            if let crate::SLTForFoldResult::Transient { initial, update } = result {
+                visit(*initial)?;
+                visit(*update)?;
+            }
             for initial in initials {
                 visit(initial.expr)?;
             }
@@ -813,11 +868,16 @@ where
                 visit(update.expr)?;
             }
             for effect in effects {
-                if let Some(guard) = effect.guard {
-                    visit(guard)?;
-                }
-                for &arg in &effect.args {
-                    visit(arg)?;
+                match effect {
+                    crate::SLTForEffect::Event { guard, args, .. } => {
+                        if let Some(guard) = guard {
+                            visit(*guard)?;
+                        }
+                        for &arg in args {
+                            visit(arg)?;
+                        }
+                    }
+                    crate::SLTForEffect::Runner(runner) => visit(*runner)?,
                 }
             }
             visit(*continue_cond)?;
@@ -850,7 +910,9 @@ mod tests {
     use celox_design::{BinaryOp, UnaryOp, VarAtomBase};
 
     use super::*;
-    use crate::node::{SLTForEffect, SLTForFoldGroupState, SLTForUpdate, SLTStepOp};
+    use crate::node::{
+        SLTForEffect, SLTForFoldGroupState, SLTForFoldResult, SLTForUpdate, SLTStepOp,
+    };
 
     fn arena(nodes: Vec<SLTNode<u32>>) -> SLTNodeArena<u32> {
         SLTNodeArena::try_from_nodes(nodes).expect("test node graph must verify")
@@ -876,7 +938,7 @@ mod tests {
             step: 1,
             step_op: SLTStepOp::Add,
             reverse: false,
-            result: target,
+            result: SLTForFoldResult::State(target),
             initials: vec![SLTForUpdate {
                 target,
                 expr: NodeId(0),
@@ -1106,10 +1168,33 @@ mod tests {
         let SLTNode::ForFold { result, .. } = &mut node else {
             unreachable!()
         };
-        *result = VarAtomBase::new(3, 0, 7);
+        *result = SLTForFoldResult::State(VarAtomBase::new(3, 0, 7));
         assert_eq!(
             verify_for_fold(node).unwrap_err().invariant,
             "FOR_FOLD.RESULT_TARGET_UNIQUE"
+        );
+
+        let mut transient = valid_for_fold();
+        let SLTNode::ForFold { result, .. } = &mut transient else {
+            unreachable!()
+        };
+        *result = SLTForFoldResult::Transient {
+            initial: NodeId(1),
+            update: NodeId(1),
+        };
+        verify_for_fold(transient).expect("transient ForFold result must verify");
+
+        let mut mismatched_transient = valid_for_fold();
+        let SLTNode::ForFold { result, .. } = &mut mismatched_transient else {
+            unreachable!()
+        };
+        *result = SLTForFoldResult::Transient {
+            initial: NodeId(0),
+            update: NodeId(1),
+        };
+        assert_eq!(
+            verify_for_fold(mismatched_transient).unwrap_err().invariant,
+            "FOR_FOLD.TRANSIENT_RESULT_WIDTH_MATCHES"
         );
 
         let mut node = valid_for_fold();
@@ -1138,7 +1223,7 @@ mod tests {
         let SLTNode::ForFold { effects, .. } = &mut node else {
             unreachable!()
         };
-        effects.push(SLTForEffect {
+        effects.push(SLTForEffect::Event {
             site_id: 0,
             guard: Some(NodeId(2)),
             emit_on_true: true,
@@ -1330,7 +1415,7 @@ mod tests {
         let SLTNode::ForFold { effects, .. } = &mut effectful else {
             unreachable!()
         };
-        effects.push(SLTForEffect {
+        effects.push(SLTForEffect::Event {
             site_id: 7,
             guard: None,
             emit_on_true: true,
@@ -1414,7 +1499,7 @@ mod tests {
             step: 1,
             step_op: SLTStepOp::Add,
             reverse: false,
-            result: target,
+            result: SLTForFoldResult::State(target),
             initials: vec![SLTForUpdate {
                 target,
                 expr: NodeId(1),
@@ -1444,7 +1529,7 @@ mod tests {
                 step: 1,
                 step_op: SLTStepOp::Add,
                 reverse: false,
-                result: VarAtomBase::new(2, 7, 3),
+                result: SLTForFoldResult::State(VarAtomBase::new(2, 7, 3)),
                 initials: vec![SLTForUpdate {
                     target: VarAtomBase::new(2, 0, 0),
                     expr: NodeId(0),

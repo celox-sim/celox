@@ -635,6 +635,64 @@ fn test_ff_i32_or_step_with_only_existing_low_bits_reports_true_loop(sim) {
     );
 }
 
+fn test_ff_i32_mul_step_overflow_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            end_bound: input signed logic<64>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in 1500000000..end_bound step *= 2 {
+                    q += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let end_bound = sim.signal("end_bound");
+
+    // The first update overflows i32 even though its widened value would
+    // already exceed this still-representable bound.
+    sim.set(end_bound, 1_600_000_000u64);
+    assert_eq!(
+        sim.tick(clk).unwrap_err().to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
+    );
+}
+
+fn test_ff_i32_shl_step_overflow_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            end_bound: input signed logic<64>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in 1073741824..end_bound step <<= 1 {
+                    q += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let end_bound = sim.signal("end_bound");
+
+    // The first update overflows i32 even though its widened value would
+    // already exceed this still-representable bound.
+    sim.set(end_bound, 1_500_000_000u64);
+    assert_eq!(
+        sim.tick(clk).unwrap_err().to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
+    );
+}
+
 fn test_ff_runtime_for_break(sim) {
     @setup { let code = r#"
         module Top (
@@ -752,7 +810,7 @@ fn test_ff_runtime_for_zero_iteration_mul_loop_is_allowed(sim) {
     assert_eq!(sim.get(q), 0xaau32.into());
 }
 
-fn test_ff_runtime_for_terminal_inclusive_mul_loop_is_allowed(sim) {
+fn test_ff_runtime_for_terminal_inclusive_mul_loop_reports_true_loop(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
@@ -771,11 +829,144 @@ fn test_ff_runtime_for_terminal_inclusive_mul_loop_is_allowed(sim) {
     @build Simulator::builder(code, "Top");
     let clk = sim.event("clk");
     let count = sim.signal("count");
-    let q = sim.signal("q");
 
     sim.modify(|io| io.set(count, 0u8)).unwrap();
+    assert_eq!(
+        sim.tick(clk).unwrap_err().to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
+    );
+}
+
+fn test_ff_runtime_reverse_step_matches_emitted_sv_order(sim) {
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            start: input signed logic<64>,
+            end_bound: input signed logic<64>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in rev start..end_bound step += 2 {
+                    q = i as 32;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let end_bound = sim.signal("end_bound");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(start, 0u64);
+        io.set(end_bound, 10u64);
+    })
+    .unwrap();
     sim.tick(clk).unwrap();
+    // The last iteration is i = 1 for the emitted 9,7,5,3,1 order.
     assert_eq!(sim.get(q), 1u32.into());
+}
+
+fn test_ff_runtime_reverse_exclusive_i32_upper_sentinel(sim) {
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            start: input signed logic<64>,
+            end_bound: input signed logic<64>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in rev start..end_bound {
+                    q = i as 32;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let end_bound = sim.signal("end_bound");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(start, 2147483640u64);
+        io.set(end_bound, 2147483648u64);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 2147483640u32.into());
+}
+
+fn test_ff_runtime_reverse_min_i32_end_wraps_before_range_check(sim) {
+    // veryl-simulator 0.20.2's non-JIT interpreter evaluates `end - 1` as i64
+    // without truncating it to the signed 32-bit loop-counter width. It therefore
+    // gets -2147483649 instead of wrapping to i32::MAX and skips the loop body.
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            start: input signed logic<64>,
+            end_bound: input signed logic<64>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in rev start..end_bound {
+                    q = i as 32;
+                    break;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let end_bound = sim.signal("end_bound");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(start, (-2147483648i64) as u64);
+        io.set(end_bound, (-2147483648i64) as u64);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0x7fff_ffffu32.into());
+}
+
+fn test_ff_runtime_reverse_i32_step_truncation_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            start: input signed logic<64>,
+            end_bound: input signed logic<64>,
+            q: output logic<32>
+        ) {
+            always_ff (clk) {
+                q = 0;
+                for i in rev start..=end_bound step += 4294967296 {
+                    q += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let end_bound = sim.signal("end_bound");
+
+    sim.modify(|io| {
+        io.set(start, 0u64);
+        io.set(end_bound, 3u64);
+    })
+    .unwrap();
+    assert_eq!(
+        sim.tick(clk).unwrap_err().to_string(),
+        "Non-progressing for loop in always_ff (loop variable `i`): i"
+    );
 }
 
 fn test_ff_runtime_for_reverse_singleton_exits_cleanly(sim) {
@@ -1799,7 +1990,7 @@ fn test_ff_function_call_preserves_unsigned_formal_signedness_for_nonvariable_ac
 }
 
 fn test_ff_function_call_nonvariable_argument_uses_formal_shape_for_indexing(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1831,7 +2022,7 @@ fn test_ff_function_call_nonvariable_argument_uses_formal_shape_for_indexing(sim
 }
 
 fn test_ff_function_call_array_literal_element_uses_element_width(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1854,7 +2045,7 @@ fn test_ff_function_call_array_literal_element_uses_element_width(sim) {
 }
 
 fn test_ff_function_call_array_literal_default_fill_matches_formal_shape(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1877,7 +2068,7 @@ fn test_ff_function_call_array_literal_default_fill_matches_formal_shape(sim) {
 }
 
 fn test_ff_function_call_multidim_array_literal_default_fill_matches_formal_shape(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1900,7 +2091,7 @@ fn test_ff_function_call_multidim_array_literal_default_fill_matches_formal_shap
 }
 
 fn test_ff_function_call_multidim_array_literal_indexing_preserves_element_order(sim) {
-    @ignore_on(veryl);
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2090,6 +2281,40 @@ fn test_ff_runtime_for_wide_dynamic_end_errors_before_iteration() {
 
     sim.modify(|io| io.set_wide(count, BigUint::from(1u64) << 40))
         .unwrap();
+    assert_eq!(
+        sim.tick(clk).unwrap_err().to_string(),
+        "For loop value exceeds loop variable range in always_ff (loop variable `i`): i"
+    );
+}
+
+#[test]
+fn test_ff_runtime_for_wide_dynamic_reverse_end_errors_before_iteration() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            start: input signed logic<64>,
+            end_bound: input signed logic<128>,
+            q_hits: output logic<8>
+        ) {
+            always_ff (clk) {
+                q_hits = 0;
+                for i in rev start..end_bound {
+                    q_hits += 1;
+                }
+            }
+        }
+    "#;
+
+    let mut sim = Simulator::builder(code, "Top").build().unwrap();
+    let clk = sim.event("clk");
+    let start = sim.signal("start");
+    let end_bound = sim.signal("end_bound");
+
+    sim.modify(|io| {
+        io.set(start, 0u64);
+        io.set_wide(end_bound, BigUint::from(1u64) << 40);
+    })
+    .unwrap();
     assert_eq!(
         sim.tick(clk).unwrap_err().to_string(),
         "For loop value exceeds loop variable range in always_ff (loop variable `i`): i"

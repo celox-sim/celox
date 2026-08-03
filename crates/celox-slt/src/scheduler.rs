@@ -193,7 +193,7 @@ fn node_reads_only_covered_ranges<Addr: Clone + Eq + Hash>(
                 work.push(*lhs);
                 work.push(*rhs);
             }
-            SLTNode::Unary(_, inner) => work.push(*inner),
+            SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => work.push(*inner),
             SLTNode::Mux {
                 cond,
                 then_expr,
@@ -208,6 +208,7 @@ fn node_reads_only_covered_ranges<Addr: Clone + Eq + Hash>(
             SLTNode::ForFold {
                 start,
                 end,
+                result,
                 initials,
                 updates,
                 effects,
@@ -220,11 +221,20 @@ fn node_reads_only_covered_ranges<Addr: Clone + Eq + Hash>(
                 if let crate::SLTLoopBound::Expr(node) = end {
                     work.push(*node);
                 }
+                if let crate::SLTForFoldResult::Transient { initial, update } = result {
+                    work.push(*initial);
+                    work.push(*update);
+                }
                 work.extend(initials.iter().map(|state| state.expr));
                 work.extend(updates.iter().map(|state| state.expr));
                 for effect in effects {
-                    work.extend(effect.guard);
-                    work.extend(effect.args.iter().copied());
+                    match effect {
+                        crate::SLTForEffect::Event { guard, args, .. } => {
+                            work.extend(*guard);
+                            work.extend(args.iter().copied());
+                        }
+                        crate::SLTForEffect::Runner(runner) => work.push(*runner),
+                    }
                 }
                 work.push(*continue_cond);
             }
@@ -283,6 +293,9 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
         crate::SLTNode::Unary(_, inner) => {
             collect_node_input_deps(*inner, arena, memo, inverse_memo)
         }
+        crate::SLTNode::Capture { expr, .. } => {
+            collect_node_input_deps(*expr, arena, memo, inverse_memo)
+        }
         crate::SLTNode::Mux {
             cond,
             then_expr,
@@ -307,6 +320,7 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
             loop_var,
             start,
             end,
+            result,
             initials,
             updates,
             effects,
@@ -326,6 +340,10 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
                     set.extend(collect_node_input_deps(*node, arena, memo, inverse_memo));
                 }
             }
+            if let crate::SLTForFoldResult::Transient { initial, update } = result {
+                set.extend(collect_node_input_deps(*initial, arena, memo, inverse_memo));
+                set.extend(collect_node_input_deps(*update, arena, memo, inverse_memo));
+            }
             for init in initials {
                 set.extend(collect_node_input_deps(
                     init.expr,
@@ -343,11 +361,18 @@ fn collect_node_input_deps<Addr: Clone + Eq + Hash + Debug + Copy + Display>(
                 ));
             }
             for effect in effects {
-                if let Some(guard) = effect.guard {
-                    set.extend(collect_node_input_deps(guard, arena, memo, inverse_memo));
-                }
-                for arg in &effect.args {
-                    set.extend(collect_node_input_deps(*arg, arena, memo, inverse_memo));
+                match effect {
+                    crate::SLTForEffect::Event { guard, args, .. } => {
+                        if let Some(guard) = guard {
+                            set.extend(collect_node_input_deps(*guard, arena, memo, inverse_memo));
+                        }
+                        for arg in args {
+                            set.extend(collect_node_input_deps(*arg, arena, memo, inverse_memo));
+                        }
+                    }
+                    crate::SLTForEffect::Runner(runner) => {
+                        set.extend(collect_node_input_deps(*runner, arena, memo, inverse_memo));
+                    }
                 }
             }
             set.remove(loop_var);
@@ -794,6 +819,16 @@ fn lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
     arena: &SLTNodeArena<Addr>,
     lower_cache: &mut HashMap<NodeId, RegisterId>,
 ) -> RegisterId {
+    if path.local_inputs.is_empty() {
+        return lowerer.lower(builder, node, arena, lower_cache);
+    }
+    // Unbound captures may already have been materialized before a later
+    // write. Do not rebuild them under the observer's unrelated local inputs.
+    if matches!(arena.get(node), crate::SLTNode::Capture { .. })
+        && let Some(reg) = lower_cache.get(&node)
+    {
+        return *reg;
+    }
     let mut env_inputs = HashMap::default();
     for (addr, local_node) in &path.local_inputs {
         let reg = lowerer.lower(builder, *local_node, arena, lower_cache);
@@ -860,18 +895,19 @@ fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Cop
             };
             let width = 1 + target.access.msb - target.access.lsb;
             let offset = static_access_offset(&target.id, target.access, unpacked_element_widths);
-            let old_reg = if path.comb_capture_enable_sites.is_empty() {
-                None
-            } else {
-                let old_reg = builder.alloc_bit(width, false);
-                builder.emit(SIRInstruction::Load(
-                    old_reg,
-                    target.id,
-                    offset.clone(),
-                    width,
-                ));
-                Some(old_reg)
-            };
+            let old_reg =
+                if path.comb_capture_enable_sites.is_empty() || path.comb_capture_enable_always {
+                    None
+                } else {
+                    let old_reg = builder.alloc_bit(width, false);
+                    builder.emit(SIRInstruction::Load(
+                        old_reg,
+                        target.id,
+                        offset.clone(),
+                        width,
+                    ));
+                    Some(old_reg)
+                };
             builder.emit(SIRInstruction::Store(
                 target.id,
                 offset,
@@ -880,10 +916,22 @@ fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Cop
                 Vec::new(),
                 Vec::new(),
             ));
-            if let Some(old) = old_reg {
+            if !path.comb_capture_enable_sites.is_empty() {
+                let (old, new) = if path.comb_capture_enable_always {
+                    let old = builder.alloc_bit(1, false);
+                    let new = builder.alloc_bit(1, false);
+                    builder.emit(SIRInstruction::Imm(old, SIRValue::new(0u8)));
+                    builder.emit(SIRInstruction::Imm(new, SIRValue::new(1u8)));
+                    (old, new)
+                } else {
+                    (
+                        old_reg.expect("changed capture enable loads the old value"),
+                        result_reg,
+                    )
+                };
                 builder.emit(SIRInstruction::CombCaptureEnableIfChanged {
                     old,
-                    new: result_reg,
+                    new,
                     sites: path.comb_capture_enable_sites.clone(),
                 });
             }
@@ -974,7 +1022,9 @@ fn invalidate_logic_path_target<Addr: Clone + Eq + Ord + Hash + Debug + Copy + D
     };
     if let Some(to_remove) = inverse_dep_memo.get(&target.id) {
         for node in to_remove {
-            lower_cache.remove(node);
+            if !path.pre_lower_nodes.contains(node) {
+                lower_cache.remove(node);
+            }
         }
     }
 }
@@ -1143,7 +1193,7 @@ fn push_scheduler_node_children<Addr: Clone + Eq + Hash>(
             work.push(*lhs);
             work.push(*rhs);
         }
-        SLTNode::Unary(_, inner) => work.push(*inner),
+        SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => work.push(*inner),
         SLTNode::Mux {
             cond,
             then_expr,
@@ -1158,6 +1208,7 @@ fn push_scheduler_node_children<Addr: Clone + Eq + Hash>(
         SLTNode::ForFold {
             start,
             end,
+            result,
             initials,
             updates,
             effects,
@@ -1170,11 +1221,20 @@ fn push_scheduler_node_children<Addr: Clone + Eq + Hash>(
             if let crate::SLTLoopBound::Expr(node) = end {
                 work.push(*node);
             }
+            if let crate::SLTForFoldResult::Transient { initial, update } = result {
+                work.push(*initial);
+                work.push(*update);
+            }
             work.extend(initials.iter().map(|state| state.expr));
             work.extend(updates.iter().map(|state| state.expr));
             for effect in effects {
-                work.extend(effect.guard);
-                work.extend(effect.args.iter().copied());
+                match effect {
+                    crate::SLTForEffect::Event { guard, args, .. } => {
+                        work.extend(*guard);
+                        work.extend(args.iter().copied());
+                    }
+                    crate::SLTForEffect::Runner(runner) => work.push(*runner),
+                }
             }
             work.push(*continue_cond);
         }
@@ -1329,6 +1389,7 @@ fn normalize_index_expr<Addr: Clone + Eq + Hash + Copy>(
             *op,
             Box::new(normalize_index_expr(*inner, loop_var, arena, memo)?),
         )),
+        SLTNode::Capture { expr, .. } => normalize_index_expr(*expr, loop_var, arena, memo),
         SLTNode::Mux {
             cond,
             then_expr,
@@ -2355,9 +2416,9 @@ fn collect_pure_scheduled_nodes<A: Clone + Eq + Hash>(
             collect_pure_scheduled_nodes(*lhs, arena, nodes)
                 && collect_pure_scheduled_nodes(*rhs, arena, nodes)
         }
-        SLTNode::Unary(_, inner) | SLTNode::Slice { expr: inner, .. } => {
-            collect_pure_scheduled_nodes(*inner, arena, nodes)
-        }
+        SLTNode::Unary(_, inner)
+        | SLTNode::Capture { expr: inner, .. }
+        | SLTNode::Slice { expr: inner, .. } => collect_pure_scheduled_nodes(*inner, arena, nodes),
         SLTNode::Mux {
             cond,
             then_expr,
@@ -2488,7 +2549,9 @@ fn condition_reads_target<A: Clone + Eq + Hash>(
             }
             SLTNode::Constant(..) => {}
             SLTNode::Binary(lhs, _, rhs) => work.extend([*lhs, *rhs]),
-            SLTNode::Unary(_, inner) | SLTNode::Slice { expr: inner, .. } => work.push(*inner),
+            SLTNode::Unary(_, inner)
+            | SLTNode::Capture { expr: inner, .. }
+            | SLTNode::Slice { expr: inner, .. } => work.push(*inner),
             SLTNode::Mux {
                 cond,
                 then_expr,
@@ -3500,9 +3563,18 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                         Vec::new(),
                     ));
                     if !path.comb_capture_enable_sites.is_empty() {
+                        let (old, new) = if path.comb_capture_enable_always {
+                            let old = builder.alloc_bit(1, false);
+                            let new = builder.alloc_bit(1, false);
+                            builder.emit(SIRInstruction::Imm(old, SIRValue::new(0u8)));
+                            builder.emit(SIRInstruction::Imm(new, SIRValue::new(1u8)));
+                            (old, new)
+                        } else {
+                            (old_val_reg, new_val_reg)
+                        };
                         builder.emit(SIRInstruction::CombCaptureEnableIfChanged {
-                            old: old_val_reg,
-                            new: new_val_reg,
+                            old,
+                            new,
                             sites: path.comb_capture_enable_sites.clone(),
                         });
                     }
@@ -3810,6 +3882,7 @@ mod tests {
             local_inputs: Vec::new(),
             order_before: crate::HashSet::default(),
             comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
             pre_lower_nodes: Vec::new(),
             expr,
         }
@@ -3859,6 +3932,7 @@ mod tests {
                 local_inputs: Vec::new(),
                 order_before: crate::HashSet::default(),
                 comb_capture_enable_sites: Vec::new(),
+                comb_capture_enable_always: false,
                 pre_lower_nodes: Vec::new(),
                 expr,
             });
@@ -4007,6 +4081,7 @@ mod tests {
                 local_inputs: Vec::new(),
                 order_before: crate::HashSet::default(),
                 comb_capture_enable_sites: Vec::new(),
+                comb_capture_enable_always: false,
                 pre_lower_nodes: Vec::new(),
                 expr,
             });
@@ -4270,6 +4345,7 @@ mod tests {
             local_inputs: Vec::new(),
             order_before: crate::HashSet::default(),
             comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
             pre_lower_nodes: Vec::new(),
             expr: group,
         }
@@ -4751,6 +4827,7 @@ mod tests {
             local_inputs: Vec::new(),
             order_before: crate::HashSet::default(),
             comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
             pre_lower_nodes: Vec::new(),
             expr,
         };

@@ -22,8 +22,8 @@ mod symbolic_verify;
 pub use lower::matches_slt_or_scan_group;
 pub use lower::{SLTToSIRLowerer, matches_slt_count_idiom};
 pub use node::{
-    NodeId, SLTForEffect, SLTForFoldGroupState, SLTForUpdate, SLTIndex, SLTIndexKind, SLTLoopBound,
-    SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTStepOp,
+    NodeId, SLTForEffect, SLTForFoldGroupState, SLTForFoldResult, SLTForUpdate, SLTIndex,
+    SLTIndexKind, SLTLoopBound, SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTStepOp,
 };
 pub use node_facts::{SLTNodeFacts, SLTNodeFactsError};
 pub use path::{LogicPath, LogicPathId, LogicPathTarget};

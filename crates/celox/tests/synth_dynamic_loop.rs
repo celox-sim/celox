@@ -165,6 +165,35 @@ fn test_runtime_bounds_in_synth_for_loops(sim) {
     assert_eq!(sim.get(sum_step), 15u32.into());
 }
 
+fn test_loop_bound_is_evaluated_once_before_body(sim) {
+    @setup { let code = r#"
+        module Top (
+            initial_limit: input logic<32>,
+            count: output logic<32>,
+        ) {
+            var limit: logic<32>;
+
+            always_comb {
+                limit = initial_limit;
+                count = 0;
+
+                for _i in 0..limit {
+                    count += 1;
+                    limit = 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let initial_limit = sim.signal("initial_limit");
+    let count = sim.signal("count");
+
+    sim.set(initial_limit, 4u32);
+    sim.eval_comb().unwrap();
+    assert_eq!(sim.get(count), 4u32.into());
+}
+
 fn test_runtime_bitwise_steps_in_synth_for_loops(sim) {
     @setup { let code = r#"
         module Top (
@@ -326,7 +355,51 @@ fn test_i32_or_step_with_only_existing_low_bits_reports_true_loop(sim) {
     assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
 }
 
-fn test_runtime_bounds_terminal_inclusive_mul_loop_exits_cleanly(sim) {
+fn test_i32_mul_step_overflow_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            end_bound: input signed logic<64>,
+            hits: output logic<32>
+        ) {
+            always_comb {
+                hits = 0;
+                for i in 1500000000..end_bound step *= 2 {
+                    hits += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let end_bound = sim.signal("end_bound");
+    sim.set(end_bound, 3_100_000_000u64);
+    assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+}
+
+fn test_i32_shl_step_overflow_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            end_bound: input signed logic<64>,
+            hits: output logic<32>
+        ) {
+            always_comb {
+                hits = 0;
+                for i in 1073741824..end_bound step <<= 1 {
+                    hits += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let end_bound = sim.signal("end_bound");
+    sim.set(end_bound, 2_147_483_649u64);
+    assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+}
+
+fn test_runtime_bounds_terminal_inclusive_mul_loop_reports_true_loop(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
@@ -344,11 +417,59 @@ fn test_runtime_bounds_terminal_inclusive_mul_loop_exits_cleanly(sim) {
     @build Simulator::builder(code, "Top");
 
     let count = sim.signal("count");
-    let hits = sim.signal("hits");
-
     sim.set(count, 0u32);
+    assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
+}
+
+fn test_runtime_reverse_step_matches_emitted_sv_order(sim) {
+    @setup { let code = r#"
+        module Top (
+            start: input signed logic<64>,
+            end_bound: input signed logic<64>,
+            digits: output logic<32>
+        ) {
+            always_comb {
+                digits = 0;
+                for i in rev start..end_bound step += 2 {
+                    digits = digits * 10 + i as 32;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    let end_bound = sim.signal("end_bound");
+    let digits = sim.signal("digits");
+    sim.set(start, 0u64);
+    sim.set(end_bound, 10u64);
     sim.eval_comb().unwrap();
-    assert_eq!(sim.get(hits), 1u32.into());
+    assert_eq!(sim.get(digits), 97_531u32.into());
+}
+
+fn test_runtime_reverse_i32_step_truncation_reports_true_loop(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            start: input signed logic<64>,
+            end_bound: input signed logic<64>,
+            hits: output logic<32>
+        ) {
+            always_comb {
+                hits = 0;
+                for i in rev start..=end_bound step += 4294967296 {
+                    hits += 1;
+                }
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+
+    let start = sim.signal("start");
+    let end_bound = sim.signal("end_bound");
+    sim.set(start, 0u64);
+    sim.set(end_bound, 3u64);
+    assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
 }
 
 fn test_runtime_break_in_synth_comb_loop(sim) {

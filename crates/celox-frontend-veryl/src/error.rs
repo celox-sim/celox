@@ -76,6 +76,14 @@ pub enum ParserError {
         source_location: Option<SourceLocation>,
     },
 
+    #[error("Invalid argument binding for `{argument}` in call to function `{function}`: {detail}")]
+    InvalidFunctionArgumentBinding {
+        function: String,
+        argument: String,
+        detail: String,
+        source_location: Option<SourceLocation>,
+    },
+
     #[error(
         "Unresolved type width for variable `{variable}` in module `{module}`: \
              width cannot be determined at compile time (type: {typ})"
@@ -154,6 +162,20 @@ impl ParserError {
             source_location: Some(SourceLocation::from_token(&var.token)),
         }
     }
+
+    pub fn invalid_function_argument_binding(
+        function: impl Into<String>,
+        argument: impl Into<String>,
+        detail: impl Into<String>,
+        token: Option<&TokenRange>,
+    ) -> Self {
+        ParserError::InvalidFunctionArgumentBinding {
+            function: function.into(),
+            argument: argument.into(),
+            detail: detail.into(),
+            source_location: token.map(SourceLocation::from_token),
+        }
+    }
 }
 
 impl miette::Diagnostic for ParserError {
@@ -168,6 +190,9 @@ impl miette::Diagnostic for ParserError {
                 }
             ))),
             ParserError::IllegalContext { .. } => Some(Box::new("illegal_context")),
+            ParserError::InvalidFunctionArgumentBinding { .. } => {
+                Some(Box::new("invalid_function_argument_binding"))
+            }
             ParserError::UnresolvedWidth { .. } => Some(Box::new("unresolved_width")),
             ParserError::Scheduler(_) | ParserError::SchedulerWithLocation { .. } => {
                 Some(Box::new("scheduler"))
@@ -193,6 +218,9 @@ impl miette::Diagnostic for ParserError {
             | ParserError::IllegalContext {
                 source_location, ..
             }
+            | ParserError::InvalidFunctionArgumentBinding {
+                source_location, ..
+            }
             | ParserError::UnresolvedWidth {
                 source_location, ..
             } => source_location.as_ref(),
@@ -210,6 +238,9 @@ impl miette::Diagnostic for ParserError {
                 source_location, ..
             }
             | ParserError::IllegalContext {
+                source_location, ..
+            }
+            | ParserError::InvalidFunctionArgumentBinding {
                 source_location, ..
             }
             | ParserError::UnresolvedWidth {

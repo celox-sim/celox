@@ -214,7 +214,9 @@ fn eval_loop_bound<B: SimBackend>(
     bound: &LoopBound,
 ) -> Result<EvaluatedLoopBound, TestbenchEvaluationError> {
     match bound {
-        LoopBound::Static(v) => Ok(EvaluatedLoopBound::Unsigned(*v)),
+        // ForBound::Const no longer carries source signedness; use the signed
+        // i32 induction-variable semantics for static Veryl loop bounds.
+        LoopBound::Static(v) => Ok(EvaluatedLoopBound::Signed(*v as i128)),
         LoopBound::Dynamic {
             expr,
             width,
@@ -306,6 +308,49 @@ fn truncate_i128_to_width(value: i128, width: usize, signed: bool) -> i128 {
     }
 }
 
+fn truncate_bigint_to_width(value: BigInt, width: usize, signed: bool) -> BigInt {
+    let width = width.max(1);
+    let modulus = BigInt::from(1u8) << width;
+    let mut wrapped = value % &modulus;
+    if wrapped.sign() == Sign::Minus {
+        wrapped += &modulus;
+    }
+    if signed && wrapped >= (BigInt::from(1u8) << (width - 1)) {
+        wrapped - modulus
+    } else {
+        wrapped
+    }
+}
+
+fn advance_bigint_counter(
+    current: &BigInt,
+    step: usize,
+    step_op: Option<Op>,
+    reverse: bool,
+    width: usize,
+    signed: bool,
+) -> BigInt {
+    let step_value = BigInt::from(step);
+    let raw = if reverse {
+        current - &step_value
+    } else {
+        match step_op {
+            Some(Op::Mul) => current * &step_value,
+            Some(Op::BitOr) => current | &step_value,
+            Some(Op::BitXor) => current ^ &step_value,
+            Some(Op::LogicShiftL | Op::ArithShiftL) => {
+                if step >= width.max(1) {
+                    BigInt::from(0u8)
+                } else {
+                    current << step
+                }
+            }
+            _ => current + &step_value,
+        }
+    };
+    truncate_bigint_to_width(raw, width, signed)
+}
+
 fn truncate_usize_to_width(value: usize, width: usize) -> usize {
     if width >= usize::BITS as usize {
         value
@@ -381,20 +426,12 @@ fn sim_set_bigint<B: SimBackend>(
     }
 }
 
-fn as_biguint_bound(bound: &EvaluatedLoopBound) -> Option<BigUint> {
-    match bound {
-        EvaluatedLoopBound::Unsigned(v) => Some(BigUint::from(*v)),
-        EvaluatedLoopBound::UnsignedWide(v) => Some(v.clone()),
-        _ => None,
-    }
-}
-
 fn as_bigint_bound(bound: &EvaluatedLoopBound) -> Option<BigInt> {
     match bound {
         EvaluatedLoopBound::Unsigned(v) => Some(BigInt::from(*v)),
+        EvaluatedLoopBound::UnsignedWide(v) => Some(BigInt::from(v.clone())),
         EvaluatedLoopBound::Signed(v) => Some(BigInt::from(*v)),
         EvaluatedLoopBound::SignedWide(v) => Some(v.clone()),
-        _ => None,
     }
 }
 
@@ -409,54 +446,61 @@ fn exec_for_loop<B: SimBackend>(
     reverse: bool,
     mut exec_body: impl FnMut(&mut Simulator<B>) -> ExecResult,
 ) -> ExecResult {
-    let start = match eval_loop_bound(sim, start) {
+    let mut start = match eval_loop_bound(sim, start) {
         Ok(v) => v,
         Err(error) => return ExecResult::Fail(error.to_string()),
     };
-    let end = match eval_loop_bound(sim, end) {
+    let mut end = match eval_loop_bound(sim, end) {
         Ok(v) => v,
         Err(error) => return ExecResult::Fail(error.to_string()),
     };
 
-    if matches!(start, EvaluatedLoopBound::UnsignedWide(_))
+    let initially_wide = matches!(start, EvaluatedLoopBound::UnsignedWide(_))
         || matches!(end, EvaluatedLoopBound::UnsignedWide(_))
+        || matches!(start, EvaluatedLoopBound::SignedWide(_))
+        || matches!(end, EvaluatedLoopBound::SignedWide(_));
+    if let Some((_, width, true)) = loop_var.as_ref()
+        && !initially_wide
     {
-        let start = as_biguint_bound(&start).expect("unsigned big bound");
-        let end = as_biguint_bound(&end).expect("unsigned big bound");
-        let mut step_body = |sim: &mut Simulator<B>, i: BigUint| -> ExecResult {
-            if let Some((sig, _, _)) = loop_var {
-                sim_set_biguint(sim, *sig, i);
-            }
-            exec_body(sim)
+        let width = (*width).max(1);
+        let unsigned_max = if width <= usize::BITS as usize {
+            Some((1usize << (width - 1)) - 1)
+        } else {
+            None
         };
-        if reverse {
-            if inclusive {
-                if end < start {
-                    return ExecResult::Continue;
-                }
-                if end == start {
-                    return step_body(sim, end);
-                }
-            } else if end <= start {
-                return ExecResult::Continue;
-            }
-        } else if inclusive {
-            if start > end {
-                return ExecResult::Continue;
-            }
-            if start == end {
-                return step_body(sim, start);
-            }
-        } else if start >= end {
-            return ExecResult::Continue;
+        let unsigned_value = |bound: &EvaluatedLoopBound| match bound {
+            EvaluatedLoopBound::Unsigned(value) => Some(*value),
+            _ => None,
+        };
+        let start_out_of_range = unsigned_max
+            .zip(unsigned_value(&start))
+            .is_some_and(|(max, value)| value > max);
+        let end_out_of_range =
+            unsigned_max
+                .zip(unsigned_value(&end))
+                .is_some_and(|(max, value)| {
+                    value > max && !(!inclusive && value == max.saturating_add(1))
+                });
+        if start_out_of_range || end_out_of_range {
+            return ExecResult::Fail("non-progressing stepped for loop".to_string());
         }
-        return ExecResult::Fail("dynamic for-loop bound exceeds host usize".to_string());
+        start = match start {
+            EvaluatedLoopBound::Unsigned(value) => EvaluatedLoopBound::Signed(value as i128),
+            other => other,
+        };
+        end = match end {
+            EvaluatedLoopBound::Unsigned(value) => EvaluatedLoopBound::Signed(value as i128),
+            other => other,
+        };
     }
-    if matches!(start, EvaluatedLoopBound::SignedWide(_))
-        || matches!(end, EvaluatedLoopBound::SignedWide(_))
-    {
-        let start = as_bigint_bound(&start).expect("signed big bound");
-        let end = as_bigint_bound(&end).expect("signed big bound");
+
+    let has_unsigned_wide = matches!(start, EvaluatedLoopBound::UnsignedWide(_))
+        || matches!(end, EvaluatedLoopBound::UnsignedWide(_));
+    let has_signed_wide = matches!(start, EvaluatedLoopBound::SignedWide(_))
+        || matches!(end, EvaluatedLoopBound::SignedWide(_));
+    if has_unsigned_wide || has_signed_wide {
+        let start = as_bigint_bound(&start).expect("big loop bound");
+        let end = as_bigint_bound(&end).expect("big loop bound");
         let mut step_body = |sim: &mut Simulator<B>, i: BigInt| -> ExecResult {
             if let Some((sig, width, _)) = loop_var {
                 sim_set_bigint(sim, *sig, *width, i);
@@ -469,7 +513,26 @@ fn exec_for_loop<B: SimBackend>(
                     return ExecResult::Continue;
                 }
                 if end == start {
-                    return step_body(sim, end);
+                    let (width, signed) = loop_var
+                        .as_ref()
+                        .map_or((usize::BITS as usize, false), |(_, width, signed)| {
+                            (*width, *signed)
+                        });
+                    let current = truncate_bigint_to_width(end, width, signed);
+                    let result = step_body(sim, current.clone());
+                    if matches!(result, ExecResult::Break) {
+                        return ExecResult::Continue;
+                    }
+                    if result.should_stop() {
+                        return result;
+                    }
+                    let next =
+                        advance_bigint_counter(&current, step, step_op, reverse, width, signed);
+                    return if next >= current {
+                        ExecResult::Fail("non-progressing stepped for loop".to_string())
+                    } else {
+                        ExecResult::Continue
+                    };
                 }
             } else if end <= start {
                 return ExecResult::Continue;
@@ -479,12 +542,34 @@ fn exec_for_loop<B: SimBackend>(
                 return ExecResult::Continue;
             }
             if start == end {
-                return step_body(sim, start);
+                let (width, signed) = loop_var
+                    .as_ref()
+                    .map_or((usize::BITS as usize, false), |(_, width, signed)| {
+                        (*width, *signed)
+                    });
+                let current = truncate_bigint_to_width(start, width, signed);
+                let result = step_body(sim, current.clone());
+                if matches!(result, ExecResult::Break) {
+                    return ExecResult::Continue;
+                }
+                if result.should_stop() {
+                    return result;
+                }
+                let next = advance_bigint_counter(&current, step, step_op, reverse, width, signed);
+                return if next <= current {
+                    ExecResult::Fail("non-progressing stepped for loop".to_string())
+                } else {
+                    ExecResult::Continue
+                };
             }
         } else if start >= end {
             return ExecResult::Continue;
         }
-        return ExecResult::Fail("dynamic signed for-loop bound exceeds host i128".to_string());
+        return ExecResult::Fail(if loop_var.as_ref().is_some_and(|(_, _, signed)| *signed) {
+            "dynamic signed for-loop bound exceeds host i128".to_string()
+        } else {
+            "dynamic for-loop bound exceeds host usize".to_string()
+        });
     }
 
     let (start_signed, end_signed) = match (start, end) {
@@ -504,6 +589,11 @@ fn exec_for_loop<B: SimBackend>(
     };
 
     if let Some((start, end)) = start_signed {
+        let truncate_counter = |value| {
+            loop_var.as_ref().map_or(value, |(_, width, signed)| {
+                truncate_i128_to_width(value, *width, *signed)
+            })
+        };
         let mut step_body = |sim: &mut Simulator<B>, i: i128| -> ExecResult {
             if let Some((sig, width, _)) = loop_var {
                 sim_set_i128(sim, *sig, *width, i);
@@ -513,20 +603,7 @@ fn exec_for_loop<B: SimBackend>(
 
         let step_i = step as i128;
         if reverse {
-            if step == 0 {
-                if inclusive {
-                    if end < start {
-                        return ExecResult::Continue;
-                    }
-                    if end == start {
-                        return step_body(sim, end);
-                    }
-                } else if end <= start {
-                    return ExecResult::Continue;
-                }
-                return ExecResult::Fail("non-progressing stepped for loop".to_string());
-            }
-            let mut i = if inclusive { end } else { end - step_i };
+            let mut i = truncate_counter(if inclusive { end } else { end.wrapping_sub(1) });
             while i >= start {
                 let r = step_body(sim, i);
                 if matches!(r, ExecResult::Break) {
@@ -535,13 +612,14 @@ fn exec_for_loop<B: SimBackend>(
                 if r.should_stop() {
                     return r;
                 }
-                let Some(next) = i.checked_sub(step_i) else {
-                    break;
-                };
+                let next = truncate_counter(i.wrapping_sub(step_i));
+                if next >= i {
+                    return ExecResult::Fail("non-progressing stepped for loop".to_string());
+                }
                 i = next;
             }
         } else if let Some(op) = step_op {
-            let mut i = start;
+            let mut i = truncate_counter(start);
             while if inclusive { i <= end } else { i < end } {
                 let r = step_body(sim, i);
                 if matches!(r, ExecResult::Break) {
@@ -550,35 +628,27 @@ fn exec_for_loop<B: SimBackend>(
                 if r.should_stop() {
                     return r;
                 }
-                if inclusive && i == end {
-                    break;
-                }
                 let new_i = match op {
-                    Op::Mul => i.saturating_mul(step_i),
+                    Op::Mul => i.wrapping_mul(step_i),
                     Op::BitOr => i | step_i,
                     Op::BitXor => i ^ step_i,
                     Op::LogicShiftL | Op::ArithShiftL => {
                         if step >= i128::BITS as usize {
-                            break;
+                            0
+                        } else {
+                            i.checked_shl(step as u32).unwrap_or(0)
                         }
-                        i.checked_shl(step as u32).unwrap_or(0)
                     }
-                    _ => i.saturating_add(step_i),
+                    _ => i.wrapping_add(step_i),
                 };
-                let new_i = if matches!(op, Op::BitOr | Op::BitXor) {
-                    loop_var.as_ref().map_or(new_i, |(_, width, signed)| {
-                        truncate_i128_to_width(new_i, *width, *signed)
-                    })
-                } else {
-                    new_i
-                };
+                let new_i = truncate_counter(new_i);
                 if new_i <= i {
                     return ExecResult::Fail("non-progressing stepped for loop".to_string());
                 }
                 i = new_i;
             }
         } else {
-            let mut i = start;
+            let mut i = truncate_counter(start);
             while if inclusive { i <= end } else { i < end } {
                 let r = step_body(sim, i);
                 if matches!(r, ExecResult::Break) {
@@ -587,9 +657,11 @@ fn exec_for_loop<B: SimBackend>(
                 if r.should_stop() {
                     return r;
                 }
-                let Some(next) = i.checked_add(step_i) else {
-                    break;
-                };
+                let next = i.wrapping_add(step_i);
+                let next = truncate_counter(next);
+                if next <= i {
+                    return ExecResult::Fail("non-progressing stepped for loop".to_string());
+                }
                 i = next;
             }
         }
@@ -598,6 +670,11 @@ fn exec_for_loop<B: SimBackend>(
     }
 
     let (start, end) = end_signed.expect("unsigned loop bounds expected");
+    let truncate_counter = |value| {
+        loop_var.as_ref().map_or(value, |(_, width, _)| {
+            truncate_usize_to_width(value, *width)
+        })
+    };
 
     let mut step_body = |sim: &mut Simulator<B>, i: usize| -> ExecResult {
         if let Some((sig, _, _)) = loop_var {
@@ -607,26 +684,7 @@ fn exec_for_loop<B: SimBackend>(
     };
 
     if reverse {
-        if step == 0 {
-            if inclusive {
-                if end < start {
-                    return ExecResult::Continue;
-                }
-                if end == start {
-                    return step_body(sim, end);
-                }
-            } else if end <= start {
-                return ExecResult::Continue;
-            }
-            return ExecResult::Fail("non-progressing stepped for loop".to_string());
-        }
-        let mut i = if inclusive {
-            end
-        } else if let Some(v) = end.checked_sub(step) {
-            v
-        } else {
-            return ExecResult::Continue;
-        };
+        let mut i = truncate_counter(if inclusive { end } else { end.wrapping_sub(1) });
         while i >= start {
             let r = step_body(sim, i);
             if matches!(r, ExecResult::Break) {
@@ -635,13 +693,14 @@ fn exec_for_loop<B: SimBackend>(
             if r.should_stop() {
                 return r;
             }
-            let Some(next) = i.checked_sub(step) else {
-                break;
-            };
+            let next = truncate_counter(i.wrapping_sub(step));
+            if next >= i {
+                return ExecResult::Fail("non-progressing stepped for loop".to_string());
+            }
             i = next;
         }
     } else if let Some(op) = step_op {
-        let mut i = start;
+        let mut i = truncate_counter(start);
         while if inclusive { i <= end } else { i < end } {
             let r = step_body(sim, i);
             if matches!(r, ExecResult::Break) {
@@ -650,35 +709,27 @@ fn exec_for_loop<B: SimBackend>(
             if r.should_stop() {
                 return r;
             }
-            if inclusive && i == end {
-                break;
-            }
             let new_i = match op {
-                Op::Mul => i.saturating_mul(step),
+                Op::Mul => i.wrapping_mul(step),
                 Op::BitOr => i | step,
                 Op::BitXor => i ^ step,
                 Op::LogicShiftL | Op::ArithShiftL => {
                     if step >= usize::BITS as usize {
-                        break;
+                        0
+                    } else {
+                        i << step
                     }
-                    i << step
                 }
-                _ => i.saturating_add(step),
+                _ => i.wrapping_add(step),
             };
-            let new_i = if matches!(op, Op::BitOr | Op::BitXor) {
-                loop_var.as_ref().map_or(new_i, |(_, width, _)| {
-                    truncate_usize_to_width(new_i, *width)
-                })
-            } else {
-                new_i
-            };
+            let new_i = truncate_counter(new_i);
             if new_i <= i {
                 return ExecResult::Fail("non-progressing stepped for loop".to_string());
             }
             i = new_i;
         }
     } else {
-        let mut i = start;
+        let mut i = truncate_counter(start);
         while if inclusive { i <= end } else { i < end } {
             let r = step_body(sim, i);
             if matches!(r, ExecResult::Break) {
@@ -687,9 +738,11 @@ fn exec_for_loop<B: SimBackend>(
             if r.should_stop() {
                 return r;
             }
-            let Some(next) = i.checked_add(step) else {
-                break;
-            };
+            let next = i.wrapping_add(step);
+            let next = truncate_counter(next);
+            if next <= i {
+                return ExecResult::Fail("non-progressing stepped for loop".to_string());
+            }
             i = next;
         }
     }

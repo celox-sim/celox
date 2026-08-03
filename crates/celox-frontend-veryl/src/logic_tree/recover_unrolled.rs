@@ -11,7 +11,7 @@ use veryl_parser::token_range::TokenRange;
 
 use super::{
     ActiveGuard, BoundaryMap, NodeId, SLTForFoldGroupState, SLTNode, SLTNodeArena, SymbolicStore,
-    combine_active_guard, combine_parts_with_default, eval_expression, eval_statement,
+    combine_active_guard, combine_parts_with_default, eval_expression_effectful, eval_statement,
     eval_statement_with_recovery, get_width, merge_boundaries, procedural_condition,
     range_store_error,
 };
@@ -37,8 +37,9 @@ pub(super) fn eval_statements(
             let guarded_matches = matching_candidates(module, &if_stmt.true_side, candidates);
             if guarded_matches.len() == 1 {
                 let candidate = guarded_matches[0];
+                let store_before_probe = store.clone();
                 let ((guard, guard_sources), guard_boundaries) =
-                    eval_expression(module, &store, &if_stmt.cond, arena, None)?;
+                    eval_expression_effectful(module, &mut store, &if_stmt.cond, arena, None)?;
                 let guard = procedural_condition(arena, guard)?;
                 let guard = combine_active_guard(arena, active_guard, guard, &guard_sources)?;
                 if let Some((next_store, recovered_boundaries)) = recover_group(
@@ -57,6 +58,7 @@ pub(super) fn eval_statements(
                     index += 1;
                     continue;
                 }
+                store = store_before_probe;
             }
         }
 
@@ -2009,7 +2011,7 @@ fn slt_reaches_input_id(
                 pending.push(*lhs);
                 pending.push(*rhs);
             }
-            SLTNode::Unary(_, inner) => pending.push(*inner),
+            SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => pending.push(*inner),
             SLTNode::Mux {
                 cond,
                 then_expr,
@@ -2053,7 +2055,7 @@ fn collect_slt_input_sources(
                 pending.push(*lhs);
                 pending.push(*rhs);
             }
-            SLTNode::Unary(_, inner) => pending.push(*inner),
+            SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => pending.push(*inner),
             SLTNode::Mux {
                 cond,
                 then_expr,
@@ -2283,7 +2285,7 @@ fn specialize_slt_node(
                 pending.push(lhs);
                 pending.push(rhs);
             }
-            SLTNode::Unary(_, inner) => pending.push(inner),
+            SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => pending.push(inner),
             SLTNode::Mux {
                 cond,
                 then_expr,
@@ -2448,6 +2450,12 @@ fn specialize_slt_node(
                     arena.alloc(SLTNode::Unary(op, inner)).ok()?
                 }
             }
+            SLTNode::Capture { expr, key } => arena
+                .alloc(SLTNode::Capture {
+                    expr: *cache.get(&expr)?,
+                    key,
+                })
+                .ok()?,
             SLTNode::Mux {
                 cond,
                 then_expr,
@@ -2910,6 +2918,7 @@ fn proof_node_signed(node: NodeId, arena: &SLTNodeArena<VarId>) -> bool {
             UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot,
             inner,
         ) => proof_node_signed(*inner, arena),
+        SLTNode::Capture { expr, .. } => proof_node_signed(*expr, arena),
         SLTNode::Mux {
             then_expr,
             else_expr,
@@ -3593,7 +3602,9 @@ fn collect_template_inputs(
             collect_template_inputs(*lhs, arena, visited, inputs)
                 && collect_template_inputs(*rhs, arena, visited, inputs)
         }
-        SLTNode::Unary(_, inner) => collect_template_inputs(*inner, arena, visited, inputs),
+        SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => {
+            collect_template_inputs(*inner, arena, visited, inputs)
+        }
         SLTNode::Mux {
             cond,
             then_expr,
@@ -3906,7 +3917,7 @@ mod tests {
             .expect("always_comb must exist");
         let mut arena = SLTNodeArena::new();
         let (paths, _, _, _, _) =
-            parse_comb_with_loop_recovery(module, declaration, &mut arena, candidates)
+            parse_comb_with_loop_recovery(module, declaration, &mut arena, candidates, 0)
                 .expect("comb lowering must succeed");
         (paths, arena)
     }
@@ -4466,6 +4477,71 @@ mod tests {
         candidates[0].unrolled.iterations[2].value = 9;
         let (_, arena) = parse_with_candidates(&module, &candidates);
         assert_eq!(group_count(&arena), 0);
+    }
+
+    #[test]
+    fn failed_guarded_probe_restores_effectful_guard_store() {
+        let (module, provenance) = analyze(
+            r#"
+                module Top (
+                    en         : input  logic,
+                    bits       : input  logic<4>,
+                    guard_calls: output logic<8>,
+                ) {
+                    function guard (
+                        enabled : input  logic,
+                        previous: input  logic<8>,
+                        next    : output logic<8>,
+                    ) -> logic {
+                        next = previous + 8'd1;
+                        return enabled;
+                    }
+
+                    var state: logic<4>;
+                    var calls: logic<8>;
+                    always_comb {
+                        state = 4'd0;
+                        calls = 8'd0;
+                        if guard(en, calls, calls) {
+                            for i in 0..4 {
+                                state[i] = bits[i];
+                            }
+                        }
+                        guard_calls = calls;
+                    }
+                }
+            "#,
+        );
+        let mut candidates = provenance.candidates_for_module(&module);
+        assert_eq!(candidates.len(), 1);
+        // Keep the source-range match intact while making recovery decline
+        // the candidate after the speculative guard evaluation.
+        candidates[0].unrolled.iterations[2].value = 9;
+
+        let (paths, arena) = parse_with_candidates(&module, &candidates);
+        assert_eq!(group_count(&arena), 0);
+        let guard_calls = variable(&module, "guard_calls");
+        let path = paths
+            .iter()
+            .find(|path| {
+                path.target
+                    .var()
+                    .is_some_and(|target| target.id == guard_calls)
+            })
+            .expect("guard_calls path must exist");
+        let SLTNode::Binary(lhs, BinaryOp::Add, rhs) = arena.get(path.expr) else {
+            panic!("guard_calls expression: {:?}", arena.get(path.expr));
+        };
+        assert!(matches!(
+            arena.get(*lhs),
+            SLTNode::Constant(value, mask, 8, false)
+                if value.is_zero() && mask.is_zero()
+        ));
+        assert!(matches!(
+            arena.get(*rhs),
+            SLTNode::Constant(value, mask, 8, false)
+                if value == &BigUint::from(1u8) && mask.is_zero()
+        ));
     }
 
     #[test]
@@ -5210,7 +5286,7 @@ mod tests {
                 update_has_dynamic_loop_index(*lhs, loop_var, arena, visited)
                     || update_has_dynamic_loop_index(*rhs, loop_var, arena, visited)
             }
-            SLTNode::Unary(_, inner) => {
+            SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => {
                 update_has_dynamic_loop_index(*inner, loop_var, arena, visited)
             }
             SLTNode::Mux {
@@ -5275,7 +5351,7 @@ mod tests {
                 collect_narrow_dynamic_input_widths(*lhs, loop_var, arena, visited, widths);
                 collect_narrow_dynamic_input_widths(*rhs, loop_var, arena, visited, widths);
             }
-            SLTNode::Unary(_, inner) => {
+            SLTNode::Unary(_, inner) | SLTNode::Capture { expr: inner, .. } => {
                 collect_narrow_dynamic_input_widths(*inner, loop_var, arena, visited, widths)
             }
             SLTNode::Mux {
