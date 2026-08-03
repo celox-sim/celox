@@ -2671,6 +2671,66 @@ fn test_ff_function_call_tracks_array_reads_in_output_indices(sim) {
     assert_eq!(sim.get(side), 0x55u32.into());
 }
 
+fn test_ff_function_call_tracks_nested_array_reads_in_output_indices(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            var scratch: logic<8>[2];
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function write (
+                value: input logic<8>,
+                dst: output logic<8>
+            ) -> logic<8> {
+                dst = value;
+                return 0;
+            }
+            function helper (x: input logic<8>[2]) -> logic<8> {
+                return write(0, scratch[x[0]]);
+            }
+            function outer (
+                x: input logic<8>[2],
+                guard: input logic,
+                middle: input logic<8>
+            ) -> logic<8> {
+                return (if guard ? helper(x) : 0) + middle + x[0];
+            }
+            always_ff (clk) {
+                out_q = outer(
+                    '{observe(8'h01, side), default: 8'h00},
+                    guard,
+                    observe(8'h55, side)
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let out_q = sim.signal("out_q");
+    let side = sim.signal("side");
+
+    sim.modify(|io| io.set(guard, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x56u32.into());
+    assert_eq!(sim.get(side), 0x01u32.into());
+
+    sim.modify(|io| io.set(guard, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x56u32.into());
+    assert_eq!(sim.get(side), 0x55u32.into());
+}
+
 fn test_ff_function_call_restores_initialized_forwarded_alias_view(sim) {
     @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"

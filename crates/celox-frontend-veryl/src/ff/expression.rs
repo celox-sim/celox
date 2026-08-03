@@ -1040,6 +1040,17 @@ impl<'a> FfParser<'a> {
                             self.collect_function_input_usage(expr, usage, active_calls)?;
                         }
                     }
+                    for dst in call.outputs.values().flatten() {
+                        for expr in &dst.index.0 {
+                            self.collect_function_input_usage(expr, usage, active_calls)?;
+                        }
+                        for expr in &dst.select.0 {
+                            self.collect_function_input_usage(expr, usage, active_calls)?;
+                        }
+                        if let Some((_, expr)) = &dst.select.1 {
+                            self.collect_function_input_usage(expr, usage, active_calls)?;
+                        }
+                    }
                 }
                 Factor::SystemFunctionCall(call) => match &call.kind {
                     SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => {}
