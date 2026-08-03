@@ -1471,13 +1471,27 @@ impl<'a> FfParser<'a> {
                     let mut live_paths = FunctionPathCondition::Never;
                     let mut arm_states = Vec::with_capacity(statement.arms.len());
                     for arm in &statement.arms {
+                        let last_effectful_pattern =
+                            arm.patterns.iter().rposition(|pattern| match pattern {
+                                CasePattern::Eq(expr) => {
+                                    self.expression_needs_eager_evaluation(expr)
+                                }
+                                CasePattern::Range { lo, hi, .. } => {
+                                    self.expression_needs_eager_evaluation(lo)
+                                        || self.expression_needs_eager_evaluation(hi)
+                                }
+                            });
                         let mut pattern_remaining = remaining.clone();
                         let mut arm_active = FunctionPathCondition::Never;
                         let mut arm_condition = None;
-                        for pattern in &arm.patterns {
+                        for (pattern_index, pattern) in arm.patterns.iter().enumerate() {
+                            let snapshot_for_later_effect =
+                                last_effectful_pattern.is_some_and(|last| pattern_index < last);
                             match pattern {
                                 CasePattern::Eq(expr) => {
-                                    if self.expression_needs_eager_evaluation(expr) {
+                                    if snapshot_for_later_effect
+                                        || self.expression_needs_runtime_materialization(expr)
+                                    {
                                         self.materialize_function_runtime_expression(
                                             expr,
                                             &mut state,
@@ -1492,10 +1506,15 @@ impl<'a> FfParser<'a> {
                                 }
                                 CasePattern::Range { lo, hi, .. } => {
                                     let bounds = [lo, hi];
-                                    if let Some(last_effectful) = bounds.iter().rposition(|expr| {
+                                    let last_effectful_bound = bounds.iter().rposition(|expr| {
                                         self.expression_needs_eager_evaluation(expr)
-                                    }) {
-                                        for expr in &bounds[..=last_effectful] {
+                                    });
+                                    for (bound_index, expr) in bounds.iter().enumerate() {
+                                        if snapshot_for_later_effect
+                                            || last_effectful_bound
+                                                .is_some_and(|last| bound_index <= last)
+                                            || Self::expression_needs_assignment_snapshot(expr)
+                                        {
                                             self.materialize_function_runtime_expression(
                                                 expr,
                                                 &mut state,
@@ -2782,7 +2801,10 @@ impl<'a> FfParser<'a> {
                 None
             };
 
-            for (arg_path, dsts) in &call.outputs {
+            for arg_path in &ordered_arg_paths {
+                let Some(dsts) = call.outputs.get(arg_path) else {
+                    continue;
+                };
                 let Some(arg_id) = function_body.arg_map.get(arg_path) else {
                     return Err(ParserError::unsupported(
                         61,
@@ -2946,7 +2968,10 @@ impl<'a> FfParser<'a> {
                 None
             };
 
-            for (arg_path, dsts) in &call.outputs {
+            for arg_path in &ordered_arg_paths {
+                let Some(dsts) = call.outputs.get(arg_path) else {
+                    continue;
+                };
                 let Some(arg_id) = function_body.arg_map.get(arg_path) else {
                     return Err(ParserError::unsupported(
                         61,

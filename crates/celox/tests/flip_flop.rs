@@ -1547,6 +1547,59 @@ fn test_ff_statement_call_materializes_output_only_input_effect(sim) {
     );
 }
 
+fn test_ff_statement_call_copies_outputs_in_declaration_order(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            first_effect: output logic,
+            second_effect: output logic,
+            a: output logic<2>,
+            b: output logic<2>
+        ) {
+            function observed_index (
+                tag: input logic,
+                written: output logic
+            ) -> logic {
+                $display("index=%0d", tag);
+                written = tag;
+                return tag;
+            }
+
+            function split (
+                first: output logic,
+                second: output logic
+            ) {
+                first = 1'b1;
+                second = 1'b1;
+            }
+
+            always_ff (clk) {
+                split(
+                    a[observed_index(1'b0, first_effect)],
+                    b[observed_index(1'b1, second_effect)]
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "index=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "index=1".to_string(),
+            },
+        ],
+    );
+}
+
 fn test_ff_composite_runtime_arg_preserves_left_to_right_snapshot(sim) {
     @omit_veryl;
     @ignore_on(wasm);
