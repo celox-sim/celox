@@ -1419,4 +1419,47 @@ sv_backends! {
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(sim.signal("q")), 1u8.into());
     }
+
+    fn preserves_multidimensional_packed_prefix_in_part_selects(sim) {
+        @setup {
+    let sv = r#"
+        module Top(input logic [1:0][7:0] a, output logic [7:0] y);
+            assign y = a[1][7:0];
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("packed_prefix_select.sv"))], "Top");
+
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 0xabcdu16)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xabu8.into());
+    }
+
+    fn guards_division_by_zero_nested_under_muxes(sim) {
+        @setup {
+    let sv = r#"
+        module Top(input logic select, input logic [7:0] a, b, output logic [7:0] y);
+            assign y = select ? (a / b) : 8'h00;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(sv, Path::new("nested_zero_div.sv"))],
+            "Top",
+        ).four_state(true);
+
+    let select = sim.signal("select");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    sim.modify(|io| {
+        io.set(select, 1u8);
+        io.set(a, 5u8);
+        io.set(b, 0u8);
+    })
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(sim.signal("y")),
+        (BigUint::from(0xffu8), BigUint::from(0xffu8))
+    );
+    }
 }

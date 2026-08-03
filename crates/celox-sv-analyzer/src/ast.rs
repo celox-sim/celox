@@ -681,6 +681,17 @@ impl Parameter {
     pub fn value(&self) -> Option<&ConstExpr> {
         self.value.as_ref()
     }
+
+    pub(crate) fn resolved_value(&self, constants: &HashMap<String, i128>) -> Option<i128> {
+        let mut value = self
+            .value()
+            .and_then(|value| typecheck::eval_const_expr(&value.clone().into(), constants))?;
+        if let Some(width) = self.declared_width {
+            value =
+                coerce_const_parameter_value(value, width, self.declared_signed.unwrap_or(false));
+        }
+        Some(value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2346,26 +2357,24 @@ fn parameter_overrides_from_value_assignment(
             "ordered parameter assignment".to_string(),
         ));
     };
-    Ok(assignments
-        .nodes
-        .0
-        .contents()
-        .into_iter()
-        .filter_map(|assignment| {
-            let name = identifier_text(
-                RefNode::ParameterIdentifier(&assignment.nodes.1),
-                syntax_tree,
-            )?;
-            let value = assignment
-                .nodes
-                .2
-                .nodes
-                .1
-                .as_ref()
-                .and_then(|expr| const_expr_from_param_expression(expr, syntax_tree));
-            Some(ParameterOverride::new(name, value))
-        })
-        .collect())
+    let mut overrides = Vec::new();
+    for assignment in assignments.nodes.0.contents() {
+        let name = identifier_text(
+            RefNode::ParameterIdentifier(&assignment.nodes.1),
+            syntax_tree,
+        )
+        .ok_or_else(|| AnalyzerError::Unsupported("parameter override identifier".to_string()))?;
+        let value = match assignment.nodes.2.nodes.1.as_ref() {
+            Some(expr) => Some(
+                const_expr_from_param_expression(expr, syntax_tree).ok_or_else(|| {
+                    AnalyzerError::Unsupported("parameter override expression".to_string())
+                })?,
+            ),
+            None => None,
+        };
+        overrides.push(ParameterOverride::new(name, value));
+    }
+    Ok(overrides)
 }
 
 fn port_connections_from_hierarchical_instance(
@@ -4602,11 +4611,11 @@ fn conditional_assignments_from_conditional_statement(
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     assignments: &mut Vec<ConditionalAssignment>,
 ) -> Result<(), AnalyzerError> {
-    let Some(if_condition) =
+    let if_condition =
         expr_from_cond_predicate(&stmt.nodes.2.nodes.1, syntax_tree, packed_dimensions)
-    else {
-        return Ok(());
-    };
+            .ok_or_else(|| {
+                AnalyzerError::Unsupported("always_ff predicate lowering".to_string())
+            })?;
     let mut prior_false = Vec::new();
     let then_condition = combine_expr_conditions(parent_condition.clone(), if_condition.clone());
     conditional_assignments_from_statement_or_null(
@@ -4620,11 +4629,11 @@ fn conditional_assignments_from_conditional_statement(
     prior_false.push(procedural_false_condition(if_condition));
 
     for (_, _, predicate, branch) in &stmt.nodes.4 {
-        let Some(branch_condition) =
+        let branch_condition =
             expr_from_cond_predicate(&predicate.nodes.1, syntax_tree, packed_dimensions)
-        else {
-            return Ok(());
-        };
+                .ok_or_else(|| {
+                    AnalyzerError::Unsupported("always_ff predicate lowering".to_string())
+                })?;
         let mut terms = prior_false.clone();
         terms.push(branch_condition.clone());
         let condition = combine_expr_condition_terms(parent_condition.clone(), terms);
@@ -5046,28 +5055,66 @@ fn expr_from_expression_with_types_raw(
 }
 
 fn guard_zero_divisions(expr: Expr) -> Expr {
-    let Expr::Binary { left, op, right } = expr else {
-        return expr;
-    };
-    let left = Box::new(guard_zero_divisions(*left));
-    let right = Box::new(guard_zero_divisions(*right));
-    let operation = Expr::Binary {
-        left,
-        op,
-        right: right.clone(),
-    };
-    if matches!(op, BinaryOp::Div | BinaryOp::Mod) {
-        Expr::Mux {
-            condition: Box::new(Expr::Binary {
-                left: right,
-                op: BinaryOp::EqCase,
-                right: Box::new(Expr::Literal("0".to_string())),
-            }),
-            then_expr: Box::new(Expr::Literal("'x".to_string())),
-            else_expr: Box::new(operation),
+    match expr {
+        Expr::Ident(_) | Expr::Literal(_) => expr,
+        Expr::Select { expr, msb, lsb } => Expr::Select {
+            expr: Box::new(guard_zero_divisions(*expr)),
+            msb,
+            lsb,
+        },
+        Expr::Concat(parts) => Expr::Concat(parts.into_iter().map(guard_zero_divisions).collect()),
+        Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
+            count,
+            parts: parts.into_iter().map(guard_zero_divisions).collect(),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(guard_zero_divisions(*expr)),
+            width,
+            signed,
+        },
+        Expr::Unary { op, expr } => Expr::Unary {
+            op,
+            expr: Box::new(guard_zero_divisions(*expr)),
+        },
+        Expr::Binary { left, op, right } => {
+            let left = Box::new(guard_zero_divisions(*left));
+            let right = Box::new(guard_zero_divisions(*right));
+            let operation = Expr::Binary {
+                left,
+                op,
+                right: right.clone(),
+            };
+            if matches!(op, BinaryOp::Div | BinaryOp::Mod) {
+                Expr::Mux {
+                    condition: Box::new(Expr::Binary {
+                        left: right,
+                        op: BinaryOp::EqCase,
+                        right: Box::new(Expr::Literal("0".to_string())),
+                    }),
+                    then_expr: Box::new(Expr::Literal("'x".to_string())),
+                    else_expr: Box::new(operation),
+                }
+            } else {
+                operation
+            }
         }
-    } else {
-        operation
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expr::Mux {
+            condition: Box::new(guard_zero_divisions(*condition)),
+            then_expr: Box::new(guard_zero_divisions(*then_expr)),
+            else_expr: Box::new(guard_zero_divisions(*else_expr)),
+        },
+        Expr::Call { name, args } => Expr::Call {
+            name,
+            args: args.into_iter().map(guard_zero_divisions).collect(),
+        },
     }
 }
 
@@ -5229,14 +5276,27 @@ fn expr_select_from_select(
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Option<Expr> {
+    let bit_selects = select.nodes.1.nodes.0.as_slice();
+    let indices = bit_selects
+        .iter()
+        .map(|bit_select| const_expr_from_expr(&bit_select.nodes.1, syntax_tree))
+        .collect::<Option<Vec<_>>>()?;
     if let Some(range) = &select.nodes.2 {
         let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
             return None;
         };
-        let msb =
+        let mut msb =
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
-        let lsb =
+        let mut lsb =
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
+        if !indices.is_empty() {
+            let Expr::Ident(name) = &base else {
+                return None;
+            };
+            let (_, prefix_offset) = flatten_packed_select(name, &indices, packed_dimensions)?;
+            msb = add_expr(prefix_offset.clone(), msb);
+            lsb = add_expr(prefix_offset, lsb);
+        }
         return Some(Expr::Select {
             expr: Box::new(base),
             msb,
@@ -5244,11 +5304,6 @@ fn expr_select_from_select(
         });
     }
 
-    let bit_selects = select.nodes.1.nodes.0.as_slice();
-    let indices = bit_selects
-        .iter()
-        .map(|bit_select| const_expr_from_expr(&bit_select.nodes.1, syntax_tree))
-        .collect::<Option<Vec<_>>>()?;
     if let Expr::Ident(name) = &base {
         if let Some((msb, lsb)) = flatten_packed_select(name, &indices, packed_dimensions) {
             return Some(Expr::Select {

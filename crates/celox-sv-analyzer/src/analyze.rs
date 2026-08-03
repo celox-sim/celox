@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use crate::{
     AnalyzerError, ast, ir,
     symbol::{ModuleTable, ParameterTable, PortTable},
-    typecheck,
 };
 
 pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
@@ -19,9 +18,7 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
         for parameter in module.parameters() {
             parameter_table.insert(module, parameter)?;
             let value: Option<ir::ConstExpr> = parameter.value().cloned().map(Into::into);
-            let resolved_value = value
-                .as_ref()
-                .and_then(|expr| typecheck::eval_const_expr(expr, &constants));
+            let resolved_value = parameter.resolved_value(&constants);
             if let Some(resolved_value) = resolved_value {
                 constants.insert(parameter.name().to_string(), resolved_value);
             }

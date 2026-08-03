@@ -216,6 +216,63 @@ fn validate_instance_net_drivers(
     Ok(())
 }
 
+fn validate_specialized_instance_net_drivers(
+    module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
+    modules: &HashMap<ModuleId, LoweredSvModule>,
+) -> Result<(), sv::AnalyzerError> {
+    for module in modules.values() {
+        for signal in module
+            .source
+            .signals()
+            .iter()
+            .filter(|signal| signal.is_net())
+        {
+            let locally_driven = module.source.comb_processes().iter().any(|process| {
+                process
+                    .assignments()
+                    .iter()
+                    .any(|assignment| assignment.lhs() == signal.name())
+            }) || module.source.ff_processes().iter().any(|process| {
+                process
+                    .assignments()
+                    .iter()
+                    .any(|assignment| assignment.assignment().lhs() == signal.name())
+            });
+            if locally_driven {
+                continue;
+            }
+            let driven_by_child = module.instances.iter().any(|instance| {
+                let key = LoweredSvModuleKey::instance_key(instance);
+                let Some(child_id) = module_ids.get(&key) else {
+                    return false;
+                };
+                let Some(child) = modules.get(child_id) else {
+                    return false;
+                };
+                instance.port_connections.iter().any(|connection| {
+                    matches!(
+                        connection.actual_expr.as_ref(),
+                        Some(sv::ir::Expr::Ident(name)) if name == signal.name()
+                    ) && child.source.ports().iter().any(|port| {
+                        port.name() == connection.formal
+                            && matches!(
+                                port.direction(),
+                                sv::ir::PortDirection::Output | sv::ir::PortDirection::Inout
+                            )
+                    })
+                })
+            });
+            if !driven_by_child {
+                return Err(sv::AnalyzerError::Unsupported(format!(
+                    "undriven net declaration `{}`",
+                    signal.name()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Lower every SystemVerilog module into an embeddable hierarchy. The module
 /// IDs in the returned graph are local and are remapped by the Veryl frontend.
 pub fn prepare_external_hierarchy(
@@ -264,6 +321,7 @@ pub fn prepare_external_hierarchy(
             Ok((module_id, specialize_module(base, key)?))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
+    validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
     let mut modules = HashMap::default();
     for (key, &module_id) in &module_ids {
         let lowered = &lowered_modules[&module_id];
@@ -392,6 +450,7 @@ pub fn schedule_sources(
             Ok((module_id, lowered))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
+    validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
     let root = &lowered_modules[&root_id];
     if let Some(port) = root
         .port_order
@@ -2093,6 +2152,14 @@ fn lower_ff_processes(
         let clock_id = *name_to_id
             .get(clock.signal())
             .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
+        if reset_edges
+            .get(&clock_id)
+            .is_some_and(|edge| *edge != clock.edge())
+        {
+            return Err(sv::AnalyzerError::Unsupported(
+                "mixed clock/reset-edge polarities for one signal".to_string(),
+            ));
+        }
         if clock_edges
             .insert(clock_id, clock.edge())
             .is_some_and(|edge| edge != clock.edge())
@@ -2109,6 +2176,14 @@ fn lower_ff_processes(
             let reset_id = *name_to_id.get(reset.signal()).ok_or_else(|| {
                 sv::AnalyzerError::Unsupported("always_ff event control".to_string())
             })?;
+            if clock_edges
+                .get(&reset_id)
+                .is_some_and(|edge| *edge != reset.edge())
+            {
+                return Err(sv::AnalyzerError::Unsupported(
+                    "mixed clock/reset-edge polarities for one signal".to_string(),
+                ));
+            }
             if reset_edges
                 .insert(reset_id, reset.edge())
                 .is_some_and(|edge| edge != reset.edge())
@@ -3106,12 +3181,15 @@ fn module_constants_with_overrides(
         .collect();
     let mut constants = std::collections::HashMap::new();
     for parameter in module.parameters() {
-        let value = override_values
-            .get(parameter.name())
-            .copied()
-            .or_else(|| parameter.value())
-            .and_then(|expr| sv::typecheck::eval_const_expr(expr, &constants))
-            .or_else(|| parameter.resolved_value());
+        let value = if let Some(override_value) = override_values.get(parameter.name()) {
+            sv::typecheck::eval_const_expr(override_value, &constants)
+        } else {
+            parameter.resolved_value().or_else(|| {
+                parameter
+                    .value()
+                    .and_then(|expr| sv::typecheck::eval_const_expr(expr, &constants))
+            })
+        };
         if let Some(value) = value {
             constants.insert(parameter.name().to_string(), value);
         }

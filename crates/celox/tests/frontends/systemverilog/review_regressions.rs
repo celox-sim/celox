@@ -89,6 +89,45 @@ fn evaluates_sized_arithmetic_and_logical_right_shift_parameters() {
 }
 
 #[test]
+fn coerces_ir_parameter_constants_to_their_declared_widths() {
+    let source = r#"
+        module Top #(
+            parameter logic [3:0] W = 5'd16
+        ) (output logic [W:0] y);
+            assign y = '1;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("typed_parameter.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn validates_net_drivers_after_parameter_specialization() {
+    let error = cranelift_build_error(
+        r#"
+        module Driver(output logic y); assign y = 1'b1; endmodule
+        module Sink(input logic a); endmodule
+        module Child #(parameter ENABLE = 1) (output logic y);
+            wire w;
+            if (ENABLE) Driver driver(.y(w));
+            Sink sink(.a(w));
+            assign y = 1'b0;
+        endmodule
+        module Top(output logic y);
+            Child #(.ENABLE(0)) child(.y(y));
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("undriven net declaration `w`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn applies_unsigned_coercion_to_mixed_signed_constant_comparisons() {
     let source = r#"
         module Top(output logic y);
@@ -904,6 +943,13 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "parameter override expression",
+            r#"
+            module Child #(parameter W = 1) (output logic [W-1:0] y); assign y = '0; endmodule
+            module Top(output logic [7:0] y); Child #(.W(2 ** 3)) child(.y(y)); endmodule
+        "#,
+        ),
+        (
             "module instantiation inside loop-generate",
             r#"
             module Child(); endmodule
@@ -950,6 +996,17 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic clk, input logic i, d, output logic [1:0] q);
                 always_ff @(posedge clk) q[i] <= d;
+            endmodule
+        "#,
+        ),
+        (
+            "always_ff predicate lowering",
+            r#"
+            module Top(input logic clk, input logic [3:0] a, b, d, e, output logic [3:0] q);
+                always_ff @(posedge clk) begin
+                    if (a ** b) q <= d;
+                    else q <= e;
+                end
             endmodule
         "#,
         ),
@@ -1363,6 +1420,17 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                     if (rst) q1 <= 1'b0; else q1 <= d;
                 always_ff @(posedge clk2 or negedge rst)
                     if (!rst) q2 <= 1'b0; else q2 <= d;
+            endmodule
+        "#,
+        ),
+        (
+            "mixed clock/reset-edge polarities for one signal",
+            r#"
+            module Top(input logic sig, clk2, rst2, d, output logic q1, q2);
+                always_ff @(posedge sig or posedge rst2)
+                    if (rst2) q1 <= 1'b0; else q1 <= d;
+                always_ff @(posedge clk2 or negedge sig)
+                    if (!sig) q2 <= 1'b0; else q2 <= d;
             endmodule
         "#,
         ),
