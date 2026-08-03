@@ -815,6 +815,7 @@ impl<'a> FfParser<'a> {
             }
         }
         let mut array_views = HashMap::default();
+        let mut array_view_plan = HashSet::default();
         let mut symbolic_bindings = bindings.clone();
         symbolic_bindings.retain(|var_id, _| self.module.variables[var_id].r#type.array.is_empty());
 
@@ -848,27 +849,25 @@ impl<'a> FfParser<'a> {
         // output. A later dynamic access must turn an earlier static access
         // into a view load rather than evaluating the literal twice.
         self.function_arg_stack.push(bindings.clone());
+        self.function_array_view_plan_stack.push(array_view_plan);
         self.function_array_view_stack.push(array_views);
-        let prepare_result: Result<(), ParserError> = (|| {
-            for (_, expr) in &output_exprs {
-                self.prepare_function_array_views_for_expression(
-                    expr, targets, domain, convert, sources, ir_builder,
-                )?;
-            }
-            self.prepare_function_array_views_for_expression(
-                &ret_expr, targets, domain, convert, sources, ir_builder,
-            )
-        })();
+        for (_, expr) in &output_exprs {
+            self.plan_function_array_views_for_expression(expr);
+        }
+        self.plan_function_array_views_for_expression(&ret_expr);
         array_views = self.function_array_view_stack.pop().unwrap();
+        array_view_plan = self.function_array_view_plan_stack.pop().unwrap();
         self.function_arg_stack.pop();
-        prepare_result?;
 
         for (dsts, expr) in output_exprs {
             self.function_arg_stack.push(bindings.clone());
+            self.function_array_view_plan_stack
+                .push(array_view_plan.clone());
             self.function_array_view_stack.push(array_views);
             let parse_result =
                 self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None);
             array_views = self.function_array_view_stack.pop().unwrap();
+            self.function_array_view_plan_stack.pop();
             self.function_arg_stack.pop();
             parse_result?;
 
@@ -882,11 +881,13 @@ impl<'a> FfParser<'a> {
         }
 
         self.function_arg_stack.push(bindings);
+        self.function_array_view_plan_stack.push(array_view_plan);
         self.function_array_view_stack.push(array_views);
         let result = self.parse_expression(
             &ret_expr, targets, domain, convert, sources, ir_builder, None,
         );
         let finished_views = self.function_array_view_stack.pop().unwrap();
+        self.function_array_view_plan_stack.pop();
         self.function_arg_stack.pop();
         self.restore_active_function_array_views(&finished_views, convert, ir_builder)?;
 
@@ -943,6 +944,7 @@ impl<'a> FfParser<'a> {
             }
         }
         let mut array_views = HashMap::default();
+        let mut array_view_plan = HashSet::default();
         let mut symbolic_bindings = bindings.clone();
         symbolic_bindings.retain(|var_id, _| self.module.variables[var_id].r#type.array.is_empty());
 
@@ -964,25 +966,24 @@ impl<'a> FfParser<'a> {
         }
 
         self.function_arg_stack.push(bindings.clone());
+        self.function_array_view_plan_stack.push(array_view_plan);
         self.function_array_view_stack.push(array_views);
-        let prepare_result: Result<(), ParserError> = (|| {
-            for (_, expr) in &output_exprs {
-                self.prepare_function_array_views_for_expression(
-                    expr, targets, domain, convert, sources, ir_builder,
-                )?;
-            }
-            Ok(())
-        })();
+        for (_, expr) in &output_exprs {
+            self.plan_function_array_views_for_expression(expr);
+        }
         array_views = self.function_array_view_stack.pop().unwrap();
+        array_view_plan = self.function_array_view_plan_stack.pop().unwrap();
         self.function_arg_stack.pop();
-        prepare_result?;
 
         for (dsts, expr) in output_exprs {
             self.function_arg_stack.push(bindings.clone());
+            self.function_array_view_plan_stack
+                .push(array_view_plan.clone());
             self.function_array_view_stack.push(array_views);
             let parse_result =
                 self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None);
             array_views = self.function_array_view_stack.pop().unwrap();
+            self.function_array_view_plan_stack.pop();
             self.function_arg_stack.pop();
             parse_result?;
 

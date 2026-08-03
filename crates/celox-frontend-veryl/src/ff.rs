@@ -264,6 +264,10 @@ struct FunctionArrayView {
     // Aliased forwarding views do not write their backing and therefore do
     // not require the caller's snapshot to be restored.
     owns_backing: bool,
+    // Branch-local lazy initialization is represented explicitly at control
+    // flow joins. `None` means every path reaching the current block has a
+    // valid backing view; `Some` guards the carried element snapshot.
+    initialized: Option<RegisterId>,
 }
 
 impl<A> Default for FfGroupParseResult<A> {
@@ -288,6 +292,9 @@ pub struct FfParser<'a> {
     loop_exit_blocks: Vec<BlockId>,
     reset: Option<FfReset>,
     function_arg_stack: Vec<HashMap<VarId, Expression>>,
+    // Invocation-wide analysis records which formals will eventually need a
+    // complete view, without evaluating their actual arguments early.
+    function_array_view_plan_stack: Vec<HashSet<VarId>>,
     // Maps an active array formal to its call-specific register snapshot and
     // the formal working region used for O(1) dynamic element loads.
     function_array_view_stack: Vec<HashMap<VarId, FunctionArrayView>>,
@@ -328,6 +335,7 @@ impl<'a> FfParser<'a> {
             loop_exit_blocks: Vec::new(),
             reset: None,
             function_arg_stack: Vec::new(),
+            function_array_view_plan_stack: Vec::new(),
             function_array_view_stack: Vec::new(),
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),

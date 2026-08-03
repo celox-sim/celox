@@ -101,6 +101,12 @@ struct ArrayLiteralSelection<'a> {
     element_count: usize,
 }
 
+struct ArrayViewMergeParams {
+    var_id: VarId,
+    initialized: RegisterId,
+    elements: Vec<RegisterId>,
+}
+
 #[derive(Default)]
 struct FunctionInputUsage {
     runtime_reads: HashSet<VarId>,
@@ -449,9 +455,9 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<FunctionArrayView, ParserError> {
         // Function bodies are lowered inline, so the formal's working region
-        // is a call-scoped temporary. Populate it before lowering any output
-        // or return expression so every later access is dominated by these
-        // stores, including accesses inside short-circuit control flow.
+        // is a call-scoped temporary. Populate it at the first access that
+        // needs a complete view; control-flow joins carry its initialization
+        // state and element snapshot explicitly.
         let Some(formal) = self.module.variables.get(&var_id) else {
             unreachable!("validated function argument must have a formal variable");
         };
@@ -487,14 +493,6 @@ impl<'a> FfParser<'a> {
                         "function argument validation resolves array literal item dimensions"
                     )
                 });
-            self.prepare_function_array_views_for_expression(
-                selected_expr,
-                targets,
-                domain,
-                convert,
-                sources,
-                ir_builder,
-            )?;
             self.parse_expression(
                 selected_expr,
                 targets,
@@ -560,6 +558,7 @@ impl<'a> FfParser<'a> {
             backing_var_id: var_id,
             elements,
             owns_backing: true,
+            initialized: None,
         })
     }
 
@@ -704,6 +703,7 @@ impl<'a> FfParser<'a> {
             backing_var_id: var_id,
             elements,
             owns_backing: true,
+            initialized: None,
         })
     }
 
@@ -897,8 +897,12 @@ impl<'a> FfParser<'a> {
                         .function_arg_stack
                         .last()
                         .is_some_and(|bindings| bindings.contains_key(var_id));
+                    let is_planned_here = self
+                        .function_array_view_plan_stack
+                        .last()
+                        .is_some_and(|plan| plan.contains(var_id));
                     if is_bound_here
-                        && self.array_access_needs_view(*var_id, index, select)
+                        && (is_planned_here || self.array_access_needs_view(*var_id, index, select))
                         && seen.insert(*var_id)
                     {
                         views.push(*var_id);
@@ -965,19 +969,8 @@ impl<'a> FfParser<'a> {
             Expression::Unary(_, inner, _) => collect(inner, views, seen),
             Expression::Ternary(cond, then_expr, else_expr, _) => {
                 collect(cond, views, seen);
-                let mut then_views = Vec::new();
-                let mut then_seen = HashSet::default();
-                collect(then_expr, &mut then_views, &mut then_seen);
-                let mut else_views = Vec::new();
-                let mut else_seen = HashSet::default();
-                collect(else_expr, &mut else_views, &mut else_seen);
-                // Only views required by both arms may be prepared before the
-                // condition. Arm-local views are prepared inside that arm.
-                for var_id in then_views {
-                    if else_seen.contains(&var_id) && seen.insert(var_id) {
-                        views.push(var_id);
-                    }
-                }
+                collect(then_expr, views, seen);
+                collect(else_expr, views, seen);
             }
             Expression::Concatenation(items, _) => {
                 for (expr, repeat) in items {
@@ -1009,7 +1002,7 @@ impl<'a> FfParser<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn ensure_function_array_view_at<A>(
+    fn build_function_array_view_at<A>(
         &mut self,
         frame: usize,
         var_id: VarId,
@@ -1019,9 +1012,6 @@ impl<'a> FfParser<'a> {
         sources: &mut Vec<VarAtomBase<A>>,
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<Option<FunctionArrayView>, ParserError> {
-        if let Some(view) = self.function_array_view_stack[frame].get(&var_id) {
-            return Ok(Some(view.clone()));
-        }
         let Some(bound_expr) = self.function_arg_stack[frame].get(&var_id).cloned() else {
             return Ok(None);
         };
@@ -1063,11 +1053,13 @@ impl<'a> FfParser<'a> {
                 let source = self.array_view_layout(*bound_var_id)?;
                 if target.element_width == source.element_width
                     && target.is_2state == source.is_2state
+                    && target.signed == source.signed
                 {
                     Some(FunctionArrayView {
                         backing_var_id: source_view.backing_var_id,
                         elements: source_view.elements,
                         owns_backing: false,
+                        initialized: None,
                     })
                 } else {
                     Some(self.materialize_converted_array_view(
@@ -1080,45 +1072,207 @@ impl<'a> FfParser<'a> {
             }
             _ => None,
         };
+        Ok(view)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ensure_function_array_view_at<A>(
+        &mut self,
+        frame: usize,
+        var_id: VarId,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<Option<FunctionArrayView>, ParserError> {
+        if let Some(view) = self.function_array_view_stack[frame].get(&var_id).cloned() {
+            let Some(initialized) = view.initialized else {
+                return Ok(Some(view));
+            };
+
+            let pre_defined = self.defined_ranges.clone();
+            let pre_dynamic = self.dynamic_defined_vars.clone();
+            let initialize_block = ir_builder.new_block();
+            let merged_elements = view
+                .elements
+                .iter()
+                .map(|reg| ir_builder.alloc_reg(ir_builder.register(reg).clone()))
+                .collect::<Vec<_>>();
+            let merge_block = ir_builder.new_block_with(merged_elements.clone());
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: initialized,
+                true_block: (merge_block, view.elements.clone()),
+                false_block: (initialize_block, vec![]),
+            });
+
+            ir_builder.switch_to_block(initialize_block);
+            let Some(initialized_view) = self.build_function_array_view_at(
+                frame, var_id, targets, domain, convert, sources, ir_builder,
+            )?
+            else {
+                unreachable!("a conditional array view has a materializable binding");
+            };
+            if initialized_view.backing_var_id != view.backing_var_id
+                || initialized_view.owns_backing != view.owns_backing
+            {
+                unreachable!("a function array view has stable backing metadata");
+            }
+            let initialized_defined =
+                std::mem::replace(&mut self.defined_ranges, pre_defined.clone());
+            let initialized_dynamic =
+                std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone());
+            ir_builder.seal_block(SIRTerminator::Jump(merge_block, initialized_view.elements));
+            ir_builder.switch_to_block(merge_block);
+            self.defined_ranges = self.intersect_defined_states(pre_defined, initialized_defined);
+            self.dynamic_defined_vars =
+                self.intersect_dynamic_vars(pre_dynamic, initialized_dynamic);
+            let view = FunctionArrayView {
+                backing_var_id: view.backing_var_id,
+                elements: merged_elements,
+                owns_backing: view.owns_backing,
+                initialized: None,
+            };
+            self.function_array_view_stack[frame].insert(var_id, view.clone());
+            return Ok(Some(view));
+        }
+
+        let view = self.build_function_array_view_at(
+            frame, var_id, targets, domain, convert, sources, ir_builder,
+        )?;
         if let Some(view) = &view {
             self.function_array_view_stack[frame].insert(var_id, view.clone());
         }
         Ok(view)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn prepare_function_array_views_for_expression<A>(
-        &mut self,
-        expr: &Expression,
-        targets: &mut Vec<VarAtomBase<A>>,
-        domain: &Domain,
-        convert: &impl Fn(VarId, u32) -> A,
-        sources: &mut Vec<VarAtomBase<A>>,
-        ir_builder: &mut SIRBuilder<A>,
-    ) -> Result<(), ParserError> {
+    pub(super) fn plan_function_array_views_for_expression(&mut self, expr: &Expression) {
         let Some(frame) = self.function_arg_stack.len().checked_sub(1) else {
-            return Ok(());
+            return;
         };
-        // Prepare outside the expression's control-flow lowering so every
-        // dynamic load is dominated by the stores that initialize its view.
-        // Fully static literal element accesses are deliberately omitted and
-        // continue through the direct-selection path below.
+        // Record the invocation-wide strategy without evaluating any actual
+        // argument. The first relevant access performs materialization in
+        // source order at its normal evaluation point.
         let mut views = Vec::new();
         self.collect_array_views_for_expression(expr, &mut views, &mut HashSet::default());
-        for var_id in views {
-            self.ensure_function_array_view_at(
-                frame, var_id, targets, domain, convert, sources, ir_builder,
-            )?;
-        }
-        Ok(())
+        self.function_array_view_plan_stack[frame].extend(views);
     }
 
-    fn expression_needs_unmaterialized_array_view(&self, expr: &Expression) -> bool {
-        let mut views = Vec::new();
-        self.collect_array_views_for_expression(expr, &mut views, &mut HashSet::default());
-        views
-            .into_iter()
-            .any(|var_id| self.get_bound_function_array_view(var_id).is_none())
+    fn array_view_merge_candidates<'b>(
+        &self,
+        expressions: impl IntoIterator<Item = &'b Expression>,
+    ) -> Vec<VarId> {
+        let Some(frame) = self.function_arg_stack.len().checked_sub(1) else {
+            return Vec::new();
+        };
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::default();
+        for expr in expressions {
+            self.collect_array_views_for_expression(expr, &mut candidates, &mut seen);
+        }
+        candidates.retain(|var_id| {
+            self.function_array_view_stack[frame]
+                .get(var_id)
+                .is_none_or(|view| view.initialized.is_some())
+        });
+        candidates
+    }
+
+    fn alloc_array_view_merge_params<A>(
+        &self,
+        candidates: &[VarId],
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<Vec<ArrayViewMergeParams>, ParserError> {
+        candidates
+            .iter()
+            .map(|&var_id| {
+                let layout = self.array_view_layout(var_id)?;
+                let initialized = ir_builder.alloc_bit(1, false);
+                let elements = (0..layout.element_count)
+                    .map(|_| {
+                        if layout.is_2state {
+                            ir_builder.alloc_bit(layout.element_width, layout.signed)
+                        } else {
+                            ir_builder.alloc_logic(layout.element_width)
+                        }
+                    })
+                    .collect();
+                Ok(ArrayViewMergeParams {
+                    var_id,
+                    initialized,
+                    elements,
+                })
+            })
+            .collect()
+    }
+
+    fn array_view_state_args<A>(
+        &self,
+        frame: usize,
+        params: &[ArrayViewMergeParams],
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<Vec<RegisterId>, ParserError> {
+        let mut args = Vec::new();
+        for params in params {
+            if let Some(view) = self.function_array_view_stack[frame].get(&params.var_id) {
+                let initialized = if let Some(initialized) = view.initialized {
+                    initialized
+                } else {
+                    let initialized = ir_builder.alloc_bit(1, false);
+                    ir_builder.emit(SIRInstruction::Imm(initialized, SIRValue::new(1u8)));
+                    initialized
+                };
+                args.push(initialized);
+                args.extend(view.elements.iter().copied());
+            } else {
+                let initialized = ir_builder.alloc_bit(1, false);
+                ir_builder.emit(SIRInstruction::Imm(initialized, SIRValue::new(0u8)));
+                args.push(initialized);
+                let layout = self.array_view_layout(params.var_id)?;
+                for _ in 0..layout.element_count {
+                    let element = if layout.is_2state {
+                        ir_builder.alloc_bit(layout.element_width, layout.signed)
+                    } else {
+                        ir_builder.alloc_logic(layout.element_width)
+                    };
+                    ir_builder.emit(SIRInstruction::Imm(element, SIRValue::new(0u8)));
+                    args.push(element);
+                }
+            }
+        }
+        Ok(args)
+    }
+
+    fn install_merged_array_views(
+        &mut self,
+        frame: usize,
+        params: &[ArrayViewMergeParams],
+        states: &[&HashMap<VarId, FunctionArrayView>],
+    ) {
+        for params in params {
+            let views = states
+                .iter()
+                .filter_map(|state| state.get(&params.var_id))
+                .collect::<Vec<_>>();
+            let Some(first) = views.first() else {
+                continue;
+            };
+            if views.iter().any(|view| {
+                view.backing_var_id != first.backing_var_id
+                    || view.owns_backing != first.owns_backing
+            }) {
+                unreachable!("a function array view has stable backing metadata");
+            }
+            self.function_array_view_stack[frame].insert(
+                params.var_id,
+                FunctionArrayView {
+                    backing_var_id: first.backing_var_id,
+                    elements: params.elements.clone(),
+                    owns_backing: first.owns_backing,
+                    initialized: Some(params.initialized),
+                },
+            );
+        }
     }
 
     pub(super) fn restore_active_function_array_views<A>(
@@ -1187,14 +1341,6 @@ impl<'a> FfParser<'a> {
         };
         let access_width = get_access_width(self.module, var_id, index, select)?;
         let selected_expr = selection.expr;
-        self.prepare_function_array_views_for_expression(
-            selected_expr,
-            targets,
-            domain,
-            convert,
-            sources,
-            ir_builder,
-        )?;
         self.parse_expression(
             selected_expr,
             targets,
@@ -1886,12 +2032,19 @@ impl<'a> FfParser<'a> {
             left, targets, domain, convert, sources, ir_builder, None,
         )?;
         let lhs = self.stack.pop_back().unwrap();
-        let pre_rhs_state = expression_has_side_effect(right).then(|| {
-            (
-                self.defined_ranges.clone(),
-                self.dynamic_defined_vars.clone(),
-            )
-        });
+        let array_view_frame = self.function_arg_stack.len().checked_sub(1);
+        let array_view_candidates = self.array_view_merge_candidates([right]);
+        let array_view_params =
+            self.alloc_array_view_merge_params(&array_view_candidates, ir_builder)?;
+        let pre_rhs_array_views =
+            array_view_frame.map(|frame| self.function_array_view_stack[frame].clone());
+        let pre_rhs_state =
+            (expression_has_side_effect(right) || !array_view_candidates.is_empty()).then(|| {
+                (
+                    self.defined_ranges.clone(),
+                    self.dynamic_defined_vars.clone(),
+                )
+            });
 
         // Only a definite dominant value may short-circuit.  Logical-not
         // produces a one-bit 4-state truth value; ToTwoState maps its X result
@@ -1914,15 +2067,28 @@ impl<'a> FfParser<'a> {
 
         let rhs_block = ir_builder.new_block();
         let result_param = ir_builder.alloc_logic(1);
-        let merge_block = ir_builder.new_block_with(vec![result_param]);
+        let mut merge_params = vec![result_param];
+        for params in &array_view_params {
+            merge_params.push(params.initialized);
+            merge_params.extend(params.elements.iter().copied());
+        }
+        let merge_block = ir_builder.new_block_with(merge_params);
         let shortcut_value = ir_builder.alloc_bit(1, false);
         ir_builder.emit(SIRInstruction::Imm(
             shortcut_value,
             SIRValue::new(if is_and { 0u8 } else { 1u8 }),
         ));
+        let mut shortcut_args = vec![shortcut_value];
+        if let Some(frame) = array_view_frame {
+            shortcut_args.extend(self.array_view_state_args(
+                frame,
+                &array_view_params,
+                ir_builder,
+            )?);
+        }
         ir_builder.seal_block(SIRTerminator::Branch {
             cond: shortcut,
-            true_block: (merge_block, vec![shortcut_value]),
+            true_block: (merge_block, shortcut_args),
             false_block: (rhs_block, vec![]),
         });
 
@@ -1948,9 +2114,23 @@ impl<'a> FfParser<'a> {
             },
             rhs,
         ));
-        ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![evaluated]));
+        let rhs_array_views =
+            array_view_frame.map(|frame| self.function_array_view_stack[frame].clone());
+        let mut rhs_args = vec![evaluated];
+        if let Some(frame) = array_view_frame {
+            rhs_args.extend(self.array_view_state_args(frame, &array_view_params, ir_builder)?);
+        }
+        ir_builder.seal_block(SIRTerminator::Jump(merge_block, rhs_args));
 
         ir_builder.switch_to_block(merge_block);
+        if let (Some(frame), Some(pre_views), Some(rhs_views)) = (
+            array_view_frame,
+            pre_rhs_array_views.as_ref(),
+            rhs_array_views.as_ref(),
+        ) {
+            self.function_array_view_stack[frame] = pre_views.clone();
+            self.install_merged_array_views(frame, &array_view_params, &[pre_views, rhs_views]);
+        }
         if let (Some((pre_defined, pre_dynamic)), Some((rhs_defined, rhs_dynamic))) =
             (pre_rhs_state, rhs_state)
         {
@@ -2402,6 +2582,17 @@ impl<'a> FfParser<'a> {
                                 return Ok(());
                             }
                         }
+                    }
+                }
+                if let Some(frame) = (0..self.function_arg_stack.len())
+                    .rev()
+                    .find(|&frame| self.function_arg_stack[frame].contains_key(var_id))
+                {
+                    let planned = self.function_array_view_plan_stack[frame].contains(var_id);
+                    if planned || self.array_access_needs_view(*var_id, var_index, var_select) {
+                        self.ensure_function_array_view_at(
+                            frame, *var_id, targets, domain, convert, sources, ir_builder,
+                        )?;
                     }
                 }
                 if let Some(backing_var_id) = self.get_bound_function_array_view(*var_id) {
@@ -2901,8 +3092,9 @@ impl<'a> FfParser<'a> {
         )?;
         let cond_reg = self.stack.pop_back().unwrap();
 
-        let branch_materializes_array_view = self.expression_needs_unmaterialized_array_view(then)
-            || self.expression_needs_unmaterialized_array_view(els);
+        let array_view_frame = self.function_arg_stack.len().checked_sub(1);
+        let array_view_candidates = self.array_view_merge_candidates([then, els]);
+        let branch_materializes_array_view = !array_view_candidates.is_empty();
 
         if !expression_has_side_effect(then)
             && !expression_has_side_effect(els)
@@ -2968,23 +3160,42 @@ impl<'a> FfParser<'a> {
         let merge_else = ir_builder.alloc_bit(1, false);
         ir_builder.emit(SIRInstruction::Imm(merge_else, SIRValue::new(1u8)));
 
+        let else_view_params =
+            self.alloc_array_view_merge_params(&array_view_candidates, ir_builder)?;
+        let merge_view_params =
+            self.alloc_array_view_merge_params(&array_view_candidates, ir_builder)?;
         let then_block = ir_builder.new_block();
         let carried_then = ir_builder.alloc_logic(result_width);
         let needs_merge = ir_builder.alloc_bit(1, false);
-        let else_block = ir_builder.new_block_with(vec![carried_then, needs_merge]);
+        let mut else_params = vec![carried_then, needs_merge];
+        for params in &else_view_params {
+            else_params.push(params.initialized);
+            else_params.extend(params.elements.iter().copied());
+        }
+        let else_block = ir_builder.new_block_with(else_params);
         let result = ir_builder.alloc_logic(result_width);
-        let merge_block = ir_builder.new_block_with(vec![result]);
+        let mut merge_params = vec![result];
+        for params in &merge_view_params {
+            merge_params.push(params.initialized);
+            merge_params.extend(params.elements.iter().copied());
+        }
+        let merge_block = ir_builder.new_block_with(merge_params);
 
+        let mut initial_else_args = vec![dummy_then, direct_else];
+        if let Some(frame) = array_view_frame {
+            initial_else_args.extend(self.array_view_state_args(
+                frame,
+                &else_view_params,
+                ir_builder,
+            )?);
+        }
         ir_builder.seal_block(SIRTerminator::Branch {
             cond: known_false,
-            true_block: (else_block, vec![dummy_then, direct_else]),
+            true_block: (else_block, initial_else_args),
             false_block: (then_block, vec![]),
         });
 
         ir_builder.switch_to_block(then_block);
-        self.prepare_function_array_views_for_expression(
-            then, targets, domain, convert, sources, ir_builder,
-        )?;
         self.parse_expression_in_context(
             then,
             targets,
@@ -2998,17 +3209,36 @@ impl<'a> FfParser<'a> {
         let then_defined = std::mem::replace(&mut self.defined_ranges, pre_ternary_defined.clone());
         let then_dynamic =
             std::mem::replace(&mut self.dynamic_defined_vars, pre_ternary_dynamic.clone());
+        let then_array_views = self.function_array_view_stack.clone();
+        let mut then_merge_args = vec![then_val];
+        let mut then_else_args = vec![then_val, merge_else];
+        if let Some(frame) = array_view_frame {
+            then_merge_args.extend(self.array_view_state_args(
+                frame,
+                &merge_view_params,
+                ir_builder,
+            )?);
+            then_else_args.extend(self.array_view_state_args(
+                frame,
+                &else_view_params,
+                ir_builder,
+            )?);
+        }
         ir_builder.seal_block(SIRTerminator::Branch {
             cond: known_true,
-            true_block: (merge_block, vec![then_val]),
-            false_block: (else_block, vec![then_val, merge_else]),
+            true_block: (merge_block, then_merge_args),
+            false_block: (else_block, then_else_args),
         });
 
         self.function_array_view_stack = pre_ternary_array_views.clone();
         ir_builder.switch_to_block(else_block);
-        self.prepare_function_array_views_for_expression(
-            els, targets, domain, convert, sources, ir_builder,
-        )?;
+        if let Some(frame) = array_view_frame {
+            self.install_merged_array_views(
+                frame,
+                &else_view_params,
+                &[&pre_ternary_array_views[frame], &then_array_views[frame]],
+            );
+        }
         self.parse_expression_in_context(
             els,
             targets,
@@ -3021,6 +3251,7 @@ impl<'a> FfParser<'a> {
         let else_val = self.stack.pop_back().unwrap();
         let else_defined = std::mem::take(&mut self.defined_ranges);
         let else_dynamic = std::mem::take(&mut self.dynamic_defined_vars);
+        let else_array_views = self.function_array_view_stack.clone();
         let merged = ir_builder.alloc_logic(result_width);
         ir_builder.emit(SIRInstruction::Mux(
             merged,
@@ -3029,20 +3260,42 @@ impl<'a> FfParser<'a> {
             else_val,
         ));
         let direct_else_block = ir_builder.new_block();
+        let mut else_merge_state = Vec::new();
+        if let Some(frame) = array_view_frame {
+            else_merge_state.extend(self.array_view_state_args(
+                frame,
+                &merge_view_params,
+                ir_builder,
+            )?);
+        }
+        let mut merged_args = vec![merged];
+        merged_args.extend(else_merge_state.iter().copied());
         ir_builder.seal_block(SIRTerminator::Branch {
             cond: needs_merge,
-            true_block: (merge_block, vec![merged]),
+            true_block: (merge_block, merged_args),
             false_block: (direct_else_block, vec![]),
         });
 
         ir_builder.switch_to_block(direct_else_block);
-        ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![else_val]));
+        let mut direct_else_args = vec![else_val];
+        direct_else_args.extend(else_merge_state);
+        ir_builder.seal_block(SIRTerminator::Jump(merge_block, direct_else_args));
 
-        // An arm-local view is not initialized on paths that skip that arm,
-        // so it must not escape the ternary's merge point.
         self.function_array_view_stack = pre_ternary_array_views;
 
         ir_builder.switch_to_block(merge_block);
+        if let Some(frame) = array_view_frame {
+            let pre_views = self.function_array_view_stack[frame].clone();
+            self.install_merged_array_views(
+                frame,
+                &merge_view_params,
+                &[
+                    &pre_views,
+                    &then_array_views[frame],
+                    &else_array_views[frame],
+                ],
+            );
+        }
         self.defined_ranges = self.intersect_defined_states(then_defined, else_defined);
         self.dynamic_defined_vars = self.intersect_dynamic_vars(then_dynamic, else_dynamic);
         self.stack.push_back(result);
