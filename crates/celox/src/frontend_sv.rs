@@ -620,7 +620,6 @@ fn lower_module_with_overrides(
     let mut name_to_id = HashMap::default();
     let mut port_order = Vec::new();
     let mut initial_memory_values = Vec::new();
-    let constants = module_constants_with_overrides(module, parameter_overrides);
     let parameter_types = module
         .parameters()
         .iter()
@@ -634,6 +633,7 @@ fn lower_module_with_overrides(
             ))
         })
         .collect();
+    let constants = module_constants_with_overrides(module, parameter_overrides);
 
     for port in module.ports() {
         let id = next_var_id(&mut next_id);
@@ -699,11 +699,12 @@ fn lower_module_with_overrides(
     for process in module.comb_processes() {
         if let Some(condition) = process.condition() {
             let condition =
-                sv::typecheck::eval_const_expr(condition, &constants).ok_or_else(|| {
-                    sv::AnalyzerError::Unsupported(
-                        "unknown conditional-generate condition".to_string(),
-                    )
-                })?;
+                sv::typecheck::eval_const_expr_with_types(condition, &constants, &parameter_types)
+                    .ok_or_else(|| {
+                        sv::AnalyzerError::Unsupported(
+                            "unknown conditional-generate condition".to_string(),
+                        )
+                    })?;
             if condition == 0 {
                 continue;
             }
@@ -728,11 +729,12 @@ fn lower_module_with_overrides(
     for instance in module.instances() {
         if let Some(condition) = instance.condition() {
             let condition =
-                sv::typecheck::eval_const_expr(condition, &constants).ok_or_else(|| {
-                    sv::AnalyzerError::Unsupported(
-                        "unknown conditional-generate condition".to_string(),
-                    )
-                })?;
+                sv::typecheck::eval_const_expr_with_types(condition, &constants, &parameter_types)
+                    .ok_or_else(|| {
+                        sv::AnalyzerError::Unsupported(
+                            "unknown conditional-generate condition".to_string(),
+                        )
+                    })?;
             if condition == 0 {
                 continue;
             }

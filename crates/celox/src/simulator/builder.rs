@@ -296,6 +296,7 @@ pub fn compile_sv_to_sir(
     metadata: Option<Metadata>,
     clock_type: Option<ClockType>,
     reset_type: Option<ResetType>,
+    param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     compile_sv_to_sir_with_layout_mode(
@@ -309,7 +310,7 @@ pub fn compile_sv_to_sir(
         metadata,
         clock_type,
         reset_type,
-        &[],
+        param_overrides,
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
         crate::backend::memory_layout::MemoryLayoutMode::Packed,

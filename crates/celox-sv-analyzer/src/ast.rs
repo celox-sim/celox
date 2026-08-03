@@ -1871,6 +1871,7 @@ fn const_env_from_parameters(parameters: &[Parameter]) -> HashMap<String, i128> 
         };
         if let Some(r#type) = parameter.resolved_type(&parameter_types) {
             parameter_types.insert(parameter.name().to_string(), r#type);
+            insert_parameter_type_markers(&mut env, parameter.name(), r#type);
         }
         env.insert(parameter.name().to_string(), value);
         env.insert(parameter_marker(parameter.name()), value);
@@ -2201,6 +2202,40 @@ fn packed_dimension_widths(ranges: &[PackedRange]) -> Vec<ConstExpr> {
 
 fn parameter_marker(name: &str) -> String {
     format!("__parameter::{name}")
+}
+
+fn parameter_width_marker(name: &str) -> String {
+    format!("__parameter::width::{name}")
+}
+
+fn parameter_signed_marker(name: &str) -> String {
+    format!("__parameter::signed::{name}")
+}
+
+fn insert_parameter_type_markers(
+    const_env: &mut HashMap<String, i128>,
+    name: &str,
+    r#type: ExprType,
+) {
+    if let Ok(width) = i128::try_from(r#type.width) {
+        const_env.insert(parameter_width_marker(name), width);
+        const_env.insert(parameter_signed_marker(name), r#type.signed as i128);
+    }
+}
+
+fn parameter_types_from_const_env(const_env: &HashMap<String, i128>) -> HashMap<String, ExprType> {
+    const PREFIX: &str = "__parameter::width::";
+    const_env
+        .iter()
+        .filter_map(|(marker, width)| {
+            let name = marker.strip_prefix(PREFIX)?;
+            let width = usize::try_from(*width).ok()?;
+            let signed = const_env
+                .get(&parameter_signed_marker(name))
+                .is_some_and(|signed| *signed != 0);
+            Some((name.to_string(), ExprType { width, signed }))
+        })
+        .collect()
 }
 
 fn module_parameter_port_list(node: RefNode<'_>) -> Option<RefNode<'_>> {
@@ -4088,20 +4123,24 @@ fn add_localparams_from_generate_item(
     {
         return true;
     }
+    let mut parameter_types = parameter_types_from_const_env(const_env);
     for parameter in parameters {
-        let Some(value) = parameter
-            .value()
-            .and_then(|value| eval_ast_const_expr(value, const_env))
-        else {
+        let Some(value) = parameter.resolved_value(const_env, &parameter_types) else {
             continue;
         };
+        if let Some(r#type) = parameter.resolved_type(&parameter_types) {
+            parameter_types.insert(parameter.name().to_string(), r#type);
+            insert_parameter_type_markers(const_env, parameter.name(), r#type);
+        }
         const_env.insert(parameter.name().to_string(), value);
     }
     true
 }
 
 fn eval_ast_const_expr(expr: &ConstExpr, const_env: &HashMap<String, i128>) -> Option<i128> {
-    typecheck::eval_const_expr(&expr.clone().into(), const_env)
+    let parameter_types = parameter_types_from_const_env(const_env);
+    let expr = substitute_typed_parameter_literals(expr.clone(), const_env, &parameter_types);
+    typecheck::eval_const_expr(&expr.into(), const_env)
 }
 
 fn substitute_process_constants(
@@ -5055,7 +5094,11 @@ fn conditional_assignments_from_statement(
                 assignments,
             )?;
         }
-        _ => {}
+        _ => {
+            return Err(AnalyzerError::Unsupported(
+                "unsupported statement inside always_ff".to_string(),
+            ));
+        }
     }
     Ok(())
 }

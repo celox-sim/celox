@@ -1,6 +1,6 @@
 //! Type and width resolution helpers.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, hash::BuildHasher};
 
 use num_bigint::BigUint;
 
@@ -123,6 +123,83 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
                 eval_const_expr(else_expr, constants)
             }
         }
+    }
+}
+
+/// Evaluate a constant expression while preserving declared parameter types.
+///
+/// The plain constant environment stores only mathematical values. Replacing
+/// typed identifiers with sized literals before evaluation preserves the
+/// SystemVerilog width and signedness rules for mixed-type operations.
+pub fn eval_const_expr_with_types<S: BuildHasher>(
+    expr: &ConstExpr,
+    constants: &HashMap<String, i128>,
+    types: &HashMap<String, (usize, bool), S>,
+) -> Option<i128> {
+    let expr = substitute_typed_constants(expr.clone(), constants, types);
+    eval_const_expr(&expr, constants)
+}
+
+fn substitute_typed_constants<S: BuildHasher>(
+    expr: ConstExpr,
+    constants: &HashMap<String, i128>,
+    types: &HashMap<String, (usize, bool), S>,
+) -> ConstExpr {
+    match expr {
+        ConstExpr::Ident(name) => match (constants.get(&name), types.get(&name)) {
+            (Some(value), Some((width, signed))) => {
+                ConstExpr::Literal(format_typed_constant_literal(*value, *width, *signed))
+            }
+            _ => ConstExpr::Ident(name),
+        },
+        ConstExpr::Literal(value) => ConstExpr::Literal(value),
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: Box::new(substitute_typed_constants(*expr, constants, types)),
+            bit: Box::new(substitute_typed_constants(*bit, constants, types)),
+        },
+        ConstExpr::Function { name, args } => ConstExpr::Function {
+            name,
+            args: args
+                .into_iter()
+                .map(|arg| substitute_typed_constants(arg, constants, types))
+                .collect(),
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op,
+            expr: Box::new(substitute_typed_constants(*expr, constants, types)),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: Box::new(substitute_typed_constants(*left, constants, types)),
+            op,
+            right: Box::new(substitute_typed_constants(*right, constants, types)),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: Box::new(substitute_typed_constants(*condition, constants, types)),
+            then_expr: Box::new(substitute_typed_constants(*then_expr, constants, types)),
+            else_expr: Box::new(substitute_typed_constants(*else_expr, constants, types)),
+        },
+    }
+}
+
+fn format_typed_constant_literal(value: i128, width: usize, signed: bool) -> String {
+    let signing = if signed { "s" } else { "" };
+    if width <= 128 {
+        let mask = if width == 128 {
+            u128::MAX
+        } else {
+            (1u128 << width) - 1
+        };
+        let bits = (value as u128) & mask;
+        format!("{width}'{signing}d{bits}")
+    } else {
+        let extension = if value.is_negative() { '1' } else { '0' };
+        let high_bits = extension.to_string().repeat(width - 128);
+        let low_bits = value as u128;
+        format!("{width}'{signing}b{high_bits}{low_bits:0128b}")
     }
 }
 

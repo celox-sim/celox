@@ -4,7 +4,7 @@ fn cranelift_build_error(source: &str) -> String {
     match Simulator::from_sv_sources(vec![(source, Path::new("review.sv"))], "Top")
         .build_cranelift()
     {
-        Ok(_) => panic!("unsupported SystemVerilog unexpectedly compiled"),
+        Ok(_) => panic!("unsupported SystemVerilog unexpectedly compiled:\n{source}"),
         Err(error) => error.to_string(),
     }
 }
@@ -106,6 +106,62 @@ fn preserves_declared_width_for_parameter_logical_right_shifts() {
             .unwrap();
     assert_eq!(sim.get(sim.signal("shifted")), 0x7fu8.into());
     assert_eq!(sim.get(sim.signal("negation_matches")), 1u8.into());
+}
+
+#[test]
+fn applies_unsigned_coercion_to_typed_parameter_comparisons() {
+    let source = r#"
+        module Top(output logic y, output logic all_ones);
+            parameter logic signed [7:0] P = -1;
+            if (P < 8'h01) assign y = 1'b0;
+            else assign y = 1'b1;
+            if (&P) assign all_ones = 1'b1;
+            else assign all_ones = 1'b0;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("typed_parameter_compare.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("all_ones")), 1u8.into());
+}
+
+#[test]
+fn compile_sv_to_sir_forwards_parameter_overrides() {
+    let source = r#"
+        module Top #(parameter ENABLE_UNSUPPORTED = 0)
+                   (input logic clk, d, output logic q);
+            if (ENABLE_UNSUPPORTED) begin
+                always_ff @(posedge clk)
+                    assert (d) q <= 1'b1; else q <= 1'b0;
+            end else begin
+                assign q = d;
+            end
+        endmodule
+    "#;
+    let error = celox::compile_sv_to_sir(
+        &[(source, Path::new("compile_sv_override.sv"))],
+        "Top",
+        &[],
+        &[],
+        false,
+        &celox::TraceOptions::default(),
+        None,
+        None,
+        None,
+        None,
+        &[("ENABLE_UNSUPPORTED".to_string(), 1)],
+        &celox::OptimizeOptions::default(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("unsupported statement inside always_ff"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -1091,6 +1147,15 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "unsupported statement inside always_ff",
+            r#"
+            module Top(input logic clk, d, output logic q);
+                always_ff @(posedge clk)
+                    assert (d) q <= 1'b1; else q <= 1'b0;
+            endmodule
+        "#,
+        ),
+        (
             "always_ff predicate lowering",
             r#"
             module Top(input logic clk, input logic [3:0] a, b, d, e, output logic [3:0] q);
@@ -1459,15 +1524,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top #(parameter logic P = 1'bx) (output logic y);
                 if (P) assign y = 1'b1;
-            endmodule
-        "#,
-        ),
-        (
-            "unknown conditional-generate condition",
-            r#"
-            module Top #(parameter logic [3:0] P = 4'hf) (output logic y);
-                if (&P) assign y = 1'b1;
-                else assign y = 1'b0;
             endmodule
         "#,
         ),
