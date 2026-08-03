@@ -2487,6 +2487,104 @@ module Top (
 
 }
 
+fn test_function_break_keeps_post_loop_effect_live(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @build Simulator::builder(r#"
+module Top (
+    value: input logic<8>,
+    stop: input logic,
+    return_early: input logic,
+    out: output logic<8>,
+) {
+    function pass (
+        x: input logic<8>,
+        stop: input logic,
+        return_early: input logic,
+    ) -> logic<8> {
+        for i in 0..4 {
+            if stop && i == 1 {
+                break;
+            }
+            if return_early && i == 0 {
+                return x + 8'd1;
+            }
+        }
+        $display("after-loop");
+        return x;
+    }
+
+    always_comb {
+        out = pass(value, stop, return_early);
+    }
+}
+"#, "Top");
+
+    let value = sim.signal("value");
+    let stop = sim.signal("stop");
+    let return_early = sim.signal("return_early");
+    let out = sim.signal("out");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(value, 9u8);
+        io.set(stop, 1u8);
+    }).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 9);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "after-loop".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(return_early, 1u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 10);
+    assert_eq!(sim.drain_runtime_events(), vec![]);
+}
+
+fn test_named_function_inputs_evaluate_in_source_order(sim) {
+    @omit_veryl;
+    @build Simulator::builder(r#"
+module Top (
+    value: input logic<8>,
+    tmp: output logic<8>,
+    out: output logic<8>,
+) {
+    function write_tmp (
+        x: input logic<8>,
+        dst: output logic<8>,
+    ) -> logic<8> {
+        dst = x;
+        return x;
+    }
+
+    function add (
+        first: input logic<8>,
+        second: input logic<8>,
+    ) -> logic<8> {
+        return first + second;
+    }
+
+    always_comb {
+        tmp = 8'd0;
+        out = add(
+            second: write_tmp(value, tmp),
+            first: tmp,
+        );
+    }
+}
+"#, "Top");
+
+    let value = sim.signal("value");
+    let tmp = sim.signal("tmp");
+    let out = sim.signal("out");
+
+    sim.modify(|io| io.set(value, 13u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(tmp), 13);
+    assert_eq!(sim.get_as::<u8>(out), 26);
+}
+
 fn test_nested_dynamic_function_loops_preserve_effect_runners(sim) {
     @omit_veryl;
     @ignore_on(wasm);

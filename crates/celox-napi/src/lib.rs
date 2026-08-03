@@ -2335,6 +2335,31 @@ mod tests {
     }
 
     #[test]
+    fn normal_project_loading_excludes_example_sources() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join("src")).unwrap();
+        std::fs::create_dir(project.path().join("examples")).unwrap();
+        std::fs::write(
+            project.path().join("Veryl.toml"),
+            "[project]\nname = \"example_filter\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(project.path().join("src/top.veryl"), "module Top () {}\n").unwrap();
+        std::fs::write(
+            project.path().join("examples/demo.veryl"),
+            "module Demo () {}\n",
+        )
+        .unwrap();
+
+        let (sources, _, _) = load_project_sources(project.path().to_str().unwrap()).unwrap();
+        let source_names = sources
+            .iter()
+            .map(|(_, path)| path.file_name().unwrap().to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(source_names, ["top.veryl"]);
+    }
+
+    #[test]
     fn same_inputs_produce_same_key() {
         let src = make_sources(&[("module Top {}", "a.veryl")]);
         let opts = default_opts();

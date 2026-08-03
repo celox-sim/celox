@@ -614,6 +614,57 @@ fn test_sv_module_instance_returns_unsupported_parser_error() {
 }
 
 #[test]
+fn test_testbench_helper_hierarchical_read_returns_error_without_panicking() {
+    let code = r#"
+        module Dut () {
+            var q: logic;
+            assign q = 1'b1;
+        }
+
+        #[test(t)]
+        module t {
+            inst dut: Dut ();
+
+            function read_q() -> logic {
+                return dut.q;
+            }
+
+            initial {
+                $assert(read_q());
+                $finish();
+            }
+        }
+    "#;
+
+    let outcome = std::panic::catch_unwind(|| Simulator::builder(code, "t").build());
+    let result = outcome.expect("helper-body hierarchical read must not panic");
+    match result.as_ref().map_err(|error| error.kind()) {
+        Err(SimulatorErrorKind::Analyzer(errors)) => assert!(
+            errors.iter().any(|error| matches!(
+                error,
+                veryl_analyzer::AnalyzerError::InvisibleIndentifier { .. }
+            )),
+            "expected Veryl InvisibleIndentifier for helper's hierarchical read, got {errors:?}"
+        ),
+        Err(SimulatorErrorKind::SIRParser(ParserError::Unsupported {
+            issue,
+            phase: LoweringPhase::SimulatorParser,
+            feature,
+            ..
+        })) => {
+            assert_eq!(*issue, 467);
+            assert_eq!(*feature, "hierarchical variable reference");
+        }
+        Err(kind) => panic!(
+            "expected InvisibleIndentifier or Unsupported(SimulatorParser) for helper's hierarchical read, got {kind:?}"
+        ),
+        Ok(_) => panic!(
+            "expected InvisibleIndentifier or Unsupported(SimulatorParser) for helper's hierarchical read, got Ok"
+        ),
+    }
+}
+
+#[test]
 fn test_top_not_found_returns_error() {
     let code = r#"
         module Foo (a: input logic, b: output logic) {
