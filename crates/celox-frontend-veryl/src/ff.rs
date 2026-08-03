@@ -255,6 +255,32 @@ pub struct FfGroupParseResult<A = RegionedVarAddr> {
     pub dynamic_write_vars: HashSet<VarId>,
 }
 
+#[derive(Clone)]
+struct FunctionArrayView {
+    backing_var_id: VarId,
+    // Registers preserve this invocation's values if a nested invocation
+    // temporarily reuses the same formal working region.
+    elements: Vec<RegisterId>,
+    // Aliased forwarding views do not write their backing and therefore do
+    // not require the caller's snapshot to be restored.
+    owns_backing: bool,
+    // Lazily evaluated literal items are keyed by their structural path in
+    // the bound array literal so the cache survives cloned bindings.
+    cached_literal_items: HashMap<Vec<usize>, FunctionArrayLiteralItemCache>,
+    // Branch-local lazy initialization is represented explicitly at control
+    // flow joins. `None` means every path reaching the current block has a
+    // valid backing view; `Some` guards the carried element snapshot.
+    initialized: Option<RegisterId>,
+}
+
+#[derive(Clone)]
+struct FunctionArrayLiteralItemCache {
+    elements: Vec<RegisterId>,
+    // `None` means the item is available on every path reaching the current
+    // block. `Some` guards a cache populated on only some predecessors.
+    initialized: Option<RegisterId>,
+}
+
 impl<A> Default for FfGroupParseResult<A> {
     fn default() -> Self {
         Self {
@@ -277,6 +303,9 @@ pub struct FfParser<'a> {
     loop_exit_blocks: Vec<BlockId>,
     reset: Option<FfReset>,
     function_arg_stack: Vec<HashMap<VarId, Expression>>,
+    // Maps an active array formal to its call-specific register snapshot and
+    // the formal working region used for O(1) dynamic element loads.
+    function_array_view_stack: Vec<HashMap<VarId, FunctionArrayView>>,
     runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     runtime_event_sites: Vec<RuntimeEventSite>,
     next_runtime_error_code: i64,
@@ -314,6 +343,7 @@ impl<'a> FfParser<'a> {
             loop_exit_blocks: Vec::new(),
             reset: None,
             function_arg_stack: Vec::new(),
+            function_array_view_stack: Vec::new(),
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
             next_runtime_error_code: 2000,
