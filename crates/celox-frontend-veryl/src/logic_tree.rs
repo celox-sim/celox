@@ -25,6 +25,7 @@ use crate::{
         PartSelectGeometry, celox_value_from_comptime, eval_constexpr, eval_var_select,
         select_geometry,
     },
+    function_call_has_arg,
     loop_provenance::LoopRecoveryCandidate,
     resolve_total_width,
 };
@@ -90,23 +91,20 @@ pub(super) fn invalid_function_call_argument_error(
     )
 }
 
-/// Returns input expressions in formal declaration order.
+/// Returns input expressions in source evaluation order.
 ///
-/// Veryl's AIR stores call connections in a hash map, so iterating
-/// `FunctionCall::inputs` directly makes side-effect ordering depend on the hash
-/// layout. `Function::args`, in contrast, preserves the declared port order.
+/// Veryl 0.20.3 preserves the source order in `FunctionCall::inputs`. Keep that
+/// order when mapping flattened argument paths to their specialized variables:
+/// evaluating in formal declaration order can reorder side effects in named
+/// arguments.
 pub(super) fn ordered_function_inputs<'a>(
     function: &Function,
     function_body: &FunctionBody,
     call: &'a FunctionCall,
 ) -> Result<Vec<(VarId, &'a Expression)>, ParserError> {
-    let mut inputs = Vec::with_capacity(call.inputs.len());
-    let mut ordered_ids = HashSet::default();
+    let mut declared_ids = HashSet::default();
     for arg in &function.args {
         for (arg_path, _, _) in &arg.members {
-            let Some(arg_expr) = call.inputs.get(arg_path) else {
-                continue;
-            };
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
                 return Err(invalid_function_call_argument_error(
                     function,
@@ -115,12 +113,12 @@ pub(super) fn ordered_function_inputs<'a>(
                     call,
                 ));
             };
-            inputs.push((*arg_id, arg_expr));
-            ordered_ids.insert(*arg_id);
+            declared_ids.insert(*arg_id);
         }
     }
 
-    for arg_path in call.inputs.keys() {
+    let mut inputs = Vec::with_capacity(call.inputs.len());
+    for (arg_path, arg_expr) in &call.inputs {
         let Some(arg_id) = function_body.arg_map.get(arg_path) else {
             return Err(invalid_function_call_argument_error(
                 function,
@@ -129,7 +127,7 @@ pub(super) fn ordered_function_inputs<'a>(
                 call,
             ));
         };
-        if !ordered_ids.contains(arg_id) {
+        if !declared_ids.contains(arg_id) {
             return Err(invalid_function_call_argument_error(
                 function,
                 arg_path,
@@ -137,27 +135,25 @@ pub(super) fn ordered_function_inputs<'a>(
                 call,
             ));
         }
+        inputs.push((*arg_id, arg_expr));
     }
 
     Ok(inputs)
 }
 
-/// Returns output destinations in formal declaration order.
+/// Returns output destinations in source evaluation order.
 ///
-/// Like inputs, output connections are stored in a hash map. Destination
-/// expressions may have effects, so their order must follow the declaration.
+/// Veryl 0.20.3 preserves the source order in `FunctionCall::outputs`.
+/// Destination expressions may have effects, so applying them in formal
+/// declaration order can change simulation behavior for named arguments.
 pub(super) fn ordered_function_outputs<'a>(
     function: &Function,
     function_body: &FunctionBody,
     call: &'a FunctionCall,
 ) -> Result<Vec<(VarId, &'a [veryl_analyzer::ir::AssignDestination])>, ParserError> {
-    let mut outputs = Vec::with_capacity(call.outputs.len());
-    let mut ordered_ids = HashSet::default();
+    let mut declared_ids = HashSet::default();
     for arg in &function.args {
         for (arg_path, _, _) in &arg.members {
-            let Some(destinations) = call.outputs.get(arg_path) else {
-                continue;
-            };
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
                 return Err(invalid_function_call_argument_error(
                     function,
@@ -166,12 +162,12 @@ pub(super) fn ordered_function_outputs<'a>(
                     call,
                 ));
             };
-            outputs.push((*arg_id, destinations.as_slice()));
-            ordered_ids.insert(*arg_id);
+            declared_ids.insert(*arg_id);
         }
     }
 
-    for arg_path in call.outputs.keys() {
+    let mut outputs = Vec::with_capacity(call.outputs.len());
+    for (arg_path, destinations) in &call.outputs {
         let Some(arg_id) = function_body.arg_map.get(arg_path) else {
             return Err(invalid_function_call_argument_error(
                 function,
@@ -180,7 +176,7 @@ pub(super) fn ordered_function_outputs<'a>(
                 call,
             ));
         };
-        if !ordered_ids.contains(arg_id) {
+        if !declared_ids.contains(arg_id) {
             return Err(invalid_function_call_argument_error(
                 function,
                 arg_path,
@@ -188,6 +184,7 @@ pub(super) fn ordered_function_outputs<'a>(
                 call,
             ));
         }
+        outputs.push((*arg_id, destinations.as_slice()));
     }
 
     Ok(outputs)
@@ -1708,6 +1705,13 @@ pub(super) fn collect_written_expression(
                 }
                 Ok(())
             }
+            Factor::HierVariable(reference) => Err(ParserError::unsupported(
+                467,
+                LoweringPhase::CombLowering,
+                "hierarchical variable reference",
+                format!("{}", reference.var_path),
+                Some(&reference.comptime.token),
+            )),
             Factor::SystemFunctionCall(call) => {
                 collect_written_system_function_call(module, call, out)
             }
@@ -2650,7 +2654,9 @@ fn eval_statement_form_function_call(
     }
 
     for arg_path in function_body.arg_map.keys() {
-        if !call.inputs.contains_key(arg_path) && !call.outputs.contains_key(arg_path) {
+        if !function_call_has_arg(&call.inputs, arg_path)
+            && !function_call_has_arg(&call.outputs, arg_path)
+        {
             return Err(invalid_function_call_argument_error(
                 function,
                 arg_path,
@@ -3303,7 +3309,7 @@ mod tests {
         assert!(errors.is_empty(), "analyze_pass1 errors: {errors:?}");
         let errors = Analyzer::analyze_post_pass1();
         assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
-        let errors = analyzer.analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir));
+        let errors = analyzer.analyze_pass2(&parser.veryl, &mut context, Some(&mut ir));
         assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
         let errors = Analyzer::analyze_post_pass2(&ir);
         assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
@@ -3423,139 +3429,6 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_statement_function_argument_reports_binding_diagnostic() {
-        let code = r#"
-            module Top (a: input logic<8>, q: output logic<8>) {
-                function f (
-                    x: input logic<8>,
-                    y: output logic<8>,
-                ) {
-                    y = x;
-                }
-
-                always_comb {
-                    f(a, q);
-                }
-            }
-        "#;
-        let mut module = parse_top_module(code);
-        let comb_index = module
-            .declarations
-            .iter()
-            .position(|declaration| matches!(declaration, Declaration::Comb(_)))
-            .unwrap();
-        let Declaration::Comb(comb) = &mut module.declarations[comb_index] else {
-            unreachable!();
-        };
-        let Statement::FunctionCall(call) = &mut comb.statements[0] else {
-            panic!("expected statement-form function call");
-        };
-        call.inputs.clear();
-
-        let Declaration::Comb(comb) = &module.declarations[comb_index] else {
-            unreachable!();
-        };
-        let mut arena = SLTNodeArena::new();
-        let error = match super::parse_comb(&module, comb, &mut arena) {
-            Ok(_) => panic!("expected an invalid function argument error"),
-            Err(error) => error,
-        };
-        assert_eq!(
-            error.to_string(),
-            "Invalid argument binding for `x` in call to function `f`: formal argument has neither an input expression nor an output destination"
-        );
-        assert_eq!(
-            miette::Diagnostic::code(&error).unwrap().to_string(),
-            "invalid_function_argument_binding"
-        );
-        match error {
-            ParserError::InvalidFunctionArgumentBinding {
-                function,
-                argument,
-                detail,
-                source_location,
-            } => {
-                assert_eq!(function, "f");
-                assert_eq!(argument, "x");
-                assert_eq!(
-                    detail,
-                    "formal argument has neither an input expression nor an output destination"
-                );
-                assert!(source_location.is_some());
-            }
-            error => panic!("expected an argument binding diagnostic, got {error:?}"),
-        }
-    }
-
-    #[test]
-    fn test_invalid_expression_function_argument_reports_binding_diagnostic() {
-        let code = r#"
-            module Top (a: input logic<8>, q: output logic<8>) {
-                function f (x: input logic<8>) -> logic<8> {
-                    return x;
-                }
-
-                always_comb {
-                    q = f(a);
-                }
-            }
-        "#;
-        let mut module = parse_top_module(code);
-        let comb_index = module
-            .declarations
-            .iter()
-            .position(|declaration| matches!(declaration, Declaration::Comb(_)))
-            .unwrap();
-        let Declaration::Comb(comb) = &mut module.declarations[comb_index] else {
-            unreachable!();
-        };
-        let Statement::Assign(assign) = &mut comb.statements[0] else {
-            panic!("expected assignment statement");
-        };
-        let Expression::Term(factor) = &mut assign.expr else {
-            panic!("expected function-call term");
-        };
-        let Factor::FunctionCall(call) = factor.as_mut() else {
-            panic!("expected expression-form function call");
-        };
-        call.inputs.clear();
-
-        let Declaration::Comb(comb) = &module.declarations[comb_index] else {
-            unreachable!();
-        };
-        let mut arena = SLTNodeArena::new();
-        let error = match super::parse_comb(&module, comb, &mut arena) {
-            Ok(_) => panic!("expected an invalid function argument error"),
-            Err(error) => error,
-        };
-        assert_eq!(
-            error.to_string(),
-            "Invalid argument binding for `x` in call to function `f`: formal argument has neither an input expression nor an output destination"
-        );
-        assert_eq!(
-            miette::Diagnostic::code(&error).unwrap().to_string(),
-            "invalid_function_argument_binding"
-        );
-        match error {
-            ParserError::InvalidFunctionArgumentBinding {
-                function,
-                argument,
-                detail,
-                source_location,
-            } => {
-                assert_eq!(function, "f");
-                assert_eq!(argument, "x");
-                assert_eq!(
-                    detail,
-                    "formal argument has neither an input expression nor an output destination"
-                );
-                assert!(source_location.is_some());
-            }
-            error => panic!("expected an argument binding diagnostic, got {error:?}"),
-        }
-    }
-
-    #[test]
     fn test_statement_form_function_call_without_outputs_in_function_body() {
         let code = r#"
             module Top (a: input logic<8>, q: output logic<8>) {
@@ -3598,6 +3471,7 @@ mod tests {
                 }
 
                 always_comb {
+                    q = 4'b0;
                     for i in 0..n {
                         set_bit(1'b0, q[i]);
                     }

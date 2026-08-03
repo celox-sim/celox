@@ -65,6 +65,7 @@ fn run() -> Result<(), VerylHeliodorError> {
     let paths = metadata.paths(&options.source_files, false, true)?;
     let sources = paths
         .into_iter()
+        .filter(|path| !options.source_files.is_empty() || !path.example)
         .map(|path| {
             let input = fs::read_to_string(&path.src)?;
             Ok::<_, std::io::Error>((path, input))
@@ -92,15 +93,10 @@ fn run() -> Result<(), VerylHeliodorError> {
 
     let mut context = Context::default();
     let mut analyzer_ir = air::Ir::default();
-    for (path, parser, analyzer) in &contexts {
+    for (_path, parser, analyzer) in &contexts {
         ensure_no_errors(
             "analyze_pass2",
-            analyzer.analyze_pass2(
-                &path.prj,
-                &parser.veryl,
-                &mut context,
-                Some(&mut analyzer_ir),
-            ),
+            analyzer.analyze_pass2(&parser.veryl, &mut context, Some(&mut analyzer_ir)),
         )?;
     }
     ensure_no_errors(

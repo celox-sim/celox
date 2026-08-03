@@ -1,4 +1,6 @@
-use celox::{DeadStorePolicy, ResetType, Simulator, TestResult};
+use celox::{DeadStorePolicy, ResetType, Simulator, SimulatorErrorKind, TestResult};
+use veryl_analyzer::{AnalyzerError, analyzer_error::InvalidForRangeKind};
+use veryl_metadata::Metadata;
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]
@@ -38,6 +40,27 @@ fn bench_native_tb_std_counter() -> String {
 // ── Basic ──────────────────────────────────────────────────────────────
 
 #[test]
+fn test_native_testbench_uses_metadata_project_name() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                $finish();
+            }
+        }
+    "#;
+    let metadata = Metadata::create_default("heliodor").unwrap();
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
 fn test_counter_pass() {
     let code = format!(
         r#"
@@ -49,7 +72,7 @@ fn test_counter_pass() {
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next  (10);
                 $assert   (cnt == 32'd10);
                 $finish   ();
@@ -75,7 +98,7 @@ fn test_counter_fail() {
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next  (5);
                 $assert   (cnt == 32'd99);
                 $finish   ();
@@ -138,7 +161,7 @@ fn test_wide_128bit() {
             var cnt: logic<128>;
             inst dut: W (clk, rst, cnt);
             initial {
-                rst.assert(clk);
+                rst.assert();
                 clk.next  (5);
                 $assert   (cnt == 128'd5);
                 $finish   ();
@@ -166,7 +189,7 @@ fn test_reset_async_high() {
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next  (7);
                 $assert   (cnt == 32'd7);
                 $finish   ();
@@ -197,7 +220,7 @@ fn test_reset_explicit_duration() {
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk, 5);
+                rst.assert(5);
                 clk.next  (10);
                 $assert   (cnt == 32'd10);
                 $finish   ();
@@ -225,7 +248,7 @@ fn test_for_loop_basic() {
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 $assert(cnt == 32'd10);
                 for _i in 0..5 {{
@@ -255,7 +278,7 @@ fn test_for_loop_step() {
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 $assert(cnt == 32'd10);
                 for _i in 0..10 step += 2 {{
@@ -290,7 +313,7 @@ fn test_for_loop_bitwise_steps() {
             var xor_wide_last: signed logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 or_end = 7;
                 xor_end = 5;
                 for i in 3..=or_end step |= 6 {{
@@ -424,7 +447,7 @@ fn test_for_loop_rev() {
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 $assert(cnt == 32'd10);
                 for _i in rev 0..5 {{
@@ -454,7 +477,7 @@ fn test_for_loop_break_exits_testbench_loop() {
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 for i in 0..10 {{
                     if i == 3 {{
                         break;
@@ -486,7 +509,7 @@ fn test_for_loop_expression_bound_forward() {
             var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 limit = cnt >> 1;
                 for _i in 0..limit {{
@@ -516,7 +539,7 @@ fn test_for_loop_expression_bound_reverse() {
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 for _i in rev 0..(cnt >> 1) {{
                     clk.next();
@@ -546,7 +569,7 @@ fn test_for_loop_expression_bound_inclusive() {
             var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(3);
                 limit = cnt + 32'd2;
                 for _i in 0..=limit {{
@@ -577,7 +600,7 @@ fn test_for_loop_expression_bound_stepped() {
             var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 limit = cnt >> 1;
                 for _i in 1..limit step *= 2 {{
@@ -608,7 +631,7 @@ fn test_for_loop_expression_bound_stepped_non_progress_fails() {
             var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 limit = cnt;
                 for _i in (limit - limit)..limit step *= 2 {{
@@ -639,7 +662,7 @@ fn test_for_loop_expression_bound_arith_shift_step() {
             var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 limit = cnt >> 1;
                 for _i in 1..limit step <<<= 1 {{
@@ -670,7 +693,7 @@ fn test_for_loop_expression_bound_large_arith_shift_reports_non_progress() {
             var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 limit = cnt;
                 for _i in 1..limit step <<<= 100 {{
@@ -717,7 +740,6 @@ fn test_for_loop_i32_mul_and_shl_overflow_fail() {
 #[test]
 fn test_for_loop_static_bounds_use_signed_i32_progress() {
     for (start, end, step) in [
-        ("2147483647", "2147483648", "+= 1"),
         ("1500000000", "1600000000", "*= 2"),
         ("1073741824", "1500000000", "<<= 1"),
         ("1", "100", "|= 2147483648"),
@@ -739,6 +761,30 @@ fn test_for_loop_static_bounds_use_signed_i32_progress() {
         };
         assert!(message.contains("non-progressing stepped for loop"));
     }
+}
+
+#[test]
+fn test_for_loop_static_signed_i32_upper_bound_is_rejected() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial {
+                for _i in 2147483647..2147483648 step += 1 {}
+                $finish();
+            }
+        }
+    "#;
+    let error = Simulator::builder(code, "t").run_test().unwrap_err();
+    let SimulatorErrorKind::Analyzer(errors) = error.kind() else {
+        panic!("expected analyzer error, got {error:?}");
+    };
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        AnalyzerError::InvalidForRange {
+            kind: InvalidForRangeKind::NegativeBound,
+            ..
+        }
+    )));
 }
 
 #[test]
@@ -868,7 +914,7 @@ fn test_for_loop_expression_bound_non_progress_reports_failure() {
             var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 limit = cnt;
                 for _i in (limit - limit)..limit step *= 2 {{
@@ -898,7 +944,7 @@ fn test_for_loop_expression_bound_terminal_inclusive_mul_reports_non_progress() 
             var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 limit = cnt;
                 for _i in (limit - limit)..=(limit - limit) step *= 2 {{
@@ -929,7 +975,7 @@ fn test_for_loop_expression_bound_reverse_zero_step_singleton_succeeds() {
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 for _i in rev 4..=4 step += 0 {{
                     clk.next();
@@ -959,7 +1005,7 @@ fn test_for_loop_dynamic_wide_bound_overflow_reports_failure() {
             var bound: logic<128>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 bound = 128'd1;
                 for _i in 0..(bound << 64) {{
@@ -1170,7 +1216,7 @@ fn test_for_loop_dynamic_inclusive_unrepresentable_max_bound_reports_non_progres
             var bound: logic<64>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 bound = 64'hffff_ffff_ffff_ffff;
                 for _i in bound..=bound {{
@@ -1201,7 +1247,7 @@ fn test_for_loop_dynamic_wide_singleton_bound_runs_once() {
             var bound: logic<128>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 bound = (128'd1 << 100);
                 for _i in bound..=bound {{
@@ -1247,7 +1293,7 @@ fn test_function_call() {
             }
 
             initial {
-                rst.assert(clk);
+                rst.assert();
                 step_n(5);
                 step_n(5);
                 $assert(cnt == 32'd10);
@@ -1292,7 +1338,7 @@ fn test_function_return_value_in_assert() {
             }
 
             initial {
-                rst.assert(clk);
+                rst.assert();
                 clk.next(1);
                 $assert(val == 8'd42);
                 $assert(double(val) == 8'd84);
@@ -1345,8 +1391,8 @@ fn test_dual_clock() {
             );
 
             initial {
-                rst_a.assert(clk_a);
-                rst_b.assert(clk_b);
+                rst_a.assert();
+                rst_b.assert();
                 clk_a.next  (10);
                 $assert     (cnt_a == 32'd10);
                 $assert     (cnt_b == 32'd0);
@@ -1377,7 +1423,7 @@ fn test_no_finish_is_pass() {
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(3);
                 $assert(cnt == 32'd3);
             }}
@@ -1415,7 +1461,7 @@ fn test_dynamic_array_index_in_for() {
             var arr: logic<8>[4];
             inst dut: ArrayFill (clk, rst, arr);
             initial {
-                rst.assert(clk);
+                rst.assert();
                 clk.next(1);
                 // arr[0]=10, arr[1]=11, arr[2]=12, arr[3]=13
                 for i in 0..4 {
@@ -1451,7 +1497,7 @@ fn test_multiple_assertions() {
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 $assert(cnt == 32'd0);
                 clk.next(1);
                 $assert(cnt == 32'd1);
@@ -1482,7 +1528,7 @@ fn test_assert_continue_records_failure_and_continues() {
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 $assert_continue(cnt == 32'd99, "first failure: cnt=%d", cnt);
                 clk.next(1);
                 $assert(cnt == 32'd1, "second assertion");
@@ -1534,7 +1580,7 @@ fn test_run_test_preserves_runtime_error_after_assert_continue_failures() {
             var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 $assert_continue(1'b0, "first");
                 clk.next(2);
                 limit = cnt;
@@ -1962,7 +2008,7 @@ fn test_unpacked_array_index() {
             var cnt: logic<8>[4];
             inst dut: ArrayCounter (clk, rst, cnt);
             initial {
-                rst.assert(clk);
+                rst.assert();
                 clk.next(1);
                 $assert(cnt[0] == 8'd1);
                 $assert(cnt[1] == 8'd2);
@@ -1999,7 +2045,7 @@ fn test_bit_select() {
             var val: logic<16>;
             inst dut: BitSel (clk, rst, val);
             initial {
-                rst.assert(clk);
+                rst.assert();
                 clk.next(1);
                 $assert(val == 16'hABCD);
                 $assert(val[7:0] == 8'hCD);
@@ -2039,7 +2085,7 @@ fn test_concatenation() {
             var lo: logic<8>;
             inst dut: ConcatDut (clk, rst, hi, lo);
             initial {
-                rst.assert(clk);
+                rst.assert();
                 clk.next(1);
                 $assert({hi, lo} == 16'hABCD);
                 $finish();
@@ -2073,7 +2119,7 @@ fn test_repeat_concatenation() {
             var val: logic<4>;
             inst dut: RepDut (clk, rst, val);
             initial {
-                rst.assert(clk);
+                rst.assert();
                 clk.next(1);
                 $assert({val repeat 2} == 8'b1010_1010);
                 $finish();
@@ -2100,7 +2146,7 @@ fn test_comparison_operators() {
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(5);
                 $assert(cnt == 32'd5);
                 $assert(cnt != 32'd0);
@@ -2131,7 +2177,7 @@ fn test_arithmetic_in_assert() {
             var cnt: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
-                rst.assert(clk);
+                rst.assert();
                 clk.next(10);
                 $assert(cnt + 32'd5 == 32'd15);
                 $assert(cnt - 32'd3 == 32'd7);

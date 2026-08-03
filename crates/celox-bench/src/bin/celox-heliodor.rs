@@ -716,6 +716,7 @@ fn load_sources(
         metadata
             .paths::<&str>(&[], false, false)?
             .into_iter()
+            .filter(|path| !path.example)
             .map(|path| path.src)
             .collect()
     } else {

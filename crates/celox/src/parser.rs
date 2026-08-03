@@ -397,7 +397,7 @@ pub fn parse(
     let (sir, mut runtime, testbench_source) = RuntimeProgram::from_scheduled(scheduled);
     crate::testbench_compile::project_observability(&mut runtime, &testbench_source);
     runtime.testbench =
-        crate::testbench_compile::compile_semantic_testbench(&runtime, &testbench_source);
+        crate::testbench_compile::compile_semantic_testbench(&runtime, &testbench_source)?;
     dump_addr_map_if_requested(&runtime, diagnostics);
     let mut program = UnoptimizedSir::new(sir, runtime);
     if let Some(t) = trace.as_deref_mut()

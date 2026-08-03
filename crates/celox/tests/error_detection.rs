@@ -614,6 +614,114 @@ fn test_sv_module_instance_returns_unsupported_parser_error() {
 }
 
 #[test]
+fn test_testbench_helper_hierarchical_read_returns_error_without_panicking() {
+    let code = r#"
+        module Dut () {
+            var q: logic;
+            assign q = 1'b1;
+        }
+
+        #[test(t)]
+        module t {
+            inst dut: Dut ();
+
+            function read_q() -> logic {
+                return dut.q;
+            }
+
+            initial {
+                $assert(read_q());
+                $finish();
+            }
+        }
+    "#;
+
+    let outcome = std::panic::catch_unwind(|| Simulator::builder(code, "t").build());
+    let result = outcome.expect("helper-body hierarchical read must not panic");
+    match result.as_ref().map_err(|error| error.kind()) {
+        Err(SimulatorErrorKind::Analyzer(errors)) => assert!(
+            errors.iter().any(|error| matches!(
+                error,
+                veryl_analyzer::AnalyzerError::InvisibleIndentifier { .. }
+            )),
+            "expected Veryl InvisibleIndentifier for helper's hierarchical read, got {errors:?}"
+        ),
+        Err(SimulatorErrorKind::SIRParser(ParserError::Unsupported {
+            issue,
+            phase: LoweringPhase::SimulatorParser,
+            feature,
+            ..
+        })) => {
+            assert_eq!(*issue, 467);
+            assert_eq!(*feature, "hierarchical variable reference");
+        }
+        Err(kind) => panic!(
+            "expected InvisibleIndentifier or Unsupported(SimulatorParser) for helper's hierarchical read, got {kind:?}"
+        ),
+        Ok(_) => panic!(
+            "expected InvisibleIndentifier or Unsupported(SimulatorParser) for helper's hierarchical read, got Ok"
+        ),
+    }
+}
+
+#[test]
+fn test_dynamic_reset_duration_returns_unsupported_parser_error() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var duration: logic<32>;
+
+            initial {
+                duration = 5;
+                rst.assert(duration);
+                $finish();
+            }
+        }
+    "#;
+
+    let result = Simulator::builder(code, "t").build();
+    match result.as_ref().map_err(|error| error.kind()) {
+        Err(SimulatorErrorKind::SIRParser(ParserError::Unsupported {
+            issue,
+            phase: LoweringPhase::SimulatorParser,
+            feature,
+            ..
+        })) => {
+            assert_eq!(*issue, 473);
+            assert_eq!(*feature, "dynamic reset duration");
+        }
+        Err(kind) => {
+            panic!("expected Unsupported(SimulatorParser) for dynamic reset duration, got {kind:?}")
+        }
+        Ok(_) => {
+            panic!("expected Unsupported(SimulatorParser) for dynamic reset duration, got Ok")
+        }
+    }
+}
+
+#[test]
+fn test_reset_compile_time_expression_duration_is_accepted() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+
+            initial {
+                rst.assert(1 + 2);
+                $finish();
+            }
+        }
+    "#;
+
+    Simulator::builder(code, "t")
+        .build()
+        .expect("compile-time reset duration expression should be accepted");
+}
+
+#[test]
 fn test_top_not_found_returns_error() {
     let code = r#"
         module Foo (a: input logic, b: output logic) {
@@ -976,7 +1084,7 @@ fn test_ff_array_literal_non_constant_repeat_is_illegal_context() {
 }
 
 #[test]
-fn test_ff_function_argument_array_literal_non_constant_repeat_is_rejected_by_shape_validation() {
+fn test_ff_function_argument_array_literal_non_constant_repeat_is_rejected_by_analyzer() {
     let code = r#"
         module Top (
             clk: input clock,
@@ -996,16 +1104,18 @@ fn test_ff_function_argument_array_literal_non_constant_repeat_is_rejected_by_sh
         .build()
         .expect_err("non-constant repeat must be rejected");
     match err.kind() {
-        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
-            assert_eq!(*issue, 43);
-            assert_eq!(*feature, "function call argument shape");
-        }
-        other => panic!("expected function argument shape error, got: {other:?}"),
+        SimulatorErrorKind::Analyzer(errors) => assert!(
+            errors
+                .iter()
+                .any(|error| matches!(error, veryl_analyzer::AnalyzerError::InvalidOperand { .. })),
+            "expected analyzer InvalidOperand for non-constant repeat, got: {errors:?}"
+        ),
+        other => panic!("expected analyzer InvalidOperand for non-constant repeat, got: {other:?}"),
     }
 }
 
 #[test]
-fn test_ff_function_argument_array_literal_multiple_default_is_rejected_by_shape_validation() {
+fn test_ff_function_argument_array_literal_multiple_default_is_rejected_by_analyzer() {
     let code = r#"
         module Top (
             clk: input clock,
@@ -1024,11 +1134,14 @@ fn test_ff_function_argument_array_literal_multiple_default_is_rejected_by_shape
         .build()
         .expect_err("multiple defaults must be rejected");
     match err.kind() {
-        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
-            assert_eq!(*issue, 43);
-            assert_eq!(*feature, "function call argument shape");
-        }
-        other => panic!("expected function argument shape error, got: {other:?}"),
+        SimulatorErrorKind::Analyzer(errors) => assert!(
+            errors.iter().any(|error| matches!(
+                error,
+                veryl_analyzer::AnalyzerError::MultipleDefault { .. }
+            )),
+            "expected analyzer MultipleDefault for array literal, got: {errors:?}"
+        ),
+        other => panic!("expected analyzer MultipleDefault for array literal, got: {other:?}"),
     }
 }
 

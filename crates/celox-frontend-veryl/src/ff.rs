@@ -183,7 +183,7 @@ mod signed_div_rem_tests {
         assert!(Analyzer::analyze_post_pass1().is_empty());
         assert!(
             analyzer
-                .analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut ir))
+                .analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir))
                 .is_empty()
         );
         assert!(Analyzer::analyze_post_pass2(&ir).is_empty());

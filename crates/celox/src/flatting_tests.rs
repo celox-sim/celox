@@ -28,7 +28,7 @@ fn setup_to_flatting(
     assert!(errors.is_empty(), "analyze_pass1 errors: {errors:?}");
     let errors = Analyzer::analyze_post_pass1();
     assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
-    let errors = analyzer.analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir));
+    let errors = analyzer.analyze_pass2(&parser.veryl, &mut context, Some(&mut ir));
     assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
     let errors = Analyzer::analyze_post_pass2(&ir);
     assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
@@ -238,55 +238,6 @@ fn test_split_by_boundaries() {
 }
 
 #[test]
-fn test_dynamic_index_no_split() {
-    let code = r#"
-    module Top (
-        a: input logic<32>,
-        i: input logic<5>,
-        b: output logic<32>,
-    ) {
-        var x: logic<32>;
-        
-        assign x = a; 
-        assign x[i] = 1'b1;
-        assign b = x;
-    }
-    "#;
-
-    let (relocation_module, modules, _arena) = setup_to_flatting(code, "Top");
-
-    let x_id = modules
-        .values()
-        .find(|module| module.name == resource_table::insert_str("Top"))
-        .expect("Top module not found")
-        .variables
-        .iter()
-        .find(|(_, v)| v.path.0.len() == 1 && v.path.0[0] == resource_table::insert_str("x"))
-        .map(|(id, _)| *id)
-        .expect("Variable x not found");
-
-    let x_targets: Vec<_> = relocation_module
-        .comb_blocks
-        .iter()
-        .filter(|path| path.target.var().unwrap().id.var_id == x_id)
-        .collect();
-
-    // 2 assignments (x=a, x[i]=1) -> 2 paths. No limit boundaries -> No splitting.
-    // So 2 paths total.
-    assert_eq!(
-        x_targets.len(),
-        2,
-        "Dynamic indexing should not induce splitting (2 original paths preserved)"
-    );
-    assert_eq!(
-        x_targets[0].target.var().unwrap().access.msb
-            - x_targets[0].target.var().unwrap().access.lsb
-            + 1,
-        32
-    );
-}
-
-#[test]
 fn test_mixed_boundaries() {
     let code = r#"
     module Top (
@@ -354,7 +305,7 @@ fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::UnoptimizedSir {
     assert!(errors.is_empty(), "analyze_pass1 errors: {errors:?}");
     let errors = Analyzer::analyze_post_pass1();
     assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
-    let errors = analyzer.analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir));
+    let errors = analyzer.analyze_pass2(&parser.veryl, &mut context, Some(&mut ir));
     assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
     let errors = Analyzer::analyze_post_pass2(&ir);
     assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");

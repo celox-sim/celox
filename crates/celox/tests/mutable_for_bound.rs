@@ -335,7 +335,7 @@ module t {
     inst dut: Counter (clk, rst, count);
 
     initial {
-        rst.assert(clk);
+        rst.assert();
         clk.next(2);
         for _i in 0..count {
             clk.next();
@@ -371,7 +371,7 @@ module t {
 
     initial {
         limit = 2;
-        rst.assert(clk);
+        rst.assert();
         for _i in 0..limit {
             clk.next();
         }
@@ -410,7 +410,7 @@ module t {
     inst dut: Counter (clk, rst, count);
 
     initial {
-        rst.assert(clk);
+        rst.assert();
         for _i in 0..count[7:4] {
             clk.next();
         }
@@ -518,7 +518,7 @@ module t {
 
     initial {
         for _i in 0..count {
-            rst.assert(reset_clk);
+            rst.assert();
         }
         $finish();
     }

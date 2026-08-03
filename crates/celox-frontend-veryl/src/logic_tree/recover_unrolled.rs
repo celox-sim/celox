@@ -16,7 +16,7 @@ use super::{
     range_store_error,
 };
 use crate::loop_provenance::{LoopRecoveryCandidate, UnrolledLoopCandidate};
-use crate::{HashMap, HashSet, ParserError, resolve_total_width};
+use crate::{HashMap, HashSet, ParserError, function_call_arg, resolve_total_width};
 use celox_design::{BinaryOp, BitAccess, UnaryOp, VarAtomBase};
 use celox_slt::RangeStore;
 
@@ -272,6 +272,7 @@ fn collect_expression_variables(expression: &Expression, out: &mut Vec<VarId>) -
                 out.push(*variable);
                 collect_index_variables(index, out) && collect_select_variables(select, out)
             }
+            Factor::HierVariable(_) => false,
             Factor::Value(_) => true,
             Factor::FunctionCall(call) if call.outputs.is_empty() => call
                 .inputs
@@ -1246,6 +1247,7 @@ fn parameterize_factor(
                     | parameterize_select(module, template_select, &selects, candidate)?,
             )
         }
+        Factor::HierVariable(_) => None,
         Factor::Value(template_comptime) => {
             let values = variants
                 .iter()
@@ -1295,10 +1297,10 @@ fn parameterize_factor(
                 })
                 .collect::<Option<Vec<_>>>()?;
             let mut depends = false;
-            for (path, template_input) in &mut template_call.inputs {
+            for (path, template_input) in template_call.inputs.iter_mut() {
                 let inputs = calls
                     .iter()
-                    .map(|call| call.inputs.get(path))
+                    .map(|call| function_call_arg(&call.inputs, path))
                     .collect::<Option<Vec<_>>>()?;
                 depends |= parameterize_expression(module, template_input, &inputs, candidate)?;
             }
@@ -3471,6 +3473,7 @@ fn rewrite_expression(
                 }
                 self_depends || index_depends || select_depends
             }
+            Factor::HierVariable(_) => return None,
             Factor::Value(_) => false,
             Factor::FunctionCall(call) if call.outputs.is_empty() => {
                 let mut depends = false;
@@ -3711,8 +3714,7 @@ mod tests {
 
         let mut context = Context::default();
         let mut ir = Ir::default();
-        let pass2_errors =
-            analyzer.analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut ir));
+        let pass2_errors = analyzer.analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir));
         assert!(pass2_errors.is_empty(), "pass2 errors: {pass2_errors:?}");
         assert!(
             Analyzer::analyze_post_pass2(&ir).is_empty(),

@@ -8,7 +8,7 @@ use crate::{
         celox_value_from_comptime, celox_value_from_comptime_in_context, eval_var_select,
         get_access_width, is_static_access,
     },
-    resolve_total_width,
+    function_call_arg, resolve_total_width,
 };
 use celox_design::{
     BinaryOp, BitAccess, SPARSE_WORKING_REGION, STABLE_REGION, UnaryOp, VarAtomBase, WORKING_REGION,
@@ -58,6 +58,7 @@ fn expression_has_side_effect(expr: &Expression) -> bool {
                 | SystemFunctionKind::Assert { .. }
                 | SystemFunctionKind::Finish => true,
             },
+            Factor::HierVariable(_) => false,
             Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
         },
         Expression::Binary(lhs, _, rhs, _) => {
@@ -984,7 +985,7 @@ impl<'a> FfParser<'a> {
                 function.get_function(&[])?
             };
             let mut usage = FunctionInputUsage::default();
-            for arg_path in call.outputs.keys() {
+            for (arg_path, _) in &call.outputs {
                 let arg_id = *function_body.arg_map.get(arg_path)?;
                 let expr = self
                     .extract_function_target_expr(&function_body, arg_id, &HashMap::default())
@@ -1051,7 +1052,9 @@ impl<'a> FfParser<'a> {
                             nested_usage.runtime_reads.contains(arg_id)
                                 || nested_usage.array_views.contains(arg_id)
                         };
-                        if needs_actual && let Some(expr) = call.inputs.get(arg_path) {
+                        if needs_actual
+                            && let Some(expr) = function_call_arg(&call.inputs, arg_path)
+                        {
                             self.collect_function_input_usage(expr, usage, active_calls)?;
                         }
                     }
@@ -1081,6 +1084,7 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Assert { .. }
                     | SystemFunctionKind::Finish => {}
                 },
+                Factor::HierVariable(_) => return None,
                 Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
             },
             Expression::Binary(lhs, _, rhs, _) => {
@@ -1198,7 +1202,9 @@ impl<'a> FfParser<'a> {
                                 input_usage.runtime_reads.contains(arg_id)
                                     || input_usage.array_views.contains(arg_id)
                             };
-                            if needs_actual && let Some(expr) = call.inputs.get(arg_path) {
+                            if needs_actual
+                                && let Some(expr) = function_call_arg(&call.inputs, arg_path)
+                            {
                                 collect(expr, candidates, candidate_indices);
                             }
                         }
@@ -1237,6 +1243,7 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Assert { .. }
                     | SystemFunctionKind::Finish => {}
                 },
+                Factor::HierVariable(_) => {}
                 Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
             },
             Expression::Binary(lhs, _, rhs, _) => {
@@ -3585,6 +3592,15 @@ impl<'a> FfParser<'a> {
                     )?;
                 }
             }
+            Factor::HierVariable(reference) => {
+                return Err(ParserError::unsupported(
+                    467,
+                    LoweringPhase::FfLowering,
+                    "hierarchical variable reference",
+                    format!("{}", reference.var_path),
+                    Some(&reference.comptime.token),
+                ));
+            }
             Factor::Value(comptime) => {
                 let (celox_value, mask_xz, width, _) =
                     celox_value_from_comptime_in_context(comptime, context_width)
@@ -3603,8 +3619,14 @@ impl<'a> FfParser<'a> {
             Factor::FunctionCall(call) => {
                 self.parse_function_call_expr(call, targets, domain, convert, sources, ir_builder)?;
             }
-            Factor::Anonymous(_) | Factor::Unknown(_) => {
-                unreachable!("Expression factors must be resolved before FF lowering")
+            Factor::Anonymous(comptime) | Factor::Unknown(comptime) => {
+                return Err(ParserError::unsupported(
+                    67,
+                    LoweringPhase::FfLowering,
+                    "unresolved factor in FF expression",
+                    format!("{factor:?}"),
+                    Some(&comptime.token),
+                ));
             }
         }
 
@@ -4512,7 +4534,7 @@ module Top (
         assert!(Analyzer::analyze_post_pass1().is_empty());
         assert!(
             analyzer
-                .analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut ir))
+                .analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir))
                 .is_empty()
         );
         assert!(Analyzer::analyze_post_pass2(&ir).is_empty());

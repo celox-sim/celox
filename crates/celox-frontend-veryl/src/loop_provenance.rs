@@ -307,8 +307,7 @@ mod tests {
 
         let mut context = Context::default();
         let mut ir = Ir::default();
-        let pass2_errors =
-            analyzer.analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut ir));
+        let pass2_errors = analyzer.analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir));
         assert!(pass2_errors.is_empty(), "pass2 errors: {pass2_errors:?}");
         let post2_errors = Analyzer::analyze_post_pass2(&ir);
         assert!(

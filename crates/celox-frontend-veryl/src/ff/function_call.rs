@@ -3,6 +3,7 @@ use crate::{
     HashMap, HashSet, LoweringPhase, ParserError,
     bitaccess::{build_partial_assign_expr, is_static_access},
     case::case_arm_condition_expr,
+    function_call_arg,
 };
 use celox_design::VarAtomBase;
 use celox_sir::SIRBuilder;
@@ -79,6 +80,11 @@ impl<'a> FfParser<'a> {
 
     fn expr_shape_matches_formal(expr: &Expression, formal_shape: &[usize]) -> bool {
         match expr {
+            Expression::Term(factor)
+                if matches!(factor.as_ref(), Factor::Anonymous(_) | Factor::Unknown(_)) =>
+            {
+                false
+            }
             Expression::ArrayLiteral(items, _) => {
                 let Some((&formal_len, formal_tail)) = formal_shape.split_first() else {
                     return false;
@@ -152,7 +158,7 @@ impl<'a> FfParser<'a> {
         function_body: &veryl_analyzer::ir::FunctionBody,
     ) -> Result<(), ParserError> {
         for (arg_path, arg_id) in &function_body.arg_map {
-            let Some(arg_expr) = call.inputs.get(arg_path) else {
+            let Some(arg_expr) = function_call_arg(&call.inputs, arg_path) else {
                 continue;
             };
             let formal = &self.module.variables[arg_id];
@@ -205,7 +211,7 @@ impl<'a> FfParser<'a> {
 
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
-            if let Some(arg_expr) = call.inputs.get(arg_path) {
+            if let Some(arg_expr) = function_call_arg(&call.inputs, arg_path) {
                 bindings.insert(*arg_id, Self::substitute_function_expr(arg_expr, state));
             }
         }
@@ -811,7 +817,7 @@ impl<'a> FfParser<'a> {
 
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
-            if let Some(arg_expr) = call.inputs.get(arg_path) {
+            if let Some(arg_expr) = function_call_arg(&call.inputs, arg_path) {
                 bindings.insert(*arg_id, arg_expr.clone());
             }
         }
@@ -920,7 +926,7 @@ impl<'a> FfParser<'a> {
 
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
-            if let Some(arg_expr) = call.inputs.get(arg_path) {
+            if let Some(arg_expr) = function_call_arg(&call.inputs, arg_path) {
                 bindings.insert(*arg_id, arg_expr.clone());
             }
         }
