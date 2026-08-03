@@ -28,6 +28,18 @@ fn rejects_cross_lhs_read_before_write_in_always_comb() {
 }
 
 #[test]
+fn rejects_inline_enum_ports_instead_of_scalarizing_them() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input enum { A, B, C } state, output logic y);
+            assign y = (state == C);
+        endmodule
+        "#,
+    );
+    assert!(error.contains("enum port"), "unexpected error: {error}");
+}
+
+#[test]
 fn evaluates_sized_arithmetic_and_logical_right_shift_parameters() {
     let source = r#"
         module Top(output logic wraps, output logic logical_shift);
@@ -1119,13 +1131,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(input logic [10000:0] a, output logic [10000:0] y);
                 for (genvar i = 0; i < 10001; i++) assign y[i] = a[i];
             endmodule
-        "#,
-        ),
-        (
-            "open input port connection",
-            r#"
-            module Child(input wire a, output logic y); assign y = (a === 1'bz); endmodule
-            module Top(output logic y); Child child(.a(), .y(y)); endmodule
         "#,
         ),
         (

@@ -1322,4 +1322,29 @@ sv_backends! {
     sim.modify(|io| io.set(value, 0b0100u8)).unwrap();
     assert_eq!(sim.get(sim.signal("y")), 0u8.into());
     }
+
+    fn preserves_function_locals_assigned_by_conditionals(sim) {
+        @setup {
+    let sv = r#"
+        module Top(input logic select, output logic y);
+            function automatic logic choose(input logic condition);
+                logic value;
+                value = 1'b0;
+                if (condition) value = 1'b1;
+                else value = 1'b0;
+                return value;
+            endfunction
+            assign y = choose(select);
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("function_local_if.sv"))], "Top");
+
+    let select = sim.signal("select");
+    sim.modify(|io| io.set(select, 1u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+
+    sim.modify(|io| io.set(select, 0u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0u8.into());
+    }
 }

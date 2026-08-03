@@ -1,6 +1,24 @@
 use super::*;
 
 sv_backends! {
+    fn drives_omitted_and_open_child_inputs_with_z(sim) {
+        @setup {
+    let sv = r#"
+        module Child(input logic a, output logic y); assign y = (a === 1'bz); endmodule
+        module Top(output logic omitted, output logic open);
+            Child omitted_child(.y(omitted));
+            Child open_child(.a(), .y(open));
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("open_input.sv"))], "Top")
+            .four_state(true);
+
+    sim.modify(|_| {}).unwrap();
+    assert_eq!(sim.get(sim.signal("omitted")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("open")), 1u8.into());
+    }
+
     fn treats_child_outputs_as_explicit_net_drivers(sim) {
         @setup {
     let sv = r#"

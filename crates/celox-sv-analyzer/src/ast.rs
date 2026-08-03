@@ -251,6 +251,20 @@ fn reject_silently_ignored_constructs(
     }
     for child in node {
         match child {
+            RefNode::AnsiPortDeclarationVariable(port)
+                if RefNode::AnsiPortDeclarationVariable(port)
+                    .into_iter()
+                    .any(|node| matches!(node, RefNode::DataTypeEnum(_))) =>
+            {
+                return Err(AnalyzerError::Unsupported("enum port".to_string()));
+            }
+            RefNode::AnsiPortDeclarationNet(port)
+                if RefNode::AnsiPortDeclarationNet(port)
+                    .into_iter()
+                    .any(|node| matches!(node, RefNode::DataTypeEnum(_))) =>
+            {
+                return Err(AnalyzerError::Unsupported("enum port".to_string()));
+            }
             RefNode::AlwaysConstruct(always) => {
                 if matches!(
                     always.nodes.0,
@@ -2904,7 +2918,7 @@ fn function_expr_from_statement(
 
 fn function_expr_from_conditional_statement(
     statement: &sv_parser::ConditionalStatement,
-    locals: &HashMap<String, Expr>,
+    locals: &mut HashMap<String, Expr>,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Option<Expr> {
@@ -2917,10 +2931,11 @@ fn function_expr_from_conditional_statement(
         &mut then_locals,
         syntax_tree,
         packed_dimensions,
-    )?;
+    );
     branches.push((
         procedural_truth_condition(substitute_expr_idents(if_condition, locals)),
         then_expr,
+        then_locals,
     ));
 
     for (_, _, predicate, branch) in &statement.nodes.4 {
@@ -2932,33 +2947,65 @@ fn function_expr_from_conditional_statement(
             &mut branch_locals,
             syntax_tree,
             packed_dimensions,
-        )?;
+        );
         branches.push((
             procedural_truth_condition(substitute_expr_idents(condition, locals)),
             branch_expr,
+            branch_locals,
         ));
     }
 
-    let mut else_expr = if let Some((_, branch)) = &statement.nodes.5 {
+    let (else_expr, else_locals) = if let Some((_, branch)) = &statement.nodes.5 {
         let mut branch_locals = locals.clone();
-        function_expr_from_statement_or_null_stmt(
-            branch,
-            &mut branch_locals,
-            syntax_tree,
-            packed_dimensions,
-        )?
+        (
+            function_expr_from_statement_or_null_stmt(
+                branch,
+                &mut branch_locals,
+                syntax_tree,
+                packed_dimensions,
+            ),
+            branch_locals,
+        )
     } else {
-        return None;
+        (None, locals.clone())
     };
 
-    for (condition, branch_expr) in branches.into_iter().rev() {
-        else_expr = Expr::Mux {
-            condition: Box::new(condition),
-            then_expr: Box::new(branch_expr),
-            else_expr: Box::new(else_expr),
-        };
+    if branches.iter().all(|(_, expr, _)| expr.is_some()) && else_expr.is_some() {
+        let mut result = else_expr?;
+        for (condition, branch_expr, _) in branches.into_iter().rev() {
+            result = Expr::Mux {
+                condition: Box::new(condition),
+                then_expr: Box::new(branch_expr?),
+                else_expr: Box::new(result),
+            };
+        }
+        return Some(result);
     }
-    Some(else_expr)
+
+    if branches.iter().all(|(_, expr, _)| expr.is_none()) && else_expr.is_none() {
+        let mut merged = locals.clone();
+        for name in locals.keys() {
+            let mut value = else_locals.get(name)?.clone();
+            for (condition, _, branch_locals) in branches.iter().rev() {
+                let branch_value = branch_locals.get(name)?.clone();
+                if branch_value != value {
+                    value = Expr::Mux {
+                        condition: Box::new(condition.clone()),
+                        then_expr: Box::new(branch_value),
+                        else_expr: Box::new(value),
+                    };
+                }
+            }
+            merged.insert(name.clone(), value);
+        }
+        *locals = merged;
+        return None;
+    }
+
+    Some(Expr::Call {
+        name: "$unsupported_mixed_function_conditional".to_string(),
+        args: Vec::new(),
+    })
 }
 
 fn procedural_truth_condition(condition: Expr) -> Expr {
@@ -5468,7 +5515,12 @@ fn direction_from_port_direction(direction: &sv_parser::PortDirection) -> PortDi
 
 fn type_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<Type> {
     if let Some(atom) = integer_atom_expr_type(node.clone()) {
-        let mut r#type = Type::new(TypeKind::Logic);
+        let kind = if integer_atom_is_2state(node.clone()) {
+            TypeKind::Bit
+        } else {
+            TypeKind::Logic
+        };
+        let mut r#type = Type::new(kind);
         r#type.is_signed = atom.signed;
         r#type.packed_ranges = vec![PackedRange::new(
             ConstExpr::Literal((atom.width - 1).to_string()),
@@ -5489,6 +5541,18 @@ fn type_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<Typ
     r#type.is_signed = is_signed_from_ref_node(node.clone()).unwrap_or(false);
     r#type.packed_ranges = packed_ranges_from_ref_node(node, syntax_tree);
     Some(r#type)
+}
+
+fn integer_atom_is_2state(node: RefNode<'_>) -> bool {
+    matches!(
+        unwrap_node!(node, IntegerAtomType),
+        Some(RefNode::IntegerAtomType(
+            sv_parser::IntegerAtomType::Byte(_)
+                | sv_parser::IntegerAtomType::Shortint(_)
+                | sv_parser::IntegerAtomType::Int(_)
+                | sv_parser::IntegerAtomType::Longint(_)
+        ))
+    )
 }
 
 fn type_from_net_port_header(

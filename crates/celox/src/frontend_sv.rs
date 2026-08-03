@@ -894,44 +894,49 @@ fn build_instance_glue(
         let connection = connections
             .iter()
             .find(|connection| connection.formal == formal);
-        let Some(connection) = connection else {
-            continue;
-        };
-        let actual = connection.actual.as_str();
         let width = child_var.width;
         match child_var.kind {
             VarKind::Input => {
-                let actual_expr = connection.actual_expr.as_ref().ok_or_else(|| {
-                    ParserError::unsupported(
-                        64,
-                        LoweringPhase::SimulatorParser,
-                        "systemverilog open input port connection",
-                        formal.clone(),
-                        None,
+                let (mut expr, sources, source_ids) = if let Some(actual_expr) =
+                    connection.and_then(|item| item.actual_expr.as_ref())
+                {
+                    let actual = connection.map_or("", |item| item.actual.as_str());
+                    let (expr, sources, source_ids) = lower_glue_parent_expr(
+                        actual_expr,
+                        parent_variables,
+                        parent_signal_names,
+                        parent_constants,
+                        &mut arena,
                     )
-                })?;
-                let (expr, sources, source_ids) = lower_glue_parent_expr(
-                    actual_expr,
-                    parent_variables,
-                    parent_signal_names,
-                    parent_constants,
-                    &mut arena,
-                )
-                .ok_or_else(|| {
-                    ParserError::unsupported(
-                        64,
-                        LoweringPhase::SimulatorParser,
-                        "systemverilog input port connection",
-                        format!("{formal} -> {actual}"),
-                        None,
+                    .ok_or_else(|| {
+                        ParserError::unsupported(
+                            64,
+                            LoweringPhase::SimulatorParser,
+                            "systemverilog input port connection",
+                            format!("{formal} -> {actual}"),
+                            None,
+                        )
+                    })?;
+                    let expr = coerce_node_width(
+                        &mut arena,
+                        expr,
+                        Some(width),
+                        sv_expr_is_signed(actual_expr, parent_variables, parent_signal_names),
+                    )?;
+                    (expr, sources, source_ids)
+                } else {
+                    let unknown_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+                    (
+                        arena.alloc(SLTNode::Constant(
+                            BigUint::default(),
+                            unknown_mask,
+                            width,
+                            false,
+                        ))?,
+                        HashSet::default(),
+                        Vec::new(),
                     )
-                })?;
-                let mut expr = coerce_node_width(
-                    &mut arena,
-                    expr,
-                    Some(width),
-                    sv_expr_is_signed(actual_expr, parent_variables, parent_signal_names),
-                )?;
+                };
                 if !child_var.is_4state {
                     expr = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
                 }
@@ -956,6 +961,10 @@ fn build_instance_glue(
                 ));
             }
             VarKind::Output => {
+                let Some(connection) = connection else {
+                    continue;
+                };
+                let actual = connection.actual.as_str();
                 let Some(actual_expr) = connection.actual_expr.as_ref() else {
                     continue;
                 };
