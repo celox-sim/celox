@@ -8,7 +8,10 @@ use veryl_parser::Parser;
 use veryl_parser::resource_table;
 
 use crate::parser::BuildConfig;
-use crate::{ParserError, SimulatorError, SimulatorErrorKind, ir::OptimizedSir, parser};
+use crate::{
+    CompilationWarning, FrontendDiagnostic, ParserError, SimulatorError, SimulatorErrorKind,
+    ir::OptimizedSir, parser,
+};
 
 fn analyze(
     sources: &[(&str, &Path)],
@@ -32,7 +35,11 @@ fn analyze(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
-) -> (Result<OptimizedSir, ParserError>, Vec<AnalyzerError>) {
+) -> (
+    Result<OptimizedSir, ParserError>,
+    Vec<AnalyzerError>,
+    Vec<FrontendDiagnostic>,
+) {
     symbol_table::clear();
     attribute_table::clear();
 
@@ -81,6 +88,11 @@ fn analyze(
         ));
     }
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
+    let mut frontend_diagnostics = if errors.iter().any(AnalyzerError::is_error) {
+        Vec::new()
+    } else {
+        celox_frontend_veryl::check_dynamic_for_bounds(&ir)
+    };
     let loop_provenance = loop_sources.match_unrolled(&ir);
 
     let top = veryl_parser::resource_table::insert_str(top);
@@ -104,14 +116,18 @@ fn analyze(
         optimize_options,
         diagnostics,
         preserve_element_storage_layout,
-    );
-    (sir, errors)
+    )
+    .map(|(sir, mut elaborated_diagnostics)| {
+        frontend_diagnostics.append(&mut elaborated_diagnostics);
+        sir
+    });
+    (sir, errors, frontend_diagnostics)
 }
 
 /// Compile Veryl source code to the SIR (Simulation IR) representation.
 ///
 /// This is the shared compilation pipeline used by all backends.
-/// Returns verified optimized SIR and any analyzer warnings on success.
+/// Returns verified optimized SIR and any compilation warnings on success.
 pub fn compile_to_sir(
     sources: &[(&str, &Path)],
     top: &str,
@@ -132,7 +148,7 @@ pub fn compile_to_sir(
     reset_type: Option<ResetType>,
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
-) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     compile_to_sir_with_layout_mode(
         sources,
         top,
@@ -173,8 +189,8 @@ fn compile_to_sir_with_layout_mode(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
-) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
-    let (sir, errors) = analyze(
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    let (sir, errors, frontend_diagnostics) = analyze(
         sources,
         top,
         ignored_loops,
@@ -190,10 +206,29 @@ fn compile_to_sir_with_layout_mode(
         diagnostics,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
     );
-    let (real_errors, warnings): (Vec<_>, Vec<_>) = errors.into_iter().partition(|e| e.is_error());
+    let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
+        errors.into_iter().partition(AnalyzerError::is_error);
+    let (frontend_errors, frontend_warnings): (Vec<_>, Vec<_>) = frontend_diagnostics
+        .into_iter()
+        .partition(FrontendDiagnostic::is_error);
+    let warnings = analyzer_warnings
+        .into_iter()
+        .map(CompilationWarning::Analyzer)
+        .chain(
+            frontend_warnings
+                .into_iter()
+                .map(CompilationWarning::Frontend),
+        )
+        .collect::<Vec<_>>();
     if !real_errors.is_empty() {
         return Err(
             SimulatorError::new(SimulatorErrorKind::Analyzer(real_errors)).with_warnings(warnings),
+        );
+    }
+    if !frontend_errors.is_empty() {
+        return Err(
+            SimulatorError::new(SimulatorErrorKind::Frontend(frontend_errors))
+                .with_warnings(warnings),
         );
     }
     match sir {
@@ -233,7 +268,10 @@ mod host {
         pub optimize_options: crate::optimizer::OptimizeOptions,
         /// Fine-grained Cranelift backend options.
         pub cranelift_options: crate::backend::CraneliftOptions,
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        ))]
         pub x86_options: crate::backend::X86BackendOptions,
         pub trace: crate::debug::TraceOptions,
         pub diagnostics: crate::RuntimeDiagnostics,
@@ -251,7 +289,10 @@ mod host {
                 four_state: false,
                 optimize_options: opt,
                 cranelift_options: crate::backend::CraneliftOptions::default(),
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(any(
+                    target_arch = "x86_64",
+                    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                ))]
                 x86_options: crate::backend::X86BackendOptions::default(),
                 trace: Default::default(),
                 diagnostics: Default::default(),
@@ -389,9 +430,21 @@ mod host {
             self
         }
 
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        ))]
         pub fn x86_slp(mut self, enable: bool) -> Self {
             self.options.x86_options.slp = enable;
+            self
+        }
+
+        #[cfg(not(any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        )))]
+        pub fn x86_slp(self, enable: bool) -> Self {
+            let _ = enable;
             self
         }
 
@@ -446,7 +499,10 @@ mod host {
             self.options.diagnostics = diagnostics.runtime;
             self.options.optimize_options.diagnostics = diagnostics.sir;
             self.options.cranelift_options.diagnostics = diagnostics.cranelift;
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            ))]
             {
                 self.options.x86_options.diagnostics = diagnostics.native;
                 if let Some(enabled) = diagnostics.native_tick_loop {
@@ -612,7 +668,7 @@ mod host {
         ) -> Result<
             (
                 crate::ir::LaidOutProgram,
-                Vec<veryl_analyzer::AnalyzerError>,
+                Vec<CompilationWarning>,
                 SimulatorOptions,
                 Option<std::path::PathBuf>,
             ),
@@ -663,13 +719,19 @@ mod host {
         }
 
         /// Compiles the Veryl source and constructs the simulator.
-        /// Uses the native x86-64 backend on x86-64, Cranelift elsewhere.
+        /// Uses a custom native backend on x86-64 and opt-in AArch64, Cranelift elsewhere.
         pub fn build(self) -> Result<Simulator<crate::DefaultBackend>, SimulatorError> {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            ))]
             {
                 self.build_native()
             }
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            )))]
             {
                 self.build_cranelift()
             }
@@ -721,8 +783,11 @@ mod host {
             Ok(sim)
         }
 
-        /// Compiles using the native x86-64 backend.
-        #[cfg(target_arch = "x86_64")]
+        /// Compiles using the custom native backend for this host architecture.
+        #[cfg(any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        ))]
         pub fn build_native(
             self,
         ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
@@ -796,7 +861,10 @@ mod host {
         }
 
         /// Compiles and runs a testbench using the custom native backend.
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        ))]
         pub fn run_test_native(self) -> Result<crate::testbench::TestResult, SimulatorError> {
             run_test_with_sim(self.build_native()?)
         }
@@ -822,9 +890,15 @@ mod host {
         /// while capturing compilation trace data as configured by TraceOptions.
         pub fn build_with_trace(self) -> crate::debug::CompilationTraceResult {
             let mut trace = crate::debug::CompilationTrace::default();
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            ))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            )))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
             let program_res = compile_to_sir_with_layout_mode(
                 &self.sources,
@@ -851,7 +925,10 @@ mod host {
                     run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
                 }
 
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(any(
+                    target_arch = "x86_64",
+                    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                ))]
                 let backend = if self.options.trace.mir
                     || !self.options.trace.native_profile_blocks.is_empty()
                 {
@@ -868,7 +945,10 @@ mod host {
                 } else {
                     crate::backend::native::NativeBackend::new(&laid_out, &self.options)?
                 };
-                #[cfg(not(target_arch = "x86_64"))]
+                #[cfg(not(any(
+                    target_arch = "x86_64",
+                    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                )))]
                 let backend = JitBackend::new(&laid_out, &self.options, None)?;
 
                 let mut sim =
@@ -945,9 +1025,15 @@ mod host {
         /// Compiles the Veryl source and constructs the timed simulation wrapper.
         pub fn build(mut self) -> Result<crate::Simulation, SimulatorError> {
             self.options.emit_triggers = true;
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            ))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            )))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
             let (program, warnings) = compile_to_sir_with_layout_mode(
                 &self.sources,
@@ -971,9 +1057,15 @@ mod host {
             if self.options.dead_store_policy != DeadStorePolicy::Off {
                 run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
             }
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            ))]
             let backend = crate::backend::native::NativeBackend::new(&laid_out, &self.options)?;
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(not(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            )))]
             let backend = crate::backend::JitBackend::new(&laid_out, &self.options, None)?;
 
             let mut sim =

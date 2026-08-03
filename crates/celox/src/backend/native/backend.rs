@@ -1,7 +1,7 @@
-//! NativeBackend: SimBackend implementation using the custom x86-64 backend.
+//! NativeBackend: SimBackend implementation using a custom host backend.
 //!
 //! Mirrors the structure of JitBackend but compiles through
-//! ISel → MIR → regalloc → x86-64 emit instead of Cranelift.
+//! ISel → scalar MIR → regalloc → host emission instead of Cranelift.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,7 +23,10 @@ use super::{emit, jit_mem, regalloc};
 // ────────────────────────────────────────────────────────────────
 
 /// JIT function type: `fn(state: *mut u8) -> i64`
+#[cfg(target_arch = "x86_64")]
 pub type NativeSimFunc = unsafe extern "sysv64" fn(*mut u8) -> i64;
+#[cfg(all(target_arch = "aarch64", feature = "experimental-arm64-backend"))]
+pub type NativeSimFunc = unsafe extern "C" fn(*mut u8) -> i64;
 
 /// Time spent inside generated native simulator functions.
 ///

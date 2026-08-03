@@ -132,6 +132,103 @@ mod procedural_condition_tests {
 }
 
 #[cfg(test)]
+mod function_state_coercion_tests {
+    use super::FfParser;
+    use crate::BuildConfig;
+    use veryl_analyzer::{
+        Analyzer, Context, attribute_table,
+        ir::{Component, Expression, Factor, Ir, Op, Statement, ValueVariant},
+        symbol_table,
+    };
+    use veryl_metadata::Metadata;
+    use veryl_parser::Parser;
+
+    #[test]
+    fn unpacked_array_element_assignment_uses_element_type() {
+        symbol_table::clear();
+        attribute_table::clear();
+
+        let code = r#"
+            module Top (
+                clk: input clock,
+                q: output logic
+            ) {
+                function observed () -> logic {
+                    var values: logic<8>[2];
+                    values[1] = 8'd0;
+                    values[0] = 16'h0100;
+                    $display("upper=%0d", values[1]);
+                    return 1'b0;
+                }
+
+                always_ff (clk) {
+                    q = observed();
+                }
+            }
+        "#;
+        let metadata = Metadata::create_default("prj").unwrap();
+        let parsed = Parser::parse(code, &"").unwrap();
+        let analyzer = Analyzer::new(&metadata);
+        let mut context = Context::default();
+        let mut ir = Ir::default();
+        assert!(analyzer.analyze_pass1("prj", &parsed.veryl).is_empty());
+        assert!(Analyzer::analyze_post_pass1().is_empty());
+        assert!(
+            analyzer
+                .analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut ir))
+                .is_empty()
+        );
+        assert!(Analyzer::analyze_post_pass2(&ir).is_empty());
+
+        let module = ir
+            .components
+            .into_iter()
+            .find_map(|component| match component {
+                Component::Module(module) => Some(module),
+                _ => None,
+            })
+            .unwrap();
+        let function_body = module
+            .functions
+            .values()
+            .find_map(|function| function.get_function(&[]))
+            .unwrap();
+        let assignment = function_body
+            .statements
+            .iter()
+            .find_map(|statement| match statement {
+                Statement::Assign(assign)
+                    if assign.expr.comptime().r#type.total_width() == Some(16) =>
+                {
+                    Some(assign)
+                }
+                _ => None,
+            })
+            .unwrap();
+
+        let parser = FfParser::new(&module, BuildConfig::default());
+        let coerced = parser
+            .coerce_function_state_assignment(assignment.expr.clone(), &assignment.dst[0])
+            .unwrap();
+        let Expression::Binary(_, Op::As, target, comptime) = coerced else {
+            panic!("unpacked array element assignment must insert an explicit cast");
+        };
+        assert_eq!(comptime.r#type.total_width(), Some(8));
+        let Expression::Term(target) = target.as_ref() else {
+            panic!("assignment cast must have a term target");
+        };
+        let Factor::Value(target) = target.as_ref() else {
+            panic!("assignment cast must have a type target");
+        };
+        let ValueVariant::Type(target) = &target.value else {
+            panic!("assignment cast target must be a type");
+        };
+        assert_eq!(target.total_width(), Some(8));
+        assert!(target.array.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod signed_div_rem_tests {
     use super::FfParser;
     use crate::BuildConfig;
@@ -256,6 +353,32 @@ pub struct FfGroupParseResult<A = RegionedVarAddr> {
     pub dynamic_write_vars: HashSet<VarId>,
 }
 
+#[derive(Clone)]
+struct FunctionArrayView {
+    backing_var_id: VarId,
+    // Registers preserve this invocation's values if a nested invocation
+    // temporarily reuses the same formal working region.
+    elements: Vec<RegisterId>,
+    // Aliased forwarding views do not write their backing and therefore do
+    // not require the caller's snapshot to be restored.
+    owns_backing: bool,
+    // Lazily evaluated literal items are keyed by their structural path in
+    // the bound array literal so the cache survives cloned bindings.
+    cached_literal_items: HashMap<Vec<usize>, FunctionArrayLiteralItemCache>,
+    // Branch-local lazy initialization is represented explicitly at control
+    // flow joins. `None` means every path reaching the current block has a
+    // valid backing view; `Some` guards the carried element snapshot.
+    initialized: Option<RegisterId>,
+}
+
+#[derive(Clone)]
+struct FunctionArrayLiteralItemCache {
+    elements: Vec<RegisterId>,
+    // `None` means the item is available on every path reaching the current
+    // block. `Some` guards a cache populated on only some predecessors.
+    initialized: Option<RegisterId>,
+}
+
 impl<A> Default for FfGroupParseResult<A> {
     fn default() -> Self {
         Self {
@@ -281,6 +404,10 @@ pub struct FfParser<'a> {
     function_arg_value_stack: Vec<HashMap<VarId, RegisterId>>,
     function_expression_value_stack: Vec<HashMap<TokenRange, RegisterId>>,
     function_event_arg_state_stack: Vec<HashMap<TokenRange, HashMap<VarId, Expression>>>,
+    // Maps an active array formal to its call-specific register snapshot and
+    // the formal working region used for O(1) dynamic element loads.
+    function_array_view_stack: Vec<HashMap<VarId, FunctionArrayView>>,
+    function_array_view_enabled_stack: Vec<bool>,
     runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     runtime_event_sites: Vec<RuntimeEventSite>,
     next_runtime_error_code: i64,
@@ -321,6 +448,8 @@ impl<'a> FfParser<'a> {
             function_arg_value_stack: Vec::new(),
             function_expression_value_stack: Vec::new(),
             function_event_arg_state_stack: Vec::new(),
+            function_array_view_stack: Vec::new(),
+            function_array_view_enabled_stack: Vec::new(),
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
             next_runtime_error_code: 2000,
@@ -436,10 +565,14 @@ impl<'a> FfParser<'a> {
         let has_state = state.is_some();
         if let Some(state) = state {
             self.function_arg_stack.push(state);
+            self.function_array_view_stack.push(HashMap::default());
+            self.function_array_view_enabled_stack.push(false);
         }
         let result =
             self.parse_expression(expr, targets, domain, convert, sources, ir_builder, None);
         if has_state {
+            self.function_array_view_enabled_stack.pop();
+            self.function_array_view_stack.pop();
             self.function_arg_stack.pop();
         }
         result

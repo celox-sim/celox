@@ -346,6 +346,7 @@ mod tests {
             local_inputs: Vec::new(),
             order_before: HashSet::default(),
             comb_capture_enable_sites: Vec::new(),
+            comb_capture_enable_always: false,
             pre_lower_nodes: Vec::new(),
             expr,
         }

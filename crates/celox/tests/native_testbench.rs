@@ -483,11 +483,13 @@ fn test_for_loop_expression_bound_forward() {
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
+            var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i in 0..(cnt >> 1) {{
+                limit = cnt >> 1;
+                for _i in 0..limit {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd15);
@@ -541,11 +543,13 @@ fn test_for_loop_expression_bound_inclusive() {
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
+            var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
                 rst.assert(clk);
                 clk.next(3);
-                for _i in 0..=(cnt + 32'd2) {{
+                limit = cnt + 32'd2;
+                for _i in 0..=limit {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd9);
@@ -570,11 +574,13 @@ fn test_for_loop_expression_bound_stepped() {
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
+            var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i in 1..(cnt >> 1) step *= 2 {{
+                limit = cnt >> 1;
+                for _i in 1..limit step *= 2 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd13);
@@ -599,11 +605,13 @@ fn test_for_loop_expression_bound_stepped_non_progress_fails() {
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
+            var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i in (cnt - cnt)..cnt step *= 2 {{
+                limit = cnt;
+                for _i in (limit - limit)..limit step *= 2 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd11);
@@ -628,11 +636,13 @@ fn test_for_loop_expression_bound_arith_shift_step() {
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
+            var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i in 1..(cnt >> 1) step <<<= 1 {{
+                limit = cnt >> 1;
+                for _i in 1..limit step <<<= 1 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd13);
@@ -657,11 +667,13 @@ fn test_for_loop_expression_bound_large_arith_shift_reports_non_progress() {
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
+            var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i in 1..cnt step <<<= 100 {{
+                limit = cnt;
+                for _i in 1..limit step <<<= 100 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd11);
@@ -853,11 +865,13 @@ fn test_for_loop_expression_bound_non_progress_reports_failure() {
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
+            var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i in (cnt - cnt)..cnt step *= 2 {{
+                limit = cnt;
+                for _i in (limit - limit)..limit step *= 2 {{
                     clk.next();
                 }}
                 $finish();
@@ -881,11 +895,13 @@ fn test_for_loop_expression_bound_terminal_inclusive_mul_reports_non_progress() 
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
+            var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
                 rst.assert(clk);
                 clk.next(10);
-                for _i in (cnt - cnt)..=(cnt - cnt) step *= 2 {{
+                limit = cnt;
+                for _i in (limit - limit)..=(limit - limit) step *= 2 {{
                     clk.next();
                 }}
                 $assert(cnt == 32'd11);
@@ -1515,12 +1531,14 @@ fn test_run_test_preserves_runtime_error_after_assert_continue_failures() {
             inst clk: $tb::clock_gen;
             inst rst: $tb::reset_gen(clk);
             var cnt: logic<32>;
+            var limit: logic<32>;
             inst dut: Counter (clk, rst, cnt);
             initial {{
                 rst.assert(clk);
                 $assert_continue(1'b0, "first");
                 clk.next(2);
-                for _i in (cnt - cnt)..cnt step *= 2 {{
+                limit = cnt;
+                for _i in (limit - limit)..limit step *= 2 {{
                     clk.next();
                 }}
                 $finish();

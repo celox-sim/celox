@@ -4794,6 +4794,1239 @@ fn test_ff_function_call_nonvariable_argument_uses_formal_shape_for_indexing(sim
     assert_eq!(sim.get(out_q), 0x3u32.into());
 }
 
+fn test_ff_function_call_array_literal_element_uses_formal_context_width(sim) {
+    @ignore_on(veryl);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            in0: input logic<4>,
+            in1: input logic<4>,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>[1]) -> logic<8> {
+                return x[0];
+            }
+            always_ff (clk) {
+                out_q = f('{in0 + in1});
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let in0 = sim.signal("in0");
+    let in1 = sim.signal("in1");
+    let out_q = sim.signal("out_q");
+
+    sim.modify(|io| {
+        io.set(in0, 0xFu8);
+        io.set(in1, 0xFu8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x1Eu32.into());
+}
+
+fn test_ff_function_call_array_literal_supports_dynamic_multidim_indexing(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            row: input logic,
+            col: input logic,
+            out_q: output logic<8>
+        ) {
+            function f (
+                x: input logic<8>[2, 2],
+                i: input logic,
+                j: input logic
+            ) -> logic<8> {
+                return x[i][j];
+            }
+            always_ff (clk) {
+                out_q = f(
+                    '{'{8'h11, 8'h22} repeat 1, default: '{8'h33, 8'h44}},
+                    row,
+                    col
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let row = sim.signal("row");
+    let col = sim.signal("col");
+    let out_q = sim.signal("out_q");
+
+    for (i, j, expected) in [
+        (0u8, 0u8, 0x11u32),
+        (0, 1, 0x22),
+        (1, 0, 0x33),
+        (1, 1, 0x44),
+    ] {
+        sim.modify(|io| {
+            io.set(row, i);
+            io.set(col, j);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(out_q), expected.into());
+    }
+}
+
+fn test_ff_function_call_array_literal_view_dominates_conditional_access(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>
+        ) {
+            function f (x: input logic<8>[2], guard: input logic) -> logic<8> {
+                var first: logic<8>;
+                first = if guard ? x[0] : 8'h00;
+                return first + x[1];
+            }
+            always_ff (clk) {
+                out_q = f('{8'h11, 8'h22}, guard);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let out_q = sim.signal("out_q");
+
+    sim.modify(|io| io.set(guard, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x22u32.into());
+
+    sim.modify(|io| io.set(guard, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x33u32.into());
+}
+
+fn test_ff_function_call_array_literal_view_is_lazy_in_ternary_arm(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            in0: input logic<8>,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function pick_if (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return if guard ? x[index] : 8'h00;
+            }
+            always_ff (clk) {
+                out_q = pick_if(
+                    '{observe(in0, side), default: 8'h00},
+                    0,
+                    guard
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let in0 = sim.signal("in0");
+    let out_q = sim.signal("out_q");
+    let side = sim.signal("side");
+
+    sim.modify(|io| {
+        io.set(guard, 0u8);
+        io.set(in0, 0x5au8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0u32.into());
+    assert_eq!(sim.get(side), 0u32.into());
+
+    sim.modify(|io| io.set(guard, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x5au32.into());
+    assert_eq!(sim.get(side), 0x5au32.into());
+}
+
+fn test_ff_function_call_array_literal_view_is_lazy_in_short_circuit_rhs(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            in0: input logic<8>,
+            out_and: output logic,
+            out_or: output logic,
+            and_side: output logic<8>,
+            or_side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function pick_and (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic {
+                return guard && x[index] != 0;
+            }
+            function pick_or (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic {
+                return guard || x[index] != 0;
+            }
+            always_ff (clk) {
+                and_side = 0;
+                or_side = 0;
+                out_and = pick_and(
+                    '{observe(in0, and_side), default: 8'h00},
+                    0,
+                    guard
+                );
+                out_or = pick_or(
+                    '{observe(in0, or_side), default: 8'h00},
+                    0,
+                    guard
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let in0 = sim.signal("in0");
+    let out_and = sim.signal("out_and");
+    let out_or = sim.signal("out_or");
+    let and_side = sim.signal("and_side");
+    let or_side = sim.signal("or_side");
+
+    sim.modify(|io| {
+        io.set(guard, 0u8);
+        io.set(in0, 0x5au8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_and), 0u32.into());
+    assert_eq!(sim.get(and_side), 0u32.into());
+    assert_eq!(sim.get(out_or), 1u32.into());
+    assert_eq!(sim.get(or_side), 0x5au32.into());
+
+    sim.modify(|io| io.set(guard, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_and), 1u32.into());
+    assert_eq!(sim.get(and_side), 0x5au32.into());
+    assert_eq!(sim.get(out_or), 1u32.into());
+    assert_eq!(sim.get(or_side), 0u32.into());
+}
+
+fn test_ff_function_call_array_literal_view_preserves_expression_order(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function ordered (
+                x: input logic<8>[2],
+                index: input logic,
+                left: input logic<8>
+            ) -> logic<8> {
+                return left + x[index];
+            }
+            always_ff (clk) {
+                out_q = ordered(
+                    '{observe(8'h22, side), default: 8'h00},
+                    0,
+                    observe(8'h11, side)
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+    let side = sim.signal("side");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x33u32.into());
+    assert_eq!(sim.get(side), 0x22u32.into());
+}
+
+fn test_ff_function_call_array_literal_branch_view_is_reused_after_merge(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            in0: input logic<8>,
+            out_q: output logic<8>
+        ) {
+            function pick_then_first (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic,
+                first: output logic<8>
+            ) -> logic<8> {
+                first = if guard ? x[index] : 8'h00;
+                return x[0];
+            }
+            var first: logic<8>;
+            always_ff (clk) {
+                out_q = pick_then_first(
+                    '{in0, default: 8'h00},
+                    0,
+                    guard,
+                    first
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let in0 = sim.signal("in0");
+    let out_q = sim.signal("out_q");
+
+    for guard_value in [0u8, 1u8] {
+        sim.modify(|io| {
+            io.set(guard, guard_value);
+            io.set(in0, 0x5au8);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(out_q), 0x5au32.into());
+    }
+}
+
+fn test_ff_function_call_static_array_item_stays_lazy_before_conditional_dynamic_access(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side0: output logic<8>,
+            side1: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function static_then_dynamic (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic,
+                first: output logic<8>
+            ) -> logic<8> {
+                first = x[0];
+                return if guard ? x[index] : 8'h00;
+            }
+            var first: logic<8>;
+            always_ff (clk) {
+                side0 = 0;
+                side1 = 0;
+                out_q = static_then_dynamic(
+                    '{observe(8'h11, side0), observe(8'h22, side1)},
+                    1,
+                    guard,
+                    first
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let out_q = sim.signal("out_q");
+    let side0 = sim.signal("side0");
+    let side1 = sim.signal("side1");
+
+    sim.modify(|io| io.set(guard, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0u32.into());
+    assert_eq!(sim.get(side0), 0x11u32.into());
+    assert_eq!(sim.get(side1), 0u32.into());
+
+    sim.modify(|io| io.set(guard, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x22u32.into());
+    assert_eq!(sim.get(side0), 0x11u32.into());
+    assert_eq!(sim.get(side1), 0x22u32.into());
+}
+
+fn test_ff_function_call_carries_branch_local_static_array_item_cache(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function branch_then_static (
+                x: input logic<8>[2],
+                guard: input logic,
+                first: output logic<8>
+            ) -> logic<8> {
+                first = if guard ? x[0] : 8'h00;
+                return x[0];
+            }
+            var first: logic<8>;
+            always_ff (clk) {
+                side = 0;
+                out_q = branch_then_static(
+                    '{observe(side + 1, side), default: 8'h00},
+                    guard,
+                    first
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let out_q = sim.signal("out_q");
+    let side = sim.signal("side");
+
+    sim.modify(|io| io.set(guard, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 1u32.into());
+    assert_eq!(sim.get(side), 1u32.into());
+}
+
+fn test_ff_function_call_tracks_nested_static_array_read_through_branch(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function inner (x: input logic<8>[2]) -> logic<8> {
+                return x[0];
+            }
+            function nested_then_static (
+                x: input logic<8>[2],
+                guard: input logic,
+                first: output logic<8>
+            ) -> logic<8> {
+                first = if guard ? inner(x) : 8'h00;
+                return x[0];
+            }
+            var first: logic<8>;
+            always_ff (clk) {
+                side = 0;
+                out_q = nested_then_static(
+                    '{observe(side + 1, side), default: 8'h00},
+                    guard,
+                    first
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let out_q = sim.signal("out_q");
+    let side = sim.signal("side");
+
+    sim.modify(|io| io.set(guard, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 1u32.into());
+    assert_eq!(sim.get(side), 1u32.into());
+}
+
+fn test_ff_function_call_tracks_array_view_hidden_in_bound_literal(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function middle (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return if guard ? x[index] : 8'h00;
+            }
+            function outer (
+                y: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return middle('{y[index], default: 8'h00}, 0, guard) + y[0];
+            }
+            always_ff (clk) {
+                side = 0;
+                out_q = outer(
+                    '{observe(side + 1, side), default: 8'h00},
+                    0,
+                    guard
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let out_q = sim.signal("out_q");
+    let side = sim.signal("side");
+
+    sim.modify(|io| io.set(guard, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 2u32.into());
+    assert_eq!(sim.get(side), 1u32.into());
+}
+
+fn test_ff_function_call_merges_nested_array_state_at_cache_completion(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function middle (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return (if guard ? x[0] : 8'h00) + x[index];
+            }
+            function outer (
+                y: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return middle(
+                    '{y[index], default: 8'h00},
+                    0,
+                    guard
+                ) + y[0];
+            }
+            always_ff (clk) {
+                side = 0;
+                out_q = outer(
+                    '{observe(side + 1, side), default: 8'h00},
+                    0,
+                    guard
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let out_q = sim.signal("out_q");
+    let side = sim.signal("side");
+
+    sim.modify(|io| io.set(guard, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 3u32.into());
+    assert_eq!(sim.get(side), 1u32.into());
+}
+
+fn test_ff_function_call_merges_nested_array_state_at_static_cache_completion(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function middle (
+                x: input logic<8>[2],
+                guard: input logic
+            ) -> logic<8> {
+                return (if guard ? x[0] : 8'h00) + x[0];
+            }
+            function outer (
+                y: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return middle(
+                    '{y[index], default: 8'h00},
+                    guard
+                ) + y[0];
+            }
+            always_ff (clk) {
+                side = 0;
+                out_q = outer(
+                    '{observe(side + 1, side), default: 8'h00},
+                    0,
+                    guard
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let out_q = sim.signal("out_q");
+    let side = sim.signal("side");
+
+    sim.modify(|io| io.set(guard, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 3u32.into());
+    assert_eq!(sim.get(side), 1u32.into());
+}
+
+fn test_ff_function_call_merges_directly_forwarded_array_cache(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function inner (
+                x: input logic<8>[2],
+                guard: input logic
+            ) -> logic<8> {
+                return if guard ? x[0] : 8'h00;
+            }
+            function outer (
+                y: input logic<8>[2],
+                guard: input logic,
+                middle: input logic<8>
+            ) -> logic<8> {
+                return inner(y, guard) + middle + y[0];
+            }
+            always_ff (clk) {
+                out_q = outer(
+                    '{observe(8'h11, side), default: 8'h00},
+                    guard,
+                    observe(8'h55, side)
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let out_q = sim.signal("out_q");
+    let side = sim.signal("side");
+
+    sim.modify(|io| io.set(guard, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x66u32.into());
+    assert_eq!(sim.get(side), 0x11u32.into());
+
+    sim.modify(|io| io.set(guard, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x77u32.into());
+    // The scalar effect is eager at call entry; the observed array element is
+    // evaluated later on first use and therefore supplies the final write.
+    assert_eq!(sim.get(side), 0x11u32.into());
+}
+
+fn test_ff_function_call_tracks_array_reads_in_output_indices(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            var scratch: logic<8>[2];
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function write (
+                value: input logic<8>,
+                dst: output logic<8>
+            ) -> logic<8> {
+                dst = value;
+                return 0;
+            }
+            function outer (
+                x: input logic<8>[2],
+                guard: input logic,
+                middle: input logic<8>
+            ) -> logic<8> {
+                return (if guard ? write(0, scratch[x[0]]) : 0) + middle + x[0];
+            }
+            always_ff (clk) {
+                out_q = outer(
+                    '{observe(8'h01, side), default: 8'h00},
+                    guard,
+                    observe(8'h55, side)
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let out_q = sim.signal("out_q");
+    let side = sim.signal("side");
+
+    sim.modify(|io| io.set(guard, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x56u32.into());
+    assert_eq!(sim.get(side), 0x01u32.into());
+
+    sim.modify(|io| io.set(guard, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x56u32.into());
+    assert_eq!(sim.get(side), 0x01u32.into());
+}
+
+fn test_ff_function_call_tracks_nested_array_reads_in_output_indices(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            var scratch: logic<8>[2];
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function write (
+                value: input logic<8>,
+                dst: output logic<8>
+            ) -> logic<8> {
+                dst = value;
+                return 0;
+            }
+            function helper (x: input logic<8>[2]) -> logic<8> {
+                return write(0, scratch[x[0]]);
+            }
+            function outer (
+                x: input logic<8>[2],
+                guard: input logic,
+                middle: input logic<8>
+            ) -> logic<8> {
+                return (if guard ? helper(x) : 0) + middle + x[0];
+            }
+            always_ff (clk) {
+                out_q = outer(
+                    '{observe(8'h01, side), default: 8'h00},
+                    guard,
+                    observe(8'h55, side)
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let out_q = sim.signal("out_q");
+    let side = sim.signal("side");
+
+    sim.modify(|io| io.set(guard, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x56u32.into());
+    assert_eq!(sim.get(side), 0x01u32.into());
+
+    sim.modify(|io| io.set(guard, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x56u32.into());
+    assert_eq!(sim.get(side), 0x01u32.into());
+}
+
+fn test_ff_function_call_restores_initialized_forwarded_alias_view(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            select: input logic,
+            out_q: output logic<8>
+        ) {
+            function alias_use (
+                a: input logic<8>[2],
+                b: input logic<8>[2],
+                index: input logic,
+                select: input logic,
+                clobber: input logic<8>
+            ) -> logic<8> {
+                return (if select ? a[index] : b[index])
+                    + clobber
+                    + (if select ? a[0] : b[0]);
+            }
+            function forward (
+                x: input logic<8>[2],
+                index: input logic,
+                select: input logic,
+                clobber: input logic<8>
+            ) -> logic<8> {
+                return alias_use(x, x, index, select, clobber);
+            }
+            always_ff (clk) {
+                out_q = forward(
+                    '{8'h11, 8'h22},
+                    1,
+                    select,
+                    forward('{8'haa, 8'hbb}, 1, 0, 0)
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let select = sim.signal("select");
+    let out_q = sim.signal("out_q");
+
+    for select_value in [0u8, 1u8] {
+        sim.modify(|io| io.set(select, select_value)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(out_q), 0x98u32.into());
+    }
+}
+
+fn test_ff_function_call_merges_outer_array_view_across_nested_short_circuit(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            in0: input logic<8>,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function inner (y: input logic[2], index: input logic) -> logic {
+                return y[index];
+            }
+            function outer (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return inner('{guard && x[index] != 0, default: 0}, 0) + x[0];
+            }
+            always_ff (clk) {
+                side = 0;
+                out_q = outer(
+                    '{observe(in0, side), default: 8'h00},
+                    0,
+                    guard
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let in0 = sim.signal("in0");
+    let out_q = sim.signal("out_q");
+    let side = sim.signal("side");
+
+    sim.modify(|io| {
+        io.set(guard, 0u8);
+        io.set(in0, 0x5au8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x5au32.into());
+    assert_eq!(sim.get(side), 0x5au32.into());
+
+    sim.modify(|io| io.set(guard, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x5bu32.into());
+    assert_eq!(sim.get(side), 0x5au32.into());
+}
+
+fn test_ff_function_call_forwards_array_literal_view_to_nested_call(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            index: input logic,
+            out_q: output logic<8>
+        ) {
+            function inner (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return x[index];
+            }
+            function middle (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return inner(x, index);
+            }
+            function outer (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return middle(x, index);
+            }
+            always_ff (clk) {
+                out_q = outer('{8'h11, 8'h22}, index);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let index = sim.signal("index");
+    let out_q = sim.signal("out_q");
+
+    sim.modify(|io| io.set(index, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x11u32.into());
+
+    sim.modify(|io| io.set(index, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x22u32.into());
+}
+
+fn test_ff_function_call_keeps_array_view_active_for_output_index(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function pick (
+                x: input logic<8>[2],
+                index: input logic,
+                selected: output logic<8>
+            ) -> logic<8> {
+                selected = x[index];
+                return x[0];
+            }
+            var selected: logic<8>[2];
+            var inner_selected: logic<8>;
+            always_ff (clk) {
+                out_q = pick(
+                    '{8'h11, 8'h22},
+                    1,
+                    selected[pick('{8'h01, 8'h00}, 0, inner_selected)]
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x11u32.into());
+}
+
+fn test_ff_function_call_restores_array_literal_view_after_reentrant_call(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function pick (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return x[index];
+            }
+            always_ff (clk) {
+                out_q = pick('{8'h11, 8'h22}, pick('{8'h00, 8'h01}, 0));
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x11u32.into());
+}
+
+fn test_ff_function_call_restores_nearest_array_view_after_deep_reentrant_call(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function pick (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return x[index];
+            }
+            always_ff (clk) {
+                out_q = pick(
+                    '{8'h11, 8'h22},
+                    pick(
+                        '{8'h00, 8'h00},
+                        pick('{8'h00, 8'h00}, 0)
+                    )
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x11u32.into());
+}
+
+fn test_ff_function_call_bits_and_size_do_not_evaluate_array_argument(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            in0: input logic<8>,
+            out_bits: output logic<32>,
+            out_size: output logic<32>,
+            bits_side: output logic<8>,
+            size_side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function array_bits (x: input logic<8>[2]) -> logic<32> {
+                return $bits(x);
+            }
+            function array_size (x: input logic<8>[2]) -> logic<32> {
+                return $size(x);
+            }
+            always_ff (clk) {
+                out_bits = array_bits('{observe(in0, bits_side), default: 0});
+                out_size = array_size('{observe(in0, size_side), default: 0});
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let in0 = sim.signal("in0");
+    let out_bits = sim.signal("out_bits");
+    let out_size = sim.signal("out_size");
+    let bits_side = sim.signal("bits_side");
+    let size_side = sim.signal("size_side");
+
+    sim.modify(|io| io.set(in0, 0x5au8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_bits), 16u32.into());
+    assert_eq!(sim.get(out_size), 2u32.into());
+    assert_eq!(sim.get(bits_side), 0u32.into());
+    assert_eq!(sim.get(size_side), 0u32.into());
+}
+
+fn test_ff_function_call_nested_bits_does_not_evaluate_forwarded_array_argument(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            in0: input logic<8>,
+            out_q: output logic<32>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function inner (x: input logic<8>[2]) -> logic<32> {
+                return $bits(x);
+            }
+            function outer (x: input logic<8>[2]) -> logic<32> {
+                return inner(x);
+            }
+            always_ff (clk) {
+                out_q = outer('{observe(in0, side), default: 8'h00});
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let in0 = sim.signal("in0");
+    let out_q = sim.signal("out_q");
+    let side = sim.signal("side");
+
+    sim.modify(|io| io.set(in0, 0x5au8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 16u32.into());
+    assert_eq!(sim.get(side), 0u32.into());
+}
+
+fn test_ff_function_call_array_literal_view_preserves_source_order(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            index: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function pick (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return x[index];
+            }
+            always_ff (clk) {
+                out_q = pick(
+                    '{default: observe(8'h11, side), observe(8'h22, side)},
+                    index
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let index = sim.signal("index");
+    let side = sim.signal("side");
+
+    sim.modify(|io| io.set(index, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(side), 0x22u32.into());
+}
+
+fn test_ff_function_call_converts_array_literal_view_for_wider_nested_formal(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            index: input logic,
+            out_q: output logic<8>
+        ) {
+            function inner (x: input logic<8>[2], index: input logic) -> logic<8> {
+                return x[index];
+            }
+            function outer (x: input logic<4>[2], index: input logic) -> logic<8> {
+                return inner(x, index);
+            }
+            always_ff (clk) {
+                out_q = outer('{4'ha, 4'h3}, index);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let index = sim.signal("index");
+    let out_q = sim.signal("out_q");
+
+    sim.modify(|io| io.set(index, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x0au32.into());
+
+    sim.modify(|io| io.set(index, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x03u32.into());
+}
+
+fn test_ff_function_call_converts_forwarded_static_array_element(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function inner (x: input logic<8>[2]) -> logic<8> {
+                return x[0];
+            }
+            function outer (x: input logic<4>[2]) -> logic<8> {
+                return inner(x);
+            }
+            always_ff (clk) {
+                out_q = outer('{4'ha, 4'h3});
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x0au32.into());
+}
+
 fn test_ff_function_call_array_literal_element_uses_element_width(sim) {
     @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
@@ -4884,6 +6117,62 @@ fn test_ff_function_call_multidim_array_literal_indexing_preserves_element_order
 
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_q), 0x11u32.into());
+}
+
+fn test_ff_function_call_dynamic_multidim_indexing_accepts_array_valued_items(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            row: input logic,
+            col: input logic,
+            out_q: output logic<8>
+        ) {
+            function pick (
+                x: input logic<8>[2, 2],
+                row: input logic,
+                col: input logic
+            ) -> logic<8> {
+                return x[row][col];
+            }
+            function pass_rows (
+                row0: input logic<4>[2],
+                row1: input logic<4>[2],
+                row: input logic,
+                col: input logic
+            ) -> logic<8> {
+                return pick('{row0, row1}, row, col);
+            }
+            always_ff (clk) {
+                out_q = pass_rows(
+                    '{4'h1, 4'h2},
+                    '{4'h3, 4'h4},
+                    row,
+                    col
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let row = sim.signal("row");
+    let col = sim.signal("col");
+    let out_q = sim.signal("out_q");
+
+    for (i, j, expected) in [
+        (0u8, 0u8, 0x01u32),
+        (0, 1, 0x02),
+        (1, 0, 0x03),
+        (1, 1, 0x04),
+    ] {
+        sim.modify(|io| {
+            io.set(row, i);
+            io.set(col, j);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(out_q), expected.into());
+    }
 }
 
 fn test_ff_function_call_bit_select_on_nonvariable_one_bit_formal(sim) {
@@ -5537,6 +6826,194 @@ fn test_ff_dynamic_store_sir() {
 }
 
 #[test]
+fn test_ff_function_array_literal_view_sir() {
+    let code = r#"
+    module Top (
+        clk: input clock,
+        index: input logic<2>,
+        in0: input logic<8>,
+        in1: input logic<8>,
+        in2: input logic<8>,
+        in3: input logic<8>,
+        out_q: output logic<8>
+    ) {
+        function select (x: input logic<8>[4], index: input logic<2>) -> logic<8> {
+            return x[index];
+        }
+        always_ff (clk) {
+            out_q = select('{in0, in1, in2, in3}, index);
+        }
+    }
+"#;
+    let trace = setup_and_trace(code, "Top");
+    let output = trace.format_program().unwrap();
+    assert_snapshot!("ff_function_array_literal_view_sir", output);
+}
+
+#[test]
+fn test_ff_function_static_array_literal_access_is_lazy() {
+    let code = r#"
+    module Top (
+        clk: input clock,
+        in0: input logic<8>,
+        out_q: output logic<8>
+    ) {
+        function first (x: input logic<8>[1024]) -> logic<8> {
+            return x[0];
+        }
+        always_ff (clk) {
+            out_q = first('{default: in0});
+        }
+    }
+"#;
+    let trace = setup_and_trace(code, "Top");
+    let output = trace.format_program().unwrap();
+
+    assert!(!output.contains("Store(addr=first.x"), "{output}");
+    assert!(output.lines().count() < 100, "{output}");
+}
+
+#[test]
+fn test_ff_nested_function_static_array_literal_access_is_lazy() {
+    let code = r#"
+    module Top (
+        clk: input clock,
+        in0: input logic<8>,
+        out_q: output logic<8>
+    ) {
+        function first (x: input logic<8>[1024]) -> logic<8> {
+            return x[0];
+        }
+        function forward (x: input logic<8>[1024]) -> logic<8> {
+            return first(x);
+        }
+        always_ff (clk) {
+            out_q = forward('{default: in0});
+        }
+    }
+"#;
+    let trace = setup_and_trace(code, "Top");
+    let output = trace.format_program().unwrap();
+
+    assert!(!output.contains("Store(addr=forward.x"), "{output}");
+    assert!(!output.contains("Store(addr=first.x"), "{output}");
+    assert!(output.lines().count() < 100, "{output}");
+}
+
+#[test]
+fn test_ff_static_branch_array_literal_access_is_lazy() {
+    let code = r#"
+    module Top (
+        clk: input clock,
+        guard: input logic,
+        in0: input logic<8>,
+        out_q: output logic<8>
+    ) {
+        function first_if (
+            x: input logic<8>[1024],
+            guard: input logic
+        ) -> logic<8> {
+            return if guard ? x[0] : 8'h00;
+        }
+        always_ff (clk) {
+            out_q = first_if('{default: in0}, guard);
+        }
+    }
+"#;
+    let trace = setup_and_trace(code, "Top");
+    let output = trace.format_program().unwrap();
+
+    assert!(!output.contains("Store(addr=first_if.x"), "{output}");
+    assert!(output.lines().count() < 150, "{output}");
+}
+
+#[test]
+fn test_ff_array_literal_argument_is_not_reevaluated_for_array_output() {
+    let code = r#"
+    module Top (
+        clk: input clock,
+        in0: input logic<8>,
+        out_q: output logic<8>
+    ) {
+        function observe (
+            x: input logic<8>,
+            side: output logic<8>
+        ) -> logic<8> {
+            side = x;
+            return x;
+        }
+        function copy (
+            x: input logic<8>[2],
+            y: output logic<8>[2]
+        ) -> logic<8> {
+            y = x;
+            return y[0];
+        }
+        var copied: logic<8>[2];
+        var side: logic<8>;
+        always_ff (clk) {
+            out_q = copy('{observe(in0, side), 8'h22}, copied);
+        }
+    }
+"#;
+    let result = SimulatorBuilder::new(code, "Top")
+        .optimize(false)
+        .trace_sim_modules()
+        .trace_pre_optimized_sir()
+        .build_with_trace();
+    assert!(result.res.is_ok(), "{:?}", result.res.err());
+    let output = result.trace.format_pre_optimized_sir().unwrap();
+
+    assert_eq!(output.matches("Store(addr=side").count(), 1, "{output}");
+}
+
+#[test]
+fn test_ff_array_literal_static_then_dynamic_access_evaluates_each_item_once() {
+    let code = r#"
+    module Top (
+        clk: input clock,
+        in0: input logic<8>,
+        index: input logic,
+        out_q: output logic<8>
+    ) {
+        function observe (
+            x: input logic<8>,
+            side: output logic<8>
+        ) -> logic<8> {
+            side = x;
+            return x;
+        }
+        function mixed (
+            x: input logic<8>[2],
+            index: input logic,
+            first: output logic<8>
+        ) -> logic<8> {
+            first = x[0];
+            return x[index];
+        }
+        var first: logic<8>;
+        var side: logic<8>;
+        always_ff (clk) {
+            out_q = mixed('{observe(in0, side), 8'h00}, index, first);
+        }
+    }
+"#;
+    let result = SimulatorBuilder::new(code, "Top")
+        .optimize(false)
+        .trace_sim_modules()
+        .trace_pre_optimized_sir()
+        .build_with_trace();
+    assert!(result.res.is_ok(), "{:?}", result.res.err());
+    let output = result.trace.format_pre_optimized_sir().unwrap();
+
+    assert_eq!(output.matches("Store(addr=side").count(), 1, "{output}");
+}
+
+#[test]
+#[cfg(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+))]
 fn test_ff_packed_bit_select_writes_regression() {
     let code = r#"
     module Top (

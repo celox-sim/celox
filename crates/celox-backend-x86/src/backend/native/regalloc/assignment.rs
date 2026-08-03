@@ -6,6 +6,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+use celox_backend_common::regalloc::{
+    MachineRegister, RegConstraint as CommonRegConstraint, RegisterSet, ValueLocation,
+};
+
 use crate::native::features::VariableShiftEncoding;
 use crate::native::mir::*;
 
@@ -31,6 +35,12 @@ pub enum PhysReg {
     R13 = 13,
     R14 = 14,
     R15 = 15,
+}
+
+impl MachineRegister for PhysReg {
+    fn index(self) -> u8 {
+        self as u8
+    }
 }
 
 /// Physical register in the x86 128-bit vector class.
@@ -66,27 +76,7 @@ impl fmt::Display for PhysReg {
     }
 }
 
-// ────────────────────────────────────────────────────────────────
-// PhysRegSet: u16 bitset for small PhysReg sets
-// ────────────────────────────────────────────────────────────────
-
-#[derive(Clone, Copy, Default)]
-pub struct PhysRegSet(u16);
-
-impl PhysRegSet {
-    pub fn new() -> Self {
-        Self(0)
-    }
-    pub fn insert(&mut self, r: PhysReg) {
-        self.0 |= 1 << (r as u16);
-    }
-    pub fn contains(&self, r: &PhysReg) -> bool {
-        self.0 & (1 << (*r as u16)) != 0
-    }
-    pub fn is_empty(&self) -> bool {
-        self.0 == 0
-    }
-}
+pub type PhysRegSet = RegisterSet;
 
 pub const ALLOCATABLE_REGS: &[PhysReg] = &[
     PhysReg::RAX,
@@ -110,24 +100,21 @@ pub const ALLOCATABLE_REGS: &[PhysReg] = &[
 // Register constraints
 // ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RegConstraint {
-    Any,
-    Fixed(PhysReg),
-}
+pub type RegConstraint = CommonRegConstraint<PhysReg>;
 
 /// Physical location of a phi source at one predecessor edge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EdgeLocation {
-    Register(PhysReg),
-    Stack(i32),
-    Immediate(u64),
-}
+pub type EdgeLocation = ValueLocation<PhysReg>;
 
 pub(super) fn use_constraints(
     inst: &MInst,
     shift_encoding: VariableShiftEncoding,
 ) -> Vec<RegConstraint> {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = shift_encoding;
+        return inst.uses().iter().map(|_| RegConstraint::Any).collect();
+    }
+    #[cfg(target_arch = "x86_64")]
     match inst {
         // BMI2's three-operand shifts accept the count in any GPR. Baseline
         // x86 shifts require it in CL (the low byte of RCX).
@@ -145,6 +132,12 @@ pub(super) fn use_constraints(
 
 /// Returns physical registers clobbered by this instruction (besides dst).
 pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = inst;
+        return &[];
+    }
+    #[cfg(target_arch = "x86_64")]
     match inst {
         MInst::UDiv { .. }
         | MInst::URem { .. }

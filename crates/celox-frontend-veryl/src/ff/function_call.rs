@@ -351,20 +351,20 @@ impl<'a> FfParser<'a> {
         })
     }
 
-    fn coerce_function_state_assignment(
+    pub(super) fn coerce_function_state_assignment(
         &self,
         expr: Expression,
         dst: &AssignDestination,
     ) -> Result<Expression, ParserError> {
         let variable = &self.module.variables[&dst.id];
+        let is_whole_var =
+            dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
         // Unpacked arrays are shape-checked and lowered element-wise elsewhere;
         // a scalar `as` cast cannot represent their assignment conversion.
-        if !variable.r#type.array.is_empty() {
+        if !variable.r#type.array.is_empty() && is_whole_var {
             return Ok(expr);
         }
 
-        let is_whole_var =
-            dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
         let target_type = if is_whole_var {
             variable.r#type.clone()
         } else {
@@ -1172,9 +1172,13 @@ impl<'a> FfParser<'a> {
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<RegisterId, ParserError> {
         self.function_arg_stack.push(state.clone());
+        self.function_array_view_stack.push(HashMap::default());
+        self.function_array_view_enabled_stack.push(false);
         let result = self.parse_expression(
             condition, targets, domain, convert, sources, ir_builder, None,
         );
+        self.function_array_view_enabled_stack.pop();
+        self.function_array_view_stack.pop();
         self.function_arg_stack.pop();
         result?;
         let condition = self
@@ -1255,11 +1259,15 @@ impl<'a> FfParser<'a> {
             FunctionPathCondition::Always => {
                 *state = evaluated_state;
                 self.function_arg_stack.push(state.clone());
+                self.function_array_view_stack.push(HashMap::default());
+                self.function_array_view_enabled_stack.push(false);
                 self.function_event_arg_state_stack
                     .push(expression_states.clone());
                 let result = self
                     .parse_expression(&expr, targets, domain, convert, sources, ir_builder, None);
                 self.function_event_arg_state_stack.pop();
+                self.function_array_view_enabled_stack.pop();
+                self.function_array_view_stack.pop();
                 self.function_arg_stack.pop();
                 result?;
                 self.stack
@@ -1301,11 +1309,15 @@ impl<'a> FfParser<'a> {
 
                 ir_builder.switch_to_block(effect_block);
                 self.function_arg_stack.push(evaluated_state.clone());
+                self.function_array_view_stack.push(HashMap::default());
+                self.function_array_view_enabled_stack.push(false);
                 self.function_event_arg_state_stack
                     .push(expression_states.clone());
                 let parse_result = self
                     .parse_expression(&expr, targets, domain, convert, sources, ir_builder, None);
                 self.function_event_arg_state_stack.pop();
+                self.function_array_view_enabled_stack.pop();
+                self.function_array_view_stack.pop();
                 self.function_arg_stack.pop();
                 parse_result?;
                 let effect_value = self
@@ -2218,27 +2230,10 @@ impl<'a> FfParser<'a> {
             let must_snapshot_for_order = last_effectful_arg.is_some_and(|last| arg_index <= last);
             let formal = &self.module.variables[arg_id];
             if !formal.r#type.array.is_empty() {
-                let later_input_writes_state = ordered_arg_paths
-                    .iter()
-                    .skip(arg_index + 1)
-                    .filter_map(|path| call.inputs.get(path))
-                    .any(super::expression::expression_has_side_effect);
-                let requires_value_snapshot = self.expression_needs_eager_evaluation(actual)
-                    || Self::expression_references_any(actual, &output_ids)
-                    || later_input_writes_state
-                    || has_effectful_output_destination;
-                if requires_value_snapshot {
-                    return Err(ParserError::unsupported(
-                        43,
-                        LoweringPhase::FfLowering,
-                        "materialized unpacked function argument",
-                        format!("{actual}"),
-                        Some(&call.comptime.token),
-                    ));
-                }
-                // Runtime-only effects in later arguments cannot change this
-                // pure array value, so retaining its symbolic binding preserves
-                // call-time semantics without scalarizing the unpacked shape.
+                // Array arguments are represented by call-scoped views. The
+                // view snapshots each observed element in source order while
+                // leaving unobserved, side-effect-free elements lazy; a scalar
+                // register cannot preserve that unpacked behavior.
                 continue;
             }
             if !must_snapshot_for_order
@@ -2269,6 +2264,20 @@ impl<'a> FfParser<'a> {
             values.insert(*arg_id, formal_reg);
         }
         Ok(values)
+    }
+
+    pub(super) fn get_bound_function_array_view(&self, var_id: VarId) -> Option<VarId> {
+        for frame in (0..self.function_arg_stack.len()).rev() {
+            if self.function_array_view_enabled_stack[frame]
+                && self.function_arg_stack[frame].contains_key(&var_id)
+            {
+                return self.function_array_view_stack[frame]
+                    .get(&var_id)
+                    .filter(|view| view.initialized.is_none())
+                    .map(|view| view.backing_var_id);
+            }
+        }
+        None
     }
 
     pub(super) fn substitute_function_expr(
@@ -2862,9 +2871,12 @@ impl<'a> FfParser<'a> {
         for arg_id in materialized.keys() {
             symbolic_bindings.remove(arg_id);
         }
+        symbolic_bindings.retain(|var_id, _| self.module.variables[var_id].r#type.array.is_empty());
 
         self.function_arg_stack.push(bindings);
         self.function_arg_value_stack.push(materialized);
+        self.function_array_view_stack.push(HashMap::default());
+        self.function_array_view_enabled_stack.push(true);
         self.function_expression_value_stack
             .push(HashMap::default());
         let result = (|| {
@@ -2954,7 +2966,10 @@ impl<'a> FfParser<'a> {
         })();
         self.function_expression_value_stack.pop();
         self.function_arg_value_stack.pop();
+        self.function_array_view_enabled_stack.pop();
+        let finished_views = self.function_array_view_stack.pop().unwrap();
         self.function_arg_stack.pop();
+        self.restore_active_function_array_views(&finished_views, convert, ir_builder)?;
         result
     }
 
@@ -3032,9 +3047,12 @@ impl<'a> FfParser<'a> {
         for arg_id in materialized.keys() {
             symbolic_bindings.remove(arg_id);
         }
+        symbolic_bindings.retain(|var_id, _| self.module.variables[var_id].r#type.array.is_empty());
 
         self.function_arg_stack.push(bindings);
         self.function_arg_value_stack.push(materialized);
+        self.function_array_view_stack.push(HashMap::default());
+        self.function_array_view_enabled_stack.push(true);
         self.function_expression_value_stack
             .push(HashMap::default());
         let result = (|| {
@@ -3095,7 +3113,10 @@ impl<'a> FfParser<'a> {
         })();
         self.function_expression_value_stack.pop();
         self.function_arg_value_stack.pop();
+        self.function_array_view_enabled_stack.pop();
+        let finished_views = self.function_array_view_stack.pop().unwrap();
         self.function_arg_stack.pop();
+        self.restore_active_function_array_views(&finished_views, convert, ir_builder)?;
         result
     }
 }
