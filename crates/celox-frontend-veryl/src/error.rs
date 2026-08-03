@@ -31,6 +31,96 @@ impl SourceLocation {
     }
 }
 
+/// Celox-specific source diagnostics produced after Veryl analysis but before
+/// source identities are discarded by lowering.
+#[derive(Error, Debug)]
+pub enum FrontendDiagnostic {
+    #[error("Loop continuation bound is not stable: {detail}")]
+    MutableForBound {
+        detail: String,
+        source_location: SourceLocation,
+    },
+
+    #[error("Unable to prove that the loop continuation bound remains unchanged: {detail}")]
+    UnknownForBoundEffect {
+        detail: String,
+        source_location: SourceLocation,
+    },
+}
+
+impl FrontendDiagnostic {
+    pub fn mutable_for_bound(token: &TokenRange, detail: impl Into<String>) -> Self {
+        Self::MutableForBound {
+            detail: detail.into(),
+            source_location: SourceLocation::from_token(token),
+        }
+    }
+
+    pub fn unknown_for_bound_effect(token: &TokenRange, detail: impl Into<String>) -> Self {
+        Self::UnknownForBoundEffect {
+            detail: detail.into(),
+            source_location: SourceLocation::from_token(token),
+        }
+    }
+
+    pub fn is_error(&self) -> bool {
+        matches!(self, Self::MutableForBound { .. })
+    }
+
+    fn source_location(&self) -> &SourceLocation {
+        match self {
+            Self::MutableForBound {
+                source_location, ..
+            }
+            | Self::UnknownForBoundEffect {
+                source_location, ..
+            } => source_location,
+        }
+    }
+}
+
+impl miette::Diagnostic for FrontendDiagnostic {
+    fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
+        Some(Box::new(match self {
+            Self::MutableForBound { .. } => "mutable_for_bound",
+            Self::UnknownForBoundEffect { .. } => "unknown_for_bound_effect",
+        }))
+    }
+
+    fn severity(&self) -> Option<miette::Severity> {
+        Some(if self.is_error() {
+            miette::Severity::Error
+        } else {
+            miette::Severity::Warning
+        })
+    }
+
+    fn help<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
+        Some(Box::new(match self {
+            Self::MutableForBound { .. } => {
+                "copy the bound to a value that is not modified by the loop body"
+            }
+            Self::UnknownForBoundEffect { .. } => {
+                "avoid opaque or time-advancing calls in the loop, or make the bound independent of mutable state"
+            }
+        }))
+    }
+
+    fn source_code(&self) -> Option<&dyn miette::SourceCode> {
+        Some(&self.source_location().source)
+    }
+
+    fn labels(&self) -> Option<Box<dyn Iterator<Item = miette::LabeledSpan> + '_>> {
+        let location = self.source_location();
+        Some(Box::new(std::iter::once(
+            miette::LabeledSpan::new_with_span(
+                Some("loop with an unstable continuation bound".to_string()),
+                location.span,
+            ),
+        )))
+    }
+}
+
 /// The compilation phase where an unsupported feature was encountered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoweringPhase {

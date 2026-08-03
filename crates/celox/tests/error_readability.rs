@@ -134,3 +134,49 @@ fn test_sv_module_unsupported_error_readability() {
     let err = res.unwrap_err().to_string();
     assert_snapshot!(err);
 }
+
+#[test]
+fn test_mutable_for_bound_error_readability() {
+    let code = r#"
+        module Top {
+            var limit: logic<8>;
+            always_comb {
+                limit = 4;
+                for _i in 0..limit {
+                    limit = 1;
+                }
+            }
+        }
+    "#;
+    let error = Simulator::builder(code, "Top").build().unwrap_err();
+    assert_snapshot!(error.to_string());
+}
+
+#[test]
+fn test_elaborated_mutable_for_bound_error_readability() {
+    let code = r#"
+        module Counter (
+            clk: input clock,
+            count: output logic<8>,
+        ) {
+            always_ff {
+                count += 1;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var count: logic<8>;
+            inst dut: Counter (clk, count);
+            initial {
+                for _i in 0..count {
+                    clk.next();
+                }
+                $finish();
+            }
+        }
+    "#;
+    let error = Simulator::builder(code, "t").build().unwrap_err();
+    assert_snapshot!(error.to_string());
+}

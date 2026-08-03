@@ -165,35 +165,6 @@ fn test_runtime_bounds_in_synth_for_loops(sim) {
     assert_eq!(sim.get(sum_step), 15u32.into());
 }
 
-fn test_loop_bound_is_evaluated_once_before_body(sim) {
-    @setup { let code = r#"
-        module Top (
-            initial_limit: input logic<32>,
-            count: output logic<32>,
-        ) {
-            var limit: logic<32>;
-
-            always_comb {
-                limit = initial_limit;
-                count = 0;
-
-                for _i in 0..limit {
-                    count += 1;
-                    limit = 1;
-                }
-            }
-        }
-    "#; }
-    @build Simulator::builder(code, "Top");
-
-    let initial_limit = sim.signal("initial_limit");
-    let count = sim.signal("count");
-
-    sim.set(initial_limit, 4u32);
-    sim.eval_comb().unwrap();
-    assert_eq!(sim.get(count), 4u32.into());
-}
-
 fn test_runtime_bitwise_steps_in_synth_for_loops(sim) {
     @setup { let code = r#"
         module Top (
