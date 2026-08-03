@@ -167,6 +167,15 @@ fn run() -> Result<(), CeloxHeliodorError> {
             message: "--dump-ir-and-run requires --dump-ir-dir",
         });
     }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )))]
+    if matches!(opts.backend, Backend::Native) {
+        return Err(CeloxHeliodorError::InvalidConfiguration {
+            message: "the custom native backend is unavailable; enable experimental-arm64-backend on AArch64",
+        });
+    }
     let (sources, metadata) = load_sources(&opts.project, &opts.source_files)?;
     let source_refs: Vec<(&str, &Path)> = sources
         .iter()
@@ -309,6 +318,10 @@ fn run() -> Result<(), CeloxHeliodorError> {
         if opts.dump_ir_and_run {
             let testbench =
                 compile_initial_testbench(&sim).ok_or(CeloxHeliodorError::MissingInitialBlock)?;
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            ))]
             sim.start_native_execution_timing();
             let execute_cpu_start = process_cpu_time();
             let execute_start = Instant::now();
@@ -318,10 +331,19 @@ fn run() -> Result<(), CeloxHeliodorError> {
             } else {
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            ))]
             let jit_execute_elapsed = sim
                 .finish_native_execution_timing()
                 .expect("native execution timing was started")
                 .elapsed();
+            #[cfg(not(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            )))]
+            let jit_execute_elapsed = Duration::ZERO;
             let execute_elapsed = execute_start.elapsed();
             let execute_cpu_elapsed = process_cpu_time()
                 .zip(execute_cpu_start)
@@ -377,9 +399,18 @@ fn run() -> Result<(), CeloxHeliodorError> {
     if opts.compile_only {
         let compile_start = Instant::now();
         match opts.backend {
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            ))]
             Backend::Native => {
                 let _sim = builder.build_native()?;
             }
+            #[cfg(not(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            )))]
+            Backend::Native => unreachable!("native backend availability checked above"),
             Backend::Cranelift => {
                 let _sim = builder.build_cranelift()?;
             }
@@ -411,6 +442,10 @@ fn run() -> Result<(), CeloxHeliodorError> {
         jit_execute_elapsed,
         execute_cpu_elapsed,
     ) = match opts.backend {
+        #[cfg(any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        ))]
         Backend::Native => {
             let mut sim = builder.build_native()?;
             let testbench =
@@ -441,6 +476,11 @@ fn run() -> Result<(), CeloxHeliodorError> {
                     .map(|(end, start)| end.saturating_sub(start)),
             )
         }
+        #[cfg(not(any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        )))]
+        Backend::Native => unreachable!("native backend availability checked above"),
         Backend::Cranelift => {
             let mut sim = builder.build_cranelift()?;
             let testbench =

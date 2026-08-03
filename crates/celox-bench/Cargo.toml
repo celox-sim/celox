@@ -8,6 +8,10 @@ license.workspace     = true
 description           = "Macro-benchmark runners for Celox"
 edition.workspace     = true
 
+[features]
+default = []
+experimental-arm64-backend = ["celox/experimental-arm64-backend"]
+
 [dependencies]
 celox           = { path = "../celox" }
 clap            = { workspace = true }

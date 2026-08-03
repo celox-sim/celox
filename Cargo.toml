@@ -3,6 +3,8 @@ members = [
     "crates/celox",
     "crates/celox-analysis",
     "crates/celox-backend-cranelift",
+    "crates/celox-backend-common",
+    "crates/celox-backend-arm64",
     "crates/celox-backend-wasm",
     "crates/celox-backend-x86",
     "crates/celox-bench",

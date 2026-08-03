@@ -72,21 +72,39 @@ pub enum CodegenError {
         source: celox_sir::verify::SirVerifyError,
     },
 
-    #[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "host-runtime",
+        any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        )
+    ))]
     #[error("native emission failed: {source}")]
     NativePipeline {
         #[source]
-        source: celox_backend_x86::native::emit::ChainedEmitError,
+        source: crate::backend::native::emit::ChainedEmitError,
     },
 
-    #[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "host-runtime",
+        any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        )
+    ))]
     #[error("native emission failed: {source}")]
     NativeEmission {
         #[source]
-        source: celox_backend_x86::native::emit::EmitError,
+        source: crate::backend::native::emit::EmitError,
     },
 
-    #[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "host-runtime",
+        any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        )
+    ))]
     #[error("failed to allocate executable native memory: {source}")]
     NativeMemory {
         #[source]

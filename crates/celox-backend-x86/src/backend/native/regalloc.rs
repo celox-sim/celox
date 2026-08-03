@@ -11,6 +11,7 @@ mod cfg;
 mod color;
 mod constraints;
 mod cost;
+mod facts;
 mod home_verify;
 mod interval_union;
 mod legalize;
