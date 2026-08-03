@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785740424014,
+  "lastUpdate": 1785778597806,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -153101,6 +153101,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
             "value": 125432.051961,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+s@gmail.com",
+            "name": "tig",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "debe07eae721dfb6a89d1bbf6e240e8a8895f798",
+          "message": "Merge pull request #430 from celox-sim/feat/mutable-for-bound-analysis\n\nfeat(frontend)!: diagnose mutable for loop bounds",
+          "timestamp": "2026-08-03T16:45:16Z",
+          "tree_id": "4a0532cdad25036823d4fc18e9be6342befc11b6",
+          "url": "https://github.com/celox-sim/celox/commit/debe07eae721dfb6a89d1bbf6e240e8a8895f798"
+        },
+        "date": 1785778585355,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-jit/heliodor_linux_boot_execution",
+            "value": 98150.882963,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-total/heliodor_linux_boot_execution",
+            "value": 98172.07167,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl/heliodor_linux_boot_execution",
+            "value": 115886.010556,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-compile/heliodor_linux_boot_compilation",
+            "value": 154115.735997,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
+            "value": 123700.257343,
             "unit": "ms"
           }
         ]
