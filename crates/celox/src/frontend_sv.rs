@@ -637,7 +637,7 @@ fn lower_module_with_overrides(
 
     for port in module.ports() {
         let id = next_var_id(&mut next_id);
-        let type_info = signal_type_from_sv(port.r#type(), &constants);
+        let type_info = signal_type_from_sv(port.r#type(), &constants)?;
         let path = VarPath::new(resource_table::insert_str(port.name()));
         let kind = signal_kind_from_port_direction(port.direction());
         let variable = SvVariable {
@@ -676,7 +676,7 @@ fn lower_module_with_overrides(
             )));
         }
         let id = next_var_id(&mut next_id);
-        let type_info = signal_type_from_sv(signal.r#type(), &constants);
+        let type_info = signal_type_from_sv(signal.r#type(), &constants)?;
         let path = VarPath::new(resource_table::insert_str(signal.name()));
         let variable = SvVariable {
             id,
@@ -1630,11 +1630,17 @@ struct SvSignalType {
 fn signal_type_from_sv(
     typ: &sv::ir::Type,
     constants: &std::collections::HashMap<String, i128>,
-) -> SvSignalType {
-    let width = sv::typecheck::resolve_packed_width_with_env(typ.packed_ranges(), constants)
-        .or_else(|| typ.resolved_width())
-        .unwrap_or(1)
-        .max(1);
+) -> Result<SvSignalType, sv::AnalyzerError> {
+    let width = if typ.packed_ranges().is_empty() {
+        1
+    } else {
+        sv::typecheck::resolve_packed_width_with_env(typ.packed_ranges(), constants)
+            .or_else(|| typ.resolved_width())
+            .ok_or_else(|| {
+                sv::AnalyzerError::Unsupported("unresolved explicit packed width".to_string())
+            })?
+            .max(1)
+    };
     let signed = typ.is_signed();
     let is_4state = !matches!(typ.kind(), sv::ir::TypeKind::Bit);
     let packed_ranges = typ
@@ -1653,13 +1659,13 @@ fn signal_type_from_sv(
             PortTypeKind::Logic
         }
     };
-    SvSignalType {
+    Ok(SvSignalType {
         width,
         signed,
         is_4state,
         packed_ranges,
         type_kind,
-    }
+    })
 }
 
 fn lower_comb_process(

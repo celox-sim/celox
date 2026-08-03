@@ -4,7 +4,7 @@
 //! `sv-parser` CST, but it is still a language frontend structure rather than
 //! Celox runtime IR.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sv_parser::{Locate, RefNode, SyntaxTree, unwrap_node};
 
@@ -240,6 +240,7 @@ fn reject_silently_ignored_constructs(
     syntax_tree: &SyntaxTree,
 ) -> Result<(), AnalyzerError> {
     let module_scope_signal_names = module_scope_signal_names(node.clone(), syntax_tree);
+    reject_duplicate_conditional_generate_locals(node.clone(), syntax_tree)?;
     if node
         .clone()
         .into_iter()
@@ -682,15 +683,36 @@ impl Parameter {
         self.value.as_ref()
     }
 
-    pub(crate) fn resolved_value(&self, constants: &HashMap<String, i128>) -> Option<i128> {
-        let mut value = self
-            .value()
-            .and_then(|value| typecheck::eval_const_expr(&value.clone().into(), constants))?;
+    pub(crate) fn resolved_value(
+        &self,
+        constants: &HashMap<String, i128>,
+        parameter_types: &HashMap<String, ExprType>,
+    ) -> Option<i128> {
+        let value =
+            substitute_typed_parameter_literals(self.value()?.clone(), constants, parameter_types);
+        let mut value = typecheck::eval_const_expr(&value.into(), constants)?;
         if let Some(width) = self.declared_width {
             value =
                 coerce_const_parameter_value(value, width, self.declared_signed.unwrap_or(false));
         }
         Some(value)
+    }
+
+    pub(crate) fn resolved_type(
+        &self,
+        parameter_types: &HashMap<String, ExprType>,
+    ) -> Option<ExprType> {
+        let inferred = self
+            .value()
+            .and_then(|value| infer_const_expr_type(value, parameter_types));
+        let width = self
+            .declared_width
+            .or(inferred.map(|r#type| r#type.width))?;
+        let signed = self
+            .declared_signed
+            .or(inferred.map(|r#type| r#type.signed))
+            .unwrap_or(false);
+        Some(ExprType { width, signed })
     }
 
     pub(crate) fn declared_width(&self) -> Option<usize> {
@@ -1192,6 +1214,13 @@ struct Function {
 struct FunctionParam {
     name: String,
     width: Option<usize>,
+    signed: bool,
+    is_2state: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FunctionLocalType {
+    width: usize,
     signed: bool,
     is_2state: bool,
 }
@@ -1835,19 +1864,13 @@ fn normalize_unbased_unsized_parameter_value(
 
 fn const_env_from_parameters(parameters: &[Parameter]) -> HashMap<String, i128> {
     let mut env = HashMap::new();
+    let mut parameter_types = HashMap::new();
     for parameter in parameters {
-        let Some(mut value) = parameter
-            .value()
-            .and_then(|value| typecheck::eval_const_expr(&value.clone().into(), &env))
-        else {
+        let Some(value) = parameter.resolved_value(&env, &parameter_types) else {
             continue;
         };
-        if let Some(width) = parameter.declared_width {
-            value = coerce_const_parameter_value(
-                value,
-                width,
-                parameter.declared_signed.unwrap_or(false),
-            );
+        if let Some(r#type) = parameter.resolved_type(&parameter_types) {
+            parameter_types.insert(parameter.name().to_string(), r#type);
         }
         env.insert(parameter.name().to_string(), value);
         env.insert(parameter_marker(parameter.name()), value);
@@ -1984,9 +2007,88 @@ fn format_typed_parameter_literal(value: i128, width: usize, signed: bool) -> St
 }
 
 #[derive(Clone, Copy)]
-struct ExprType {
-    width: usize,
-    signed: bool,
+pub(crate) struct ExprType {
+    pub(crate) width: usize,
+    pub(crate) signed: bool,
+}
+
+fn substitute_typed_parameter_literals(
+    expr: ConstExpr,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, ExprType>,
+) -> ConstExpr {
+    match expr {
+        ConstExpr::Ident(name) => match (constants.get(&name), parameter_types.get(&name)) {
+            (Some(value), Some(r#type)) => ConstExpr::Literal(format_typed_parameter_literal(
+                *value,
+                r#type.width,
+                r#type.signed,
+            )),
+            _ => ConstExpr::Ident(name),
+        },
+        ConstExpr::Literal(value) => ConstExpr::Literal(value),
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: Box::new(substitute_typed_parameter_literals(
+                *expr,
+                constants,
+                parameter_types,
+            )),
+            bit: Box::new(substitute_typed_parameter_literals(
+                *bit,
+                constants,
+                parameter_types,
+            )),
+        },
+        ConstExpr::Function { name, args } => ConstExpr::Function {
+            name,
+            args: args
+                .into_iter()
+                .map(|arg| substitute_typed_parameter_literals(arg, constants, parameter_types))
+                .collect(),
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op,
+            expr: Box::new(substitute_typed_parameter_literals(
+                *expr,
+                constants,
+                parameter_types,
+            )),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: Box::new(substitute_typed_parameter_literals(
+                *left,
+                constants,
+                parameter_types,
+            )),
+            op,
+            right: Box::new(substitute_typed_parameter_literals(
+                *right,
+                constants,
+                parameter_types,
+            )),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: Box::new(substitute_typed_parameter_literals(
+                *condition,
+                constants,
+                parameter_types,
+            )),
+            then_expr: Box::new(substitute_typed_parameter_literals(
+                *then_expr,
+                constants,
+                parameter_types,
+            )),
+            else_expr: Box::new(substitute_typed_parameter_literals(
+                *else_expr,
+                constants,
+                parameter_types,
+            )),
+        },
+    }
 }
 
 fn infer_const_expr_type(
@@ -2581,7 +2683,15 @@ fn function_from_declaration(
                 .as_ref()
                 .map(|ports| tf_params(ports, syntax_tree, const_env, type_aliases))
                 .unwrap_or_default();
-            let expr = function_body_expr(&body.nodes.6, syntax_tree, packed_dimensions)?;
+            let mut local_types = function_local_types_from_block_items(
+                &body.nodes.5,
+                syntax_tree,
+                const_env,
+                type_aliases,
+            )?;
+            insert_function_param_types(&params, &mut local_types);
+            let expr =
+                function_body_expr(&body.nodes.6, syntax_tree, packed_dimensions, &local_types)?;
             let return_type =
                 function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
             let return_is_2state =
@@ -2598,7 +2708,19 @@ fn function_from_declaration(
         sv_parser::FunctionBodyDeclaration::WithoutPort(body) => {
             let name = identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), syntax_tree)?;
             let params = tf_item_params(&body.nodes.4, syntax_tree, const_env, type_aliases);
-            let expr = function_body_expr(&body.nodes.5, syntax_tree, packed_dimensions)?;
+            let block_items = body.nodes.4.iter().filter_map(|item| match item {
+                sv_parser::TfItemDeclaration::BlockItemDeclaration(item) => Some(&**item),
+                sv_parser::TfItemDeclaration::TfPortDeclaration(_) => None,
+            });
+            let mut local_types = function_local_types_from_block_item_iter(
+                block_items,
+                syntax_tree,
+                const_env,
+                type_aliases,
+            )?;
+            insert_function_param_types(&params, &mut local_types);
+            let expr =
+                function_body_expr(&body.nodes.5, syntax_tree, packed_dimensions, &local_types)?;
             let return_type =
                 function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
             let return_is_2state =
@@ -2613,6 +2735,73 @@ fn function_from_declaration(
             })
         }
     }
+}
+
+fn insert_function_param_types(
+    params: &[FunctionParam],
+    local_types: &mut HashMap<String, FunctionLocalType>,
+) {
+    for param in params {
+        if let Some(width) = param.width {
+            local_types.insert(
+                param.name.clone(),
+                FunctionLocalType {
+                    width,
+                    signed: param.signed,
+                    is_2state: param.is_2state,
+                },
+            );
+        }
+    }
+}
+
+fn function_local_types_from_block_items(
+    items: &[sv_parser::BlockItemDeclaration],
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<HashMap<String, FunctionLocalType>> {
+    function_local_types_from_block_item_iter(items.iter(), syntax_tree, const_env, type_aliases)
+}
+
+fn function_local_types_from_block_item_iter<'a>(
+    items: impl IntoIterator<Item = &'a sv_parser::BlockItemDeclaration>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<HashMap<String, FunctionLocalType>> {
+    let mut local_types = HashMap::new();
+    for item in items {
+        let sv_parser::BlockItemDeclaration::Data(item) = item else {
+            continue;
+        };
+        let signals =
+            signals_from_data_declaration(&item.nodes.1, syntax_tree, type_aliases).ok()?;
+        for signal in signals {
+            let r#type = signal.r#type();
+            let width = if r#type.packed_ranges().is_empty() {
+                1
+            } else {
+                r#type
+                    .packed_ranges()
+                    .iter()
+                    .try_fold(1usize, |acc, range| {
+                        let left = eval_ast_const_expr(range.left(), const_env)?;
+                        let right = eval_ast_const_expr(range.right(), const_env)?;
+                        acc.checked_mul(left.abs_diff(right) as usize + 1)
+                    })?
+            };
+            local_types.insert(
+                signal.name().to_string(),
+                FunctionLocalType {
+                    width,
+                    signed: r#type.is_signed(),
+                    is_2state: r#type.kind() == TypeKind::Bit,
+                },
+            );
+        }
+    }
+    Some(local_types)
 }
 
 fn function_return_is_2state(
@@ -2891,6 +3080,7 @@ fn function_body_expr(
     statements: &[sv_parser::FunctionStatementOrNull],
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
     let mut locals = HashMap::new();
     for statement in statements {
@@ -2899,6 +3089,7 @@ fn function_body_expr(
             &mut locals,
             syntax_tree,
             packed_dimensions,
+            local_types,
         ) {
             return Some(expr);
         }
@@ -2911,11 +3102,18 @@ fn function_expr_from_statement_or_null(
     locals: &mut HashMap<String, Expr>,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
     let sv_parser::FunctionStatementOrNull::Statement(statement) = statement else {
         return None;
     };
-    function_expr_from_statement(&statement.nodes.0, locals, syntax_tree, packed_dimensions)
+    function_expr_from_statement(
+        &statement.nodes.0,
+        locals,
+        syntax_tree,
+        packed_dimensions,
+        local_types,
+    )
 }
 
 fn function_expr_from_statement_or_null_stmt(
@@ -2923,11 +3121,18 @@ fn function_expr_from_statement_or_null_stmt(
     locals: &mut HashMap<String, Expr>,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
     let sv_parser::StatementOrNull::Statement(statement) = statement else {
         return None;
     };
-    function_expr_from_statement(statement, locals, syntax_tree, packed_dimensions)
+    function_expr_from_statement(
+        statement,
+        locals,
+        syntax_tree,
+        packed_dimensions,
+        local_types,
+    )
 }
 
 fn function_expr_from_statement(
@@ -2935,6 +3140,7 @@ fn function_expr_from_statement(
     locals: &mut HashMap<String, Expr>,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
     match &statement.nodes.2 {
         sv_parser::StatementItem::JumpStatement(statement) => {
@@ -2980,7 +3186,13 @@ fn function_expr_from_statement(
                 return None;
             };
             if let Some(rhs) = rhs {
-                locals.insert(name, substitute_expr_idents(rhs, locals));
+                let rhs = substitute_expr_idents(rhs, locals);
+                let rhs = local_types
+                    .get(&name)
+                    .copied()
+                    .map(|r#type| coerce_function_local_assignment(rhs.clone(), r#type))
+                    .unwrap_or(rhs);
+                locals.insert(name, rhs);
             }
             None
         }
@@ -2992,6 +3204,7 @@ fn function_expr_from_statement(
                     &mut block_locals,
                     syntax_tree,
                     packed_dimensions,
+                    local_types,
                 ) {
                     return Some(expr);
                 }
@@ -3005,11 +3218,16 @@ fn function_expr_from_statement(
                 locals,
                 syntax_tree,
                 packed_dimensions,
+                local_types,
             )
         }
-        sv_parser::StatementItem::CaseStatement(statement) => {
-            function_expr_from_case_statement(statement, locals, syntax_tree, packed_dimensions)
-        }
+        sv_parser::StatementItem::CaseStatement(statement) => function_expr_from_case_statement(
+            statement,
+            locals,
+            syntax_tree,
+            packed_dimensions,
+            local_types,
+        ),
         _ => None,
     }
 }
@@ -3019,6 +3237,7 @@ fn function_expr_from_conditional_statement(
     locals: &mut HashMap<String, Expr>,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
     let mut branches = Vec::new();
     let if_condition =
@@ -3029,6 +3248,7 @@ fn function_expr_from_conditional_statement(
         &mut then_locals,
         syntax_tree,
         packed_dimensions,
+        local_types,
     );
     branches.push((
         procedural_truth_condition(substitute_expr_idents(if_condition, locals)),
@@ -3045,6 +3265,7 @@ fn function_expr_from_conditional_statement(
             &mut branch_locals,
             syntax_tree,
             packed_dimensions,
+            local_types,
         );
         branches.push((
             procedural_truth_condition(substitute_expr_idents(condition, locals)),
@@ -3061,6 +3282,7 @@ fn function_expr_from_conditional_statement(
                 &mut branch_locals,
                 syntax_tree,
                 packed_dimensions,
+                local_types,
             ),
             branch_locals,
         )
@@ -3106,6 +3328,22 @@ fn function_expr_from_conditional_statement(
     })
 }
 
+fn coerce_function_local_assignment(expr: Expr, r#type: FunctionLocalType) -> Expr {
+    let expr = Expr::Resize {
+        expr: Box::new(expr),
+        width: r#type.width,
+        signed: r#type.signed,
+    };
+    if r#type.is_2state {
+        Expr::Unary {
+            op: UnaryOp::ToTwoState,
+            expr: Box::new(expr),
+        }
+    } else {
+        expr
+    }
+}
+
 fn procedural_truth_condition(condition: Expr) -> Expr {
     Expr::Unary {
         op: UnaryOp::RedOr,
@@ -3121,6 +3359,7 @@ fn function_expr_from_case_statement(
     locals: &mut HashMap<String, Expr>,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
     let sv_parser::CaseStatement::Normal(statement) = statement else {
         return None;
@@ -3142,6 +3381,7 @@ fn function_expr_from_case_statement(
                     &mut branch_locals,
                     syntax_tree,
                     packed_dimensions,
+                    local_types,
                 );
                 let conditions = item
                     .nodes
@@ -3173,6 +3413,7 @@ fn function_expr_from_case_statement(
                         &mut branch_locals,
                         syntax_tree,
                         packed_dimensions,
+                        local_types,
                     ),
                     branch_locals,
                 );
@@ -3536,6 +3777,133 @@ fn module_scope_signal_names(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Vec
         })
         .map(|signal| signal.name)
         .collect()
+}
+
+fn reject_duplicate_conditional_generate_locals(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+) -> Result<(), AnalyzerError> {
+    let mut signal_names = HashSet::new();
+    let mut parameter_names = HashSet::new();
+    for child in node {
+        let RefNode::ConditionalGenerateConstruct(sv_parser::ConditionalGenerateConstruct::If(
+            generate,
+        )) = child
+        else {
+            continue;
+        };
+        let blocks = std::iter::once(&generate.nodes.2).chain(
+            generate
+                .nodes
+                .3
+                .as_ref()
+                .into_iter()
+                .map(|(_, block)| block),
+        );
+        for block in blocks {
+            for name in generate_block_direct_data_declaration_names(block, syntax_tree) {
+                if signal_names.insert(name) {
+                    continue;
+                }
+                return Err(AnalyzerError::Unsupported(
+                    "local data declaration inside conditional-generate".to_string(),
+                ));
+            }
+            for name in generate_block_direct_local_parameter_names(block, syntax_tree) {
+                if parameter_names.insert(name) {
+                    continue;
+                }
+                return Err(AnalyzerError::Unsupported(
+                    "local data declaration inside conditional-generate".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn generate_block_direct_data_declaration_names(
+    block: &sv_parser::GenerateBlock,
+    syntax_tree: &SyntaxTree,
+) -> Vec<String> {
+    let aliases = HashMap::new();
+    let mut names = Vec::new();
+    visit_direct_generate_items(block, |item| {
+        let Some(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data)) =
+            package_declaration_from_generate_item(item)
+        else {
+            return;
+        };
+        names.extend(
+            signals_from_data_declaration(data, syntax_tree, &aliases)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|signal| signal.name),
+        );
+    });
+    names
+}
+
+fn generate_block_direct_local_parameter_names(
+    block: &sv_parser::GenerateBlock,
+    syntax_tree: &SyntaxTree,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    visit_direct_generate_items(block, |item| {
+        let Some(sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(
+            localparam,
+        )) = package_declaration_from_generate_item(item)
+        else {
+            return;
+        };
+        let mut parameters = Vec::new();
+        if parameters_from_ref_node(
+            RefNode::LocalParameterDeclaration(&localparam.0),
+            syntax_tree,
+            &mut parameters,
+            true,
+        )
+        .is_ok()
+        {
+            names.extend(parameters.into_iter().map(|parameter| parameter.name));
+        }
+    });
+    names
+}
+
+fn visit_direct_generate_items(
+    block: &sv_parser::GenerateBlock,
+    mut visit: impl FnMut(&sv_parser::GenerateItem),
+) {
+    match block {
+        sv_parser::GenerateBlock::GenerateItem(item) => visit(item),
+        sv_parser::GenerateBlock::Multiple(block) => {
+            for item in &block.nodes.3 {
+                visit(item);
+            }
+        }
+    }
+}
+
+fn package_declaration_from_generate_item(
+    item: &sv_parser::GenerateItem,
+) -> Option<&sv_parser::PackageOrGenerateItemDeclaration> {
+    let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item else {
+        return None;
+    };
+    let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = &**item else {
+        return None;
+    };
+    let sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) = &item.nodes.1
+    else {
+        return None;
+    };
+    let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(declaration) =
+        &**declaration
+    else {
+        return None;
+    };
+    Some(declaration)
 }
 
 fn conditional_generate_local_collides(

@@ -88,6 +88,11 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
                 BinaryOp::Div => left.checked_div(right),
                 BinaryOp::Mod => left.checked_rem(right),
                 BinaryOp::Shl => shift_amount(right).and_then(|right| left.checked_shl(right)),
+                // The untyped constant environment cannot recover the declared
+                // width needed to zero-fill a negative value. Typed parameter
+                // evaluation substitutes a sized literal before reaching this
+                // fallback; reject any remaining ambiguous logical shift.
+                BinaryOp::Shr if left.is_negative() => None,
                 BinaryOp::Shr => shift_amount(right).and_then(|right| left.checked_shr(right)),
                 BinaryOp::Sar => shift_amount(right).and_then(|right| left.checked_shr(right)),
                 BinaryOp::BitAnd => Some(left & right),
@@ -281,7 +286,23 @@ fn eval_literal_unary(op: UnaryOp, literal: &str) -> Option<i128> {
     let value = literal_as_i128(literal_text)?;
     match op {
         UnaryOp::Plus => Some(value),
-        UnaryOp::Minus => value.checked_neg(),
+        UnaryOp::Minus => {
+            let modulus = BigUint::from(1u8) << literal.width;
+            let negated = if literal.value == BigUint::default() {
+                BigUint::default()
+            } else {
+                &modulus - literal.value
+            };
+            integral_literal_as_i128(
+                &IntegralLiteral {
+                    width: literal.width,
+                    signed: literal.signed,
+                    value: negated,
+                    mask: BigUint::default(),
+                },
+                literal.signed,
+            )
+        }
         UnaryOp::BitNot if literal.signed => Some(!value),
         UnaryOp::BitNot => {
             let width_mask = (BigUint::from(1u8) << literal.width) - BigUint::from(1u8);
@@ -803,6 +824,16 @@ mod literal_tests {
 
         assert_eq!(eval_const_expr(&minus, &HashMap::new()), Some(1));
         assert_eq!(eval_const_expr(&bit_not, &HashMap::new()), Some(-1));
+    }
+
+    #[test]
+    fn wraps_unsigned_literal_negation_to_its_width() {
+        let expr = ConstExpr::Unary {
+            op: UnaryOp::Minus,
+            expr: Box::new(ConstExpr::Literal("8'd1".to_string())),
+        };
+
+        assert_eq!(eval_const_expr(&expr, &HashMap::new()), Some(0xff));
     }
 
     #[test]

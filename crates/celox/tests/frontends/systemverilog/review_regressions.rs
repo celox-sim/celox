@@ -89,6 +89,26 @@ fn evaluates_sized_arithmetic_and_logical_right_shift_parameters() {
 }
 
 #[test]
+fn preserves_declared_width_for_parameter_logical_right_shifts() {
+    let source = r#"
+        module Top(output logic [7:0] shifted, output logic negation_matches);
+            parameter logic signed [7:0] P = -2;
+            parameter logic [7:0] Q = P >> 1;
+            parameter NEGATED = -8'd1;
+            parameter NEGATION_MATCHES = (NEGATED == 8'hff);
+            assign shifted = Q;
+            assign negation_matches = NEGATION_MATCHES;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("typed_parameter_ops.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("shifted")), 0x7fu8.into());
+    assert_eq!(sim.get(sim.signal("negation_matches")), 1u8.into());
+}
+
+#[test]
 fn coerces_ir_parameter_constants_to_their_declared_widths() {
     let source = r#"
         module Top #(
@@ -345,6 +365,44 @@ fn converts_unknown_bits_when_assigning_to_bit() {
     assert_eq!(
         sim.get_four_state(y),
         (BigUint::from(0u8), BigUint::from(0u8))
+    );
+}
+
+#[test]
+fn coerces_assignments_to_declared_function_local_types() {
+    let source = r#"
+        module Top(input logic [7:0] a, input logic x,
+                   output logic [7:0] truncated, output logic two_state);
+            function automatic logic [7:0] truncate(input logic [7:0] value);
+                logic [3:0] tmp;
+                tmp = value;
+                return tmp;
+            endfunction
+            function automatic logic convert(input logic value);
+                bit tmp;
+                tmp = value;
+                return tmp;
+            endfunction
+            assign truncated = truncate(a);
+            assign two_state = convert(x);
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("function_local_types.sv"))], "Top")
+            .four_state(true)
+            .build_cranelift()
+            .unwrap();
+    let a = sim.signal("a");
+    let x = sim.signal("x");
+    sim.modify(|io| {
+        io.set(a, 0xabu8);
+        io.set_four_state(x, BigUint::from(1u8), BigUint::from(1u8));
+    })
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("truncated")), 0x0bu8.into());
+    assert_eq!(
+        sim.get_four_state(sim.signal("two_state")),
+        (BigUint::default(), BigUint::default())
     );
 }
 
@@ -1453,6 +1511,46 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(output logic y);
                 if (2 ** 3) assign y = 1'b1;
                 else assign y = 1'b0;
+            endmodule
+        "#,
+        ),
+        (
+            "local data declaration inside conditional-generate",
+            r#"
+            module Top #(parameter SELECT = 1) (input logic clk, output logic q);
+                if (SELECT) begin : selected
+                    localparam VALUE = 1'b1;
+                    always_ff @(posedge clk) q <= VALUE;
+                end else begin : unselected
+                    localparam VALUE = 1'b0;
+                    always_ff @(posedge clk) q <= VALUE;
+                end
+            endmodule
+        "#,
+        ),
+        (
+            "local data declaration inside conditional-generate",
+            r#"
+            module Top(output logic a_value, output logic b_value);
+                if (1) begin : a
+                    logic tmp;
+                    assign tmp = 1'b0;
+                    assign a_value = tmp;
+                end
+                if (1) begin : b
+                    logic tmp;
+                    assign tmp = 1'b1;
+                    assign b_value = tmp;
+                end
+            endmodule
+        "#,
+        ),
+        (
+            "unresolved explicit packed width",
+            r#"
+            module Top #(parameter W = 2 ** 3)
+                      (input logic [W-1:0] a, output logic [W-1:0] y);
+                assign y = a;
             endmodule
         "#,
         ),

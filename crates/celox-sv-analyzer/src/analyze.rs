@@ -13,14 +13,18 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
     for module in source.modules() {
         let id = module_table.insert(module)?;
         let mut constants = HashMap::new();
+        let mut parameter_types = HashMap::new();
         let mut parameter_table = ParameterTable::default();
         let mut parameters = Vec::new();
         for parameter in module.parameters() {
             parameter_table.insert(module, parameter)?;
             let value: Option<ir::ConstExpr> = parameter.value().cloned().map(Into::into);
-            let resolved_value = parameter.resolved_value(&constants);
+            let resolved_value = parameter.resolved_value(&constants, &parameter_types);
             if let Some(resolved_value) = resolved_value {
                 constants.insert(parameter.name().to_string(), resolved_value);
+            }
+            if let Some(r#type) = parameter.resolved_type(&parameter_types) {
+                parameter_types.insert(parameter.name().to_string(), r#type);
             }
             parameters.push(ir::Parameter::new(
                 parameter.name().to_string(),
