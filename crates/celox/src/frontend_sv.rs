@@ -1866,6 +1866,84 @@ fn lower_expr_to_sir(
     lower_expr_to_sir_with_context(builder, expr, variables, name_to_id, constants, None)
 }
 
+fn sv_expr_natural_width(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<VarId, SvVariable>,
+    name_to_id: &HashMap<String, VarId>,
+    constants: &std::collections::HashMap<String, i128>,
+) -> Option<usize> {
+    match expr {
+        sv::ir::Expr::Ident(name) => name_to_id
+            .get(name)
+            .and_then(|id| variables.get(id))
+            .map_or_else(
+                || constants.contains_key(name).then_some(32),
+                |var| Some(var.width),
+            ),
+        sv::ir::Expr::Literal(literal) => {
+            Some(sv::typecheck::parse_integral_literal(literal)?.width)
+        }
+        sv::ir::Expr::Select { msb, lsb, .. } => {
+            let msb = sv::typecheck::eval_const_expr(msb, constants)?;
+            let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
+            usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)
+        }
+        sv::ir::Expr::Resize { width, .. } => Some(*width),
+        sv::ir::Expr::Unary { expr, .. } => {
+            sv_expr_natural_width(expr, variables, name_to_id, constants)
+        }
+        sv::ir::Expr::Binary { left, op, right } => {
+            if matches!(
+                op,
+                sv::ir::BinaryOp::LogicAnd
+                    | sv::ir::BinaryOp::LogicOr
+                    | sv::ir::BinaryOp::Eq
+                    | sv::ir::BinaryOp::Ne
+                    | sv::ir::BinaryOp::EqCase
+                    | sv::ir::BinaryOp::NeCase
+                    | sv::ir::BinaryOp::EqWildcard
+                    | sv::ir::BinaryOp::NeWildcard
+                    | sv::ir::BinaryOp::Lt
+                    | sv::ir::BinaryOp::Le
+                    | sv::ir::BinaryOp::Gt
+                    | sv::ir::BinaryOp::Ge
+            ) {
+                Some(1)
+            } else {
+                Some(
+                    sv_expr_natural_width(left, variables, name_to_id, constants)?.max(
+                        sv_expr_natural_width(right, variables, name_to_id, constants)?,
+                    ),
+                )
+            }
+        }
+        sv::ir::Expr::Concat(parts) => parts.iter().try_fold(0usize, |width, part| {
+            width.checked_add(sv_expr_natural_width(
+                part, variables, name_to_id, constants,
+            )?)
+        }),
+        sv::ir::Expr::RepeatConcat { count, parts } => {
+            let count = usize::try_from(sv::typecheck::eval_const_expr(count, constants)?).ok()?;
+            let parts_width = parts.iter().try_fold(0usize, |width, part| {
+                width.checked_add(sv_expr_natural_width(
+                    part, variables, name_to_id, constants,
+                )?)
+            })?;
+            count.checked_mul(parts_width)
+        }
+        sv::ir::Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => Some(
+            sv_expr_natural_width(then_expr, variables, name_to_id, constants)?.max(
+                sv_expr_natural_width(else_expr, variables, name_to_id, constants)?,
+            ),
+        ),
+        sv::ir::Expr::Call { .. } => None,
+    }
+}
+
 fn lower_expr_to_sir_with_context(
     builder: &mut SIRBuilder<RegionedVarAddr>,
     expr: &sv::ir::Expr,
@@ -1977,10 +2055,16 @@ fn lower_expr_to_sir_with_context(
             );
             let context_determined = !comparison
                 && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
-            let left_context = context_determined.then_some(context_width).flatten();
+            let operation_context = context_width.map(|context_width| {
+                context_width.max(
+                    sv_expr_natural_width(expr, variables, name_to_id, constants)
+                        .unwrap_or(context_width),
+                )
+            });
+            let left_context = context_determined.then_some(operation_context).flatten();
             let right_context = (context_determined
                 && !matches!(op, sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr))
-            .then_some(context_width)
+            .then_some(operation_context)
             .flatten();
             let right_fill = match &**right {
                 sv::ir::Expr::Literal(literal) => unbased_fill_literal(literal),

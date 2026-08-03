@@ -917,6 +917,7 @@ sv_backends! {
             output logic [7:0] q_wide_parameter,
             output logic [7:0] q_wide_fill,
             output logic [7:0] q_wide_expression,
+            output logic [7:0] q_natural_width,
             output logic [63:0] q_fill,
             output logic [63:0] q_shift
         );
@@ -946,6 +947,10 @@ sv_backends! {
                 case (wide_expr_mode)
                     WIDE_SHIFT: q_wide_expression <= 8'hd8;
                     default: q_wide_expression <= 0;
+                endcase
+                case (mode)
+                    0: q_natural_width <= 16'h0100 / 16'd2;
+                    default: q_natural_width <= 0;
                 endcase
                 case (mode)
                     0: q_fill <= '1;
@@ -985,6 +990,7 @@ sv_backends! {
     assert_eq!(sim.get(sim.signal("q_wide_parameter")), 0xb6u8.into());
     assert_eq!(sim.get(sim.signal("q_wide_fill")), 0xc7u8.into());
     assert_eq!(sim.get(sim.signal("q_wide_expression")), 0xd8u8.into());
+    assert_eq!(sim.get(sim.signal("q_natural_width")), 0x80u8.into());
     assert_eq!(sim.get(sim.signal("q_fill")), u64::MAX.into());
     assert_eq!(sim.get(sim.signal("q_shift")), (1u64 << 40).into());
     }
@@ -1009,6 +1015,7 @@ sv_backends! {
             output logic [7:0] q_function_integer,
             output logic [7:0] q_function_typedef,
             output logic [7:0] q_function_nonansi,
+            output logic [7:0] q_function_inherited_param,
             output logic q_const_case_equality,
             output logic q_const_case_fill,
             output logic q_const_wildcard_equality
@@ -1056,6 +1063,10 @@ sv_backends! {
                 return value === 0;
             endfunction
 
+            function automatic logic grouped(input logic [3:0] a, b);
+                return b === 4'b0100;
+            endfunction
+
             always_ff @(posedge clk) begin
                 q_unrelated <= d;
                 case (decode(mode))
@@ -1095,6 +1106,10 @@ sv_backends! {
                 case (decode_nonansi(4'b0100))
                     1'b1: q_function_nonansi <= 8'hab;
                     default: q_function_nonansi <= 0;
+                endcase
+                case (grouped(0, 4'b0100))
+                    1'b1: q_function_inherited_param <= 8'hbc;
+                    default: q_function_inherited_param <= 0;
                 endcase
                 q_const_case_equality <= MATCH_X;
                 q_const_case_fill <= MATCH_FILL;
@@ -1137,6 +1152,10 @@ sv_backends! {
     assert_eq!(sim.get(sim.signal("q_function_integer")), 0xe9u8.into());
     assert_eq!(sim.get(sim.signal("q_function_typedef")), 0xfau8.into());
     assert_eq!(sim.get(sim.signal("q_function_nonansi")), 0xabu8.into());
+    assert_eq!(
+        sim.get(sim.signal("q_function_inherited_param")),
+        0xbcu8.into(),
+    );
     assert_eq!(sim.get(sim.signal("q_const_case_equality")), 1u8.into());
     assert_eq!(sim.get(sim.signal("q_const_case_fill")), 1u8.into());
     assert_eq!(
@@ -1167,6 +1186,10 @@ sv_backends! {
     assert_eq!(sim.get(sim.signal("q_function_integer")), 0xe9u8.into());
     assert_eq!(sim.get(sim.signal("q_function_typedef")), 0xfau8.into());
     assert_eq!(sim.get(sim.signal("q_function_nonansi")), 0xabu8.into());
+    assert_eq!(
+        sim.get(sim.signal("q_function_inherited_param")),
+        0xbcu8.into(),
+    );
     assert_eq!(sim.get(sim.signal("q_const_case_equality")), 1u8.into());
     assert_eq!(sim.get(sim.signal("q_const_case_fill")), 1u8.into());
     assert_eq!(

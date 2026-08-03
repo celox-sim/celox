@@ -1971,26 +1971,57 @@ fn tf_params(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Vec<FunctionParam> {
-    list.nodes
-        .0
-        .contents()
-        .into_iter()
-        .filter_map(|port| {
-            let (identifier, _, _) = port.nodes.4.as_ref()?;
-            let name = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)?;
-            let r#type = value_type_from_ref_node(
-                RefNode::DataTypeOrImplicit(&port.nodes.3),
-                syntax_tree,
-                const_env,
-                type_aliases,
-            );
-            Some(FunctionParam {
-                name,
-                width: r#type.map(|r#type| r#type.width),
-                signed: r#type.is_some_and(|r#type| r#type.signed),
-            })
-        })
-        .collect()
+    let mut params = Vec::new();
+    let mut previous_type = None;
+    for port in list.nodes.0.contents() {
+        let type_node = RefNode::DataTypeOrImplicit(&port.nodes.3);
+        let inferred_type =
+            value_type_from_ref_node(type_node.clone(), syntax_tree, const_env, type_aliases);
+        let omitted_type = matches!(
+            port.nodes.3,
+            sv_parser::DataTypeOrImplicit::ImplicitDataType(_)
+        ) && is_signed_from_ref_node(type_node.clone()).is_none()
+            && packed_ranges_from_ref_node(type_node.clone(), syntax_tree).is_empty();
+        let (name, r#type) = if let Some((identifier, _, _)) = port.nodes.4.as_ref() {
+            let Some(name) = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
+            else {
+                continue;
+            };
+            let r#type = if port.nodes.1.is_none() && omitted_type {
+                previous_type.or(inferred_type)
+            } else {
+                inferred_type
+            };
+            (name, r#type)
+        } else {
+            // An identifier following a comma is syntactically ambiguous with a
+            // user-defined type. sv-parser represents the shorthand `a, b` as a
+            // type-only item, so reinterpret an unknown type name as the next
+            // parameter and inherit the preceding item's type.
+            if type_alias_from_ref_node(type_node.clone(), syntax_tree, type_aliases).is_some() {
+                continue;
+            }
+            let Some(name) = identifier_text(type_node, syntax_tree) else {
+                continue;
+            };
+            let r#type = if port.nodes.1.is_none() {
+                previous_type
+            } else {
+                Some(ExprType {
+                    width: 1,
+                    signed: false,
+                })
+            };
+            (name, r#type)
+        };
+        previous_type = r#type;
+        params.push(FunctionParam {
+            name,
+            width: r#type.map(|r#type| r#type.width),
+            signed: r#type.is_some_and(|r#type| r#type.signed),
+        });
+    }
+    params
 }
 
 fn tf_item_params(
