@@ -1033,6 +1033,45 @@ fn test_ff_function_argument_array_literal_multiple_default_is_rejected_by_shape
 }
 
 #[test]
+fn test_ff_function_call_rejects_unpacked_input_aliased_by_later_effect() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            var samples: logic<8>[2];
+
+            function pick (
+                values: input logic<8>[2],
+                ignored: input logic<8>
+            ) -> logic<8> {
+                return values[0];
+            }
+
+            function update (value: output logic<8>) -> logic<8> {
+                value = 8'h00;
+                return 8'h00;
+            }
+
+            always_ff (clk) {
+                out_q = pick(samples, update(samples[0]));
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("an unpacked input must not observe a later aliased output effect lazily");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 43);
+            assert_eq!(*feature, "unpacked function argument aliases later effect");
+        }
+        other => panic!("expected unpacked input aliasing error, got: {other:?}"),
+    }
+}
+
+#[test]
 fn test_ff_function_runtime_effect_in_for_bound_is_detected() {
     let code = r#"
         module Top (

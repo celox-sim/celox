@@ -2192,6 +2192,196 @@ impl<'a> FfParser<'a> {
         }
     }
 
+    fn collect_expression_array_variables(
+        &self,
+        expr: &Expression,
+        variables: &mut HashSet<VarId>,
+    ) {
+        let collect_input = |input: &veryl_analyzer::ir::SystemFunctionInput,
+                             variables: &mut HashSet<VarId>| {
+            self.collect_expression_array_variables(&input.0, variables)
+        };
+        match expr {
+            Expression::Term(factor) => match factor.as_ref() {
+                Factor::Variable(id, index, select, _) => {
+                    if self
+                        .module
+                        .variables
+                        .get(id)
+                        .is_some_and(|variable| !variable.r#type.array.is_empty())
+                    {
+                        variables.insert(*id);
+                    }
+                    for expr in &index.0 {
+                        self.collect_expression_array_variables(expr, variables);
+                    }
+                    for expr in &select.0 {
+                        self.collect_expression_array_variables(expr, variables);
+                    }
+                    if let Some((_, expr)) = &select.1 {
+                        self.collect_expression_array_variables(expr, variables);
+                    }
+                }
+                Factor::FunctionCall(call) => {
+                    for expr in call.inputs.values() {
+                        self.collect_expression_array_variables(expr, variables);
+                    }
+                    for dst in call.outputs.values().flatten() {
+                        if self
+                            .module
+                            .variables
+                            .get(&dst.id)
+                            .is_some_and(|variable| !variable.r#type.array.is_empty())
+                        {
+                            variables.insert(dst.id);
+                        }
+                    }
+                }
+                Factor::SystemFunctionCall(call) => match &call.kind {
+                    SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
+                        for arg in args {
+                            collect_input(arg, variables);
+                        }
+                    }
+                    SystemFunctionKind::Assert { cond, args, .. } => {
+                        collect_input(cond, variables);
+                        for arg in args {
+                            collect_input(arg, variables);
+                        }
+                    }
+                    SystemFunctionKind::Bits(input)
+                    | SystemFunctionKind::Size(input)
+                    | SystemFunctionKind::Clog2(input)
+                    | SystemFunctionKind::Onehot(input)
+                    | SystemFunctionKind::Signed(input)
+                    | SystemFunctionKind::Unsigned(input) => collect_input(input, variables),
+                    SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => {}
+                },
+                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+            },
+            Expression::Binary(lhs, _, rhs, _) => {
+                self.collect_expression_array_variables(lhs, variables);
+                self.collect_expression_array_variables(rhs, variables);
+            }
+            Expression::Unary(_, inner, _) => {
+                self.collect_expression_array_variables(inner, variables)
+            }
+            Expression::Ternary(cond, then_expr, else_expr, _) => {
+                self.collect_expression_array_variables(cond, variables);
+                self.collect_expression_array_variables(then_expr, variables);
+                self.collect_expression_array_variables(else_expr, variables);
+            }
+            Expression::Concatenation(items, _) => {
+                for (expr, repeat) in items {
+                    self.collect_expression_array_variables(expr, variables);
+                    if let Some(repeat) = repeat {
+                        self.collect_expression_array_variables(repeat, variables);
+                    }
+                }
+            }
+            Expression::ArrayLiteral(items, _) => {
+                for item in items {
+                    match item {
+                        ArrayLiteralItem::Value(expr, repeat) => {
+                            self.collect_expression_array_variables(expr, variables);
+                            if let Some(repeat) = repeat {
+                                self.collect_expression_array_variables(repeat, variables);
+                            }
+                        }
+                        ArrayLiteralItem::Defaul(expr) => {
+                            self.collect_expression_array_variables(expr, variables);
+                        }
+                    }
+                }
+            }
+            Expression::StructConstructor(_, fields, _) => {
+                for (_, expr) in fields {
+                    self.collect_expression_array_variables(expr, variables);
+                }
+            }
+        }
+    }
+
+    fn expression_writes_any(expr: &Expression, candidates: &HashSet<VarId>) -> bool {
+        match expr {
+            Expression::Term(factor) => match factor.as_ref() {
+                Factor::FunctionCall(call) => {
+                    call.outputs
+                        .values()
+                        .flatten()
+                        .any(|dst| candidates.contains(&dst.id))
+                        || call
+                            .inputs
+                            .values()
+                            .any(|expr| Self::expression_writes_any(expr, candidates))
+                }
+                Factor::Variable(_, index, select, _) => {
+                    index
+                        .0
+                        .iter()
+                        .any(|expr| Self::expression_writes_any(expr, candidates))
+                        || select
+                            .0
+                            .iter()
+                            .any(|expr| Self::expression_writes_any(expr, candidates))
+                        || select
+                            .1
+                            .as_ref()
+                            .is_some_and(|(_, expr)| Self::expression_writes_any(expr, candidates))
+                }
+                Factor::SystemFunctionCall(call) => match &call.kind {
+                    SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => args
+                        .iter()
+                        .any(|arg| Self::expression_writes_any(&arg.0, candidates)),
+                    SystemFunctionKind::Assert { cond, args, .. } => {
+                        Self::expression_writes_any(&cond.0, candidates)
+                            || args
+                                .iter()
+                                .any(|arg| Self::expression_writes_any(&arg.0, candidates))
+                    }
+                    SystemFunctionKind::Bits(input)
+                    | SystemFunctionKind::Size(input)
+                    | SystemFunctionKind::Clog2(input)
+                    | SystemFunctionKind::Onehot(input)
+                    | SystemFunctionKind::Signed(input)
+                    | SystemFunctionKind::Unsigned(input) => {
+                        Self::expression_writes_any(&input.0, candidates)
+                    }
+                    SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
+                },
+                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+            },
+            Expression::Binary(lhs, _, rhs, _) => {
+                Self::expression_writes_any(lhs, candidates)
+                    || Self::expression_writes_any(rhs, candidates)
+            }
+            Expression::Unary(_, inner, _) => Self::expression_writes_any(inner, candidates),
+            Expression::Ternary(cond, then_expr, else_expr, _) => {
+                Self::expression_writes_any(cond, candidates)
+                    || Self::expression_writes_any(then_expr, candidates)
+                    || Self::expression_writes_any(else_expr, candidates)
+            }
+            Expression::Concatenation(items, _) => items.iter().any(|(expr, repeat)| {
+                Self::expression_writes_any(expr, candidates)
+                    || repeat
+                        .as_ref()
+                        .is_some_and(|repeat| Self::expression_writes_any(repeat, candidates))
+            }),
+            Expression::ArrayLiteral(items, _) => items.iter().any(|item| match item {
+                ArrayLiteralItem::Value(expr, repeat) => {
+                    Self::expression_writes_any(expr, candidates)
+                        || repeat
+                            .as_ref()
+                            .is_some_and(|repeat| Self::expression_writes_any(repeat, candidates))
+                }
+                ArrayLiteralItem::Defaul(expr) => Self::expression_writes_any(expr, candidates),
+            }),
+            Expression::StructConstructor(_, fields, _) => fields
+                .iter()
+                .any(|(_, expr)| Self::expression_writes_any(expr, candidates)),
+        }
+    }
+
     fn materialize_function_inputs<A>(
         &mut self,
         call: &veryl_analyzer::ir::FunctionCall,
@@ -2230,6 +2420,22 @@ impl<'a> FfParser<'a> {
             let must_snapshot_for_order = last_effectful_arg.is_some_and(|last| arg_index <= last);
             let formal = &self.module.variables[arg_id];
             if !formal.r#type.array.is_empty() {
+                let mut referenced_variables = HashSet::default();
+                self.collect_expression_array_variables(actual, &mut referenced_variables);
+                let aliases_later_write = ordered_arg_paths
+                    .iter()
+                    .skip(arg_index + 1)
+                    .filter_map(|path| call.inputs.get(path))
+                    .any(|expr| Self::expression_writes_any(expr, &referenced_variables));
+                if aliases_later_write || !referenced_variables.is_disjoint(&output_ids) {
+                    return Err(ParserError::unsupported(
+                        43,
+                        LoweringPhase::FfLowering,
+                        "unpacked function argument aliases later effect",
+                        format!("{actual}"),
+                        Some(&call.comptime.token),
+                    ));
+                }
                 // Array arguments are represented by call-scoped views. The
                 // view snapshots each observed element in source order while
                 // leaving unobserved, side-effect-free elements lazy; a scalar
