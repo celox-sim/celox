@@ -266,10 +266,18 @@ struct FunctionArrayView {
     owns_backing: bool,
     // Lazily evaluated literal items are keyed by their structural path in
     // the bound array literal so the cache survives cloned bindings.
-    cached_literal_items: HashMap<Vec<usize>, Vec<RegisterId>>,
+    cached_literal_items: HashMap<Vec<usize>, FunctionArrayLiteralItemCache>,
     // Branch-local lazy initialization is represented explicitly at control
     // flow joins. `None` means every path reaching the current block has a
     // valid backing view; `Some` guards the carried element snapshot.
+    initialized: Option<RegisterId>,
+}
+
+#[derive(Clone)]
+struct FunctionArrayLiteralItemCache {
+    elements: Vec<RegisterId>,
+    // `None` means the item is available on every path reaching the current
+    // block. `Some` guards a cache populated on only some predecessors.
     initialized: Option<RegisterId>,
 }
 

@@ -1,4 +1,4 @@
-use super::{Domain, FfParser, FunctionArrayView};
+use super::{Domain, FfParser, FunctionArrayLiteralItemCache, FunctionArrayView};
 use crate::context_width::{
     ValueContext, binary_semantics, cast_semantics, expression_signed, resolve_binary_op,
 };
@@ -110,6 +110,13 @@ struct ArrayViewKey {
 
 struct ArrayViewMergeParams {
     key: ArrayViewKey,
+    initialized: RegisterId,
+    elements: Vec<RegisterId>,
+    cached_literal_items: Vec<ArrayLiteralItemMergeParams>,
+}
+
+struct ArrayLiteralItemMergeParams {
+    cache_key: Vec<usize>,
     initialized: RegisterId,
     elements: Vec<RegisterId>,
 }
@@ -490,9 +497,6 @@ impl<'a> FfParser<'a> {
             &mut source_order,
         );
         for (cache_key, selected_expr) in source_order {
-            if cached_elements.contains_key(&cache_key) {
-                continue;
-            }
             let element_count = selected_expr
                 .comptime()
                 .r#type
@@ -507,6 +511,53 @@ impl<'a> FfParser<'a> {
                         "function argument validation resolves array literal item dimensions"
                     )
                 });
+            if let Some(cached) = cached_elements.get(&cache_key).cloned() {
+                if let Some(initialized) = cached.initialized {
+                    let evaluate_block = ir_builder.new_block();
+                    let merged_elements = cached
+                        .elements
+                        .iter()
+                        .map(|reg| ir_builder.alloc_reg(ir_builder.register(reg).clone()))
+                        .collect::<Vec<_>>();
+                    let merge_block = ir_builder.new_block_with(merged_elements.clone());
+                    let pre_defined = self.defined_ranges.clone();
+                    let pre_dynamic = self.dynamic_defined_vars.clone();
+                    ir_builder.seal_block(SIRTerminator::Branch {
+                        cond: initialized,
+                        true_block: (merge_block, cached.elements),
+                        false_block: (evaluate_block, vec![]),
+                    });
+                    ir_builder.switch_to_block(evaluate_block);
+                    let evaluated = self.evaluate_array_literal_item(
+                        selected_expr,
+                        element_count,
+                        layout,
+                        targets,
+                        domain,
+                        convert,
+                        sources,
+                        ir_builder,
+                    )?;
+                    let evaluated_defined =
+                        std::mem::replace(&mut self.defined_ranges, pre_defined.clone());
+                    let evaluated_dynamic =
+                        std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone());
+                    ir_builder.seal_block(SIRTerminator::Jump(merge_block, evaluated));
+                    ir_builder.switch_to_block(merge_block);
+                    self.defined_ranges =
+                        self.intersect_defined_states(pre_defined, evaluated_defined);
+                    self.dynamic_defined_vars =
+                        self.intersect_dynamic_vars(pre_dynamic, evaluated_dynamic);
+                    cached_elements.insert(
+                        cache_key,
+                        FunctionArrayLiteralItemCache {
+                            elements: merged_elements,
+                            initialized: None,
+                        },
+                    );
+                }
+                continue;
+            }
             let item_elements = self.evaluate_array_literal_item(
                 selected_expr,
                 element_count,
@@ -517,7 +568,13 @@ impl<'a> FfParser<'a> {
                 sources,
                 ir_builder,
             )?;
-            cached_elements.insert(cache_key, item_elements);
+            cached_elements.insert(
+                cache_key,
+                FunctionArrayLiteralItemCache {
+                    elements: item_elements,
+                    initialized: None,
+                },
+            );
         }
 
         let mut elements = Vec::with_capacity(layout.element_count);
@@ -537,10 +594,10 @@ impl<'a> FfParser<'a> {
             let Some(selected_regs) = cached_elements.get(&selection.cache_key) else {
                 unreachable!("every selected element was evaluated in literal source order");
             };
-            if selected_regs.len() != selection.element_count {
+            if selected_regs.elements.len() != selection.element_count {
                 unreachable!("selected array literal item has the validated element count");
             }
-            let Some(&selected_reg) = selected_regs.get(selection.element_index) else {
+            let Some(&selected_reg) = selected_regs.elements.get(selection.element_index) else {
                 unreachable!("selected array literal item index is in bounds");
             };
             elements.push(selected_reg);
@@ -580,6 +637,119 @@ impl<'a> FfParser<'a> {
             }
             path.pop();
         }
+    }
+
+    fn bound_array_literal_items_at(
+        &self,
+        frame: usize,
+        var_id: VarId,
+    ) -> Option<&[ArrayLiteralItem]> {
+        match self.function_arg_stack[frame].get(&var_id)? {
+            Expression::ArrayLiteral(items, _) => Some(items),
+            Expression::Term(factor) => {
+                let Factor::Variable(bound_var_id, index, select, _) = factor.as_ref() else {
+                    return None;
+                };
+                if !index.0.is_empty() || !select.0.is_empty() || select.1.is_some() {
+                    return None;
+                }
+                let source_frame = (0..frame).rev().find(|&source_frame| {
+                    self.function_arg_stack[source_frame].contains_key(bound_var_id)
+                })?;
+                self.bound_array_literal_items_at(source_frame, *bound_var_id)
+            }
+            _ => None,
+        }
+    }
+
+    fn array_literal_item_specs(&self, frame: usize, var_id: VarId) -> Vec<(Vec<usize>, usize)> {
+        let Some(items) = self.bound_array_literal_items_at(frame, var_id) else {
+            return Vec::new();
+        };
+        let mut source_order = Vec::new();
+        Self::collect_array_literal_elements_in_source_order(
+            items,
+            &mut Vec::new(),
+            &mut source_order,
+        );
+        source_order
+            .into_iter()
+            .map(|(cache_key, expr)| {
+                let element_count = expr
+                    .comptime()
+                    .r#type
+                    .array
+                    .iter()
+                    .copied()
+                    .try_fold(1usize, |total, dim| {
+                        dim.and_then(|dim| total.checked_mul(dim))
+                    })
+                    .unwrap_or_else(|| {
+                        unreachable!(
+                            "function argument validation resolves array literal item dimensions"
+                        )
+                    });
+                (cache_key, element_count)
+            })
+            .collect()
+    }
+
+    fn array_literal_item_elements_from_view(
+        &self,
+        frame: usize,
+        var_id: VarId,
+        cache_key: &[usize],
+        view_elements: &[RegisterId],
+        element_count: usize,
+    ) -> Option<Vec<RegisterId>> {
+        let items = self.bound_array_literal_items_at(frame, var_id)?;
+        let array_dims = self.module.variables[&var_id]
+            .r#type
+            .array
+            .iter()
+            .copied()
+            .collect::<Option<Vec<_>>>()?;
+        let mut elements = vec![None; element_count];
+        for (linear_index, &view_element) in view_elements.iter().enumerate() {
+            let mut remainder = linear_index;
+            let mut coordinates = vec![0usize; array_dims.len()];
+            for dimension in (0..array_dims.len()).rev() {
+                coordinates[dimension] = remainder % array_dims[dimension];
+                remainder /= array_dims[dimension];
+            }
+            let selection = self.select_array_literal_element(items, &coordinates, &array_dims)?;
+            if selection.cache_key == cache_key {
+                elements[selection.element_index] = Some(view_element);
+            }
+        }
+        elements.into_iter().collect()
+    }
+
+    fn definite_array_literal_caches_from_view(
+        &self,
+        frame: usize,
+        var_id: VarId,
+        view_elements: &[RegisterId],
+    ) -> HashMap<Vec<usize>, FunctionArrayLiteralItemCache> {
+        self.array_literal_item_specs(frame, var_id)
+            .into_iter()
+            .filter_map(|(cache_key, element_count)| {
+                let elements = self.array_literal_item_elements_from_view(
+                    frame,
+                    var_id,
+                    &cache_key,
+                    view_elements,
+                    element_count,
+                )?;
+                Some((
+                    cache_key,
+                    FunctionArrayLiteralItemCache {
+                        elements,
+                        initialized: None,
+                    },
+                ))
+            })
+            .collect()
     }
 
     fn slice_array_value_element<A>(
@@ -857,7 +1027,8 @@ impl<'a> FfParser<'a> {
                         let needs_actual = if formal.r#type.array.is_empty() {
                             nested_usage.runtime_reads.contains(arg_id)
                         } else {
-                            nested_usage.array_views.contains(arg_id)
+                            nested_usage.runtime_reads.contains(arg_id)
+                                || nested_usage.array_views.contains(arg_id)
                         };
                         if needs_actual && let Some(expr) = call.inputs.get(arg_path) {
                             self.collect_function_input_usage(expr, usage, active_calls)?;
@@ -978,7 +1149,8 @@ impl<'a> FfParser<'a> {
                             let needs_actual = if formal.r#type.array.is_empty() {
                                 input_usage.runtime_reads.contains(arg_id)
                             } else {
-                                input_usage.array_views.contains(arg_id)
+                                input_usage.runtime_reads.contains(arg_id)
+                                    || input_usage.array_views.contains(arg_id)
                             };
                             if needs_actual && let Some(expr) = call.inputs.get(arg_path) {
                                 collect(expr, views, seen);
@@ -1189,11 +1361,13 @@ impl<'a> FfParser<'a> {
             self.defined_ranges = self.intersect_defined_states(pre_defined, initialized_defined);
             self.dynamic_defined_vars =
                 self.intersect_dynamic_vars(pre_dynamic, initialized_dynamic);
+            let cached_literal_items =
+                self.definite_array_literal_caches_from_view(frame, var_id, &merged_elements);
             let view = FunctionArrayView {
                 backing_var_id: view.backing_var_id,
                 elements: merged_elements,
                 owns_backing: view.owns_backing,
-                cached_literal_items: initialized_view.cached_literal_items,
+                cached_literal_items,
                 initialized: None,
             };
             self.function_array_view_stack[frame].insert(var_id, view.clone());
@@ -1245,10 +1419,28 @@ impl<'a> FfParser<'a> {
                         }
                     })
                     .collect();
+                let cached_literal_items = self
+                    .array_literal_item_specs(key.frame, key.var_id)
+                    .into_iter()
+                    .map(|(cache_key, element_count)| ArrayLiteralItemMergeParams {
+                        cache_key,
+                        initialized: ir_builder.alloc_bit(1, false),
+                        elements: (0..element_count)
+                            .map(|_| {
+                                if layout.is_2state {
+                                    ir_builder.alloc_bit(layout.element_width, layout.signed)
+                                } else {
+                                    ir_builder.alloc_logic(layout.element_width)
+                                }
+                            })
+                            .collect(),
+                    })
+                    .collect();
                 Ok(ArrayViewMergeParams {
                     key,
                     initialized,
                     elements,
+                    cached_literal_items,
                 })
             })
             .collect()
@@ -1301,6 +1493,55 @@ impl<'a> FfParser<'a> {
                     args.push(element);
                 }
             }
+            let view = self.function_array_view_stack[params.key.frame].get(&params.key.var_id);
+            for cached_params in &params.cached_literal_items {
+                if let Some(cached) =
+                    view.and_then(|view| view.cached_literal_items.get(&cached_params.cache_key))
+                {
+                    let initialized = if let Some(initialized) = cached.initialized {
+                        initialized
+                    } else {
+                        let initialized = ir_builder.alloc_bit(1, false);
+                        ir_builder.emit(SIRInstruction::Imm(initialized, SIRValue::new(1u8)));
+                        initialized
+                    };
+                    args.push(initialized);
+                    args.extend(cached.elements.iter().copied());
+                } else if let Some(view) = view.filter(|view| !view.elements.is_empty()) {
+                    let initialized = if let Some(initialized) = view.initialized {
+                        initialized
+                    } else {
+                        let initialized = ir_builder.alloc_bit(1, false);
+                        ir_builder.emit(SIRInstruction::Imm(initialized, SIRValue::new(1u8)));
+                        initialized
+                    };
+                    let Some(elements) = self.array_literal_item_elements_from_view(
+                        params.key.frame,
+                        params.key.var_id,
+                        &cached_params.cache_key,
+                        &view.elements,
+                        cached_params.elements.len(),
+                    ) else {
+                        unreachable!("a materialized literal view covers every cached item");
+                    };
+                    args.push(initialized);
+                    args.extend(elements);
+                } else {
+                    let initialized = ir_builder.alloc_bit(1, false);
+                    ir_builder.emit(SIRInstruction::Imm(initialized, SIRValue::new(0u8)));
+                    args.push(initialized);
+                    let layout = self.array_view_layout(params.key.var_id)?;
+                    for _ in &cached_params.elements {
+                        let element = if layout.is_2state {
+                            ir_builder.alloc_bit(layout.element_width, layout.signed)
+                        } else {
+                            ir_builder.alloc_logic(layout.element_width)
+                        };
+                        ir_builder.emit(SIRInstruction::Imm(element, SIRValue::new(0u8)));
+                        args.push(element);
+                    }
+                }
+            }
         }
         Ok(args)
     }
@@ -1324,18 +1565,18 @@ impl<'a> FfParser<'a> {
             }) {
                 unreachable!("a function array view has stable backing metadata");
             }
-            let cached_literal_items = first
+            let cached_literal_items = params
                 .cached_literal_items
                 .iter()
-                .filter(|(key, value)| {
-                    states.iter().all(|state| {
-                        state[params.key.frame]
-                            .get(&params.key.var_id)
-                            .and_then(|view| view.cached_literal_items.get(*key))
-                            .is_some_and(|other| other == *value)
-                    })
+                .map(|cached| {
+                    (
+                        cached.cache_key.clone(),
+                        FunctionArrayLiteralItemCache {
+                            elements: cached.elements.clone(),
+                            initialized: Some(cached.initialized),
+                        },
+                    )
                 })
-                .map(|(key, value)| (key.clone(), value.clone()))
                 .collect();
             self.function_array_view_stack[params.key.frame].insert(
                 params.key.var_id,
@@ -1444,7 +1685,57 @@ impl<'a> FfParser<'a> {
             .and_then(|view| view.cached_literal_items.get(&selection.cache_key))
             .cloned();
         let item_elements = if let Some(cached) = cached {
-            cached
+            if let Some(initialized) = cached.initialized {
+                let layout = self.array_view_layout(var_id)?;
+                let merge_elements = cached
+                    .elements
+                    .iter()
+                    .map(|reg| ir_builder.alloc_reg(ir_builder.register(reg).clone()))
+                    .collect::<Vec<_>>();
+                let evaluate_block = ir_builder.new_block();
+                let merge_block = ir_builder.new_block_with(merge_elements.clone());
+                let pre_defined = self.defined_ranges.clone();
+                let pre_dynamic = self.dynamic_defined_vars.clone();
+                ir_builder.seal_block(SIRTerminator::Branch {
+                    cond: initialized,
+                    true_block: (merge_block, cached.elements),
+                    false_block: (evaluate_block, vec![]),
+                });
+                ir_builder.switch_to_block(evaluate_block);
+                let evaluated = self.evaluate_array_literal_item(
+                    selection.expr,
+                    selection.element_count,
+                    layout,
+                    targets,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
+                )?;
+                let evaluated_defined =
+                    std::mem::replace(&mut self.defined_ranges, pre_defined.clone());
+                let evaluated_dynamic =
+                    std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone());
+                ir_builder.seal_block(SIRTerminator::Jump(merge_block, evaluated));
+                ir_builder.switch_to_block(merge_block);
+                self.defined_ranges = self.intersect_defined_states(pre_defined, evaluated_defined);
+                self.dynamic_defined_vars =
+                    self.intersect_dynamic_vars(pre_dynamic, evaluated_dynamic);
+                self.function_array_view_stack[frame]
+                    .get_mut(&var_id)
+                    .unwrap()
+                    .cached_literal_items
+                    .insert(
+                        selection.cache_key.clone(),
+                        FunctionArrayLiteralItemCache {
+                            elements: merge_elements.clone(),
+                            initialized: None,
+                        },
+                    );
+                merge_elements
+            } else {
+                cached.elements
+            }
         } else if let Some((initialized, view_elements)) = self.function_array_view_stack[frame]
             .get(&var_id)
             .and_then(|view| {
@@ -1513,7 +1804,13 @@ impl<'a> FfParser<'a> {
                 .get_mut(&var_id)
                 .unwrap()
                 .cached_literal_items
-                .insert(selection.cache_key.clone(), merge_elements.clone());
+                .insert(
+                    selection.cache_key.clone(),
+                    FunctionArrayLiteralItemCache {
+                        elements: merge_elements.clone(),
+                        initialized: None,
+                    },
+                );
             merge_elements
         } else {
             let layout = self.array_view_layout(var_id)?;
@@ -1529,8 +1826,13 @@ impl<'a> FfParser<'a> {
                 ir_builder,
             )?;
             if let Some(view) = self.function_array_view_stack[frame].get_mut(&var_id) {
-                view.cached_literal_items
-                    .insert(selection.cache_key.clone(), item_elements.clone());
+                view.cached_literal_items.insert(
+                    selection.cache_key.clone(),
+                    FunctionArrayLiteralItemCache {
+                        elements: item_elements.clone(),
+                        initialized: None,
+                    },
+                );
             } else {
                 let initialized = ir_builder.alloc_bit(1, false);
                 ir_builder.emit(SIRInstruction::Imm(initialized, SIRValue::new(0u8)));
@@ -1542,7 +1844,10 @@ impl<'a> FfParser<'a> {
                         owns_backing: true,
                         cached_literal_items: HashMap::from_iter([(
                             selection.cache_key.clone(),
-                            item_elements.clone(),
+                            FunctionArrayLiteralItemCache {
+                                elements: item_elements.clone(),
+                                initialized: None,
+                            },
                         )]),
                         initialized: Some(initialized),
                     },
@@ -2279,6 +2584,10 @@ impl<'a> FfParser<'a> {
         for params in &array_view_params {
             merge_params.push(params.initialized);
             merge_params.extend(params.elements.iter().copied());
+            for cached in &params.cached_literal_items {
+                merge_params.push(cached.initialized);
+                merge_params.extend(cached.elements.iter().copied());
+            }
         }
         let merge_block = ir_builder.new_block_with(merge_params);
         let shortcut_value = ir_builder.alloc_bit(1, false);
@@ -3365,6 +3674,10 @@ impl<'a> FfParser<'a> {
         for params in &else_view_params {
             else_params.push(params.initialized);
             else_params.extend(params.elements.iter().copied());
+            for cached in &params.cached_literal_items {
+                else_params.push(cached.initialized);
+                else_params.extend(cached.elements.iter().copied());
+            }
         }
         let else_block = ir_builder.new_block_with(else_params);
         let result = ir_builder.alloc_logic(result_width);
@@ -3372,6 +3685,10 @@ impl<'a> FfParser<'a> {
         for params in &merge_view_params {
             merge_params.push(params.initialized);
             merge_params.extend(params.elements.iter().copied());
+            for cached in &params.cached_literal_items {
+                merge_params.push(cached.initialized);
+                merge_params.extend(cached.elements.iter().copied());
+            }
         }
         let merge_block = ir_builder.new_block_with(merge_params);
 
