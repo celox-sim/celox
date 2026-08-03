@@ -2168,23 +2168,14 @@ impl<'a> FfParser<'a> {
 
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<(), ParserError> {
-        let mut total_width = 0;
-
-        // Create accumulator with initial value 0
-        let mut acc_reg = ir_builder.alloc_bit(1, false);
-        ir_builder.emit(SIRInstruction::Imm(acc_reg, SIRValue::new(0u32)));
-
-        // Parse sequentially from right (LSB)
-        for (expr, replication) in exprs.iter().rev() {
-            // 1. Evaluate expression to be repeated
+        let mut evaluated = Vec::with_capacity(exprs.len());
+        for (expr, replication) in exprs {
             self.parse_expression(expr, targets, domain, convert, sources, ir_builder, None)?;
             let part_reg = self
                 .stack
                 .pop_back()
                 .expect("Concatenation part evaluation failed");
             let part_width = ir_builder.register(&part_reg).width();
-
-            // 2. Get replication count (1 if not specified)
             let rep_count = if let Some(rep_expr) = replication {
                 use crate::bitaccess::eval_constexpr;
                 let v = eval_constexpr(rep_expr);
@@ -2192,8 +2183,18 @@ impl<'a> FfParser<'a> {
             } else {
                 1
             };
+            evaluated.push((part_reg, part_width, rep_count));
+        }
 
-            // 3. Repeat packing for the specified number of times
+        let mut total_width = 0;
+
+        // Create accumulator with initial value 0
+        let mut acc_reg = ir_builder.alloc_bit(1, false);
+        ir_builder.emit(SIRInstruction::Imm(acc_reg, SIRValue::new(0u32)));
+
+        // Pack from the least-significant source element after evaluating all
+        // elements in source order.
+        for (part_reg, part_width, rep_count) in evaluated.into_iter().rev() {
             for _ in 0..rep_count {
                 let next_total_width = total_width + part_width;
 
@@ -2490,6 +2491,15 @@ impl<'a> FfParser<'a> {
         let result = self.parse_expression_in_context_inner(
             expr, targets, domain, convert, sources, ir_builder, context,
         );
+        if has_state
+            && result.is_ok()
+            && let Some(value) = self.stack.back().cloned()
+        {
+            self.function_expression_value_stack
+                .last_mut()
+                .expect("Function expression value scope is active")
+                .insert(expr.token_range(), value);
+        }
         if has_state {
             self.function_arg_stack.pop();
         }

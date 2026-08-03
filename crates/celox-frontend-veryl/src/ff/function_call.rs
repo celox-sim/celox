@@ -528,6 +528,128 @@ impl<'a> FfParser<'a> {
         Ok(state)
     }
 
+    fn apply_statements_to_function_state_in_path(
+        &self,
+        statements: &[Statement],
+        ret_id: Option<VarId>,
+        initial: &HashMap<VarId, Expression>,
+        mut active: FunctionPathCondition,
+    ) -> Result<(HashMap<VarId, Expression>, FunctionPathCondition), ParserError> {
+        let mut state = initial.clone();
+        for statement in statements {
+            if matches!(active, FunctionPathCondition::Never) {
+                break;
+            }
+            match statement {
+                Statement::Assign(_) => {
+                    let base = state.clone();
+                    let transitioned = self.apply_statement_to_function_state(statement, &base)?;
+                    state = Self::apply_state_transition_on_path(&active, &base, transitioned);
+                    if Self::statement_is_function_return(statement, ret_id) {
+                        active = FunctionPathCondition::Never;
+                    }
+                }
+                Statement::If(statement) => {
+                    let condition = Self::substitute_function_expr(&statement.cond, &state);
+                    let base = state.clone();
+                    let true_active = Self::function_path_and(active.clone(), condition.clone());
+                    let false_active =
+                        Self::function_path_and_not(active.clone(), condition.clone());
+                    let (then_state, then_active) = self
+                        .apply_statements_to_function_state_in_path(
+                            &statement.true_side,
+                            ret_id,
+                            &base,
+                            true_active,
+                        )?;
+                    let (else_state, else_active) = self
+                        .apply_statements_to_function_state_in_path(
+                            &statement.false_side,
+                            ret_id,
+                            &base,
+                            false_active,
+                        )?;
+                    state =
+                        Self::merge_expression_states(&condition, &base, &then_state, &else_state);
+                    active = Self::function_path_or(then_active, else_active);
+                }
+                Statement::Case(statement) => {
+                    let base = state.clone();
+                    let mut remaining = active.clone();
+                    let mut arm_states = Vec::with_capacity(statement.arms.len());
+                    let mut live_paths = FunctionPathCondition::Never;
+                    for arm in &statement.arms {
+                        let condition = Self::substitute_function_expr(
+                            &case_arm_condition_expr(&statement.case_target, &arm.patterns),
+                            &base,
+                        );
+                        let arm_active =
+                            Self::function_path_and(remaining.clone(), condition.clone());
+                        let (arm_state, arm_live) = self
+                            .apply_statements_to_function_state_in_path(
+                                &arm.body, ret_id, &base, arm_active,
+                            )?;
+                        arm_states.push((condition.clone(), arm_state));
+                        live_paths = Self::function_path_or(live_paths, arm_live);
+                        remaining = Self::function_path_and_not(remaining, condition);
+                    }
+                    let (mut merged, default_live) = self
+                        .apply_statements_to_function_state_in_path(
+                            &statement.default,
+                            ret_id,
+                            &base,
+                            remaining,
+                        )?;
+                    for (condition, arm_state) in arm_states.into_iter().rev() {
+                        merged =
+                            Self::merge_expression_states(&condition, &base, &arm_state, &merged);
+                    }
+                    state = merged;
+                    active = Self::function_path_or(live_paths, default_live);
+                }
+                Statement::SystemFunctionCall(call) => {
+                    let base = state.clone();
+                    let (_, transitioned, _) = self.prepare_system_function_call(call, &base)?;
+                    state = Self::apply_state_transition_on_path(&active, &base, transitioned);
+                }
+                Statement::FunctionCall(call) => {
+                    let base = state.clone();
+                    let transitioned = self.apply_function_call_to_state(call, &base)?;
+                    state = Self::apply_state_transition_on_path(&active, &base, transitioned);
+                }
+                Statement::Null => {}
+                Statement::For(statement) => {
+                    return Err(ParserError::unsupported(
+                        43,
+                        LoweringPhase::FfLowering,
+                        "for loop in function body",
+                        "for loop".to_string(),
+                        Some(&statement.token),
+                    ));
+                }
+                Statement::IfReset(statement) => {
+                    return Err(ParserError::unsupported(
+                        43,
+                        LoweringPhase::FfLowering,
+                        "function body control flow",
+                        format!("{statement}"),
+                        Some(&statement.token),
+                    ));
+                }
+                Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
+                    return Err(ParserError::unsupported(
+                        43,
+                        LoweringPhase::FfLowering,
+                        "function body control flow",
+                        format!("{statement}"),
+                        None,
+                    ));
+                }
+            }
+        }
+        Ok((state, active))
+    }
+
     fn apply_statement_to_function_state(
         &self,
         statement: &Statement,
@@ -1390,6 +1512,19 @@ impl<'a> FfParser<'a> {
                 bindings.insert(*arg_id, Self::substitute_function_expr(arg_expr, state));
             }
         }
+        let function_state = if call.outputs.is_empty() {
+            None
+        } else {
+            Some(
+                self.apply_statements_to_function_state_in_path(
+                    &function_body.statements,
+                    function_body.ret,
+                    &bindings,
+                    FunctionPathCondition::Always,
+                )?
+                .0,
+            )
+        };
 
         let mut next = state.clone();
         for (arg_path, dsts) in &call.outputs {
@@ -1417,7 +1552,19 @@ impl<'a> FfParser<'a> {
             let is_whole_var =
                 dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
 
-            let expr = self.extract_function_target_expr(&function_body, *arg_id, &bindings)?;
+            let expr = function_state
+                .as_ref()
+                .and_then(|state| state.get(arg_id))
+                .cloned()
+                .ok_or_else(|| {
+                    ParserError::unsupported(
+                        43,
+                        LoweringPhase::FfLowering,
+                        "function return expression",
+                        format!("function target var id: {arg_id:?}"),
+                        Some(&call.comptime.token),
+                    )
+                })?;
             let expr = Self::substitute_function_expr(&expr, &next);
 
             if is_whole_var {

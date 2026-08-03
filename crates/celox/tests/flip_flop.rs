@@ -1094,6 +1094,225 @@ fn test_ff_nested_call_inputs_capture_outputs_in_declaration_order(sim) {
     );
 }
 
+fn test_ff_nested_call_output_preserves_conditional_early_return_path(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            flag: input logic,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function inner (
+                flag: input logic,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = 8'd1;
+                if flag {
+                    return 8'd11;
+                }
+                written = 8'd2;
+                return 8'd22;
+            }
+
+            function outer (
+                flag: input logic,
+                written: output logic<8>
+            ) -> logic<8> {
+                $display("inner=%0d", inner(flag, written));
+                $display("written=%0d", written);
+                return written;
+            }
+
+            always_ff (clk) {
+                q = outer(flag, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let flag = sim.signal("flag");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(flag, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 1u8.into());
+    assert_eq!(sim.get(q), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "inner=11".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "written=1".to_string(),
+            },
+        ],
+    );
+
+    sim.modify(|io| io.set(flag, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 2u8.into());
+    assert_eq!(sim.get(q), 2u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "inner=22".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "written=2".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_ff_short_circuit_state_reuses_evaluated_lhs(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            gate: input logic,
+            d: input logic<8>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function lhs (
+                gate: input logic,
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic {
+                $display("lhs=%0d", x);
+                written = x + 8'd1;
+                return gate;
+            }
+
+            function rhs (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic {
+                written = x + 8'd2;
+                return 1'b1;
+            }
+
+            function outer (
+                gate: input logic,
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x;
+                $display("logic=%0d", lhs(gate, x, written) && rhs(x, written));
+                $display("result=%0d", written);
+                return written;
+            }
+
+            always_ff (clk) {
+                q = outer(gate, d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let gate = sim.signal("gate");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(gate, 0u8);
+        io.set(d, 20u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 21u8.into());
+    assert_eq!(sim.get(q), 21u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "lhs=20".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "logic=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "result=21".to_string(),
+            },
+        ],
+    );
+}
+
+fn test_ff_concatenation_effects_follow_source_order(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function first (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                $display("first=%0d", x);
+                written = x + 8'd1;
+                return x + 8'd1;
+            }
+
+            function second (
+                seen: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                $display("second=%0d", seen);
+                written = seen + 8'd1;
+                return seen;
+            }
+
+            function outer (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x;
+                $display("concat=%0d", {first(x, written), second(written, written)});
+                return written;
+            }
+
+            always_ff (clk) {
+                q = outer(d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 10u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 12u8.into());
+    assert_eq!(sim.get(q), 12u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "first=10".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "second=11".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "concat=2827".to_string(),
+            },
+        ],
+    );
+}
+
 fn test_ff_materialized_formal_slice_uses_expression_context(sim) {
     @omit_veryl;
     @ignore_on(wasm);
