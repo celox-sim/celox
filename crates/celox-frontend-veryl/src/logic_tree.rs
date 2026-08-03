@@ -25,7 +25,7 @@ use crate::{
         PartSelectGeometry, celox_value_from_comptime, eval_constexpr, eval_var_select,
         select_geometry,
     },
-    function_call_arg, function_call_has_arg,
+    function_call_has_arg,
     loop_provenance::LoopRecoveryCandidate,
     resolve_total_width,
 };
@@ -141,22 +141,19 @@ pub(super) fn ordered_function_inputs<'a>(
     Ok(inputs)
 }
 
-/// Returns output destinations in formal declaration order.
+/// Returns output destinations in source evaluation order.
 ///
-/// Like inputs, output connections are stored in a hash map. Destination
-/// expressions may have effects, so their order must follow the declaration.
+/// Veryl 0.20.3 preserves the source order in `FunctionCall::outputs`.
+/// Destination expressions may have effects, so applying them in formal
+/// declaration order can change simulation behavior for named arguments.
 pub(super) fn ordered_function_outputs<'a>(
     function: &Function,
     function_body: &FunctionBody,
     call: &'a FunctionCall,
 ) -> Result<Vec<(VarId, &'a [veryl_analyzer::ir::AssignDestination])>, ParserError> {
-    let mut outputs = Vec::with_capacity(call.outputs.len());
-    let mut ordered_ids = HashSet::default();
+    let mut declared_ids = HashSet::default();
     for arg in &function.args {
         for (arg_path, _, _) in &arg.members {
-            let Some(destinations) = function_call_arg(&call.outputs, arg_path) else {
-                continue;
-            };
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
                 return Err(invalid_function_call_argument_error(
                     function,
@@ -165,12 +162,12 @@ pub(super) fn ordered_function_outputs<'a>(
                     call,
                 ));
             };
-            outputs.push((*arg_id, destinations.as_slice()));
-            ordered_ids.insert(*arg_id);
+            declared_ids.insert(*arg_id);
         }
     }
 
-    for (arg_path, _) in &call.outputs {
+    let mut outputs = Vec::with_capacity(call.outputs.len());
+    for (arg_path, destinations) in &call.outputs {
         let Some(arg_id) = function_body.arg_map.get(arg_path) else {
             return Err(invalid_function_call_argument_error(
                 function,
@@ -179,7 +176,7 @@ pub(super) fn ordered_function_outputs<'a>(
                 call,
             ));
         };
-        if !ordered_ids.contains(arg_id) {
+        if !declared_ids.contains(arg_id) {
             return Err(invalid_function_call_argument_error(
                 function,
                 arg_path,
@@ -187,6 +184,7 @@ pub(super) fn ordered_function_outputs<'a>(
                 call,
             ));
         }
+        outputs.push((*arg_id, destinations.as_slice()));
     }
 
     Ok(outputs)
