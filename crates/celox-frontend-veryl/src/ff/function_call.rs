@@ -686,8 +686,17 @@ impl<'a> FfParser<'a> {
                     }
                 }
                 Statement::If(statement) => {
-                    let condition = Self::substitute_function_expr(&statement.cond, &state);
                     let base = state.clone();
+                    let mut condition_base = base.clone();
+                    // State-only evaluation must still apply output bindings
+                    // nested in the predicate before deriving either branch.
+                    let (condition, _) = self.capture_nested_function_outputs_with_states(
+                        &statement.cond,
+                        &mut condition_base,
+                    )?;
+                    let condition = Self::substitute_function_expr(&condition, &condition_base);
+                    let condition_base =
+                        Self::apply_state_transition_on_path(&active, &base, condition_base);
                     let true_active = Self::function_path_and(active.clone(), condition.clone());
                     let false_active =
                         Self::function_path_and_not(active.clone(), condition.clone());
@@ -695,18 +704,22 @@ impl<'a> FfParser<'a> {
                         .apply_statements_to_function_state_in_path(
                             &statement.true_side,
                             ret_id,
-                            &base,
+                            &condition_base,
                             true_active,
                         )?;
                     let (else_state, else_active) = self
                         .apply_statements_to_function_state_in_path(
                             &statement.false_side,
                             ret_id,
-                            &base,
+                            &condition_base,
                             false_active,
                         )?;
-                    state =
-                        Self::merge_expression_states(&condition, &base, &then_state, &else_state);
+                    state = Self::merge_expression_states(
+                        &condition,
+                        &condition_base,
+                        &then_state,
+                        &else_state,
+                    );
                     active = Self::function_path_or(then_active, else_active);
                 }
                 Statement::Case(statement) => {
@@ -796,14 +809,19 @@ impl<'a> FfParser<'a> {
                 self.apply_assignment_to_function_state(assign, &assign.expr, state)
             }
             Statement::If(statement) => {
-                let condition = Self::substitute_function_expr(&statement.cond, state);
-                let then_state =
-                    self.apply_statements_to_function_state(&statement.true_side, state)?;
-                let else_state =
-                    self.apply_statements_to_function_state(&statement.false_side, state)?;
+                let mut condition_state = state.clone();
+                let (condition, _) = self.capture_nested_function_outputs_with_states(
+                    &statement.cond,
+                    &mut condition_state,
+                )?;
+                let condition = Self::substitute_function_expr(&condition, &condition_state);
+                let then_state = self
+                    .apply_statements_to_function_state(&statement.true_side, &condition_state)?;
+                let else_state = self
+                    .apply_statements_to_function_state(&statement.false_side, &condition_state)?;
                 Ok(Self::merge_expression_states(
                     &condition,
-                    state,
+                    &condition_state,
                     &then_state,
                     &else_state,
                 ))
@@ -1751,7 +1769,11 @@ impl<'a> FfParser<'a> {
             )
         };
 
-        let mut next = state.clone();
+        // Function outputs are copied out together. Resolve every formal's
+        // final value against the pre-call caller state before mutating any
+        // actual destination, so the result is independent of map order and
+        // overlapping input/output bindings observe their call-time values.
+        let mut output_values = Vec::with_capacity(call.outputs.len());
         for (arg_path, dsts) in &call.outputs {
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
                 return Err(ParserError::unsupported(
@@ -1790,8 +1812,12 @@ impl<'a> FfParser<'a> {
                         Some(&call.comptime.token),
                     )
                 })?;
-            let expr = Self::substitute_function_expr(&expr, &next);
+            let expr = Self::substitute_function_expr(&expr, state);
+            output_values.push((dst, is_whole_var, expr));
+        }
 
+        let mut next = state.clone();
+        for (dst, is_whole_var, expr) in output_values {
             if is_whole_var {
                 next.insert(dst.id, expr);
             } else if is_static_access(&dst.index, &dst.select) {
@@ -2176,15 +2202,24 @@ impl<'a> FfParser<'a> {
                     Ok(next)
                 }
                 Statement::If(if_stmt) => {
-                    let then_state =
-                        build_state_from_statements(parser, &if_stmt.true_side, state, substitute)?;
+                    let mut condition_state = state.clone();
+                    let (cond, _) = parser.capture_nested_function_outputs_with_states(
+                        &if_stmt.cond,
+                        &mut condition_state,
+                    )?;
+                    let then_state = build_state_from_statements(
+                        parser,
+                        &if_stmt.true_side,
+                        &condition_state,
+                        substitute,
+                    )?;
                     let else_state = build_state_from_statements(
                         parser,
                         &if_stmt.false_side,
-                        state,
+                        &condition_state,
                         substitute,
                     )?;
-                    let cond = substitute(&if_stmt.cond, state);
+                    let cond = substitute(&cond, &condition_state);
                     Ok(merge_branch_state(&cond, then_state, else_state))
                 }
                 Statement::Case(case_stmt) => {
@@ -2344,17 +2379,32 @@ impl<'a> FfParser<'a> {
                     }
                 }
                 Statement::If(if_stmt) => {
-                    let cond = substitute(&if_stmt.cond, defs);
+                    let mut condition_defs = defs.clone();
+                    let (cond, _) = parser.capture_nested_function_outputs_with_states(
+                        &if_stmt.cond,
+                        &mut condition_defs,
+                    )?;
+                    let cond = substitute(&cond, &condition_defs);
 
                     let mut then_stmts = if_stmt.true_side.clone();
                     then_stmts.extend_from_slice(rest);
-                    let then_expr =
-                        resolve_return_expr(parser, &then_stmts, ret_id, defs, substitute)?;
+                    let then_expr = resolve_return_expr(
+                        parser,
+                        &then_stmts,
+                        ret_id,
+                        &condition_defs,
+                        substitute,
+                    )?;
 
                     let mut else_stmts = if_stmt.false_side.clone();
                     else_stmts.extend_from_slice(rest);
-                    let else_expr =
-                        resolve_return_expr(parser, &else_stmts, ret_id, defs, substitute)?;
+                    let else_expr = resolve_return_expr(
+                        parser,
+                        &else_stmts,
+                        ret_id,
+                        &condition_defs,
+                        substitute,
+                    )?;
 
                     match (then_expr, else_expr) {
                         (Some(then_expr), Some(else_expr)) => Ok(Some(Expression::Ternary(

@@ -1127,6 +1127,64 @@ fn test_ff_pure_predicate_output_updates_outer_function_state(sim) {
     );
 }
 
+fn test_ff_nested_wrapper_predicate_output_updates_caller_state(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic {
+                written = x + 8'd1;
+                return 1'b1;
+            }
+
+            function wrapper (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = 8'd0;
+                if update(x, written) {}
+                return written;
+            }
+
+            function observed (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                $display("wrapper=%0d", wrapper(x, written));
+                return written;
+            }
+
+            always_ff (clk) {
+                q = observed(d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 12u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 13u8.into());
+    assert_eq!(sim.get(q), 13u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "wrapper=13".to_string(),
+        }],
+    );
+}
+
 fn test_ff_bits_and_size_do_not_evaluate_output_writing_operand(sim) {
     @omit_veryl;
     @ignore_on(wasm);
@@ -1348,6 +1406,55 @@ fn test_ff_nested_call_inputs_capture_outputs_in_declaration_order(sim) {
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
             message: "ordered=22".to_string(),
+        }],
+    );
+}
+
+fn test_ff_nested_call_freezes_all_outputs_before_copy_out(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            first: output logic<8>,
+            second: output logic<8>
+        ) {
+            function swap_copy (
+                old_first: input logic<8>,
+                old_second: input logic<8>,
+                new_first: output logic<8>,
+                new_second: output logic<8>
+            ) -> logic<8> {
+                new_first = old_second;
+                new_second = old_first;
+                return new_first + new_second;
+            }
+
+            always_ff (clk) {
+                $display(
+                    "sum=%0d",
+                    swap_copy(first, second, first, second)
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let first = sim.signal("first");
+    let second = sim.signal("second");
+
+    sim.modify(|io| {
+        io.set(first, 7u8);
+        io.set(second, 9u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(first), 9u8.into());
+    assert_eq!(sim.get(second), 7u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "sum=16".to_string(),
         }],
     );
 }
