@@ -665,6 +665,43 @@ fn test_testbench_helper_hierarchical_read_returns_error_without_panicking() {
 }
 
 #[test]
+fn test_dynamic_reset_duration_returns_unsupported_parser_error() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var duration: logic<32>;
+
+            initial {
+                duration = 5;
+                rst.assert(duration);
+                $finish();
+            }
+        }
+    "#;
+
+    let result = Simulator::builder(code, "t").build();
+    match result.as_ref().map_err(|error| error.kind()) {
+        Err(SimulatorErrorKind::SIRParser(ParserError::Unsupported {
+            issue,
+            phase: LoweringPhase::SimulatorParser,
+            feature,
+            ..
+        })) => {
+            assert_eq!(*issue, 473);
+            assert_eq!(*feature, "dynamic reset duration");
+        }
+        Err(kind) => {
+            panic!("expected Unsupported(SimulatorParser) for dynamic reset duration, got {kind:?}")
+        }
+        Ok(_) => {
+            panic!("expected Unsupported(SimulatorParser) for dynamic reset duration, got Ok")
+        }
+    }
+}
+
+#[test]
 fn test_top_not_found_returns_error() {
     let code = r#"
         module Foo (a: input logic, b: output logic) {
