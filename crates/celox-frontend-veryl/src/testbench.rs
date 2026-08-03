@@ -15,7 +15,7 @@ use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::{self, StrId};
 
 use crate::{
-    VerylFrontendLookup, VerylTestbenchSource,
+    LoweringPhase, ParserError, VerylFrontendLookup, VerylTestbenchSource,
     context_width::{
         ValueContext, binary_semantics, cast_semantics, expression_signed, get_expr_width,
     },
@@ -266,6 +266,19 @@ fn collect_statement_reads(
                     }
                 }
                 TbMethod::FileClose | TbMethod::FileFlush => {}
+                TbMethod::Component { args, .. } => {
+                    for arg in args {
+                        collect_expression_reads(&arg.0, funcs, active_functions, reads);
+                    }
+                }
+                TbMethod::RandomSeed { value } => {
+                    collect_expression_reads(value, funcs, active_functions, reads);
+                }
+                TbMethod::RandomGetRange { min, max, .. } => {
+                    collect_expression_reads(min, funcs, active_functions, reads);
+                    collect_expression_reads(max, funcs, active_functions, reads);
+                }
+                TbMethod::RandomGet { .. } | TbMethod::RandomGetSeed => {}
             },
             Statement::Break | Statement::Unsupported(_) | Statement::Null => {}
         }
@@ -311,6 +324,7 @@ fn collect_expression_reads(
             Factor::FunctionCall(call) => {
                 collect_function_call_reads(call, funcs, active_functions, reads);
             }
+            Factor::HierVariable(_) => {}
             Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
         },
         Expression::Unary(_, inner, _) => {
@@ -764,6 +778,11 @@ impl ExprCompiler<'_> {
             }
             Factor::FunctionCall(fc) => {
                 self.emit_function_call(fc, ops);
+            }
+            Factor::HierVariable(_) => {
+                unreachable!(
+                    "hierarchical testbench references are rejected before bytecode emission"
+                )
             }
             Factor::SystemFunctionCall(call) => match &call.kind {
                 SystemFunctionKind::Signed(input) | SystemFunctionKind::Unsigned(input) => {
@@ -1252,7 +1271,12 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     TbMethod::FileOpen { .. }
                     | TbMethod::FileWrite { .. }
                     | TbMethod::FileClose
-                    | TbMethod::FileFlush => {}
+                    | TbMethod::FileFlush
+                    | TbMethod::Component { .. }
+                    | TbMethod::RandomSeed { .. }
+                    | TbMethod::RandomGet { .. }
+                    | TbMethod::RandomGetRange { .. }
+                    | TbMethod::RandomGetSeed => {}
                 },
                 Statement::If(s) => {
                     Self::scan_tb_methods(&s.true_side, clks, rsts);
@@ -1505,7 +1529,12 @@ impl<'a> SemanticTestbenchBuilder<'a> {
             TbMethod::FileOpen { .. }
             | TbMethod::FileWrite { .. }
             | TbMethod::FileClose
-            | TbMethod::FileFlush => None,
+            | TbMethod::FileFlush
+            | TbMethod::Component { .. }
+            | TbMethod::RandomSeed { .. }
+            | TbMethod::RandomGet { .. }
+            | TbMethod::RandomGetRange { .. }
+            | TbMethod::RandomGetSeed => None,
         }
     }
 
@@ -1563,13 +1592,224 @@ fn extract_source_location(
     })
 }
 
+fn validate_testbench_expression(expression: &Expression) -> Result<(), ParserError> {
+    match expression {
+        Expression::Term(factor) => match factor.as_ref() {
+            Factor::HierVariable(reference) => Err(ParserError::unsupported(
+                467,
+                LoweringPhase::SimulatorParser,
+                "hierarchical variable reference",
+                format!("{}", reference.var_path),
+                Some(&reference.comptime.token),
+            )),
+            Factor::Variable(_, index, select, _) => {
+                for expression in index.0.iter().chain(select.0.iter()) {
+                    validate_testbench_expression(expression)?;
+                }
+                if let Some((_, expression)) = &select.1 {
+                    validate_testbench_expression(expression)?;
+                }
+                Ok(())
+            }
+            Factor::FunctionCall(call) => {
+                for expression in call.inputs.values() {
+                    validate_testbench_expression(expression)?;
+                }
+                Ok(())
+            }
+            Factor::SystemFunctionCall(call) => validate_testbench_system_function(&call.kind),
+            Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
+        },
+        Expression::Unary(_, inner, _) => validate_testbench_expression(inner),
+        Expression::Binary(lhs, _, rhs, _) => {
+            validate_testbench_expression(lhs)?;
+            validate_testbench_expression(rhs)
+        }
+        Expression::Ternary(condition, then_expression, else_expression, _) => {
+            validate_testbench_expression(condition)?;
+            validate_testbench_expression(then_expression)?;
+            validate_testbench_expression(else_expression)
+        }
+        Expression::Concatenation(items, _) => {
+            for (expression, repeat) in items {
+                validate_testbench_expression(expression)?;
+                if let Some(repeat) = repeat {
+                    validate_testbench_expression(repeat)?;
+                }
+            }
+            Ok(())
+        }
+        Expression::ArrayLiteral(items, _) => {
+            for item in items {
+                match item {
+                    ArrayLiteralItem::Value(expression, repeat) => {
+                        validate_testbench_expression(expression)?;
+                        if let Some(repeat) = repeat {
+                            validate_testbench_expression(repeat)?;
+                        }
+                    }
+                    ArrayLiteralItem::Defaul(expression) => {
+                        validate_testbench_expression(expression)?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        Expression::StructConstructor(_, fields, _) => {
+            for (_, expression) in fields {
+                validate_testbench_expression(expression)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_testbench_system_function(kind: &SystemFunctionKind) -> Result<(), ParserError> {
+    let validate = |input: &SystemFunctionInput| validate_testbench_expression(&input.0);
+    match kind {
+        SystemFunctionKind::Bits(input)
+        | SystemFunctionKind::Size(input)
+        | SystemFunctionKind::Clog2(input)
+        | SystemFunctionKind::Onehot(input)
+        | SystemFunctionKind::Signed(input)
+        | SystemFunctionKind::Unsigned(input) => validate(input),
+        SystemFunctionKind::Display(inputs) | SystemFunctionKind::Write(inputs) => {
+            for input in inputs {
+                validate(input)?;
+            }
+            Ok(())
+        }
+        SystemFunctionKind::Assert { cond, args, .. } => {
+            validate(cond)?;
+            for input in args {
+                validate(input)?;
+            }
+            Ok(())
+        }
+        SystemFunctionKind::Readmemh(input, _) => validate(input),
+        SystemFunctionKind::Finish => Ok(()),
+    }
+}
+
+fn validate_testbench_statements(statements: &[Statement]) -> Result<(), ParserError> {
+    for statement in statements {
+        match statement {
+            Statement::Assign(statement) => validate_testbench_expression(&statement.expr)?,
+            Statement::If(statement) => {
+                validate_testbench_expression(&statement.cond)?;
+                validate_testbench_statements(&statement.true_side)?;
+                validate_testbench_statements(&statement.false_side)?;
+            }
+            Statement::IfReset(statement) => {
+                validate_testbench_statements(&statement.true_side)?;
+                validate_testbench_statements(&statement.false_side)?;
+            }
+            Statement::Case(statement) => {
+                validate_testbench_expression(&statement.case_target)?;
+                for arm in &statement.arms {
+                    for pattern in &arm.patterns {
+                        match pattern {
+                            CasePattern::Eq(expression) => {
+                                validate_testbench_expression(expression)?;
+                            }
+                            CasePattern::Range { lo, hi, .. } => {
+                                validate_testbench_expression(lo)?;
+                                validate_testbench_expression(hi)?;
+                            }
+                        }
+                    }
+                    validate_testbench_statements(&arm.body)?;
+                }
+                validate_testbench_statements(&statement.default)?;
+            }
+            Statement::For(statement) => {
+                let (start, end) = match &statement.range {
+                    ForRange::Forward { start, end, .. }
+                    | ForRange::Reverse { start, end, .. }
+                    | ForRange::Stepped { start, end, .. } => (start, end),
+                };
+                for bound in [start, end] {
+                    if let ForBound::Expression(expression) = bound {
+                        validate_testbench_expression(expression)?;
+                    }
+                }
+                validate_testbench_statements(&statement.body)?;
+            }
+            Statement::SystemFunctionCall(call) => {
+                validate_testbench_system_function(&call.kind)?;
+            }
+            Statement::FunctionCall(call) => {
+                for expression in call.inputs.values() {
+                    validate_testbench_expression(expression)?;
+                }
+            }
+            Statement::TbMethodCall(call) => match &call.method {
+                TbMethod::Component { .. } => {
+                    return Err(ParserError::unsupported(
+                        468,
+                        LoweringPhase::SimulatorParser,
+                        "testbench component method",
+                        "component runtime integration is not implemented",
+                        None,
+                    ));
+                }
+                TbMethod::RandomSeed { value } => {
+                    return Err(ParserError::unsupported(
+                        469,
+                        LoweringPhase::SimulatorParser,
+                        "testbench random method",
+                        "random runtime integration is not implemented",
+                        Some(&value.comptime().token),
+                    ));
+                }
+                TbMethod::RandomGet { .. }
+                | TbMethod::RandomGetRange { .. }
+                | TbMethod::RandomGetSeed => {
+                    return Err(ParserError::unsupported(
+                        469,
+                        LoweringPhase::SimulatorParser,
+                        "testbench random method",
+                        "random runtime integration is not implemented",
+                        None,
+                    ));
+                }
+                TbMethod::ClockNext { count, period } => {
+                    if let Some(expression) = count {
+                        validate_testbench_expression(expression)?;
+                    }
+                    if let Some(expression) = period {
+                        validate_testbench_expression(expression)?;
+                    }
+                }
+                TbMethod::ResetAssert { duration, .. } => {
+                    if let Some(expression) = duration {
+                        validate_testbench_expression(expression)?;
+                    }
+                }
+                TbMethod::FileOpen { name, .. } => validate_testbench_expression(&name.0)?,
+                TbMethod::FileWrite { args } => {
+                    for argument in args {
+                        validate_testbench_expression(&argument.0)?;
+                    }
+                }
+                TbMethod::FileClose | TbMethod::FileFlush => {}
+            },
+            Statement::Break | Statement::Unsupported(_) | Statement::Null => {}
+        }
+    }
+    Ok(())
+}
+
 pub fn compile_semantic_testbench(
     lookup: &VerylFrontendLookup,
     source: &VerylTestbenchSource,
     runtime_event_site_count: usize,
-) -> Option<TestbenchProgram<StateAddr>> {
-    let initial_stmts = source.initial_statements.as_ref()?;
+) -> Result<Option<TestbenchProgram<StateAddr>>, ParserError> {
+    let Some(initial_stmts) = source.initial_statements.as_ref() else {
+        return Ok(None);
+    };
+    validate_testbench_statements(initial_stmts)?;
     let mut builder = SemanticTestbenchBuilder::new(lookup, source, runtime_event_site_count);
     builder.build_event_map(initial_stmts);
-    Some(TestbenchProgram::new(builder.convert(initial_stmts)))
+    Ok(Some(TestbenchProgram::new(builder.convert(initial_stmts))))
 }

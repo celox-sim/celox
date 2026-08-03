@@ -689,6 +689,12 @@ pub(crate) fn expression_contains_runtime_effect(module: &Module, expression: &E
                 .iter()
                 .chain(select.0.iter())
                 .any(|expression| expression_contains_runtime_effect(module, expression)),
+            Factor::HierVariable(reference) => reference
+                .index
+                .0
+                .iter()
+                .chain(reference.select.0.iter())
+                .any(|expression| expression_contains_runtime_effect(module, expression)),
             Factor::SystemFunctionCall(call) => match &call.kind {
                 SystemFunctionKind::Clog2(input)
                 | SystemFunctionKind::Onehot(input)
@@ -1113,6 +1119,13 @@ fn collect_factor_effects(
             }
             Ok(())
         }
+        Factor::HierVariable(reference) => Err(ParserError::unsupported(
+            467,
+            crate::LoweringPhase::CombLowering,
+            "hierarchical variable reference",
+            format!("{}", reference.var_path),
+            Some(&reference.comptime.token),
+        )),
         Factor::FunctionCall(call) => {
             collect_function_call_effects(module, store, call, arena, collector)
         }
@@ -1953,7 +1966,12 @@ fn collect_function_body_effects(
                 format!("{stmt}"),
                 Some(&ir.token),
             )),
-            Statement::TbMethodCall(_) | Statement::Break | Statement::Unsupported(_) => {
+            Statement::Break => Ok(FunctionControlState {
+                live_expr: bool_node(arena, false)?,
+                live_sources: HashSet::default(),
+                ..state
+            }),
+            Statement::TbMethodCall(_) | Statement::Unsupported(_) => {
                 Err(ParserError::illegal_context(
                     "statement in comb function body",
                     format!("{stmt}"),
@@ -2053,6 +2071,13 @@ fn collect_factor_position_inputs(
             }
             Ok(())
         }
+        Factor::HierVariable(reference) => Err(ParserError::unsupported(
+            467,
+            crate::LoweringPhase::CombLowering,
+            "hierarchical variable reference",
+            format!("{}", reference.var_path),
+            Some(&reference.comptime.token),
+        )),
         Factor::Value(_) => Ok(()),
         Factor::FunctionCall(call) => {
             for arg in call.inputs.values() {

@@ -2002,6 +2002,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
                 src: src.clone(),
                 dst: src.with_extension("sv"),
                 map: src.with_extension("map"),
+                example: false,
             });
         }
     }
@@ -2078,15 +2079,10 @@ pub fn gen_ts(project_path: String) -> Result<String> {
     let mut file_modules: HashMap<String, Vec<String>> = HashMap::new();
     let mut post_pass_ir = Ir::default();
 
-    for (i, (path, parser)) in parsers.iter().enumerate() {
+    for (i, (_path, parser)) in parsers.iter().enumerate() {
         let mut analyzer_context = Context::default();
         let mut ir = Ir::default();
-        let results = analyzer.analyze_pass2(
-            &path.prj,
-            &parser.veryl,
-            &mut analyzer_context,
-            Some(&mut ir),
-        );
+        let results = analyzer.analyze_pass2(&parser.veryl, &mut analyzer_context, Some(&mut ir));
         let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
         if !real_errors.is_empty() {
             return Err(Error::from_reason(format_errors_with_warnings(
@@ -2230,11 +2226,10 @@ pub fn gen_ts_from_source(sources: Vec<NapiSourceFile>) -> Result<String> {
     let mut file_modules: HashMap<String, Vec<String>> = HashMap::new();
     let mut post_pass_ir = Ir::default();
 
-    for (i, (prj, _path, parser)) in parsers.iter().enumerate() {
+    for (i, (_prj, _path, parser)) in parsers.iter().enumerate() {
         let mut analyzer_context = Context::default();
         let mut ir = Ir::default();
-        let results =
-            analyzer.analyze_pass2(prj, &parser.veryl, &mut analyzer_context, Some(&mut ir));
+        let results = analyzer.analyze_pass2(&parser.veryl, &mut analyzer_context, Some(&mut ir));
         let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
         if !real_errors.is_empty() {
             return Err(Error::from_reason(format_errors_with_warnings(

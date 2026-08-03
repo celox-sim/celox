@@ -25,6 +25,7 @@ use crate::{
         PartSelectGeometry, celox_value_from_comptime, eval_constexpr, eval_var_select,
         select_geometry,
     },
+    function_call_arg, function_call_has_arg,
     loop_provenance::LoopRecoveryCandidate,
     resolve_total_width,
 };
@@ -104,7 +105,7 @@ pub(super) fn ordered_function_inputs<'a>(
     let mut ordered_ids = HashSet::default();
     for arg in &function.args {
         for (arg_path, _, _) in &arg.members {
-            let Some(arg_expr) = call.inputs.get(arg_path) else {
+            let Some(arg_expr) = function_call_arg(&call.inputs, arg_path) else {
                 continue;
             };
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
@@ -120,7 +121,7 @@ pub(super) fn ordered_function_inputs<'a>(
         }
     }
 
-    for arg_path in call.inputs.keys() {
+    for (arg_path, _) in &call.inputs {
         let Some(arg_id) = function_body.arg_map.get(arg_path) else {
             return Err(invalid_function_call_argument_error(
                 function,
@@ -155,7 +156,7 @@ pub(super) fn ordered_function_outputs<'a>(
     let mut ordered_ids = HashSet::default();
     for arg in &function.args {
         for (arg_path, _, _) in &arg.members {
-            let Some(destinations) = call.outputs.get(arg_path) else {
+            let Some(destinations) = function_call_arg(&call.outputs, arg_path) else {
                 continue;
             };
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
@@ -171,7 +172,7 @@ pub(super) fn ordered_function_outputs<'a>(
         }
     }
 
-    for arg_path in call.outputs.keys() {
+    for (arg_path, _) in &call.outputs {
         let Some(arg_id) = function_body.arg_map.get(arg_path) else {
             return Err(invalid_function_call_argument_error(
                 function,
@@ -1708,6 +1709,13 @@ pub(super) fn collect_written_expression(
                 }
                 Ok(())
             }
+            Factor::HierVariable(reference) => Err(ParserError::unsupported(
+                467,
+                LoweringPhase::CombLowering,
+                "hierarchical variable reference",
+                format!("{}", reference.var_path),
+                Some(&reference.comptime.token),
+            )),
             Factor::SystemFunctionCall(call) => {
                 collect_written_system_function_call(module, call, out)
             }
@@ -2650,7 +2658,9 @@ fn eval_statement_form_function_call(
     }
 
     for arg_path in function_body.arg_map.keys() {
-        if !call.inputs.contains_key(arg_path) && !call.outputs.contains_key(arg_path) {
+        if !function_call_has_arg(&call.inputs, arg_path)
+            && !function_call_has_arg(&call.outputs, arg_path)
+        {
             return Err(invalid_function_call_argument_error(
                 function,
                 arg_path,
@@ -3303,7 +3313,7 @@ mod tests {
         assert!(errors.is_empty(), "analyze_pass1 errors: {errors:?}");
         let errors = Analyzer::analyze_post_pass1();
         assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
-        let errors = analyzer.analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir));
+        let errors = analyzer.analyze_pass2(&parser.veryl, &mut context, Some(&mut ir));
         assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
         let errors = Analyzer::analyze_post_pass2(&ir);
         assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");

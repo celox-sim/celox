@@ -558,6 +558,13 @@ fn collect_parent_output_address_sources(
                 }
                 Ok(())
             }
+            Factor::HierVariable(reference) => Err(ParserError::unsupported(
+                467,
+                LoweringPhase::SimulatorParser,
+                "hierarchical variable reference",
+                format!("{}", reference.var_path),
+                Some(&reference.comptime.token),
+            )),
             Factor::SystemFunctionCall(call) => {
                 let mut collect = |input: &SystemFunctionInput| {
                     collect_parent_output_address_sources(module, store, &input.0, arena, out)
@@ -2561,7 +2568,7 @@ mod tests {
         assert!(Analyzer::analyze_post_pass1().is_empty());
         assert!(
             analyzer
-                .analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir))
+                .analyze_pass2(&parser.veryl, &mut context, Some(&mut ir))
                 .is_empty()
         );
         assert!(Analyzer::analyze_post_pass2(&ir).is_empty());

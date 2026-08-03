@@ -58,6 +58,7 @@ fn expression_has_side_effect(expr: &Expression) -> bool {
                 | SystemFunctionKind::Assert { .. }
                 | SystemFunctionKind::Finish => true,
             },
+            Factor::HierVariable(_) => false,
             Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
         },
         Expression::Binary(lhs, _, rhs, _) => {
@@ -3585,6 +3586,15 @@ impl<'a> FfParser<'a> {
                     )?;
                 }
             }
+            Factor::HierVariable(reference) => {
+                return Err(ParserError::unsupported(
+                    467,
+                    LoweringPhase::FfLowering,
+                    "hierarchical variable reference",
+                    format!("{}", reference.var_path),
+                    Some(&reference.comptime.token),
+                ));
+            }
             Factor::Value(comptime) => {
                 let (celox_value, mask_xz, width, _) =
                     celox_value_from_comptime_in_context(comptime, context_width)
@@ -3603,8 +3613,14 @@ impl<'a> FfParser<'a> {
             Factor::FunctionCall(call) => {
                 self.parse_function_call_expr(call, targets, domain, convert, sources, ir_builder)?;
             }
-            Factor::Anonymous(_) | Factor::Unknown(_) => {
-                unreachable!("Expression factors must be resolved before FF lowering")
+            Factor::Anonymous(comptime) | Factor::Unknown(comptime) => {
+                return Err(ParserError::unsupported(
+                    67,
+                    LoweringPhase::FfLowering,
+                    "unresolved factor in FF expression",
+                    format!("{factor:?}"),
+                    Some(&comptime.token),
+                ));
             }
         }
 
@@ -4512,7 +4528,7 @@ module Top (
         assert!(Analyzer::analyze_post_pass1().is_empty());
         assert!(
             analyzer
-                .analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut ir))
+                .analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir))
                 .is_empty()
         );
         assert!(Analyzer::analyze_post_pass2(&ir).is_empty());

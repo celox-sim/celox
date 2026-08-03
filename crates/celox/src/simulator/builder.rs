@@ -80,12 +80,7 @@ fn analyze(
     let mut ir = Ir::default();
 
     for parsed in &parsers {
-        errors.append(&mut analyzer.analyze_pass2(
-            "prj",
-            &parsed.veryl,
-            &mut context,
-            Some(&mut ir),
-        ));
+        errors.append(&mut analyzer.analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir)));
     }
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
     let mut frontend_diagnostics = if errors.iter().any(AnalyzerError::is_error) {
