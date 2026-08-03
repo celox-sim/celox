@@ -1275,7 +1275,7 @@ fn lower_comb_process(
     if process.kind() == sv::ir::CombProcessKind::AlwaysComb {
         for (index, assignment) in assignments.iter().enumerate() {
             for later_index in index + 1..assignments.len() {
-                if assignments[later_index].lhs_value() != assignment.lhs_value() {
+                if assignments[later_index].lhs() != assignment.lhs() {
                     continue;
                 }
                 if assignments[index + 1..=later_index]
@@ -1289,18 +1289,141 @@ fn lower_comb_process(
             }
         }
     }
-    assignments
-        .iter()
-        .enumerate()
-        .filter(|(index, assignment)| {
-            process.kind() != sv::ir::CombProcessKind::AlwaysComb
-                || !assignments[index + 1..]
-                    .iter()
-                    .any(|later| later.lhs_value() == assignment.lhs_value())
-        })
-        .map(|(_, assignment)| assignment)
-        .map(|assignment| lower_assignment(assignment, variables, name_to_id, constants, arena))
-        .collect()
+    let mut paths = Vec::new();
+    for (index, assignment) in assignments.iter().enumerate() {
+        if process.kind() == sv::ir::CombProcessKind::AlwaysComb
+            && assignments[index + 1..]
+                .iter()
+                .any(|later| later.lhs_value() == assignment.lhs_value())
+        {
+            continue;
+        }
+        let path = lower_assignment(assignment, variables, name_to_id, constants, arena)?;
+        merge_overlapping_comb_path(&mut paths, path, arena)?;
+    }
+    Ok(paths)
+}
+
+fn merge_overlapping_comb_path(
+    paths: &mut Vec<LogicPath<VarId>>,
+    mut later: LogicPath<VarId>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(), sv::AnalyzerError> {
+    let mut index = 0;
+    while index < paths.len() {
+        let Some(previous_target) = paths[index].target.var() else {
+            index += 1;
+            continue;
+        };
+        let Some(later_target) = later.target.var() else {
+            break;
+        };
+        if previous_target.id != later_target.id
+            || !previous_target.access.overlaps(&later_target.access)
+        {
+            index += 1;
+            continue;
+        }
+        let previous = paths.remove(index);
+        later = overlay_comb_paths(previous, later, arena)?;
+    }
+    paths.push(later);
+    Ok(())
+}
+
+fn overlay_comb_paths(
+    previous: LogicPath<VarId>,
+    later: LogicPath<VarId>,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<LogicPath<VarId>, sv::AnalyzerError> {
+    let previous_target = previous.target.var().expect("variable path target");
+    let later_target = later.target.var().expect("variable path target");
+    debug_assert_eq!(previous_target.id, later_target.id);
+    debug_assert!(previous_target.access.overlaps(&later_target.access));
+
+    let access = BitAccess::new(
+        previous_target.access.lsb.min(later_target.access.lsb),
+        previous_target.access.msb.max(later_target.access.msb),
+    );
+    let end = access.msb.checked_add(1).ok_or_else(|| {
+        sv::AnalyzerError::Unsupported("overlapping always_comb assignment width".to_string())
+    })?;
+    let previous_end = previous_target.access.msb.checked_add(1).ok_or_else(|| {
+        sv::AnalyzerError::Unsupported("overlapping always_comb assignment width".to_string())
+    })?;
+    let later_end = later_target.access.msb.checked_add(1).ok_or_else(|| {
+        sv::AnalyzerError::Unsupported("overlapping always_comb assignment width".to_string())
+    })?;
+    let mut boundaries = vec![
+        access.lsb,
+        end,
+        previous_target.access.lsb,
+        previous_end,
+        later_target.access.lsb,
+        later_end,
+    ];
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut nodes = Vec::new();
+    let mut uses_previous = false;
+    let mut uses_later = false;
+    for bounds in boundaries.windows(2).rev() {
+        let segment = BitAccess::new(bounds[0], bounds[1] - 1);
+        let (path, target) =
+            if later_target.access.lsb <= segment.lsb && segment.msb <= later_target.access.msb {
+                uses_later = true;
+                (&later, later_target)
+            } else {
+                uses_previous = true;
+                (&previous, previous_target)
+            };
+        let relative = BitAccess::new(
+            segment.lsb - target.access.lsb,
+            segment.msb - target.access.lsb,
+        );
+        let node = if relative == BitAccess::new(0, target.access.msb - target.access.lsb) {
+            path.expr
+        } else {
+            arena
+                .alloc(SLTNode::Slice {
+                    expr: path.expr,
+                    access: relative,
+                })
+                .map_err(|error| {
+                    sv::AnalyzerError::Unsupported(format!(
+                        "overlapping always_comb assignment: {error}"
+                    ))
+                })?
+        };
+        nodes.push((node, segment.msb - segment.lsb + 1));
+    }
+    let expr = if nodes.len() == 1 {
+        nodes[0].0
+    } else {
+        arena.alloc(SLTNode::Concat(nodes)).map_err(|error| {
+            sv::AnalyzerError::Unsupported(format!("overlapping always_comb assignment: {error}"))
+        })?
+    };
+    let mut sources = HashSet::default();
+    if uses_previous {
+        sources.extend(previous.sources);
+    }
+    if uses_later {
+        sources.extend(later.sources);
+    }
+    Ok(LogicPath {
+        target: LogicPathTarget::Var(VarAtomBase::new(previous_target.id, access.lsb, access.msb)),
+        expr,
+        sources,
+        address_sources: HashSet::default(),
+        previous_sources: HashSet::default(),
+        local_inputs: Vec::new(),
+        order_before: HashSet::default(),
+        comb_capture_enable_sites: Vec::new(),
+        comb_capture_enable_always: false,
+        pre_lower_nodes: Vec::new(),
+    })
 }
 
 fn expr_references_ident(expr: &sv::ir::Expr, name: &str) -> bool {

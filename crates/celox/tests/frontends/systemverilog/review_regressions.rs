@@ -431,6 +431,43 @@ fn preserves_last_write_order_inside_always_comb() {
 }
 
 #[test]
+fn merges_overlapping_writes_inside_always_comb() {
+    let source = r#"
+        module Top(input logic a, output logic [7:0] y);
+            always_comb begin
+                y = 8'h00;
+                y[0] = a;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("comb_overlap.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+    sim.modify(|io| io.set(a, 0u8)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+}
+
+#[test]
+fn interprets_signed_literals_before_constant_unary_operations() {
+    let source = r#"
+        module Top #(
+            parameter NEGATED = -8'shff,
+            parameter FLAG = (NEGATED == 1)
+        ) (output logic y);
+            assign y = FLAG;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("signed_unary.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
 fn resolves_parent_parameters_in_input_port_connections() {
     let source = r#"
         module Child(input logic [15:0] value, output logic [15:0] y);

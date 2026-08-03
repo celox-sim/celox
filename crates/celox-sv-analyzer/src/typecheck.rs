@@ -114,14 +114,16 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
 }
 
 fn eval_literal_unary(op: UnaryOp, literal: &str) -> Option<i128> {
-    let literal = parse_integral_literal(literal)?;
+    let literal_text = literal;
+    let literal = parse_integral_literal(literal_text)?;
     if literal.mask != BigUint::default() {
         return None;
     }
-    let value = i128::try_from(&literal.value).ok()?;
+    let value = literal_as_i128(literal_text)?;
     match op {
         UnaryOp::Plus => Some(value),
         UnaryOp::Minus => value.checked_neg(),
+        UnaryOp::BitNot if literal.signed => Some(!value),
         UnaryOp::BitNot => {
             let width_mask = (BigUint::from(1u8) << literal.width) - BigUint::from(1u8);
             i128::try_from(width_mask ^ literal.value).ok()
@@ -627,5 +629,20 @@ mod literal_tests {
 
             assert_eq!(eval_const_expr(&expr, &HashMap::new()), None);
         }
+    }
+
+    #[test]
+    fn sign_interprets_literals_before_unary_operations() {
+        let minus = ConstExpr::Unary {
+            op: UnaryOp::Minus,
+            expr: Box::new(ConstExpr::Literal("8'shff".to_string())),
+        };
+        let bit_not = ConstExpr::Unary {
+            op: UnaryOp::BitNot,
+            expr: Box::new(ConstExpr::Literal("8'sh00".to_string())),
+        };
+
+        assert_eq!(eval_const_expr(&minus, &HashMap::new()), Some(1));
+        assert_eq!(eval_const_expr(&bit_not, &HashMap::new()), Some(-1));
     }
 }
