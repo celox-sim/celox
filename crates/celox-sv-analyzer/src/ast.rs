@@ -4166,7 +4166,9 @@ fn ff_process_from_always_construct(
         return Ok(None);
     }
     let Some((events, body)) = ff_event_control_and_body(&always.nodes.1, syntax_tree) else {
-        return Ok(None);
+        return Err(AnalyzerError::Unsupported(
+            "always_ff event expression".to_string(),
+        ));
     };
     let mut assignments = Vec::new();
     conditional_assignments_from_statement_or_null(

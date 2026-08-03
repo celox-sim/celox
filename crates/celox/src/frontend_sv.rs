@@ -339,6 +339,15 @@ pub fn schedule_sources(
             Ok((module_id, lowered))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
+    let root = &lowered_modules[&root_id];
+    if let Some(port) = root
+        .port_order
+        .iter()
+        .map(|port_id| &root.variables[port_id])
+        .find(|port| port.kind == VarKind::Inout)
+    {
+        return Err(unsupported_sv_inout(port.path.to_string(), &port.token).into());
+    }
     validate_sv_module_graph(
         &root_key,
         &module_ids,
@@ -514,12 +523,16 @@ fn lower_module_with_overrides(
     let mut arena = SLTNodeArena::new();
     let mut comb_blocks = Vec::new();
     for process in module.comb_processes() {
-        if process
-            .condition()
-            .and_then(|condition| sv::typecheck::eval_const_expr(condition, &constants))
-            .is_some_and(|condition| condition == 0)
-        {
-            continue;
+        if let Some(condition) = process.condition() {
+            let condition =
+                sv::typecheck::eval_const_expr(condition, &constants).ok_or_else(|| {
+                    sv::AnalyzerError::Unsupported(
+                        "unknown conditional-generate condition".to_string(),
+                    )
+                })?;
+            if condition == 0 {
+                continue;
+            }
         }
         comb_blocks.extend(lower_comb_process(
             process,
@@ -537,6 +550,34 @@ fn lower_module_with_overrides(
         .iter()
         .map(|(&id, variable)| (id, variable.to_shared_variable()))
         .collect();
+    let mut instances = Vec::new();
+    for instance in module.instances() {
+        if let Some(condition) = instance.condition() {
+            let condition =
+                sv::typecheck::eval_const_expr(condition, &constants).ok_or_else(|| {
+                    sv::AnalyzerError::Unsupported(
+                        "unknown conditional-generate condition".to_string(),
+                    )
+                })?;
+            if condition == 0 {
+                continue;
+            }
+        }
+        instances.push(LoweredSvInstance {
+            module_name: resource_table::insert_str(instance.module_name()),
+            instance_name: resource_table::insert_str(instance.name()),
+            parameter_overrides: lower_parameter_overrides(instance, &constants),
+            port_connections: instance
+                .port_connections()
+                .iter()
+                .map(|connection| LoweredSvPortConnection {
+                    formal: connection.formal().to_string(),
+                    actual: connection.actual().to_string(),
+                    actual_expr: connection.actual_expr().cloned(),
+                })
+                .collect(),
+        });
+    }
 
     Ok(LoweredSvModule {
         source: module.clone(),
@@ -564,30 +605,7 @@ fn lower_module_with_overrides(
         port_order,
         signal_names: name_to_id,
         constants: constants.clone(),
-        instances: module
-            .instances()
-            .iter()
-            .filter(|instance| {
-                instance
-                    .condition()
-                    .and_then(|condition| sv::typecheck::eval_const_expr(condition, &constants))
-                    .is_none_or(|condition| condition != 0)
-            })
-            .map(|instance| LoweredSvInstance {
-                module_name: resource_table::insert_str(instance.module_name()),
-                instance_name: resource_table::insert_str(instance.name()),
-                parameter_overrides: lower_parameter_overrides(instance, &constants),
-                port_connections: instance
-                    .port_connections()
-                    .iter()
-                    .map(|connection| LoweredSvPortConnection {
-                        formal: connection.formal().to_string(),
-                        actual: connection.actual().to_string(),
-                        actual_expr: connection.actual_expr().cloned(),
-                    })
-                    .collect(),
-            })
-            .collect(),
+        instances,
     })
 }
 
@@ -851,12 +869,15 @@ fn build_instance_glue(
                         None,
                     )
                 })?;
-                let expr = coerce_node_width(
+                let mut expr = coerce_node_width(
                     &mut arena,
                     expr,
                     Some(width),
                     sv_expr_is_signed(actual_expr, parent_variables, parent_signal_names),
                 )?;
+                if !child_var.is_4state {
+                    expr = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
+                }
                 input_ports.push((
                     source_ids,
                     LogicPath {

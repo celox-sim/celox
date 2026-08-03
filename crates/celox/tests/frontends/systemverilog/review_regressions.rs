@@ -145,6 +145,30 @@ fn converts_unknown_bits_when_assigning_to_bit() {
 }
 
 #[test]
+fn converts_unknown_hierarchical_inputs_to_bit() {
+    let source = r#"
+        module Child(input bit a, output logic y);
+            assign y = a;
+        endmodule
+        module Top(input logic x, output logic y);
+            Child child(.a(x), .y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("child_bit.sv"))], "Top")
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set_four_state(x, BigUint::from(1u8), BigUint::from(1u8)))
+        .unwrap();
+    assert_eq!(
+        sim.get_four_state(y),
+        (BigUint::from(0u8), BigUint::from(0u8))
+    );
+}
+
+#[test]
 fn preserves_nested_loop_generate_assignments() {
     let source = r#"
         module Top #(parameter ENABLE = 1) (
@@ -1038,6 +1062,28 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Child(input logic a, output logic y); assign y = a; endmodule
             module Top(input logic a, output logic y); Child child(.aa(a), .y(y)); endmodule
+        "#,
+        ),
+        (
+            "unknown conditional-generate condition",
+            r#"
+            module Top #(parameter logic P = 1'bx) (output logic y);
+                if (P) assign y = 1'b1;
+            endmodule
+        "#,
+        ),
+        (
+            "always_ff event expression",
+            r#"
+            module Top(input logic clk, enable, d, output logic q);
+                always_ff @(posedge (clk & enable)) q <= d;
+            endmodule
+        "#,
+        ),
+        (
+            "systemverilog inout port",
+            r#"
+            module Top(inout wire io); endmodule
         "#,
         ),
     ];
