@@ -1853,6 +1853,15 @@ fn validate_testbench_statements(
                 TbMethod::ResetAssert { duration, .. } => {
                     if let Some(expression) = duration {
                         validate_testbench_expression(expression, source, active_functions)?;
+                        if try_eval_const(expression).is_none() {
+                            return Err(ParserError::unsupported(
+                                473,
+                                LoweringPhase::SimulatorParser,
+                                "dynamic reset duration",
+                                "runtime reset durations are not implemented",
+                                Some(&expression.comptime().token),
+                            ));
+                        }
                     }
                 }
                 TbMethod::FileOpen { name, .. } => {
