@@ -1889,9 +1889,15 @@ fn sv_expr_natural_width(
             usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)
         }
         sv::ir::Expr::Resize { width, .. } => Some(*width),
-        sv::ir::Expr::Unary { expr, .. } => {
-            sv_expr_natural_width(expr, variables, name_to_id, constants)
-        }
+        sv::ir::Expr::Unary { op, expr } => matches!(
+            op,
+            sv::ir::UnaryOp::LogicNot
+                | sv::ir::UnaryOp::RedAnd
+                | sv::ir::UnaryOp::RedOr
+                | sv::ir::UnaryOp::RedXor
+        )
+        .then_some(1)
+        .or_else(|| sv_expr_natural_width(expr, variables, name_to_id, constants)),
         sv::ir::Expr::Binary { left, op, right } => {
             if matches!(
                 op,
@@ -1909,6 +1915,8 @@ fn sv_expr_natural_width(
                     | sv::ir::BinaryOp::Ge
             ) {
                 Some(1)
+            } else if matches!(op, sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr) {
+                sv_expr_natural_width(left, variables, name_to_id, constants)
             } else {
                 Some(
                     sv_expr_natural_width(left, variables, name_to_id, constants)?.max(
@@ -1981,6 +1989,11 @@ fn lower_expr_to_sir_with_context(
             resize_sir_register(builder, reg, context_width.unwrap_or(var.width), var.signed)
         }
         sv::ir::Expr::Literal(literal) => {
+            if let Some(width) = context_width
+                && let Some(fill) = unbased_fill_literal(literal)
+            {
+                return lower_unbased_fill_literal(builder, fill, width);
+            }
             let literal = sv::typecheck::parse_integral_literal(literal)?;
             let width = literal.width;
             let signed = literal.signed;
@@ -2020,15 +2033,26 @@ fn lower_expr_to_sir_with_context(
             resize_sir_register(builder, inner, *width, *signed)
         }
         sv::ir::Expr::Unary { op, expr } => {
+            let one_bit_result = matches!(
+                op,
+                sv::ir::UnaryOp::LogicNot
+                    | sv::ir::UnaryOp::RedAnd
+                    | sv::ir::UnaryOp::RedOr
+                    | sv::ir::UnaryOp::RedXor
+            );
             let inner = lower_expr_to_sir_with_context(
                 builder,
                 expr,
                 variables,
                 name_to_id,
                 constants,
-                context_width,
+                (!one_bit_result).then_some(context_width).flatten(),
             )?;
-            let width = builder.register(&inner).width();
+            let width = if one_bit_result {
+                1
+            } else {
+                builder.register(&inner).width()
+            };
             let reg = if matches!(op, sv::ir::UnaryOp::ToTwoState) {
                 builder.alloc_bit(width, false)
             } else {
@@ -2137,6 +2161,7 @@ fn lower_expr_to_sir_with_context(
                 | sv::ir::BinaryOp::Le
                 | sv::ir::BinaryOp::Gt
                 | sv::ir::BinaryOp::Ge => 1,
+                sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr => builder.register(&left).width(),
                 _ => builder
                     .register(&left)
                     .width()
@@ -2194,29 +2219,38 @@ fn lower_expr_to_sir_with_context(
             then_expr,
             else_expr,
         } => {
+            let arms_signed = sv_expr_is_signed(then_expr, variables, name_to_id)
+                && sv_expr_is_signed(else_expr, variables, name_to_id);
+            let arm_context = sv_expr_natural_width(expr, variables, name_to_id, constants)
+                .map(|natural_width| {
+                    context_width.map_or(natural_width, |width| width.max(natural_width))
+                })
+                .or(context_width);
             let condition = lower_expr_to_sir_with_context(
                 builder, condition, variables, name_to_id, constants, None,
             )?;
-            let then_expr = lower_expr_to_sir_with_context(
+            let mut then_expr = lower_expr_to_sir_with_context(
                 builder,
                 then_expr,
                 variables,
                 name_to_id,
                 constants,
-                context_width,
+                arm_context,
             )?;
-            let else_expr = lower_expr_to_sir_with_context(
+            let mut else_expr = lower_expr_to_sir_with_context(
                 builder,
                 else_expr,
                 variables,
                 name_to_id,
                 constants,
-                context_width,
+                arm_context,
             )?;
             let width = builder
                 .register(&then_expr)
                 .width()
                 .max(builder.register(&else_expr).width());
+            then_expr = resize_sir_register(builder, then_expr, width, arms_signed)?;
+            else_expr = resize_sir_register(builder, else_expr, width, arms_signed)?;
             let reg = builder.alloc_logic(width);
             builder.emit(SIRInstruction::Mux(reg, condition, then_expr, else_expr));
             Some(reg)

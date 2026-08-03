@@ -1264,16 +1264,39 @@ fn normalize_unbased_unsized_parameter_value(
 fn const_env_from_parameters(parameters: &[Parameter]) -> HashMap<String, i128> {
     let mut env = HashMap::new();
     for parameter in parameters {
-        let Some(value) = parameter
+        let Some(mut value) = parameter
             .value()
             .and_then(|value| typecheck::eval_const_expr(&value.clone().into(), &env))
         else {
             continue;
         };
+        if let Some(width) = parameter.declared_width {
+            value = coerce_const_parameter_value(
+                value,
+                width,
+                parameter.declared_signed.unwrap_or(false),
+            );
+        }
         env.insert(parameter.name().to_string(), value);
         env.insert(parameter_marker(parameter.name()), value);
     }
     env
+}
+
+fn coerce_const_parameter_value(value: i128, width: usize, signed: bool) -> i128 {
+    if width >= 128 {
+        return value;
+    }
+    if width == 0 {
+        return 0;
+    }
+    let mask = (1u128 << width) - 1;
+    let bits = (value as u128) & mask;
+    if signed && bits & (1u128 << (width - 1)) != 0 {
+        (bits | !mask) as i128
+    } else {
+        bits as i128
+    }
 }
 
 fn parameter_value_env(

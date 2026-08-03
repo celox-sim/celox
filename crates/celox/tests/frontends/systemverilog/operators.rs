@@ -910,6 +910,7 @@ sv_backends! {
             input logic clk,
             input logic mode,
             input logic signed [1:0] signed_mode,
+            input logic signed [7:0] signed_value,
             input logic [255:0] wide_mode,
             input logic [255:0] wide_expr_mode,
             output logic [7:0] q_negative,
@@ -918,7 +919,13 @@ sv_backends! {
             output logic [7:0] q_wide_fill,
             output logic [7:0] q_wide_expression,
             output logic [7:0] q_natural_width,
+            output logic q_reduction,
+            output logic q_logic_not,
+            output logic [7:0] q_narrow_shift,
+            output logic [7:0] q_mux_selector,
+            output logic [7:0] q_dependent_parameter,
             output logic [63:0] q_fill,
+            output logic [63:0] q_nested_fill,
             output logic [63:0] q_shift
         );
             localparam NEGATIVE = -1;
@@ -926,6 +933,8 @@ sv_backends! {
             localparam logic [255:0] WIDE_NEGATIVE = -1;
             localparam logic [255:0] WIDE_FILL = '1;
             localparam logic [255:0] WIDE_SHIFT = 256'b1 << 200;
+            localparam logic [1:0] TRUNCATED = 4;
+            localparam DEPENDENT = TRUNCATED + 1;
 
             always_ff @(posedge clk) begin
                 case (signed_mode)
@@ -952,10 +961,22 @@ sv_backends! {
                     0: q_natural_width <= 16'h0100 / 16'd2;
                     default: q_natural_width <= 0;
                 endcase
+                q_reduction <= |signed_value;
+                q_logic_not <= !signed_value;
+                q_narrow_shift <= signed_value >> 1;
+                case (mode ? 1'b0 : 2'b10)
+                    2'b10: q_mux_selector <= 8'he9;
+                    default: q_mux_selector <= 0;
+                endcase
+                case (1'b1)
+                    DEPENDENT: q_dependent_parameter <= 8'hfa;
+                    default: q_dependent_parameter <= 0;
+                endcase
                 case (mode)
                     0: q_fill <= '1;
                     default: q_fill <= '0;
                 endcase
+                q_nested_fill <= !mode ? '1 : 0;
                 case (mode)
                     0: q_shift <= 1 << 40;
                     default: q_shift <= 0;
@@ -972,6 +993,7 @@ sv_backends! {
     let clk = sim.event("clk");
     let mode = sim.signal("mode");
     let signed_mode = sim.signal("signed_mode");
+    let signed_value = sim.signal("signed_value");
     let wide_mode = sim.signal("wide_mode");
     let wide_expr_mode = sim.signal("wide_expr_mode");
     let wide_negative = (BigUint::from(1u8) << 256) - BigUint::from(1u8);
@@ -980,6 +1002,7 @@ sv_backends! {
     sim.modify(|io| {
         io.set(mode, 0u8);
         io.set(signed_mode, 3u8);
+        io.set(signed_value, 0x82u8);
         io.set_wide(wide_mode, wide_negative);
         io.set_wide(wide_expr_mode, wide_shift);
     }).unwrap();
@@ -991,7 +1014,16 @@ sv_backends! {
     assert_eq!(sim.get(sim.signal("q_wide_fill")), 0xc7u8.into());
     assert_eq!(sim.get(sim.signal("q_wide_expression")), 0xd8u8.into());
     assert_eq!(sim.get(sim.signal("q_natural_width")), 0x80u8.into());
+    assert_eq!(sim.get(sim.signal("q_reduction")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("q_logic_not")), 0u8.into());
+    assert_eq!(sim.get(sim.signal("q_narrow_shift")), 0x41u8.into());
+    assert_eq!(sim.get(sim.signal("q_mux_selector")), 0xe9u8.into());
+    assert_eq!(
+        sim.get(sim.signal("q_dependent_parameter")),
+        0xfau8.into(),
+    );
     assert_eq!(sim.get(sim.signal("q_fill")), u64::MAX.into());
+    assert_eq!(sim.get(sim.signal("q_nested_fill")), u64::MAX.into());
     assert_eq!(sim.get(sim.signal("q_shift")), (1u64 << 40).into());
     }
 
