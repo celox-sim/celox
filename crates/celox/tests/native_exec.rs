@@ -1,9 +1,11 @@
 //! Integration tests: execute native backend output and verify correctness.
-#![cfg(target_arch = "x86_64")]
+#![cfg(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+))]
 
 use celox::{MemoryLayout, MemoryLayoutMode, OptimizedSir, Simulator, SimulatorBuilder};
 
-#[cfg(target_arch = "x86_64")]
 fn run_single_block_mir(insts: Vec<celox::native_backend::mir::MInst>, vreg_count: usize) -> u64 {
     use celox::native_backend::emit;
     use celox::native_backend::jit_mem;

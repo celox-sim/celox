@@ -17,7 +17,7 @@ pub use backend::{
     EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, SimBackend, get_byte_size,
 };
 pub use celox_design::{ElaboratedDesign, EventTopology, RuntimeSchema};
-pub use celox_frontend_veryl::{LoweringPhase, ParserError};
+pub use celox_frontend_veryl::{FrontendDiagnostic, LoweringPhase, ParserError};
 pub use celox_slt::scheduler::SchedulerError;
 pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
 pub use diagnostics::RuntimeDiagnostics;
@@ -34,7 +34,7 @@ pub use optimizer::OptimizeOptions;
 pub use optimizer::SirDiagnostics;
 pub use optimizer::SirPass;
 pub use simulator::render_diagnostic;
-pub use simulator::{CodegenError, SimulatorError, SimulatorErrorKind};
+pub use simulator::{CodegenError, CompilationWarning, SimulatorError, SimulatorErrorKind};
 pub use veryl_metadata::{ClockType, ResetType};
 
 #[cfg(feature = "host-runtime")]
@@ -79,24 +79,45 @@ mod host_api {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     pub mod native_backend {
-        //! Re-exports for the native x86-64 backend (for testing/integration).
+        //! Re-exports for the custom native backend (for testing/integration).
         pub use crate::backend::native::*;
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     pub use crate::backend::native::backend::NativeEventRef;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     pub use crate::backend::native::{NativeBackend, SharedNativeCode};
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     pub use crate::backend::{NativeDiagnostics, NativeDumpOptions};
 
-    /// Default simulation backend: NativeBackend on x86-64, JitBackend (Cranelift) elsewhere.
-    #[cfg(target_arch = "x86_64")]
+    /// Default simulation backend: custom native on x86-64 and opt-in AArch64,
+    /// Cranelift elsewhere.
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     pub type DefaultBackend = NativeBackend;
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )))]
     pub type DefaultBackend = JitBackend;
+
+    pub type DefaultEventRef = <DefaultBackend as SimBackend>::Event;
 }
 
 #[cfg(feature = "host-runtime")]

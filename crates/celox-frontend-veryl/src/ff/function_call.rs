@@ -848,19 +848,19 @@ impl<'a> FfParser<'a> {
         for (dsts, expr) in output_exprs {
             self.function_arg_stack.push(bindings.clone());
             self.function_array_view_stack.push(array_views);
-            let parse_result =
-                self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None);
+            let assign_result = (|| {
+                self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None)?;
+                let rhs_reg = self
+                    .stack
+                    .pop_back()
+                    .expect("Function output expression evaluation failed");
+                self.emit_multi_dst_assign(
+                    rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
+                )
+            })();
             array_views = self.function_array_view_stack.pop().unwrap();
             self.function_arg_stack.pop();
-            parse_result?;
-
-            let rhs_reg = self
-                .stack
-                .pop_back()
-                .expect("Function output expression evaluation failed");
-            self.emit_multi_dst_assign(
-                rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
-            )?;
+            assign_result?;
         }
 
         self.function_arg_stack.push(bindings);
@@ -948,19 +948,19 @@ impl<'a> FfParser<'a> {
         for (dsts, expr) in output_exprs {
             self.function_arg_stack.push(bindings.clone());
             self.function_array_view_stack.push(array_views);
-            let parse_result =
-                self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None);
+            let assign_result = (|| {
+                self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None)?;
+                let rhs_reg = self
+                    .stack
+                    .pop_back()
+                    .expect("Function output expression evaluation failed");
+                self.emit_multi_dst_assign(
+                    rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
+                )
+            })();
             array_views = self.function_array_view_stack.pop().unwrap();
             self.function_arg_stack.pop();
-            parse_result?;
-
-            let rhs_reg = self
-                .stack
-                .pop_back()
-                .expect("Function output expression evaluation failed");
-            self.emit_multi_dst_assign(
-                rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
-            )?;
+            assign_result?;
         }
 
         self.restore_active_function_array_views(&array_views, convert, ir_builder)?;

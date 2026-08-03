@@ -600,11 +600,11 @@ fn load_project_sources(
     Ok((sources, metadata, celox_cfg))
 }
 
-/// Format analyzer warnings as a JSON array of strings.
+/// Format compilation warnings as a JSON array of strings.
 ///
 /// Uses `render_diagnostic` to include source location and span information,
 /// matching the format used for error messages.
-fn format_warnings_json(warnings: &[veryl_analyzer::AnalyzerError]) -> String {
+fn format_warnings_json(warnings: &[celox::CompilationWarning]) -> String {
     let msgs: Vec<String> = warnings
         .iter()
         .map(|w| celox::render_diagnostic(w))
@@ -1030,7 +1030,7 @@ impl NativeSimulatorHandle {
         self.hierarchy_json.clone()
     }
 
-    /// Returns analyzer warnings as a JSON array of strings.
+    /// Returns compilation warnings as a JSON array of strings.
     #[napi(getter)]
     pub fn warnings_json(&self) -> String {
         self.warnings_json.clone()
@@ -1283,7 +1283,7 @@ impl NativeSimulationHandle {
         self.hierarchy_json.clone()
     }
 
-    /// Returns analyzer warnings as a JSON array of strings.
+    /// Returns compilation warnings as a JSON array of strings.
     #[napi(getter)]
     pub fn warnings_json(&self) -> String {
         self.warnings_json.clone()
@@ -1587,7 +1587,7 @@ impl NativeSimulatorHandle {
         self.hierarchy_json.clone()
     }
 
-    /// Returns analyzer warnings as a JSON array of strings.
+    /// Returns compilation warnings as a JSON array of strings.
     #[napi(getter)]
     pub fn warnings_json(&self) -> String {
         self.warnings_json.clone()

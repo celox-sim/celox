@@ -82,6 +82,538 @@ o_data: top_out
 
     }
 
+    fn test_instance_input_function_output_writeback(sim) {
+        // veryl-simulator currently evaluates the connection value but does
+        // not write the function output actual back to the parent variable.
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Child (
+i: input logic,
+o: output logic
+) {
+assign o = i;
+}
+module Top (
+a: input logic,
+child_o: output logic,
+seen_o: output logic
+) {
+function write_seen (
+x: input logic,
+seen: output logic
+) -> logic {
+seen = x;
+return x;
+}
+var seen: logic;
+inst child: Child (
+i: write_seen(a, seen),
+o: child_o
+);
+assign seen_o = seen;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let a = sim.signal("a");
+    let child_o = sim.signal("child_o");
+    let seen_o = sim.signal("seen_o");
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(child_o), 1u8.into());
+    assert_eq!(sim.get(seen_o), 1u8.into());
+
+    }
+
+    fn test_instance_input_function_output_concat_dynamic_writeback(sim) {
+        // veryl-simulator currently evaluates the connection value but does
+        // not write the function output actual back to the parent variables.
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Child (
+i: input logic,
+o: output logic
+) {
+assign o = i;
+}
+module Top (
+value: input logic<2>,
+index: input logic,
+child_o: output logic,
+mem_o: output logic<2>,
+tmp_o: output logic
+) {
+function write_pair (
+x: input logic<2>,
+dst: output logic<2>
+) -> logic {
+dst = x;
+return x[0];
+}
+var mem: logic<2>;
+var tmp: logic;
+inst child: Child (
+i: write_pair(value, {mem[index], tmp}),
+o: child_o
+);
+assign mem_o = mem;
+assign tmp_o = tmp;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let value = sim.signal("value");
+    let index = sim.signal("index");
+    let child_o = sim.signal("child_o");
+    let mem_o = sim.signal("mem_o");
+    let tmp_o = sim.signal("tmp_o");
+
+    sim.modify(|io| {
+        io.set(value, 3u8);
+        io.set(index, 1u8);
+    }).unwrap();
+    assert_eq!(sim.get(child_o), 1u8.into());
+    assert_eq!(sim.get(mem_o), 2u8.into());
+    assert_eq!(sim.get(tmp_o), 1u8.into());
+
+    }
+
+    fn test_inactive_instance_input_output_call_adds_no_parent_driver(sim) {
+        @setup { let code = r#"
+module Child (
+i: input logic,
+o: output logic
+) {
+assign o = i;
+}
+module Top (
+a: input logic,
+child_o: output logic,
+seen_o: output logic
+) {
+function write_seen (
+x: input logic,
+seen: output logic
+) -> logic {
+seen = !x;
+return x;
+}
+var seen: logic;
+inst child: Child (
+i: if 1'b0 ? write_seen(a, seen) : a,
+o: child_o
+);
+assign seen = a;
+assign seen_o = seen;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let a = sim.signal("a");
+    let child_o = sim.signal("child_o");
+    let seen_o = sim.signal("seen_o");
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(child_o), 1u8.into());
+    assert_eq!(sim.get(seen_o), 1u8.into());
+
+    }
+
+    fn test_instance_input_function_output_preserves_runtime_display(sim) {
+        // veryl-simulator does not write the connection's function output
+        // actual back; wasm does not currently expose runtime event draining.
+        @omit_veryl;
+        @ignore_on(wasm);
+        @setup { let code = r#"
+module Child (
+i: input logic,
+o: output logic
+) {
+assign o = i;
+}
+module Top (
+a: input logic,
+child_o: output logic,
+seen_o: output logic
+) {
+function write_seen (
+x: input logic,
+seen: output logic
+) -> logic {
+seen = x;
+$display("seen=%0d", seen);
+return x;
+}
+var seen: logic;
+inst child: Child (
+i: write_seen(a, seen),
+o: child_o
+);
+assign seen_o = seen;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let a = sim.signal("a");
+    let child_o = sim.signal("child_o");
+    let seen_o = sim.signal("seen_o");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(child_o), 1u8.into());
+    assert_eq!(sim.get(seen_o), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "seen=1".to_string(),
+        }],
+    );
+
+    }
+
+    fn test_instance_output_dynamic_index_function_output_writeback(sim) {
+        // veryl-simulator does not write the dynamic connection index call's
+        // output actual back to the parent variable.
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Child (
+i: input logic,
+o: output logic
+) {
+assign o = i;
+}
+module Top (
+sel: input logic,
+mem_o: output logic<2>,
+tmp_o: output logic
+) {
+function choose_index (
+x: input logic,
+tmp: output logic
+) -> logic {
+tmp = x;
+return x;
+}
+var mem: logic<2>;
+var tmp: logic;
+inst child: Child (
+i: 1'b1,
+o: mem[choose_index(sel, tmp)]
+);
+assign mem_o = mem;
+assign tmp_o = tmp;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let sel = sim.signal("sel");
+    let mem_o = sim.signal("mem_o");
+    let tmp_o = sim.signal("tmp_o");
+
+    sim.modify(|io| io.set(sel, 1u8)).unwrap();
+    assert_eq!(sim.get(mem_o), 2u8.into());
+    assert_eq!(sim.get(tmp_o), 1u8.into());
+
+    }
+
+    fn test_instance_output_dynamic_index_preserves_runtime_display(sim) {
+        // veryl-simulator does not write the dynamic connection index call's
+        // output actual back; wasm does not currently expose runtime events.
+        @omit_veryl;
+        @ignore_on(wasm);
+        @setup { let code = r#"
+module Child (i: input logic, o: output logic) {
+assign o = i;
+}
+module Top (
+sel: input logic,
+mem_o: output logic<2>,
+tmp_o: output logic
+) {
+function choose_index (
+x: input logic,
+tmp: output logic
+) -> logic {
+tmp = x;
+$display("index=%0d", x);
+return x;
+}
+var mem: logic<2>;
+var tmp: logic;
+inst child: Child (
+i: 1'b1,
+o: mem[choose_index(sel, tmp)]
+);
+assign mem_o = mem;
+assign tmp_o = tmp;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let sel = sim.signal("sel");
+    let mem_o = sim.signal("mem_o");
+    let tmp_o = sim.signal("tmp_o");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(sel, 1u8)).unwrap();
+    assert_eq!(sim.get(mem_o), 3u8.into());
+    assert_eq!(sim.get(tmp_o), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "index=1".to_string(),
+        }],
+    );
+
+    }
+
+    fn test_instance_output_index_runtime_effect_tracks_plain_sibling_source(sim) {
+        @omit_veryl;
+        @ignore_on(wasm);
+        @setup { let code = r#"
+module Child (i: input logic, o: output logic) {
+assign o = i;
+}
+module Top (
+d: input logic,
+offset: input logic,
+mem_o: output logic<2>
+) {
+function emit (x: input logic) -> logic {
+$display("d=%0d", x);
+return 1'b0;
+}
+var mem: logic<2>;
+inst child: Child (
+i: 1'b1,
+o: mem[emit(d) + offset]
+);
+assign mem_o = mem;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let offset = sim.signal("offset");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(offset, 1u8)).unwrap();
+    sim.drain_runtime_events();
+
+    // Both destinations already contain the driven value, so no generated
+    // parent write changes. The ordinary address source must still activate
+    // the runtime effect when the selected location changes.
+    sim.modify(|io| io.set(offset, 0u8)).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "d=0".to_string(),
+        }],
+    );
+
+    }
+
+    fn test_instance_output_dynamic_index_composes_aliasing_writeback(sim) {
+        // veryl-simulator does not write the dynamic connection index call's
+        // output actual back to the parent array.
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Child (i: input logic, o: output logic) {
+assign o = i;
+}
+module Top (
+sel: input logic,
+mem_o: output logic<2>
+) {
+function choose_index (
+x: input logic,
+tmp: output logic
+) -> logic {
+tmp = x;
+return x;
+}
+var mem: logic<2>;
+inst child: Child (
+i: 1'b1,
+o: mem[choose_index(sel, mem[0])]
+);
+assign mem_o = mem;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let sel = sim.signal("sel");
+    let mem_o = sim.signal("mem_o");
+
+    sim.modify(|io| io.set(sel, 1u8)).unwrap();
+    assert_eq!(sim.get(mem_o), 3u8.into());
+
+    }
+
+    fn test_instance_output_concat_advances_each_destination(sim) {
+        @ignore_on(veryl);
+        @setup { let code = r#"
+module Child (i: input logic<2>, o: output logic<2>) {
+assign o = i;
+}
+module Top (
+value: input logic<2>,
+mem_o: output logic<2>,
+tmp_o: output logic
+) {
+var mem: logic<2>;
+var tmp: logic;
+inst child: Child (
+i: value,
+o: {mem[tmp], tmp}
+);
+assign mem_o = mem;
+assign tmp_o = tmp;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let value = sim.signal("value");
+    let mem_o = sim.signal("mem_o");
+    let tmp_o = sim.signal("tmp_o");
+
+    sim.modify(|io| io.set(value, 3u8)).unwrap();
+    assert_eq!(sim.get(tmp_o), 1u8.into());
+    assert_eq!(sim.get(mem_o), 2u8.into());
+
+    }
+
+    fn test_instance_output_concat_runtime_effect_observes_prior_slice(sim) {
+        @omit_veryl;
+        @ignore_on(wasm);
+        @setup { let code = r#"
+module Child (i: input logic<2>, o: output logic<2>) {
+assign o = i;
+}
+module Top (
+value: input logic<2>,
+mem_o: output logic<2>,
+tmp_o: output logic
+) {
+function observe_index (x: input logic) -> logic {
+$display("index=%0d", x);
+return x;
+}
+var mem: logic<2>;
+var tmp: logic;
+inst child: Child (
+i: value,
+o: {mem[observe_index(tmp)], tmp}
+);
+assign mem_o = mem;
+assign tmp_o = tmp;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let value = sim.signal("value");
+    let tmp_o = sim.signal("tmp_o");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| io.set(value, 3u8)).unwrap();
+    assert_eq!(sim.get(tmp_o), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "index=1".to_string(),
+        }],
+    );
+
+    }
+
+    fn test_instance_output_index_runtime_effect_triggers_on_child_change(sim) {
+        @omit_veryl;
+        @ignore_on(wasm);
+        @setup { let code = r#"
+module Child (i: input logic, o: output logic) {
+assign o = i;
+}
+module Top (
+data: input logic,
+sel: input logic,
+mem_o: output logic<2>
+) {
+function observe_index (x: input logic) -> logic {
+$display("index=%0d", x);
+return x;
+}
+var mem: logic<2>;
+inst child: Child (
+i: data,
+o: mem[observe_index(sel)]
+);
+assign mem_o = mem;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let data = sim.signal("data");
+    let sel = sim.signal("sel");
+    sim.drain_runtime_events();
+
+    sim.modify(|io| {
+        io.set(data, 0u8);
+        io.set(sel, 1u8);
+    }).unwrap();
+    sim.drain_runtime_events();
+    sim.modify(|io| io.set(data, 1u8)).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "index=1".to_string(),
+        }],
+    );
+
+    }
+
+    fn test_instance_output_index_effect_triggers_when_two_state_parent_is_unchanged(sim) {
+        @omit_veryl;
+        @ignore_on(wasm);
+        @setup { let code = r#"
+module Child (mode: input logic<2>, o: output logic) {
+always_comb {
+case mode {
+2'd0: o = 1'b0;
+2'd1: o = 1'bx;
+default: o = 1'bz;
+}
+}
+}
+module Top (
+mode: input logic<2>,
+index: input logic,
+mem_o: output bit<2>
+) {
+function observe_index (x: input logic) -> logic {
+$display("index=%0d", x);
+return x;
+}
+var mem: bit<2>;
+inst child: Child (
+mode,
+o: mem[observe_index(index)]
+);
+assign mem_o = mem;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let mode = sim.signal("mode");
+    let index = sim.signal("index");
+    let mem_o = sim.signal("mem_o");
+    sim.modify(|io| {
+        io.set(mode, 0u8);
+        io.set(index, 0u8);
+    }).unwrap();
+    sim.drain_runtime_events();
+
+    assert_eq!(sim.get_as::<u8>(mem_o), 0);
+    sim.modify(|io| io.set(mode, 1u8)).unwrap();
+    let x_parent_value = sim.get_as::<u8>(mem_o);
+    sim.drain_runtime_events();
+    sim.modify(|io| io.set(mode, 2u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(mem_o), x_parent_value);
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "index=0".to_string(),
+        }],
+    );
+
+    }
+
     fn test_unconnected_child_output_needs_no_parent_glue(sim) {
         @setup { let code = r#"
 module Child (
@@ -239,6 +771,28 @@ assign out = mem;
     })
     .unwrap();
     assert_eq!(sim.get(out), 0xc3u8.into());
+
+    }
+
+    fn test_dynamic_output_port_converts_four_state_child_to_two_state_parent(sim) {
+        @omit_veryl;
+        @setup { let code = r#"
+module Child (y: output logic) {
+assign y = 1'bx;
+}
+module Top (idx: input logic, out: output bit<2>) {
+var mem: bit<2>;
+inst child: Child (y: mem[idx]);
+assign out = mem;
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let idx = sim.signal("idx");
+    let out = sim.signal("out");
+
+    assert_eq!(sim.get_as::<u8>(out), 0);
+    sim.modify(|io| io.set(idx, 1u8)).unwrap();
+    assert_eq!(sim.get_as::<u8>(out), 0);
 
     }
 

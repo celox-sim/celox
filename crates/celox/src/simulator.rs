@@ -5,7 +5,7 @@ pub use builder::compile_to_sir;
 #[cfg(feature = "host-runtime")]
 pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions};
 pub use error::render_diagnostic;
-pub use error::{CodegenError, SimulatorError, SimulatorErrorKind};
+pub use error::{CodegenError, CompilationWarning, SimulatorError, SimulatorErrorKind};
 
 #[cfg(feature = "host-runtime")]
 mod host {
@@ -14,7 +14,10 @@ mod host {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use crate::backend::RuntimeEventBuffer;
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     use crate::backend::native::{NativeBackend, SharedNativeCode};
     use crate::{
         IOContext, RuntimeErrorCode,
@@ -59,13 +62,13 @@ mod host {
     /// and an optional VCD writer. Provides low-level, event-driven control.
     ///
     /// The default type parameter `B = DefaultBackend` means that bare `Simulator`
-    /// uses the native x86-64 backend on x86-64 and Cranelift elsewhere.
+    /// uses the custom native backend on x86-64 and opt-in AArch64, and Cranelift elsewhere.
     pub struct Simulator<B: SimBackend = crate::DefaultBackend> {
         pub(crate) backend: B,
         pub(crate) program: RuntimeProgram,
         pub(crate) vcd_writer: Option<crate::VcdWriter>,
         pub(crate) dirty: bool,
-        pub(crate) warnings: Vec<veryl_analyzer::AnalyzerError>,
+        pub(crate) warnings: Vec<CompilationWarning>,
         runtime_event_read_seq: Arc<AtomicU64>,
         runtime_event_drain_active: Arc<AtomicBool>,
         comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
@@ -492,7 +495,7 @@ mod host {
         pub fn with_backend_and_program(
             backend: B,
             program: RuntimeProgram,
-            warnings: Vec<veryl_analyzer::AnalyzerError>,
+            warnings: Vec<CompilationWarning>,
         ) -> Self {
             let mut sim = Self {
                 backend,
@@ -777,8 +780,8 @@ mod host {
             &self.backend
         }
 
-        /// Returns analyzer warnings emitted during compilation.
-        pub fn warnings(&self) -> &[veryl_analyzer::AnalyzerError] {
+        /// Returns warnings emitted during compilation.
+        pub fn warnings(&self) -> &[CompilationWarning] {
             &self.warnings
         }
 
@@ -1450,7 +1453,10 @@ mod host {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     impl Simulator<NativeBackend> {
         /// Returns the shared compiled native code, allowing it to be reused
         /// for creating additional simulator instances without recompilation.

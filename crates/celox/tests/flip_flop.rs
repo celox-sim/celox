@@ -2815,6 +2815,40 @@ fn test_ff_function_call_forwards_array_literal_view_to_nested_call(sim) {
     assert_eq!(sim.get(out_q), 0x22u32.into());
 }
 
+fn test_ff_function_call_keeps_array_view_active_for_output_index(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            function pick (
+                x: input logic<8>[2],
+                index: input logic,
+                selected: output logic<8>
+            ) -> logic<8> {
+                selected = x[index];
+                return x[0];
+            }
+            var selected: logic<8>[2];
+            var inner_selected: logic<8>;
+            always_ff (clk) {
+                out_q = pick(
+                    '{8'h11, 8'h22},
+                    1,
+                    selected[pick('{8'h01, 8'h00}, 0, inner_selected)]
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0x11u32.into());
+}
+
 fn test_ff_function_call_restores_array_literal_view_after_reentrant_call(sim) {
     @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
@@ -3785,6 +3819,10 @@ fn test_ff_array_literal_static_then_dynamic_access_evaluates_each_item_once() {
 }
 
 #[test]
+#[cfg(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+))]
 fn test_ff_packed_bit_select_writes_regression() {
     let code = r#"
     module Top (

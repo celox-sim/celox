@@ -65,6 +65,10 @@ pub struct LogicPath<A: Hash + Eq + Clone> {
     pub local_inputs: Vec<(A, NodeId)>,
     pub order_before: HashSet<LogicPathId>,
     pub comb_capture_enable_sites: Vec<u32>,
+    /// Enable the listed capture sites whenever this path executes, even when
+    /// assignment conversion leaves the stored target unchanged.
+    #[serde(default)]
+    pub comb_capture_enable_always: bool,
     pub pre_lower_nodes: Vec<NodeId>,
     pub expr: NodeId,
 }
@@ -172,6 +176,7 @@ impl<A: fmt::Debug + fmt::Display + Hash + Eq + Clone> LogicPath<A> {
             local_inputs,
             order_before: self.order_before.clone(),
             comb_capture_enable_sites: self.comb_capture_enable_sites.clone(),
+            comb_capture_enable_always: self.comb_capture_enable_always,
             pre_lower_nodes,
             expr,
         })
