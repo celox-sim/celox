@@ -1033,6 +1033,82 @@ fn test_ff_function_argument_array_literal_multiple_default_is_rejected_by_shape
 }
 
 #[test]
+fn test_ff_function_runtime_effect_in_for_bound_is_detected() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            count: input logic<3>
+        ) {
+            function observed (x: input logic<3>) -> logic<3> {
+                $display("bound=%0d", x);
+                return x;
+            }
+
+            function consume (n: input logic<3>) {
+                for i in observed(n)..n {}
+            }
+
+            always_ff (clk) {
+                consume(count);
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("runtime effect in a function-local for bound must not be discarded");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 66);
+            assert_eq!(
+                *feature,
+                "control flow around runtime effect in function body"
+            );
+        }
+        other => panic!("expected effectful for-bound error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_ff_function_runtime_effect_in_assignment_destination_is_detected() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            index: input logic<3>
+        ) {
+            function observed (x: input logic<3>) -> logic<3> {
+                $display("index=%0d", x);
+                return x;
+            }
+
+            function consume (i: input logic<3>) {
+                var tmp: logic<8>;
+                tmp = 8'd0;
+                tmp[observed(i)] = 1'b1;
+            }
+
+            always_ff (clk) {
+                consume(index);
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("runtime effect in an assignment destination must not be discarded");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 66);
+            assert_eq!(
+                *feature,
+                "effectful assignment destination in function body"
+            );
+        }
+        other => panic!("expected effectful assignment-destination error, got: {other:?}"),
+    }
+}
+
+#[test]
 fn test_ff_array_literal_width_overflow_is_illegal_context() {
     let code = r#"
         module Top (

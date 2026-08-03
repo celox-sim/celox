@@ -11,9 +11,9 @@ use celox_sir::{
 };
 use num_traits::ToPrimitive;
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, CasePattern, CaseStatement, Comptime, Expression, Factor, Op, Shape,
-    Statement, SystemFunctionCall, SystemFunctionKind, Type, TypeKind, ValueVariant, VarId,
-    VarIndex, VarSelect,
+    ArrayLiteralItem, CasePattern, CaseStatement, Comptime, Expression, Factor, ForBound, ForRange,
+    Op, Shape, Statement, SystemFunctionCall, SystemFunctionKind, Type, TypeKind, ValueVariant,
+    VarId, VarIndex, VarSelect,
 };
 use veryl_parser::token_range::TokenRange;
 
@@ -140,7 +140,21 @@ impl<'a> FfParser<'a> {
         statements.iter().any(|statement| match statement {
             Statement::SystemFunctionCall(_) => true,
             Statement::Assign(assign) => {
-                self.expression_has_runtime_effect_inner(&assign.expr, visiting)
+                let destination_effect =
+                    assign.dst.iter().any(|dst| {
+                        dst.index
+                            .0
+                            .iter()
+                            .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
+                            || dst.select.0.iter().any(|expr| {
+                                self.expression_has_runtime_effect_inner(expr, visiting)
+                            })
+                            || dst.select.1.as_ref().is_some_and(|(_, expr)| {
+                                self.expression_has_runtime_effect_inner(expr, visiting)
+                            })
+                    });
+                destination_effect
+                    || self.expression_has_runtime_effect_inner(&assign.expr, visiting)
             }
             Statement::If(statement) => {
                 self.expression_has_runtime_effect_inner(&statement.cond, visiting)
@@ -168,7 +182,18 @@ impl<'a> FfParser<'a> {
                     || self.statements_have_runtime_effect(&statement.default, visiting)
             }
             Statement::For(statement) => {
-                self.statements_have_runtime_effect(&statement.body, visiting)
+                let (start, end) = match &statement.range {
+                    ForRange::Forward { start, end, .. }
+                    | ForRange::Reverse { start, end, .. }
+                    | ForRange::Stepped { start, end, .. } => (start, end),
+                };
+                let bound_effect = [start, end].into_iter().any(|bound| match bound {
+                    ForBound::Const(_) => false,
+                    ForBound::Expression(expr) => {
+                        self.expression_has_runtime_effect_inner(expr, visiting)
+                    }
+                });
+                bound_effect || self.statements_have_runtime_effect(&statement.body, visiting)
             }
             Statement::FunctionCall(call) => {
                 call.inputs
@@ -249,6 +274,20 @@ impl<'a> FfParser<'a> {
             .collect()
     }
 
+    fn apply_state_transition_on_path(
+        path: &FunctionPathCondition,
+        base: &HashMap<VarId, Expression>,
+        transitioned: HashMap<VarId, Expression>,
+    ) -> HashMap<VarId, Expression> {
+        match path {
+            FunctionPathCondition::Always => transitioned,
+            FunctionPathCondition::Never => base.clone(),
+            FunctionPathCondition::Conditional(condition) => {
+                Self::merge_expression_states(condition, base, &transitioned, base)
+            }
+        }
+    }
+
     fn capture_nested_function_outputs_with_states(
         &self,
         expr: &Expression,
@@ -276,12 +315,28 @@ impl<'a> FfParser<'a> {
                 Factor::Variable(_, _, _, _) => expr.clone(),
                 Factor::FunctionCall(call) => {
                     let mut call = call.clone();
-                    for input in call.inputs.values_mut() {
-                        *input = self.capture_nested_function_outputs_inner(
-                            input,
-                            state,
-                            expression_states,
-                        )?;
+                    let Some(function) = self.module.functions.get(&call.id) else {
+                        return Err(ParserError::unsupported(
+                            43,
+                            LoweringPhase::FfLowering,
+                            "function call",
+                            format!("unknown function id: {:?}", call.id),
+                            Some(&call.comptime.token),
+                        ));
+                    };
+                    let ordered_paths: Vec<_> = function
+                        .args
+                        .iter()
+                        .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path.clone()))
+                        .collect();
+                    for path in ordered_paths {
+                        if let Some(input) = call.inputs.get_mut(&path) {
+                            *input = self.capture_nested_function_outputs_inner(
+                                input,
+                                state,
+                                expression_states,
+                            )?;
+                        }
                     }
                     *state = self.apply_function_call_to_state(&call, state)?;
                     call.outputs.clear();
@@ -803,7 +858,7 @@ impl<'a> FfParser<'a> {
         }
         let guard_state = state.clone();
         let (call, next_state, arg_states) = self.prepare_system_function_call(call, state)?;
-        *state = next_state;
+        *state = Self::apply_state_transition_on_path(active, &guard_state, next_state);
         let merge_block = if let FunctionPathCondition::Conditional(condition) = active {
             let condition = self.parse_function_path_condition(
                 condition,
@@ -861,6 +916,28 @@ impl<'a> FfParser<'a> {
             let is_return = Self::statement_is_function_return(statement, ret_id);
             match statement {
                 Statement::Assign(assign) => {
+                    if assign.dst.iter().any(|dst| {
+                        dst.index
+                            .0
+                            .iter()
+                            .any(|expr| self.expression_needs_eager_evaluation(expr))
+                            || dst
+                                .select
+                                .0
+                                .iter()
+                                .any(|expr| self.expression_needs_eager_evaluation(expr))
+                            || dst.select.1.as_ref().is_some_and(|(_, expr)| {
+                                self.expression_needs_eager_evaluation(expr)
+                            })
+                    }) {
+                        return Err(ParserError::unsupported(
+                            66,
+                            LoweringPhase::FfLowering,
+                            "effectful assignment destination in function body",
+                            format!("{statement}"),
+                            Some(&assign.token),
+                        ));
+                    }
                     if self.expression_needs_eager_evaluation(&assign.expr) {
                         self.materialize_function_runtime_expression(
                             &assign.expr,
@@ -873,7 +950,9 @@ impl<'a> FfParser<'a> {
                             ir_builder,
                         )?;
                     }
-                    state = self.apply_statement_to_function_state(statement, &state)?;
+                    let base = state.clone();
+                    let transitioned = self.apply_statement_to_function_state(statement, &base)?;
+                    state = Self::apply_state_transition_on_path(&active, &base, transitioned);
                     if is_return {
                         active = FunctionPathCondition::Never;
                     }
@@ -945,13 +1024,21 @@ impl<'a> FfParser<'a> {
                     let mut remaining = active.clone();
                     let mut live_paths = FunctionPathCondition::Never;
                     for arm in &statement.arms {
+                        let mut pattern_remaining = remaining.clone();
+                        let mut arm_active = FunctionPathCondition::Never;
                         for pattern in &arm.patterns {
                             match pattern {
                                 CasePattern::Eq(expr) => {
                                     if self.expression_needs_eager_evaluation(expr) {
                                         self.materialize_function_runtime_expression(
-                                            expr, &mut state, &remaining, targets, domain, convert,
-                                            sources, ir_builder,
+                                            expr,
+                                            &mut state,
+                                            &pattern_remaining,
+                                            targets,
+                                            domain,
+                                            convert,
+                                            sources,
+                                            ir_builder,
                                         )?;
                                     }
                                 }
@@ -959,27 +1046,42 @@ impl<'a> FfParser<'a> {
                                     for expr in [lo, hi] {
                                         if self.expression_needs_eager_evaluation(expr) {
                                             self.materialize_function_runtime_expression(
-                                                expr, &mut state, &remaining, targets, domain,
-                                                convert, sources, ir_builder,
+                                                expr,
+                                                &mut state,
+                                                &pattern_remaining,
+                                                targets,
+                                                domain,
+                                                convert,
+                                                sources,
+                                                ir_builder,
                                             )?;
                                         }
                                     }
                                 }
                             }
+                            let pattern_base = state.clone();
+                            let condition = Self::substitute_function_expr(
+                                &case_arm_condition_expr(
+                                    &statement.case_target,
+                                    std::slice::from_ref(pattern),
+                                ),
+                                &pattern_base,
+                            );
+                            let matched = Self::function_path_and(
+                                pattern_remaining.clone(),
+                                condition.clone(),
+                            );
+                            arm_active = Self::function_path_or(arm_active, matched);
+                            pattern_remaining =
+                                Self::function_path_and_not(pattern_remaining, condition);
                         }
                         let base = state.clone();
-                        let condition = Self::substitute_function_expr(
-                            &case_arm_condition_expr(&statement.case_target, &arm.patterns),
-                            &base,
-                        );
-                        let arm_active =
-                            Self::function_path_and(remaining.clone(), condition.clone());
                         let (_, arm_live) = self.emit_function_runtime_effects_in_path(
                             &arm.body, ret_id, &base, arm_active, targets, domain, convert,
                             sources, ir_builder,
                         )?;
                         live_paths = Self::function_path_or(live_paths, arm_live);
-                        remaining = Self::function_path_and_not(remaining, condition);
+                        remaining = pattern_remaining;
                     }
                     let base = state.clone();
                     let (_, default_live) = self.emit_function_runtime_effects_in_path(
@@ -1041,7 +1143,9 @@ impl<'a> FfParser<'a> {
                             )?;
                         }
                     }
-                    state = self.apply_function_call_to_state(call, &state)?;
+                    let base = state.clone();
+                    let transitioned = self.apply_function_call_to_state(call, &base)?;
+                    state = Self::apply_state_transition_on_path(&active, &base, transitioned);
                 }
                 Statement::IfReset(statement) => {
                     return Err(ParserError::unsupported(
@@ -2178,7 +2282,11 @@ impl<'a> FfParser<'a> {
 
         let has_runtime_effect =
             self.statements_have_runtime_effect(&function_body.statements, &mut HashSet::default());
-        if call.outputs.is_empty() && !has_runtime_effect {
+        let has_effectful_input = call
+            .inputs
+            .values()
+            .any(|expr| self.expression_needs_eager_evaluation(expr));
+        if call.outputs.is_empty() && !has_runtime_effect && !has_effectful_input {
             // A pure statement-form function call has no observable result.
             return Ok(());
         }

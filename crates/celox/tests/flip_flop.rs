@@ -466,8 +466,8 @@ fn test_ff_case_skips_effectful_patterns_after_matching_arm(sim) {
 
             function consume (x: input logic<8>) {
                 case x {
-                    observed(8'd1, 8'd1): {}
-                    observed(8'd2, 8'd1): {}
+                    observed(8'd1, 8'd1), observed(8'd2, 8'd1): {}
+                    observed(8'd3, 8'd1): {}
                     default: {}
                 }
             }
@@ -568,10 +568,10 @@ fn test_ff_runtime_effect_after_conditional_return_uses_live_path(sim) {
                 x: input logic<8>
             ) -> logic<8> {
                 if skip {
-                    return x;
+                    return x + 8'd1;
                 }
                 $display("live=%0d", x);
-                return x;
+                return x + 8'd2;
             }
 
             always_ff (clk) {
@@ -583,6 +583,7 @@ fn test_ff_runtime_effect_after_conditional_return_uses_live_path(sim) {
     let clk = sim.event("clk");
     let skip = sim.signal("skip");
     let d = sim.signal("d");
+    let q = sim.signal("q");
 
     sim.modify(|io| {
         io.set(skip, 1u8);
@@ -590,6 +591,7 @@ fn test_ff_runtime_effect_after_conditional_return_uses_live_path(sim) {
     })
     .unwrap();
     sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 8u8.into());
     assert!(sim.drain_runtime_events().is_empty());
 
     sim.modify(|io| {
@@ -598,6 +600,7 @@ fn test_ff_runtime_effect_after_conditional_return_uses_live_path(sim) {
     })
     .unwrap();
     sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 10u8.into());
     assert_eq!(
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
@@ -638,6 +641,37 @@ fn test_ff_statement_call_evaluates_effectful_inputs(sim) {
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
             message: "input=9".to_string(),
+        }],
+    );
+}
+
+fn test_ff_top_level_statement_call_evaluates_discarded_effectful_input(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, d: input logic<8>) {
+            function observed (x: input logic<8>) -> logic<8> {
+                $display("direct=%0d", x);
+                return x;
+            }
+
+            function consume (x: input logic<8>) {}
+
+            always_ff (clk) {
+                consume(observed(d));
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+
+    sim.modify(|io| io.set(d, 13u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "direct=13".to_string(),
         }],
     );
 }
@@ -988,6 +1022,74 @@ fn test_ff_composite_runtime_arg_preserves_left_to_right_snapshot(sim) {
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
             message: "sum=22".to_string(),
+        }],
+    );
+}
+
+fn test_ff_nested_call_inputs_capture_outputs_in_declaration_order(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function first (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x + 8'd1;
+            }
+
+            function second (
+                seen: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = seen + 8'd1;
+                return seen;
+            }
+
+            function combine (
+                a: input logic<8>,
+                b: input logic<8>
+            ) -> logic<8> {
+                return a + b;
+            }
+
+            function outer (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x;
+                $display(
+                    "ordered=%0d",
+                    combine(first(x, written), second(written, written))
+                );
+                return written;
+            }
+
+            always_ff (clk) {
+                q = outer(d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 10u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 12u8.into());
+    assert_eq!(sim.get(q), 12u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "ordered=22".to_string(),
         }],
     );
 }
