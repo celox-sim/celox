@@ -58,7 +58,12 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
                 UnaryOp::BitNot => Some(!value),
                 UnaryOp::LogicNot => Some((value == 0) as i128),
                 UnaryOp::ToTwoState => Some(value),
-                UnaryOp::RedAnd => Some((value == -1) as i128),
+                // The constant environment currently stores values without their
+                // declared widths.  An all-ones reduction therefore cannot be
+                // evaluated correctly for an identifier such as a 4-bit 4'hf.
+                // Sized literal reductions are handled above; reject other
+                // reduction-AND operands until constant widths are preserved.
+                UnaryOp::RedAnd => None,
                 UnaryOp::RedOr => Some((value != 0) as i128),
                 UnaryOp::RedXor => Some((value.count_ones() & 1) as i128),
             }

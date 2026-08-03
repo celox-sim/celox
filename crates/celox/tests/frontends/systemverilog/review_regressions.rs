@@ -40,6 +40,37 @@ fn rejects_inline_enum_ports_instead_of_scalarizing_them() {
 }
 
 #[test]
+fn rejects_non_integral_ports_instead_of_scalarizing_them() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input real value, output logic y);
+            assign y = 1'b0;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("unsupported port data type"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_internal_signals_that_shadow_ports() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(output logic y);
+            logic y;
+            assign y = 1'b1;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("duplicate port or signal name `y`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn evaluates_sized_arithmetic_and_logical_right_shift_parameters() {
     let source = r#"
         module Top(output logic wraps, output logic logical_shift);
@@ -923,6 +954,14 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "always_ff assignment lowering",
+            r#"
+            module Top(input logic clk, input logic [3:0] a, b, output logic [3:0] q);
+                always_ff @(posedge clk) q <= a ** b;
+            endmodule
+        "#,
+        ),
+        (
             "unpacked array dimension",
             r#"
             module Top(input logic [7:0] mem [0:1], output logic [7:0] y);
@@ -1259,6 +1298,15 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top #(parameter logic P = 1'bx) (output logic y);
                 if (P) assign y = 1'b1;
+            endmodule
+        "#,
+        ),
+        (
+            "unknown conditional-generate condition",
+            r#"
+            module Top #(parameter logic [3:0] P = 4'hf) (output logic y);
+                if (&P) assign y = 1'b1;
+                else assign y = 1'b0;
             endmodule
         "#,
         ),

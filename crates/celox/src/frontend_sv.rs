@@ -554,6 +554,12 @@ fn lower_module_with_overrides(
     }
 
     for signal in module.signals() {
+        if name_to_id.contains_key(signal.name()) {
+            return Err(sv::AnalyzerError::Unsupported(format!(
+                "duplicate port or signal name `{}`",
+                signal.name()
+            )));
+        }
         let id = next_var_id(&mut next_id);
         let type_info = signal_type_from_sv(signal.r#type(), &constants);
         let path = VarPath::new(resource_table::insert_str(signal.name()));
@@ -2156,6 +2162,7 @@ fn clock_event_from_ff_process(process: &sv::ir::FfProcess) -> Option<&sv::ir::F
             assignment
                 .condition()
                 .is_some_and(|condition| expr_references_ident(condition, event.signal()))
+                || expr_references_ident(assignment.assignment().rhs(), event.signal())
         })
     });
     let clock = candidates.next()?;
@@ -2315,7 +2322,10 @@ fn emit_ff_assignment_stores(
         builder.emit(SIRInstruction::Load(
             value,
             RegionedVarAddrBase {
-                region: STABLE_REGION,
+                // Each process seeds the slices it owns before evaluating.  Read
+                // the shared working value here so a later merged always_ff
+                // process preserves disjoint slices written by an earlier one.
+                region: WORKING_REGION,
                 var_id: target_id,
             },
             SIROffset::Static(0),
@@ -2391,17 +2401,32 @@ fn emit_ff_assignment_stores(
                 None => assigned,
             };
         }
-        builder.emit(SIRInstruction::Store(
-            RegionedVarAddrBase {
-                region: WORKING_REGION,
-                var_id: target_id,
-            },
-            SIROffset::Static(0),
-            width,
-            value,
-            Vec::new(),
-            Vec::new(),
-        ));
+        for target in targets.iter().filter(|target| target.id == target_id) {
+            let target_width = target.access.msb - target.access.lsb + 1;
+            let store_value = if target.access.lsb == 0 && target_width == width {
+                value
+            } else {
+                let slice = builder.alloc_logic(target_width);
+                builder.emit(SIRInstruction::Slice(
+                    slice,
+                    value,
+                    target.access.lsb,
+                    target_width,
+                ));
+                slice
+            };
+            builder.emit(SIRInstruction::Store(
+                RegionedVarAddrBase {
+                    region: WORKING_REGION,
+                    var_id: target_id,
+                },
+                SIROffset::Static(target.access.lsb),
+                target_width,
+                store_value,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
     }
     Some(())
 }

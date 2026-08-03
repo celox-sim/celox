@@ -1233,13 +1233,13 @@ fn ports_from_module_node(
                 let direction = header
                     .and_then(|header| direction_from_ref_node(header.into()))
                     .unwrap_or(inherited_direction);
-                let r#type = header.map_or_else(
-                    || inherited_type.clone(),
-                    |header| {
-                        type_from_net_port_header(header, syntax_tree, &type_aliases)
-                            .unwrap_or_else(Type::implicit)
-                    },
-                );
+                let r#type = match header {
+                    Some(header) => type_from_net_port_header(header, syntax_tree, &type_aliases)
+                        .ok_or_else(|| {
+                        AnalyzerError::Unsupported("unsupported port data type".to_string())
+                    })?,
+                    None => inherited_type.clone(),
+                };
                 let r#type = type_with_fallback_ranges(
                     r#type,
                     RefNode::AnsiPortDeclarationNet(port),
@@ -1255,13 +1255,15 @@ fn ports_from_module_node(
                 let direction = header
                     .and_then(|header| direction_from_ref_node(header.into()))
                     .unwrap_or(inherited_direction);
-                let r#type = header.map_or_else(
-                    || inherited_type.clone(),
-                    |header| {
+                let r#type = match header {
+                    Some(header) => {
                         type_from_variable_port_header(header, syntax_tree, &type_aliases)
-                            .unwrap_or_else(Type::implicit)
-                    },
-                );
+                            .ok_or_else(|| {
+                                AnalyzerError::Unsupported("unsupported port data type".to_string())
+                            })?
+                    }
+                    None => inherited_type.clone(),
+                };
                 let r#type = type_with_fallback_ranges(
                     r#type,
                     RefNode::AnsiPortDeclarationVariable(port),
@@ -3020,7 +3022,7 @@ fn procedural_truth_condition(condition: Expr) -> Expr {
 
 fn function_expr_from_case_statement(
     statement: &sv_parser::CaseStatement,
-    locals: &HashMap<String, Expr>,
+    locals: &mut HashMap<String, Expr>,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Option<Expr> {
@@ -3033,7 +3035,7 @@ fn function_expr_from_case_statement(
         packed_dimensions,
     )?;
     let case_expr = substitute_expr_idents(case_expr, locals);
-    let mut default_expr = None;
+    let mut default_branch = (None, locals.clone());
     let mut branches = Vec::new();
     for item in std::iter::once(&statement.nodes.3).chain(statement.nodes.4.iter()) {
         match item {
@@ -3044,7 +3046,7 @@ fn function_expr_from_case_statement(
                     &mut branch_locals,
                     syntax_tree,
                     packed_dimensions,
-                )?;
+                );
                 let conditions = item
                     .nodes
                     .0
@@ -3065,28 +3067,59 @@ fn function_expr_from_case_statement(
                     op: BinaryOp::LogicOr,
                     right: Box::new(right),
                 })?;
-                branches.push((condition, branch_expr));
+                branches.push((condition, branch_expr, branch_locals));
             }
             sv_parser::CaseItem::Default(item) => {
                 let mut branch_locals = locals.clone();
-                default_expr = function_expr_from_statement_or_null_stmt(
-                    &item.nodes.2,
-                    &mut branch_locals,
-                    syntax_tree,
-                    packed_dimensions,
+                default_branch = (
+                    function_expr_from_statement_or_null_stmt(
+                        &item.nodes.2,
+                        &mut branch_locals,
+                        syntax_tree,
+                        packed_dimensions,
+                    ),
+                    branch_locals,
                 );
             }
         }
     }
-    let mut expr = default_expr?;
-    for (condition, branch_expr) in branches.into_iter().rev() {
-        expr = Expr::Mux {
-            condition: Box::new(condition),
-            then_expr: Box::new(branch_expr),
-            else_expr: Box::new(expr),
-        };
+
+    if branches.iter().all(|(_, expr, _)| expr.is_some()) && default_branch.0.is_some() {
+        let mut result = default_branch.0?;
+        for (condition, branch_expr, _) in branches.into_iter().rev() {
+            result = Expr::Mux {
+                condition: Box::new(condition),
+                then_expr: Box::new(branch_expr?),
+                else_expr: Box::new(result),
+            };
+        }
+        return Some(result);
     }
-    Some(expr)
+
+    if branches.iter().all(|(_, expr, _)| expr.is_none()) && default_branch.0.is_none() {
+        let mut merged = locals.clone();
+        for name in locals.keys() {
+            let mut value = default_branch.1.get(name)?.clone();
+            for (condition, _, branch_locals) in branches.iter().rev() {
+                let branch_value = branch_locals.get(name)?.clone();
+                if branch_value != value {
+                    value = Expr::Mux {
+                        condition: Box::new(condition.clone()),
+                        then_expr: Box::new(branch_value),
+                        else_expr: Box::new(value),
+                    };
+                }
+            }
+            merged.insert(name.clone(), value);
+        }
+        *locals = merged;
+        return None;
+    }
+
+    Some(Expr::Call {
+        name: "$unsupported_mixed_function_case".to_string(),
+        args: Vec::new(),
+    })
 }
 
 fn case_item_condition(case_expr: Expr, item_expr: Expr) -> Expr {
@@ -4507,18 +4540,22 @@ fn conditional_assignments_from_statement(
     match &stmt.nodes.2 {
         sv_parser::StatementItem::NonblockingAssignment(assignment) => {
             let lhs =
-                variable_lvalue_from_node(&assignment.0.nodes.0, syntax_tree, packed_dimensions);
+                variable_lvalue_from_node(&assignment.0.nodes.0, syntax_tree, packed_dimensions)
+                    .ok_or_else(|| {
+                        AnalyzerError::Unsupported("always_ff assignment lowering".to_string())
+                    })?;
             let rhs = expr_from_expression_with_types(
                 &assignment.0.nodes.3,
                 syntax_tree,
                 packed_dimensions,
-            );
-            if let (Some(lhs), Some(rhs)) = (lhs, rhs) {
-                assignments.push(ConditionalAssignment::new(
-                    condition,
-                    Assignment::new(lhs, rhs),
-                ));
-            }
+            )
+            .ok_or_else(|| {
+                AnalyzerError::Unsupported("always_ff assignment lowering".to_string())
+            })?;
+            assignments.push(ConditionalAssignment::new(
+                condition,
+                Assignment::new(lhs, rhs),
+            ));
         }
         sv_parser::StatementItem::SeqBlock(block) => {
             for stmt in &block.nodes.3 {
@@ -5564,16 +5601,19 @@ fn type_from_net_port_header(
         return None;
     };
     match &header.nodes.1 {
-        sv_parser::NetPortType::DataType(data_type) => {
-            type_from_ref_node(RefNode::DataTypeOrImplicit(&data_type.nodes.1), syntax_tree)
-                .or_else(|| {
-                    type_alias_from_ref_node(
-                        RefNode::DataTypeOrImplicit(&data_type.nodes.1),
-                        syntax_tree,
-                        type_aliases,
-                    )
-                })
-        }
+        sv_parser::NetPortType::DataType(data_type) => match &data_type.nodes.1 {
+            sv_parser::DataTypeOrImplicit::ImplicitDataType(_) => Some(Type::implicit()),
+            sv_parser::DataTypeOrImplicit::DataType(_) => {
+                type_from_ref_node(RefNode::DataTypeOrImplicit(&data_type.nodes.1), syntax_tree)
+                    .or_else(|| {
+                        type_alias_from_ref_node(
+                            RefNode::DataTypeOrImplicit(&data_type.nodes.1),
+                            syntax_tree,
+                            type_aliases,
+                        )
+                    })
+            }
+        },
         sv_parser::NetPortType::NetTypeIdentifier(identifier) => {
             let name = identifier_text(RefNode::NetTypeIdentifier(identifier), syntax_tree)?;
             type_aliases.get(&name).cloned()
@@ -5592,16 +5632,19 @@ fn type_from_variable_port_header(
             type_from_ref_node(RefNode::DataType(data_type), syntax_tree)
                 .or_else(|| type_alias_from_data_type(data_type, syntax_tree, type_aliases))
         }
-        sv_parser::VarDataType::Var(data_type) => {
-            type_from_ref_node(RefNode::DataTypeOrImplicit(&data_type.nodes.1), syntax_tree)
-                .or_else(|| {
-                    type_alias_from_data_type_or_implicit(
-                        &data_type.nodes.1,
-                        syntax_tree,
-                        type_aliases,
-                    )
-                })
-        }
+        sv_parser::VarDataType::Var(data_type) => match &data_type.nodes.1 {
+            sv_parser::DataTypeOrImplicit::ImplicitDataType(_) => Some(Type::implicit()),
+            sv_parser::DataTypeOrImplicit::DataType(_) => {
+                type_from_ref_node(RefNode::DataTypeOrImplicit(&data_type.nodes.1), syntax_tree)
+                    .or_else(|| {
+                        type_alias_from_data_type_or_implicit(
+                            &data_type.nodes.1,
+                            syntax_tree,
+                            type_aliases,
+                        )
+                    })
+            }
+        },
     }
 }
 

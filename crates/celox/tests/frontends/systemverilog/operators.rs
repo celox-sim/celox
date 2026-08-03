@@ -1347,4 +1347,76 @@ sv_backends! {
     sim.modify(|io| io.set(select, 0u8)).unwrap();
     assert_eq!(sim.get(sim.signal("y")), 0u8.into());
     }
+
+    fn preserves_function_locals_assigned_by_case_items(sim) {
+        @setup {
+    let sv = r#"
+        module Top(input logic select, output logic y);
+            function automatic logic choose(input logic condition);
+                logic value;
+                value = 1'b0;
+                case (condition)
+                    1'b1: value = 1'b1;
+                    default: value = 1'b0;
+                endcase
+                return value;
+            endfunction
+            assign y = choose(select);
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("function_local_case.sv"))], "Top");
+
+    let select = sim.signal("select");
+    sim.modify(|io| io.set(select, 1u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+
+    sim.modify(|io| io.set(select, 0u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0u8.into());
+    }
+
+    fn preserves_disjoint_slice_writes_in_merged_always_ff_processes(sim) {
+        @setup {
+    let sv = r#"
+        module Top(input logic clk, input logic a, input logic b, output logic [1:0] q);
+            always_ff @(posedge clk) q[0] <= a;
+            always_ff @(posedge clk) q[1] <= b;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("disjoint_ff_slices.sv"))], "Top");
+
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    sim.modify(|io| {
+        io.set(a, 1u8);
+        io.set(b, 1u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 3u8.into());
+    }
+
+    fn infers_async_reset_from_always_ff_assignment_rhs(sim) {
+        @setup {
+    let sv = r#"
+        module Top(input logic clk, input logic rst, input logic d, output logic q);
+            always_ff @(posedge rst or posedge clk) q <= rst ? 1'b0 : d;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("rhs_reset.sv"))], "Top");
+
+    let clk = sim.event("clk");
+    let rst = sim.signal("rst");
+    let d = sim.signal("d");
+    sim.modify(|io| {
+        io.set(rst, 0u8);
+        io.set(d, 1u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+    }
 }
