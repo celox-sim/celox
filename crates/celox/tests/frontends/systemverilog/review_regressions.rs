@@ -63,6 +63,112 @@ fn uses_the_first_always_ff_event_as_a_negedge_clock() {
 }
 
 #[test]
+fn infers_the_clock_when_reset_precedes_it_in_the_event_list() {
+    let source = r#"
+        module Top(input logic clk, input logic rst, input logic d, output logic q);
+            always_ff @(posedge rst or posedge clk) begin
+                if (rst) q <= 1'b0;
+                else q <= d;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("reset_first.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let clk = sim.event("clk");
+    let rst = sim.signal("rst");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+    sim.modify(|io| {
+        io.set(rst, 0u8);
+        io.set(d, 1u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 1u8.into());
+}
+
+#[test]
+fn preserves_comb_function_return_width() {
+    let source = r#"
+        module Top(input logic [7:0] x, output logic [15:0] y);
+            function automatic logic [7:0] increment(input logic [7:0] value);
+                return value + 1'b1;
+            endfunction
+            assign y = increment(x);
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("function_width.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(x, 0xffu8)).unwrap();
+    assert_eq!(sim.get(y), 0u16.into());
+}
+
+#[test]
+fn preserves_declared_parameter_width_in_comb_expressions() {
+    let source = r#"
+        module Top #(
+            parameter logic [63:0] VALUE = 64'h0000_0001_0000_0000
+        ) (output logic [63:0] y);
+            assign y = VALUE;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("parameter_width.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0x1_0000_0000u64.into());
+}
+
+#[test]
+fn converts_unknown_bits_when_assigning_to_bit() {
+    let source = r#"
+        module Top(input logic x, output bit y);
+            assign y = x;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("two_state.sv"))], "Top")
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set_four_state(x, BigUint::from(1u8), BigUint::from(1u8)))
+        .unwrap();
+    assert_eq!(
+        sim.get_four_state(y),
+        (BigUint::from(0u8), BigUint::from(0u8))
+    );
+}
+
+#[test]
+fn preserves_typedef_function_return_width_in_ff_case() {
+    let source = r#"
+        module Top(input logic clk, output logic [7:0] q);
+            typedef logic [1:0] word_t;
+            function automatic word_t decode(input logic ignored);
+                return 4;
+            endfunction
+            always_ff @(posedge clk) begin
+                case (decode(1'b0))
+                    2'b00: q <= 8'hfa;
+                    default: q <= 0;
+                endcase
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("typedef_function.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 0xfau8.into());
+}
+
+#[test]
 fn coerces_hierarchy_widths_and_leaves_omitted_ports_unconnected() {
     let source = r#"
         module Child(input logic [7:0] i, input logic omitted, output logic o);
@@ -368,6 +474,37 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic a, output logic y);
                 always_comb begin y = a; y = y + 1'b1; end
+            endmodule
+        "#,
+        ),
+        (
+            "always and always_latch processes",
+            r#"
+            module Top(input logic a, output logic y); always @* y = a; endmodule
+        "#,
+        ),
+        (
+            "always and always_latch processes",
+            r#"
+            module Top(input logic a, output logic y); always_latch y = a; endmodule
+        "#,
+        ),
+        (
+            "case-generate construct",
+            r#"
+            module Top #(parameter MODE = 0) (output logic y);
+                case (MODE)
+                    0: assign y = 1'b0;
+                    default: assign y = 1'b1;
+                endcase
+            endmodule
+        "#,
+        ),
+        (
+            "always_ff event control",
+            r#"
+            module Top(input logic a, b, d, output logic q);
+                always_ff @(posedge a or posedge b) q <= d;
             endmodule
         "#,
         ),

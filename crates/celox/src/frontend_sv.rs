@@ -597,7 +597,7 @@ fn mark_ff_event_domains(
     name_to_id: &HashMap<String, VarId>,
 ) {
     for process in module.ff_processes() {
-        let Some(clock) = process.events().first() else {
+        let Some(clock) = clock_event_from_ff_process(process) else {
             continue;
         };
         if let Some(id) = name_to_id.get(clock.signal()).copied()
@@ -1323,7 +1323,7 @@ fn lower_assignment(
             ))
         })?
     };
-    let expr = coerce_node_width(
+    let mut expr = coerce_node_width(
         arena,
         expr,
         Some(target_width),
@@ -1335,6 +1335,20 @@ fn lower_assignment(
             assignment.lhs()
         ))
     })?;
+    let target_is_two_state = target
+        .var()
+        .and_then(|target| variables.get(&target.id))
+        .is_some_and(|variable| !variable.is_4state);
+    if target_is_two_state {
+        expr = arena
+            .alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))
+            .map_err(|error| {
+                sv::AnalyzerError::Unsupported(format!(
+                    "two-state conversion for `{}`: {error}",
+                    assignment.lhs()
+                ))
+            })?;
+    }
     Ok(LogicPath {
         target,
         expr,
@@ -1534,7 +1548,14 @@ fn lower_expr_with_context(
             width,
             signed,
         } => {
-            let (inner, sources) = lower_expr(expr, variables, name_to_id, constants, arena)?;
+            let (inner, sources) = lower_expr_with_context(
+                expr,
+                variables,
+                name_to_id,
+                constants,
+                arena,
+                Some(*width),
+            )?;
             let resized = coerce_node_width(arena, inner, Some(*width), *signed).ok()?;
             Some((resized, sources))
         }
@@ -1758,7 +1779,7 @@ fn lower_ff_processes(
     let mut reset_clock_map = HashMap::default();
 
     for process in module.ff_processes() {
-        let trigger_set = trigger_set_from_ff_events(process.events(), name_to_id)
+        let trigger_set = trigger_set_from_ff_process(process, name_to_id)
             .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
         for reset in &trigger_set.resets {
             reset_clock_map.insert(*reset, trigger_set.clock);
@@ -1792,13 +1813,30 @@ fn insert_or_merge_ff_unit(
     }
 }
 
-fn trigger_set_from_ff_events(
-    events: &[sv::ir::FfEvent],
+fn clock_event_from_ff_process(process: &sv::ir::FfProcess) -> Option<&sv::ir::FfEvent> {
+    if process.events().len() == 1 {
+        return process.events().first();
+    }
+
+    let mut candidates = process.events().iter().filter(|event| {
+        !process.assignments().iter().any(|assignment| {
+            assignment
+                .condition()
+                .is_some_and(|condition| expr_references_ident(condition, event.signal()))
+        })
+    });
+    let clock = candidates.next()?;
+    candidates.next().is_none().then_some(clock)
+}
+
+fn trigger_set_from_ff_process(
+    process: &sv::ir::FfProcess,
     name_to_id: &HashMap<String, VarId>,
 ) -> Option<TriggerSet<VarId>> {
-    let clock = events.first()?;
+    let clock = clock_event_from_ff_process(process)?;
     let clock_id = *name_to_id.get(clock.signal())?;
-    let resets = events
+    let resets = process
+        .events()
         .iter()
         .filter(|event| event.signal() != clock.signal())
         .filter_map(|event| name_to_id.get(event.signal()).copied())

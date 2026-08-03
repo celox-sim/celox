@@ -220,7 +220,8 @@ mod tests {
 
         assert!(matches!(
             ir.modules()[0].assignments()[0].rhs(),
-            ir::Expr::Mux { .. }
+            ir::Expr::Resize { expr, width: 1, .. }
+                if matches!(&**expr, ir::Expr::Mux { .. })
         ));
     }
 
@@ -258,6 +259,16 @@ mod tests {
                 .assignments()
                 .iter()
                 .all(|assignment| !expr_contains_call(assignment.rhs()))
+        );
+        let count_next = counter
+            .assignments()
+            .iter()
+            .find(|assignment| assignment.lhs() == "count_next")
+            .expect("count_next assignment should exist");
+        assert!(
+            matches!(count_next.rhs(), ir::Expr::Resize { width: 2, .. }),
+            "{:#?}",
+            count_next.rhs()
         );
         assert!(
             counter

@@ -40,7 +40,7 @@ sv_backends! {
     let y = sim.signal("y");
     sim.modify(|_| {}).unwrap();
 
-    assert_eq!(sim.get(y), BigUint::from(0b1010u32));
+    assert_eq!(sim.get(y), BigUint::from(0b1000u32));
     let (_value, mask) = sim.get_four_state(y);
     assert_eq!(mask, BigUint::from(0u32));
     }

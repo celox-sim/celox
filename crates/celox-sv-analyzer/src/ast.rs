@@ -111,7 +111,13 @@ impl Module {
         )
         .into_iter()
         .map(|process| expand_process_calls(process, &functions))
-        .map(|process| substitute_process_constants(process, &const_env))
+        .map(|process| {
+            substitute_process_constants_with_parameter_literals(
+                process,
+                &const_env,
+                &parameter_values,
+            )
+        })
         .collect::<Vec<_>>();
         let ff_processes = ff_processes_from_module_node(
             node.clone(),
@@ -177,6 +183,14 @@ fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerE
     for child in node {
         match child {
             RefNode::AlwaysConstruct(always) => {
+                if matches!(
+                    always.nodes.0,
+                    sv_parser::AlwaysKeyword::Always(_) | sv_parser::AlwaysKeyword::AlwaysLatch(_)
+                ) {
+                    return Err(AnalyzerError::Unsupported(
+                        "always and always_latch processes".to_string(),
+                    ));
+                }
                 let body = RefNode::Statement(&always.nodes.1);
                 if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_))
                     && body.clone().into_iter().any(|node| {
@@ -227,6 +241,13 @@ fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerE
             }
             RefNode::InitialConstruct(_) => {
                 return Err(AnalyzerError::Unsupported("initial construct".to_string()));
+            }
+            RefNode::ConditionalGenerateConstruct(
+                sv_parser::ConditionalGenerateConstruct::Case(_),
+            ) => {
+                return Err(AnalyzerError::Unsupported(
+                    "case-generate construct".to_string(),
+                ));
             }
             _ => {}
         }
@@ -1063,6 +1084,9 @@ fn type_aliases_from_module_node(
             continue;
         };
         match declaration {
+            sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(declaration) => {
+                add_type_alias_from_data_declaration(declaration, syntax_tree, &mut aliases);
+            }
             sv_parser::PackageOrGenerateItemDeclaration::LocalParameterDeclaration(localparam) => {
                 add_type_aliases_from_localparam(&localparam.0, syntax_tree, &mut aliases);
             }
@@ -1079,6 +1103,28 @@ fn type_aliases_from_module_node(
         add_type_alias_from_type_assignment(assignment, syntax_tree, &mut aliases);
     }
     aliases
+}
+
+fn add_type_alias_from_data_declaration(
+    declaration: &sv_parser::DataDeclaration,
+    syntax_tree: &SyntaxTree,
+    aliases: &mut HashMap<String, Type>,
+) {
+    let sv_parser::DataDeclaration::TypeDeclaration(declaration) = declaration else {
+        return;
+    };
+    let sv_parser::TypeDeclaration::DataType(declaration) = &**declaration else {
+        return;
+    };
+    let Some(name) = identifier_text(RefNode::TypeIdentifier(&declaration.nodes.2), syntax_tree)
+    else {
+        return;
+    };
+    let Some(r#type) = type_from_ref_node(RefNode::DataType(&declaration.nodes.1), syntax_tree)
+    else {
+        return;
+    };
+    aliases.insert(name, r#type);
 }
 
 fn add_type_aliases_from_parameter_port_list(
@@ -1247,10 +1293,15 @@ fn type_alias_from_ref_node(
     syntax_tree: &SyntaxTree,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<Type> {
-    let RefNode::TypeIdentifier(identifier) = unwrap_node!(node, TypeIdentifier)? else {
-        return None;
-    };
-    let name = identifier_text(RefNode::TypeIdentifier(identifier), syntax_tree)?;
+    let name =
+        if let Some(RefNode::DataTypeType(data_type)) = unwrap_node!(node.clone(), DataTypeType) {
+            identifier_text(RefNode::TypeIdentifier(&data_type.nodes.1), syntax_tree)?
+        } else {
+            let RefNode::TypeIdentifier(identifier) = unwrap_node!(node, TypeIdentifier)? else {
+                return None;
+            };
+            identifier_text(RefNode::TypeIdentifier(identifier), syntax_tree)?
+        };
     type_aliases.get(&name).cloned()
 }
 
@@ -2015,12 +2066,8 @@ fn function_from_declaration(
                 .map(|ports| tf_params(ports, syntax_tree, const_env, type_aliases))
                 .unwrap_or_default();
             let expr = function_body_expr(&body.nodes.6, syntax_tree, packed_dimensions)?;
-            let return_type = function_return_type(
-                RefNode::FunctionDataTypeOrImplicit(&body.nodes.0),
-                syntax_tree,
-                const_env,
-                type_aliases,
-            );
+            let return_type =
+                function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
             Some(Function {
                 name,
                 params,
@@ -2033,12 +2080,8 @@ fn function_from_declaration(
             let name = identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), syntax_tree)?;
             let params = tf_item_params(&body.nodes.4, syntax_tree, const_env, type_aliases);
             let expr = function_body_expr(&body.nodes.5, syntax_tree, packed_dimensions)?;
-            let return_type = function_return_type(
-                RefNode::FunctionDataTypeOrImplicit(&body.nodes.0),
-                syntax_tree,
-                const_env,
-                type_aliases,
-            );
+            let return_type =
+                function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
             Some(Function {
                 name,
                 params,
@@ -2051,35 +2094,27 @@ fn function_from_declaration(
 }
 
 fn function_return_type(
-    node: RefNode<'_>,
+    node: &sv_parser::FunctionDataTypeOrImplicit,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<ExprType> {
-    let alias = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases);
-    if alias.is_some() {
-        return value_type_from_ref_node(node, syntax_tree, const_env, type_aliases);
+    match node {
+        sv_parser::FunctionDataTypeOrImplicit::DataTypeOrVoid(data_type) => match &**data_type {
+            sv_parser::DataTypeOrVoid::DataType(data_type) => {
+                value_type_from_data_type(data_type, syntax_tree, const_env, type_aliases)
+            }
+            sv_parser::DataTypeOrVoid::Void(_) => None,
+        },
+        sv_parser::FunctionDataTypeOrImplicit::ImplicitDataType(data_type) => {
+            value_type_from_ref_node(
+                RefNode::ImplicitDataType(data_type),
+                syntax_tree,
+                const_env,
+                type_aliases,
+            )
+        }
     }
-    if unwrap_node!(node.clone(), TypeIdentifier).is_some() {
-        return None;
-    }
-    if let Some(r#type) = integer_atom_expr_type(node.clone()) {
-        return Some(r#type);
-    }
-    let ranges = packed_ranges_from_ref_node(node.clone(), syntax_tree);
-    let width = if ranges.is_empty() {
-        1
-    } else {
-        ranges.iter().try_fold(1usize, |acc, range| {
-            let left = eval_ast_const_expr(range.left(), const_env)?;
-            let right = eval_ast_const_expr(range.right(), const_env)?;
-            acc.checked_mul(left.abs_diff(right) as usize + 1)
-        })?
-    };
-    Some(ExprType {
-        width,
-        signed: is_signed_from_ref_node(node).unwrap_or(false),
-    })
 }
 
 fn tf_params(
@@ -2092,8 +2127,12 @@ fn tf_params(
     let mut previous_type = None;
     for port in list.nodes.0.contents() {
         let type_node = RefNode::DataTypeOrImplicit(&port.nodes.3);
-        let inferred_type =
-            value_type_from_ref_node(type_node.clone(), syntax_tree, const_env, type_aliases);
+        let inferred_type = value_type_from_data_type_or_implicit(
+            &port.nodes.3,
+            syntax_tree,
+            const_env,
+            type_aliases,
+        );
         let omitted_type = matches!(
             port.nodes.3,
             sv_parser::DataTypeOrImplicit::ImplicitDataType(_)
@@ -2115,7 +2154,9 @@ fn tf_params(
             // user-defined type. sv-parser represents the shorthand `a, b` as a
             // type-only item, so reinterpret an unknown type name as the next
             // parameter and inherit the preceding item's type.
-            if type_alias_from_ref_node(type_node.clone(), syntax_tree, type_aliases).is_some() {
+            if type_alias_from_data_type_or_implicit(&port.nodes.3, syntax_tree, type_aliases)
+                .is_some()
+            {
                 continue;
             }
             let Some(name) = identifier_text(type_node, syntax_tree) else {
@@ -2152,8 +2193,8 @@ fn tf_item_params(
         let sv_parser::TfItemDeclaration::TfPortDeclaration(declaration) = item else {
             continue;
         };
-        let r#type = value_type_from_ref_node(
-            RefNode::DataTypeOrImplicit(&declaration.nodes.3),
+        let r#type = value_type_from_data_type_or_implicit(
+            &declaration.nodes.3,
             syntax_tree,
             const_env,
             type_aliases,
@@ -2171,6 +2212,51 @@ fn tf_item_params(
         }
     }
     params
+}
+
+fn value_type_from_data_type_or_implicit(
+    node: &sv_parser::DataTypeOrImplicit,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<ExprType> {
+    match node {
+        sv_parser::DataTypeOrImplicit::DataType(data_type) => {
+            value_type_from_data_type(data_type, syntax_tree, const_env, type_aliases)
+        }
+        sv_parser::DataTypeOrImplicit::ImplicitDataType(data_type) => value_type_from_ref_node(
+            RefNode::ImplicitDataType(data_type),
+            syntax_tree,
+            const_env,
+            type_aliases,
+        ),
+    }
+}
+
+fn value_type_from_data_type(
+    node: &sv_parser::DataType,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<ExprType> {
+    let r#type = type_from_ref_node(RefNode::DataType(node), syntax_tree)
+        .or_else(|| type_alias_from_data_type(node, syntax_tree, type_aliases))?;
+    let width = if r#type.packed_ranges().is_empty() {
+        1
+    } else {
+        r#type
+            .packed_ranges()
+            .iter()
+            .try_fold(1usize, |acc, range| {
+                let left = eval_ast_const_expr(range.left(), const_env)?;
+                let right = eval_ast_const_expr(range.right(), const_env)?;
+                acc.checked_mul(left.abs_diff(right) as usize + 1)
+            })?
+    };
+    Some(ExprType {
+        width,
+        signed: r#type.is_signed(),
+    })
 }
 
 fn value_type_from_ref_node(
@@ -2908,6 +2994,14 @@ fn substitute_process_constants(
     process: CombProcess,
     const_env: &HashMap<String, i128>,
 ) -> CombProcess {
+    substitute_process_constants_with_parameter_literals(process, const_env, &HashMap::new())
+}
+
+fn substitute_process_constants_with_parameter_literals(
+    process: CombProcess,
+    const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
+) -> CombProcess {
     CombProcess::new(
         process.kind,
         process
@@ -2916,7 +3010,13 @@ fn substitute_process_constants(
         process
             .assignments
             .into_iter()
-            .map(|assignment| substitute_assignment_constants(assignment, const_env))
+            .map(|assignment| {
+                substitute_assignment_constants_with_parameter_literals(
+                    assignment,
+                    const_env,
+                    parameter_literals,
+                )
+            })
             .collect(),
     )
 }
@@ -3086,7 +3186,7 @@ fn expand_process_calls(
         process
             .assignments
             .into_iter()
-            .map(|assignment| expand_assignment_calls(assignment, functions, false))
+            .map(|assignment| expand_assignment_calls(assignment, functions, true))
             .collect(),
     )
 }
