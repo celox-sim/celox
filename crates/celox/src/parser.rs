@@ -353,6 +353,42 @@ fn finalize_scheduled_rtl(
     Ok(program)
 }
 
+fn dynamic_for_diagnostics(
+    scheduled: &celox_frontend_veryl::ScheduledRtlOutput,
+    ir: &veryl_analyzer::ir::Ir,
+) -> Vec<celox_frontend_veryl::FrontendDiagnostic> {
+    scheduled
+        .scheduled
+        .frontend_lookup
+        .root_instance_and_module()
+        .and_then(|(_, module)| {
+            scheduled
+                .scheduled
+                .frontend_lookup
+                .module_names
+                .get(&module)
+                .copied()
+        })
+        .and_then(|root_module_name| {
+            ir.components.iter().find_map(|component| match component {
+                veryl_analyzer::ir::Component::Module(module)
+                    if module.name == root_module_name =>
+                {
+                    Some(module)
+                }
+                _ => None,
+            })
+        })
+        .map(|module| {
+            celox_frontend_veryl::check_elaborated_dynamic_for_bounds(
+                &scheduled.scheduled,
+                module,
+                &scheduled.fused_optimization_hints,
+            )
+        })
+        .unwrap_or_default()
+}
+
 pub fn parse(
     top: &StrId,
     ir: &veryl_analyzer::ir::Ir,
@@ -373,7 +409,13 @@ pub fn parse(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
-) -> Result<crate::ir::OptimizedSir, ParserError> {
+) -> Result<
+    (
+        crate::ir::OptimizedSir,
+        Vec<celox_frontend_veryl::FrontendDiagnostic>,
+    ),
+    ParserError,
+> {
     debug_assert!(
         loop_provenance.is_consistent_with(ir),
         "loop provenance must describe the analyzer IR passed to the parser"
@@ -419,15 +461,18 @@ pub fn parse(
     if let Some(trace) = trace.as_deref_mut() {
         trace.absorb_frontend(frontend_trace);
     }
-    finalize_scheduled_rtl(
-        scheduled?,
+    let scheduled = scheduled?;
+    let dynamic_for_diagnostics = dynamic_for_diagnostics(&scheduled, ir);
+    let program = finalize_scheduled_rtl(
+        scheduled,
         four_state,
         trace_opts,
         trace,
         optimize_options,
         diagnostics,
         preserve_element_storage_layout,
-    )
+    )?;
+    Ok((program, dynamic_for_diagnostics))
 }
 
 #[cfg(feature = "systemverilog")]
@@ -512,7 +557,13 @@ pub fn parse_mixed(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
-) -> Result<crate::ir::OptimizedSir, ParserError> {
+) -> Result<
+    (
+        crate::ir::OptimizedSir,
+        Vec<celox_frontend_veryl::FrontendDiagnostic>,
+    ),
+    ParserError,
+> {
     let external =
         crate::frontend_sv::prepare_external_hierarchy(sv_sources).map_err(
             |error| match error {
@@ -552,7 +603,8 @@ pub fn parse_mixed(
     if let Some(trace) = trace.as_deref_mut() {
         trace.absorb_frontend(frontend_trace);
     }
-    finalize_scheduled_rtl(
+    let dynamic_for_diagnostics = dynamic_for_diagnostics(&scheduled, ir);
+    let program = finalize_scheduled_rtl(
         scheduled,
         four_state,
         trace_opts,
@@ -560,5 +612,6 @@ pub fn parse_mixed(
         optimize_options,
         diagnostics,
         preserve_element_storage_layout,
-    )
+    )?;
+    Ok((program, dynamic_for_diagnostics))
 }

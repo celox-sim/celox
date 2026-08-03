@@ -152,8 +152,8 @@ impl<B: SimBackend> Simulation<B> {
         Self { simulator, state }
     }
 
-    /// Returns analyzer warnings emitted during compilation.
-    pub fn warnings(&self) -> &[veryl_analyzer::AnalyzerError] {
+    /// Returns warnings emitted during compilation.
+    pub fn warnings(&self) -> &[crate::CompilationWarning] {
         self.simulator.warnings()
     }
 

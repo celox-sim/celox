@@ -10,6 +10,7 @@ pub mod case;
 mod config;
 pub mod context_width;
 mod design_assembly;
+mod dynamic_for_check;
 mod error;
 pub mod ff;
 pub mod flattening;
@@ -26,7 +27,8 @@ mod types;
 
 pub use config::BuildConfig;
 pub use design_assembly::schedule_symbolic_rtl;
-pub use error::{LoweringPhase, ParserError, SourceLocation};
+pub use dynamic_for_check::{check_dynamic_for_bounds, check_elaborated_dynamic_for_bounds};
+pub use error::{FrontendDiagnostic, LoweringPhase, ParserError, SourceLocation};
 pub use global_ff::{
     FfClockRecipe, FfRuntimeRelocation, SharedClockLowering, build_ff_clock_recipes,
 };

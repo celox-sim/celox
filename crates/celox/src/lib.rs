@@ -19,7 +19,7 @@ pub use backend::{
     EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, SimBackend, get_byte_size,
 };
 pub use celox_design::{ElaboratedDesign, EventTopology, RuntimeSchema};
-pub use celox_frontend_veryl::{LoweringPhase, ParserError};
+pub use celox_frontend_veryl::{FrontendDiagnostic, LoweringPhase, ParserError};
 pub use celox_slt::scheduler::SchedulerError;
 pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
 pub use diagnostics::RuntimeDiagnostics;
@@ -36,7 +36,7 @@ pub use optimizer::OptimizeOptions;
 pub use optimizer::SirDiagnostics;
 pub use optimizer::SirPass;
 pub use simulator::render_diagnostic;
-pub use simulator::{CodegenError, SimulatorError, SimulatorErrorKind};
+pub use simulator::{CodegenError, CompilationWarning, SimulatorError, SimulatorErrorKind};
 pub use veryl_metadata::{ClockType, ResetType};
 
 #[cfg(feature = "host-runtime")]
