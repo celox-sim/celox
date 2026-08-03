@@ -45,13 +45,14 @@ fn analyze(
 
     let metadata = metadata.unwrap_or_else(|| Metadata::create_default("prj").unwrap());
     let analyzer = Analyzer::new(&metadata);
+    let project_name = metadata.project.name.clone();
 
     // Per-file: parse + pass1
     let mut parsers = Vec::new();
     let mut errors = vec![];
     for (code, path) in sources {
         let parsed = Parser::parse(code, path).unwrap();
-        errors.append(&mut analyzer.analyze_pass1("prj", &parsed.veryl));
+        errors.append(&mut analyzer.analyze_pass1(&project_name, &parsed.veryl));
         parsers.push(parsed);
     }
     let loop_sources =
