@@ -432,7 +432,7 @@ pub(crate) fn specialize_module(
     if key.parameter_overrides.is_empty() {
         return Ok(module.clone());
     }
-    let overrides = evaluated_parameter_overrides(&key.parameter_overrides);
+    let overrides = evaluated_parameter_overrides(&key.parameter_overrides)?;
     let ir = sv::analyze_source_with_module_parameter_overrides(
         &module.source_code,
         &module.source_path,
@@ -632,18 +632,22 @@ fn mark_ff_event_domains(
 
 fn evaluated_parameter_overrides(
     parameter_overrides: &[LoweredSvParameterOverride],
-) -> std::collections::HashMap<String, i128> {
+) -> Result<std::collections::HashMap<String, i128>, sv::AnalyzerError> {
     let constants = std::collections::HashMap::new();
-    parameter_overrides
-        .iter()
-        .filter_map(|parameter| {
-            parameter
-                .value
-                .as_ref()
-                .and_then(|value| sv::typecheck::eval_const_expr(value, &constants))
-                .map(|value| (parameter.name.clone(), value))
-        })
-        .collect()
+    let mut evaluated = std::collections::HashMap::new();
+    for parameter in parameter_overrides {
+        let Some(value) = parameter.value.as_ref() else {
+            continue;
+        };
+        let value = sv::typecheck::eval_const_expr(value, &constants).ok_or_else(|| {
+            sv::AnalyzerError::Unsupported(format!(
+                "non-integer module parameter override `{}`",
+                parameter.name
+            ))
+        })?;
+        evaluated.insert(parameter.name.clone(), value);
+    }
+    Ok(evaluated)
 }
 
 fn lower_parameter_overrides(
@@ -790,6 +794,24 @@ fn build_instance_glue(
     let mut input_ports = Vec::new();
     let mut output_ports = Vec::new();
     let mut arena = SLTNodeArena::<GlueAddr>::new();
+
+    let mut connected_formals = HashSet::default();
+    for connection in connections {
+        let matches = child
+            .port_order
+            .iter()
+            .filter(|port_id| child.variables[port_id].path.to_string() == connection.formal)
+            .count();
+        if matches != 1 || !connected_formals.insert(connection.formal.clone()) {
+            return Err(ParserError::unsupported(
+                64,
+                LoweringPhase::SimulatorParser,
+                "unknown or duplicate systemverilog child port connection",
+                connection.formal.clone(),
+                None,
+            ));
+        }
+    }
 
     for child_port_id in &child.port_order {
         let child_var = &child.variables[child_port_id];
@@ -999,7 +1021,15 @@ fn lower_glue_parent_expr(
             let mut source_ids = Vec::new();
             for part in parts {
                 let (node, part_sources, part_source_ids) =
-                    lower_glue_parent_expr(part, variables, name_to_id, constants, arena)?;
+                    if let Some(fill) = expr_unbased_fill_literal(part) {
+                        (
+                            lower_unbased_fill_literal_slt(arena, fill, 1)?,
+                            HashSet::default(),
+                            Vec::new(),
+                        )
+                    } else {
+                        lower_glue_parent_expr(part, variables, name_to_id, constants, arena)?
+                    };
                 let width = celox_slt::get_width(node, arena);
                 nodes.push((node, width));
                 sources.extend(part_sources);
@@ -1022,7 +1052,15 @@ fn lower_glue_parent_expr(
             for _ in 0..count {
                 for part in parts {
                     let (node, part_sources, part_source_ids) =
-                        lower_glue_parent_expr(part, variables, name_to_id, constants, arena)?;
+                        if let Some(fill) = expr_unbased_fill_literal(part) {
+                            (
+                                lower_unbased_fill_literal_slt(arena, fill, 1)?,
+                                HashSet::default(),
+                                Vec::new(),
+                            )
+                        } else {
+                            lower_glue_parent_expr(part, variables, name_to_id, constants, arena)?
+                        };
                     let width = celox_slt::get_width(node, arena);
                     nodes.push((node, width));
                     sources.extend(part_sources);
@@ -1487,8 +1525,14 @@ fn lower_expr_with_context(
             let mut nodes = Vec::new();
             let mut sources = HashSet::default();
             for part in parts {
-                let (node, part_sources) =
-                    lower_expr(part, variables, name_to_id, constants, arena)?;
+                let (node, part_sources) = lower_expr_with_context(
+                    part,
+                    variables,
+                    name_to_id,
+                    constants,
+                    arena,
+                    expr_unbased_fill_literal(part).map(|_| 1),
+                )?;
                 let width = celox_slt::get_width(node, arena);
                 nodes.push((node, width));
                 sources.extend(part_sources);
@@ -1502,8 +1546,14 @@ fn lower_expr_with_context(
             let mut sources = HashSet::default();
             for _ in 0..count {
                 for part in parts {
-                    let (node, part_sources) =
-                        lower_expr(part, variables, name_to_id, constants, arena)?;
+                    let (node, part_sources) = lower_expr_with_context(
+                        part,
+                        variables,
+                        name_to_id,
+                        constants,
+                        arena,
+                        expr_unbased_fill_literal(part).map(|_| 1),
+                    )?;
                     let width = celox_slt::get_width(node, arena);
                     repeated.push((node, width));
                     sources.extend(part_sources);
@@ -2075,6 +2125,13 @@ fn emit_ff_assignment_stores(
                     )?
                 }
             };
+            let rhs = if variables.get(&target.id)?.is_4state {
+                rhs
+            } else {
+                let two_state = builder.alloc_bit(target_width, false);
+                builder.emit(SIRInstruction::Unary(two_state, UnaryOp::ToTwoState, rhs));
+                two_state
+            };
             let assigned =
                 replace_sir_slice(builder, value, rhs, target.access.lsb, target_width, width)?;
             value = match assignment.condition() {
@@ -2359,9 +2416,11 @@ fn sv_expr_natural_width(
                 || constants.contains_key(name).then_some(32),
                 |var| Some(var.width),
             ),
-        sv::ir::Expr::Literal(literal) => {
-            Some(sv::typecheck::parse_integral_literal(literal)?.width)
-        }
+        sv::ir::Expr::Literal(literal) => Some(
+            unbased_fill_literal(literal)
+                .map(|_| 1)
+                .unwrap_or(sv::typecheck::parse_integral_literal(literal)?.width),
+        ),
         sv::ir::Expr::Select { msb, lsb, .. } => {
             let msb = sv::typecheck::eval_const_expr(msb, constants)?;
             let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
@@ -2676,8 +2735,13 @@ fn lower_expr_to_sir_with_context(
         sv::ir::Expr::Concat(parts) => {
             let mut regs = Vec::new();
             for part in parts {
-                regs.push(lower_expr_to_sir(
-                    builder, part, variables, name_to_id, constants,
+                regs.push(lower_expr_to_sir_with_context(
+                    builder,
+                    part,
+                    variables,
+                    name_to_id,
+                    constants,
+                    expr_unbased_fill_literal(part).map(|_| 1),
                 )?);
             }
             let width = regs
@@ -2694,8 +2758,13 @@ fn lower_expr_to_sir_with_context(
             let mut regs = Vec::new();
             for _ in 0..count {
                 for part in parts {
-                    regs.push(lower_expr_to_sir(
-                        builder, part, variables, name_to_id, constants,
+                    regs.push(lower_expr_to_sir_with_context(
+                        builder,
+                        part,
+                        variables,
+                        name_to_id,
+                        constants,
+                        expr_unbased_fill_literal(part).map(|_| 1),
                     )?);
                 }
             }

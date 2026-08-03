@@ -523,6 +523,81 @@ fn treats_unknown_procedural_conditions_as_false() {
 }
 
 #[test]
+fn propagates_function_assignments_out_of_nested_blocks() {
+    let source = r#"
+        module Top(input logic a, output logic y);
+            function automatic logic invert(input logic value);
+                begin value = ~value; end
+                return value;
+            endfunction
+            assign y = invert(a);
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("nested_function.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.modify(|io| io.set(a, 0u8)).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn sizes_unbased_literals_as_one_bit_inside_concatenations() {
+    let source = r#"
+        module Top(output logic [1:0] y); assign y = {1'b0, '1}; endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("concat_fill.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn lowers_complemented_reductions_in_always_ff() {
+    let source = r#"
+        module Top(input logic clk, input logic [1:0] d, output logic q);
+            always_ff @(posedge clk) q <= ~&d;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("reduction_ff.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+    sim.modify(|io| io.set(d, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 1u8.into());
+    sim.modify(|io| io.set(d, 3u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0u8.into());
+}
+
+#[test]
+fn converts_unknown_ff_values_when_storing_to_bit() {
+    let source = r#"
+        module Top(input logic clk, input logic d, output bit q);
+            always_ff @(posedge clk) q <= d;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("ff_bit.sv"))], "Top")
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+    sim.modify(|io| io.set_four_state(d, BigUint::from(1u8), BigUint::from(1u8)))
+        .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0u8.into());
+}
+
+#[test]
 fn rejects_constructs_that_are_not_yet_lowered() {
     let cases = [
         (
@@ -881,6 +956,51 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "gate primitive instantiation",
             r#"
             module Top(input logic a, b, output logic y); and (y, a, b); endmodule
+        "#,
+        ),
+        (
+            "procedural loop inside always_comb",
+            r#"
+            module Top(input logic a, output logic y); always_comb repeat (1) y = a; endmodule
+        "#,
+        ),
+        (
+            "local data declaration inside conditional-generate",
+            r#"
+            module Top #(parameter ENABLE = 0) (output logic y);
+                logic [3:0] local_value;
+                if (ENABLE) begin : enabled
+                    logic local_value;
+                    assign y = local_value;
+                end else assign y = local_value[0];
+            endmodule
+        "#,
+        ),
+        (
+            "undriven net declaration `w`",
+            r#"
+            module Top(output logic y); wire w; assign y = (w === 1'bz); endmodule
+        "#,
+        ),
+        (
+            "non-integer module parameter override `P`",
+            r#"
+            module Child #(parameter logic P = 1'b0) (output logic y); assign y = P; endmodule
+            module Top(output logic y); Child #(.P(1'bx)) child(.y(y)); endmodule
+        "#,
+        ),
+        (
+            "package-dependent systemverilog module",
+            r#"
+            package p; parameter W = 8; endpackage
+            module Top(output logic [7:0] y); import p::*; logic [W-1:0] value; assign y = value; endmodule
+        "#,
+        ),
+        (
+            "unknown or duplicate systemverilog child port connection",
+            r#"
+            module Child(input logic a, output logic y); assign y = a; endmodule
+            module Top(input logic a, output logic y); Child child(.aa(a), .y(y)); endmodule
         "#,
         ),
     ];

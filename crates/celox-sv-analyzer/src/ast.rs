@@ -129,7 +129,27 @@ impl Module {
         )?
         .into_iter()
         .map(|process| expand_ff_process_calls(process, &functions, &const_env, &parameter_values))
-        .collect();
+        .collect::<Vec<_>>();
+        if let Some(signal) = signals.iter().find(|signal| {
+            signal.is_net()
+                && !comb_processes.iter().any(|process| {
+                    process
+                        .assignments()
+                        .iter()
+                        .any(|assignment| assignment.lhs() == signal.name())
+                })
+                && !ff_processes.iter().any(|process| {
+                    process
+                        .assignments()
+                        .iter()
+                        .any(|assignment| assignment.assignment().lhs() == signal.name())
+                })
+        }) {
+            return Err(AnalyzerError::Unsupported(format!(
+                "undriven net declaration `{}`",
+                signal.name()
+            )));
+        }
         let assignments = comb_processes
             .iter()
             .flat_map(|process| process.assignments().iter().cloned())
@@ -211,6 +231,7 @@ fn reject_silently_ignored_constructs(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
 ) -> Result<(), AnalyzerError> {
+    let module_scope_signal_names = module_scope_signal_names(node.clone(), syntax_tree);
     if node
         .clone()
         .into_iter()
@@ -271,14 +292,26 @@ fn reject_silently_ignored_constructs(
                         "casez, casex, or pattern case inside always_ff".to_string(),
                     ));
                 }
-                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
+                if matches!(
+                    always.nodes.0,
+                    sv_parser::AlwaysKeyword::AlwaysFf(_)
+                        | sv_parser::AlwaysKeyword::AlwaysComb(_)
+                )
                     && body
                         .clone()
                         .into_iter()
                         .any(|node| matches!(node, RefNode::LoopStatement(_)))
                 {
+                    let kind = if matches!(
+                        always.nodes.0,
+                        sv_parser::AlwaysKeyword::AlwaysComb(_)
+                    ) {
+                        "always_comb"
+                    } else {
+                        "always_ff"
+                    };
                     return Err(AnalyzerError::Unsupported(
-                        "procedural loop inside always_ff".to_string(),
+                        format!("procedural loop inside {kind}"),
                     ));
                 }
                 if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_))
@@ -374,12 +407,17 @@ fn reject_silently_ignored_constructs(
             }
             RefNode::ConditionalGenerateConstruct(sv_parser::ConditionalGenerateConstruct::If(
                 generate,
-            )) if generate_block_has_data_declaration(&generate.nodes.2)
+            )) if (generate_block_has_data_declaration(&generate.nodes.2)
                 && generate
                     .nodes
                     .3
                     .as_ref()
-                    .is_some_and(|(_, block)| generate_block_has_data_declaration(block)) =>
+                    .is_some_and(|(_, block)| generate_block_has_data_declaration(block)))
+                || conditional_generate_local_collides(
+                    generate,
+                    syntax_tree,
+                    &module_scope_signal_names,
+                ) =>
             {
                 return Err(AnalyzerError::Unsupported(
                     "local data declaration inside conditional-generate".to_string(),
@@ -471,6 +509,11 @@ fn reject_silently_ignored_constructs(
             RefNode::GateInstantiation(_) => {
                 return Err(AnalyzerError::Unsupported(
                     "gate primitive instantiation".to_string(),
+                ));
+            }
+            RefNode::PackageImportDeclaration(_) | RefNode::PackageScope(_) => {
+                return Err(AnalyzerError::Unsupported(
+                    "package-dependent systemverilog module".to_string(),
                 ));
             }
             RefNode::ParamAssignment(parameter)
@@ -572,11 +615,24 @@ pub struct Port {
 pub struct Signal {
     name: String,
     r#type: Type,
+    is_net: bool,
 }
 
 impl Signal {
     fn new(name: String, r#type: Type) -> Self {
-        Self { name, r#type }
+        Self {
+            name,
+            r#type,
+            is_net: false,
+        }
+    }
+
+    fn new_net(name: String, r#type: Type) -> Self {
+        Self {
+            name,
+            r#type,
+            is_net: true,
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -585,6 +641,10 @@ impl Signal {
 
     pub fn r#type(&self) -> &Type {
         &self.r#type
+    }
+
+    fn is_net(&self) -> bool {
+        self.is_net
     }
 }
 
@@ -1258,11 +1318,11 @@ fn signals_from_net_declaration(
     syntax_tree: &SyntaxTree,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Signal>, AnalyzerError> {
-    let (r#type, assignments) = match net {
+    let (r#type, assignments, is_net) = match net {
         sv_parser::NetDeclaration::NetType(net) => {
             let r#type = type_from_ref_node(RefNode::DataTypeOrImplicit(&net.nodes.3), syntax_tree)
                 .unwrap_or_else(Type::implicit);
-            (r#type, net.nodes.5.nodes.0.contents())
+            (r#type, net.nodes.5.nodes.0.contents(), true)
         }
         sv_parser::NetDeclaration::NetTypeIdentifier(net) => {
             let Some(name) = identifier_text(RefNode::NetTypeIdentifier(&net.nodes.0), syntax_tree)
@@ -1272,7 +1332,7 @@ fn signals_from_net_declaration(
             let Some(r#type) = type_aliases.get(&name).cloned() else {
                 return Ok(Vec::new());
             };
-            (r#type, net.nodes.2.nodes.0.contents())
+            (r#type, net.nodes.2.nodes.0.contents(), false)
         }
         sv_parser::NetDeclaration::Interconnect(_) => return Ok(Vec::new()),
     };
@@ -1282,7 +1342,11 @@ fn signals_from_net_declaration(
             .ok_or_else(|| {
                 AnalyzerError::Unsupported("unsupported signal identifier".to_string())
             })?;
-        signals.push(Signal::new(name, r#type.clone()));
+        signals.push(if is_net {
+            Signal::new_net(name, r#type.clone())
+        } else {
+            Signal::new(name, r#type.clone())
+        });
     }
     Ok(signals)
 }
@@ -2642,17 +2706,40 @@ fn function_expr_from_statement(
                 .map(|expr| substitute_expr_idents(expr, locals))
         }
         sv_parser::StatementItem::BlockingAssignment(assignment) => {
-            let sv_parser::BlockingAssignment::Variable(assignment) = &assignment.0 else {
+            let (lhs, rhs) = match &assignment.0 {
+                sv_parser::BlockingAssignment::Variable(assignment) => (
+                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions),
+                    expr_from_expression_with_types(
+                        &assignment.nodes.3,
+                        syntax_tree,
+                        packed_dimensions,
+                    ),
+                ),
+                sv_parser::BlockingAssignment::OperatorAssignment(assignment) => {
+                    let lhs = variable_lvalue_from_node(
+                        &assignment.nodes.0,
+                        syntax_tree,
+                        packed_dimensions,
+                    );
+                    let rhs = expr_from_expression_with_types(
+                        &assignment.nodes.2,
+                        syntax_tree,
+                        packed_dimensions,
+                    );
+                    let op = syntax_tree.get_str(&assignment.nodes.1.nodes.0.nodes.0);
+                    let rhs = match (&lhs, rhs, op) {
+                        (_, Some(rhs), Some("=")) => Some(rhs),
+                        (Some(lhs), Some(rhs), Some(op)) => assignment_op_expr(lhs, op, rhs),
+                        _ => None,
+                    };
+                    (lhs, rhs)
+                }
+                _ => (None, None),
+            };
+            let Some(LValue::Ident(name)) = lhs else {
                 return None;
             };
-            let Some(LValue::Ident(name)) =
-                variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)
-            else {
-                return None;
-            };
-            if let Some(rhs) =
-                expr_from_expression_with_types(&assignment.nodes.3, syntax_tree, packed_dimensions)
-            {
+            if let Some(rhs) = rhs {
                 locals.insert(name, substitute_expr_idents(rhs, locals));
             }
             None
@@ -2669,6 +2756,7 @@ fn function_expr_from_statement(
                     return Some(expr);
                 }
             }
+            *locals = block_locals;
             None
         }
         sv_parser::StatementItem::ConditionalStatement(statement) => {
@@ -3108,6 +3196,60 @@ fn has_local_constants(const_env: &HashMap<String, i128>) -> bool {
     const_env.keys().any(|name| {
         !name.starts_with("__parameter::") && !const_env.contains_key(&parameter_marker(name))
     })
+}
+
+fn module_scope_signal_names(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Vec<String> {
+    let aliases = HashMap::new();
+    module_non_port_items(node)
+        .into_iter()
+        .filter_map(package_or_generate_declaration_from_non_port_item)
+        .flat_map(|declaration| match declaration {
+            sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) => {
+                signals_from_data_declaration(data, syntax_tree, &aliases).unwrap_or_default()
+            }
+            sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(net) => {
+                signals_from_net_declaration(net, syntax_tree, &aliases).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        })
+        .map(|signal| signal.name)
+        .collect()
+}
+
+fn conditional_generate_local_collides(
+    generate: &sv_parser::IfGenerateConstruct,
+    syntax_tree: &SyntaxTree,
+    module_scope_signal_names: &[String],
+) -> bool {
+    generate_block_data_declaration_names(&generate.nodes.2, syntax_tree)
+        .into_iter()
+        .chain(
+            generate
+                .nodes
+                .3
+                .as_ref()
+                .into_iter()
+                .flat_map(|(_, block)| generate_block_data_declaration_names(block, syntax_tree)),
+        )
+        .any(|name| module_scope_signal_names.contains(&name))
+}
+
+fn generate_block_data_declaration_names(
+    block: &sv_parser::GenerateBlock,
+    syntax_tree: &SyntaxTree,
+) -> Vec<String> {
+    let aliases = HashMap::new();
+    RefNode::GenerateBlock(block)
+        .into_iter()
+        .filter_map(|node| match node {
+            RefNode::DataDeclaration(data) => Some(data),
+            _ => None,
+        })
+        .flat_map(|data| {
+            signals_from_data_declaration(data, syntax_tree, &aliases).unwrap_or_default()
+        })
+        .map(|signal| signal.name)
+        .collect()
 }
 
 fn generate_item_has_data_declaration(item: &sv_parser::GenerateItem) -> bool {
@@ -4617,13 +4759,9 @@ fn expr_from_expression_with_types_raw(
             expr_from_primary_with_types(primary, syntax_tree, packed_dimensions)
         }
         sv_parser::Expression::Unary(unary) => {
-            let op = unary_op_from_symbol(&unary.nodes.0.nodes.0.nodes.0, syntax_tree)?;
             let expr =
                 expr_from_primary_with_types(&unary.nodes.2, syntax_tree, packed_dimensions)?;
-            Some(Expr::Unary {
-                op,
-                expr: Box::new(expr),
-            })
+            unary_expr_from_symbol(&unary.nodes.0.nodes.0.nodes.0, expr, syntax_tree)
         }
         sv_parser::Expression::Binary(binary) => {
             let left = expr_from_expression_with_types_raw(
@@ -5563,6 +5701,28 @@ fn unary_op_from_symbol(symbol: &Locate, syntax_tree: &SyntaxTree) -> Option<Una
         "^" => Some(UnaryOp::RedXor),
         _ => None,
     }
+}
+
+fn unary_expr_from_symbol(symbol: &Locate, expr: Expr, syntax_tree: &SyntaxTree) -> Option<Expr> {
+    let reduction = match syntax_tree.get_str(symbol)? {
+        "~&" => Some(UnaryOp::RedAnd),
+        "~|" => Some(UnaryOp::RedOr),
+        "~^" | "^~" => Some(UnaryOp::RedXor),
+        _ => None,
+    };
+    if let Some(op) = reduction {
+        return Some(Expr::Unary {
+            op: UnaryOp::BitNot,
+            expr: Box::new(Expr::Unary {
+                op,
+                expr: Box::new(expr),
+            }),
+        });
+    }
+    Some(Expr::Unary {
+        op: unary_op_from_symbol(symbol, syntax_tree)?,
+        expr: Box::new(expr),
+    })
 }
 
 fn binary_op_from_symbol(symbol: &Locate, syntax_tree: &SyntaxTree) -> Option<BinaryOp> {
