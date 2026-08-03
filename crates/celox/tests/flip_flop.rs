@@ -2507,6 +2507,58 @@ fn test_ff_function_call_tracks_nested_static_array_read_through_branch(sim) {
     assert_eq!(sim.get(side), 1u32.into());
 }
 
+fn test_ff_function_call_tracks_array_view_hidden_in_bound_literal(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            guard: input logic,
+            out_q: output logic<8>,
+            side: output logic<8>
+        ) {
+            function observe (
+                x: input logic<8>,
+                side: output logic<8>
+            ) -> logic<8> {
+                side = x;
+                return x;
+            }
+            function middle (
+                x: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return if guard ? x[index] : 8'h00;
+            }
+            function outer (
+                y: input logic<8>[2],
+                index: input logic,
+                guard: input logic
+            ) -> logic<8> {
+                return middle('{y[index], default: 8'h00}, 0, guard) + y[0];
+            }
+            always_ff (clk) {
+                side = 0;
+                out_q = outer(
+                    '{observe(side + 1, side), default: 8'h00},
+                    0,
+                    guard
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let guard = sim.signal("guard");
+    let out_q = sim.signal("out_q");
+    let side = sim.signal("side");
+
+    sim.modify(|io| io.set(guard, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 2u32.into());
+    assert_eq!(sim.get(side), 1u32.into());
+}
+
 fn test_ff_function_call_restores_initialized_forwarded_alias_view(sim) {
     @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"

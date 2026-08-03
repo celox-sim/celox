@@ -1123,6 +1123,11 @@ impl<'a> FfParser<'a> {
                         if seen.insert(key) {
                             views.push(key);
                         }
+                        if let Some(bound_expr) = self.function_arg_stack[frame].get(var_id) {
+                            self.collect_array_views_in_bound_expression(
+                                frame, bound_expr, views, seen,
+                            );
+                        }
                     }
                     for expr in &index.0 {
                         collect(expr, views, seen);
@@ -1216,6 +1221,29 @@ impl<'a> FfParser<'a> {
                     collect(expr, views, seen);
                 }
             }
+        }
+    }
+
+    fn collect_array_views_in_bound_expression(
+        &self,
+        frame: usize,
+        expr: &Expression,
+        views: &mut Vec<ArrayViewKey>,
+        seen: &mut HashSet<ArrayViewKey>,
+    ) {
+        if let Expression::Term(factor) = expr
+            && let Factor::Variable(bound_var_id, index, select, _) = factor.as_ref()
+            && index.0.is_empty()
+            && select.0.is_empty()
+            && select.1.is_none()
+            && let Some(source_frame) = (0..frame).rev().find(|&source_frame| {
+                self.function_arg_stack[source_frame].contains_key(bound_var_id)
+            })
+            && let Some(source_expr) = self.function_arg_stack[source_frame].get(bound_var_id)
+        {
+            self.collect_array_views_in_bound_expression(source_frame, source_expr, views, seen);
+        } else {
+            self.collect_array_views_for_expression(expr, views, seen);
         }
     }
 
