@@ -1254,6 +1254,7 @@ impl<'a> FfParser<'a> {
         // Any other entry was introduced by a nested output actual (or a
         // direct write in the function body) and needs an actual store in the
         // caller's FF region.
+        let mut writes = Vec::new();
         for (&var_id, expr) in state {
             let variable = &self.module.variables[&var_id];
             if variable.affiliation == Affiliation::Function {
@@ -1281,6 +1282,14 @@ impl<'a> FfParser<'a> {
                 expression_signed(expr),
                 ir_builder,
             )?;
+            writes.push((dst, value));
+        }
+
+        // Resolve every RHS against the caller's pre-copy-out state before
+        // mutating any nonlocal destination. `state` is a hash map, so
+        // interleaving evaluation and stores would make the result depend on
+        // its iteration order when one final expression reads another target.
+        for (dst, value) in writes {
             self.emit_multi_dst_assign(
                 value,
                 std::slice::from_ref(&dst),
