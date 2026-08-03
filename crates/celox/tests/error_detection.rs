@@ -702,6 +702,26 @@ fn test_dynamic_reset_duration_returns_unsupported_parser_error() {
 }
 
 #[test]
+fn test_reset_compile_time_expression_duration_is_accepted() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+
+            initial {
+                rst.assert(1 + 2);
+                $finish();
+            }
+        }
+    "#;
+
+    Simulator::builder(code, "t")
+        .build()
+        .expect("compile-time reset duration expression should be accepted");
+}
+
+#[test]
 fn test_top_not_found_returns_error() {
     let code = r#"
         module Foo (a: input logic, b: output logic) {

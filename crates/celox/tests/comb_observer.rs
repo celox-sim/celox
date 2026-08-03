@@ -2585,6 +2585,39 @@ module Top (
     assert_eq!(sim.get_as::<u8>(out), 26);
 }
 
+fn test_named_function_outputs_apply_in_source_order(sim) {
+    @omit_veryl;
+    @build Simulator::builder(r#"
+module Top (
+    tmp: output logic<8>,
+    out: output logic,
+) {
+    function write_outputs (
+        first: output logic<8>,
+        second: output logic<8>,
+    ) -> logic {
+        first = 8'd1;
+        second = 8'd2;
+        return 1'b1;
+    }
+
+    always_comb {
+        tmp = 8'd0;
+        out = write_outputs(
+            second: tmp,
+            first: tmp,
+        );
+    }
+}
+"#, "Top");
+
+    let tmp = sim.signal("tmp");
+    let out = sim.signal("out");
+
+    assert_eq!(sim.get_as::<u8>(tmp), 1);
+    assert_eq!(sim.get_as::<u8>(out), 1);
+}
+
 fn test_nested_dynamic_function_loops_preserve_effect_runners(sim) {
     @omit_veryl;
     @ignore_on(wasm);
