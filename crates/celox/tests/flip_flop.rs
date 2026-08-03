@@ -1953,6 +1953,99 @@ fn test_ff_runtime_event_formal_uses_declared_type(sim) {
     );
 }
 
+fn test_ff_runtime_effectful_return_uses_declared_signed_type(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<16>,
+            q: output signed logic<16>
+        ) {
+            function observed (x: input logic<16>) -> signed bit<8> {
+                $display("return");
+                return x;
+            }
+
+            always_ff (clk) {
+                q = observed(d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top").four_state(true);
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set_four_state(
+            d,
+            BigUint::from(0x12abu32),
+            BigUint::from(0x000fu32),
+        )
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.get_four_state(q),
+        (BigUint::from(0xffa0u32), BigUint::from(0u32))
+    );
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "return".to_string(),
+        }],
+    );
+}
+
+fn test_ff_runtime_effectful_output_uses_declared_formal_type(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<16>,
+            effect: output logic<16>
+        ) {
+            function observed (
+                x: input logic<16>,
+                written: output bit<8>
+            ) {
+                written = x;
+                $display("output");
+            }
+
+            always_ff (clk) {
+                observed(d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top").four_state(true);
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+
+    sim.modify(|io| {
+        io.set_four_state(
+            d,
+            BigUint::from(0x12abu32),
+            BigUint::from(0x000fu32),
+        )
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.get_four_state(effect),
+        (BigUint::from(0xa0u32), BigUint::from(0u32))
+    );
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "output".to_string(),
+        }],
+    );
+}
+
 fn test_ff_rewritten_runtime_event_argument_preserves_signedness(sim) {
     @omit_veryl;
     @ignore_on(wasm);

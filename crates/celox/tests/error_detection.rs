@@ -1109,6 +1109,49 @@ fn test_ff_function_runtime_effect_in_assignment_destination_is_detected() {
 }
 
 #[test]
+fn test_ff_function_runtime_effect_in_statement_call_output_destination_is_detected() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            index: input logic<3>
+        ) {
+            function observed (x: input logic<3>) -> logic<3> {
+                $display("index=%0d", x);
+                return x;
+            }
+
+            function set (value: output logic) {
+                value = 1'b1;
+            }
+
+            function consume (i: input logic<3>) {
+                var tmp: logic<8>;
+                tmp = 8'd0;
+                set(tmp[observed(i)]);
+            }
+
+            always_ff (clk) {
+                consume(index);
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("runtime effect in a call output destination must not be discarded");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 66);
+            assert_eq!(
+                *feature,
+                "effectful function call output destination in function body"
+            );
+        }
+        other => panic!("expected effectful call-output-destination error, got: {other:?}"),
+    }
+}
+
+#[test]
 fn test_ff_array_literal_width_overflow_is_illegal_context() {
     let code = r#"
         module Top (

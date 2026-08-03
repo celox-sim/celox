@@ -11,9 +11,9 @@ use celox_sir::{
 };
 use num_traits::ToPrimitive;
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, AssignStatement, CasePattern, CaseStatement, Comptime, Expression, Factor,
-    ForBound, ForRange, Op, Shape, Statement, SystemFunctionCall, SystemFunctionKind, Type,
-    TypeKind, ValueVariant, VarId, VarIndex, VarSelect,
+    ArrayLiteralItem, AssignDestination, AssignStatement, CasePattern, CaseStatement, Comptime,
+    Expression, Factor, ForBound, ForRange, Op, Shape, Statement, SystemFunctionCall,
+    SystemFunctionKind, Type, TypeKind, ValueVariant, VarId, VarIndex, VarSelect,
 };
 use veryl_parser::token_range::TokenRange;
 
@@ -119,6 +119,9 @@ impl<'a> FfParser<'a> {
                     call.inputs
                         .values()
                         .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
+                        || call.outputs.values().flatten().any(|dst| {
+                            self.assignment_destination_has_runtime_effect(dst, visiting)
+                        })
                         || self.function_call_has_runtime_effect(call, visiting)
                 }
                 Factor::SystemFunctionCall(call) => match &call.kind {
@@ -193,6 +196,44 @@ impl<'a> FfParser<'a> {
         result
     }
 
+    fn assignment_destination_has_runtime_effect(
+        &self,
+        dst: &AssignDestination,
+        visiting: &mut HashSet<VarId>,
+    ) -> bool {
+        dst.index
+            .0
+            .iter()
+            .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
+            || dst
+                .select
+                .0
+                .iter()
+                .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
+            || dst
+                .select
+                .1
+                .as_ref()
+                .is_some_and(|(_, expr)| self.expression_has_runtime_effect_inner(expr, visiting))
+    }
+
+    fn assignment_destination_needs_eager_evaluation(&self, dst: &AssignDestination) -> bool {
+        dst.index
+            .0
+            .iter()
+            .any(|expr| self.expression_needs_eager_evaluation(expr))
+            || dst
+                .select
+                .0
+                .iter()
+                .any(|expr| self.expression_needs_eager_evaluation(expr))
+            || dst
+                .select
+                .1
+                .as_ref()
+                .is_some_and(|(_, expr)| self.expression_needs_eager_evaluation(expr))
+    }
+
     fn statements_have_runtime_effect(
         &self,
         statements: &[Statement],
@@ -201,19 +242,10 @@ impl<'a> FfParser<'a> {
         statements.iter().any(|statement| match statement {
             Statement::SystemFunctionCall(_) => true,
             Statement::Assign(assign) => {
-                let destination_effect =
-                    assign.dst.iter().any(|dst| {
-                        dst.index
-                            .0
-                            .iter()
-                            .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
-                            || dst.select.0.iter().any(|expr| {
-                                self.expression_has_runtime_effect_inner(expr, visiting)
-                            })
-                            || dst.select.1.as_ref().is_some_and(|(_, expr)| {
-                                self.expression_has_runtime_effect_inner(expr, visiting)
-                            })
-                    });
+                let destination_effect = assign
+                    .dst
+                    .iter()
+                    .any(|dst| self.assignment_destination_has_runtime_effect(dst, visiting));
                 destination_effect
                     || self.expression_has_runtime_effect_inner(&assign.expr, visiting)
             }
@@ -260,6 +292,11 @@ impl<'a> FfParser<'a> {
                 call.inputs
                     .values()
                     .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
+                    || call
+                        .outputs
+                        .values()
+                        .flatten()
+                        .any(|dst| self.assignment_destination_has_runtime_effect(dst, visiting))
                     || self.function_call_has_runtime_effect(call, visiting)
             }
             Statement::IfReset(statement) => {
@@ -976,6 +1013,25 @@ impl<'a> FfParser<'a> {
         }
     }
 
+    fn coerce_register_to_variable_type<A>(
+        &self,
+        reg: RegisterId,
+        var_id: VarId,
+        extend_signed: bool,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<RegisterId, ParserError> {
+        let variable = &self.module.variables[&var_id];
+        let width = resolve_total_width(self.module, variable)?;
+        Ok(self.coerce_register_to_formal(
+            ir_builder,
+            reg,
+            width,
+            extend_signed,
+            variable.r#type.signed,
+            variable.r#type.is_2state(),
+        ))
+    }
+
     fn materialize_function_runtime_expression<A>(
         &mut self,
         expr: &Expression,
@@ -1146,20 +1202,11 @@ impl<'a> FfParser<'a> {
             let is_return = Self::statement_is_function_return(statement, ret_id);
             match statement {
                 Statement::Assign(assign) => {
-                    if assign.dst.iter().any(|dst| {
-                        dst.index
-                            .0
-                            .iter()
-                            .any(|expr| self.expression_needs_eager_evaluation(expr))
-                            || dst
-                                .select
-                                .0
-                                .iter()
-                                .any(|expr| self.expression_needs_eager_evaluation(expr))
-                            || dst.select.1.as_ref().is_some_and(|(_, expr)| {
-                                self.expression_needs_eager_evaluation(expr)
-                            })
-                    }) {
+                    if assign
+                        .dst
+                        .iter()
+                        .any(|dst| self.assignment_destination_needs_eager_evaluation(dst))
+                    {
                         return Err(ParserError::unsupported(
                             66,
                             LoweringPhase::FfLowering,
@@ -1393,6 +1440,20 @@ impl<'a> FfParser<'a> {
                     ));
                 }
                 Statement::FunctionCall(call) => {
+                    if call
+                        .outputs
+                        .values()
+                        .flatten()
+                        .any(|dst| self.assignment_destination_needs_eager_evaluation(dst))
+                    {
+                        return Err(ParserError::unsupported(
+                            66,
+                            LoweringPhase::FfLowering,
+                            "effectful function call output destination in function body",
+                            format!("{statement}"),
+                            Some(&call.comptime.token),
+                        ));
+                    }
                     if self.function_call_has_runtime_effect(call, &mut HashSet::default()) {
                         return Err(ParserError::unsupported(
                             66,
@@ -2522,6 +2583,12 @@ impl<'a> FfParser<'a> {
                     .stack
                     .pop_back()
                     .expect("Function output expression evaluation failed");
+                let rhs_reg = self.coerce_register_to_variable_type(
+                    rhs_reg,
+                    *arg_id,
+                    expr.comptime().r#type.signed,
+                    ir_builder,
+                )?;
                 self.emit_multi_dst_assign(
                     rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
                 )?;
@@ -2542,7 +2609,19 @@ impl<'a> FfParser<'a> {
                 };
             self.parse_expression(
                 &ret_expr, targets, domain, convert, sources, ir_builder, None,
-            )
+            )?;
+            let ret_reg = self
+                .stack
+                .pop_back()
+                .expect("Function return expression evaluation failed");
+            let ret_reg = self.coerce_register_to_variable_type(
+                ret_reg,
+                ret_id,
+                ret_expr.comptime().r#type.signed,
+                ir_builder,
+            )?;
+            self.stack.push_back(ret_reg);
+            Ok(())
         })();
         self.function_expression_value_stack.pop();
         self.function_arg_value_stack.pop();
@@ -2668,6 +2747,12 @@ impl<'a> FfParser<'a> {
                     .stack
                     .pop_back()
                     .expect("Function output expression evaluation failed");
+                let rhs_reg = self.coerce_register_to_variable_type(
+                    rhs_reg,
+                    *arg_id,
+                    expr.comptime().r#type.signed,
+                    ir_builder,
+                )?;
                 self.emit_multi_dst_assign(
                     rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
                 )?;
