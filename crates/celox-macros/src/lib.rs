@@ -55,7 +55,10 @@ pub fn veryl_test(input: TokenStream) -> TokenStream {
     analyzer.clear();
 
     let paths = match metadata.paths::<PathBuf>(&[], false, true) {
-        Ok(p) => p,
+        Ok(p) => p
+            .into_iter()
+            .filter(|path| !path.example)
+            .collect::<Vec<_>>(),
         Err(e) => exit_with_error!(&format!("Failed to gather paths: {}", e)),
     };
 

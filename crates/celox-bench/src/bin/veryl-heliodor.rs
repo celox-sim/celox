@@ -65,6 +65,7 @@ fn run() -> Result<(), VerylHeliodorError> {
     let paths = metadata.paths(&options.source_files, false, true)?;
     let sources = paths
         .into_iter()
+        .filter(|path| !options.source_files.is_empty() || !path.example)
         .map(|path| {
             let input = fs::read_to_string(&path.src)?;
             Ok::<_, std::io::Error>((path, input))

@@ -1594,7 +1594,33 @@ fn extract_source_location(
     })
 }
 
-fn validate_testbench_expression(expression: &Expression) -> Result<(), ParserError> {
+fn validate_testbench_function_call(
+    call: &FunctionCall,
+    source: &VerylTestbenchSource,
+    active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
+) -> Result<(), ParserError> {
+    for expression in call.inputs.values() {
+        validate_testbench_expression(expression, source, active_functions)?;
+    }
+
+    let key = (call.id, call.index.clone());
+    if !active_functions.insert(key.clone()) {
+        return Ok(());
+    }
+    let result = if let Some(body) = function_body(&source.functions, call) {
+        validate_testbench_statements(&body.statements, source, active_functions)
+    } else {
+        Ok(())
+    };
+    active_functions.remove(&key);
+    result
+}
+
+fn validate_testbench_expression(
+    expression: &Expression,
+    source: &VerylTestbenchSource,
+    active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
+) -> Result<(), ParserError> {
     match expression {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::HierVariable(reference) => Err(ParserError::unsupported(
@@ -1606,37 +1632,64 @@ fn validate_testbench_expression(expression: &Expression) -> Result<(), ParserEr
             )),
             Factor::Variable(_, index, select, _) => {
                 for expression in index.0.iter().chain(select.0.iter()) {
-                    validate_testbench_expression(expression)?;
+                    validate_testbench_expression(expression, source, active_functions)?;
                 }
                 if let Some((_, expression)) = &select.1 {
-                    validate_testbench_expression(expression)?;
+                    validate_testbench_expression(expression, source, active_functions)?;
                 }
                 Ok(())
             }
             Factor::FunctionCall(call) => {
-                for expression in call.inputs.values() {
-                    validate_testbench_expression(expression)?;
-                }
-                Ok(())
+                validate_testbench_function_call(call, source, active_functions)
             }
-            Factor::SystemFunctionCall(call) => validate_testbench_system_function(&call.kind),
+            Factor::SystemFunctionCall(call) => {
+                validate_testbench_system_function(&call.kind, source, active_functions)
+            }
+            Factor::Anonymous(comptime) | Factor::Unknown(comptime)
+                if comptime.get_value().is_err() =>
+            {
+                let token = &comptime.token;
+                let source = token.source().get_text();
+                let start = token.beg.pos as usize;
+                let end = (token.end.pos + token.end.length) as usize;
+                let factor_text = source.get(start..end).unwrap_or_default();
+                if factor_text.contains('.') {
+                    Err(ParserError::unsupported(
+                        467,
+                        LoweringPhase::SimulatorParser,
+                        "hierarchical variable reference",
+                        factor_text,
+                        Some(token),
+                    ))
+                } else {
+                    Err(ParserError::unsupported(
+                        67,
+                        LoweringPhase::SimulatorParser,
+                        "unresolved factor in testbench expression",
+                        format!("{factor:?}"),
+                        Some(token),
+                    ))
+                }
+            }
             Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
         },
-        Expression::Unary(_, inner, _) => validate_testbench_expression(inner),
+        Expression::Unary(_, inner, _) => {
+            validate_testbench_expression(inner, source, active_functions)
+        }
         Expression::Binary(lhs, _, rhs, _) => {
-            validate_testbench_expression(lhs)?;
-            validate_testbench_expression(rhs)
+            validate_testbench_expression(lhs, source, active_functions)?;
+            validate_testbench_expression(rhs, source, active_functions)
         }
         Expression::Ternary(condition, then_expression, else_expression, _) => {
-            validate_testbench_expression(condition)?;
-            validate_testbench_expression(then_expression)?;
-            validate_testbench_expression(else_expression)
+            validate_testbench_expression(condition, source, active_functions)?;
+            validate_testbench_expression(then_expression, source, active_functions)?;
+            validate_testbench_expression(else_expression, source, active_functions)
         }
         Expression::Concatenation(items, _) => {
             for (expression, repeat) in items {
-                validate_testbench_expression(expression)?;
+                validate_testbench_expression(expression, source, active_functions)?;
                 if let Some(repeat) = repeat {
-                    validate_testbench_expression(repeat)?;
+                    validate_testbench_expression(repeat, source, active_functions)?;
                 }
             }
             Ok(())
@@ -1645,13 +1698,13 @@ fn validate_testbench_expression(expression: &Expression) -> Result<(), ParserEr
             for item in items {
                 match item {
                     ArrayLiteralItem::Value(expression, repeat) => {
-                        validate_testbench_expression(expression)?;
+                        validate_testbench_expression(expression, source, active_functions)?;
                         if let Some(repeat) = repeat {
-                            validate_testbench_expression(repeat)?;
+                            validate_testbench_expression(repeat, source, active_functions)?;
                         }
                     }
                     ArrayLiteralItem::Defaul(expression) => {
-                        validate_testbench_expression(expression)?;
+                        validate_testbench_expression(expression, source, active_functions)?;
                     }
                 }
             }
@@ -1659,15 +1712,21 @@ fn validate_testbench_expression(expression: &Expression) -> Result<(), ParserEr
         }
         Expression::StructConstructor(_, fields, _) => {
             for (_, expression) in fields {
-                validate_testbench_expression(expression)?;
+                validate_testbench_expression(expression, source, active_functions)?;
             }
             Ok(())
         }
     }
 }
 
-fn validate_testbench_system_function(kind: &SystemFunctionKind) -> Result<(), ParserError> {
-    let validate = |input: &SystemFunctionInput| validate_testbench_expression(&input.0);
+fn validate_testbench_system_function(
+    kind: &SystemFunctionKind,
+    source: &VerylTestbenchSource,
+    active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
+) -> Result<(), ParserError> {
+    let mut validate = |input: &SystemFunctionInput| {
+        validate_testbench_expression(&input.0, source, active_functions)
+    };
     match kind {
         SystemFunctionKind::Bits(input)
         | SystemFunctionKind::Size(input)
@@ -1693,36 +1752,46 @@ fn validate_testbench_system_function(kind: &SystemFunctionKind) -> Result<(), P
     }
 }
 
-fn validate_testbench_statements(statements: &[Statement]) -> Result<(), ParserError> {
+fn validate_testbench_statements(
+    statements: &[Statement],
+    source: &VerylTestbenchSource,
+    active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
+) -> Result<(), ParserError> {
     for statement in statements {
         match statement {
-            Statement::Assign(statement) => validate_testbench_expression(&statement.expr)?,
+            Statement::Assign(statement) => {
+                validate_testbench_expression(&statement.expr, source, active_functions)?
+            }
             Statement::If(statement) => {
-                validate_testbench_expression(&statement.cond)?;
-                validate_testbench_statements(&statement.true_side)?;
-                validate_testbench_statements(&statement.false_side)?;
+                validate_testbench_expression(&statement.cond, source, active_functions)?;
+                validate_testbench_statements(&statement.true_side, source, active_functions)?;
+                validate_testbench_statements(&statement.false_side, source, active_functions)?;
             }
             Statement::IfReset(statement) => {
-                validate_testbench_statements(&statement.true_side)?;
-                validate_testbench_statements(&statement.false_side)?;
+                validate_testbench_statements(&statement.true_side, source, active_functions)?;
+                validate_testbench_statements(&statement.false_side, source, active_functions)?;
             }
             Statement::Case(statement) => {
-                validate_testbench_expression(&statement.case_target)?;
+                validate_testbench_expression(&statement.case_target, source, active_functions)?;
                 for arm in &statement.arms {
                     for pattern in &arm.patterns {
                         match pattern {
                             CasePattern::Eq(expression) => {
-                                validate_testbench_expression(expression)?;
+                                validate_testbench_expression(
+                                    expression,
+                                    source,
+                                    active_functions,
+                                )?;
                             }
                             CasePattern::Range { lo, hi, .. } => {
-                                validate_testbench_expression(lo)?;
-                                validate_testbench_expression(hi)?;
+                                validate_testbench_expression(lo, source, active_functions)?;
+                                validate_testbench_expression(hi, source, active_functions)?;
                             }
                         }
                     }
-                    validate_testbench_statements(&arm.body)?;
+                    validate_testbench_statements(&arm.body, source, active_functions)?;
                 }
-                validate_testbench_statements(&statement.default)?;
+                validate_testbench_statements(&statement.default, source, active_functions)?;
             }
             Statement::For(statement) => {
                 let (start, end) = match &statement.range {
@@ -1732,18 +1801,16 @@ fn validate_testbench_statements(statements: &[Statement]) -> Result<(), ParserE
                 };
                 for bound in [start, end] {
                     if let ForBound::Expression(expression) = bound {
-                        validate_testbench_expression(expression)?;
+                        validate_testbench_expression(expression, source, active_functions)?;
                     }
                 }
-                validate_testbench_statements(&statement.body)?;
+                validate_testbench_statements(&statement.body, source, active_functions)?;
             }
             Statement::SystemFunctionCall(call) => {
-                validate_testbench_system_function(&call.kind)?;
+                validate_testbench_system_function(&call.kind, source, active_functions)?;
             }
             Statement::FunctionCall(call) => {
-                for expression in call.inputs.values() {
-                    validate_testbench_expression(expression)?;
-                }
+                validate_testbench_function_call(call, source, active_functions)?;
             }
             Statement::TbMethodCall(call) => match &call.method {
                 TbMethod::Component { .. } => {
@@ -1777,21 +1844,23 @@ fn validate_testbench_statements(statements: &[Statement]) -> Result<(), ParserE
                 }
                 TbMethod::ClockNext { count, period } => {
                     if let Some(expression) = count {
-                        validate_testbench_expression(expression)?;
+                        validate_testbench_expression(expression, source, active_functions)?;
                     }
                     if let Some(expression) = period {
-                        validate_testbench_expression(expression)?;
+                        validate_testbench_expression(expression, source, active_functions)?;
                     }
                 }
                 TbMethod::ResetAssert { duration, .. } => {
                     if let Some(expression) = duration {
-                        validate_testbench_expression(expression)?;
+                        validate_testbench_expression(expression, source, active_functions)?;
                     }
                 }
-                TbMethod::FileOpen { name, .. } => validate_testbench_expression(&name.0)?,
+                TbMethod::FileOpen { name, .. } => {
+                    validate_testbench_expression(&name.0, source, active_functions)?
+                }
                 TbMethod::FileWrite { args } => {
                     for argument in args {
-                        validate_testbench_expression(&argument.0)?;
+                        validate_testbench_expression(&argument.0, source, active_functions)?;
                     }
                 }
                 TbMethod::FileClose | TbMethod::FileFlush => {}
@@ -1810,7 +1879,7 @@ pub fn compile_semantic_testbench(
     let Some(initial_stmts) = source.initial_statements.as_ref() else {
         return Ok(None);
     };
-    validate_testbench_statements(initial_stmts)?;
+    validate_testbench_statements(initial_stmts, source, &mut FxHashSet::default())?;
     let mut builder = SemanticTestbenchBuilder::new(lookup, source, runtime_event_site_count);
     builder.build_event_map(initial_stmts);
     Ok(Some(TestbenchProgram::new(builder.convert(initial_stmts))))

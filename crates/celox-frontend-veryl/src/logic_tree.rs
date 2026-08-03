@@ -91,23 +91,20 @@ pub(super) fn invalid_function_call_argument_error(
     )
 }
 
-/// Returns input expressions in formal declaration order.
+/// Returns input expressions in source evaluation order.
 ///
-/// Veryl's AIR stores call connections in a hash map, so iterating
-/// `FunctionCall::inputs` directly makes side-effect ordering depend on the hash
-/// layout. `Function::args`, in contrast, preserves the declared port order.
+/// Veryl 0.20.3 preserves the source order in `FunctionCall::inputs`. Keep that
+/// order when mapping flattened argument paths to their specialized variables:
+/// evaluating in formal declaration order can reorder side effects in named
+/// arguments.
 pub(super) fn ordered_function_inputs<'a>(
     function: &Function,
     function_body: &FunctionBody,
     call: &'a FunctionCall,
 ) -> Result<Vec<(VarId, &'a Expression)>, ParserError> {
-    let mut inputs = Vec::with_capacity(call.inputs.len());
-    let mut ordered_ids = HashSet::default();
+    let mut declared_ids = HashSet::default();
     for arg in &function.args {
         for (arg_path, _, _) in &arg.members {
-            let Some(arg_expr) = function_call_arg(&call.inputs, arg_path) else {
-                continue;
-            };
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
                 return Err(invalid_function_call_argument_error(
                     function,
@@ -116,12 +113,12 @@ pub(super) fn ordered_function_inputs<'a>(
                     call,
                 ));
             };
-            inputs.push((*arg_id, arg_expr));
-            ordered_ids.insert(*arg_id);
+            declared_ids.insert(*arg_id);
         }
     }
 
-    for (arg_path, _) in &call.inputs {
+    let mut inputs = Vec::with_capacity(call.inputs.len());
+    for (arg_path, arg_expr) in &call.inputs {
         let Some(arg_id) = function_body.arg_map.get(arg_path) else {
             return Err(invalid_function_call_argument_error(
                 function,
@@ -130,7 +127,7 @@ pub(super) fn ordered_function_inputs<'a>(
                 call,
             ));
         };
-        if !ordered_ids.contains(arg_id) {
+        if !declared_ids.contains(arg_id) {
             return Err(invalid_function_call_argument_error(
                 function,
                 arg_path,
@@ -138,6 +135,7 @@ pub(super) fn ordered_function_inputs<'a>(
                 call,
             ));
         }
+        inputs.push((*arg_id, arg_expr));
     }
 
     Ok(inputs)

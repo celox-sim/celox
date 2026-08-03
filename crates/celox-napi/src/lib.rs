@@ -586,7 +586,7 @@ fn load_project_sources(
         .paths::<&str>(&[], false, false)
         .map_err(|e| Error::from_reason(format!("Failed to gather sources: {e}")))?;
     let mut sources = Vec::new();
-    for p in &paths {
+    for p in paths.iter().filter(|path| !path.example) {
         let content = std::fs::read_to_string(&p.src)
             .map_err(|e| Error::from_reason(format!("{}: {e}", p.src.display())))?;
         sources.push((content, p.src.clone()));
@@ -1986,6 +1986,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
     let mut paths = metadata
         .paths::<std::path::PathBuf>(&[], true, true)
         .map_err(|e| Error::from_reason(format!("Failed to gather sources: {e}")))?;
+    paths.retain(|path| !path.example);
 
     // Append test-only sources declared in celox.toml
     let project_root = toml_path.parent().unwrap_or(&toml_path).to_path_buf();
