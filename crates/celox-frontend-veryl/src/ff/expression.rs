@@ -108,6 +108,12 @@ struct ArrayViewKey {
     var_id: VarId,
 }
 
+struct ArrayViewMergeCandidate {
+    key: ArrayViewKey,
+    needs_view: bool,
+    cached_literal_items: HashSet<Vec<usize>>,
+}
+
 struct ArrayViewMergeParams {
     key: ArrayViewKey,
     initialized: RegisterId,
@@ -1098,11 +1104,11 @@ impl<'a> FfParser<'a> {
     fn collect_array_views_for_expression(
         &self,
         expr: &Expression,
-        views: &mut Vec<ArrayViewKey>,
-        seen: &mut HashSet<ArrayViewKey>,
+        candidates: &mut Vec<ArrayViewMergeCandidate>,
+        candidate_indices: &mut HashMap<ArrayViewKey, usize>,
     ) {
-        let collect = |expr, views: &mut Vec<_>, seen: &mut HashSet<_>| {
-            self.collect_array_views_for_expression(expr, views, seen)
+        let collect = |expr, candidates: &mut Vec<_>, candidate_indices: &mut HashMap<_, _>| {
+            self.collect_array_views_for_expression(expr, candidates, candidate_indices)
         };
         match expr {
             Expression::Term(factor) => match factor.as_ref() {
@@ -1120,23 +1126,32 @@ impl<'a> FfParser<'a> {
                             frame,
                             var_id: *var_id,
                         };
-                        if seen.insert(key) {
-                            views.push(key);
-                        }
+                        let static_indices = self.static_array_view_indices(*var_id, index, select);
+                        self.record_array_view_merge_candidate(
+                            key,
+                            static_indices.as_deref(),
+                            candidates,
+                            candidate_indices,
+                        );
                         if let Some(bound_expr) = self.function_arg_stack[frame].get(var_id) {
                             self.collect_array_views_in_bound_expression(
-                                frame, bound_expr, views, seen,
+                                frame,
+                                *var_id,
+                                bound_expr,
+                                static_indices.as_deref(),
+                                candidates,
+                                candidate_indices,
                             );
                         }
                     }
                     for expr in &index.0 {
-                        collect(expr, views, seen);
+                        collect(expr, candidates, candidate_indices);
                     }
                     for expr in &select.0 {
-                        collect(expr, views, seen);
+                        collect(expr, candidates, candidate_indices);
                     }
                     if let Some((_, expr)) = &select.1 {
-                        collect(expr, views, seen);
+                        collect(expr, candidates, candidate_indices);
                     }
                 }
                 Factor::FunctionCall(call) => {
@@ -1158,14 +1173,25 @@ impl<'a> FfParser<'a> {
                                     || input_usage.array_views.contains(arg_id)
                             };
                             if needs_actual && let Some(expr) = call.inputs.get(arg_path) {
-                                collect(expr, views, seen);
+                                collect(expr, candidates, candidate_indices);
                             }
                         }
                     } else {
                         // Unsupported or recursive callees will fail during
                         // normal lowering; keep the conservative traversal.
                         for expr in call.inputs.values() {
-                            collect(expr, views, seen);
+                            collect(expr, candidates, candidate_indices);
+                        }
+                    }
+                    for dst in call.outputs.values().flatten() {
+                        for expr in &dst.index.0 {
+                            collect(expr, candidates, candidate_indices);
+                        }
+                        for expr in &dst.select.0 {
+                            collect(expr, candidates, candidate_indices);
+                        }
+                        if let Some((_, expr)) = &dst.select.1 {
+                            collect(expr, candidates, candidate_indices);
                         }
                     }
                 }
@@ -1176,7 +1202,9 @@ impl<'a> FfParser<'a> {
                     SystemFunctionKind::Clog2(input)
                     | SystemFunctionKind::Onehot(input)
                     | SystemFunctionKind::Signed(input)
-                    | SystemFunctionKind::Unsigned(input) => collect(&input.0, views, seen),
+                    | SystemFunctionKind::Unsigned(input) => {
+                        collect(&input.0, candidates, candidate_indices)
+                    }
                     SystemFunctionKind::Readmemh(_, _)
                     | SystemFunctionKind::Display(_)
                     | SystemFunctionKind::Write(_)
@@ -1186,20 +1214,20 @@ impl<'a> FfParser<'a> {
                 Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
             },
             Expression::Binary(lhs, _, rhs, _) => {
-                collect(lhs, views, seen);
-                collect(rhs, views, seen);
+                collect(lhs, candidates, candidate_indices);
+                collect(rhs, candidates, candidate_indices);
             }
-            Expression::Unary(_, inner, _) => collect(inner, views, seen),
+            Expression::Unary(_, inner, _) => collect(inner, candidates, candidate_indices),
             Expression::Ternary(cond, then_expr, else_expr, _) => {
-                collect(cond, views, seen);
-                collect(then_expr, views, seen);
-                collect(else_expr, views, seen);
+                collect(cond, candidates, candidate_indices);
+                collect(then_expr, candidates, candidate_indices);
+                collect(else_expr, candidates, candidate_indices);
             }
             Expression::Concatenation(items, _) => {
                 for (expr, repeat) in items {
-                    collect(expr, views, seen);
+                    collect(expr, candidates, candidate_indices);
                     if let Some(repeat) = repeat {
-                        collect(repeat, views, seen);
+                        collect(repeat, candidates, candidate_indices);
                     }
                 }
             }
@@ -1207,29 +1235,88 @@ impl<'a> FfParser<'a> {
                 for item in items {
                     match item {
                         ArrayLiteralItem::Value(expr, repeat) => {
-                            collect(expr, views, seen);
+                            collect(expr, candidates, candidate_indices);
                             if let Some(repeat) = repeat {
-                                collect(repeat, views, seen);
+                                collect(repeat, candidates, candidate_indices);
                             }
                         }
-                        ArrayLiteralItem::Defaul(expr) => collect(expr, views, seen),
+                        ArrayLiteralItem::Defaul(expr) => {
+                            collect(expr, candidates, candidate_indices)
+                        }
                     }
                 }
             }
             Expression::StructConstructor(_, fields, _) => {
                 for (_, expr) in fields {
-                    collect(expr, views, seen);
+                    collect(expr, candidates, candidate_indices);
                 }
             }
+        }
+    }
+
+    fn static_array_view_indices(
+        &self,
+        var_id: VarId,
+        index: &VarIndex,
+        select: &VarSelect,
+    ) -> Option<Vec<usize>> {
+        if self.array_access_needs_view(var_id, index, select) {
+            return None;
+        }
+        index
+            .0
+            .iter()
+            .chain(&select.0)
+            .map(|expr| self.get_constant_value(expr).map(|value| value as usize))
+            .collect()
+    }
+
+    fn record_array_view_merge_candidate(
+        &self,
+        key: ArrayViewKey,
+        static_indices: Option<&[usize]>,
+        candidates: &mut Vec<ArrayViewMergeCandidate>,
+        candidate_indices: &mut HashMap<ArrayViewKey, usize>,
+    ) {
+        let candidate_index = if let Some(&candidate_index) = candidate_indices.get(&key) {
+            candidate_index
+        } else {
+            let candidate_index = candidates.len();
+            candidates.push(ArrayViewMergeCandidate {
+                key,
+                needs_view: false,
+                cached_literal_items: HashSet::default(),
+            });
+            candidate_indices.insert(key, candidate_index);
+            candidate_index
+        };
+        let candidate = &mut candidates[candidate_index];
+        if let Some(static_indices) = static_indices {
+            if let Some(items) = self.bound_array_literal_items_at(key.frame, key.var_id)
+                && let Some(array_dims) = self.module.variables[&key.var_id]
+                    .r#type
+                    .array
+                    .iter()
+                    .copied()
+                    .collect::<Option<Vec<_>>>()
+                && let Some(selection) =
+                    self.select_array_literal_element(items, static_indices, &array_dims)
+            {
+                candidate.cached_literal_items.insert(selection.cache_key);
+            }
+        } else {
+            candidate.needs_view = true;
         }
     }
 
     fn collect_array_views_in_bound_expression(
         &self,
         frame: usize,
+        var_id: VarId,
         expr: &Expression,
-        views: &mut Vec<ArrayViewKey>,
-        seen: &mut HashSet<ArrayViewKey>,
+        static_indices: Option<&[usize]>,
+        candidates: &mut Vec<ArrayViewMergeCandidate>,
+        candidate_indices: &mut HashMap<ArrayViewKey, usize>,
     ) {
         if let Expression::Term(factor) = expr
             && let Factor::Variable(bound_var_id, index, select, _) = factor.as_ref()
@@ -1245,12 +1332,34 @@ impl<'a> FfParser<'a> {
                 frame: source_frame,
                 var_id: *bound_var_id,
             };
-            if seen.insert(key) {
-                views.push(key);
-            }
-            self.collect_array_views_in_bound_expression(source_frame, source_expr, views, seen);
+            self.record_array_view_merge_candidate(
+                key,
+                static_indices,
+                candidates,
+                candidate_indices,
+            );
+            self.collect_array_views_in_bound_expression(
+                source_frame,
+                *bound_var_id,
+                source_expr,
+                static_indices,
+                candidates,
+                candidate_indices,
+            );
+        } else if let (Some(static_indices), Expression::ArrayLiteral(items, _)) =
+            (static_indices, expr)
+            && let Some(array_dims) = self.module.variables[&var_id]
+                .r#type
+                .array
+                .iter()
+                .copied()
+                .collect::<Option<Vec<_>>>()
+            && let Some(selection) =
+                self.select_array_literal_element(items, static_indices, &array_dims)
+        {
+            self.collect_array_views_for_expression(selection.expr, candidates, candidate_indices);
         } else {
-            self.collect_array_views_for_expression(expr, views, seen);
+            self.collect_array_views_for_expression(expr, candidates, candidate_indices);
         }
     }
 
@@ -1421,15 +1530,15 @@ impl<'a> FfParser<'a> {
     fn array_view_merge_candidates<'b>(
         &self,
         expressions: impl IntoIterator<Item = &'b Expression>,
-    ) -> Vec<ArrayViewKey> {
+    ) -> Vec<ArrayViewMergeCandidate> {
         let mut candidates = Vec::new();
-        let mut seen = HashSet::default();
+        let mut candidate_indices = HashMap::default();
         for expr in expressions {
-            self.collect_array_views_for_expression(expr, &mut candidates, &mut seen);
+            self.collect_array_views_for_expression(expr, &mut candidates, &mut candidate_indices);
         }
-        candidates.retain(|key| {
-            self.function_array_view_stack[key.frame]
-                .get(&key.var_id)
+        candidates.retain(|candidate| {
+            self.function_array_view_stack[candidate.key.frame]
+                .get(&candidate.key.var_id)
                 .is_none_or(|view| view.initialized.is_some())
         });
         candidates
@@ -1437,15 +1546,23 @@ impl<'a> FfParser<'a> {
 
     fn alloc_array_view_merge_params<A>(
         &self,
-        candidates: &[ArrayViewKey],
+        candidates: &[ArrayViewMergeCandidate],
         ir_builder: &mut SIRBuilder<A>,
     ) -> Result<Vec<ArrayViewMergeParams>, ParserError> {
         candidates
             .iter()
-            .map(|&key| {
-                let layout = self.array_view_layout(key.var_id)?;
+            .map(|candidate| {
+                let key = candidate.key;
+                let layout = self.array_view_layout(candidate.key.var_id)?;
                 let initialized = ir_builder.alloc_bit(1, false);
-                let elements = (0..layout.element_count)
+                let existing_view = self.function_array_view_stack[key.frame].get(&key.var_id);
+                let carries_view = candidate.needs_view
+                    || existing_view.is_some_and(|view| !view.elements.is_empty());
+                let elements = (0..if carries_view {
+                    layout.element_count
+                } else {
+                    0
+                })
                     .map(|_| {
                         if layout.is_2state {
                             ir_builder.alloc_bit(layout.element_width, layout.signed)
@@ -1454,9 +1571,18 @@ impl<'a> FfParser<'a> {
                         }
                     })
                     .collect();
+                let existing_cache_keys = existing_view
+                    .into_iter()
+                    .flat_map(|view| view.cached_literal_items.keys())
+                    .collect::<HashSet<_>>();
                 let cached_literal_items = self
                     .array_literal_item_specs(key.frame, key.var_id)
                     .into_iter()
+                    .filter(|(cache_key, _)| {
+                        carries_view
+                            || candidate.cached_literal_items.contains(cache_key)
+                            || existing_cache_keys.contains(cache_key)
+                    })
                     .map(|(cache_key, element_count)| ArrayLiteralItemMergeParams {
                         cache_key,
                         initialized: ir_builder.alloc_bit(1, false),
@@ -1501,7 +1627,7 @@ impl<'a> FfParser<'a> {
                 args.push(initialized);
                 if view.elements.is_empty() {
                     let layout = self.array_view_layout(params.key.var_id)?;
-                    for _ in 0..layout.element_count {
+                    for _ in &params.elements {
                         let element = if layout.is_2state {
                             ir_builder.alloc_bit(layout.element_width, layout.signed)
                         } else {
@@ -1511,6 +1637,9 @@ impl<'a> FfParser<'a> {
                         args.push(element);
                     }
                 } else {
+                    if view.elements.len() != params.elements.len() {
+                        unreachable!("a merged array view has the planned element count");
+                    }
                     args.extend(view.elements.iter().copied());
                 }
             } else {
@@ -1518,7 +1647,7 @@ impl<'a> FfParser<'a> {
                 ir_builder.emit(SIRInstruction::Imm(initialized, SIRValue::new(0u8)));
                 args.push(initialized);
                 let layout = self.array_view_layout(params.key.var_id)?;
-                for _ in 0..layout.element_count {
+                for _ in &params.elements {
                     let element = if layout.is_2state {
                         ir_builder.alloc_bit(layout.element_width, layout.signed)
                     } else {
