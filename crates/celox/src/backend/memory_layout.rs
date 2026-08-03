@@ -3,8 +3,14 @@ use crate::ir::{
     AbsoluteAddr, OptimizedSir, RegisterId, SIRInstruction, SIROffset, STABLE_REGION,
     collect_exact_zero_registers,
 };
-#[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
-pub use celox_backend_x86::STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET;
+#[cfg(all(
+    feature = "host-runtime",
+    any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )
+))]
+pub use celox_state_layout::STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET;
 pub use celox_state_layout::{
     LayoutInput, LayoutRequirements, LayoutSource, MemoryLayoutMode, StateObjectLayout,
     UnpackedArrayLayout, get_byte_size,

@@ -128,7 +128,13 @@ impl OptimizedSir {
         }
     }
 
-    #[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+    #[cfg(all(
+        feature = "host-runtime",
+        any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        )
+    ))]
     pub(crate) fn into_runtime(self) -> RuntimeProgram {
         self.runtime
     }
@@ -497,7 +503,13 @@ pub(crate) mod verify {
 pub use celox_slt::{GlueAddrBase, GlueBlockBase};
 
 pub use celox_frontend_veryl::SimModule;
-#[cfg(all(feature = "host-runtime", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "host-runtime",
+    any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )
+))]
 pub(crate) use celox_runtime::SignalArrayLayout;
 pub use celox_runtime::SignalRef;
 

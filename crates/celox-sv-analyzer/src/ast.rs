@@ -99,6 +99,7 @@ impl Module {
         let signals = signals_from_module_node(node.clone(), syntax_tree)?;
         let instances = instances_from_module_node(node.clone(), syntax_tree)?;
         let const_env = const_env_from_parameters(&parameters);
+        reject_unsupported_multidimensional_packed_bounds(&ports, &signals, &const_env)?;
         let parameter_values = parameter_value_env(&parameters, &const_env);
         let packed_dimensions = packed_dimensions_from_ports_and_signals(&ports, &signals);
         let functions =
@@ -179,7 +180,43 @@ impl Module {
     }
 }
 
+fn reject_unsupported_multidimensional_packed_bounds(
+    ports: &[Port],
+    signals: &[Signal],
+    const_env: &HashMap<String, i128>,
+) -> Result<(), AnalyzerError> {
+    let unsupported = ports
+        .iter()
+        .map(Port::r#type)
+        .chain(signals.iter().map(Signal::r#type))
+        .any(|r#type| {
+            let ranges = r#type.packed_ranges();
+            ranges.len() > 1
+                && ranges.iter().any(|range| {
+                    let left = eval_ast_const_expr(range.left(), const_env);
+                    let right = eval_ast_const_expr(range.right(), const_env);
+                    !matches!((left, right), (Some(left), Some(0)) if left >= 0)
+                })
+        });
+    if unsupported {
+        Err(AnalyzerError::Unsupported(
+            "non-zero-based or ascending multidimensional packed range".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerError> {
+    if node
+        .clone()
+        .into_iter()
+        .any(|child| matches!(child, RefNode::UnpackedDimension(_)))
+    {
+        return Err(AnalyzerError::Unsupported(
+            "unpacked array dimension".to_string(),
+        ));
+    }
     for child in node {
         match child {
             RefNode::AlwaysConstruct(always) => {
@@ -206,11 +243,29 @@ fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerE
                 }
                 if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
                     && body
+                        .clone()
                         .into_iter()
                         .any(|node| matches!(node, RefNode::BlockingAssignment(_)))
                 {
                     return Err(AnalyzerError::Unsupported(
                         "blocking assignment inside always_ff".to_string(),
+                    ));
+                }
+                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
+                    && body.into_iter().any(|node| {
+                        matches!(
+                            node,
+                            RefNode::CaseStatement(case)
+                                if !matches!(
+                                    case,
+                                    sv_parser::CaseStatement::Normal(case)
+                                        if matches!(case.nodes.1, sv_parser::CaseKeyword::Case(_))
+                                )
+                        )
+                    })
+                {
+                    return Err(AnalyzerError::Unsupported(
+                        "casez, casex, or pattern case inside always_ff".to_string(),
                     ));
                 }
             }
@@ -233,6 +288,20 @@ fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerE
                         "local data declaration inside loop-generate".to_string(),
                     ));
                 }
+                if RefNode::LoopGenerateConstruct(generate)
+                    .into_iter()
+                    .any(|node| {
+                        matches!(
+                            node,
+                            RefNode::AlwaysConstruct(always)
+                                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
+                        )
+                    })
+                {
+                    return Err(AnalyzerError::Unsupported(
+                        "always_ff inside loop-generate".to_string(),
+                    ));
+                }
             }
             RefNode::UnpackedDimension(_) => {
                 return Err(AnalyzerError::Unsupported(
@@ -248,6 +317,37 @@ fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerE
                 return Err(AnalyzerError::Unsupported(
                     "case-generate construct".to_string(),
                 ));
+            }
+            RefNode::ConditionalGenerateConstruct(sv_parser::ConditionalGenerateConstruct::If(
+                generate,
+            )) if generate_block_has_data_declaration(&generate.nodes.2)
+                && generate
+                    .nodes
+                    .3
+                    .as_ref()
+                    .is_some_and(|(_, block)| generate_block_has_data_declaration(block)) =>
+            {
+                return Err(AnalyzerError::Unsupported(
+                    "local data declaration inside conditional-generate".to_string(),
+                ));
+            }
+            RefNode::VariableDeclAssignmentVariable(assignment) if assignment.nodes.2.is_some() => {
+                return Err(AnalyzerError::Unsupported(
+                    "variable declaration initializer".to_string(),
+                ));
+            }
+            RefNode::IndexedRange(_) | RefNode::ConstantIndexedRange(_) => {
+                return Err(AnalyzerError::Unsupported(
+                    "indexed part-select".to_string(),
+                ));
+            }
+            RefNode::DataTypeStructUnion(_) => {
+                return Err(AnalyzerError::Unsupported(
+                    "packed struct or union type".to_string(),
+                ));
+            }
+            RefNode::Cast(_) | RefNode::ConstantCast(_) => {
+                return Err(AnalyzerError::Unsupported("cast expression".to_string()));
             }
             _ => {}
         }
@@ -577,6 +677,7 @@ pub enum BinaryOp {
     Mod,
     Shl,
     Shr,
+    Sar,
     BitAnd,
     BitOr,
     BitXor,
@@ -1597,7 +1698,7 @@ fn infer_const_expr_type(
                     width: 1,
                     signed: false,
                 }),
-                BinaryOp::Shl | BinaryOp::Shr => Some(left),
+                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => Some(left),
                 _ => Some(ExprType {
                     width: left.width.max(right.width),
                     signed: left.signed && right.signed,
@@ -2762,9 +2863,6 @@ fn comb_processes_from_loop_generate(
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<CombProcess>,
 ) {
-    if condition.is_some() {
-        return;
-    }
     if generate_block_has_data_declaration(&generate.nodes.2) {
         return;
     }
@@ -4163,7 +4261,9 @@ fn assignment_op_expr(lhs: &LValue, op: &str, rhs: Expr) -> Option<Expr> {
         "/" => BinaryOp::Div,
         "%" => BinaryOp::Mod,
         "<<" => BinaryOp::Shl,
+        "<<<" => BinaryOp::Shl,
         ">>" => BinaryOp::Shr,
+        ">>>" => BinaryOp::Sar,
         "&" => BinaryOp::BitAnd,
         "|" => BinaryOp::BitOr,
         "^" => BinaryOp::BitXor,
@@ -4378,10 +4478,8 @@ fn expr_from_primary_with_types(
                 .1
                 .contents()
                 .into_iter()
-                .filter_map(|expr| {
-                    expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
-                })
-                .collect::<Vec<_>>();
+                .map(|expr| expr_from_expression_with_types(expr, syntax_tree, packed_dimensions))
+                .collect::<Option<Vec<_>>>()?;
             (!parts.is_empty()).then_some(Expr::Concat(parts))
         }
         sv_parser::Primary::MultipleConcatenation(concat) => {
@@ -4394,10 +4492,8 @@ fn expr_from_primary_with_types(
                 .1
                 .contents()
                 .into_iter()
-                .filter_map(|expr| {
-                    expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
-                })
-                .collect::<Vec<_>>();
+                .map(|expr| expr_from_expression_with_types(expr, syntax_tree, packed_dimensions))
+                .collect::<Option<Vec<_>>>()?;
             (!parts.is_empty()).then_some(Expr::RepeatConcat { count, parts })
         }
         sv_parser::Primary::FunctionSubroutineCall(call) => {
@@ -4733,7 +4829,7 @@ fn binary_precedence(op: BinaryOp) -> u8 {
     match op {
         BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => 11,
         BinaryOp::Add | BinaryOp::Sub => 10,
-        BinaryOp::Shl | BinaryOp::Shr => 9,
+        BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => 9,
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => 8,
         BinaryOp::Eq
         | BinaryOp::Ne
@@ -5152,9 +5248,18 @@ fn integral_number_literal(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Optio
                 &number.nodes.2.nodes.0,
                 syntax_tree,
             ),
-            sv_parser::DecimalNumber::BaseXNumber(_) | sv_parser::DecimalNumber::BaseZNumber(_) => {
-                None
-            }
+            sv_parser::DecimalNumber::BaseXNumber(number) => based_literal(
+                number.nodes.0.as_ref().map(|size| &size.nodes.0.nodes.0),
+                &number.nodes.1.nodes.0,
+                &number.nodes.2.nodes.0,
+                syntax_tree,
+            ),
+            sv_parser::DecimalNumber::BaseZNumber(number) => based_literal(
+                number.nodes.0.as_ref().map(|size| &size.nodes.0.nodes.0),
+                &number.nodes.1.nodes.0,
+                &number.nodes.2.nodes.0,
+                syntax_tree,
+            ),
         },
         sv_parser::IntegralNumber::BinaryNumber(number) => based_literal(
             number.nodes.0.as_ref().map(|size| &size.nodes.0.nodes.0),
@@ -5227,7 +5332,9 @@ fn binary_op_from_symbol(symbol: &Locate, syntax_tree: &SyntaxTree) -> Option<Bi
         "/" => Some(BinaryOp::Div),
         "%" => Some(BinaryOp::Mod),
         "<<" => Some(BinaryOp::Shl),
+        "<<<" => Some(BinaryOp::Shl),
         ">>" => Some(BinaryOp::Shr),
+        ">>>" => Some(BinaryOp::Sar),
         "&" => Some(BinaryOp::BitAnd),
         "|" => Some(BinaryOp::BitOr),
         "^" => Some(BinaryOp::BitXor),

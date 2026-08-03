@@ -2518,6 +2518,10 @@ fn test_ff_dynamic_store_sir() {
 }
 
 #[test]
+#[cfg(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+))]
 fn test_ff_packed_bit_select_writes_regression() {
     let code = r#"
     module Top (

@@ -173,6 +173,41 @@ jobs:
       - name: Build NAPI WASM compatibility target
         run: pnpm --filter @celox-sim/celox-napi exec napi build --platform --target wasm32-wasip1-threads --manifest-path ../../Cargo.toml -p celox-napi
 
+  arm64-backend:
+    name: ARM64 Backend Test
+    needs: changes
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true')
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Lint ARM64 backend
+        run: >-
+          cargo clippy --locked
+          -p celox-backend-common -p celox-backend-arm64
+          --all-targets --no-deps --
+          -D warnings
+          -A clippy::useless_conversion
+          -A clippy::missing_transmute_annotations
+
+      - name: Run ARM64 backend tests natively
+        run: cargo test --locked -p celox-backend-common -p celox-backend-arm64
+
+      - name: Check default AArch64 facade and benchmark runner (ARM64 backend off)
+        run: cargo check --locked -p celox -p celox-bench
+
+      - name: Check experimental AArch64 facade and benchmark runner
+        run: cargo check --locked -p celox -p celox-bench --features experimental-arm64-backend
+
+      - name: Test experimental AArch64 facade integration
+        run: cargo test --locked -p celox --lib --features experimental-arm64-backend
+
   napi-windows:
     name: NAPI Build (Windows)
     needs: changes

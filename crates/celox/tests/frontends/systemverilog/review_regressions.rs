@@ -145,6 +145,82 @@ fn converts_unknown_bits_when_assigning_to_bit() {
 }
 
 #[test]
+fn preserves_nested_loop_generate_assignments() {
+    let source = r#"
+        module Top #(parameter ENABLE = 1) (
+            input logic [1:0] a,
+            output logic [1:0] y
+        );
+            if (ENABLE) begin
+                for (genvar i = 0; i < 2; i++) begin
+                    assign y[i] = a[i];
+                end
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("nested_loop.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(a, 2u8)).unwrap();
+    assert_eq!(sim.get(y), 2u8.into());
+}
+
+#[test]
+fn preserves_decimal_unknown_literals() {
+    let source = r#"
+        module Top(output logic [3:0] x, output logic [7:0] z);
+            assign x = 4'dx;
+            assign z = 8'dz;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("decimal_xz.sv"))], "Top")
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(
+        sim.get_four_state(sim.signal("x")),
+        (BigUint::from(0x0fu8), BigUint::from(0x0fu8))
+    );
+    assert_eq!(
+        sim.get_four_state(sim.signal("z")),
+        (BigUint::from(0u8), BigUint::from(0xffu8))
+    );
+}
+
+#[test]
+fn preserves_arithmetic_shift_operators() {
+    let source = r#"
+        module Top(
+            input logic signed [7:0] a,
+            input logic [7:0] u,
+            output logic signed [7:0] left,
+            output logic signed [7:0] right,
+            output logic [7:0] unsigned_right
+        );
+            assign left = a <<< 1;
+            assign right = a >>> 1;
+            assign unsigned_right = u >>> 1;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("arithmetic_shift.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let a = sim.signal("a");
+    let u = sim.signal("u");
+    sim.modify(|io| {
+        io.set(a, 0xfcu8);
+        io.set(u, 0xfcu8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("left")), 0xf8u8.into());
+    assert_eq!(sim.get(sim.signal("right")), 0xfeu8.into());
+    assert_eq!(sim.get(sim.signal("unsigned_right")), 0x7eu8.into());
+}
+
+#[test]
 fn preserves_typedef_function_return_width_in_ff_case() {
     let source = r#"
         module Top(input logic clk, output logic [7:0] q);
@@ -505,6 +581,74 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic a, b, d, output logic q);
                 always_ff @(posedge a or posedge b) q <= d;
+            endmodule
+        "#,
+        ),
+        (
+            "always_ff inside loop-generate",
+            r#"
+            module Top(input logic clk, input logic [1:0] d, output logic [1:0] q);
+                for (genvar i = 0; i < 2; i++) always_ff @(posedge clk) q[i] <= d[i];
+            endmodule
+        "#,
+        ),
+        (
+            "variable declaration initializer",
+            r#"
+            module Top(output logic y); logic value = 1'b1; assign y = value; endmodule
+        "#,
+        ),
+        (
+            "indexed part-select",
+            r#"
+            module Top(input logic [15:0] a, input logic [3:0] index,
+                       output logic [7:0] y);
+                assign y = a[index +: 8];
+            endmodule
+        "#,
+        ),
+        (
+            "non-zero-based or ascending multidimensional packed range",
+            r#"
+            module Top(input logic [2:1][7:0] a, output logic [7:0] y);
+                assign y = a[1];
+            endmodule
+        "#,
+        ),
+        (
+            "casez, casex, or pattern case inside always_ff",
+            r#"
+            module Top(input logic clk, input logic [1:0] a, output logic y);
+                always_ff @(posedge clk) casez (a) 2'b1?: y <= 1'b1; default: y <= 0; endcase
+            endmodule
+        "#,
+        ),
+        (
+            "local data declaration inside conditional-generate",
+            r#"
+            module Top #(parameter ENABLE = 1) (input logic a, output logic y);
+                if (ENABLE) begin
+                    logic tmp; assign tmp = a; assign y = tmp;
+                end else begin
+                    logic [1:0] tmp; assign tmp = {a, a}; assign y = tmp[0];
+                end
+            endmodule
+        "#,
+        ),
+        (
+            "packed struct or union type",
+            r#"
+            module Top(output logic [7:0] y);
+                struct packed { logic [3:0] a; logic [3:0] b; } value;
+                assign y = value;
+            endmodule
+        "#,
+        ),
+        (
+            "cast expression",
+            r#"
+            module Top(input logic a, b, output logic [1:0] y);
+                assign y = {logic'(a), b};
             endmodule
         "#,
         ),

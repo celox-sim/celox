@@ -23,9 +23,15 @@ mod host {
         pub runtime: RuntimeDiagnostics,
         pub sir: crate::optimizer::SirDiagnostics,
         pub cranelift: crate::backend::CraneliftDiagnostics,
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        ))]
         pub native: crate::backend::NativeDiagnostics,
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        ))]
         pub native_tick_loop: Option<bool>,
     }
 
@@ -91,7 +97,10 @@ mod host {
                 effect_case_dispatch: enabled("CELOX_EFFECT_CASE_DISPATCH"),
             };
             let cranelift = crate::backend::CraneliftDiagnostics { pass_timing };
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            ))]
             let (native, native_tick_loop) = {
                 let native_tick_loop = variables
                     .get(OsStr::new("CELOX_NATIVE_TICK_LOOP"))
@@ -136,9 +145,15 @@ mod host {
                 runtime,
                 sir,
                 cranelift,
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(any(
+                    target_arch = "x86_64",
+                    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                ))]
                 native,
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(any(
+                    target_arch = "x86_64",
+                    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                ))]
                 native_tick_loop,
             }
         }
@@ -159,7 +174,10 @@ mod host {
             assert!(options.sir.pass_timing);
             assert_eq!(options.sir.branchify_trace_reg, Some(42));
             assert_eq!(options.runtime.tick_timing_every, Some(100));
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            ))]
             assert!(options.native.verify_regalloc);
         }
 

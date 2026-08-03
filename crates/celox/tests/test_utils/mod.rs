@@ -92,6 +92,10 @@ macro_rules! all_backends {
             use super::*;
 
             #[test]
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+            ))]
             $(#[$meta])*
             $(#[$na])*
             #[allow(unused_mut, unused_variables)]

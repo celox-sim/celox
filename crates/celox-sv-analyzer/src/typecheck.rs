@@ -81,6 +81,7 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
                 BinaryOp::Mod => (right != 0).then(|| left % right),
                 BinaryOp::Shl => shift_amount(right).and_then(|right| left.checked_shl(right)),
                 BinaryOp::Shr => shift_amount(right).and_then(|right| left.checked_shr(right)),
+                BinaryOp::Sar => shift_amount(right).and_then(|right| left.checked_shr(right)),
                 BinaryOp::BitAnd => Some(left & right),
                 BinaryOp::BitOr => Some(left | right),
                 BinaryOp::BitXor => Some(left ^ right),

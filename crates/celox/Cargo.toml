@@ -18,6 +18,7 @@ host-runtime = [
     "celox-sir-opt/timing",
 ]
 systemverilog = ["dep:celox-sv-analyzer"]
+experimental-arm64-backend = ["host-runtime", "dep:celox-backend-arm64"]
 
 [dependencies]
 toml                  = { workspace = true }
@@ -51,9 +52,14 @@ celox-macros          = { path = "../celox-macros", optional = true }
 celox-backend-cranelift = { path = "../celox-backend-cranelift", optional = true }
 wasmtime              = { version = "47", optional = true }
 
-[target.'cfg(target_arch = "x86_64")'.dependencies]
+[target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
 celox-backend-x86     = { path = "../celox-backend-x86", optional = true }
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
 celox-sir-opt         = { path = "../celox-sir-opt", default-features = false, features = ["wide-native-memory"] }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+celox-backend-arm64   = { path = "../celox-backend-arm64", optional = true }
 
 [dev-dependencies]
 insta      = "1.46"

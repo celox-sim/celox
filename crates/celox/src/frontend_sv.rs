@@ -1070,6 +1070,11 @@ fn lower_glue_parent_expr(
         sv::ir::Expr::Binary { left, op, right } => {
             let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
                 && sv_expr_is_signed(right, variables, name_to_id);
+            let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
+                sv_expr_is_signed(left, variables, name_to_id)
+            } else {
+                operands_signed
+            };
             let context_sized_comparison = matches!(
                 op,
                 sv::ir::BinaryOp::EqCase
@@ -1145,7 +1150,7 @@ fn lower_glue_parent_expr(
                 arena
                     .alloc(SLTNode::Binary(
                         left,
-                        binary_op_from_sv(*op, operands_signed),
+                        binary_op_from_sv(*op, operator_signed),
                         right,
                     ))
                     .ok()?,
@@ -1562,6 +1567,11 @@ fn lower_expr_with_context(
         sv::ir::Expr::Binary { left, op, right } => {
             let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
                 && sv_expr_is_signed(right, variables, name_to_id);
+            let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
+                sv_expr_is_signed(left, variables, name_to_id)
+            } else {
+                operands_signed
+            };
             let comparison = matches!(
                 op,
                 sv::ir::BinaryOp::Eq
@@ -1585,7 +1595,10 @@ fn lower_expr_with_context(
             });
             let left_context = context_determined.then_some(operation_context).flatten();
             let right_context = (context_determined
-                && !matches!(op, sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr))
+                && !matches!(
+                    op,
+                    sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar
+                ))
             .then_some(operation_context)
             .flatten();
             let left_fill = comparison
@@ -1673,7 +1686,7 @@ fn lower_expr_with_context(
                 arena
                     .alloc(SLTNode::Binary(
                         left,
-                        binary_op_from_sv(*op, operands_signed),
+                        binary_op_from_sv(*op, operator_signed),
                         right,
                     ))
                     .ok()?,
@@ -2172,7 +2185,7 @@ fn sv_expr_is_signed(
             ) && sv_expr_is_signed(expr, variables, name_to_id)
         }
         sv::ir::Expr::Binary { left, op, right } => match op {
-            sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr => {
+            sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar => {
                 sv_expr_is_signed(left, variables, name_to_id)
             }
             sv::ir::BinaryOp::Add
@@ -2356,7 +2369,10 @@ fn sv_expr_natural_width(
                     | sv::ir::BinaryOp::Ge
             ) {
                 Some(1)
-            } else if matches!(op, sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr) {
+            } else if matches!(
+                op,
+                sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar
+            ) {
                 sv_expr_natural_width(left, variables, name_to_id, constants)
             } else {
                 Some(
@@ -2506,6 +2522,11 @@ fn lower_expr_to_sir_with_context(
         sv::ir::Expr::Binary { left, op, right } => {
             let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
                 && sv_expr_is_signed(right, variables, name_to_id);
+            let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
+                sv_expr_is_signed(left, variables, name_to_id)
+            } else {
+                operands_signed
+            };
             let comparison = matches!(
                 op,
                 sv::ir::BinaryOp::Eq
@@ -2529,7 +2550,10 @@ fn lower_expr_to_sir_with_context(
             });
             let left_context = context_determined.then_some(operation_context).flatten();
             let right_context = (context_determined
-                && !matches!(op, sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr))
+                && !matches!(
+                    op,
+                    sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar
+                ))
             .then_some(operation_context)
             .flatten();
             let right_fill = match &**right {
@@ -2603,7 +2627,9 @@ fn lower_expr_to_sir_with_context(
                 | sv::ir::BinaryOp::Le
                 | sv::ir::BinaryOp::Gt
                 | sv::ir::BinaryOp::Ge => 1,
-                sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr => builder.register(&left).width(),
+                sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar => {
+                    builder.register(&left).width()
+                }
                 _ => builder
                     .register(&left)
                     .width()
@@ -2617,7 +2643,7 @@ fn lower_expr_to_sir_with_context(
             builder.emit(SIRInstruction::Binary(
                 reg,
                 left,
-                binary_op_from_sv(*op, operands_signed),
+                binary_op_from_sv(*op, operator_signed),
                 right,
             ));
             Some(reg)
@@ -2754,6 +2780,8 @@ fn binary_op_from_sv(op: sv::ir::BinaryOp, operands_signed: bool) -> BinaryOp {
         sv::ir::BinaryOp::Mod => BinaryOp::RemU,
         sv::ir::BinaryOp::Shl => BinaryOp::Shl,
         sv::ir::BinaryOp::Shr => BinaryOp::Shr,
+        sv::ir::BinaryOp::Sar if operands_signed => BinaryOp::Sar,
+        sv::ir::BinaryOp::Sar => BinaryOp::Shr,
         sv::ir::BinaryOp::BitAnd => BinaryOp::And,
         sv::ir::BinaryOp::BitOr => BinaryOp::Or,
         sv::ir::BinaryOp::BitXor => BinaryOp::Xor,
