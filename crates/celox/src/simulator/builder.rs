@@ -92,6 +92,7 @@ fn analyze(
     if let Some(rt) = reset_type {
         build_config.reset_type = rt;
     }
+    #[cfg(feature = "systemverilog")]
     let sir = if let Some(sv_sources) = sv_sources {
         parser::parse_mixed(
             &top,
@@ -109,6 +110,24 @@ fn analyze(
             preserve_element_storage_layout,
         )
     } else {
+        parser::parse(
+            &top,
+            &ir,
+            &loop_provenance,
+            &build_config,
+            ignored_loops,
+            true_loops,
+            four_state,
+            trace_opts,
+            trace_out,
+            optimize_options,
+            diagnostics,
+            preserve_element_storage_layout,
+        )
+    };
+    #[cfg(not(feature = "systemverilog"))]
+    let sir = {
+        debug_assert!(sv_sources.is_none());
         parser::parse(
             &top,
             &ir,
@@ -223,6 +242,7 @@ fn compile_to_sir_with_layout_mode(
 }
 
 /// Compile SystemVerilog sources to optimized SIR.
+#[cfg(feature = "systemverilog")]
 pub fn compile_sv_to_sir(
     sources: &[(&str, &Path)],
     top: &str,
@@ -261,6 +281,7 @@ pub fn compile_sv_to_sir(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "systemverilog")]
 fn compile_sv_to_sir_with_layout_mode(
     sources: &[(&str, &Path)],
     top: &str,
@@ -310,6 +331,7 @@ fn compile_sv_to_sir_with_layout_mode(
 
 /// Compile a Veryl hierarchy with SystemVerilog modules to optimized SIR.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "systemverilog")]
 pub fn compile_mixed_to_sir(
     sources: &[(&str, &Path)],
     sv_sources: &[(&str, &Path)],
@@ -352,6 +374,7 @@ pub fn compile_mixed_to_sir(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "systemverilog")]
 fn compile_mixed_to_sir_with_layout_mode(
     sources: &[(&str, &Path)],
     sv_sources: &[(&str, &Path)],
@@ -431,6 +454,27 @@ fn compile_hdl_to_sir_with_layout_mode(
     diagnostics: &crate::RuntimeDiagnostics,
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
 ) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
+    #[cfg(not(feature = "systemverilog"))]
+    {
+        debug_assert!(sv_sources.is_empty());
+        return compile_to_sir_with_layout_mode(
+            sources,
+            top,
+            ignored_loops,
+            true_loops,
+            four_state,
+            trace_opts,
+            trace_out,
+            metadata,
+            clock_type,
+            reset_type,
+            param_overrides,
+            optimize_options,
+            diagnostics,
+            layout_mode,
+        );
+    }
+    #[cfg(feature = "systemverilog")]
     match (sources.is_empty(), sv_sources.is_empty()) {
         (_, true) => compile_to_sir_with_layout_mode(
             sources,
@@ -579,11 +623,13 @@ mod host {
         }
 
         /// Returns the SystemVerilog source files passed to this builder.
+        #[cfg(feature = "systemverilog")]
         pub fn sv_sources(&self) -> &[(&'a str, &'a Path)] {
             &self.sv_sources
         }
 
         /// Replace the builder's SystemVerilog source set.
+        #[cfg(feature = "systemverilog")]
         pub fn with_sv_sources(mut self, sources: Vec<(&'a str, &'a Path)>) -> Self {
             self.sv_sources = sources;
             self
@@ -898,6 +944,7 @@ mod host {
             }
         }
 
+        #[cfg(feature = "systemverilog")]
         pub fn from_sv_sources(sources: Vec<(&'a str, &'a Path)>, top: &'a str) -> Self {
             Self {
                 sources: Vec::new(),
@@ -916,6 +963,7 @@ mod host {
             }
         }
 
+        #[cfg(feature = "systemverilog")]
         pub fn from_mixed_sources(
             sources: Vec<(&'a str, &'a Path)>,
             sv_sources: Vec<(&'a str, &'a Path)>,

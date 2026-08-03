@@ -92,7 +92,7 @@ jobs:
 
       - name: cargo clippy
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
-        run: cargo clippy --locked -p celox -p celox-macros -p celox-napi -p celox-ts-gen --all-targets --no-deps
+        run: cargo clippy --locked -p celox -p celox-macros -p celox-napi -p celox-sv-analyzer -p celox-ts-gen --all-targets --features celox/systemverilog --no-deps
 
       - uses: pnpm/action-setup@v6
         if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true'
@@ -134,6 +134,10 @@ jobs:
       - name: Run tests
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
         run: cargo test --locked
+
+      - name: Run SystemVerilog frontend tests
+        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
+        run: cargo test --locked -p celox --features systemverilog --test systemverilog
 
       - uses: pnpm/action-setup@v6
 

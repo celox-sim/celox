@@ -1,6 +1,7 @@
 mod backend;
 mod debug;
 mod diagnostics;
+#[cfg(feature = "systemverilog")]
 mod frontend_sv;
 mod ir;
 mod optimizer;
@@ -107,7 +108,9 @@ pub use host_api::*;
 pub use backend::wasm_codegen;
 
 // Public compilation API (available on all targets)
-pub use simulator::{compile_mixed_to_sir, compile_sv_to_sir, compile_to_sir};
+pub use simulator::compile_to_sir;
+#[cfg(feature = "systemverilog")]
+pub use simulator::{compile_mixed_to_sir, compile_sv_to_sir};
 
 #[cfg(test)]
 mod flatting_tests;

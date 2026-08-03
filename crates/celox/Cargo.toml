@@ -17,6 +17,7 @@ host-runtime = [
     "dep:wasmtime",
     "celox-sir-opt/timing",
 ]
+systemverilog = ["dep:celox-sv-analyzer"]
 
 [dependencies]
 toml                  = { workspace = true }
@@ -32,7 +33,7 @@ celox-sir             = { path = "../celox-sir" }
 celox-sir-opt         = { path = "../celox-sir-opt", default-features = false }
 celox-slt             = { path = "../celox-slt" }
 celox-state-layout    = { path = "../celox-state-layout" }
-celox-sv-analyzer     = { path = "../celox-sv-analyzer" }
+celox-sv-analyzer     = { path = "../celox-sv-analyzer", optional = true }
 celox-runtime         = { path = "../celox-runtime" }
 celox-testbench       = { path = "../celox-testbench" }
 fxhash                = { workspace = true }
@@ -70,6 +71,11 @@ harness = false
 [[bench]]
 name = "overhead"
 harness = false
+
+[[test]]
+name = "systemverilog"
+path = "tests/systemverilog.rs"
+required-features = ["systemverilog"]
 
 [lints]
 workspace = true

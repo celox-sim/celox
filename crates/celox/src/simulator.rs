@@ -1,9 +1,11 @@
 mod builder;
 mod error;
 
+pub use builder::compile_to_sir;
 #[cfg(feature = "host-runtime")]
 pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions};
-pub use builder::{compile_mixed_to_sir, compile_sv_to_sir, compile_to_sir};
+#[cfg(feature = "systemverilog")]
+pub use builder::{compile_mixed_to_sir, compile_sv_to_sir};
 pub use error::render_diagnostic;
 pub use error::{CodegenError, SimulatorError, SimulatorErrorKind};
 
@@ -1430,6 +1432,7 @@ mod host {
         }
 
         /// Build a simulator directly from SystemVerilog sources.
+        #[cfg(feature = "systemverilog")]
         pub fn from_sv_sources<'a>(
             sources: Vec<(&'a str, &'a std::path::Path)>,
             top: &'a str,
@@ -1438,6 +1441,7 @@ mod host {
         }
 
         /// Build a simulator from a Veryl hierarchy with SystemVerilog children.
+        #[cfg(feature = "systemverilog")]
         pub fn from_mixed_sources<'a>(
             sources: Vec<(&'a str, &'a std::path::Path)>,
             sv_sources: Vec<(&'a str, &'a std::path::Path)>,

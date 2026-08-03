@@ -430,6 +430,7 @@ pub fn parse(
     )
 }
 
+#[cfg(feature = "systemverilog")]
 pub fn parse_sv(
     sources: &[(&str, &std::path::Path)],
     top: &str,
@@ -487,6 +488,7 @@ pub fn parse_sv(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "systemverilog")]
 pub fn parse_mixed(
     top: &StrId,
     ir: &veryl_analyzer::ir::Ir,
