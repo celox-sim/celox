@@ -1241,6 +1241,13 @@ impl<'a> FfParser<'a> {
             })
             && let Some(source_expr) = self.function_arg_stack[source_frame].get(bound_var_id)
         {
+            let key = ArrayViewKey {
+                frame: source_frame,
+                var_id: *bound_var_id,
+            };
+            if seen.insert(key) {
+                views.push(key);
+            }
             self.collect_array_views_in_bound_expression(source_frame, source_expr, views, seen);
         } else {
             self.collect_array_views_for_expression(expr, views, seen);
@@ -1630,11 +1637,23 @@ impl<'a> FfParser<'a> {
             .filter(|view| view.owns_backing && !view.elements.is_empty())
             .map(|view| view.backing_var_id)
             .collect::<HashSet<_>>();
+        let active_owned_backings = self
+            .function_array_view_stack
+            .iter()
+            .flat_map(|frame| frame.values())
+            .filter(|view| view.owns_backing && !view.elements.is_empty())
+            .map(|view| view.backing_var_id)
+            .collect::<HashSet<_>>();
+        // An owning snapshot is authoritative; restoring an alias afterward
+        // could overwrite it with a duplicate conditional placeholder.
         // Older callers must be restored first so that the nearest active
         // invocation is the final snapshot left in the shared formal region.
         for frame in &self.function_array_view_stack {
             for view in frame.values() {
-                if !clobbered.contains(&view.backing_var_id) || view.elements.is_empty() {
+                if !clobbered.contains(&view.backing_var_id)
+                    || view.elements.is_empty()
+                    || (!view.owns_backing && active_owned_backings.contains(&view.backing_var_id))
+                {
                     continue;
                 }
                 let layout = self.array_view_layout(view.backing_var_id)?;
