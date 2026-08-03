@@ -131,6 +131,57 @@ module Top {
 }
 
 #[test]
+fn time_advancing_effects_in_the_bound_itself_are_errors() {
+    expect_mutable_bound_error(
+        r#"
+#[test(t)]
+module t {
+    inst clk: $tb::clock_gen;
+
+    function get_limit() -> logic<8> {
+        clk.next();
+        return 1;
+    }
+
+    initial {
+        for _i in 0..get_limit() {
+        }
+        $finish();
+    }
+}
+"#,
+        "t",
+    );
+}
+
+#[test]
+fn file_effects_in_the_bound_itself_are_errors() {
+    expect_mutable_bound_error(
+        r#"
+#[test(t)]
+module t {
+    var file: $tb::file;
+
+    function get_limit() -> logic<8> {
+        file.open("mutable_for_bound.txt");
+        file.write("bound");
+        file.flush();
+        file.close();
+        return 1;
+    }
+
+    initial {
+        for _i in 0..get_limit() {
+        }
+        $finish();
+    }
+}
+"#,
+        "t",
+    );
+}
+
+#[test]
 fn only_the_continuation_side_of_the_range_is_protected() {
     let forward = r#"
 module Top (

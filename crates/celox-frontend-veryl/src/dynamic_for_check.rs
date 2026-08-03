@@ -128,9 +128,7 @@ impl Effects {
 pub fn check_dynamic_for_bounds(ir: &Ir) -> Vec<FrontendDiagnostic> {
     let mut diagnostics = Vec::new();
     for component in &ir.components {
-        if let Component::Module(module) = component
-            && !module.suppress_unassigned
-        {
+        if let Component::Module(module) = component {
             check_module(module, &mut diagnostics);
         }
     }
@@ -267,8 +265,9 @@ fn check_elaborated_for(
             .iter()
             .any(|write| accesses_conflict(read, write))
     });
-    let bound_has_visible_effect =
-        bound_effects.observable || bound_effects.writes.iter().any(|write| !write.deferred);
+    let bound_has_visible_effect = bound_effects.observable
+        || !bound_effects.state_changes.is_empty()
+        || bound_effects.writes.iter().any(|write| !write.deferred);
     if immediate_conflict || bound_has_visible_effect {
         return;
     }
@@ -1004,8 +1003,9 @@ fn check_for(
             .iter()
             .any(|write| accesses_conflict(read, write))
     });
-    let bound_has_visible_effect =
-        bound_effects.observable || bound_effects.writes.iter().any(|write| !write.deferred);
+    let bound_has_visible_effect = bound_effects.observable
+        || !bound_effects.state_changes.is_empty()
+        || bound_effects.writes.iter().any(|write| !write.deferred);
 
     if body_conflict || bound_has_visible_effect {
         diagnostics.push(FrontendDiagnostic::mutable_for_bound(
@@ -1186,12 +1186,16 @@ fn collect_statement_effects(
                         clock: *clock,
                     });
                 }
-                TbMethod::FileOpen { name, .. } => effects.append(collect_expression_effects(
-                    &name.0,
-                    module,
-                    active_functions,
-                )),
+                TbMethod::FileOpen { name, .. } => {
+                    effects.observable = true;
+                    effects.append(collect_expression_effects(
+                        &name.0,
+                        module,
+                        active_functions,
+                    ));
+                }
                 TbMethod::FileWrite { args } => {
+                    effects.observable = true;
                     for argument in args {
                         effects.append(collect_expression_effects(
                             &argument.0,
@@ -1200,7 +1204,7 @@ fn collect_statement_effects(
                         ));
                     }
                 }
-                TbMethod::FileClose | TbMethod::FileFlush => {}
+                TbMethod::FileClose | TbMethod::FileFlush => effects.observable = true,
             },
             Statement::Unsupported(_) => {
                 effects.mark_unknown("unsupported statement has unknown effects")
@@ -1612,6 +1616,82 @@ mod tests {
         assert!(matches!(
             diagnostics.as_slice(),
             [FrontendDiagnostic::UnknownForBoundEffect { .. }]
+        ));
+    }
+
+    #[test]
+    fn suppress_unassigned_does_not_skip_mutable_bound_checks() {
+        let token = TokenRange::default();
+        let bound_id = VarId::from_raw(1);
+        let mut bound_type = Type::new(TypeKind::Logic);
+        bound_type.set_concrete_width(Shape::new(vec![Some(8)]));
+        let bound_comptime = Comptime {
+            r#type: bound_type.clone(),
+            ..Default::default()
+        };
+        let bound = Expression::Term(Box::new(Factor::Variable(
+            bound_id,
+            VarIndex::default(),
+            VarSelect::default(),
+            bound_comptime.clone(),
+        )));
+        let body_write = Statement::Assign(veryl_analyzer::ir::AssignStatement {
+            dst: vec![AssignDestination {
+                id: bound_id,
+                path: VarPath::default(),
+                index: VarIndex::default(),
+                select: VarSelect::default(),
+                comptime: bound_comptime,
+                token,
+            }],
+            width: Some(8),
+            expr: bound.clone(),
+            token,
+        });
+        let statement = Statement::For(ForStatement {
+            var_id: VarId::default(),
+            var_name: StrId::default(),
+            var_type: Type::default(),
+            range: ForRange::Forward {
+                start: ForBound::Const(0),
+                end: ForBound::Expression(Box::new(bound)),
+                inclusive: false,
+                step: 1,
+            },
+            body: vec![body_write],
+            token,
+        });
+        let variable = Variable {
+            id: bound_id,
+            path: VarPath::default(),
+            kind: VarKind::Variable,
+            r#type: bound_type,
+            value: Vec::new(),
+            assigned: Vec::new(),
+            affiliation: Affiliation::Module,
+            token,
+        };
+        let module = Module {
+            name: StrId::default(),
+            token,
+            ports: HashMap::default(),
+            port_types: HashMap::default(),
+            variables: [(bound_id, variable)].into_iter().collect(),
+            functions: HashMap::default(),
+            declarations: vec![Declaration::new_comb(vec![statement])],
+            suppress_unassigned: true,
+            per_decl_refs: HashMap::default(),
+            assign_tokens: HashMap::default(),
+            ff_table: FfTable::default(),
+        };
+        let ir = Ir {
+            components: vec![Component::Module(module)],
+        };
+
+        let diagnostics = check_dynamic_for_bounds(&ir);
+        assert!(matches!(
+            diagnostics.as_slice(),
+            [FrontendDiagnostic::MutableForBound { .. }]
         ));
     }
 }
