@@ -472,6 +472,38 @@ impl<'a> FfParser<'a> {
         Ok((expr, expression_states))
     }
 
+    fn apply_statement_function_call_to_state(
+        &self,
+        call: &veryl_analyzer::ir::FunctionCall,
+        state: &HashMap<VarId, Expression>,
+    ) -> Result<HashMap<VarId, Expression>, ParserError> {
+        let Some(function) = self.module.functions.get(&call.id) else {
+            return Err(ParserError::unsupported(
+                43,
+                LoweringPhase::FfLowering,
+                "function call",
+                format!("unknown function id: {:?}", call.id),
+                Some(&call.comptime.token),
+            ));
+        };
+
+        let ordered_paths: Vec<_> = function
+            .args
+            .iter()
+            .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path.clone()))
+            .collect();
+        let mut call = call.clone();
+        let mut next = state.clone();
+        for path in ordered_paths {
+            if let Some(input) = call.inputs.get_mut(&path) {
+                *input = self
+                    .capture_nested_function_outputs_with_states(input, &mut next)?
+                    .0;
+            }
+        }
+        self.apply_function_call_to_state(&call, &next)
+    }
+
     fn capture_nested_function_outputs_inner(
         &self,
         expr: &Expression,
@@ -905,7 +937,7 @@ impl<'a> FfParser<'a> {
                 }
                 Statement::FunctionCall(call) => {
                     let base = state.clone();
-                    let transitioned = self.apply_function_call_to_state(call, &base)?;
+                    let transitioned = self.apply_statement_function_call_to_state(call, &base)?;
                     state = self.apply_state_transition_on_path(&active, &base, transitioned);
                 }
                 Statement::Null => {}
@@ -969,7 +1001,9 @@ impl<'a> FfParser<'a> {
                 ))
             }
             Statement::Case(statement) => self.apply_case_to_function_state(statement, 0, state),
-            Statement::FunctionCall(call) => self.apply_function_call_to_state(call, state),
+            Statement::FunctionCall(call) => {
+                self.apply_statement_function_call_to_state(call, state)
+            }
             Statement::SystemFunctionCall(call) => {
                 let (_, next, _) = self.prepare_system_function_call(call, state)?;
                 Ok(next)
@@ -1943,8 +1977,15 @@ impl<'a> FfParser<'a> {
         // final value against the pre-call caller state before mutating any
         // actual destination, so the result is independent of map order and
         // overlapping input/output bindings observe their call-time values.
+        let ordered_paths = function
+            .args
+            .iter()
+            .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path));
         let mut output_values = Vec::with_capacity(call.outputs.len());
-        for (arg_path, dsts) in &call.outputs {
+        for arg_path in ordered_paths {
+            let Some(dsts) = call.outputs.get(arg_path) else {
+                continue;
+            };
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
                 return Err(ParserError::unsupported(
                     61,
@@ -1983,6 +2024,7 @@ impl<'a> FfParser<'a> {
                     )
                 })?;
             let expr = Self::substitute_function_expr(&expr, state);
+            let expr = self.coerce_function_state_assignment(expr, dst)?;
             output_values.push((dst, is_whole_var, expr));
         }
 
@@ -2427,7 +2469,9 @@ impl<'a> FfParser<'a> {
                     let (_, next_state, _) = parser.prepare_system_function_call(call, state)?;
                     Ok(next_state)
                 }
-                Statement::FunctionCall(call) => parser.apply_function_call_to_state(call, state),
+                Statement::FunctionCall(call) => {
+                    parser.apply_statement_function_call_to_state(call, state)
+                }
                 Statement::For(f) => Err(ParserError::unsupported(
                     43,
                     LoweringPhase::FfLowering,
@@ -2623,7 +2667,7 @@ impl<'a> FfParser<'a> {
                     resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
                 }
                 Statement::FunctionCall(call) => {
-                    let next_defs = parser.apply_function_call_to_state(call, defs)?;
+                    let next_defs = parser.apply_statement_function_call_to_state(call, defs)?;
                     resolve_return_expr(parser, rest, ret_id, &next_defs, substitute)
                 }
                 Statement::For(f) => Err(ParserError::unsupported(

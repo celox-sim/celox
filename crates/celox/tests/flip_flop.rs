@@ -1547,6 +1547,150 @@ fn test_ff_statement_call_materializes_output_only_input_effect(sim) {
     );
 }
 
+fn test_ff_nested_statement_call_copies_outputs_in_declaration_order(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function split (
+                first: output logic<8>,
+                second: output logic<8>
+            ) {
+                first = 8'd1;
+                second = 8'd2;
+            }
+
+            function outer (written: output logic<8>) -> logic<8> {
+                split(written, written);
+                $display("written=%0d", written);
+                return written;
+            }
+
+            always_ff (clk) {
+                q = outer(effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 2u8.into());
+    assert_eq!(sim.get(q), 2u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "written=2".to_string(),
+        }],
+    );
+}
+
+fn test_ff_nested_statement_call_coerces_output_to_actual_width(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function write_wide (written: output logic<16>) {
+                written = 16'h0101;
+            }
+
+            function outer (written: output logic<8>) -> logic<8> {
+                write_wide(written);
+                $display("written=%0d", written);
+                return written;
+            }
+
+            always_ff (clk) {
+                q = outer(effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 1u8.into());
+    assert_eq!(sim.get(q), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "written=1".to_string(),
+        }],
+    );
+}
+
+fn test_ff_state_only_statement_call_materializes_nested_input_output(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x;
+            }
+
+            function consume (x: input logic<8>) {}
+
+            function wrapper (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x;
+                consume(update(x, written));
+                return written;
+            }
+
+            function outer (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                $display("wrapped=%0d", wrapper(x, written));
+                return written;
+            }
+
+            always_ff (clk) {
+                q = outer(d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 16u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 17u8.into());
+    assert_eq!(sim.get(q), 17u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "wrapped=17".to_string(),
+        }],
+    );
+}
+
 fn test_ff_statement_call_copies_outputs_in_declaration_order(sim) {
     @omit_veryl;
     @ignore_on(wasm);
