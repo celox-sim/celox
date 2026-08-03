@@ -2383,42 +2383,42 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    fn expression_writes_any(expr: &Expression, candidates: &HashSet<VarId>) -> bool {
+    fn expression_writes_any(&self, expr: &Expression, candidates: &HashSet<VarId>) -> bool {
+        self.expression_writes_any_inner(expr, candidates, &mut HashSet::default())
+    }
+
+    fn expression_writes_any_inner(
+        &self,
+        expr: &Expression,
+        candidates: &HashSet<VarId>,
+        visiting: &mut HashSet<VarId>,
+    ) -> bool {
         match expr {
             Expression::Term(factor) => match factor.as_ref() {
                 Factor::FunctionCall(call) => {
-                    call.outputs
-                        .values()
-                        .flatten()
-                        .any(|dst| candidates.contains(&dst.id))
-                        || call
-                            .inputs
-                            .values()
-                            .any(|expr| Self::expression_writes_any(expr, candidates))
+                    self.function_call_writes_any(call, candidates, visiting)
                 }
                 Factor::Variable(_, index, select, _) => {
                     index
                         .0
                         .iter()
-                        .any(|expr| Self::expression_writes_any(expr, candidates))
-                        || select
-                            .0
-                            .iter()
-                            .any(|expr| Self::expression_writes_any(expr, candidates))
-                        || select
-                            .1
-                            .as_ref()
-                            .is_some_and(|(_, expr)| Self::expression_writes_any(expr, candidates))
+                        .any(|expr| self.expression_writes_any_inner(expr, candidates, visiting))
+                        || select.0.iter().any(|expr| {
+                            self.expression_writes_any_inner(expr, candidates, visiting)
+                        })
+                        || select.1.as_ref().is_some_and(|(_, expr)| {
+                            self.expression_writes_any_inner(expr, candidates, visiting)
+                        })
                 }
                 Factor::SystemFunctionCall(call) => match &call.kind {
                     SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => args
                         .iter()
-                        .any(|arg| Self::expression_writes_any(&arg.0, candidates)),
+                        .any(|arg| self.expression_writes_any_inner(&arg.0, candidates, visiting)),
                     SystemFunctionKind::Assert { cond, args, .. } => {
-                        Self::expression_writes_any(&cond.0, candidates)
-                            || args
-                                .iter()
-                                .any(|arg| Self::expression_writes_any(&arg.0, candidates))
+                        self.expression_writes_any_inner(&cond.0, candidates, visiting)
+                            || args.iter().any(|arg| {
+                                self.expression_writes_any_inner(&arg.0, candidates, visiting)
+                            })
                     }
                     SystemFunctionKind::Bits(input)
                     | SystemFunctionKind::Size(input)
@@ -2426,61 +2426,188 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Onehot(input)
                     | SystemFunctionKind::Signed(input)
                     | SystemFunctionKind::Unsigned(input) => {
-                        Self::expression_writes_any(&input.0, candidates)
+                        self.expression_writes_any_inner(&input.0, candidates, visiting)
                     }
                     SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                 },
                 Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
             },
             Expression::Binary(lhs, _, rhs, _) => {
-                Self::expression_writes_any(lhs, candidates)
-                    || Self::expression_writes_any(rhs, candidates)
+                self.expression_writes_any_inner(lhs, candidates, visiting)
+                    || self.expression_writes_any_inner(rhs, candidates, visiting)
             }
-            Expression::Unary(_, inner, _) => Self::expression_writes_any(inner, candidates),
+            Expression::Unary(_, inner, _) => {
+                self.expression_writes_any_inner(inner, candidates, visiting)
+            }
             Expression::Ternary(cond, then_expr, else_expr, _) => {
-                Self::expression_writes_any(cond, candidates)
-                    || Self::expression_writes_any(then_expr, candidates)
-                    || Self::expression_writes_any(else_expr, candidates)
+                self.expression_writes_any_inner(cond, candidates, visiting)
+                    || self.expression_writes_any_inner(then_expr, candidates, visiting)
+                    || self.expression_writes_any_inner(else_expr, candidates, visiting)
             }
             Expression::Concatenation(items, _) => items.iter().any(|(expr, repeat)| {
-                Self::expression_writes_any(expr, candidates)
-                    || repeat
-                        .as_ref()
-                        .is_some_and(|repeat| Self::expression_writes_any(repeat, candidates))
+                self.expression_writes_any_inner(expr, candidates, visiting)
+                    || repeat.as_ref().is_some_and(|repeat| {
+                        self.expression_writes_any_inner(repeat, candidates, visiting)
+                    })
             }),
             Expression::ArrayLiteral(items, _) => items.iter().any(|item| match item {
                 ArrayLiteralItem::Value(expr, repeat) => {
-                    Self::expression_writes_any(expr, candidates)
-                        || repeat
-                            .as_ref()
-                            .is_some_and(|repeat| Self::expression_writes_any(repeat, candidates))
+                    self.expression_writes_any_inner(expr, candidates, visiting)
+                        || repeat.as_ref().is_some_and(|repeat| {
+                            self.expression_writes_any_inner(repeat, candidates, visiting)
+                        })
                 }
-                ArrayLiteralItem::Defaul(expr) => Self::expression_writes_any(expr, candidates),
+                ArrayLiteralItem::Defaul(expr) => {
+                    self.expression_writes_any_inner(expr, candidates, visiting)
+                }
             }),
             Expression::StructConstructor(_, fields, _) => fields
                 .iter()
-                .any(|(_, expr)| Self::expression_writes_any(expr, candidates)),
+                .any(|(_, expr)| self.expression_writes_any_inner(expr, candidates, visiting)),
         }
     }
 
+    fn function_call_writes_any(
+        &self,
+        call: &veryl_analyzer::ir::FunctionCall,
+        candidates: &HashSet<VarId>,
+        visiting: &mut HashSet<VarId>,
+    ) -> bool {
+        if call.outputs.values().flatten().any(|dst| {
+            candidates.contains(&dst.id)
+                || self.assignment_destination_writes_any_inner(dst, candidates, visiting)
+        }) || call
+            .inputs
+            .values()
+            .any(|expr| self.expression_writes_any_inner(expr, candidates, visiting))
+        {
+            return true;
+        }
+        if !visiting.insert(call.id) {
+            return false;
+        }
+        let writes = self
+            .module
+            .functions
+            .get(&call.id)
+            .and_then(|function| {
+                if let Some(index) = &call.index {
+                    function.get_function(index)
+                } else {
+                    function.get_function(&[])
+                }
+            })
+            .is_some_and(|body| self.statements_write_any(&body.statements, candidates, visiting));
+        visiting.remove(&call.id);
+        writes
+    }
+
+    fn statements_write_any(
+        &self,
+        statements: &[Statement],
+        candidates: &HashSet<VarId>,
+        visiting: &mut HashSet<VarId>,
+    ) -> bool {
+        statements.iter().any(|statement| match statement {
+            Statement::Assign(assign) => {
+                assign.dst.iter().any(|dst| {
+                    candidates.contains(&dst.id)
+                        || self.assignment_destination_writes_any_inner(dst, candidates, visiting)
+                }) || self.expression_writes_any_inner(&assign.expr, candidates, visiting)
+            }
+            Statement::If(statement) => {
+                self.expression_writes_any_inner(&statement.cond, candidates, visiting)
+                    || self.statements_write_any(&statement.true_side, candidates, visiting)
+                    || self.statements_write_any(&statement.false_side, candidates, visiting)
+            }
+            Statement::Case(statement) => {
+                self.expression_writes_any_inner(&statement.case_target, candidates, visiting)
+                    || statement.arms.iter().any(|arm| {
+                        arm.patterns.iter().any(|pattern| match pattern {
+                            CasePattern::Eq(expr) => {
+                                self.expression_writes_any_inner(expr, candidates, visiting)
+                            }
+                            CasePattern::Range { lo, hi, .. } => {
+                                self.expression_writes_any_inner(lo, candidates, visiting)
+                                    || self.expression_writes_any_inner(hi, candidates, visiting)
+                            }
+                        }) || self.statements_write_any(&arm.body, candidates, visiting)
+                    })
+                    || self.statements_write_any(&statement.default, candidates, visiting)
+            }
+            Statement::For(statement) => {
+                let (start, end) = match &statement.range {
+                    ForRange::Forward { start, end, .. }
+                    | ForRange::Reverse { start, end, .. }
+                    | ForRange::Stepped { start, end, .. } => (start, end),
+                };
+                [start, end].into_iter().any(|bound| match bound {
+                    ForBound::Const(_) => false,
+                    ForBound::Expression(expr) => {
+                        self.expression_writes_any_inner(expr, candidates, visiting)
+                    }
+                }) || self.statements_write_any(&statement.body, candidates, visiting)
+            }
+            Statement::FunctionCall(call) => {
+                self.function_call_writes_any(call, candidates, visiting)
+            }
+            Statement::SystemFunctionCall(call) => match &call.kind {
+                SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => args
+                    .iter()
+                    .any(|arg| self.expression_writes_any_inner(&arg.0, candidates, visiting)),
+                SystemFunctionKind::Assert { cond, args, .. } => {
+                    self.expression_writes_any_inner(&cond.0, candidates, visiting)
+                        || args.iter().any(|arg| {
+                            self.expression_writes_any_inner(&arg.0, candidates, visiting)
+                        })
+                }
+                SystemFunctionKind::Bits(input)
+                | SystemFunctionKind::Size(input)
+                | SystemFunctionKind::Clog2(input)
+                | SystemFunctionKind::Onehot(input)
+                | SystemFunctionKind::Signed(input)
+                | SystemFunctionKind::Unsigned(input) => {
+                    self.expression_writes_any_inner(&input.0, candidates, visiting)
+                }
+                SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
+            },
+            Statement::IfReset(statement) => {
+                self.statements_write_any(&statement.true_side, candidates, visiting)
+                    || self.statements_write_any(&statement.false_side, candidates, visiting)
+            }
+            Statement::TbMethodCall(_)
+            | Statement::Break
+            | Statement::Unsupported(_)
+            | Statement::Null => false,
+        })
+    }
+
     fn assignment_destination_writes_any(
+        &self,
         dst: &AssignDestination,
         candidates: &HashSet<VarId>,
+    ) -> bool {
+        self.assignment_destination_writes_any_inner(dst, candidates, &mut HashSet::default())
+    }
+
+    fn assignment_destination_writes_any_inner(
+        &self,
+        dst: &AssignDestination,
+        candidates: &HashSet<VarId>,
+        visiting: &mut HashSet<VarId>,
     ) -> bool {
         dst.index
             .0
             .iter()
-            .any(|expr| Self::expression_writes_any(expr, candidates))
+            .any(|expr| self.expression_writes_any_inner(expr, candidates, visiting))
             || dst
                 .select
                 .0
                 .iter()
-                .any(|expr| Self::expression_writes_any(expr, candidates))
-            || dst
-                .select
-                .1
-                .as_ref()
-                .is_some_and(|(_, expr)| Self::expression_writes_any(expr, candidates))
+                .any(|expr| self.expression_writes_any_inner(expr, candidates, visiting))
+            || dst.select.1.as_ref().is_some_and(|(_, expr)| {
+                self.expression_writes_any_inner(expr, candidates, visiting)
+            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2586,7 +2713,7 @@ impl<'a> FfParser<'a> {
                     .iter()
                     .skip(arg_index + 1)
                     .filter_map(|path| call.inputs.get(path))
-                    .any(|expr| Self::expression_writes_any(expr, &array_variables));
+                    .any(|expr| self.expression_writes_any(expr, &array_variables));
                 let mut dependencies = HashSet::default();
                 self.collect_expression_variables(actual, &mut dependencies, false);
                 let aliases_output_write = !dependencies.is_disjoint(&output_ids)
@@ -2594,7 +2721,7 @@ impl<'a> FfParser<'a> {
                         .outputs
                         .values()
                         .flatten()
-                        .any(|dst| Self::assignment_destination_writes_any(dst, &dependencies));
+                        .any(|dst| self.assignment_destination_writes_any(dst, &dependencies));
                 if aliases_later_write || aliases_output_write {
                     return Err(ParserError::unsupported(
                         43,
