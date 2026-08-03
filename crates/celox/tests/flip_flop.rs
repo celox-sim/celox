@@ -491,6 +491,119 @@ fn test_ff_case_skips_effectful_patterns_after_matching_arm(sim) {
     );
 }
 
+fn test_ff_assignment_snapshots_dynamic_rhs_access(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, d: input logic<8>, q: output logic) {
+            function observed (value: input logic<8>) -> logic {
+                var index: logic<3>;
+                var captured: logic;
+                index = 3'd0;
+                captured = value[index];
+                index = 3'd1;
+                $display("captured=%0d", captured);
+                return captured;
+            }
+
+            always_ff (clk) {
+                q = observed(d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 0b0000_0001u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "captured=1".to_string(),
+        }],
+    );
+}
+
+fn test_ff_case_merges_nested_output_state_from_selected_arm(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            choose: input logic,
+            d: input logic<8>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x + 8'd2;
+            }
+
+            function observed (
+                choose: input logic,
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                var temporary: logic<8>;
+                written = x;
+                case choose {
+                    1'b1: temporary = update(x, written);
+                    default: temporary = x;
+                }
+                $display("written=%0d", written);
+                return written;
+            }
+
+            always_ff (clk) {
+                q = observed(choose, d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let choose = sim.signal("choose");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(choose, 1u8);
+        io.set(d, 10u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 11u8.into());
+    assert_eq!(sim.get(q), 11u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "written=11".to_string(),
+        }],
+    );
+
+    sim.modify(|io| {
+        io.set(choose, 0u8);
+        io.set(d, 20u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 20u8.into());
+    assert_eq!(sim.get(q), 20u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "written=20".to_string(),
+        }],
+    );
+}
+
 fn test_ff_variable_select_captures_nested_output(sim) {
     @omit_veryl;
     @ignore_on(wasm);

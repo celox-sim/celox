@@ -11,9 +11,9 @@ use celox_sir::{
 };
 use num_traits::ToPrimitive;
 use veryl_analyzer::ir::{
-    ArrayLiteralItem, CasePattern, CaseStatement, Comptime, Expression, Factor, ForBound, ForRange,
-    Op, Shape, Statement, SystemFunctionCall, SystemFunctionKind, Type, TypeKind, ValueVariant,
-    VarId, VarIndex, VarSelect,
+    ArrayLiteralItem, AssignStatement, CasePattern, CaseStatement, Comptime, Expression, Factor,
+    ForBound, ForRange, Op, Shape, Statement, SystemFunctionCall, SystemFunctionKind, Type,
+    TypeKind, ValueVariant, VarId, VarIndex, VarSelect,
 };
 use veryl_parser::token_range::TokenRange;
 
@@ -32,6 +32,67 @@ impl<'a> FfParser<'a> {
     fn expression_needs_eager_evaluation(&self, expr: &Expression) -> bool {
         super::expression::expression_has_side_effect(expr)
             || self.expression_has_runtime_effect(expr)
+    }
+
+    fn expression_needs_assignment_snapshot(expr: &Expression) -> bool {
+        let input_needs_snapshot = |input: &veryl_analyzer::ir::SystemFunctionInput| {
+            Self::expression_needs_assignment_snapshot(&input.0)
+        };
+        match expr {
+            Expression::Term(factor) => match factor.as_ref() {
+                Factor::Variable(_, index, select, _) => {
+                    !index.0.is_empty() || !select.0.is_empty() || select.1.is_some()
+                }
+                Factor::FunctionCall(call) => call
+                    .inputs
+                    .values()
+                    .any(Self::expression_needs_assignment_snapshot),
+                Factor::SystemFunctionCall(call) => match &call.kind {
+                    SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
+                        args.iter().any(input_needs_snapshot)
+                    }
+                    SystemFunctionKind::Assert { cond, args, .. } => {
+                        input_needs_snapshot(cond) || args.iter().any(input_needs_snapshot)
+                    }
+                    SystemFunctionKind::Bits(input)
+                    | SystemFunctionKind::Size(input)
+                    | SystemFunctionKind::Clog2(input)
+                    | SystemFunctionKind::Onehot(input)
+                    | SystemFunctionKind::Signed(input)
+                    | SystemFunctionKind::Unsigned(input) => input_needs_snapshot(input),
+                    SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
+                },
+                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+            },
+            Expression::Binary(lhs, _, rhs, _) => {
+                Self::expression_needs_assignment_snapshot(lhs)
+                    || Self::expression_needs_assignment_snapshot(rhs)
+            }
+            Expression::Unary(_, inner, _) => Self::expression_needs_assignment_snapshot(inner),
+            Expression::Ternary(cond, then_expr, else_expr, _) => {
+                Self::expression_needs_assignment_snapshot(cond)
+                    || Self::expression_needs_assignment_snapshot(then_expr)
+                    || Self::expression_needs_assignment_snapshot(else_expr)
+            }
+            Expression::Concatenation(items, _) => items.iter().any(|(expr, repeat)| {
+                Self::expression_needs_assignment_snapshot(expr)
+                    || repeat
+                        .as_ref()
+                        .is_some_and(Self::expression_needs_assignment_snapshot)
+            }),
+            Expression::ArrayLiteral(items, _) => items.iter().any(|item| match item {
+                ArrayLiteralItem::Value(expr, repeat) => {
+                    Self::expression_needs_assignment_snapshot(expr)
+                        || repeat.as_ref().is_some_and(|repeat| {
+                            Self::expression_needs_assignment_snapshot(repeat)
+                        })
+                }
+                ArrayLiteralItem::Defaul(expr) => Self::expression_needs_assignment_snapshot(expr),
+            }),
+            Expression::StructConstructor(_, fields, _) => fields
+                .iter()
+                .any(|(_, expr)| Self::expression_needs_assignment_snapshot(expr)),
+        }
     }
 
     fn expression_has_runtime_effect_inner(
@@ -571,9 +632,17 @@ impl<'a> FfParser<'a> {
                 break;
             }
             match statement {
-                Statement::Assign(_) => {
+                Statement::Assign(assign) => {
                     let base = state.clone();
-                    let transitioned = self.apply_statement_to_function_state(statement, &base)?;
+                    let mut transitioned_base = base.clone();
+                    // State-only evaluation must still apply output bindings
+                    // nested in an assignment RHS.
+                    let (rhs, _) = self.capture_nested_function_outputs_with_states(
+                        &assign.expr,
+                        &mut transitioned_base,
+                    )?;
+                    let transitioned =
+                        self.apply_assignment_to_function_state(assign, &rhs, &transitioned_base)?;
                     state = Self::apply_state_transition_on_path(&active, &base, transitioned);
                     if Self::statement_is_function_return(statement, ret_id) {
                         active = FunctionPathCondition::Never;
@@ -687,38 +756,7 @@ impl<'a> FfParser<'a> {
     ) -> Result<HashMap<VarId, Expression>, ParserError> {
         match statement {
             Statement::Assign(assign) => {
-                if assign.dst.len() != 1 {
-                    return Err(ParserError::unsupported(
-                        43,
-                        LoweringPhase::FfLowering,
-                        "function body assignment shape",
-                        format!("{statement}"),
-                        Some(&assign.token),
-                    ));
-                }
-                let dst = &assign.dst[0];
-                let rhs = Self::substitute_function_expr(&assign.expr, state);
-                let mut next = state.clone();
-                let is_whole_var =
-                    dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
-                if is_whole_var {
-                    next.insert(dst.id, rhs);
-                } else if is_static_access(&dst.index, &dst.select) {
-                    let old_value = Self::state_value_expr(dst.id, state);
-                    next.insert(
-                        dst.id,
-                        build_partial_assign_expr(self.module, dst, rhs, old_value)?,
-                    );
-                } else {
-                    return Err(ParserError::unsupported(
-                        66,
-                        LoweringPhase::FfLowering,
-                        "dynamic assignment before runtime effect in function body",
-                        format!("{statement}"),
-                        Some(&assign.token),
-                    ));
-                }
-                Ok(next)
+                self.apply_assignment_to_function_state(assign, &assign.expr, state)
             }
             Statement::If(statement) => {
                 let condition = Self::substitute_function_expr(&statement.cond, state);
@@ -764,6 +802,46 @@ impl<'a> FfParser<'a> {
                 ))
             }
         }
+    }
+
+    fn apply_assignment_to_function_state(
+        &self,
+        assign: &AssignStatement,
+        rhs: &Expression,
+        state: &HashMap<VarId, Expression>,
+    ) -> Result<HashMap<VarId, Expression>, ParserError> {
+        if assign.dst.len() != 1 {
+            return Err(ParserError::unsupported(
+                43,
+                LoweringPhase::FfLowering,
+                "function body assignment shape",
+                format!("{}", Statement::Assign(assign.clone())),
+                Some(&assign.token),
+            ));
+        }
+        let dst = &assign.dst[0];
+        let rhs = Self::substitute_function_expr(rhs, state);
+        let mut next = state.clone();
+        let is_whole_var =
+            dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
+        if is_whole_var {
+            next.insert(dst.id, rhs);
+        } else if is_static_access(&dst.index, &dst.select) {
+            let old_value = Self::state_value_expr(dst.id, state);
+            next.insert(
+                dst.id,
+                build_partial_assign_expr(self.module, dst, rhs, old_value)?,
+            );
+        } else {
+            return Err(ParserError::unsupported(
+                66,
+                LoweringPhase::FfLowering,
+                "dynamic assignment before runtime effect in function body",
+                format!("{}", Statement::Assign(assign.clone())),
+                Some(&assign.token),
+            ));
+        }
+        Ok(next)
     }
 
     fn apply_case_to_function_state(
@@ -1090,7 +1168,9 @@ impl<'a> FfParser<'a> {
                             Some(&assign.token),
                         ));
                     }
-                    if self.expression_needs_eager_evaluation(&assign.expr) {
+                    if self.expression_needs_eager_evaluation(&assign.expr)
+                        || Self::expression_needs_assignment_snapshot(&assign.expr)
+                    {
                         self.materialize_function_runtime_expression(
                             &assign.expr,
                             &mut state,
@@ -1184,11 +1264,14 @@ impl<'a> FfParser<'a> {
                             ir_builder,
                         )?;
                     }
+                    let case_base = state.clone();
                     let mut remaining = active.clone();
                     let mut live_paths = FunctionPathCondition::Never;
+                    let mut arm_states = Vec::with_capacity(statement.arms.len());
                     for arm in &statement.arms {
                         let mut pattern_remaining = remaining.clone();
                         let mut arm_active = FunctionPathCondition::Never;
+                        let mut arm_condition = None;
                         for pattern in &arm.patterns {
                             match pattern {
                                 CasePattern::Eq(expr) => {
@@ -1237,6 +1320,15 @@ impl<'a> FfParser<'a> {
                                 pattern_remaining.clone(),
                                 condition.clone(),
                             );
+                            arm_condition = Some(match arm_condition {
+                                None => condition.clone(),
+                                Some(previous) => Expression::Binary(
+                                    Box::new(previous),
+                                    Op::LogicOr,
+                                    Box::new(condition.clone()),
+                                    Box::new(Comptime::create_unknown(TokenRange::default())),
+                                ),
+                            });
                             arm_active = Self::function_path_or(arm_active, matched);
                             pattern_remaining =
                                 Self::function_path_and_not(pattern_remaining, condition);
@@ -1246,6 +1338,20 @@ impl<'a> FfParser<'a> {
                             &arm.body, ret_id, &base, arm_active, targets, domain, convert,
                             sources, ir_builder,
                         )?;
+                        // The emitted state includes an inactive-path fallback,
+                        // which can retain a self-reference for output formals.
+                        // Recompute the selected-arm value without the guard,
+                        // then apply case priority once below.
+                        let (arm_state, _) = self.apply_statements_to_function_state_in_path(
+                            &arm.body,
+                            ret_id,
+                            &base,
+                            FunctionPathCondition::Always,
+                        )?;
+                        arm_states.push((
+                            arm_condition.expect("Case arm must have at least one pattern"),
+                            arm_state,
+                        ));
                         live_paths = Self::function_path_or(live_paths, arm_live);
                         remaining = pattern_remaining;
                     }
@@ -1261,8 +1367,21 @@ impl<'a> FfParser<'a> {
                         sources,
                         ir_builder,
                     )?;
+                    let (default_state, _) = self.apply_statements_to_function_state_in_path(
+                        &statement.default,
+                        ret_id,
+                        &base,
+                        FunctionPathCondition::Always,
+                    )?;
+                    state = arm_states.into_iter().rev().fold(
+                        default_state,
+                        |merged, (condition, arm_state)| {
+                            Self::merge_expression_states(
+                                &condition, &case_base, &arm_state, &merged,
+                            )
+                        },
+                    );
                     active = Self::function_path_or(live_paths, default_live);
-                    state = self.apply_case_to_function_state(statement, 0, &base)?;
                 }
                 Statement::For(statement) => {
                     return Err(ParserError::unsupported(
