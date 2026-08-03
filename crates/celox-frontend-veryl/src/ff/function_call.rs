@@ -2192,46 +2192,49 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    fn collect_expression_array_variables(
+    fn collect_expression_variables(
         &self,
         expr: &Expression,
         variables: &mut HashSet<VarId>,
+        arrays_only: bool,
     ) {
         let collect_input = |input: &veryl_analyzer::ir::SystemFunctionInput,
                              variables: &mut HashSet<VarId>| {
-            self.collect_expression_array_variables(&input.0, variables)
+            self.collect_expression_variables(&input.0, variables, arrays_only)
         };
         match expr {
             Expression::Term(factor) => match factor.as_ref() {
                 Factor::Variable(id, index, select, _) => {
-                    if self
-                        .module
-                        .variables
-                        .get(id)
-                        .is_some_and(|variable| !variable.r#type.array.is_empty())
+                    if !arrays_only
+                        || self
+                            .module
+                            .variables
+                            .get(id)
+                            .is_some_and(|variable| !variable.r#type.array.is_empty())
                     {
                         variables.insert(*id);
                     }
                     for expr in &index.0 {
-                        self.collect_expression_array_variables(expr, variables);
+                        self.collect_expression_variables(expr, variables, arrays_only);
                     }
                     for expr in &select.0 {
-                        self.collect_expression_array_variables(expr, variables);
+                        self.collect_expression_variables(expr, variables, arrays_only);
                     }
                     if let Some((_, expr)) = &select.1 {
-                        self.collect_expression_array_variables(expr, variables);
+                        self.collect_expression_variables(expr, variables, arrays_only);
                     }
                 }
                 Factor::FunctionCall(call) => {
                     for expr in call.inputs.values() {
-                        self.collect_expression_array_variables(expr, variables);
+                        self.collect_expression_variables(expr, variables, arrays_only);
                     }
                     for dst in call.outputs.values().flatten() {
-                        if self
-                            .module
-                            .variables
-                            .get(&dst.id)
-                            .is_some_and(|variable| !variable.r#type.array.is_empty())
+                        if !arrays_only
+                            || self
+                                .module
+                                .variables
+                                .get(&dst.id)
+                                .is_some_and(|variable| !variable.r#type.array.is_empty())
                         {
                             variables.insert(dst.id);
                         }
@@ -2260,22 +2263,22 @@ impl<'a> FfParser<'a> {
                 Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
             },
             Expression::Binary(lhs, _, rhs, _) => {
-                self.collect_expression_array_variables(lhs, variables);
-                self.collect_expression_array_variables(rhs, variables);
+                self.collect_expression_variables(lhs, variables, arrays_only);
+                self.collect_expression_variables(rhs, variables, arrays_only);
             }
             Expression::Unary(_, inner, _) => {
-                self.collect_expression_array_variables(inner, variables)
+                self.collect_expression_variables(inner, variables, arrays_only)
             }
             Expression::Ternary(cond, then_expr, else_expr, _) => {
-                self.collect_expression_array_variables(cond, variables);
-                self.collect_expression_array_variables(then_expr, variables);
-                self.collect_expression_array_variables(else_expr, variables);
+                self.collect_expression_variables(cond, variables, arrays_only);
+                self.collect_expression_variables(then_expr, variables, arrays_only);
+                self.collect_expression_variables(else_expr, variables, arrays_only);
             }
             Expression::Concatenation(items, _) => {
                 for (expr, repeat) in items {
-                    self.collect_expression_array_variables(expr, variables);
+                    self.collect_expression_variables(expr, variables, arrays_only);
                     if let Some(repeat) = repeat {
-                        self.collect_expression_array_variables(repeat, variables);
+                        self.collect_expression_variables(repeat, variables, arrays_only);
                     }
                 }
             }
@@ -2283,20 +2286,20 @@ impl<'a> FfParser<'a> {
                 for item in items {
                     match item {
                         ArrayLiteralItem::Value(expr, repeat) => {
-                            self.collect_expression_array_variables(expr, variables);
+                            self.collect_expression_variables(expr, variables, arrays_only);
                             if let Some(repeat) = repeat {
-                                self.collect_expression_array_variables(repeat, variables);
+                                self.collect_expression_variables(repeat, variables, arrays_only);
                             }
                         }
                         ArrayLiteralItem::Defaul(expr) => {
-                            self.collect_expression_array_variables(expr, variables);
+                            self.collect_expression_variables(expr, variables, arrays_only);
                         }
                     }
                 }
             }
             Expression::StructConstructor(_, fields, _) => {
                 for (_, expr) in fields {
-                    self.collect_expression_array_variables(expr, variables);
+                    self.collect_expression_variables(expr, variables, arrays_only);
                 }
             }
         }
@@ -2382,6 +2385,26 @@ impl<'a> FfParser<'a> {
         }
     }
 
+    fn assignment_destination_writes_any(
+        dst: &AssignDestination,
+        candidates: &HashSet<VarId>,
+    ) -> bool {
+        dst.index
+            .0
+            .iter()
+            .any(|expr| Self::expression_writes_any(expr, candidates))
+            || dst
+                .select
+                .0
+                .iter()
+                .any(|expr| Self::expression_writes_any(expr, candidates))
+            || dst
+                .select
+                .1
+                .as_ref()
+                .is_some_and(|(_, expr)| Self::expression_writes_any(expr, candidates))
+    }
+
     fn materialize_function_inputs<A>(
         &mut self,
         call: &veryl_analyzer::ir::FunctionCall,
@@ -2420,14 +2443,22 @@ impl<'a> FfParser<'a> {
             let must_snapshot_for_order = last_effectful_arg.is_some_and(|last| arg_index <= last);
             let formal = &self.module.variables[arg_id];
             if !formal.r#type.array.is_empty() {
-                let mut referenced_variables = HashSet::default();
-                self.collect_expression_array_variables(actual, &mut referenced_variables);
+                let mut array_variables = HashSet::default();
+                self.collect_expression_variables(actual, &mut array_variables, true);
                 let aliases_later_write = ordered_arg_paths
                     .iter()
                     .skip(arg_index + 1)
                     .filter_map(|path| call.inputs.get(path))
-                    .any(|expr| Self::expression_writes_any(expr, &referenced_variables));
-                if aliases_later_write || !referenced_variables.is_disjoint(&output_ids) {
+                    .any(|expr| Self::expression_writes_any(expr, &array_variables));
+                let mut dependencies = HashSet::default();
+                self.collect_expression_variables(actual, &mut dependencies, false);
+                let aliases_output_write = !dependencies.is_disjoint(&output_ids)
+                    || call
+                        .outputs
+                        .values()
+                        .flatten()
+                        .any(|dst| Self::assignment_destination_writes_any(dst, &dependencies));
+                if aliases_later_write || aliases_output_write {
                     return Err(ParserError::unsupported(
                         43,
                         LoweringPhase::FfLowering,

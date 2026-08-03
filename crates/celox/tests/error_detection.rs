@@ -1072,6 +1072,47 @@ fn test_ff_function_call_rejects_unpacked_input_aliased_by_later_effect() {
 }
 
 #[test]
+fn test_ff_function_call_rejects_unpacked_literal_aliased_by_output_index_effect() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            var changing: logic<8>;
+            var sink: logic<8>[2];
+
+            function pick (
+                values: input logic<8>[2],
+                result: output logic<8>
+            ) -> logic<8> {
+                result = 8'h00;
+                return values[0];
+            }
+
+            function update (value: output logic<8>) -> logic {
+                value = 8'h00;
+                return 1'b0;
+            }
+
+            always_ff (clk) {
+                out_q = pick('{changing, default: 8'h00}, sink[update(changing)]);
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("an unpacked literal must not observe an output-index effect lazily");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 43);
+            assert_eq!(*feature, "unpacked function argument aliases later effect");
+        }
+        other => panic!("expected unpacked input aliasing error, got: {other:?}"),
+    }
+}
+
+#[test]
 fn test_ff_function_runtime_effect_in_for_bound_is_detected() {
     let code = r#"
         module Top (
