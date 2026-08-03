@@ -95,8 +95,10 @@ impl Module {
         let signals = signals_from_module_node(node.clone(), syntax_tree)?;
         let instances = instances_from_module_node(node.clone(), syntax_tree)?;
         let const_env = const_env_from_parameters(&parameters);
+        let parameter_values = parameter_value_env(&parameters, &const_env);
         let packed_dimensions = packed_dimensions_from_ports_and_signals(&ports, &signals);
-        let functions = functions_from_module_node(node.clone(), syntax_tree, &packed_dimensions);
+        let functions =
+            functions_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions);
         let comb_processes = comb_processes_from_module_node(
             node.clone(),
             syntax_tree,
@@ -111,8 +113,12 @@ impl Module {
             node.clone(),
             syntax_tree,
             &const_env,
+            &parameter_values,
             &packed_dimensions,
-        );
+        )?
+        .into_iter()
+        .map(|process| expand_ff_process_calls(process, &functions, &const_env, &parameter_values))
+        .collect();
         let assignments = comb_processes
             .iter()
             .flat_map(|process| process.assignments().iter().cloned())
@@ -175,11 +181,23 @@ fn apply_parameter_overrides(parameters: &mut [Parameter], overrides: &HashMap<S
 pub struct Parameter {
     name: String,
     value: Option<ConstExpr>,
+    declared_width: Option<usize>,
+    declared_signed: Option<bool>,
 }
 
 impl Parameter {
-    fn new(name: String, value: Option<ConstExpr>) -> Self {
-        Self { name, value }
+    fn new(
+        name: String,
+        value: Option<ConstExpr>,
+        declared_width: Option<usize>,
+        declared_signed: Option<bool>,
+    ) -> Self {
+        Self {
+            name,
+            value,
+            declared_width,
+            declared_signed,
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -458,6 +476,7 @@ pub enum UnaryOp {
     Minus,
     BitNot,
     LogicNot,
+    ToTwoState,
     RedAnd,
     RedOr,
     RedXor,
@@ -479,6 +498,10 @@ pub enum BinaryOp {
     LogicOr,
     Eq,
     Ne,
+    EqCase,
+    NeCase,
+    EqWildcard,
+    NeWildcard,
     Lt,
     Le,
     Gt,
@@ -641,8 +664,17 @@ impl ConditionalAssignment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Function {
     name: String,
-    params: Vec<String>,
+    params: Vec<FunctionParam>,
     body: Expr,
+    return_width: Option<usize>,
+    return_signed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FunctionParam {
+    name: String,
+    width: Option<usize>,
+    signed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -658,6 +690,11 @@ pub enum Expr {
     RepeatConcat {
         count: ConstExpr,
         parts: Vec<Expr>,
+    },
+    Resize {
+        expr: Box<Expr>,
+        width: usize,
+        signed: bool,
     },
     Unary {
         op: UnaryOp,
@@ -791,7 +828,7 @@ fn parameters_from_module_node(
             .2
             .as_ref()
             .and_then(|(_, expr)| const_expr_from_constant_param(expr, syntax_tree));
-        parameters.push(Parameter::new(name, value));
+        parameters.push(Parameter::new(name, value, None, None));
     }
 
     Ok(parameters)
@@ -1145,6 +1182,11 @@ fn parameters_from_ref_node(
     parameters: &mut Vec<Parameter>,
 ) -> Result<(), AnalyzerError> {
     let parameter_width = parameter_declared_width(node.clone(), syntax_tree, parameters);
+    let parameter_signed = parameter_width.map(|_| {
+        integer_atom_expr_type(node.clone())
+            .map(|r#type| r#type.signed)
+            .unwrap_or_else(|| is_signed_from_ref_node(node.clone()).unwrap_or(false))
+    });
     for child in node {
         if let RefNode::ParamAssignment(param) = child {
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
@@ -1153,8 +1195,14 @@ fn parameters_from_ref_node(
                 .2
                 .as_ref()
                 .and_then(|(_, expr)| const_expr_from_constant_param(expr, syntax_tree));
-            value = normalize_unbased_unsized_parameter_value(value, parameter_width);
-            parameters.push(Parameter::new(name, value));
+            value =
+                normalize_unbased_unsized_parameter_value(value, parameter_width, parameter_signed);
+            parameters.push(Parameter::new(
+                name,
+                value,
+                parameter_width,
+                parameter_signed,
+            ));
         }
     }
     Ok(())
@@ -1165,9 +1213,12 @@ fn parameter_declared_width(
     syntax_tree: &SyntaxTree,
     parameters: &[Parameter],
 ) -> Option<usize> {
-    let ranges = packed_ranges_from_ref_node(node, syntax_tree);
+    let ranges = packed_ranges_from_ref_node(node.clone(), syntax_tree);
     if ranges.is_empty() {
-        return None;
+        if let Some(r#type) = integer_atom_expr_type(node.clone()) {
+            return Some(r#type.width);
+        }
+        return unwrap_node!(node, IntegerVectorType).is_some().then_some(1);
     }
     let env = const_env_from_parameters(parameters);
     ranges.iter().try_fold(1usize, |acc, range| {
@@ -1180,18 +1231,31 @@ fn parameter_declared_width(
 fn normalize_unbased_unsized_parameter_value(
     value: Option<ConstExpr>,
     width: Option<usize>,
+    signed: Option<bool>,
 ) -> Option<ConstExpr> {
+    let signing = if signed.unwrap_or(false) { "s" } else { "" };
     match (value, width) {
-        (Some(ConstExpr::Literal(value)), Some(width)) if value == "'1" && width <= 128 => {
-            let bits = if width == 128 {
-                u128::MAX
+        (Some(ConstExpr::Literal(value)), Some(width)) if value == "'1" => {
+            let literal = if width <= 128 {
+                let bits = if width == 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << width) - 1
+                };
+                format!("{width}'{signing}d{bits}")
             } else {
-                (1u128 << width) - 1
+                format!("{width}'{signing}b{}", "1".repeat(width))
             };
-            Some(ConstExpr::Literal(format!("{width}'d{bits}")))
+            Some(ConstExpr::Literal(literal))
         }
         (Some(ConstExpr::Literal(value)), Some(width)) if value == "'0" => {
-            Some(ConstExpr::Literal(format!("{width}'d0")))
+            Some(ConstExpr::Literal(format!("{width}'{signing}d0")))
+        }
+        (Some(ConstExpr::Literal(value)), Some(width))
+            if matches!(value.as_str(), "'x" | "'X" | "'z" | "'Z" | "'?") =>
+        {
+            let fill = value.chars().nth(1)?;
+            Some(ConstExpr::Literal(format!("{width}'{signing}b{fill}")))
         }
         (value, _) => value,
     }
@@ -1200,16 +1264,230 @@ fn normalize_unbased_unsized_parameter_value(
 fn const_env_from_parameters(parameters: &[Parameter]) -> HashMap<String, i128> {
     let mut env = HashMap::new();
     for parameter in parameters {
-        let Some(value) = parameter
+        let Some(mut value) = parameter
             .value()
             .and_then(|value| typecheck::eval_const_expr(&value.clone().into(), &env))
         else {
             continue;
         };
+        if let Some(width) = parameter.declared_width {
+            value = coerce_const_parameter_value(
+                value,
+                width,
+                parameter.declared_signed.unwrap_or(false),
+            );
+        }
         env.insert(parameter.name().to_string(), value);
         env.insert(parameter_marker(parameter.name()), value);
     }
     env
+}
+
+fn coerce_const_parameter_value(value: i128, width: usize, signed: bool) -> i128 {
+    if width >= 128 {
+        return value;
+    }
+    if width == 0 {
+        return 0;
+    }
+    let mask = (1u128 << width) - 1;
+    let bits = (value as u128) & mask;
+    if signed && bits & (1u128 << (width - 1)) != 0 {
+        (bits | !mask) as i128
+    } else {
+        bits as i128
+    }
+}
+
+fn parameter_value_env(
+    parameters: &[Parameter],
+    const_env: &HashMap<String, i128>,
+) -> HashMap<String, Expr> {
+    let mut values = HashMap::new();
+    let mut parameter_types = HashMap::new();
+    for parameter in parameters {
+        let inferred_type = parameter
+            .value()
+            .and_then(|value| infer_const_expr_type(value, &parameter_types));
+        let width = parameter
+            .declared_width
+            .or(inferred_type.map(|r#type| r#type.width));
+        let signed = parameter
+            .declared_signed
+            .or(inferred_type.map(|r#type| r#type.signed))
+            .unwrap_or(false);
+        if let Some(width) = width {
+            parameter_types.insert(parameter.name().to_string(), ExprType { width, signed });
+        }
+
+        let value = if let Some(value) = const_env.get(parameter.name()).copied() {
+            if let Some(width) = width {
+                Expr::Literal(format_typed_parameter_literal(value, width, signed))
+            } else if value.is_negative() {
+                let width = (128 - (!value as u128).leading_zeros() as usize + 1).max(32);
+                let mask = if width == 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << width) - 1
+                };
+                Expr::Literal(format!("{width}'sd{}", (value as u128) & mask))
+            } else if let Some(ConstExpr::Literal(literal)) = parameter.value() {
+                Expr::Literal(literal.clone())
+            } else {
+                Expr::Literal(value.to_string())
+            }
+        } else if let Some(value) = parameter.value().cloned() {
+            let value = substitute_expr_constants_with_parameter_literals(
+                const_expr_to_expr(value),
+                const_env,
+                &values,
+            );
+            if let Some(width) = width {
+                Expr::Resize {
+                    expr: Box::new(value),
+                    width,
+                    signed,
+                }
+            } else {
+                value
+            }
+        } else {
+            continue;
+        };
+        values.insert(parameter.name().to_string(), value);
+    }
+    values
+}
+
+fn const_expr_to_expr(expr: ConstExpr) -> Expr {
+    match expr {
+        ConstExpr::Literal(value) => Expr::Literal(value),
+        ConstExpr::Ident(name) => Expr::Ident(name),
+        ConstExpr::Select { expr, bit } => Expr::Select {
+            expr: Box::new(const_expr_to_expr(*expr)),
+            msb: (*bit).clone(),
+            lsb: *bit,
+        },
+        ConstExpr::Function { name, args } => Expr::Call {
+            name,
+            args: args.into_iter().map(const_expr_to_expr).collect(),
+        },
+        ConstExpr::Unary { op, expr } => Expr::Unary {
+            op,
+            expr: Box::new(const_expr_to_expr(*expr)),
+        },
+        ConstExpr::Binary { left, op, right } => Expr::Binary {
+            left: Box::new(const_expr_to_expr(*left)),
+            op,
+            right: Box::new(const_expr_to_expr(*right)),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => Expr::Mux {
+            condition: Box::new(const_expr_to_expr(*condition)),
+            then_expr: Box::new(const_expr_to_expr(*then_expr)),
+            else_expr: Box::new(const_expr_to_expr(*else_expr)),
+        },
+    }
+}
+
+fn format_typed_parameter_literal(value: i128, width: usize, signed: bool) -> String {
+    let signing = if signed { "s" } else { "" };
+    if width <= 128 {
+        let mask = if width == 128 {
+            u128::MAX
+        } else {
+            (1u128 << width) - 1
+        };
+        let bits = (value as u128) & mask;
+        format!("{width}'{signing}d{bits}")
+    } else {
+        let extension = if value.is_negative() { '1' } else { '0' };
+        let high_bits = extension.to_string().repeat(width - 128);
+        let low_bits = value as u128;
+        format!("{width}'{signing}b{high_bits}{low_bits:0128b}")
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ExprType {
+    width: usize,
+    signed: bool,
+}
+
+fn infer_const_expr_type(
+    expr: &ConstExpr,
+    parameter_types: &HashMap<String, ExprType>,
+) -> Option<ExprType> {
+    match expr {
+        ConstExpr::Literal(literal) => {
+            let literal = typecheck::parse_integral_literal(literal)?;
+            Some(ExprType {
+                width: literal.width,
+                signed: literal.signed,
+            })
+        }
+        ConstExpr::Ident(name) => parameter_types.get(name).copied(),
+        ConstExpr::Select { .. } => Some(ExprType {
+            width: 1,
+            signed: false,
+        }),
+        ConstExpr::Function { .. } => None,
+        ConstExpr::Unary { op, expr } => {
+            let operand = infer_const_expr_type(expr, parameter_types)?;
+            if matches!(
+                op,
+                UnaryOp::LogicNot | UnaryOp::RedAnd | UnaryOp::RedOr | UnaryOp::RedXor
+            ) {
+                Some(ExprType {
+                    width: 1,
+                    signed: false,
+                })
+            } else {
+                Some(operand)
+            }
+        }
+        ConstExpr::Binary { left, op, right } => {
+            let left = infer_const_expr_type(left, parameter_types)?;
+            let right = infer_const_expr_type(right, parameter_types)?;
+            match op {
+                BinaryOp::LogicAnd
+                | BinaryOp::LogicOr
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::EqCase
+                | BinaryOp::NeCase
+                | BinaryOp::EqWildcard
+                | BinaryOp::NeWildcard
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => Some(ExprType {
+                    width: 1,
+                    signed: false,
+                }),
+                BinaryOp::Shl | BinaryOp::Shr => Some(left),
+                _ => Some(ExprType {
+                    width: left.width.max(right.width),
+                    signed: left.signed && right.signed,
+                }),
+            }
+        }
+        ConstExpr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            let then_type = infer_const_expr_type(then_expr, parameter_types)?;
+            let else_type = infer_const_expr_type(else_expr, parameter_types)?;
+            Some(ExprType {
+                width: then_type.width.max(else_type.width),
+                signed: then_type.signed && else_type.signed,
+            })
+        }
+    }
 }
 
 fn packed_dimensions_from_ports_and_signals(
@@ -1597,9 +1875,11 @@ fn identifier_text(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<String
 fn functions_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> HashMap<String, Function> {
     let mut functions = HashMap::new();
+    let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
     for item in module_non_port_items(node) {
         let Some(declaration) = package_or_generate_declaration_from_non_port_item(item) else {
             continue;
@@ -1609,9 +1889,13 @@ fn functions_from_module_node(
         else {
             continue;
         };
-        if let Some(function) =
-            function_from_declaration(declaration, syntax_tree, packed_dimensions)
-        {
+        if let Some(function) = function_from_declaration(
+            declaration,
+            syntax_tree,
+            const_env,
+            &type_aliases,
+            packed_dimensions,
+        ) {
             functions.insert(function.name.clone(), function);
         }
     }
@@ -1621,6 +1905,8 @@ fn functions_from_module_node(
 fn function_from_declaration(
     declaration: &sv_parser::FunctionDeclaration,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Option<Function> {
     match &declaration.nodes.2 {
@@ -1632,33 +1918,220 @@ fn function_from_declaration(
                 .nodes
                 .1
                 .as_ref()
-                .map(|ports| tf_port_names(ports, syntax_tree))
+                .map(|ports| tf_params(ports, syntax_tree, const_env, type_aliases))
                 .unwrap_or_default();
-            let body = function_body_expr(&body.nodes.6, syntax_tree, packed_dimensions)?;
-            Some(Function { name, params, body })
+            let expr = function_body_expr(&body.nodes.6, syntax_tree, packed_dimensions)?;
+            let return_type = function_return_type(
+                RefNode::FunctionDataTypeOrImplicit(&body.nodes.0),
+                syntax_tree,
+                const_env,
+                type_aliases,
+            );
+            Some(Function {
+                name,
+                params,
+                body: expr,
+                return_width: return_type.map(|r#type| r#type.width),
+                return_signed: return_type.is_some_and(|r#type| r#type.signed),
+            })
         }
         sv_parser::FunctionBodyDeclaration::WithoutPort(body) => {
             let name = identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), syntax_tree)?;
-            let body = function_body_expr(&body.nodes.5, syntax_tree, packed_dimensions)?;
+            let params = tf_item_params(&body.nodes.4, syntax_tree, const_env, type_aliases);
+            let expr = function_body_expr(&body.nodes.5, syntax_tree, packed_dimensions)?;
+            let return_type = function_return_type(
+                RefNode::FunctionDataTypeOrImplicit(&body.nodes.0),
+                syntax_tree,
+                const_env,
+                type_aliases,
+            );
             Some(Function {
                 name,
-                params: Vec::new(),
-                body,
+                params,
+                body: expr,
+                return_width: return_type.map(|r#type| r#type.width),
+                return_signed: return_type.is_some_and(|r#type| r#type.signed),
             })
         }
     }
 }
 
-fn tf_port_names(list: &sv_parser::TfPortList, syntax_tree: &SyntaxTree) -> Vec<String> {
-    list.nodes
-        .0
-        .contents()
-        .into_iter()
-        .filter_map(|port| {
-            let (identifier, _, _) = port.nodes.4.as_ref()?;
-            identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
-        })
-        .collect()
+fn function_return_type(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<ExprType> {
+    let alias = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases);
+    if alias.is_some() {
+        return value_type_from_ref_node(node, syntax_tree, const_env, type_aliases);
+    }
+    if unwrap_node!(node.clone(), TypeIdentifier).is_some() {
+        return None;
+    }
+    if let Some(r#type) = integer_atom_expr_type(node.clone()) {
+        return Some(r#type);
+    }
+    let ranges = packed_ranges_from_ref_node(node.clone(), syntax_tree);
+    let width = if ranges.is_empty() {
+        1
+    } else {
+        ranges.iter().try_fold(1usize, |acc, range| {
+            let left = eval_ast_const_expr(range.left(), const_env)?;
+            let right = eval_ast_const_expr(range.right(), const_env)?;
+            acc.checked_mul(left.abs_diff(right) as usize + 1)
+        })?
+    };
+    Some(ExprType {
+        width,
+        signed: is_signed_from_ref_node(node).unwrap_or(false),
+    })
+}
+
+fn tf_params(
+    list: &sv_parser::TfPortList,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Vec<FunctionParam> {
+    let mut params = Vec::new();
+    let mut previous_type = None;
+    for port in list.nodes.0.contents() {
+        let type_node = RefNode::DataTypeOrImplicit(&port.nodes.3);
+        let inferred_type =
+            value_type_from_ref_node(type_node.clone(), syntax_tree, const_env, type_aliases);
+        let omitted_type = matches!(
+            port.nodes.3,
+            sv_parser::DataTypeOrImplicit::ImplicitDataType(_)
+        ) && is_signed_from_ref_node(type_node.clone()).is_none()
+            && packed_ranges_from_ref_node(type_node.clone(), syntax_tree).is_empty();
+        let (name, r#type) = if let Some((identifier, _, _)) = port.nodes.4.as_ref() {
+            let Some(name) = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
+            else {
+                continue;
+            };
+            let r#type = if port.nodes.1.is_none() && omitted_type {
+                previous_type.or(inferred_type)
+            } else {
+                inferred_type
+            };
+            (name, r#type)
+        } else {
+            // An identifier following a comma is syntactically ambiguous with a
+            // user-defined type. sv-parser represents the shorthand `a, b` as a
+            // type-only item, so reinterpret an unknown type name as the next
+            // parameter and inherit the preceding item's type.
+            if type_alias_from_ref_node(type_node.clone(), syntax_tree, type_aliases).is_some() {
+                continue;
+            }
+            let Some(name) = identifier_text(type_node, syntax_tree) else {
+                continue;
+            };
+            let r#type = if port.nodes.1.is_none() {
+                previous_type
+            } else {
+                Some(ExprType {
+                    width: 1,
+                    signed: false,
+                })
+            };
+            (name, r#type)
+        };
+        previous_type = r#type;
+        params.push(FunctionParam {
+            name,
+            width: r#type.map(|r#type| r#type.width),
+            signed: r#type.is_some_and(|r#type| r#type.signed),
+        });
+    }
+    params
+}
+
+fn tf_item_params(
+    items: &[sv_parser::TfItemDeclaration],
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Vec<FunctionParam> {
+    let mut params = Vec::new();
+    for item in items {
+        let sv_parser::TfItemDeclaration::TfPortDeclaration(declaration) = item else {
+            continue;
+        };
+        let r#type = value_type_from_ref_node(
+            RefNode::DataTypeOrImplicit(&declaration.nodes.3),
+            syntax_tree,
+            const_env,
+            type_aliases,
+        );
+        for (identifier, _, _) in declaration.nodes.4.nodes.0.contents() {
+            let Some(name) = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
+            else {
+                continue;
+            };
+            params.push(FunctionParam {
+                name,
+                width: r#type.map(|r#type| r#type.width),
+                signed: r#type.is_some_and(|r#type| r#type.signed),
+            });
+        }
+    }
+    params
+}
+
+fn value_type_from_ref_node(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<ExprType> {
+    let alias = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases);
+    if alias.is_none()
+        && let Some(r#type) = integer_atom_expr_type(node.clone())
+    {
+        return Some(r#type);
+    }
+    let direct_ranges;
+    let ranges = if let Some(alias) = &alias {
+        alias.packed_ranges()
+    } else {
+        direct_ranges = packed_ranges_from_ref_node(node.clone(), syntax_tree);
+        &direct_ranges
+    };
+    let width = if ranges.is_empty() {
+        1
+    } else {
+        ranges.iter().try_fold(1usize, |acc, range| {
+            let left = eval_ast_const_expr(range.left(), const_env)?;
+            let right = eval_ast_const_expr(range.right(), const_env)?;
+            acc.checked_mul(left.abs_diff(right) as usize + 1)
+        })?
+    };
+    Some(ExprType {
+        width,
+        signed: alias
+            .as_ref()
+            .map(|r#type| r#type.is_signed())
+            .unwrap_or_else(|| is_signed_from_ref_node(node).unwrap_or(false)),
+    })
+}
+
+fn integer_atom_expr_type(node: RefNode<'_>) -> Option<ExprType> {
+    let atom = unwrap_node!(node.clone(), IntegerAtomType)?;
+    let RefNode::IntegerAtomType(atom) = atom else {
+        return None;
+    };
+    let (width, default_signed) = match atom {
+        sv_parser::IntegerAtomType::Byte(_) => (8, true),
+        sv_parser::IntegerAtomType::Shortint(_) => (16, true),
+        sv_parser::IntegerAtomType::Int(_) | sv_parser::IntegerAtomType::Integer(_) => (32, true),
+        sv_parser::IntegerAtomType::Longint(_) => (64, true),
+        sv_parser::IntegerAtomType::Time(_) => (64, false),
+    };
+    Some(ExprType {
+        width,
+        signed: is_signed_from_ref_node(node).unwrap_or(default_signed),
+    })
 }
 
 fn function_body_expr(
@@ -1889,19 +2362,11 @@ fn function_expr_from_case_statement(
 }
 
 fn case_item_condition(case_expr: Expr, item_expr: Expr) -> Expr {
-    if expr_is_literal_one(&case_expr) {
-        item_expr
-    } else {
-        Expr::Binary {
-            left: Box::new(case_expr),
-            op: BinaryOp::Eq,
-            right: Box::new(item_expr),
-        }
+    Expr::Binary {
+        left: Box::new(case_expr),
+        op: BinaryOp::EqCase,
+        right: Box::new(item_expr),
     }
-}
-
-fn expr_is_literal_one(expr: &Expr) -> bool {
-    matches!(expr, Expr::Literal(value) if value == "1" || value == "1'b1")
 }
 
 fn comb_processes_from_module_node(
@@ -2366,9 +2831,21 @@ fn substitute_assignment_constants(
     assignment: Assignment,
     const_env: &HashMap<String, i128>,
 ) -> Assignment {
+    substitute_assignment_constants_with_parameter_literals(assignment, const_env, &HashMap::new())
+}
+
+fn substitute_assignment_constants_with_parameter_literals(
+    assignment: Assignment,
+    const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
+) -> Assignment {
     Assignment::new(
         substitute_lvalue_constants(assignment.lhs, const_env),
-        substitute_expr_constants(assignment.rhs, const_env),
+        substitute_expr_constants_with_parameter_literals(
+            assignment.rhs,
+            const_env,
+            parameter_literals,
+        ),
     )
 }
 
@@ -2383,55 +2860,123 @@ fn substitute_lvalue_constants(lvalue: LValue, const_env: &HashMap<String, i128>
     }
 }
 
-fn substitute_expr_constants(expr: Expr, const_env: &HashMap<String, i128>) -> Expr {
+fn substitute_expr_constants_with_parameter_literals(
+    expr: Expr,
+    const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
+) -> Expr {
     match expr {
-        Expr::Ident(name) => const_env
+        Expr::Ident(name) => parameter_literals
             .get(&name)
-            .filter(|_| !const_env.contains_key(&parameter_marker(&name)))
-            .map(|value| Expr::Literal(value.to_string()))
+            .cloned()
+            .or_else(|| {
+                const_env
+                    .get(&name)
+                    .filter(|_| !const_env.contains_key(&parameter_marker(&name)))
+                    .map(|value| Expr::Literal(value.to_string()))
+            })
             .unwrap_or(Expr::Ident(name)),
         Expr::Literal(value) => Expr::Literal(value),
         Expr::Select { expr, msb, lsb } => Expr::Select {
-            expr: Box::new(substitute_expr_constants(*expr, const_env)),
+            expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                *expr,
+                const_env,
+                parameter_literals,
+            )),
             msb: substitute_const_expr_constants(msb, const_env),
             lsb: substitute_const_expr_constants(lsb, const_env),
         },
         Expr::Concat(parts) => Expr::Concat(
             parts
                 .into_iter()
-                .map(|part| substitute_expr_constants(part, const_env))
+                .map(|part| {
+                    substitute_expr_constants_with_parameter_literals(
+                        part,
+                        const_env,
+                        parameter_literals,
+                    )
+                })
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
             count: substitute_const_expr_constants(count, const_env),
             parts: parts
                 .into_iter()
-                .map(|part| substitute_expr_constants(part, const_env))
+                .map(|part| {
+                    substitute_expr_constants_with_parameter_literals(
+                        part,
+                        const_env,
+                        parameter_literals,
+                    )
+                })
                 .collect(),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                *expr,
+                const_env,
+                parameter_literals,
+            )),
+            width,
+            signed,
         },
         Expr::Unary { op, expr } => Expr::Unary {
             op,
-            expr: Box::new(substitute_expr_constants(*expr, const_env)),
+            expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                *expr,
+                const_env,
+                parameter_literals,
+            )),
         },
         Expr::Binary { left, op, right } => Expr::Binary {
-            left: Box::new(substitute_expr_constants(*left, const_env)),
+            left: Box::new(substitute_expr_constants_with_parameter_literals(
+                *left,
+                const_env,
+                parameter_literals,
+            )),
             op,
-            right: Box::new(substitute_expr_constants(*right, const_env)),
+            right: Box::new(substitute_expr_constants_with_parameter_literals(
+                *right,
+                const_env,
+                parameter_literals,
+            )),
         },
         Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => Expr::Mux {
-            condition: Box::new(substitute_expr_constants(*condition, const_env)),
-            then_expr: Box::new(substitute_expr_constants(*then_expr, const_env)),
-            else_expr: Box::new(substitute_expr_constants(*else_expr, const_env)),
+            condition: Box::new(substitute_expr_constants_with_parameter_literals(
+                *condition,
+                const_env,
+                parameter_literals,
+            )),
+            then_expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                *then_expr,
+                const_env,
+                parameter_literals,
+            )),
+            else_expr: Box::new(substitute_expr_constants_with_parameter_literals(
+                *else_expr,
+                const_env,
+                parameter_literals,
+            )),
         },
         Expr::Call { name, args } => Expr::Call {
             name,
             args: args
                 .into_iter()
-                .map(|arg| substitute_expr_constants(arg, const_env))
+                .map(|arg| {
+                    substitute_expr_constants_with_parameter_literals(
+                        arg,
+                        const_env,
+                        parameter_literals,
+                    )
+                })
                 .collect(),
         },
     }
@@ -2447,7 +2992,37 @@ fn expand_process_calls(
         process
             .assignments
             .into_iter()
-            .map(|assignment| expand_assignment_calls(assignment, functions))
+            .map(|assignment| expand_assignment_calls(assignment, functions, false))
+            .collect(),
+    )
+}
+
+fn expand_ff_process_calls(
+    process: FfProcess,
+    functions: &HashMap<String, Function>,
+    const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
+) -> FfProcess {
+    FfProcess::new(
+        process.events,
+        process
+            .assignments
+            .into_iter()
+            .map(|assignment| {
+                let condition = assignment.condition.map(|condition| {
+                    substitute_expr_constants_with_parameter_literals(
+                        expand_expr_calls(condition, functions, 0, true),
+                        const_env,
+                        parameter_literals,
+                    )
+                });
+                let assignment = substitute_assignment_constants_with_parameter_literals(
+                    expand_assignment_calls(assignment.assignment, functions, true),
+                    const_env,
+                    parameter_literals,
+                );
+                ConditionalAssignment::new(condition, assignment)
+            })
             .collect(),
     )
 }
@@ -2455,14 +3030,20 @@ fn expand_process_calls(
 fn expand_assignment_calls(
     assignment: Assignment,
     functions: &HashMap<String, Function>,
+    apply_return_type: bool,
 ) -> Assignment {
     Assignment::new(
         assignment.lhs,
-        expand_expr_calls(assignment.rhs, functions, 0),
+        expand_expr_calls(assignment.rhs, functions, 0, apply_return_type),
     )
 }
 
-fn expand_expr_calls(expr: Expr, functions: &HashMap<String, Function>, depth: usize) -> Expr {
+fn expand_expr_calls(
+    expr: Expr,
+    functions: &HashMap<String, Function>,
+    depth: usize,
+    apply_return_type: bool,
+) -> Expr {
     if depth > 32 {
         return expr;
     }
@@ -2470,45 +3051,94 @@ fn expand_expr_calls(expr: Expr, functions: &HashMap<String, Function>, depth: u
         Expr::Ident(name) => Expr::Ident(name),
         Expr::Literal(value) => Expr::Literal(value),
         Expr::Select { expr, msb, lsb } => Expr::Select {
-            expr: Box::new(expand_expr_calls(*expr, functions, depth)),
+            expr: Box::new(expand_expr_calls(
+                *expr,
+                functions,
+                depth,
+                apply_return_type,
+            )),
             msb,
             lsb,
         },
         Expr::Concat(parts) => Expr::Concat(
             parts
                 .into_iter()
-                .map(|part| expand_expr_calls(part, functions, depth))
+                .map(|part| expand_expr_calls(part, functions, depth, apply_return_type))
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
             count,
             parts: parts
                 .into_iter()
-                .map(|part| expand_expr_calls(part, functions, depth))
+                .map(|part| expand_expr_calls(part, functions, depth, apply_return_type))
                 .collect(),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(expand_expr_calls(
+                *expr,
+                functions,
+                depth,
+                apply_return_type,
+            )),
+            width,
+            signed,
         },
         Expr::Unary { op, expr } => Expr::Unary {
             op,
-            expr: Box::new(expand_expr_calls(*expr, functions, depth)),
+            expr: Box::new(expand_expr_calls(
+                *expr,
+                functions,
+                depth,
+                apply_return_type,
+            )),
         },
         Expr::Binary { left, op, right } => Expr::Binary {
-            left: Box::new(expand_expr_calls(*left, functions, depth)),
+            left: Box::new(expand_expr_calls(
+                *left,
+                functions,
+                depth,
+                apply_return_type,
+            )),
             op,
-            right: Box::new(expand_expr_calls(*right, functions, depth)),
+            right: Box::new(expand_expr_calls(
+                *right,
+                functions,
+                depth,
+                apply_return_type,
+            )),
         },
         Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => Expr::Mux {
-            condition: Box::new(expand_expr_calls(*condition, functions, depth)),
-            then_expr: Box::new(expand_expr_calls(*then_expr, functions, depth)),
-            else_expr: Box::new(expand_expr_calls(*else_expr, functions, depth)),
+            condition: Box::new(expand_expr_calls(
+                *condition,
+                functions,
+                depth,
+                apply_return_type,
+            )),
+            then_expr: Box::new(expand_expr_calls(
+                *then_expr,
+                functions,
+                depth,
+                apply_return_type,
+            )),
+            else_expr: Box::new(expand_expr_calls(
+                *else_expr,
+                functions,
+                depth,
+                apply_return_type,
+            )),
         },
         Expr::Call { name, args } => {
             let args = args
                 .into_iter()
-                .map(|arg| expand_expr_calls(arg, functions, depth))
+                .map(|arg| expand_expr_calls(arg, functions, depth, apply_return_type))
                 .collect::<Vec<_>>();
             let Some(function) = functions.get(&name) else {
                 return Expr::Call { name, args };
@@ -2519,11 +3149,31 @@ fn expand_expr_calls(expr: Expr, functions: &HashMap<String, Function>, depth: u
             let env = function
                 .params
                 .iter()
-                .cloned()
                 .zip(args)
+                .map(|(param, arg)| {
+                    let arg = if apply_return_type && let Some(width) = param.width {
+                        Expr::Resize {
+                            expr: Box::new(arg),
+                            width,
+                            signed: param.signed,
+                        }
+                    } else {
+                        arg
+                    };
+                    (param.name.clone(), arg)
+                })
                 .collect::<HashMap<_, _>>();
             let body = substitute_expr_idents(function.body.clone(), &env);
-            expand_expr_calls(body, functions, depth + 1)
+            let expanded = expand_expr_calls(body, functions, depth + 1, apply_return_type);
+            if apply_return_type && let Some(width) = function.return_width {
+                Expr::Resize {
+                    expr: Box::new(expanded),
+                    width,
+                    signed: function.return_signed,
+                }
+            } else {
+                expanded
+            }
         }
     }
 }
@@ -2549,6 +3199,15 @@ fn substitute_expr_idents(expr: Expr, env: &HashMap<String, Expr>) -> Expr {
                 .into_iter()
                 .map(|part| substitute_expr_idents(part, env))
                 .collect(),
+        },
+        Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => Expr::Resize {
+            expr: Box::new(substitute_expr_idents(*expr, env)),
+            width,
+            signed,
         },
         Expr::Unary { op, expr } => Expr::Unary {
             op,
@@ -2684,28 +3343,31 @@ fn ff_processes_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
-) -> Vec<FfProcess> {
+) -> Result<Vec<FfProcess>, AnalyzerError> {
     let mut processes = Vec::new();
     for item in module_non_port_items(node) {
         ff_processes_from_non_port_module_item(
             item,
             syntax_tree,
             const_env,
+            parameter_literals,
             packed_dimensions,
             &mut processes,
-        );
+        )?;
     }
-    processes
+    Ok(processes)
 }
 
 fn ff_processes_from_non_port_module_item(
     item: &sv_parser::NonPortModuleItem,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     match item {
         sv_parser::NonPortModuleItem::GenerateRegion(region) => {
             for item in &region.nodes.1 {
@@ -2713,9 +3375,10 @@ fn ff_processes_from_non_port_module_item(
                     item,
                     syntax_tree,
                     const_env,
+                    parameter_literals,
                     packed_dimensions,
                     processes,
-                );
+                )?;
             }
         }
         sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) => {
@@ -2723,77 +3386,90 @@ fn ff_processes_from_non_port_module_item(
                 item,
                 syntax_tree,
                 const_env,
+                parameter_literals,
                 packed_dimensions,
                 processes,
-            );
+            )?;
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn ff_processes_from_generate_item(
     item: &sv_parser::GenerateItem,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
         ff_processes_from_module_or_generate_item(
             item,
             syntax_tree,
             const_env,
+            parameter_literals,
             packed_dimensions,
             processes,
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn ff_processes_from_module_or_generate_item(
     item: &sv_parser::ModuleOrGenerateItem,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     if let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item {
         ff_processes_from_module_common_item(
             &item.nodes.1,
             syntax_tree,
             const_env,
+            parameter_literals,
             packed_dimensions,
             processes,
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn ff_processes_from_module_common_item(
     item: &sv_parser::ModuleCommonItem,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     match item {
         sv_parser::ModuleCommonItem::AlwaysConstruct(always) => {
-            if let Some(process) =
-                ff_process_from_always_construct(always, syntax_tree, const_env, packed_dimensions)
-            {
+            if let Some(process) = ff_process_from_always_construct(
+                always,
+                syntax_tree,
+                const_env,
+                parameter_literals,
+                packed_dimensions,
+            )? {
                 processes.push(process);
             }
         }
         sv_parser::ModuleCommonItem::ConditionalGenerateConstruct(generate) => {
             let sv_parser::ConditionalGenerateConstruct::If(generate) = &**generate else {
-                return;
+                return Ok(());
             };
             let Some(condition) = const_expr_from_ref_node(
                 RefNode::ConstantExpression(&generate.nodes.1.nodes.1),
                 syntax_tree,
             ) else {
-                return;
+                return Ok(());
             };
             let Some(condition_value) = eval_ast_const_expr(&condition, const_env) else {
-                return;
+                return Ok(());
             };
             let block = if condition_value != 0 {
                 Some(&generate.nodes.2)
@@ -2805,31 +3481,35 @@ fn ff_processes_from_module_common_item(
                     block,
                     syntax_tree,
                     const_env,
+                    parameter_literals,
                     packed_dimensions,
                     processes,
-                );
+                )?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn ff_processes_from_generate_block(
     block: &sv_parser::GenerateBlock,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<FfProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     match block {
         sv_parser::GenerateBlock::GenerateItem(item) => {
             ff_processes_from_generate_item(
                 item,
                 syntax_tree,
                 const_env,
+                parameter_literals,
                 packed_dimensions,
                 processes,
-            );
+            )?;
         }
         sv_parser::GenerateBlock::Multiple(block) => {
             for item in &block.nodes.3 {
@@ -2837,44 +3517,61 @@ fn ff_processes_from_generate_block(
                     item,
                     syntax_tree,
                     const_env,
+                    parameter_literals,
                     packed_dimensions,
                     processes,
-                );
+                )?;
             }
         }
     }
+    Ok(())
 }
 
 fn ff_process_from_always_construct(
     always: &sv_parser::AlwaysConstruct,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
-) -> Option<FfProcess> {
+) -> Result<Option<FfProcess>, AnalyzerError> {
     if !matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_)) {
-        return None;
+        return Ok(None);
     }
-    let (events, body) = ff_event_control_and_body(&always.nodes.1, syntax_tree)?;
+    let Some((events, body)) = ff_event_control_and_body(&always.nodes.1, syntax_tree) else {
+        return Ok(None);
+    };
     let mut assignments = Vec::new();
     conditional_assignments_from_statement_or_null(
         body,
         None,
         syntax_tree,
+        const_env,
         packed_dimensions,
         &mut assignments,
-    );
+    )?;
     let assignments = assignments
         .into_iter()
         .map(|assignment| {
             ConditionalAssignment::new(
-                assignment
-                    .condition
-                    .map(|condition| substitute_expr_constants(condition, const_env)),
-                substitute_assignment_constants(assignment.assignment, const_env),
+                assignment.condition.map(|condition| {
+                    substitute_expr_constants_with_parameter_literals(
+                        condition,
+                        const_env,
+                        parameter_literals,
+                    )
+                }),
+                substitute_assignment_constants_with_parameter_literals(
+                    assignment.assignment,
+                    const_env,
+                    parameter_literals,
+                ),
             )
         })
         .collect::<Vec<_>>();
-    (!events.is_empty() && !assignments.is_empty()).then(|| FfProcess::new(events, assignments))
+    Ok(
+        (!events.is_empty() && !assignments.is_empty())
+            .then(|| FfProcess::new(events, assignments)),
+    )
 }
 
 fn ff_event_control_and_body<'a>(
@@ -2938,27 +3635,31 @@ fn conditional_assignments_from_statement_or_null(
     stmt: &sv_parser::StatementOrNull,
     condition: Option<Expr>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     assignments: &mut Vec<ConditionalAssignment>,
-) {
+) -> Result<(), AnalyzerError> {
     if let sv_parser::StatementOrNull::Statement(stmt) = stmt {
         conditional_assignments_from_statement(
             stmt,
             condition,
             syntax_tree,
+            const_env,
             packed_dimensions,
             assignments,
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn conditional_assignments_from_statement(
     stmt: &sv_parser::Statement,
     condition: Option<Expr>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     assignments: &mut Vec<ConditionalAssignment>,
-) {
+) -> Result<(), AnalyzerError> {
     match &stmt.nodes.2 {
         sv_parser::StatementItem::NonblockingAssignment(assignment) => {
             let lhs =
@@ -2981,9 +3682,10 @@ fn conditional_assignments_from_statement(
                     stmt,
                     condition.clone(),
                     syntax_tree,
+                    const_env,
                     packed_dimensions,
                     assignments,
-                );
+                )?;
             }
         }
         sv_parser::StatementItem::ConditionalStatement(stmt) => {
@@ -2991,25 +3693,38 @@ fn conditional_assignments_from_statement(
                 stmt,
                 condition,
                 syntax_tree,
+                const_env,
                 packed_dimensions,
                 assignments,
-            );
+            )?;
+        }
+        sv_parser::StatementItem::CaseStatement(stmt) => {
+            conditional_assignments_from_case_statement(
+                stmt,
+                condition,
+                syntax_tree,
+                const_env,
+                packed_dimensions,
+                assignments,
+            )?;
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn conditional_assignments_from_conditional_statement(
     stmt: &sv_parser::ConditionalStatement,
     parent_condition: Option<Expr>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     assignments: &mut Vec<ConditionalAssignment>,
-) {
+) -> Result<(), AnalyzerError> {
     let Some(if_condition) =
         expr_from_cond_predicate(&stmt.nodes.2.nodes.1, syntax_tree, packed_dimensions)
     else {
-        return;
+        return Ok(());
     };
     let mut prior_false = Vec::new();
     let then_condition = combine_expr_conditions(parent_condition.clone(), if_condition.clone());
@@ -3017,9 +3732,10 @@ fn conditional_assignments_from_conditional_statement(
         &stmt.nodes.3,
         then_condition,
         syntax_tree,
+        const_env,
         packed_dimensions,
         assignments,
-    );
+    )?;
     prior_false.push(Expr::Unary {
         op: UnaryOp::LogicNot,
         expr: Box::new(if_condition),
@@ -3029,7 +3745,7 @@ fn conditional_assignments_from_conditional_statement(
         let Some(branch_condition) =
             expr_from_cond_predicate(&predicate.nodes.1, syntax_tree, packed_dimensions)
         else {
-            return;
+            return Ok(());
         };
         let mut terms = prior_false.clone();
         terms.push(branch_condition.clone());
@@ -3038,9 +3754,10 @@ fn conditional_assignments_from_conditional_statement(
             branch,
             condition,
             syntax_tree,
+            const_env,
             packed_dimensions,
             assignments,
-        );
+        )?;
         prior_false.push(Expr::Unary {
             op: UnaryOp::LogicNot,
             expr: Box::new(branch_condition),
@@ -3053,10 +3770,97 @@ fn conditional_assignments_from_conditional_statement(
             branch,
             condition,
             syntax_tree,
+            const_env,
             packed_dimensions,
             assignments,
-        );
+        )?;
     }
+    Ok(())
+}
+
+fn conditional_assignments_from_case_statement(
+    stmt: &sv_parser::CaseStatement,
+    parent_condition: Option<Expr>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    assignments: &mut Vec<ConditionalAssignment>,
+) -> Result<(), AnalyzerError> {
+    let sv_parser::CaseStatement::Normal(stmt) = stmt else {
+        return Ok(());
+    };
+    if !matches!(&stmt.nodes.1, sv_parser::CaseKeyword::Case(_)) {
+        return Ok(());
+    }
+    let Some(case_expr) = expr_from_expression_with_types(
+        &stmt.nodes.2.nodes.1.nodes.0,
+        syntax_tree,
+        packed_dimensions,
+    ) else {
+        return Ok(());
+    };
+
+    let mut branches = Vec::new();
+    let mut default_branch = None;
+    for item in std::iter::once(&stmt.nodes.3).chain(stmt.nodes.4.iter()) {
+        match item {
+            sv_parser::CaseItem::NonDefault(item) => {
+                let mut conditions = Vec::new();
+                for expr in item.nodes.0.contents() {
+                    let Some(expr) = expr_from_expression_with_types(
+                        &expr.nodes.0,
+                        syntax_tree,
+                        packed_dimensions,
+                    ) else {
+                        continue;
+                    };
+                    conditions.push(case_item_condition(case_expr.clone(), expr));
+                }
+                if let Some(condition) = conditions.into_iter().reduce(|left, right| Expr::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::LogicOr,
+                    right: Box::new(right),
+                }) {
+                    branches.push((condition, &item.nodes.2));
+                }
+            }
+            sv_parser::CaseItem::Default(item) => {
+                default_branch = Some(&item.nodes.2);
+            }
+        }
+    }
+
+    let mut prior_false = Vec::new();
+    for (branch_condition, branch) in branches {
+        let mut terms = prior_false.clone();
+        terms.push(branch_condition.clone());
+        let condition = combine_expr_condition_terms(parent_condition.clone(), terms);
+        conditional_assignments_from_statement_or_null(
+            branch,
+            condition,
+            syntax_tree,
+            const_env,
+            packed_dimensions,
+            assignments,
+        )?;
+        prior_false.push(Expr::Unary {
+            op: UnaryOp::LogicNot,
+            expr: Box::new(branch_condition),
+        });
+    }
+
+    if let Some(branch) = default_branch {
+        let condition = combine_expr_condition_terms(parent_condition, prior_false);
+        conditional_assignments_from_statement_or_null(
+            branch,
+            condition,
+            syntax_tree,
+            const_env,
+            packed_dimensions,
+            assignments,
+        )?;
+    }
+    Ok(())
 }
 
 fn expr_from_cond_predicate(
@@ -3076,11 +3880,13 @@ fn combine_expr_conditions(parent: Option<Expr>, child: Expr) -> Option<Expr> {
 }
 
 fn combine_expr_condition_terms(parent: Option<Expr>, terms: Vec<Expr>) -> Option<Expr> {
-    let condition = terms.into_iter().reduce(|left, right| Expr::Binary {
+    let Some(condition) = terms.into_iter().reduce(|left, right| Expr::Binary {
         left: Box::new(left),
         op: BinaryOp::LogicAnd,
         right: Box::new(right),
-    })?;
+    }) else {
+        return parent;
+    };
     Some(match parent {
         Some(parent) => Expr::Binary {
             left: Box::new(parent),
@@ -3735,7 +4541,12 @@ fn binary_precedence(op: BinaryOp) -> u8 {
         BinaryOp::Add | BinaryOp::Sub => 10,
         BinaryOp::Shl | BinaryOp::Shr => 9,
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => 8,
-        BinaryOp::Eq | BinaryOp::Ne => 7,
+        BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::EqCase
+        | BinaryOp::NeCase
+        | BinaryOp::EqWildcard
+        | BinaryOp::NeWildcard => 7,
         BinaryOp::BitAnd => 6,
         BinaryOp::BitXor => 5,
         BinaryOp::BitOr => 4,
@@ -3760,6 +4571,7 @@ fn expr_to_const(expr: Expr) -> Option<ConstExpr> {
         Expr::Select { .. }
         | Expr::Concat(_)
         | Expr::RepeatConcat { .. }
+        | Expr::Resize { .. }
         | Expr::Mux { .. }
         | Expr::Call { .. } => None,
     }
@@ -4218,8 +5030,12 @@ fn binary_op_from_symbol(symbol: &Locate, syntax_tree: &SyntaxTree) -> Option<Bi
         "^" => Some(BinaryOp::BitXor),
         "&&" => Some(BinaryOp::LogicAnd),
         "||" => Some(BinaryOp::LogicOr),
-        "==" | "==?" => Some(BinaryOp::Eq),
-        "!=" | "!=?" => Some(BinaryOp::Ne),
+        "==" => Some(BinaryOp::Eq),
+        "!=" => Some(BinaryOp::Ne),
+        "===" => Some(BinaryOp::EqCase),
+        "!==" => Some(BinaryOp::NeCase),
+        "==?" => Some(BinaryOp::EqWildcard),
+        "!=?" => Some(BinaryOp::NeWildcard),
         "<" => Some(BinaryOp::Lt),
         "<=" => Some(BinaryOp::Le),
         ">" => Some(BinaryOp::Gt),

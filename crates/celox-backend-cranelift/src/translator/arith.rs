@@ -307,6 +307,8 @@ impl SIRTranslator {
                 op,
                 BinaryOp::Eq
                     | BinaryOp::Ne
+                    | BinaryOp::EqCase
+                    | BinaryOp::NeCase
                     | BinaryOp::EqWildcard
                     | BinaryOp::NeWildcard
                     | BinaryOp::LtU
@@ -410,6 +412,8 @@ impl SIRTranslator {
                 }
                 BinaryOp::Eq => build_icmp(state.builder, IntCC::Equal),
                 BinaryOp::Ne => build_icmp(state.builder, IntCC::NotEqual),
+                BinaryOp::EqCase => build_icmp(state.builder, IntCC::Equal),
+                BinaryOp::NeCase => build_icmp(state.builder, IntCC::NotEqual),
                 BinaryOp::LtS => build_icmp(state.builder, IntCC::SignedLessThan),
                 BinaryOp::LtU => build_icmp(state.builder, IntCC::UnsignedLessThan),
                 BinaryOp::GtS => build_icmp(state.builder, IntCC::SignedGreaterThan),
@@ -510,6 +514,24 @@ impl SIRTranslator {
                             .ins()
                             .select(shift_amt_has_x, all_ones, shifted_m);
                         apply_d_width_mask_arith(state, m, common_ty, d_width)
+                    }
+                    BinaryOp::EqCase | BinaryOp::NeCase => {
+                        let value_diff = state.builder.ins().bxor(l, r);
+                        let mask_diff = state.builder.ins().bxor(l_m, r_m);
+                        let diff = state.builder.ins().bor(value_diff, mask_diff);
+                        let zero = state.builder.ins().iconst(common_ty, 0);
+                        let matches = state.builder.ins().icmp(
+                            if matches!(op, BinaryOp::EqCase) {
+                                IntCC::Equal
+                            } else {
+                                IntCC::NotEqual
+                            },
+                            diff,
+                            zero,
+                        );
+                        let one = state.builder.ins().iconst(common_ty, 1);
+                        res_v = state.builder.ins().select(matches, one, zero);
+                        zero
                     }
                     BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
                         // IEEE 1800 ==?/!=?: RHS X/Z bits are wildcards (don't care).
@@ -1048,6 +1070,41 @@ impl SIRTranslator {
                             res_chunks = new_res;
 
                             vec![mask_val; final_num_chunks]
+                        }
+                        BinaryOp::EqCase | BinaryOp::NeCase => {
+                            let mut accumulated_diff = state.builder.ins().iconst(types::I64, 0);
+                            for i in 0..num_chunks {
+                                let lv = get_chunk_as_i64(state.builder, &l_chunks, i);
+                                let rv = get_chunk_as_i64(state.builder, &r_chunks, i);
+                                let lm = get_chunk_as_i64(state.builder, &l_masks, i);
+                                let rm = get_chunk_as_i64(state.builder, &r_masks, i);
+                                let value_diff = state.builder.ins().bxor(lv, rv);
+                                let mask_diff = state.builder.ins().bxor(lm, rm);
+                                let chunk_diff = state.builder.ins().bor(value_diff, mask_diff);
+                                accumulated_diff =
+                                    state.builder.ins().bor(accumulated_diff, chunk_diff);
+                            }
+
+                            let zero = state.builder.ins().iconst(types::I64, 0);
+                            let matches = state.builder.ins().icmp(
+                                if matches!(op, BinaryOp::EqCase) {
+                                    IntCC::Equal
+                                } else {
+                                    IntCC::NotEqual
+                                },
+                                accumulated_diff,
+                                zero,
+                            );
+                            let one = state.builder.ins().iconst(types::I64, 1);
+                            let result = state.builder.ins().select(matches, one, zero);
+                            res_chunks.clear();
+                            res_chunks.push(result);
+                            while res_chunks.len() < final_num_chunks {
+                                res_chunks.push(state.builder.ins().iconst(types::I64, 0));
+                            }
+                            (0..final_num_chunks)
+                                .map(|_| state.builder.ins().iconst(types::I64, 0))
+                                .collect()
                         }
                         BinaryOp::LogicAnd | BinaryOp::LogicOr => {
                             // IEEE 1800 dominant-value: 0 for &&, 1 for ||

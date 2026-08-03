@@ -214,6 +214,8 @@ pub enum BinaryOp {
     Sar, // Arithmetic Shift Right (>>>)
     Eq,
     Ne,
+    EqCase,
+    NeCase,
     LtU,
     LtS, // Less Than (Unsigned / Signed)
     LeU,
@@ -240,6 +242,8 @@ impl BinaryOp {
                 | BinaryOp::Xor
                 | BinaryOp::Eq
                 | BinaryOp::Ne
+                | BinaryOp::EqCase
+                | BinaryOp::NeCase
                 | BinaryOp::LogicAnd
                 | BinaryOp::LogicOr
         )
@@ -264,6 +268,8 @@ impl fmt::Display for BinaryOp {
             BinaryOp::Sar => "Sar",
             BinaryOp::Eq => "Eq",
             BinaryOp::Ne => "Ne",
+            BinaryOp::EqCase => "EqCase",
+            BinaryOp::NeCase => "NeCase",
             BinaryOp::LtU => "LtU",
             BinaryOp::LtS => "LtS",
             BinaryOp::LeU => "LeU",

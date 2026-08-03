@@ -779,7 +779,7 @@ fn match_exact_case_condition_inner_impl(
     let SIRInstruction::Binary(
         compare_result,
         lhs,
-        op @ (BinaryOp::Eq | BinaryOp::EqWildcard),
+        op @ (BinaryOp::Eq | BinaryOp::EqCase | BinaryOp::EqWildcard),
         rhs,
     ) = instruction_defining(eu, def_sites, cursor)?
     else {
@@ -795,7 +795,7 @@ fn match_exact_case_condition_inner_impl(
     let lhs_constant = exact_constant(eu, def_sites, *lhs);
     let rhs_constant = exact_constant(eu, def_sites, *rhs);
     let (selector, key_reg, key) = match op {
-        BinaryOp::Eq => match (lhs_constant, rhs_constant) {
+        BinaryOp::Eq | BinaryOp::EqCase => match (lhs_constant, rhs_constant) {
             (None, Some(key)) => (*lhs, *rhs, key),
             (Some(key), None) => (*rhs, *lhs, key),
             _ => return None,
@@ -1324,7 +1324,11 @@ fn is_exact_condition_dag_instruction(inst: &SIRInstruction<RegionedAbsoluteAddr
             | SIRInstruction::Binary(
                 _,
                 _,
-                BinaryOp::Eq | BinaryOp::EqWildcard | BinaryOp::LogicOr | BinaryOp::Or,
+                BinaryOp::Eq
+                    | BinaryOp::EqCase
+                    | BinaryOp::EqWildcard
+                    | BinaryOp::LogicOr
+                    | BinaryOp::Or,
                 _,
             )
             | SIRInstruction::Unary(_, UnaryOp::Ident, _)
@@ -1529,6 +1533,8 @@ fn runtime_instruction_cost(
                 BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => 4u128.saturating_mul(n),
                 BinaryOp::Eq
                 | BinaryOp::Ne
+                | BinaryOp::EqCase
+                | BinaryOp::NeCase
                 | BinaryOp::EqWildcard
                 | BinaryOp::NeWildcard
                 | BinaryOp::LtU
@@ -3046,6 +3052,35 @@ mod tests {
         assert!(eu.blocks.len() > 1);
     }
 
+    #[test]
+    fn rewrites_two_state_case_equality_chains() {
+        let mut builder = FixtureBuilder::new();
+        let selector = builder.register(4);
+        let factor = builder.immediate(64, 3);
+        let mut previous = builder.expensive_value(17, factor);
+        for key in 0..2 {
+            let cond = builder.exact_condition(selector, key, BinaryOp::EqCase);
+            let value = builder.expensive_value(30 + key, factor);
+            previous = builder.mux(cond, value, previous);
+        }
+        builder.ident(previous);
+        let mut eu = builder.finish(vec![selector]);
+        eu.verify();
+
+        SparseCaseDispatchPass::default().run(&mut eu, &PassOptions::default());
+
+        eu.verify();
+        assert!(eu.blocks.len() > 1);
+        assert!(
+            eu.blocks.values().all(
+                |block| block.instructions.iter().all(|instruction| !matches!(
+                    instruction,
+                    SIRInstruction::Binary(_, _, BinaryOp::EqCase, _)
+                ))
+            )
+        );
+    }
+
     fn evaluate(
         eu: &ExecutionUnit<RegionedAbsoluteAddr>,
         selector: RegisterId,
@@ -3071,7 +3106,7 @@ mod tests {
                         let lhs = values[lhs].clone();
                         let rhs = values[rhs].clone();
                         let value = match op {
-                            BinaryOp::Eq | BinaryOp::EqWildcard => {
+                            BinaryOp::Eq | BinaryOp::EqCase | BinaryOp::EqWildcard => {
                                 BigUint::from(u8::from(lhs == rhs))
                             }
                             BinaryOp::LogicOr => {

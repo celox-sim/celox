@@ -2871,6 +2871,8 @@ fn proof_node_signed(node: NodeId, arena: &SLTNodeArena<VarId>) -> bool {
         SLTNode::Binary(lhs, op, rhs) => match op {
             BinaryOp::Eq
             | BinaryOp::Ne
+            | BinaryOp::EqCase
+            | BinaryOp::NeCase
             | BinaryOp::EqWildcard
             | BinaryOp::NeWildcard
             | BinaryOp::LtU
@@ -3019,6 +3021,8 @@ fn specialized_binary_result_signed(
     match op {
         BinaryOp::Eq
         | BinaryOp::Ne
+        | BinaryOp::EqCase
+        | BinaryOp::NeCase
         | BinaryOp::EqWildcard
         | BinaryOp::NeWildcard
         | BinaryOp::LtU
@@ -3219,8 +3223,12 @@ fn specialize_binary_constant(
             let shift = shift?;
             signed_to_bits(bits_to_signed(&lhs.value, lhs.width) >> shift, result_width)?
         }
-        BinaryOp::Eq | BinaryOp::EqWildcard => bool_value(comparison_lhs == comparison_rhs),
-        BinaryOp::Ne | BinaryOp::NeWildcard => bool_value(comparison_lhs != comparison_rhs),
+        BinaryOp::Eq | BinaryOp::EqCase | BinaryOp::EqWildcard => {
+            bool_value(comparison_lhs == comparison_rhs)
+        }
+        BinaryOp::Ne | BinaryOp::NeCase | BinaryOp::NeWildcard => {
+            bool_value(comparison_lhs != comparison_rhs)
+        }
         BinaryOp::LtU => bool_value(comparison_lhs < comparison_rhs),
         BinaryOp::LeU => bool_value(comparison_lhs <= comparison_rhs),
         BinaryOp::GtU => bool_value(comparison_lhs > comparison_rhs),
@@ -3252,6 +3260,8 @@ fn specialize_binary_constant(
             op,
             BinaryOp::Eq
                 | BinaryOp::Ne
+                | BinaryOp::EqCase
+                | BinaryOp::NeCase
                 | BinaryOp::EqWildcard
                 | BinaryOp::NeWildcard
                 | BinaryOp::LtU

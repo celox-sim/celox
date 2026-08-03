@@ -2924,6 +2924,8 @@ pub(super) fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarI
         SLTNode::Binary(lhs, op, rhs) => match op {
             BinaryOp::Eq
             | BinaryOp::Ne
+            | BinaryOp::EqCase
+            | BinaryOp::NeCase
             | BinaryOp::LtU
             | BinaryOp::LtS
             | BinaryOp::LeU

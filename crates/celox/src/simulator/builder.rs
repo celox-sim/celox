@@ -406,6 +406,7 @@ fn compile_mixed_to_sir_with_layout_mode(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "host-runtime")]
 fn compile_hdl_to_sir_with_layout_mode(
     sources: &[(&str, &Path)],
     sv_sources: &[(&str, &Path)],

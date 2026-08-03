@@ -114,6 +114,91 @@ mod tests {
     }
 
     #[test]
+    fn records_always_ff_case_branches() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic clk,
+                    input logic [1:0] mode,
+                    input logic [7:0] d0,
+                    input logic [7:0] d1,
+                    input logic [7:0] d2,
+                    output logic [7:0] q
+                );
+                    always_ff @(posedge clk) begin
+                        case (mode)
+                            2'b00: q <= d0;
+                            2'b01, 2'b10: q <= d1;
+                            default: q <= d2;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("ff_case.sv"),
+        )
+        .expect("SV analysis should succeed");
+
+        let process = &ir.modules()[0].ff_processes()[0];
+        assert_eq!(process.events().len(), 1);
+        assert_eq!(process.assignments().len(), 3);
+        assert!(
+            process
+                .assignments()
+                .iter()
+                .all(|assignment| assignment.condition().is_some())
+        );
+    }
+
+    #[test]
+    fn accepts_unknown_labels_in_always_ff_case() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic clk,
+                    input logic [1:0] mode,
+                    output logic q
+                );
+                    always_ff @(posedge clk) begin
+                        case (mode)
+                            2'b1x: q <= 1'b1;
+                            default: q <= 1'b0;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("ff_case_unknown_label.sv"),
+        )
+        .expect("X/Z case labels should use exact four-state case equality");
+
+        assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 2);
+    }
+
+    #[test]
+    fn accepts_dynamic_labels_in_always_ff_case() {
+        let ir = analyze_source(
+            r#"
+                module Top(
+                    input logic clk,
+                    input logic [1:0] selector,
+                    input logic [1:0] dynamic_label,
+                    output logic q
+                );
+                    always_ff @(posedge clk) begin
+                        case (selector)
+                            dynamic_label: q <= 1'b1;
+                            default: q <= 1'b0;
+                        endcase
+                    end
+                endmodule
+            "#,
+            Path::new("ff_case_dynamic_label.sv"),
+        )
+        .expect("dynamic labels should use exact four-state case equality");
+
+        assert_eq!(ir.modules()[0].ff_processes()[0].assignments().len(), 2);
+    }
+
+    #[test]
     fn inlines_simple_function_call() {
         let ir = analyze_source(
             r#"
@@ -311,6 +396,7 @@ mod tests {
         match expr {
             ir::Expr::Ident(_) | ir::Expr::Literal(_) => false,
             ir::Expr::Select { expr, .. } => expr_contains_call(expr),
+            ir::Expr::Resize { expr, .. } => expr_contains_call(expr),
             ir::Expr::Concat(parts) | ir::Expr::RepeatConcat { parts, .. } => {
                 parts.iter().any(expr_contains_call)
             }

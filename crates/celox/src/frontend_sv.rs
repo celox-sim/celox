@@ -18,7 +18,8 @@ use celox_frontend_veryl::{
     logic_tree::coerce_node_width,
 };
 use celox_sir::{
-    BlockId, ExecutionUnit, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator, SIRValue,
+    BlockId, ExecutionUnit, RegisterType, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
+    SIRValue,
 };
 use celox_slt::{
     CombObserver, GlueBlockBase, LogicPath, LogicPathTarget, SLTNode, SLTNodeArena, SymbolicStore,
@@ -923,6 +924,16 @@ fn lower_glue_parent_expr(
                 source_ids,
             ))
         }
+        sv::ir::Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => {
+            let (inner, sources, source_ids) =
+                lower_glue_parent_expr(expr, variables, name_to_id, constants, arena)?;
+            let resized = coerce_node_width(arena, inner, Some(*width), *signed).ok()?;
+            Some((resized, sources, source_ids))
+        }
         sv::ir::Expr::Literal(literal) => {
             let literal = sv::typecheck::parse_integral_literal(literal)?;
             Some((
@@ -950,14 +961,79 @@ fn lower_glue_parent_expr(
             ))
         }
         sv::ir::Expr::Binary { left, op, right } => {
-            let (left, mut sources, mut source_ids) =
-                lower_glue_parent_expr(left, variables, name_to_id, constants, arena)?;
-            let (right, right_sources, right_source_ids) =
-                lower_glue_parent_expr(right, variables, name_to_id, constants, arena)?;
+            let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
+                && sv_expr_is_signed(right, variables, name_to_id);
+            let context_sized_comparison = matches!(
+                op,
+                sv::ir::BinaryOp::EqCase
+                    | sv::ir::BinaryOp::NeCase
+                    | sv::ir::BinaryOp::EqWildcard
+                    | sv::ir::BinaryOp::NeWildcard
+            );
+            let left_fill = context_sized_comparison
+                .then(|| expr_unbased_fill_literal(left))
+                .flatten();
+            let right_fill = context_sized_comparison
+                .then(|| expr_unbased_fill_literal(right))
+                .flatten();
+            let (
+                (mut left, mut sources, mut source_ids),
+                (mut right, right_sources, right_source_ids),
+            ) = match (left_fill, right_fill) {
+                (Some(left_fill), Some(right_fill)) => (
+                    (
+                        lower_unbased_fill_literal_slt(arena, left_fill, 1)?,
+                        HashSet::default(),
+                        Vec::new(),
+                    ),
+                    (
+                        lower_unbased_fill_literal_slt(arena, right_fill, 1)?,
+                        HashSet::default(),
+                        Vec::new(),
+                    ),
+                ),
+                (Some(fill), None) => {
+                    let right =
+                        lower_glue_parent_expr(right, variables, name_to_id, constants, arena)?;
+                    let width = celox_slt::get_width(right.0, arena);
+                    (
+                        (
+                            lower_unbased_fill_literal_slt(arena, fill, width)?,
+                            HashSet::default(),
+                            Vec::new(),
+                        ),
+                        right,
+                    )
+                }
+                (None, Some(fill)) => {
+                    let left =
+                        lower_glue_parent_expr(left, variables, name_to_id, constants, arena)?;
+                    let width = celox_slt::get_width(left.0, arena);
+                    (
+                        left,
+                        (
+                            lower_unbased_fill_literal_slt(arena, fill, width)?,
+                            HashSet::default(),
+                            Vec::new(),
+                        ),
+                    )
+                }
+                (None, None) => (
+                    lower_glue_parent_expr(left, variables, name_to_id, constants, arena)?,
+                    lower_glue_parent_expr(right, variables, name_to_id, constants, arena)?,
+                ),
+            };
             sources.extend(right_sources);
             source_ids.extend(right_source_ids);
             source_ids.sort();
             source_ids.dedup();
+            if context_sized_comparison {
+                let common_width =
+                    celox_slt::get_width(left, arena).max(celox_slt::get_width(right, arena));
+                left = coerce_node_width(arena, left, Some(common_width), operands_signed).ok()?;
+                right =
+                    coerce_node_width(arena, right, Some(common_width), operands_signed).ok()?;
+            }
             Some((
                 arena
                     .alloc(SLTNode::Binary(left, binary_op_from_sv(*op), right))
@@ -1187,11 +1263,78 @@ fn lower_expr(
                 sources,
             ))
         }
+        sv::ir::Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => {
+            let (inner, sources) = lower_expr(expr, variables, name_to_id, constants, arena)?;
+            let resized = coerce_node_width(arena, inner, Some(*width), *signed).ok()?;
+            Some((resized, sources))
+        }
         sv::ir::Expr::Binary { left, op, right } => {
-            let (left, mut sources) = lower_expr(left, variables, name_to_id, constants, arena)?;
-            let (right, right_sources) =
-                lower_expr(right, variables, name_to_id, constants, arena)?;
+            let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
+                && sv_expr_is_signed(right, variables, name_to_id);
+            let context_sized_comparison = matches!(
+                op,
+                sv::ir::BinaryOp::EqCase
+                    | sv::ir::BinaryOp::NeCase
+                    | sv::ir::BinaryOp::EqWildcard
+                    | sv::ir::BinaryOp::NeWildcard
+            );
+            let left_fill = context_sized_comparison
+                .then(|| expr_unbased_fill_literal(left))
+                .flatten();
+            let right_fill = context_sized_comparison
+                .then(|| expr_unbased_fill_literal(right))
+                .flatten();
+            let ((mut left, mut sources), (mut right, right_sources)) =
+                match (left_fill, right_fill) {
+                    (Some(left_fill), Some(right_fill)) => (
+                        (
+                            lower_unbased_fill_literal_slt(arena, left_fill, 1)?,
+                            HashSet::default(),
+                        ),
+                        (
+                            lower_unbased_fill_literal_slt(arena, right_fill, 1)?,
+                            HashSet::default(),
+                        ),
+                    ),
+                    (Some(fill), None) => {
+                        let right = lower_expr(right, variables, name_to_id, constants, arena)?;
+                        let width = celox_slt::get_width(right.0, arena);
+                        (
+                            (
+                                lower_unbased_fill_literal_slt(arena, fill, width)?,
+                                HashSet::default(),
+                            ),
+                            right,
+                        )
+                    }
+                    (None, Some(fill)) => {
+                        let left = lower_expr(left, variables, name_to_id, constants, arena)?;
+                        let width = celox_slt::get_width(left.0, arena);
+                        (
+                            left,
+                            (
+                                lower_unbased_fill_literal_slt(arena, fill, width)?,
+                                HashSet::default(),
+                            ),
+                        )
+                    }
+                    (None, None) => (
+                        lower_expr(left, variables, name_to_id, constants, arena)?,
+                        lower_expr(right, variables, name_to_id, constants, arena)?,
+                    ),
+                };
             sources.extend(right_sources);
+            if context_sized_comparison {
+                let common_width =
+                    celox_slt::get_width(left, arena).max(celox_slt::get_width(right, arena));
+                left = coerce_node_width(arena, left, Some(common_width), operands_signed).ok()?;
+                right =
+                    coerce_node_width(arena, right, Some(common_width), operands_signed).ok()?;
+            }
             Some((
                 arena
                     .alloc(SLTNode::Binary(left, binary_op_from_sv(*op), right))
@@ -1412,56 +1555,93 @@ fn emit_ff_assignment_stores(
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
 ) -> Option<()> {
+    let mut target_ids = Vec::new();
     for target in targets {
-        let width = target.access.msb - target.access.lsb + 1;
+        if !target_ids.contains(&target.id) {
+            target_ids.push(target.id);
+        }
+    }
+
+    for target_id in target_ids {
+        let width = variables.get(&target_id)?.width;
         let mut value = builder.alloc_logic(width);
         builder.emit(SIRInstruction::Load(
             value,
             RegionedVarAddrBase {
                 region: STABLE_REGION,
-                var_id: target.id,
+                var_id: target_id,
             },
-            SIROffset::Static(target.access.lsb),
+            SIROffset::Static(0),
             width,
         ));
-        for assignment in process
-            .assignments()
-            .iter()
-            .filter(|assignment| {
-                lvalue_atom(
-                    assignment.assignment().lhs_value(),
-                    variables,
-                    name_to_id,
-                    constants,
-                )
-                .is_some_and(|candidate| candidate == *target)
-            })
-            .rev()
-        {
-            let rhs = lower_expr_to_sir(
-                builder,
-                assignment.assignment().rhs(),
+        for assignment in process.assignments() {
+            let target = lvalue_atom(
+                assignment.assignment().lhs_value(),
                 variables,
                 name_to_id,
                 constants,
             )?;
+            if target.id != target_id {
+                continue;
+            }
+            let target_width = target.access.msb - target.access.lsb + 1;
+            let rhs_expr = assignment.assignment().rhs();
+            let rhs = match rhs_expr {
+                sv::ir::Expr::Literal(literal) => match unbased_fill_literal(literal) {
+                    Some(fill) => lower_unbased_fill_literal(builder, fill, target_width)?,
+                    None => {
+                        let rhs = lower_expr_to_sir_with_context(
+                            builder,
+                            rhs_expr,
+                            variables,
+                            name_to_id,
+                            constants,
+                            Some(target_width),
+                        )?;
+                        resize_sir_register(
+                            builder,
+                            rhs,
+                            target_width,
+                            sv_expr_is_signed(rhs_expr, variables, name_to_id),
+                        )?
+                    }
+                },
+                _ => {
+                    let rhs = lower_expr_to_sir_with_context(
+                        builder,
+                        rhs_expr,
+                        variables,
+                        name_to_id,
+                        constants,
+                        Some(target_width),
+                    )?;
+                    resize_sir_register(
+                        builder,
+                        rhs,
+                        target_width,
+                        sv_expr_is_signed(rhs_expr, variables, name_to_id),
+                    )?
+                }
+            };
+            let assigned =
+                replace_sir_slice(builder, value, rhs, target.access.lsb, target_width, width)?;
             value = match assignment.condition() {
                 Some(condition) => {
                     let condition =
                         lower_expr_to_sir(builder, condition, variables, name_to_id, constants)?;
                     let mux = builder.alloc_logic(width);
-                    builder.emit(SIRInstruction::Mux(mux, condition, rhs, value));
+                    builder.emit(SIRInstruction::Mux(mux, condition, assigned, value));
                     mux
                 }
-                None => rhs,
+                None => assigned,
             };
         }
         builder.emit(SIRInstruction::Store(
             RegionedVarAddrBase {
                 region: WORKING_REGION,
-                var_id: target.id,
+                var_id: target_id,
             },
-            SIROffset::Static(target.access.lsb),
+            SIROffset::Static(0),
             width,
             value,
             Vec::new(),
@@ -1469,6 +1649,41 @@ fn emit_ff_assignment_stores(
         ));
     }
     Some(())
+}
+
+fn replace_sir_slice(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    current: celox_sir::RegisterId,
+    replacement: celox_sir::RegisterId,
+    lsb: usize,
+    replacement_width: usize,
+    total_width: usize,
+) -> Option<celox_sir::RegisterId> {
+    if lsb == 0 && replacement_width == total_width {
+        return Some(replacement);
+    }
+    let end = lsb.checked_add(replacement_width)?;
+    if end > total_width {
+        return None;
+    }
+
+    let mut parts = Vec::with_capacity(3);
+    if end < total_width {
+        let upper_width = total_width - end;
+        let upper = builder.alloc_logic(upper_width);
+        builder.emit(SIRInstruction::Slice(upper, current, end, upper_width));
+        parts.push(upper);
+    }
+    parts.push(replacement);
+    if lsb != 0 {
+        let lower = builder.alloc_logic(lsb);
+        builder.emit(SIRInstruction::Slice(lower, current, 0, lsb));
+        parts.push(lower);
+    }
+
+    let result = builder.alloc_logic(total_width);
+    builder.emit(SIRInstruction::Concat(result, parts));
+    Some(result)
 }
 
 fn lvalue_atom(
@@ -1491,12 +1706,259 @@ fn lvalue_atom(
     }
 }
 
+fn sv_expr_is_signed(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<VarId, SvVariable>,
+    name_to_id: &HashMap<String, VarId>,
+) -> bool {
+    match expr {
+        sv::ir::Expr::Ident(name) => name_to_id
+            .get(name)
+            .and_then(|id| variables.get(id))
+            .is_some_and(|variable| variable.signed),
+        sv::ir::Expr::Literal(literal) => {
+            sv::typecheck::parse_integral_literal(literal).is_some_and(|literal| literal.signed)
+        }
+        sv::ir::Expr::Resize { signed, .. } => *signed,
+        sv::ir::Expr::Select { .. }
+        | sv::ir::Expr::Concat(_)
+        | sv::ir::Expr::RepeatConcat { .. }
+        | sv::ir::Expr::Call { .. } => false,
+        sv::ir::Expr::Unary { op, expr } => {
+            matches!(
+                op,
+                sv::ir::UnaryOp::Plus | sv::ir::UnaryOp::Minus | sv::ir::UnaryOp::BitNot
+            ) && sv_expr_is_signed(expr, variables, name_to_id)
+        }
+        sv::ir::Expr::Binary { left, op, right } => match op {
+            sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr => {
+                sv_expr_is_signed(left, variables, name_to_id)
+            }
+            sv::ir::BinaryOp::Add
+            | sv::ir::BinaryOp::Sub
+            | sv::ir::BinaryOp::Mul
+            | sv::ir::BinaryOp::Div
+            | sv::ir::BinaryOp::Mod
+            | sv::ir::BinaryOp::BitAnd
+            | sv::ir::BinaryOp::BitOr
+            | sv::ir::BinaryOp::BitXor => {
+                sv_expr_is_signed(left, variables, name_to_id)
+                    && sv_expr_is_signed(right, variables, name_to_id)
+            }
+            _ => false,
+        },
+        sv::ir::Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            sv_expr_is_signed(then_expr, variables, name_to_id)
+                && sv_expr_is_signed(else_expr, variables, name_to_id)
+        }
+    }
+}
+
+fn resize_sir_register(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    source: celox_sir::RegisterId,
+    target_width: usize,
+    sign_extend: bool,
+) -> Option<celox_sir::RegisterId> {
+    let source_type = builder.register(&source).clone();
+    let source_width = source_type.width();
+    if source_width == target_width {
+        return Some(source);
+    }
+
+    let alloc_like = |builder: &mut SIRBuilder<RegionedVarAddr>, width| match &source_type {
+        RegisterType::Logic { .. } => builder.alloc_logic(width),
+        RegisterType::Bit { signed, .. } => builder.alloc_bit(width, *signed && sign_extend),
+    };
+
+    if source_width > target_width {
+        let resized = alloc_like(builder, target_width);
+        builder.emit(SIRInstruction::Slice(resized, source, 0, target_width));
+        return Some(resized);
+    }
+
+    let extension_width = target_width - source_width;
+    let mut parts = Vec::with_capacity(extension_width.saturating_add(1));
+    if sign_extend {
+        let sign = alloc_like(builder, 1);
+        builder.emit(SIRInstruction::Slice(
+            sign,
+            source,
+            source_width.checked_sub(1)?,
+            1,
+        ));
+        parts.extend(std::iter::repeat_n(sign, extension_width));
+    } else {
+        let zero = alloc_like(builder, extension_width);
+        builder.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        parts.push(zero);
+    }
+    parts.push(source);
+    let resized = alloc_like(builder, target_width);
+    builder.emit(SIRInstruction::Concat(resized, parts));
+    Some(resized)
+}
+
+fn unbased_fill_literal(literal: &str) -> Option<char> {
+    let normalized = literal.trim().to_ascii_lowercase();
+    let mut chars = normalized.chars();
+    (chars.next()? == '\'' && chars.clone().count() == 1).then_some(chars.next()?)
+}
+
+fn expr_unbased_fill_literal(expr: &sv::ir::Expr) -> Option<char> {
+    match expr {
+        sv::ir::Expr::Literal(literal) => unbased_fill_literal(literal),
+        _ => None,
+    }
+}
+
+fn unbased_fill_value(fill: char, width: usize) -> Option<(BigUint, BigUint)> {
+    let all_ones = if width == 0 {
+        BigUint::default()
+    } else {
+        (BigUint::from(1u8) << width) - BigUint::from(1u8)
+    };
+    match fill {
+        '0' => Some((BigUint::default(), BigUint::default())),
+        '1' => Some((all_ones, BigUint::default())),
+        'x' => Some((all_ones.clone(), all_ones)),
+        'z' | '?' => Some((BigUint::default(), all_ones)),
+        _ => None,
+    }
+}
+
+fn lower_unbased_fill_literal_slt<A: std::hash::Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    fill: char,
+    width: usize,
+) -> Option<celox_slt::NodeId> {
+    let (value, mask) = unbased_fill_value(fill, width)?;
+    arena
+        .alloc(SLTNode::Constant(value, mask, width, false))
+        .ok()
+}
+
+fn lower_unbased_fill_literal(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    fill: char,
+    width: usize,
+) -> Option<celox_sir::RegisterId> {
+    let (value, mask) = unbased_fill_value(fill, width)?;
+    let register = builder.alloc_logic(width);
+    builder.emit(SIRInstruction::Imm(
+        register,
+        SIRValue::new_four_state(value, mask),
+    ));
+    Some(register)
+}
+
 fn lower_expr_to_sir(
     builder: &mut SIRBuilder<RegionedVarAddr>,
     expr: &sv::ir::Expr,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+) -> Option<celox_sir::RegisterId> {
+    lower_expr_to_sir_with_context(builder, expr, variables, name_to_id, constants, None)
+}
+
+fn sv_expr_natural_width(
+    expr: &sv::ir::Expr,
+    variables: &HashMap<VarId, SvVariable>,
+    name_to_id: &HashMap<String, VarId>,
+    constants: &std::collections::HashMap<String, i128>,
+) -> Option<usize> {
+    match expr {
+        sv::ir::Expr::Ident(name) => name_to_id
+            .get(name)
+            .and_then(|id| variables.get(id))
+            .map_or_else(
+                || constants.contains_key(name).then_some(32),
+                |var| Some(var.width),
+            ),
+        sv::ir::Expr::Literal(literal) => {
+            Some(sv::typecheck::parse_integral_literal(literal)?.width)
+        }
+        sv::ir::Expr::Select { msb, lsb, .. } => {
+            let msb = sv::typecheck::eval_const_expr(msb, constants)?;
+            let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
+            usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)
+        }
+        sv::ir::Expr::Resize { width, .. } => Some(*width),
+        sv::ir::Expr::Unary { op, expr } => matches!(
+            op,
+            sv::ir::UnaryOp::LogicNot
+                | sv::ir::UnaryOp::RedAnd
+                | sv::ir::UnaryOp::RedOr
+                | sv::ir::UnaryOp::RedXor
+        )
+        .then_some(1)
+        .or_else(|| sv_expr_natural_width(expr, variables, name_to_id, constants)),
+        sv::ir::Expr::Binary { left, op, right } => {
+            if matches!(
+                op,
+                sv::ir::BinaryOp::LogicAnd
+                    | sv::ir::BinaryOp::LogicOr
+                    | sv::ir::BinaryOp::Eq
+                    | sv::ir::BinaryOp::Ne
+                    | sv::ir::BinaryOp::EqCase
+                    | sv::ir::BinaryOp::NeCase
+                    | sv::ir::BinaryOp::EqWildcard
+                    | sv::ir::BinaryOp::NeWildcard
+                    | sv::ir::BinaryOp::Lt
+                    | sv::ir::BinaryOp::Le
+                    | sv::ir::BinaryOp::Gt
+                    | sv::ir::BinaryOp::Ge
+            ) {
+                Some(1)
+            } else if matches!(op, sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr) {
+                sv_expr_natural_width(left, variables, name_to_id, constants)
+            } else {
+                Some(
+                    sv_expr_natural_width(left, variables, name_to_id, constants)?.max(
+                        sv_expr_natural_width(right, variables, name_to_id, constants)?,
+                    ),
+                )
+            }
+        }
+        sv::ir::Expr::Concat(parts) => parts.iter().try_fold(0usize, |width, part| {
+            width.checked_add(sv_expr_natural_width(
+                part, variables, name_to_id, constants,
+            )?)
+        }),
+        sv::ir::Expr::RepeatConcat { count, parts } => {
+            let count = usize::try_from(sv::typecheck::eval_const_expr(count, constants)?).ok()?;
+            let parts_width = parts.iter().try_fold(0usize, |width, part| {
+                width.checked_add(sv_expr_natural_width(
+                    part, variables, name_to_id, constants,
+                )?)
+            })?;
+            count.checked_mul(parts_width)
+        }
+        sv::ir::Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => Some(
+            sv_expr_natural_width(then_expr, variables, name_to_id, constants)?.max(
+                sv_expr_natural_width(else_expr, variables, name_to_id, constants)?,
+            ),
+        ),
+        sv::ir::Expr::Call { .. } => None,
+    }
+}
+
+fn lower_expr_to_sir_with_context(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    expr: &sv::ir::Expr,
+    variables: &HashMap<VarId, SvVariable>,
+    name_to_id: &HashMap<String, VarId>,
+    constants: &std::collections::HashMap<String, i128>,
+    context_width: Option<usize>,
 ) -> Option<celox_sir::RegisterId> {
     match expr {
         sv::ir::Expr::Ident(name) => {
@@ -1507,7 +1969,7 @@ fn lower_expr_to_sir(
                     reg,
                     SIRValue::new_four_state(*value as u128, 0u32),
                 ));
-                return Some(reg);
+                return resize_sir_register(builder, reg, context_width.unwrap_or(32), true);
             };
             let var = variables.get(&id)?;
             let reg = if var.is_4state {
@@ -1524,19 +1986,28 @@ fn lower_expr_to_sir(
                 SIROffset::Static(0),
                 var.width,
             ));
-            Some(reg)
+            resize_sir_register(builder, reg, context_width.unwrap_or(var.width), var.signed)
         }
         sv::ir::Expr::Literal(literal) => {
+            if let Some(width) = context_width
+                && let Some(fill) = unbased_fill_literal(literal)
+            {
+                return lower_unbased_fill_literal(builder, fill, width);
+            }
             let literal = sv::typecheck::parse_integral_literal(literal)?;
+            let width = literal.width;
+            let signed = literal.signed;
             let reg = builder.alloc_logic(literal.width);
             builder.emit(SIRInstruction::Imm(
                 reg,
                 SIRValue::new_four_state(literal.value, literal.mask),
             ));
-            Some(reg)
+            resize_sir_register(builder, reg, context_width.unwrap_or(width), signed)
         }
         sv::ir::Expr::Select { expr, msb, lsb } => {
-            let inner = lower_expr_to_sir(builder, expr, variables, name_to_id, constants)?;
+            let inner = lower_expr_to_sir_with_context(
+                builder, expr, variables, name_to_id, constants, None,
+            )?;
             let msb = sv::typecheck::eval_const_expr(msb, constants)?;
             let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
             let high = usize::try_from(msb.max(lsb)).ok()?;
@@ -1546,21 +2017,161 @@ fn lower_expr_to_sir(
             builder.emit(SIRInstruction::Slice(reg, inner, low, width));
             Some(reg)
         }
+        sv::ir::Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => {
+            let inner = lower_expr_to_sir_with_context(
+                builder,
+                expr,
+                variables,
+                name_to_id,
+                constants,
+                Some(*width),
+            )?;
+            resize_sir_register(builder, inner, *width, *signed)
+        }
         sv::ir::Expr::Unary { op, expr } => {
-            let inner = lower_expr_to_sir(builder, expr, variables, name_to_id, constants)?;
-            let width = builder.register(&inner).width();
-            let reg = builder.alloc_logic(width);
+            let one_bit_result = matches!(
+                op,
+                sv::ir::UnaryOp::LogicNot
+                    | sv::ir::UnaryOp::RedAnd
+                    | sv::ir::UnaryOp::RedOr
+                    | sv::ir::UnaryOp::RedXor
+            );
+            let inner = lower_expr_to_sir_with_context(
+                builder,
+                expr,
+                variables,
+                name_to_id,
+                constants,
+                (!one_bit_result).then_some(context_width).flatten(),
+            )?;
+            let width = if one_bit_result {
+                1
+            } else {
+                builder.register(&inner).width()
+            };
+            let reg = if matches!(op, sv::ir::UnaryOp::ToTwoState) {
+                builder.alloc_bit(width, false)
+            } else {
+                builder.alloc_logic(width)
+            };
             builder.emit(SIRInstruction::Unary(reg, unary_op_from_sv(*op)?, inner));
             Some(reg)
         }
         sv::ir::Expr::Binary { left, op, right } => {
-            let left = lower_expr_to_sir(builder, left, variables, name_to_id, constants)?;
-            let right = lower_expr_to_sir(builder, right, variables, name_to_id, constants)?;
-            let width = builder
-                .register(&left)
-                .width()
-                .max(builder.register(&right).width());
-            let reg = builder.alloc_logic(width);
+            let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
+                && sv_expr_is_signed(right, variables, name_to_id);
+            let comparison = matches!(
+                op,
+                sv::ir::BinaryOp::Eq
+                    | sv::ir::BinaryOp::Ne
+                    | sv::ir::BinaryOp::EqCase
+                    | sv::ir::BinaryOp::NeCase
+                    | sv::ir::BinaryOp::EqWildcard
+                    | sv::ir::BinaryOp::NeWildcard
+                    | sv::ir::BinaryOp::Lt
+                    | sv::ir::BinaryOp::Le
+                    | sv::ir::BinaryOp::Gt
+                    | sv::ir::BinaryOp::Ge
+            );
+            let context_determined = !comparison
+                && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
+            let operation_context = context_width.map(|context_width| {
+                context_width.max(
+                    sv_expr_natural_width(expr, variables, name_to_id, constants)
+                        .unwrap_or(context_width),
+                )
+            });
+            let left_context = context_determined.then_some(operation_context).flatten();
+            let right_context = (context_determined
+                && !matches!(op, sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr))
+            .then_some(operation_context)
+            .flatten();
+            let right_fill = match &**right {
+                sv::ir::Expr::Literal(literal) => unbased_fill_literal(literal),
+                _ => None,
+            };
+            let left_fill = match &**left {
+                sv::ir::Expr::Literal(literal) => unbased_fill_literal(literal),
+                _ => None,
+            };
+            let (mut left, mut right) = if let Some(fill) = right_fill {
+                let left = lower_expr_to_sir_with_context(
+                    builder,
+                    left,
+                    variables,
+                    name_to_id,
+                    constants,
+                    left_context,
+                )?;
+                let width = builder.register(&left).width();
+                (left, lower_unbased_fill_literal(builder, fill, width)?)
+            } else if let Some(fill) = left_fill {
+                let right = lower_expr_to_sir_with_context(
+                    builder,
+                    right,
+                    variables,
+                    name_to_id,
+                    constants,
+                    right_context,
+                )?;
+                let width = builder.register(&right).width();
+                (lower_unbased_fill_literal(builder, fill, width)?, right)
+            } else {
+                (
+                    lower_expr_to_sir_with_context(
+                        builder,
+                        left,
+                        variables,
+                        name_to_id,
+                        constants,
+                        left_context,
+                    )?,
+                    lower_expr_to_sir_with_context(
+                        builder,
+                        right,
+                        variables,
+                        name_to_id,
+                        constants,
+                        right_context,
+                    )?,
+                )
+            };
+            if comparison {
+                let common_width = builder
+                    .register(&left)
+                    .width()
+                    .max(builder.register(&right).width());
+                left = resize_sir_register(builder, left, common_width, operands_signed)?;
+                right = resize_sir_register(builder, right, common_width, operands_signed)?;
+            }
+            let width = match op {
+                sv::ir::BinaryOp::LogicAnd
+                | sv::ir::BinaryOp::LogicOr
+                | sv::ir::BinaryOp::Eq
+                | sv::ir::BinaryOp::Ne
+                | sv::ir::BinaryOp::EqCase
+                | sv::ir::BinaryOp::NeCase
+                | sv::ir::BinaryOp::EqWildcard
+                | sv::ir::BinaryOp::NeWildcard
+                | sv::ir::BinaryOp::Lt
+                | sv::ir::BinaryOp::Le
+                | sv::ir::BinaryOp::Gt
+                | sv::ir::BinaryOp::Ge => 1,
+                sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr => builder.register(&left).width(),
+                _ => builder
+                    .register(&left)
+                    .width()
+                    .max(builder.register(&right).width()),
+            };
+            let reg = if matches!(op, sv::ir::BinaryOp::EqCase | sv::ir::BinaryOp::NeCase) {
+                builder.alloc_bit(width, false)
+            } else {
+                builder.alloc_logic(width)
+            };
             builder.emit(SIRInstruction::Binary(
                 reg,
                 left,
@@ -1608,16 +2219,38 @@ fn lower_expr_to_sir(
             then_expr,
             else_expr,
         } => {
-            let condition =
-                lower_expr_to_sir(builder, condition, variables, name_to_id, constants)?;
-            let then_expr =
-                lower_expr_to_sir(builder, then_expr, variables, name_to_id, constants)?;
-            let else_expr =
-                lower_expr_to_sir(builder, else_expr, variables, name_to_id, constants)?;
+            let arms_signed = sv_expr_is_signed(then_expr, variables, name_to_id)
+                && sv_expr_is_signed(else_expr, variables, name_to_id);
+            let arm_context = sv_expr_natural_width(expr, variables, name_to_id, constants)
+                .map(|natural_width| {
+                    context_width.map_or(natural_width, |width| width.max(natural_width))
+                })
+                .or(context_width);
+            let condition = lower_expr_to_sir_with_context(
+                builder, condition, variables, name_to_id, constants, None,
+            )?;
+            let mut then_expr = lower_expr_to_sir_with_context(
+                builder,
+                then_expr,
+                variables,
+                name_to_id,
+                constants,
+                arm_context,
+            )?;
+            let mut else_expr = lower_expr_to_sir_with_context(
+                builder,
+                else_expr,
+                variables,
+                name_to_id,
+                constants,
+                arm_context,
+            )?;
             let width = builder
                 .register(&then_expr)
                 .width()
                 .max(builder.register(&else_expr).width());
+            then_expr = resize_sir_register(builder, then_expr, width, arms_signed)?;
+            else_expr = resize_sir_register(builder, else_expr, width, arms_signed)?;
             let reg = builder.alloc_logic(width);
             builder.emit(SIRInstruction::Mux(reg, condition, then_expr, else_expr));
             Some(reg)
@@ -1661,6 +2294,7 @@ fn unary_op_from_sv(op: sv::ir::UnaryOp) -> Option<UnaryOp> {
         sv::ir::UnaryOp::Minus => Some(UnaryOp::Minus),
         sv::ir::UnaryOp::BitNot => Some(UnaryOp::BitNot),
         sv::ir::UnaryOp::LogicNot => Some(UnaryOp::LogicNot),
+        sv::ir::UnaryOp::ToTwoState => Some(UnaryOp::ToTwoState),
         sv::ir::UnaryOp::RedAnd => Some(UnaryOp::And),
         sv::ir::UnaryOp::RedOr => Some(UnaryOp::Or),
         sv::ir::UnaryOp::RedXor => Some(UnaryOp::Xor),
@@ -1683,6 +2317,10 @@ fn binary_op_from_sv(op: sv::ir::BinaryOp) -> BinaryOp {
         sv::ir::BinaryOp::LogicOr => BinaryOp::LogicOr,
         sv::ir::BinaryOp::Eq => BinaryOp::Eq,
         sv::ir::BinaryOp::Ne => BinaryOp::Ne,
+        sv::ir::BinaryOp::EqCase => BinaryOp::EqCase,
+        sv::ir::BinaryOp::NeCase => BinaryOp::NeCase,
+        sv::ir::BinaryOp::EqWildcard => BinaryOp::EqWildcard,
+        sv::ir::BinaryOp::NeWildcard => BinaryOp::NeWildcard,
         sv::ir::BinaryOp::Lt => BinaryOp::LtU,
         sv::ir::BinaryOp::Le => BinaryOp::LeU,
         sv::ir::BinaryOp::Gt => BinaryOp::GtU,
