@@ -103,7 +103,7 @@ impl Module {
         let parameter_values = parameter_value_env(&parameters, &const_env);
         let packed_dimensions = packed_dimensions_from_ports_and_signals(&ports, &signals);
         let functions =
-            functions_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions);
+            functions_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions)?;
         let comb_processes = comb_processes_from_module_node(
             node.clone(),
             syntax_tree,
@@ -707,6 +707,7 @@ pub struct Port {
     name: String,
     direction: PortDirection,
     r#type: Type,
+    is_net: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -747,11 +748,12 @@ impl Signal {
 }
 
 impl Port {
-    fn new(name: String, direction: PortDirection, r#type: Type) -> Self {
+    fn new(name: String, direction: PortDirection, r#type: Type, is_net: bool) -> Self {
         Self {
             name,
             direction,
             r#type,
+            is_net,
         }
     }
 
@@ -765,6 +767,10 @@ impl Port {
 
     pub fn r#type(&self) -> &Type {
         &self.r#type
+    }
+
+    pub fn is_net(&self) -> bool {
+        self.is_net
     }
 }
 
@@ -1267,7 +1273,7 @@ fn ports_from_module_node(
                 let name = port_name(RefNode::PortIdentifier(&port.nodes.1), syntax_tree)?;
                 inherited_direction = direction;
                 inherited_type = r#type.clone();
-                ports.push(Port::new(name, direction, r#type));
+                ports.push(Port::new(name, direction, r#type, true));
             }
             RefNode::AnsiPortDeclarationVariable(port) => {
                 let header = port.nodes.0.as_ref();
@@ -1291,7 +1297,7 @@ fn ports_from_module_node(
                 let name = port_name(RefNode::PortIdentifier(&port.nodes.1), syntax_tree)?;
                 inherited_direction = direction;
                 inherited_type = r#type.clone();
-                ports.push(Port::new(name, direction, r#type));
+                ports.push(Port::new(name, direction, r#type, false));
             }
             RefNode::AnsiPortDeclarationParen(port) => {
                 let explicit_direction = port.nodes.0.as_ref().map(direction_from_port_direction);
@@ -1304,7 +1310,7 @@ fn ports_from_module_node(
                 let name = port_name(RefNode::PortIdentifier(&port.nodes.2), syntax_tree)?;
                 inherited_direction = direction;
                 inherited_type = r#type.clone();
-                ports.push(Port::new(name, direction, r#type));
+                ports.push(Port::new(name, direction, r#type, false));
             }
             _ => {}
         }
@@ -2260,7 +2266,9 @@ fn instances_from_conditional_generate(
         RefNode::ConstantExpression(&generate.nodes.1.nodes.1),
         syntax_tree,
     ) else {
-        return Ok(());
+        return Err(AnalyzerError::Unsupported(
+            "conditional-generate condition lowering".to_string(),
+        ));
     };
     let then_condition = combine_conditions(condition.clone(), generate_condition.clone());
     instances_from_generate_block(&generate.nodes.2, then_condition, syntax_tree, instances)?;
@@ -2459,7 +2467,7 @@ fn functions_from_module_node(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
-) -> HashMap<String, Function> {
+) -> Result<HashMap<String, Function>, AnalyzerError> {
     let mut functions = HashMap::new();
     let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
     for item in module_non_port_items(node) {
@@ -2471,6 +2479,7 @@ fn functions_from_module_node(
         else {
             continue;
         };
+        validate_function_declaration_statements(declaration)?;
         if let Some(function) = function_from_declaration(
             declaration,
             syntax_tree,
@@ -2481,7 +2490,77 @@ fn functions_from_module_node(
             functions.insert(function.name.clone(), function);
         }
     }
-    functions
+    Ok(functions)
+}
+
+fn validate_function_declaration_statements(
+    declaration: &sv_parser::FunctionDeclaration,
+) -> Result<(), AnalyzerError> {
+    let statements = match &declaration.nodes.2 {
+        sv_parser::FunctionBodyDeclaration::WithPort(body) => &body.nodes.6,
+        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => &body.nodes.5,
+    };
+    for statement in statements {
+        let sv_parser::FunctionStatementOrNull::Statement(statement) = statement else {
+            continue;
+        };
+        validate_function_statement(&statement.nodes.0)?;
+    }
+    Ok(())
+}
+
+fn validate_function_statement_or_null(
+    statement: &sv_parser::StatementOrNull,
+) -> Result<(), AnalyzerError> {
+    let sv_parser::StatementOrNull::Statement(statement) = statement else {
+        return Ok(());
+    };
+    validate_function_statement(statement)
+}
+
+fn validate_function_statement(statement: &sv_parser::Statement) -> Result<(), AnalyzerError> {
+    match &statement.nodes.2 {
+        sv_parser::StatementItem::JumpStatement(statement)
+            if matches!(&**statement, sv_parser::JumpStatement::Return(_)) =>
+        {
+            Ok(())
+        }
+        sv_parser::StatementItem::BlockingAssignment(_) => Ok(()),
+        sv_parser::StatementItem::SeqBlock(block) => {
+            for statement in &block.nodes.3 {
+                validate_function_statement_or_null(statement)?;
+            }
+            Ok(())
+        }
+        sv_parser::StatementItem::ConditionalStatement(statement) => {
+            validate_function_statement_or_null(&statement.nodes.3)?;
+            for (_, _, _, branch) in &statement.nodes.4 {
+                validate_function_statement_or_null(branch)?;
+            }
+            if let Some((_, branch)) = &statement.nodes.5 {
+                validate_function_statement_or_null(branch)?;
+            }
+            Ok(())
+        }
+        sv_parser::StatementItem::CaseStatement(statement) => {
+            let sv_parser::CaseStatement::Normal(statement) = &**statement else {
+                return Err(AnalyzerError::Unsupported(
+                    "unsupported statement inside function".to_string(),
+                ));
+            };
+            for item in std::iter::once(&statement.nodes.3).chain(statement.nodes.4.iter()) {
+                let branch = match item {
+                    sv_parser::CaseItem::NonDefault(item) => &item.nodes.2,
+                    sv_parser::CaseItem::Default(item) => &item.nodes.2,
+                };
+                validate_function_statement_or_null(branch)?;
+            }
+            Ok(())
+        }
+        _ => Err(AnalyzerError::Unsupported(
+            "unsupported statement inside function".to_string(),
+        )),
+    }
 }
 
 fn function_from_declaration(
@@ -3320,7 +3399,9 @@ fn comb_processes_from_conditional_generate(
         RefNode::ConstantExpression(&generate.nodes.1.nodes.1),
         syntax_tree,
     ) else {
-        return Ok(());
+        return Err(AnalyzerError::Unsupported(
+            "conditional-generate condition lowering".to_string(),
+        ));
     };
     if has_local_constants(const_env)
         && eval_ast_const_expr(&generate_condition, const_env).is_none()
@@ -4708,13 +4789,16 @@ fn conditional_assignments_from_case_statement(
             sv_parser::CaseItem::NonDefault(item) => {
                 let mut conditions = Vec::new();
                 for expr in item.nodes.0.contents() {
-                    let Some(expr) = expr_from_expression_with_types(
+                    let expr = expr_from_expression_with_types(
                         &expr.nodes.0,
                         syntax_tree,
                         packed_dimensions,
-                    ) else {
-                        continue;
-                    };
+                    )
+                    .ok_or_else(|| {
+                        AnalyzerError::Unsupported(
+                            "always_ff case item expression lowering".to_string(),
+                        )
+                    })?;
                     conditions.push(case_item_condition(case_expr.clone(), expr));
                 }
                 if let Some(condition) = conditions.into_iter().reduce(|left, right| Expr::Binary {

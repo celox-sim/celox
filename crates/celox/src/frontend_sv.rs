@@ -9,8 +9,9 @@
 use std::path::{Path, PathBuf};
 
 use celox_design::{
-    BinaryOp, BitAccess, DomainKind, ModuleId, PortTypeKind, RegionedVarAddrBase, RuntimeErrorInfo,
-    STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase, WORKING_REGION,
+    BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue, ModuleId, PortTypeKind,
+    RegionedVarAddrBase, RuntimeErrorInfo, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase,
+    WORKING_REGION,
 };
 use celox_frontend_veryl::{
     BuildConfig, ExternalHierarchy, ExternalModule, FrontendTrace, FrontendTraceOptions, GlueAddr,
@@ -35,6 +36,7 @@ use veryl_parser::{resource_table, token_range::TokenRange};
 
 type RegionedVarAddr = RegionedVarAddrBase<VarId>;
 type GlueBlock = GlueBlockBase<VarId>;
+const MAX_SV_SPECIALIZATIONS_PER_MODULE: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FrontendError {
@@ -284,11 +286,13 @@ pub fn prepare_external_hierarchy(
     names.sort_by_key(|name| resource_table::get_str_value(*name).unwrap_or_default());
 
     let mut module_ids = HashMap::default();
+    let mut module_specialization_counts = HashMap::default();
     let mut queue = Vec::new();
     for name in names {
         let key = LoweredSvModuleKey::base(name);
         let module_id = ModuleId(module_ids.len());
         module_ids.insert(key.clone(), module_id);
+        module_specialization_counts.insert(name, 1usize);
         queue.push(key);
     }
 
@@ -306,6 +310,13 @@ pub fn prepare_external_hierarchy(
                 continue;
             }
             if !module_ids.contains_key(&child_key) {
+                let specialization_count = module_specialization_counts
+                    .entry(child_key.name)
+                    .or_insert(0);
+                if *specialization_count >= MAX_SV_SPECIALIZATIONS_PER_MODULE {
+                    return Err(sv_specialization_limit_error(child_key.name).into());
+                }
+                *specialization_count += 1;
                 let child_id = ModuleId(module_ids.len());
                 module_ids.insert(child_key.clone(), child_id);
                 queue.push(child_key);
@@ -419,6 +430,8 @@ pub fn schedule_sources(
     let root_id = ModuleId(0);
     let mut module_ids = HashMap::default();
     module_ids.insert(root_key.clone(), root_id);
+    let mut module_specialization_counts = HashMap::default();
+    module_specialization_counts.insert(root_key.name, 1usize);
     let mut queue = vec![root_key.clone()];
     let mut index = 0;
     while index < queue.len() {
@@ -434,6 +447,13 @@ pub fn schedule_sources(
                 return Err(unsupported_sv_instance(child_key.name).into());
             }
             if !module_ids.contains_key(&child_key) {
+                let specialization_count = module_specialization_counts
+                    .entry(child_key.name)
+                    .or_insert(0);
+                if *specialization_count >= MAX_SV_SPECIALIZATIONS_PER_MODULE {
+                    return Err(sv_specialization_limit_error(child_key.name).into());
+                }
+                *specialization_count += 1;
                 let child_id = ModuleId(module_ids.len());
                 module_ids.insert(child_key.clone(), child_id);
                 queue.push(child_key);
@@ -505,6 +525,16 @@ pub fn schedule_sources(
         trace,
     )
     .map_err(FrontendError::from)
+}
+
+fn sv_specialization_limit_error(name: resource_table::StrId) -> ParserError {
+    ParserError::unsupported(
+        64,
+        LoweringPhase::SimulatorParser,
+        "systemverilog module specialization limit exceeded (possible recursive instantiation)",
+        resource_table::get_str_value(name).unwrap_or_default(),
+        None,
+    )
 }
 
 fn validate_sv_module_graph(
@@ -589,6 +619,7 @@ fn lower_module_with_overrides(
     let mut variables = HashMap::default();
     let mut name_to_id = HashMap::default();
     let mut port_order = Vec::new();
+    let mut initial_memory_values = Vec::new();
     let constants = module_constants_with_overrides(module, parameter_overrides);
     let parameter_types = module
         .parameters()
@@ -623,6 +654,17 @@ fn lower_module_with_overrides(
         };
         name_to_id.insert(port.name().to_string(), id);
         port_order.push(id);
+        if port.is_net() {
+            let written_mask = (BigUint::from(1u8) << type_info.width) - BigUint::from(1u8);
+            initial_memory_values.push(InitialStateValue {
+                address: id,
+                data: InitialStateData::Packed {
+                    value: BigUint::default(),
+                    mask: written_mask.clone(),
+                    written_mask,
+                },
+            });
+        }
         variables.insert(id, variable);
     }
 
@@ -727,7 +769,7 @@ fn lower_module_with_overrides(
             comb_observers: Vec::<CombObserver<VarId>>::new(),
             runtime_errors: HashMap::<i64, RuntimeErrorInfo<VarId>>::default(),
             runtime_event_sites: Vec::new(),
-            initial_memory_values: Vec::new(),
+            initial_memory_values,
             comb_boundaries: HashMap::default(),
             arena,
             store: SymbolicStore::default(),

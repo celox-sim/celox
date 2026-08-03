@@ -308,6 +308,26 @@ fn preserves_declared_parameter_width_in_comb_expressions() {
 }
 
 #[test]
+fn applies_unsigned_coercion_to_mixed_signed_constant_division() {
+    let source = r#"
+        module Top(output logic [7:0] quotient, output logic [7:0] remainder);
+            localparam QUOTIENT = 8'shfe / 8'h02;
+            localparam REMAINDER = 8'shfe % 8'h02;
+            assign quotient = QUOTIENT;
+            assign remainder = REMAINDER;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("mixed_constant_division.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("quotient")), 127u8.into());
+    assert_eq!(sim.get(sim.signal("remainder")), 0u8.into());
+}
+
+#[test]
 fn converts_unknown_bits_when_assigning_to_bit() {
     let source = r#"
         module Top(input logic x, output bit y);
@@ -325,6 +345,19 @@ fn converts_unknown_bits_when_assigning_to_bit() {
     assert_eq!(
         sim.get_four_state(y),
         (BigUint::from(0u8), BigUint::from(0u8))
+    );
+}
+
+#[test]
+fn initializes_undriven_ansi_net_outputs_to_high_impedance() {
+    let source = "module Top(output wire [7:0] y); endmodule";
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("undriven_port.sv"))], "Top")
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(
+        sim.get_four_state(sim.signal("y")),
+        (BigUint::default(), BigUint::from(0xffu8))
     );
 }
 
@@ -1389,6 +1422,41 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "always_ff case item expression lowering",
+            r#"
+            module Top(input logic clk, a, b, output logic q);
+                always_ff @(posedge clk)
+                    case (a)
+                        (b ** 2): q <= 1'b1;
+                        default: q <= 1'b0;
+                    endcase
+            endmodule
+        "#,
+        ),
+        (
+            "unsupported statement inside function",
+            r#"
+            module Top(output logic y);
+                function automatic logic f();
+                    logic x;
+                    x = 1'b0;
+                    repeat (1) x = 1'b1;
+                    return x;
+                endfunction
+                assign y = f();
+            endmodule
+        "#,
+        ),
+        (
+            "conditional-generate condition lowering",
+            r#"
+            module Top(output logic y);
+                if (2 ** 3) assign y = 1'b1;
+                else assign y = 1'b0;
+            endmodule
+        "#,
+        ),
+        (
             "systemverilog inout port",
             r#"
             module Top(inout wire io); endmodule
@@ -1486,6 +1554,20 @@ fn rejects_cycles_across_the_module_graph() {
     };
     assert!(
         error.contains("recursive systemverilog module instantiation"),
+        "{error}"
+    );
+}
+
+#[test]
+fn bounds_parameter_specialized_recursive_elaboration() {
+    let source = r#"
+        module Top #(parameter P = 0) ();
+            Top #(.P(P + 1)) child();
+        endmodule
+    "#;
+    let error = cranelift_build_error(source);
+    assert!(
+        error.contains("systemverilog module specialization limit exceeded"),
         "{error}"
     );
 }

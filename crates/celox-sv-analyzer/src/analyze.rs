@@ -39,6 +39,7 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                 port.name().to_string(),
                 port.direction().into(),
                 ir::Type::from_ast(port.r#type().clone(), &constants),
+                port.is_net(),
             ));
         }
         let signals = module

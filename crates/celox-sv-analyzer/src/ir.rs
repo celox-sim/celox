@@ -144,6 +144,7 @@ pub struct Port {
     name: String,
     direction: PortDirection,
     r#type: Type,
+    is_net: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,11 +177,12 @@ impl Signal {
 }
 
 impl Port {
-    pub(crate) fn new(name: String, direction: PortDirection, r#type: Type) -> Self {
+    pub(crate) fn new(name: String, direction: PortDirection, r#type: Type, is_net: bool) -> Self {
         Self {
             name,
             direction,
             r#type,
+            is_net,
         }
     }
 
@@ -194,6 +196,10 @@ impl Port {
 
     pub fn r#type(&self) -> &Type {
         &self.r#type
+    }
+
+    pub fn is_net(&self) -> bool {
+        self.is_net
     }
 }
 

@@ -170,6 +170,8 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
         BinaryOp::Add
             | BinaryOp::Sub
             | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Mod
             | BinaryOp::BitAnd
             | BinaryOp::BitOr
             | BinaryOp::BitXor
@@ -213,6 +215,26 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
     }
     let modulus = BigUint::from(1u8) << width;
     let width_mask = &modulus - BigUint::from(1u8);
+    if matches!(op, BinaryOp::Div | BinaryOp::Mod) {
+        if right.value == BigUint::default() {
+            return None;
+        }
+        if signed {
+            let left = integral_literal_as_i128(&left, true)?;
+            let right = integral_literal_as_i128(&right, true)?;
+            return match op {
+                BinaryOp::Div => left.checked_div(right),
+                BinaryOp::Mod => left.checked_rem(right),
+                _ => unreachable!(),
+            };
+        }
+        let value = match op {
+            BinaryOp::Div => left.value / right.value,
+            BinaryOp::Mod => left.value % right.value,
+            _ => unreachable!(),
+        };
+        return i128::try_from(value).ok();
+    }
     let value = match op {
         BinaryOp::Add => (left.value + right.value) & &width_mask,
         BinaryOp::Sub => (left.value + &modulus - right.value) & &width_mask,
@@ -814,5 +836,18 @@ mod literal_tests {
         };
 
         assert_eq!(eval_const_expr(&expr, &HashMap::new()), Some(0));
+    }
+
+    #[test]
+    fn divides_and_remainders_mixed_signed_literals_as_unsigned() {
+        for (op, expected) in [(BinaryOp::Div, 127), (BinaryOp::Mod, 0)] {
+            let expr = ConstExpr::Binary {
+                left: Box::new(ConstExpr::Literal("8'shfe".to_string())),
+                op,
+                right: Box::new(ConstExpr::Literal("8'h02".to_string())),
+            };
+
+            assert_eq!(eval_const_expr(&expr, &HashMap::new()), Some(expected));
+        }
     }
 }
