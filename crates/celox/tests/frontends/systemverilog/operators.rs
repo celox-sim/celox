@@ -1247,4 +1247,28 @@ sv_backends! {
 
     assert_eq!(sim.get(y), 0xaau8.into());
     }
+
+    fn preserves_unknown_complement_and_converts_bit_function_arguments(sim) {
+        @setup {
+    let sv = r#"
+        module Top(input logic a, output logic complement_is_x, output logic function_value);
+            function automatic logic normalize(input bit value);
+                return value;
+            endfunction
+            assign complement_is_x = (~a === 1'bx);
+            assign function_value = normalize(a);
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("four_state_unary.sv"))], "Top")
+            .four_state(true);
+
+    let a = sim.signal("a");
+    sim.modify(|io| {
+        io.set_four_state(a, BigUint::from(1u8), BigUint::from(1u8));
+    }).unwrap();
+
+    assert_eq!(sim.get(sim.signal("complement_is_x")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("function_value")), 0u8.into());
+    }
 }

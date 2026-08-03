@@ -1,6 +1,33 @@
 use super::*;
 
 sv_backends! {
+    fn converts_veryl_logic_to_systemverilog_bit_input(sim) {
+        @setup {
+    let veryl = r#"
+        module Top (
+            a: input logic,
+            y: output logic,
+        ) {
+            inst child: $sv::BitInput (a, y);
+        }
+    "#;
+    let sv = r#"
+        module BitInput(input bit a, output logic y); assign y = a; endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("top.veryl"))],
+            vec![(sv, Path::new("bit_input.sv"))],
+            "Top",
+        ).four_state(true);
+
+    let a = sim.signal("a");
+    sim.modify(|io| {
+        io.set_four_state(a, BigUint::from(1u8), BigUint::from(1u8));
+    }).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0u8.into());
+    }
+
     fn simulates_veryl_top_with_systemverilog_child(sim) {
         @setup {
     let veryl = r#"

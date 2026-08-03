@@ -136,11 +136,16 @@ pub struct Port {
 pub struct Signal {
     name: String,
     r#type: Type,
+    is_net: bool,
 }
 
 impl Signal {
-    pub(crate) fn new(name: String, r#type: Type) -> Self {
-        Self { name, r#type }
+    pub(crate) fn new(name: String, r#type: Type, is_net: bool) -> Self {
+        Self {
+            name,
+            r#type,
+            is_net,
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -149,6 +154,10 @@ impl Signal {
 
     pub fn r#type(&self) -> &Type {
         &self.r#type
+    }
+
+    pub fn is_net(&self) -> bool {
+        self.is_net
     }
 }
 

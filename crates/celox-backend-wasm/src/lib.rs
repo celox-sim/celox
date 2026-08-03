@@ -3382,7 +3382,7 @@ fn compile_unary(
 
     if four_state {
         compile_unary_mask(&d, op, &s, d_width, s_width, locals, instrs);
-        if !matches!(op, UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::BitNot) {
+        if !matches!(op, UnaryOp::Ident | UnaryOp::ToTwoState) {
             normalize_reg_with_mask(&d, d_width, instrs);
         }
     }

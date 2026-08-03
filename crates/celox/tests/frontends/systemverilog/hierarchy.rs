@@ -1,6 +1,25 @@
 use super::*;
 
 sv_backends! {
+    fn treats_child_outputs_as_explicit_net_drivers(sim) {
+        @setup {
+    let sv = r#"
+        module Source(input logic a, output logic y); assign y = a; endmodule
+        module Sink(input logic a, output logic y); assign y = a; endmodule
+        module Top(input logic a, output logic y);
+            wire w;
+            Source source(.a(a), .y(w));
+            Sink sink(.a(w), .y(y));
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("explicit_net_driver.sv"))], "Top");
+
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+    }
+
     fn simulates_systemverilog_named_port_hierarchy(sim) {
         @setup {
     let sv = r#"

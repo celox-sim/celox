@@ -49,6 +49,7 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                 ir::Signal::new(
                     signal.name().to_string(),
                     ir::Type::from_ast(signal.r#type().clone(), &constants),
+                    signal.is_net(),
                 )
             })
             .collect();

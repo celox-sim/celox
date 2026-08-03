@@ -10,6 +10,93 @@ fn cranelift_build_error(source: &str) -> String {
 }
 
 #[test]
+fn rejects_cross_lhs_read_before_write_in_always_comb() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic b, output logic a, output logic c);
+            always_comb begin
+                c = a;
+                a = b;
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("read-before-write dependency inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn evaluates_sized_arithmetic_and_logical_right_shift_parameters() {
+    let source = r#"
+        module Top(output logic wraps, output logic logical_shift);
+            localparam WRAPS = ((8'hff + 8'h01) == 8'h00);
+            localparam LOGICAL_SHIFT = ((8'shfe >> 1) == 8'h7f);
+            assign wraps = WRAPS;
+            assign logical_shift = LOGICAL_SHIFT;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("sized_constants.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("wraps")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("logical_shift")), 1u8.into());
+}
+
+#[test]
+fn does_not_count_child_inputs_as_net_drivers() {
+    let error = cranelift_build_error(
+        r#"
+        module Sink(input logic a, output logic y); assign y = a; endmodule
+        module Top(output logic y);
+            wire w;
+            Sink sink(.a(w), .y(y));
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("undriven net declaration `w`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_top_level_localparam_overrides() {
+    let source = r#"
+        module Top(output logic y);
+            localparam LOCKED = 0;
+            assign y = LOCKED;
+        endmodule
+    "#;
+    let error = Simulator::from_sv_sources(vec![(source, Path::new("localparam.sv"))], "Top")
+        .param("LOCKED", 1)
+        .build_cranelift()
+        .expect_err("localparam override must be rejected")
+        .to_string();
+    assert!(
+        error.contains("localparam override `LOCKED`"),
+        "unexpected error: {error}"
+    );
+
+    let child_override = r#"
+        module Child(output logic y);
+            localparam LOCKED = 0;
+            assign y = LOCKED;
+        endmodule
+        module Top(output logic y);
+            Child #(.LOCKED(1)) child(.y(y));
+        endmodule
+    "#;
+    let error = cranelift_build_error(child_override);
+    assert!(
+        error.contains("localparam override `LOCKED`"),
+        "unexpected child override error: {error}"
+    );
+}
+
+#[test]
 fn merges_always_ff_processes_with_the_same_trigger() {
     let source = r#"
         module Top(input logic clk, input logic a, input logic b,

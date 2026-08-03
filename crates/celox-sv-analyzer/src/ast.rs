@@ -144,6 +144,14 @@ impl Module {
                         .iter()
                         .any(|assignment| assignment.assignment().lhs() == signal.name())
                 })
+                && !instances.iter().any(|instance| {
+                    instance.port_connections().iter().any(|connection| {
+                        matches!(
+                            connection.actual_expr(),
+                            Some(Expr::Ident(name)) if name == signal.name()
+                        )
+                    })
+                })
         }) {
             return Err(AnalyzerError::Unsupported(format!(
                 "undriven net declaration `{}`",
@@ -609,6 +617,15 @@ fn apply_parameter_overrides(
             "unknown top-level parameter override `{name}`"
         )));
     }
+    if let Some(name) = overrides.keys().find(|name| {
+        parameters
+            .iter()
+            .any(|parameter| parameter.name() == *name && parameter.is_local)
+    }) {
+        return Err(AnalyzerError::Unsupported(format!(
+            "localparam override `{name}`"
+        )));
+    }
     for parameter in parameters {
         if let Some(value) = overrides.get(parameter.name()) {
             parameter.value = Some(ConstExpr::Literal(value.to_string()));
@@ -623,6 +640,7 @@ pub struct Parameter {
     value: Option<ConstExpr>,
     declared_width: Option<usize>,
     declared_signed: Option<bool>,
+    is_local: bool,
 }
 
 impl Parameter {
@@ -631,12 +649,14 @@ impl Parameter {
         value: Option<ConstExpr>,
         declared_width: Option<usize>,
         declared_signed: Option<bool>,
+        is_local: bool,
     ) -> Self {
         Self {
             name,
             value,
             declared_width,
             declared_signed,
+            is_local,
         }
     }
 
@@ -688,7 +708,7 @@ impl Signal {
         &self.r#type
     }
 
-    fn is_net(&self) -> bool {
+    pub(crate) fn is_net(&self) -> bool {
         self.is_net
     }
 }
@@ -1133,6 +1153,7 @@ struct FunctionParam {
     name: String,
     width: Option<usize>,
     signed: bool,
+    is_2state: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1261,7 +1282,7 @@ fn parameters_from_module_node(
 ) -> Result<Vec<Parameter>, AnalyzerError> {
     let mut parameters = Vec::new();
     if let Some(parameter_port_list) = module_parameter_port_list(node.clone()) {
-        parameters_from_ref_node(parameter_port_list, syntax_tree, &mut parameters)?;
+        parameters_from_ref_node(parameter_port_list, syntax_tree, &mut parameters, false)?;
     }
 
     for item in module_non_port_items(node.clone()) {
@@ -1273,12 +1294,14 @@ fn parameters_from_module_node(
                     RefNode::LocalParameterDeclaration(&localparam.0),
                     syntax_tree,
                     &mut parameters,
+                    true,
                 )?,
                 sv_parser::PackageOrGenerateItemDeclaration::ParameterDeclaration(parameter) => {
                     parameters_from_ref_node(
                         RefNode::ParameterDeclaration(&parameter.0),
                         syntax_tree,
                         &mut parameters,
+                        false,
                     )?
                 }
                 _ => {}
@@ -1299,7 +1322,7 @@ fn parameters_from_module_node(
             .2
             .as_ref()
             .and_then(|(_, expr)| const_expr_from_constant_param(expr, syntax_tree));
-        parameters.push(Parameter::new(name, value, None, None));
+        parameters.push(Parameter::new(name, value, None, None, false));
     }
 
     Ok(parameters)
@@ -1685,6 +1708,7 @@ fn parameters_from_ref_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     parameters: &mut Vec<Parameter>,
+    is_local: bool,
 ) -> Result<(), AnalyzerError> {
     let parameter_width = parameter_declared_width(node.clone(), syntax_tree, parameters);
     let parameter_signed = parameter_width.map(|_| {
@@ -1707,6 +1731,7 @@ fn parameters_from_ref_node(
                 value,
                 parameter_width,
                 parameter_signed,
+                is_local,
             ));
         }
     }
@@ -2503,6 +2528,7 @@ fn tf_params(
 ) -> Vec<FunctionParam> {
     let mut params = Vec::new();
     let mut previous_type = None;
+    let mut previous_is_2state = false;
     for port in list.nodes.0.contents() {
         let type_node = RefNode::DataTypeOrImplicit(&port.nodes.3);
         let inferred_type = value_type_from_data_type_or_implicit(
@@ -2511,12 +2537,15 @@ fn tf_params(
             const_env,
             type_aliases,
         );
+        let inferred_is_2state = type_from_ref_node(type_node.clone(), syntax_tree)
+            .or_else(|| type_alias_from_ref_node(type_node.clone(), syntax_tree, type_aliases))
+            .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
         let omitted_type = matches!(
             port.nodes.3,
             sv_parser::DataTypeOrImplicit::ImplicitDataType(_)
         ) && is_signed_from_ref_node(type_node.clone()).is_none()
             && packed_ranges_from_ref_node(type_node.clone(), syntax_tree).is_empty();
-        let (name, r#type) = if let Some((identifier, _, _)) = port.nodes.4.as_ref() {
+        let (name, r#type, is_2state) = if let Some((identifier, _, _)) = port.nodes.4.as_ref() {
             let Some(name) = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
             else {
                 continue;
@@ -2526,7 +2555,12 @@ fn tf_params(
             } else {
                 inferred_type
             };
-            (name, r#type)
+            let is_2state = if port.nodes.1.is_none() && omitted_type {
+                previous_is_2state
+            } else {
+                inferred_is_2state
+            };
+            (name, r#type, is_2state)
         } else {
             // An identifier following a comma is syntactically ambiguous with a
             // user-defined type. sv-parser represents the shorthand `a, b` as a
@@ -2548,13 +2582,16 @@ fn tf_params(
                     signed: false,
                 })
             };
-            (name, r#type)
+            let is_2state = port.nodes.1.is_none() && previous_is_2state;
+            (name, r#type, is_2state)
         };
         previous_type = r#type;
+        previous_is_2state = is_2state;
         params.push(FunctionParam {
             name,
             width: r#type.map(|r#type| r#type.width),
             signed: r#type.is_some_and(|r#type| r#type.signed),
+            is_2state,
         });
     }
     params
@@ -2577,6 +2614,18 @@ fn tf_item_params(
             const_env,
             type_aliases,
         );
+        let is_2state = type_from_ref_node(
+            RefNode::DataTypeOrImplicit(&declaration.nodes.3),
+            syntax_tree,
+        )
+        .or_else(|| {
+            type_alias_from_ref_node(
+                RefNode::DataTypeOrImplicit(&declaration.nodes.3),
+                syntax_tree,
+                type_aliases,
+            )
+        })
+        .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
         for (identifier, _, _) in declaration.nodes.4.nodes.0.contents() {
             let Some(name) = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
             else {
@@ -2586,6 +2635,7 @@ fn tf_item_params(
                 name,
                 width: r#type.map(|r#type| r#type.width),
                 signed: r#type.is_some_and(|r#type| r#type.signed),
+                is_2state,
             });
         }
     }
@@ -3437,6 +3487,7 @@ fn add_localparams_from_generate_item(
         RefNode::LocalParameterDeclaration(&localparam.0),
         syntax_tree,
         &mut parameters,
+        true,
     )
     .is_err()
     {
@@ -3813,7 +3864,7 @@ fn expand_expr_calls(
                 .iter()
                 .zip(args)
                 .map(|(param, arg)| {
-                    let arg = if apply_return_type && let Some(width) = param.width {
+                    let mut arg = if apply_return_type && let Some(width) = param.width {
                         Expr::Resize {
                             expr: Box::new(arg),
                             width,
@@ -3822,6 +3873,12 @@ fn expand_expr_calls(
                     } else {
                         arg
                     };
+                    if param.is_2state {
+                        arg = Expr::Unary {
+                            op: UnaryOp::ToTwoState,
+                            expr: Box::new(arg),
+                        };
+                    }
                     (param.name.clone(), arg)
                 })
                 .collect::<HashMap<_, _>>();

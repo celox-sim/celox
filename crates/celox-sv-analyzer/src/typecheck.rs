@@ -64,6 +64,9 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
             }
         }
         ConstExpr::Binary { left, op, right } => {
+            if let Some(result) = eval_literal_binary(left, *op, right) {
+                return Some(result);
+            }
             if matches!(
                 op,
                 BinaryOp::EqCase | BinaryOp::NeCase | BinaryOp::EqWildcard | BinaryOp::NeWildcard
@@ -110,6 +113,109 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
                 eval_const_expr(else_expr, constants)
             }
         }
+    }
+}
+
+fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Option<i128> {
+    let ConstExpr::Literal(left_text) = left else {
+        return None;
+    };
+    let ConstExpr::Literal(right_text) = right else {
+        return None;
+    };
+    let mut left = parse_integral_literal(left_text)?;
+    let mut right = parse_integral_literal(right_text)?;
+    if left.mask != BigUint::default() || right.mask != BigUint::default() {
+        return None;
+    }
+
+    if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) {
+        let amount = usize::try_from(literal_as_i128(right_text)?).ok()?;
+        let width = left.width;
+        let signed = left.signed;
+        let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        let value = match op {
+            BinaryOp::Shl if amount < width => (&left.value << amount) & &width_mask,
+            BinaryOp::Shl | BinaryOp::Shr if amount >= width => BigUint::default(),
+            BinaryOp::Shr => &left.value >> amount,
+            BinaryOp::Sar if amount >= width => {
+                if signed && width != 0 && left.value.bit((width - 1) as u64) {
+                    width_mask
+                } else {
+                    BigUint::default()
+                }
+            }
+            BinaryOp::Sar => {
+                let shifted = &left.value >> amount;
+                if signed && width != 0 && left.value.bit((width - 1) as u64) && amount != 0 {
+                    let fill = (&width_mask << (width - amount)) & &width_mask;
+                    shifted | fill
+                } else {
+                    shifted
+                }
+            }
+            _ => unreachable!(),
+        };
+        left.value = value;
+        return integral_literal_as_i128(&left, signed);
+    }
+
+    if !matches!(
+        op,
+        BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+    ) {
+        return None;
+    }
+    let width = left.width.max(right.width);
+    let signed = left.signed && right.signed;
+    left = resize_integral_literal(left.clone(), width, signed, signed_extension(&left, signed));
+    right = resize_integral_literal(
+        right.clone(),
+        width,
+        signed,
+        signed_extension(&right, signed),
+    );
+    let modulus = BigUint::from(1u8) << width;
+    let width_mask = &modulus - BigUint::from(1u8);
+    let value = match op {
+        BinaryOp::Add => (left.value + right.value) & &width_mask,
+        BinaryOp::Sub => (left.value + &modulus - right.value) & &width_mask,
+        BinaryOp::Mul => (left.value * right.value) & &width_mask,
+        BinaryOp::BitAnd => left.value & right.value,
+        BinaryOp::BitOr => left.value | right.value,
+        BinaryOp::BitXor => left.value ^ right.value,
+        _ => unreachable!(),
+    };
+    integral_literal_as_i128(
+        &IntegralLiteral {
+            width,
+            signed,
+            value,
+            mask: BigUint::default(),
+        },
+        signed,
+    )
+}
+
+fn integral_literal_as_i128(literal: &IntegralLiteral, signed: bool) -> Option<i128> {
+    if literal.width > 128 || literal.mask != BigUint::default() {
+        return None;
+    }
+    let value = u128::try_from(literal.value.clone()).ok()?;
+    if !signed || literal.width == 0 || value & (1u128 << (literal.width - 1)) == 0 {
+        return i128::try_from(value).ok();
+    }
+    if literal.width == 128 {
+        Some(value as i128)
+    } else {
+        i128::try_from(value)
+            .ok()
+            .and_then(|value| value.checked_sub(1i128 << literal.width))
     }
 }
 
@@ -644,5 +750,27 @@ mod literal_tests {
 
         assert_eq!(eval_const_expr(&minus, &HashMap::new()), Some(1));
         assert_eq!(eval_const_expr(&bit_not, &HashMap::new()), Some(-1));
+    }
+
+    #[test]
+    fn wraps_sized_literal_arithmetic_to_expression_width() {
+        let expr = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Literal("8'hff".to_string())),
+            op: BinaryOp::Add,
+            right: Box::new(ConstExpr::Literal("8'h01".to_string())),
+        };
+
+        assert_eq!(eval_const_expr(&expr, &HashMap::new()), Some(0));
+    }
+
+    #[test]
+    fn logically_shifts_signed_literals_right() {
+        let expr = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Literal("8'shfe".to_string())),
+            op: BinaryOp::Shr,
+            right: Box::new(ConstExpr::Literal("1".to_string())),
+        };
+
+        assert_eq!(eval_const_expr(&expr, &HashMap::new()), Some(0x7f));
     }
 }

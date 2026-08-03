@@ -160,7 +160,60 @@ pub(crate) fn analyze_sources(
             modules.insert(name, lower_module(module, code, path)?);
         }
     }
+    validate_instance_net_drivers(&modules)?;
     Ok(modules)
+}
+
+fn validate_instance_net_drivers(
+    modules: &HashMap<resource_table::StrId, LoweredSvModule>,
+) -> Result<(), sv::AnalyzerError> {
+    for module in modules.values() {
+        for signal in module
+            .source
+            .signals()
+            .iter()
+            .filter(|signal| signal.is_net())
+        {
+            let locally_driven = module.source.comb_processes().iter().any(|process| {
+                process
+                    .assignments()
+                    .iter()
+                    .any(|assignment| assignment.lhs() == signal.name())
+            }) || module.source.ff_processes().iter().any(|process| {
+                process
+                    .assignments()
+                    .iter()
+                    .any(|assignment| assignment.assignment().lhs() == signal.name())
+            });
+            if locally_driven {
+                continue;
+            }
+            let driven_by_child = module.instances.iter().any(|instance| {
+                let Some(child) = modules.get(&instance.module_name) else {
+                    return false;
+                };
+                instance.port_connections.iter().any(|connection| {
+                    matches!(
+                        connection.actual_expr.as_ref(),
+                        Some(sv::ir::Expr::Ident(name)) if name == signal.name()
+                    ) && child.source.ports().iter().any(|port| {
+                        port.name() == connection.formal
+                            && matches!(
+                                port.direction(),
+                                sv::ir::PortDirection::Output | sv::ir::PortDirection::Inout
+                            )
+                    })
+                })
+            });
+            if !driven_by_child {
+                return Err(sv::AnalyzerError::Unsupported(format!(
+                    "undriven net declaration `{}`",
+                    signal.name()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Lower every SystemVerilog module into an embeddable hierarchy. The module
@@ -1302,6 +1355,14 @@ fn lower_comb_process(
     let assignments = process.assignments();
     if process.kind() == sv::ir::CombProcessKind::AlwaysComb {
         for (index, assignment) in assignments.iter().enumerate() {
+            if assignments[index + 1..].iter().any(|later| {
+                later.lhs() != assignment.lhs()
+                    && expr_references_ident(assignment.rhs(), later.lhs())
+            }) {
+                return Err(sv::AnalyzerError::Unsupported(
+                    "read-before-write dependency inside always_comb".to_string(),
+                ));
+            }
             for later_index in index + 1..assignments.len() {
                 if assignments[later_index].lhs() != assignment.lhs() {
                     continue;

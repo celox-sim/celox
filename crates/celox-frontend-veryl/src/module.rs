@@ -1658,12 +1658,15 @@ impl<'a> ModuleParser<'a> {
                         index: Vec::new(),
                         access: parent_access,
                     })?;
-                    let expr = coerce_node_width(
+                    let mut expr = coerce_node_width(
                         &mut glue_arena,
                         parent_node,
                         Some(child_width),
                         parent_var.r#type.signed,
                     )?;
+                    if child_var.r#type.is_2state() {
+                        expr = glue_arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
+                    }
                     let mut sources = HashSet::default();
                     sources.insert(VarAtomBase::new(
                         GlueAddr::Parent(parent_dst.id),
