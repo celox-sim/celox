@@ -798,25 +798,83 @@ impl<'a> FfParser<'a> {
                     active = Self::function_path_or(then_active, else_active);
                 }
                 Statement::Case(statement) => {
-                    let base = state.clone();
+                    let control_base = state.clone();
+                    let case_target =
+                        Self::substitute_function_expr(&statement.case_target, &control_base);
+                    let mut evaluated_state = control_base.clone();
+                    let (case_target, _) = self.capture_nested_function_outputs_with_states(
+                        &case_target,
+                        &mut evaluated_state,
+                    )?;
+                    state = self.apply_state_transition_on_path(
+                        &active,
+                        &control_base,
+                        evaluated_state,
+                    );
+                    let case_base = state.clone();
                     let mut remaining = active.clone();
                     let mut arm_states = Vec::with_capacity(statement.arms.len());
                     let mut live_paths = FunctionPathCondition::Never;
                     for arm in &statement.arms {
-                        let condition = Self::substitute_function_expr(
-                            &case_arm_condition_expr(&statement.case_target, &arm.patterns),
-                            &base,
-                        );
-                        let arm_active =
-                            Self::function_path_and(remaining.clone(), condition.clone());
+                        let mut pattern_remaining = remaining.clone();
+                        let mut arm_active = FunctionPathCondition::Never;
+                        let mut arm_condition = None;
+                        for pattern in &arm.patterns {
+                            let mut pattern = pattern.clone();
+                            let expressions: Vec<&mut Box<Expression>> = match &mut pattern {
+                                CasePattern::Eq(expr) => vec![expr],
+                                CasePattern::Range { lo, hi, .. } => vec![lo, hi],
+                            };
+                            for expr in expressions {
+                                let pattern_base = state.clone();
+                                let frozen = Self::substitute_function_expr(expr, &pattern_base);
+                                let mut evaluated_state = pattern_base.clone();
+                                let (captured, _) = self
+                                    .capture_nested_function_outputs_with_states(
+                                        &frozen,
+                                        &mut evaluated_state,
+                                    )?;
+                                **expr = captured;
+                                state = self.apply_state_transition_on_path(
+                                    &pattern_remaining,
+                                    &pattern_base,
+                                    evaluated_state,
+                                );
+                            }
+                            let condition = case_arm_condition_expr(
+                                &case_target,
+                                std::slice::from_ref(&pattern),
+                            );
+                            let matched = Self::function_path_and(
+                                pattern_remaining.clone(),
+                                condition.clone(),
+                            );
+                            arm_condition = Some(match arm_condition {
+                                None => condition.clone(),
+                                Some(previous) => Expression::Binary(
+                                    Box::new(previous),
+                                    Op::LogicOr,
+                                    Box::new(condition.clone()),
+                                    Box::new(Comptime::create_unknown(TokenRange::default())),
+                                ),
+                            });
+                            arm_active = Self::function_path_or(arm_active, matched);
+                            pattern_remaining =
+                                Self::function_path_and_not(pattern_remaining, condition);
+                        }
+                        let base = state.clone();
                         let (arm_state, arm_live) = self
                             .apply_statements_to_function_state_in_path(
                                 &arm.body, ret_id, &base, arm_active,
                             )?;
-                        arm_states.push((condition.clone(), arm_state));
+                        arm_states.push((
+                            arm_condition.expect("Case arm must have at least one pattern"),
+                            arm_state,
+                        ));
                         live_paths = Self::function_path_or(live_paths, arm_live);
-                        remaining = Self::function_path_and_not(remaining, condition);
+                        remaining = pattern_remaining;
                     }
+                    let base = state.clone();
                     let (mut merged, default_live) = self
                         .apply_statements_to_function_state_in_path(
                             &statement.default,
@@ -825,8 +883,8 @@ impl<'a> FfParser<'a> {
                             remaining,
                         )?;
                     for (condition, arm_state) in arm_states.into_iter().rev() {
-                        merged =
-                            self.merge_expression_states(&condition, &base, &arm_state, &merged);
+                        merged = self
+                            .merge_expression_states(&condition, &case_base, &arm_state, &merged);
                     }
                     state = merged;
                     active = Self::function_path_or(live_paths, default_live);

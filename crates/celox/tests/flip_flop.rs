@@ -451,6 +451,67 @@ fn test_ff_statement_function_materializes_effectful_case_controls(sim) {
     );
 }
 
+fn test_ff_case_controls_apply_nested_output_writes_to_function_state(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x;
+            }
+
+            function observed (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = 8'd0;
+                case update(x, written) {
+                    8'd10: {}
+                    default: {}
+                }
+                return x;
+            }
+
+            function outer (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                $display("state=%0d %0d", observed(x, written), written);
+                return written;
+            }
+
+            always_ff (clk) {
+                q = outer(d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 10u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "state=10 11".to_string(),
+        }],
+    );
+    assert_eq!(sim.get(effect), 11u8.into());
+    assert_eq!(sim.get(q), 11u8.into());
+}
+
 fn test_ff_case_skips_effectful_patterns_after_matching_arm(sim) {
     @omit_veryl;
     @ignore_on(wasm);
@@ -4662,6 +4723,46 @@ fn test_ff_assert_effectful_args_snapshot_earlier_pure_values_before_branch() {
     assert_eq!(
         defining_block, unit.entry_block_id,
         "an earlier pure argument must be snapshotted before branching when a later argument is effectful",
+    );
+}
+
+#[test]
+fn test_ff_assert_trailing_pure_arg_stays_in_failure_block() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            ok: input logic,
+            d: input logic<8>,
+            effect: output logic<8>
+        ) {
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x;
+            }
+
+            always_ff (clk) {
+                $assert_continue(ok, "%0d %0d", update(d, effect), d * 8'd13);
+            }
+        }
+    "#;
+    let result = SimulatorBuilder::new(code, "Top")
+        .optimize(false)
+        .trace_pre_optimized_sir()
+        .build_with_trace();
+    let sir = result.trace.format_pre_optimized_sir().unwrap();
+    let branch = sir
+        .find("Branch(")
+        .unwrap_or_else(|| panic!("assertion branch in FF SIR:\n{sir}"));
+    let multiply = sir
+        .find(" Mul ")
+        .unwrap_or_else(|| panic!("trailing pure assertion argument in FF SIR:\n{sir}"));
+
+    assert!(
+        branch < multiply,
+        "the trailing pure argument should remain in the failure block:\n{sir}",
     );
 }
 

@@ -496,24 +496,29 @@ impl<'a> FfParser<'a> {
         } else {
             args
         };
-        let has_effectful_arg = value_args.iter().any(|arg| {
+        let last_effectful_arg = value_args.iter().rposition(|arg| {
             expression::expression_has_side_effect(&arg.0)
                 || self.expression_has_runtime_effect(&arg.0)
         });
-        if !has_effectful_arg {
+        let Some(last_effectful_arg) = last_effectful_arg else {
             return Ok(vec![None; value_args.len()]);
-        }
+        };
 
-        // Once any argument is effectful, evaluate the complete argument list
-        // left-to-right. Deferring a pure read past a later effectful argument
-        // could otherwise change the value captured for a failing assertion.
+        // Evaluate only through the last effectful argument. Earlier pure reads
+        // must be snapshotted before a later effect can change them, while pure
+        // trailing arguments can stay lazy in the assertion failure block.
         value_args
             .iter()
-            .map(|arg| {
-                self.parse_runtime_event_expression(
-                    &arg.0, targets, domain, convert, sources, ir_builder,
-                )?;
-                Ok(Some(self.stack.pop_back().unwrap()))
+            .enumerate()
+            .map(|(index, arg)| {
+                if index <= last_effectful_arg {
+                    self.parse_runtime_event_expression(
+                        &arg.0, targets, domain, convert, sources, ir_builder,
+                    )?;
+                    Ok(Some(self.stack.pop_back().unwrap()))
+                } else {
+                    Ok(None)
+                }
             })
             .collect()
     }
