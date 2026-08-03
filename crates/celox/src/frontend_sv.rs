@@ -1236,13 +1236,18 @@ fn lower_comb_process(
     let assignments = process.assignments();
     if process.kind() == sv::ir::CombProcessKind::AlwaysComb {
         for (index, assignment) in assignments.iter().enumerate() {
-            if assignments[index + 1..].iter().any(|later| {
-                later.lhs_value() == assignment.lhs_value()
-                    && expr_references_ident(later.rhs(), assignment.lhs())
-            }) {
-                return Err(sv::AnalyzerError::Unsupported(
-                    "dependent repeated assignment inside always_comb".to_string(),
-                ));
+            for later_index in index + 1..assignments.len() {
+                if assignments[later_index].lhs_value() != assignment.lhs_value() {
+                    continue;
+                }
+                if assignments[index + 1..=later_index]
+                    .iter()
+                    .any(|later| expr_references_ident(later.rhs(), assignment.lhs()))
+                {
+                    return Err(sv::AnalyzerError::Unsupported(
+                        "dependent repeated assignment inside always_comb".to_string(),
+                    ));
+                }
             }
         }
     }

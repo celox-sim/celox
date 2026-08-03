@@ -279,6 +279,30 @@ fn sign_extends_signed_literals_in_constant_expressions() {
 }
 
 #[test]
+fn produces_unknown_for_four_state_division_by_zero() {
+    let source = r#"
+        module Top(output logic [7:0] div, output logic [7:0] rem);
+            assign div = 8'd5 / 8'd0;
+            assign rem = 8'd5 % 8'd0;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("zero_div.sv"))], "Top")
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    let div = sim.signal("div");
+    let rem = sim.signal("rem");
+    assert_eq!(
+        sim.get_four_state(div),
+        (BigUint::from(0xffu8), BigUint::from(0xffu8))
+    );
+    assert_eq!(
+        sim.get_four_state(rem),
+        (BigUint::from(0xffu8), BigUint::from(0xffu8))
+    );
+}
+
+#[test]
 fn preserves_typedef_function_return_width_in_ff_case() {
     let source = r#"
         module Top(input logic clk, output logic [7:0] q);
@@ -817,12 +841,71 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             endmodule
         "#,
         ),
+        (
+            "dependent repeated assignment inside always_comb",
+            r#"
+            module Top(input logic b, d, output logic a, c);
+                always_comb begin a = b; c = a; a = d; end
+            endmodule
+        "#,
+        ),
+        (
+            "reduction operator in parameter expression",
+            r#"
+            module Top #(parameter logic [3:0] P = 4'hf, parameter FLAG = &P)
+                       (output logic y);
+                assign y = FLAG;
+            endmodule
+        "#,
+        ),
+        (
+            "casez or casex inside function",
+            r#"
+            module Top(input logic [1:0] a, output logic y);
+                function automatic logic f(input logic [1:0] x);
+                    casez (x) 2'b1?: return 1'b1; default: return 1'b0; endcase
+                endfunction
+                assign y = f(a);
+            endmodule
+        "#,
+        ),
+        (
+            "genvar update operator",
+            r#"
+            module Top(input logic [7:0] a, output logic [7:0] y);
+                for (genvar i = 7; i > 0; i &= i - 1) assign y[i] = a[i];
+            endmodule
+        "#,
+        ),
+        (
+            "gate primitive instantiation",
+            r#"
+            module Top(input logic a, b, output logic y); and (y, a, b); endmodule
+        "#,
+        ),
     ];
 
     for (expected, source) in cases {
         let error = cranelift_build_error(source);
         assert!(error.contains(expected), "{expected}: {error}");
     }
+}
+
+#[test]
+fn rejects_unknown_top_parameter_overrides() {
+    let source = r#"
+        module Top #(parameter WIDTH = 4) (output logic [WIDTH-1:0] y);
+            assign y = '0;
+        endmodule
+    "#;
+    let error = match Simulator::from_sv_sources(vec![(source, Path::new("bad_param.sv"))], "Top")
+        .param("WIDHT", 8)
+        .build_cranelift()
+    {
+        Ok(_) => panic!("unknown parameter override unexpectedly compiled"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("unknown top-level parameter override `WIDHT`"));
 }
 
 #[test]

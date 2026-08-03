@@ -77,8 +77,8 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
                 BinaryOp::Add => left.checked_add(right),
                 BinaryOp::Sub => left.checked_sub(right),
                 BinaryOp::Mul => left.checked_mul(right),
-                BinaryOp::Div => (right != 0).then(|| left / right),
-                BinaryOp::Mod => (right != 0).then(|| left % right),
+                BinaryOp::Div => left.checked_div(right),
+                BinaryOp::Mod => left.checked_rem(right),
                 BinaryOp::Shl => shift_amount(right).and_then(|right| left.checked_shl(right)),
                 BinaryOp::Shr => shift_amount(right).and_then(|right| left.checked_shr(right)),
                 BinaryOp::Sar => shift_amount(right).and_then(|right| left.checked_shr(right)),
@@ -611,5 +611,21 @@ mod literal_tests {
         assert_eq!(eval_const_expr(&eq, &HashMap::new()), Some(1));
         assert_eq!(eval_const_expr(&ne, &HashMap::new()), Some(1));
         assert_eq!(eval_const_expr(&indeterminate, &HashMap::new()), None);
+    }
+
+    #[test]
+    fn rejects_overflowing_constant_division_and_remainder() {
+        for op in [BinaryOp::Div, BinaryOp::Mod] {
+            let expr = ConstExpr::Binary {
+                left: Box::new(ConstExpr::Literal(i128::MIN.to_string())),
+                op,
+                right: Box::new(ConstExpr::Unary {
+                    op: UnaryOp::Minus,
+                    expr: Box::new(ConstExpr::Literal("1".to_string())),
+                }),
+            };
+
+            assert_eq!(eval_const_expr(&expr, &HashMap::new()), None);
+        }
     }
 }

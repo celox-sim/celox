@@ -84,10 +84,10 @@ impl Module {
                 AnalyzerError::Unsupported("invalid module identifier span".to_string())
             })?
             .to_string();
-        reject_silently_ignored_constructs(node.clone())?;
+        reject_silently_ignored_constructs(node.clone(), syntax_tree)?;
         let mut parameters = parameters_from_module_node(node.clone(), syntax_tree)?;
         if name == override_module_name {
-            apply_parameter_overrides(&mut parameters, parameter_overrides);
+            apply_parameter_overrides(&mut parameters, parameter_overrides)?;
         }
         let ports = ports_from_module_node(node.clone(), syntax_tree)?;
         if ports
@@ -207,7 +207,10 @@ fn reject_unsupported_multidimensional_packed_bounds(
     }
 }
 
-fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerError> {
+fn reject_silently_ignored_constructs(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+) -> Result<(), AnalyzerError> {
     if node
         .clone()
         .into_iter()
@@ -448,6 +451,43 @@ fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerE
                     "output or inout function argument".to_string(),
                 ));
             }
+            RefNode::FunctionDeclaration(function)
+                if RefNode::FunctionDeclaration(function).into_iter().any(|node| {
+                    matches!(
+                        node,
+                        RefNode::CaseStatement(case)
+                            if !matches!(
+                                case,
+                                sv_parser::CaseStatement::Normal(case)
+                                    if matches!(case.nodes.1, sv_parser::CaseKeyword::Case(_))
+                            )
+                    )
+                }) =>
+            {
+                return Err(AnalyzerError::Unsupported(
+                    "casez or casex inside function".to_string(),
+                ));
+            }
+            RefNode::GateInstantiation(_) => {
+                return Err(AnalyzerError::Unsupported(
+                    "gate primitive instantiation".to_string(),
+                ));
+            }
+            RefNode::ParamAssignment(parameter)
+                if RefNode::ParamAssignment(parameter).into_iter().any(|node| {
+                    matches!(
+                        node,
+                        RefNode::UnaryOperator(operator)
+                            if syntax_tree
+                                .get_str(&operator.nodes.0)
+                                .is_some_and(|op| matches!(op, "&" | "|" | "^" | "~&" | "~|" | "~^" | "^~"))
+                    )
+                }) =>
+            {
+                return Err(AnalyzerError::Unsupported(
+                    "reduction operator in parameter expression".to_string(),
+                ));
+            }
             _ => {}
         }
     }
@@ -469,12 +509,24 @@ fn non_input_function_port(node: RefNode<'_>) -> bool {
     }
 }
 
-fn apply_parameter_overrides(parameters: &mut [Parameter], overrides: &HashMap<String, i128>) {
+fn apply_parameter_overrides(
+    parameters: &mut [Parameter],
+    overrides: &HashMap<String, i128>,
+) -> Result<(), AnalyzerError> {
+    if let Some(name) = overrides
+        .keys()
+        .find(|name| !parameters.iter().any(|parameter| parameter.name() == *name))
+    {
+        return Err(AnalyzerError::Unsupported(format!(
+            "unknown top-level parameter override `{name}`"
+        )));
+    }
     for parameter in parameters {
         if let Some(value) = overrides.get(parameter.name()) {
             parameter.value = Some(ConstExpr::Literal(value.to_string()));
         }
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3027,11 +3079,8 @@ fn comb_processes_from_loop_generate(
             processes,
         )?;
         iterations += 1;
-        let Some(next) =
-            next_genvar_value(value, &generate.nodes.1.nodes.1.4, syntax_tree, &loop_env)
-        else {
-            break;
-        };
+        let next = next_genvar_value(value, &generate.nodes.1.nodes.1.4, syntax_tree, &loop_env)
+            .ok_or_else(|| AnalyzerError::Unsupported("genvar update operator".to_string()))?;
         value = next;
     }
     let mut loop_env = const_env.clone();
@@ -4414,11 +4463,11 @@ fn assignment_op_expr(lhs: &LValue, op: &str, rhs: Expr) -> Option<Expr> {
         "^" => BinaryOp::BitXor,
         _ => return None,
     };
-    Some(Expr::Binary {
+    Some(guard_zero_divisions(Expr::Binary {
         left: Box::new(expr_from_lvalue(lhs)),
         op,
         right: Box::new(rhs),
-    })
+    }))
 }
 
 fn expr_from_lvalue(lhs: &LValue) -> Expr {
@@ -4554,6 +4603,15 @@ fn expr_from_expression_with_types(
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Option<Expr> {
+    expr_from_expression_with_types_raw(expr, syntax_tree, packed_dimensions)
+        .map(guard_zero_divisions)
+}
+
+fn expr_from_expression_with_types_raw(
+    expr: &sv_parser::Expression,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+) -> Option<Expr> {
     match expr {
         sv_parser::Expression::Primary(primary) => {
             expr_from_primary_with_types(primary, syntax_tree, packed_dimensions)
@@ -4568,11 +4626,17 @@ fn expr_from_expression_with_types(
             })
         }
         sv_parser::Expression::Binary(binary) => {
-            let left =
-                expr_from_expression_with_types(&binary.nodes.0, syntax_tree, packed_dimensions)?;
+            let left = expr_from_expression_with_types_raw(
+                &binary.nodes.0,
+                syntax_tree,
+                packed_dimensions,
+            )?;
             let op = binary_op_from_symbol(&binary.nodes.1.nodes.0.nodes.0, syntax_tree)?;
-            let right =
-                expr_from_expression_with_types(&binary.nodes.3, syntax_tree, packed_dimensions)?;
+            let right = expr_from_expression_with_types_raw(
+                &binary.nodes.3,
+                syntax_tree,
+                packed_dimensions,
+            )?;
             Some(left_associate_expr_binary(Expr::Binary {
                 left: Box::new(left),
                 op,
@@ -4583,6 +4647,32 @@ fn expr_from_expression_with_types(
             expr_from_conditional_expression(expr, syntax_tree, packed_dimensions)
         }
         _ => None,
+    }
+}
+
+fn guard_zero_divisions(expr: Expr) -> Expr {
+    let Expr::Binary { left, op, right } = expr else {
+        return expr;
+    };
+    let left = Box::new(guard_zero_divisions(*left));
+    let right = Box::new(guard_zero_divisions(*right));
+    let operation = Expr::Binary {
+        left,
+        op,
+        right: right.clone(),
+    };
+    if matches!(op, BinaryOp::Div | BinaryOp::Mod) {
+        Expr::Mux {
+            condition: Box::new(Expr::Binary {
+                left: right,
+                op: BinaryOp::EqCase,
+                right: Box::new(Expr::Literal("0".to_string())),
+            }),
+            then_expr: Box::new(Expr::Literal("'x".to_string())),
+            else_expr: Box::new(operation),
+        }
+    } else {
+        operation
     }
 }
 
