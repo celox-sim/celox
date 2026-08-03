@@ -925,12 +925,15 @@ fn build_instance_glue(
                     index: Vec::new(),
                     access: BitAccess::new(0, width - 1),
                 })?;
-                let expr = coerce_node_width(
+                let mut expr = coerce_node_width(
                     &mut arena,
                     child_node,
                     Some(parent_var.width),
                     child_var.signed,
                 )?;
+                if !parent_var.is_4state {
+                    expr = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
+                }
                 let mut sources = HashSet::default();
                 sources.insert(VarAtomBase::new(
                     GlueAddr::Child(*child_port_id),
@@ -2000,6 +2003,7 @@ fn lower_ff_processes(
     let mut eval_apply_ff_blocks = HashMap::default();
     let mut reset_clock_map = HashMap::default();
     let mut clock_edges = HashMap::default();
+    let mut reset_edges = HashMap::default();
 
     for process in module.ff_processes() {
         let clock = clock_event_from_ff_process(process)
@@ -2014,6 +2018,23 @@ fn lower_ff_processes(
             return Err(sv::AnalyzerError::Unsupported(
                 "mixed clock-edge polarities for one signal".to_string(),
             ));
+        }
+        for reset in process
+            .events()
+            .iter()
+            .filter(|event| event.signal() != clock.signal())
+        {
+            let reset_id = *name_to_id.get(reset.signal()).ok_or_else(|| {
+                sv::AnalyzerError::Unsupported("always_ff event control".to_string())
+            })?;
+            if reset_edges
+                .insert(reset_id, reset.edge())
+                .is_some_and(|edge| edge != reset.edge())
+            {
+                return Err(sv::AnalyzerError::Unsupported(
+                    "mixed reset-edge polarities for one signal".to_string(),
+                ));
+            }
         }
         let trigger_set = trigger_set_from_ff_process(process, name_to_id)
             .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;

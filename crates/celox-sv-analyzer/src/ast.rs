@@ -3080,7 +3080,7 @@ fn comb_processes_from_module_common_item(
                 condition,
                 syntax_tree,
                 packed_dimensions,
-            ) {
+            )? {
                 processes.push(substitute_process_constants(process, const_env));
             }
         }
@@ -4003,13 +4003,22 @@ fn comb_process_from_always_construct(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
-) -> Option<CombProcess> {
+) -> Result<Option<CombProcess>, AnalyzerError> {
     if !matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_)) {
-        return None;
+        return Ok(None);
     }
     let assignments = assignments_from_statement(&always.nodes.1, syntax_tree, packed_dimensions);
-    (!assignments.is_empty())
-        .then(|| CombProcess::new(CombProcessKind::AlwaysComb, condition, assignments))
+    let assignment_count = RefNode::Statement(&always.nodes.1)
+        .into_iter()
+        .filter(|node| matches!(node, RefNode::BlockingAssignment(_)))
+        .count();
+    if assignments.len() != assignment_count {
+        return Err(AnalyzerError::Unsupported(
+            "always_comb assignment expression".to_string(),
+        ));
+    }
+    Ok((!assignments.is_empty())
+        .then(|| CombProcess::new(CombProcessKind::AlwaysComb, condition, assignments)))
 }
 
 fn ff_processes_from_module_node(

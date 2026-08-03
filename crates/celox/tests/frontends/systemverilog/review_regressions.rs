@@ -169,6 +169,44 @@ fn converts_unknown_hierarchical_inputs_to_bit() {
 }
 
 #[test]
+fn converts_unknown_child_outputs_to_parent_bit() {
+    let source = r#"
+        module Child(output logic y); assign y = 1'bx; endmodule
+        module Top(output bit y); Child child(.y(y)); endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("parent_bit.sv"))], "Top")
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(
+        sim.get_four_state(sim.signal("y")),
+        (BigUint::from(0u8), BigUint::from(0u8))
+    );
+}
+
+#[test]
+fn converts_unknown_mixed_sv_outputs_to_veryl_bit() {
+    let veryl = r#"
+        module Top (y: output bit) {
+            inst child: $sv::Child (y);
+        }
+    "#;
+    let sv = "module Child(output logic y); assign y = 1'bx; endmodule";
+    let mut sim = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("child.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(
+        sim.get_four_state(sim.signal("y")),
+        (BigUint::from(0u8), BigUint::from(0u8))
+    );
+}
+
+#[test]
 fn preserves_nested_loop_generate_assignments() {
     let source = r#"
         module Top #(parameter ENABLE = 1) (
@@ -1151,6 +1189,25 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                 parameter FLAG = (~P == 0)
             ) (output logic y);
                 assign y = FLAG;
+            endmodule
+        "#,
+        ),
+        (
+            "always_comb assignment expression",
+            r#"
+            module Top(input logic [3:0] a, b, output logic [7:0] y);
+                always_comb y = a ** b;
+            endmodule
+        "#,
+        ),
+        (
+            "mixed reset-edge polarities for one signal",
+            r#"
+            module Top(input logic clk1, clk2, rst, d, output logic q1, q2);
+                always_ff @(posedge clk1 or posedge rst)
+                    if (rst) q1 <= 1'b0; else q1 <= d;
+                always_ff @(posedge clk2 or negedge rst)
+                    if (!rst) q2 <= 1'b0; else q2 <= d;
             endmodule
         "#,
         ),
