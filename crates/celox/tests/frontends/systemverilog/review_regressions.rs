@@ -240,6 +240,28 @@ fn does_not_treat_typedef_variables_as_instances() {
 }
 
 #[test]
+fn preserves_ternary_parameter_values() {
+    let source = r#"
+        module Top #(
+            parameter ENABLE = 1,
+            parameter W = ENABLE ? 8 : 4
+        ) (
+            input logic [W-1:0] a,
+            output logic [W-1:0] y
+        );
+            assign y = a;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("ternary_param.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(a, 0xa5u8)).unwrap();
+    assert_eq!(sim.get(y), 0xa5u8.into());
+}
+
+#[test]
 fn preserves_typedef_function_return_width_in_ff_case() {
     let source = r#"
         module Top(input logic clk, output logic [7:0] q);
@@ -698,6 +720,42 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(input logic clk, a, b, output logic qa, qb);
                 always_ff @(posedge clk) qa <= a;
                 always_ff @(negedge clk) qb <= b;
+            endmodule
+        "#,
+        ),
+        (
+            "procedural local data declaration",
+            r#"
+            module Top(input logic a, output logic y);
+                always_comb begin logic tmp; tmp = a; y = tmp; end
+            endmodule
+        "#,
+        ),
+        (
+            "continuous assignment expression",
+            r#"
+            module Top(input logic [7:0] a, output logic [7:0] y);
+                assign y = {<<{a}};
+            endmodule
+        "#,
+        ),
+        (
+            "conditional function return without else",
+            r#"
+            module Top(input logic a, output logic y);
+                function automatic logic choose(input logic x);
+                    if (x) return 1'b1;
+                    return 1'b0;
+                endfunction
+                assign y = choose(a);
+            endmodule
+        "#,
+        ),
+        (
+            "loop-generate unroll limit exceeded",
+            r#"
+            module Top(input logic [10000:0] a, output logic [10000:0] y);
+                for (genvar i = 0; i < 10001; i++) assign y[i] = a[i];
             endmodule
         "#,
         ),

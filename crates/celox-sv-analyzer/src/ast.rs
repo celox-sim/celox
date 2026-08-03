@@ -109,7 +109,7 @@ impl Module {
             syntax_tree,
             &const_env,
             &packed_dimensions,
-        )
+        )?
         .into_iter()
         .map(|process| expand_process_calls(process, &functions))
         .map(|process| {
@@ -270,11 +270,20 @@ fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerE
                 }
                 if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
                     && body
+                        .clone()
                         .into_iter()
                         .any(|node| matches!(node, RefNode::LoopStatement(_)))
                 {
                     return Err(AnalyzerError::Unsupported(
                         "procedural loop inside always_ff".to_string(),
+                    ));
+                }
+                if body
+                    .into_iter()
+                    .any(|node| matches!(node, RefNode::DataDeclaration(_)))
+                {
+                    return Err(AnalyzerError::Unsupported(
+                        "procedural local data declaration".to_string(),
                     ));
                 }
             }
@@ -375,6 +384,26 @@ fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerE
             {
                 return Err(AnalyzerError::Unsupported(
                     "delayed continuous assignment".to_string(),
+                ));
+            }
+            RefNode::FunctionDeclaration(function)
+                if RefNode::FunctionDeclaration(function)
+                    .into_iter()
+                    .any(|node| {
+                        matches!(
+                            node,
+                            RefNode::ConditionalStatement(statement)
+                                if statement.nodes.5.is_none()
+                                    && RefNode::ConditionalStatement(statement)
+                                        .into_iter()
+                                        .any(|node| matches!(node, RefNode::JumpStatement(
+                                            sv_parser::JumpStatement::Return(_)
+                                        )))
+                        )
+                    }) =>
+            {
+                return Err(AnalyzerError::Unsupported(
+                    "conditional function return without else".to_string(),
                 ));
             }
             _ => {}
@@ -2685,7 +2714,7 @@ fn comb_processes_from_module_node(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
-) -> Vec<CombProcess> {
+) -> Result<Vec<CombProcess>, AnalyzerError> {
     let mut processes = Vec::new();
     for item in module_non_port_items(node) {
         comb_processes_from_non_port_module_item(
@@ -2695,9 +2724,9 @@ fn comb_processes_from_module_node(
             const_env,
             packed_dimensions,
             &mut processes,
-        );
+        )?;
     }
-    processes
+    Ok(processes)
 }
 
 fn comb_processes_from_non_port_module_item(
@@ -2707,7 +2736,7 @@ fn comb_processes_from_non_port_module_item(
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<CombProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     match item {
         sv_parser::NonPortModuleItem::GenerateRegion(region) => {
             for item in &region.nodes.1 {
@@ -2718,7 +2747,7 @@ fn comb_processes_from_non_port_module_item(
                     const_env,
                     packed_dimensions,
                     processes,
-                );
+                )?;
             }
         }
         sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) => {
@@ -2729,10 +2758,11 @@ fn comb_processes_from_non_port_module_item(
                 const_env,
                 packed_dimensions,
                 processes,
-            );
+            )?;
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn comb_processes_from_generate_item(
@@ -2742,7 +2772,7 @@ fn comb_processes_from_generate_item(
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<CombProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
         comb_processes_from_module_or_generate_item(
             item,
@@ -2751,8 +2781,9 @@ fn comb_processes_from_generate_item(
             const_env,
             packed_dimensions,
             processes,
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn comb_processes_from_module_or_generate_item(
@@ -2762,7 +2793,7 @@ fn comb_processes_from_module_or_generate_item(
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<CombProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     if let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item {
         comb_processes_from_module_common_item(
             &item.nodes.1,
@@ -2771,8 +2802,9 @@ fn comb_processes_from_module_or_generate_item(
             const_env,
             packed_dimensions,
             processes,
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn comb_processes_from_module_common_item(
@@ -2782,11 +2814,11 @@ fn comb_processes_from_module_common_item(
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<CombProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     match item {
         sv_parser::ModuleCommonItem::ContinuousAssign(assign) => {
             processes.extend(
-                assignments_from_continuous_assign(assign, syntax_tree, packed_dimensions)
+                assignments_from_continuous_assign(assign, syntax_tree, packed_dimensions)?
                     .into_iter()
                     .map(|assignment| substitute_assignment_constants(assignment, const_env))
                     .map(|assignment| {
@@ -2818,7 +2850,7 @@ fn comb_processes_from_module_common_item(
                 const_env,
                 packed_dimensions,
                 processes,
-            );
+            )?;
         }
         sv_parser::ModuleCommonItem::LoopGenerateConstruct(generate) => {
             comb_processes_from_loop_generate(
@@ -2828,10 +2860,11 @@ fn comb_processes_from_module_common_item(
                 const_env,
                 packed_dimensions,
                 processes,
-            );
+            )?;
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn comb_processes_from_conditional_generate(
@@ -2841,20 +2874,20 @@ fn comb_processes_from_conditional_generate(
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<CombProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     let sv_parser::ConditionalGenerateConstruct::If(generate) = generate else {
-        return;
+        return Ok(());
     };
     let Some(generate_condition) = const_expr_from_ref_node(
         RefNode::ConstantExpression(&generate.nodes.1.nodes.1),
         syntax_tree,
     ) else {
-        return;
+        return Ok(());
     };
     if has_local_constants(const_env)
         && eval_ast_const_expr(&generate_condition, const_env).is_none()
     {
-        return;
+        return Ok(());
     }
     let generate_condition = substitute_const_expr_constants(generate_condition, const_env);
     let then_condition = combine_conditions(condition.clone(), generate_condition.clone());
@@ -2865,7 +2898,7 @@ fn comb_processes_from_conditional_generate(
         const_env,
         packed_dimensions,
         processes,
-    );
+    )?;
     if let Some((_, block)) = &generate.nodes.3 {
         let else_condition = combine_conditions(
             condition,
@@ -2881,8 +2914,9 @@ fn comb_processes_from_conditional_generate(
             const_env,
             packed_dimensions,
             processes,
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn comb_processes_from_loop_generate(
@@ -2892,31 +2926,32 @@ fn comb_processes_from_loop_generate(
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<CombProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     if generate_block_has_data_declaration(&generate.nodes.2) {
-        return;
+        return Ok(());
     }
     let Some(name) = identifier_text(
         RefNode::GenvarIdentifier(&generate.nodes.1.nodes.1.0.nodes.1),
         syntax_tree,
     ) else {
-        return;
+        return Ok(());
     };
     let Some(init) = const_expr_from_ref_node(
         RefNode::ConstantExpression(&generate.nodes.1.nodes.1.0.nodes.3),
         syntax_tree,
     )
     .and_then(|expr| eval_ast_const_expr(&expr, const_env)) else {
-        return;
+        return Ok(());
     };
     let Some(condition_expr) = const_expr_from_ref_node(
         RefNode::ConstantExpression(&generate.nodes.1.nodes.1.2.nodes.0),
         syntax_tree,
     ) else {
-        return;
+        return Ok(());
     };
 
     let mut value = init;
+    let mut iterations = 0;
     for _ in 0..10_000 {
         let mut loop_env = const_env.clone();
         loop_env.insert(name.clone(), value);
@@ -2933,7 +2968,8 @@ fn comb_processes_from_loop_generate(
             &loop_env,
             packed_dimensions,
             processes,
-        );
+        )?;
+        iterations += 1;
         let Some(next) =
             next_genvar_value(value, &generate.nodes.1.nodes.1.4, syntax_tree, &loop_env)
         else {
@@ -2941,6 +2977,16 @@ fn comb_processes_from_loop_generate(
         };
         value = next;
     }
+    let mut loop_env = const_env.clone();
+    loop_env.insert(name, value);
+    if iterations == 10_000
+        && eval_ast_const_expr(&condition_expr, &loop_env).is_some_and(|value| value != 0)
+    {
+        return Err(AnalyzerError::Unsupported(
+            "loop-generate unroll limit exceeded".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn generate_block_has_data_declaration(block: &sv_parser::GenerateBlock) -> bool {
@@ -3036,7 +3082,7 @@ fn comb_processes_from_generate_block(
     const_env: &HashMap<String, i128>,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     processes: &mut Vec<CombProcess>,
-) {
+) -> Result<(), AnalyzerError> {
     match block {
         sv_parser::GenerateBlock::GenerateItem(item) => {
             comb_processes_from_generate_item(
@@ -3046,7 +3092,7 @@ fn comb_processes_from_generate_block(
                 const_env,
                 packed_dimensions,
                 processes,
-            );
+            )?;
         }
         sv_parser::GenerateBlock::Multiple(block) => {
             let mut block_env = const_env.clone();
@@ -3061,10 +3107,11 @@ fn comb_processes_from_generate_block(
                     &block_env,
                     packed_dimensions,
                     processes,
-                );
+                )?;
             }
         }
     }
+    Ok(())
 }
 
 fn add_localparams_from_generate_item(
@@ -3606,7 +3653,7 @@ fn assignments_from_continuous_assign(
     assign: &sv_parser::ContinuousAssign,
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
-) -> Vec<Assignment> {
+) -> Result<Vec<Assignment>, AnalyzerError> {
     match assign {
         sv_parser::ContinuousAssign::Net(assign) => assign
             .nodes
@@ -3615,15 +3662,20 @@ fn assignments_from_continuous_assign(
             .0
             .contents()
             .into_iter()
-            .filter_map(|assignment| {
-                let lhs =
-                    net_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)?;
+            .map(|assignment| {
+                let lhs = net_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)
+                    .ok_or_else(|| {
+                        AnalyzerError::Unsupported("continuous assignment lvalue".to_string())
+                    })?;
                 let rhs = expr_from_expression_with_types(
                     &assignment.nodes.2,
                     syntax_tree,
                     packed_dimensions,
-                )?;
-                Some(Assignment::new(lhs, rhs))
+                )
+                .ok_or_else(|| {
+                    AnalyzerError::Unsupported("continuous assignment expression".to_string())
+                })?;
+                Ok(Assignment::new(lhs, rhs))
             })
             .collect(),
         sv_parser::ContinuousAssign::Variable(assign) => assign
@@ -3633,15 +3685,21 @@ fn assignments_from_continuous_assign(
             .0
             .contents()
             .into_iter()
-            .filter_map(|assignment| {
+            .map(|assignment| {
                 let lhs =
-                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)?;
+                    variable_lvalue_from_node(&assignment.nodes.0, syntax_tree, packed_dimensions)
+                        .ok_or_else(|| {
+                            AnalyzerError::Unsupported("continuous assignment lvalue".to_string())
+                        })?;
                 let rhs = expr_from_expression_with_types(
                     &assignment.nodes.2,
                     syntax_tree,
                     packed_dimensions,
-                )?;
-                Some(Assignment::new(lhs, rhs))
+                )
+                .ok_or_else(|| {
+                    AnalyzerError::Unsupported("continuous assignment expression".to_string())
+                })?;
+                Ok(Assignment::new(lhs, rhs))
             })
             .collect(),
     }
@@ -4906,7 +4964,9 @@ fn const_expr_from_constant_param(
             sv_parser::ConstantMintypmaxExpression::Unary(expr) => {
                 const_expr_from_ref_node(RefNode::ConstantExpression(expr), syntax_tree)
             }
-            sv_parser::ConstantMintypmaxExpression::Ternary(_) => None,
+            sv_parser::ConstantMintypmaxExpression::Ternary(expr) => {
+                const_expr_from_constant_mintypmax_ternary(expr, syntax_tree)
+            }
         },
         _ => None,
     }
@@ -4921,7 +4981,11 @@ fn const_expr_from_param_expression(
             sv_parser::MintypmaxExpression::Expression(expr) => {
                 const_expr_from_expr(expr.as_ref(), syntax_tree)
             }
-            sv_parser::MintypmaxExpression::Ternary(_) => None,
+            sv_parser::MintypmaxExpression::Ternary(expr) => Some(ConstExpr::Mux {
+                condition: Box::new(const_expr_from_expr(&expr.nodes.0, syntax_tree)?),
+                then_expr: Box::new(const_expr_from_expr(&expr.nodes.2, syntax_tree)?),
+                else_expr: Box::new(const_expr_from_expr(&expr.nodes.4, syntax_tree)?),
+            }),
         },
         sv_parser::ParamExpression::DataType(_) | sv_parser::ParamExpression::Dollar(_) => None,
     }
