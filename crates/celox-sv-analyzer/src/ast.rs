@@ -252,7 +252,7 @@ fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerE
                     ));
                 }
                 if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
-                    && body.into_iter().any(|node| {
+                    && body.clone().into_iter().any(|node| {
                         matches!(
                             node,
                             RefNode::CaseStatement(case)
@@ -266,6 +266,15 @@ fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerE
                 {
                     return Err(AnalyzerError::Unsupported(
                         "casez, casex, or pattern case inside always_ff".to_string(),
+                    ));
+                }
+                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
+                    && body
+                        .into_iter()
+                        .any(|node| matches!(node, RefNode::LoopStatement(_)))
+                {
+                    return Err(AnalyzerError::Unsupported(
+                        "procedural loop inside always_ff".to_string(),
                     ));
                 }
             }
@@ -348,6 +357,25 @@ fn reject_silently_ignored_constructs(node: RefNode<'_>) -> Result<(), AnalyzerE
             }
             RefNode::Cast(_) | RefNode::ConstantCast(_) => {
                 return Err(AnalyzerError::Unsupported("cast expression".to_string()));
+            }
+            RefNode::NamedPortConnectionAsterisk(_) => {
+                return Err(AnalyzerError::Unsupported(
+                    "wildcard port connection".to_string(),
+                ));
+            }
+            RefNode::ContinuousAssign(sv_parser::ContinuousAssign::Net(assign))
+                if assign.nodes.2.is_some() =>
+            {
+                return Err(AnalyzerError::Unsupported(
+                    "delayed continuous assignment".to_string(),
+                ));
+            }
+            RefNode::ContinuousAssign(sv_parser::ContinuousAssign::Variable(assign))
+                if assign.nodes.1.is_some() =>
+            {
+                return Err(AnalyzerError::Unsupported(
+                    "delayed continuous assignment".to_string(),
+                ));
             }
             _ => {}
         }
@@ -1831,10 +1859,12 @@ fn instances_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
 ) -> Result<Vec<Instance>, AnalyzerError> {
+    let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
     let mut instances = Vec::new();
     for item in module_non_port_items(node) {
         instances_from_non_port_module_item(item, None, syntax_tree, &mut instances)?;
     }
+    instances.retain(|instance| !type_aliases.contains_key(instance.module_name()));
     Ok(instances)
 }
 

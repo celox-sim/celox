@@ -221,6 +221,25 @@ fn preserves_arithmetic_shift_operators() {
 }
 
 #[test]
+fn does_not_treat_typedef_variables_as_instances() {
+    let source = r#"
+        module Top(input logic [7:0] a, output logic [7:0] y);
+            typedef logic [7:0] word_t;
+            word_t value;
+            assign value = a;
+            assign y = value;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("typedef_signal.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let a = sim.signal("a");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(a, 0xa5u8)).unwrap();
+    assert_eq!(sim.get(y), 0xa5u8.into());
+}
+
+#[test]
 fn preserves_typedef_function_return_width_in_ff_case() {
     let source = r#"
         module Top(input logic clk, output logic [7:0] q);
@@ -649,6 +668,36 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic a, b, output logic [1:0] y);
                 assign y = {logic'(a), b};
+            endmodule
+        "#,
+        ),
+        (
+            "wildcard port connection",
+            r#"
+            module Child(input logic a, output logic y); assign y = a; endmodule
+            module Top(input logic a, output logic y); Child child (.*); endmodule
+        "#,
+        ),
+        (
+            "procedural loop inside always_ff",
+            r#"
+            module Top(input logic clk, d, output logic q);
+                always_ff @(posedge clk) repeat (1) q <= d;
+            endmodule
+        "#,
+        ),
+        (
+            "delayed continuous assignment",
+            r#"
+            module Top(input logic a, output wire y); assign #5 y = a; endmodule
+        "#,
+        ),
+        (
+            "mixed clock-edge polarities for one signal",
+            r#"
+            module Top(input logic clk, a, b, output logic qa, qb);
+                always_ff @(posedge clk) qa <= a;
+                always_ff @(negedge clk) qb <= b;
             endmodule
         "#,
         ),

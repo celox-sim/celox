@@ -1790,8 +1790,22 @@ fn lower_ff_processes(
     let mut apply_ff_blocks = HashMap::default();
     let mut eval_apply_ff_blocks = HashMap::default();
     let mut reset_clock_map = HashMap::default();
+    let mut clock_edges = HashMap::default();
 
     for process in module.ff_processes() {
+        let clock = clock_event_from_ff_process(process)
+            .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
+        let clock_id = *name_to_id
+            .get(clock.signal())
+            .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
+        if clock_edges
+            .insert(clock_id, clock.edge())
+            .is_some_and(|edge| edge != clock.edge())
+        {
+            return Err(sv::AnalyzerError::Unsupported(
+                "mixed clock-edge polarities for one signal".to_string(),
+            ));
+        }
         let trigger_set = trigger_set_from_ff_process(process, name_to_id)
             .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
         for reset in &trigger_set.resets {
