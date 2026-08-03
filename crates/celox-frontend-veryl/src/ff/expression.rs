@@ -8,7 +8,7 @@ use crate::{
         celox_value_from_comptime, celox_value_from_comptime_in_context, eval_var_select,
         get_access_width, is_static_access,
     },
-    resolve_total_width,
+    function_call_arg, resolve_total_width,
 };
 use celox_design::{
     BinaryOp, BitAccess, SPARSE_WORKING_REGION, STABLE_REGION, UnaryOp, VarAtomBase, WORKING_REGION,
@@ -985,7 +985,7 @@ impl<'a> FfParser<'a> {
                 function.get_function(&[])?
             };
             let mut usage = FunctionInputUsage::default();
-            for arg_path in call.outputs.keys() {
+            for (arg_path, _) in &call.outputs {
                 let arg_id = *function_body.arg_map.get(arg_path)?;
                 let expr = self
                     .extract_function_target_expr(&function_body, arg_id, &HashMap::default())
@@ -1052,7 +1052,9 @@ impl<'a> FfParser<'a> {
                             nested_usage.runtime_reads.contains(arg_id)
                                 || nested_usage.array_views.contains(arg_id)
                         };
-                        if needs_actual && let Some(expr) = call.inputs.get(arg_path) {
+                        if needs_actual
+                            && let Some(expr) = function_call_arg(&call.inputs, arg_path)
+                        {
                             self.collect_function_input_usage(expr, usage, active_calls)?;
                         }
                     }
@@ -1082,6 +1084,7 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Assert { .. }
                     | SystemFunctionKind::Finish => {}
                 },
+                Factor::HierVariable(_) => return None,
                 Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
             },
             Expression::Binary(lhs, _, rhs, _) => {
@@ -1199,7 +1202,9 @@ impl<'a> FfParser<'a> {
                                 input_usage.runtime_reads.contains(arg_id)
                                     || input_usage.array_views.contains(arg_id)
                             };
-                            if needs_actual && let Some(expr) = call.inputs.get(arg_path) {
+                            if needs_actual
+                                && let Some(expr) = function_call_arg(&call.inputs, arg_path)
+                            {
                                 collect(expr, candidates, candidate_indices);
                             }
                         }
@@ -1238,6 +1243,7 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Assert { .. }
                     | SystemFunctionKind::Finish => {}
                 },
+                Factor::HierVariable(_) => {}
                 Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
             },
             Expression::Binary(lhs, _, rhs, _) => {
