@@ -1568,7 +1568,9 @@ fn try_eval_const(expr: &Expression) -> Option<u64> {
     match expr {
         Expression::Term(f) => match f.as_ref() {
             Factor::Value(c) => c.get_value().ok().map(|v| v.payload_u64()),
-            Factor::Variable(_, _, _, c) => c.get_value().ok().map(|v| v.payload_u64()),
+            Factor::Variable(_, _, _, c) if c.is_const => {
+                c.get_value().ok().map(|v| v.payload_u64())
+            }
             _ => None,
         },
         _ => None,
