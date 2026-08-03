@@ -307,7 +307,13 @@ pub fn parse(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
-) -> Result<crate::ir::OptimizedSir, ParserError> {
+) -> Result<
+    (
+        crate::ir::OptimizedSir,
+        Vec<celox_frontend_veryl::FrontendDiagnostic>,
+    ),
+    ParserError,
+> {
     debug_assert!(
         loop_provenance.is_consistent_with(ir),
         "loop provenance must describe the analyzer IR passed to the parser"
@@ -354,6 +360,37 @@ pub fn parse(
         trace.absorb_frontend(frontend_trace);
     }
     let mut scheduled = scheduled?;
+    let root_module_name = scheduled
+        .scheduled
+        .frontend_lookup
+        .root_instance_and_module()
+        .and_then(|(_, module)| {
+            scheduled
+                .scheduled
+                .frontend_lookup
+                .module_names
+                .get(&module)
+                .copied()
+        });
+    let dynamic_for_diagnostics = root_module_name
+        .and_then(|root_module_name| {
+            ir.components.iter().find_map(|component| match component {
+                veryl_analyzer::ir::Component::Module(module)
+                    if module.name == root_module_name =>
+                {
+                    Some(module)
+                }
+                _ => None,
+            })
+        })
+        .map(|module| {
+            celox_frontend_veryl::check_elaborated_dynamic_for_bounds(
+                &scheduled.scheduled,
+                module,
+                &scheduled.fused_optimization_hints,
+            )
+        })
+        .unwrap_or_default();
     apply_fused_optimization_hints(&mut scheduled.scheduled, scheduled.fused_optimization_hints)?;
     scheduled.scheduled.inject_triggers();
     let scheduled = scheduled.scheduled;
@@ -401,5 +438,5 @@ pub fn parse(
         t.post_optimized_sir = Some(program.clone());
     }
 
-    Ok(program)
+    Ok((program, dynamic_for_diagnostics))
 }

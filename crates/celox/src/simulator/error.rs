@@ -37,11 +37,74 @@ fn render_analyzer_error(error: &veryl_analyzer::AnalyzerError) -> String {
     rendered
 }
 
+/// A non-fatal source diagnostic retained by a successfully built simulator.
+#[derive(Debug)]
+pub enum CompilationWarning {
+    Analyzer(veryl_analyzer::AnalyzerError),
+    Frontend(celox_frontend_veryl::FrontendDiagnostic),
+}
+
+impl fmt::Display for CompilationWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Analyzer(diagnostic) => diagnostic.fmt(f),
+            Self::Frontend(diagnostic) => diagnostic.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for CompilationWarning {}
+
+impl miette::Diagnostic for CompilationWarning {
+    fn code<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
+        match self {
+            Self::Analyzer(diagnostic) => miette::Diagnostic::code(diagnostic),
+            Self::Frontend(diagnostic) => miette::Diagnostic::code(diagnostic),
+        }
+    }
+
+    fn severity(&self) -> Option<miette::Severity> {
+        match self {
+            Self::Analyzer(diagnostic) => miette::Diagnostic::severity(diagnostic),
+            Self::Frontend(diagnostic) => miette::Diagnostic::severity(diagnostic),
+        }
+    }
+
+    fn help<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
+        match self {
+            Self::Analyzer(diagnostic) => miette::Diagnostic::help(diagnostic),
+            Self::Frontend(diagnostic) => miette::Diagnostic::help(diagnostic),
+        }
+    }
+
+    fn url<'a>(&'a self) -> Option<Box<dyn fmt::Display + 'a>> {
+        match self {
+            Self::Analyzer(diagnostic) => miette::Diagnostic::url(diagnostic),
+            Self::Frontend(diagnostic) => miette::Diagnostic::url(diagnostic),
+        }
+    }
+
+    fn source_code(&self) -> Option<&dyn miette::SourceCode> {
+        match self {
+            Self::Analyzer(diagnostic) => miette::Diagnostic::source_code(diagnostic),
+            Self::Frontend(diagnostic) => miette::Diagnostic::source_code(diagnostic),
+        }
+    }
+
+    fn labels(&self) -> Option<Box<dyn Iterator<Item = miette::LabeledSpan> + '_>> {
+        match self {
+            Self::Analyzer(diagnostic) => miette::Diagnostic::labels(diagnostic),
+            Self::Frontend(diagnostic) => miette::Diagnostic::labels(diagnostic),
+        }
+    }
+}
+
 /// The specific kind of simulator error.
 #[derive(Debug)]
 pub enum SimulatorErrorKind {
     SIRParser(crate::ParserError),
     Analyzer(Vec<veryl_analyzer::AnalyzerError>),
+    Frontend(Vec<celox_frontend_veryl::FrontendDiagnostic>),
     Runtime(crate::RuntimeErrorCode),
     Codegen(CodegenError),
 }
@@ -133,11 +196,11 @@ impl CodegenError {
     }
 }
 
-/// A simulator error that may also carry accumulated analyzer warnings.
+/// A simulator error that may also carry accumulated compilation warnings.
 #[derive(Debug)]
 pub struct SimulatorError {
     kind: Box<SimulatorErrorKind>,
-    warnings: Vec<veryl_analyzer::AnalyzerError>,
+    warnings: Vec<CompilationWarning>,
 }
 
 impl SimulatorError {
@@ -150,7 +213,7 @@ impl SimulatorError {
     }
 
     /// Attach warnings to this error.
-    pub fn with_warnings(mut self, warnings: Vec<veryl_analyzer::AnalyzerError>) -> Self {
+    pub fn with_warnings(mut self, warnings: Vec<CompilationWarning>) -> Self {
         self.warnings = warnings;
         self
     }
@@ -160,8 +223,8 @@ impl SimulatorError {
         &self.kind
     }
 
-    /// Returns accumulated analyzer warnings.
-    pub fn warnings(&self) -> &[veryl_analyzer::AnalyzerError] {
+    /// Returns accumulated compilation warnings.
+    pub fn warnings(&self) -> &[CompilationWarning] {
         &self.warnings
     }
 }
@@ -176,6 +239,14 @@ impl fmt::Display for SimulatorError {
                         f.write_str("\n")?;
                     }
                     f.write_str(&render_analyzer_error(e))?;
+                }
+            }
+            SimulatorErrorKind::Frontend(diagnostics) => {
+                for (i, diagnostic) in diagnostics.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str("\n")?;
+                    }
+                    f.write_str(&render_diagnostic(diagnostic))?;
                 }
             }
             SimulatorErrorKind::Runtime(e) => write!(f, "Runtime error: {e}")?,

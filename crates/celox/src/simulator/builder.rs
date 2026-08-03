@@ -8,7 +8,10 @@ use veryl_parser::Parser;
 use veryl_parser::resource_table;
 
 use crate::parser::BuildConfig;
-use crate::{ParserError, SimulatorError, SimulatorErrorKind, ir::OptimizedSir, parser};
+use crate::{
+    CompilationWarning, FrontendDiagnostic, ParserError, SimulatorError, SimulatorErrorKind,
+    ir::OptimizedSir, parser,
+};
 
 fn analyze(
     sources: &[(&str, &Path)],
@@ -32,7 +35,11 @@ fn analyze(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
-) -> (Result<OptimizedSir, ParserError>, Vec<AnalyzerError>) {
+) -> (
+    Result<OptimizedSir, ParserError>,
+    Vec<AnalyzerError>,
+    Vec<FrontendDiagnostic>,
+) {
     symbol_table::clear();
     attribute_table::clear();
 
@@ -81,6 +88,11 @@ fn analyze(
         ));
     }
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
+    let mut frontend_diagnostics = if errors.iter().any(AnalyzerError::is_error) {
+        Vec::new()
+    } else {
+        celox_frontend_veryl::check_dynamic_for_bounds(&ir)
+    };
     let loop_provenance = loop_sources.match_unrolled(&ir);
 
     let top = veryl_parser::resource_table::insert_str(top);
@@ -104,14 +116,18 @@ fn analyze(
         optimize_options,
         diagnostics,
         preserve_element_storage_layout,
-    );
-    (sir, errors)
+    )
+    .map(|(sir, mut elaborated_diagnostics)| {
+        frontend_diagnostics.append(&mut elaborated_diagnostics);
+        sir
+    });
+    (sir, errors, frontend_diagnostics)
 }
 
 /// Compile Veryl source code to the SIR (Simulation IR) representation.
 ///
 /// This is the shared compilation pipeline used by all backends.
-/// Returns verified optimized SIR and any analyzer warnings on success.
+/// Returns verified optimized SIR and any compilation warnings on success.
 pub fn compile_to_sir(
     sources: &[(&str, &Path)],
     top: &str,
@@ -132,7 +148,7 @@ pub fn compile_to_sir(
     reset_type: Option<ResetType>,
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
-) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     compile_to_sir_with_layout_mode(
         sources,
         top,
@@ -173,8 +189,8 @@ fn compile_to_sir_with_layout_mode(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
-) -> Result<(OptimizedSir, Vec<AnalyzerError>), SimulatorError> {
-    let (sir, errors) = analyze(
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    let (sir, errors, frontend_diagnostics) = analyze(
         sources,
         top,
         ignored_loops,
@@ -190,10 +206,29 @@ fn compile_to_sir_with_layout_mode(
         diagnostics,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
     );
-    let (real_errors, warnings): (Vec<_>, Vec<_>) = errors.into_iter().partition(|e| e.is_error());
+    let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
+        errors.into_iter().partition(AnalyzerError::is_error);
+    let (frontend_errors, frontend_warnings): (Vec<_>, Vec<_>) = frontend_diagnostics
+        .into_iter()
+        .partition(FrontendDiagnostic::is_error);
+    let warnings = analyzer_warnings
+        .into_iter()
+        .map(CompilationWarning::Analyzer)
+        .chain(
+            frontend_warnings
+                .into_iter()
+                .map(CompilationWarning::Frontend),
+        )
+        .collect::<Vec<_>>();
     if !real_errors.is_empty() {
         return Err(
             SimulatorError::new(SimulatorErrorKind::Analyzer(real_errors)).with_warnings(warnings),
+        );
+    }
+    if !frontend_errors.is_empty() {
+        return Err(
+            SimulatorError::new(SimulatorErrorKind::Frontend(frontend_errors))
+                .with_warnings(warnings),
         );
     }
     match sir {
@@ -633,7 +668,7 @@ mod host {
         ) -> Result<
             (
                 crate::ir::LaidOutProgram,
-                Vec<veryl_analyzer::AnalyzerError>,
+                Vec<CompilationWarning>,
                 SimulatorOptions,
                 Option<std::path::PathBuf>,
             ),
