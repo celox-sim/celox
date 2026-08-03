@@ -3,10 +3,20 @@
 //!
 //! # Analysis contract
 //!
-//! This is a Celox frontend rule, not a definition of Veryl language
-//! semantics. Its purpose is to reject programs that could observe the
-//! difference between capturing a continuation bound before a loop and
-//! re-evaluating it before every iteration.
+//! This is a Celox frontend rule, not a choice between capture-on-entry and
+//! per-iteration evaluation as Veryl language semantics. Celox may capture a
+//! continuation bound while emitted synthesizable SystemVerilog evaluates its
+//! loop condition on every iteration. An immediate body write that makes this
+//! difference observable is therefore an error.
+//!
+//! Testbench loops have a different compatibility requirement. Celox currently
+//! executes them only through its native testbench compiler, which captures
+//! the bound before entering the loop; it does not emit a SystemVerilog
+//! testbench. A time-advancing body is consequently not rejected. Instead, the
+//! checker warns only when the advanced event's write closure reaches state
+//! read by the original bound. This identifies fragile code without warning on
+//! unrelated clocks or writes to disjoint state. A procedural `let` can be
+//! used when an explicit snapshot is intended.
 //!
 //! The checker uses a structural, bit-level may-dependency relation. It does
 //! not attempt to prove runtime value equality, branch reachability, event-edge
@@ -29,11 +39,11 @@
 //! depends on never discarding a possible influence merely because it is hard
 //! to analyze; those cases must remain dependent or become unknown.
 //!
-//! A known overlap between the continuation-bound reads and the loop body's
-//! immediate or event-mediated write closure is an error. An opaque or
-//! otherwise unresolvable effect is a warning. Therefore, a program accepted
-//! without either diagnostic is guaranteed not to contain such an influence
-//! within Celox's closed-world elaborated execution model.
+//! A known overlap between continuation-bound reads and immediate body writes
+//! is an error. Event-mediated overlap is a warning, as is an opaque or
+//! otherwise unresolvable effect. More precise event analysis can therefore
+//! turn a conservative warning into a clean pass, but never changes an
+//! immediate-write error.
 //!
 //! Opaque SystemVerilog components, DPI/VPI callbacks, `force`/`release`,
 //! `bind`, and other external mechanisms are outside that guarantee. If Celox
@@ -131,8 +141,8 @@ pub fn check_dynamic_for_bounds(ir: &Ir) -> Vec<FrontendDiagnostic> {
 ///
 /// At this point every root variable and event domain has a concrete state
 /// identity, and the scheduled SIR contains the transitive FF/comb work for
-/// each event. This lets a loop that advances time be classified as an error
-/// or a pass instead of conservatively warning about every `clock.next()`.
+/// each event. This lets a loop that advances time either receive a targeted
+/// warning or pass cleanly instead of warning about every `clock.next()`.
 pub fn check_elaborated_dynamic_for_bounds(
     scheduled: &ScheduledRtl,
     module: &Module,
@@ -289,7 +299,7 @@ fn check_elaborated_for(
     }
 
     if conflict {
-        diagnostics.push(FrontendDiagnostic::mutable_for_bound(
+        diagnostics.push(FrontendDiagnostic::time_advancing_for_bound(
             &statement.token,
             "the loop body advances an event that may update state read by the continuation bound",
         ));

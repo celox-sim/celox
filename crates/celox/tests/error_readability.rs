@@ -1,4 +1,6 @@
-use celox::{Simulator, SimulatorBuilder};
+use celox::{
+    CompilationWarning, FrontendDiagnostic, Simulator, SimulatorBuilder, render_diagnostic,
+};
 use insta::assert_snapshot;
 
 #[test]
@@ -153,7 +155,7 @@ fn test_mutable_for_bound_error_readability() {
 }
 
 #[test]
-fn test_elaborated_mutable_for_bound_error_readability() {
+fn test_time_advancing_for_bound_warning_readability() {
     let code = r#"
         module Counter (
             clk: input clock,
@@ -177,6 +179,16 @@ fn test_elaborated_mutable_for_bound_error_readability() {
             }
         }
     "#;
-    let error = Simulator::builder(code, "t").build().unwrap_err();
-    assert_snapshot!(error.to_string());
+    let simulator = Simulator::builder(code, "t").build().unwrap();
+    let warning = simulator
+        .warnings()
+        .iter()
+        .find(|warning| {
+            matches!(
+                warning,
+                CompilationWarning::Frontend(FrontendDiagnostic::TimeAdvancingForBound { .. })
+            )
+        })
+        .expect("expected a time-advancing continuation-bound warning");
+    assert_snapshot!(render_diagnostic(warning));
 }

@@ -1,11 +1,11 @@
 ---
 source: crates/celox/tests/error_readability.rs
-expression: error.to_string()
+expression: render_diagnostic(warning)
 ---
-mutable_for_bound
+time_advancing_for_bound
 
-  × Loop continuation bound is not stable: the loop body advances an event that may update state read by the
-  │ continuation bound
+  ⚠ Loop continuation bound may change while simulation time advances: the loop body advances an event that may update
+  │ state read by the continuation bound
     ╭─[:17:21]
  16 │             initial {
  17 │                 for _i in 0..count {
@@ -13,4 +13,4 @@ mutable_for_bound
     ·                      ╰── loop with an unstable continuation bound
  18 │                     clk.next();
     ╰────
-  help: copy the bound to a value that is not modified by the loop body
+  help: copy the bound to a procedural let before entering the loop

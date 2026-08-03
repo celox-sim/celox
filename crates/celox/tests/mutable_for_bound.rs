@@ -17,6 +17,19 @@ fn expect_mutable_bound_error(code: &str, top: &str) {
     );
 }
 
+fn expect_time_advancing_bound_warning(code: &str, top: &str) {
+    let simulator = Simulator::builder(code, top)
+        .build()
+        .expect("time-advancing continuation bounds are warnings, not errors");
+    assert!(
+        simulator.warnings().iter().any(|warning| matches!(
+            warning,
+            CompilationWarning::Frontend(FrontendDiagnostic::TimeAdvancingForBound { .. })
+        )),
+        "expected a time-advancing continuation-bound warning"
+    );
+}
+
 #[test]
 fn direct_and_nested_body_writes_are_errors() {
     expect_mutable_bound_error(
@@ -250,7 +263,7 @@ module Top (
 }
 
 #[test]
-fn time_advancing_body_effects_are_errors_when_the_bound_is_in_the_event_write_closure() {
+fn time_advancing_body_effects_warn_when_the_bound_is_in_the_event_write_closure() {
     let code = r#"
 module Counter (
     clk: input clock,
@@ -280,7 +293,7 @@ module t {
     }
 }
 "#;
-    expect_mutable_bound_error(code, "t");
+    expect_time_advancing_bound_warning(code, "t");
 }
 
 #[test]
@@ -360,7 +373,7 @@ module t {
 }
 
 #[test]
-fn event_write_closure_propagates_through_comb_logic_and_testbench_functions() {
+fn event_write_closure_warning_propagates_through_comb_logic_and_testbench_functions() {
     let code = r#"
 module Counter (
     clk: input clock,
@@ -394,11 +407,11 @@ module t {
     }
 }
 "#;
-    expect_mutable_bound_error(code, "t");
+    expect_time_advancing_bound_warning(code, "t");
 }
 
 #[test]
-fn event_calls_hidden_in_testbench_helpers_are_errors() {
+fn event_calls_hidden_in_testbench_helpers_warn() {
     let code = r#"
 module Counter (
     clk: input clock,
@@ -427,11 +440,11 @@ module t {
     }
 }
 "#;
-    expect_mutable_bound_error(code, "t");
+    expect_time_advancing_bound_warning(code, "t");
 }
 
 #[test]
-fn asynchronous_reset_write_closure_is_an_error() {
+fn asynchronous_reset_write_closure_is_a_warning() {
     let code = r#"
 module Counter (
     clk: input clock,
@@ -460,25 +473,21 @@ module t {
     }
 }
 "#;
-    let error = Simulator::builder(code, "t")
+    let simulator = Simulator::builder(code, "t")
         .reset_type(ResetType::AsyncHigh)
         .build()
-        .expect_err("an asynchronous reset may update the continuation bound");
+        .expect("an asynchronous reset conflict is a warning");
     assert!(
-        matches!(
-            error.kind(),
-            SimulatorErrorKind::Frontend(diagnostics)
-                if diagnostics.iter().any(|diagnostic| matches!(
-                    diagnostic,
-                    FrontendDiagnostic::MutableForBound { .. }
-                ))
-        ),
-        "unexpected diagnostic: {error}"
+        simulator.warnings().iter().any(|warning| matches!(
+            warning,
+            CompilationWarning::Frontend(FrontendDiagnostic::TimeAdvancingForBound { .. })
+        )),
+        "expected an asynchronous reset continuation-bound warning"
     );
 }
 
 #[test]
-fn event_write_closure_follows_cascaded_clock_domains() {
+fn event_write_closure_warning_follows_cascaded_clock_domains() {
     let code = r#"
 module Counter (
     clk: input clock,
@@ -508,11 +517,11 @@ module t {
     }
 }
 "#;
-    expect_mutable_bound_error(code, "t");
+    expect_time_advancing_bound_warning(code, "t");
 }
 
 #[test]
-fn event_write_closure_tracks_concat_slice_and_mux_bits() {
+fn event_write_closure_warning_tracks_concat_slice_and_mux_bits() {
     let code = r#"
 module Counter (
     clk: input clock,
@@ -548,7 +557,7 @@ module t {
     }
 }
 "#;
-    expect_mutable_bound_error(code, "t");
+    expect_time_advancing_bound_warning(code, "t");
 }
 
 #[test]
@@ -591,7 +600,7 @@ module t {
 }
 
 #[test]
-fn event_write_closure_handles_dynamic_unpacked_array_writes_conservatively() {
+fn event_write_closure_warns_for_dynamic_unpacked_array_writes_conservatively() {
     let code = r#"
 module Counter (
     clk: input clock,
@@ -619,7 +628,7 @@ module t {
     }
 }
 "#;
-    expect_mutable_bound_error(code, "t");
+    expect_time_advancing_bound_warning(code, "t");
 }
 
 #[test]

@@ -41,6 +41,12 @@ pub enum FrontendDiagnostic {
         source_location: SourceLocation,
     },
 
+    #[error("Loop continuation bound may change while simulation time advances: {detail}")]
+    TimeAdvancingForBound {
+        detail: String,
+        source_location: SourceLocation,
+    },
+
     #[error("Unable to prove that the loop continuation bound remains unchanged: {detail}")]
     UnknownForBoundEffect {
         detail: String,
@@ -63,6 +69,13 @@ impl FrontendDiagnostic {
         }
     }
 
+    pub fn time_advancing_for_bound(token: &TokenRange, detail: impl Into<String>) -> Self {
+        Self::TimeAdvancingForBound {
+            detail: detail.into(),
+            source_location: SourceLocation::from_token(token),
+        }
+    }
+
     pub fn is_error(&self) -> bool {
         matches!(self, Self::MutableForBound { .. })
     }
@@ -70,6 +83,9 @@ impl FrontendDiagnostic {
     fn source_location(&self) -> &SourceLocation {
         match self {
             Self::MutableForBound {
+                source_location, ..
+            }
+            | Self::TimeAdvancingForBound {
                 source_location, ..
             }
             | Self::UnknownForBoundEffect {
@@ -83,6 +99,7 @@ impl miette::Diagnostic for FrontendDiagnostic {
     fn code<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         Some(Box::new(match self {
             Self::MutableForBound { .. } => "mutable_for_bound",
+            Self::TimeAdvancingForBound { .. } => "time_advancing_for_bound",
             Self::UnknownForBoundEffect { .. } => "unknown_for_bound_effect",
         }))
     }
@@ -99,6 +116,9 @@ impl miette::Diagnostic for FrontendDiagnostic {
         Some(Box::new(match self {
             Self::MutableForBound { .. } => {
                 "copy the bound to a value that is not modified by the loop body"
+            }
+            Self::TimeAdvancingForBound { .. } => {
+                "copy the bound to a procedural let before entering the loop"
             }
             Self::UnknownForBoundEffect { .. } => {
                 "avoid opaque or time-advancing calls in the loop, or make the bound independent of mutable state"
