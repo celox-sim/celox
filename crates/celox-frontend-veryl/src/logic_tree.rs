@@ -3475,6 +3475,7 @@ mod tests {
                 }
 
                 always_comb {
+                    q = 4'b0;
                     for i in 0..n {
                         set_bit(1'b0, q[i]);
                     }
