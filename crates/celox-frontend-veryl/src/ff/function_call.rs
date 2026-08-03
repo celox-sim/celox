@@ -1385,15 +1385,16 @@ impl<'a> FfParser<'a> {
                             &arm.body, ret_id, &base, arm_active, targets, domain, convert,
                             sources, ir_builder,
                         )?;
-                        // The emitted state includes an inactive-path fallback,
+                        // The emitted state includes the case-selection guard,
                         // which can retain a self-reference for output formals.
-                        // Recompute the selected-arm value without the guard,
-                        // then apply case priority once below.
+                        // Recompute without that guard, but preserve the outer
+                        // live-path condition from preceding returns. Case
+                        // priority is applied once below.
                         let (arm_state, _) = self.apply_statements_to_function_state_in_path(
                             &arm.body,
                             ret_id,
                             &base,
-                            FunctionPathCondition::Always,
+                            active.clone(),
                         )?;
                         arm_states.push((
                             arm_condition.expect("Case arm must have at least one pattern"),
@@ -1418,7 +1419,7 @@ impl<'a> FfParser<'a> {
                         &statement.default,
                         ret_id,
                         &base,
-                        FunctionPathCondition::Always,
+                        active.clone(),
                     )?;
                     state = arm_states.into_iter().rev().fold(
                         default_state,

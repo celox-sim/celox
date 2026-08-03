@@ -778,6 +778,95 @@ fn test_ff_runtime_effect_after_conditional_return_uses_live_path(sim) {
     );
 }
 
+fn test_ff_case_after_conditional_return_preserves_returned_path(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            skip: input logic,
+            choose: input logic,
+            d: input logic<8>,
+            q: output logic<8>
+        ) {
+            function observed (
+                skip: input logic,
+                choose: input logic,
+                x: input logic<8>
+            ) -> logic<8> {
+                if skip {
+                    return x + 8'd1;
+                }
+                $display("case=%0d", choose);
+                case choose {
+                    1'b0: return x + 8'd2;
+                    default: return x + 8'd3;
+                }
+            }
+
+            always_ff (clk) {
+                q = observed(skip, choose, d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let skip = sim.signal("skip");
+    let choose = sim.signal("choose");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(skip, 1u8);
+        io.set(choose, 0u8);
+        io.set(d, 10u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 11u8.into());
+    assert!(sim.drain_runtime_events().is_empty());
+
+    sim.modify(|io| {
+        io.set(skip, 1u8);
+        io.set(choose, 1u8);
+        io.set(d, 20u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 21u8.into());
+    assert!(sim.drain_runtime_events().is_empty());
+
+    sim.modify(|io| {
+        io.set(skip, 0u8);
+        io.set(choose, 0u8);
+        io.set(d, 30u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 32u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "case=0".to_string(),
+        }],
+    );
+
+    sim.modify(|io| {
+        io.set(skip, 0u8);
+        io.set(choose, 1u8);
+        io.set(d, 40u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 43u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "case=1".to_string(),
+        }],
+    );
+}
+
 fn test_ff_statement_call_evaluates_effectful_inputs(sim) {
     @omit_veryl;
     @ignore_on(wasm);
