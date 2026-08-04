@@ -1162,6 +1162,11 @@ impl<'a> FfParser<'a> {
                 dst.id,
                 build_partial_assign_expr(self.module, dst, rhs, old_value)?,
             );
+        } else if self.module.variables[&dst.id].affiliation != Affiliation::Function {
+            // Runtime lowering emits dynamic nonlocal stores directly. They
+            // cannot be represented as a whole-variable expression here, so
+            // state-only capture leaves the binding unchanged while retaining
+            // the enclosing call for runtime evaluation.
         } else {
             return Err(ParserError::unsupported(
                 66,
@@ -1638,6 +1643,77 @@ impl<'a> FfParser<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn emit_dynamic_nonlocal_function_assignment<A>(
+        &mut self,
+        assign: &AssignStatement,
+        state: &mut HashMap<VarId, Expression>,
+        active: &FunctionPathCondition,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        if matches!(active, FunctionPathCondition::Never) {
+            return Ok(());
+        }
+
+        let mut assign = assign.clone();
+        if self.expression_needs_runtime_materialization(&assign.expr) {
+            assign.expr = self.materialize_function_runtime_expression(
+                &assign.expr,
+                state,
+                active,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+            )?;
+        }
+
+        let pre_defined = self.defined_ranges.clone();
+        let pre_dynamic = self.dynamic_defined_vars.clone();
+        let merge_block = if let FunctionPathCondition::Conditional(condition) = active {
+            let condition = self.parse_function_path_condition(
+                condition, state, targets, domain, convert, sources, ir_builder,
+            )?;
+            let store_block = ir_builder.new_block();
+            let merge_block = ir_builder.new_block();
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: condition,
+                true_block: (store_block, vec![]),
+                false_block: (merge_block, vec![]),
+            });
+            ir_builder.switch_to_block(store_block);
+            Some(merge_block)
+        } else {
+            None
+        };
+
+        self.function_arg_stack.push(state.clone());
+        self.function_array_view_stack.push(HashMap::default());
+        self.function_array_view_enabled_stack.push(false);
+        let result =
+            self.parse_assign_statement(&assign, targets, domain, convert, sources, ir_builder);
+        self.function_array_view_enabled_stack.pop();
+        self.function_array_view_stack.pop();
+        self.function_arg_stack.pop();
+        result?;
+
+        if let Some(merge_block) = merge_block {
+            let store_defined = std::mem::replace(&mut self.defined_ranges, pre_defined.clone());
+            let store_dynamic =
+                std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone());
+            ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![]));
+            ir_builder.switch_to_block(merge_block);
+            self.defined_ranges = self.intersect_defined_states(pre_defined, store_defined);
+            self.dynamic_defined_vars = self.intersect_dynamic_vars(pre_dynamic, store_dynamic);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn emit_function_runtime_effects_in_path<A>(
         &mut self,
         statements: &[Statement],
@@ -1658,6 +1734,17 @@ impl<'a> FfParser<'a> {
             let is_return = Self::statement_is_function_return(statement, ret_id);
             match statement {
                 Statement::Assign(assign) => {
+                    let direct_dynamic_nonlocal = assign.dst.len() == 1
+                        && self.assignment_destination_needs_direct_runtime_copyout(&assign.dst[0]);
+                    if direct_dynamic_nonlocal
+                        && !self.assignment_destination_needs_eager_evaluation(&assign.dst[0])
+                    {
+                        self.emit_dynamic_nonlocal_function_assignment(
+                            assign, &mut state, &active, targets, domain, convert, sources,
+                            ir_builder,
+                        )?;
+                        continue;
+                    }
                     if assign
                         .dst
                         .iter()

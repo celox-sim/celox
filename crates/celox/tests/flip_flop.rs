@@ -1605,6 +1605,51 @@ fn test_ff_outputless_wrapper_dynamic_indexed_copyout_to_nonlocal_is_observable(
     assert_eq!(sim.get(global_value), 2u8.into());
 }
 
+fn test_ff_outputless_wrapper_direct_dynamic_nonlocal_assignment_is_observable(sim) {
+    @omit_veryl;
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            index: input logic<3>,
+            value: input logic,
+            global_value: output logic<8>
+        ) {
+            function write_at (
+                index: input logic<3>,
+                value: input logic
+            ) -> logic {
+                global_value[index] = value;
+                return 1'b0;
+            }
+
+            function outer (
+                index: input logic<3>,
+                value: input logic
+            ) {
+                var ignored: logic;
+                ignored = write_at(index, value);
+            }
+
+            always_ff (clk) {
+                outer(index, value);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let index = sim.signal("index");
+    let value = sim.signal("value");
+    let global_value = sim.signal("global_value");
+
+    sim.modify(|io| {
+        io.set(index, 2u8);
+        io.set(value, 1u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 4u8.into());
+}
+
 fn test_ff_function_output_index_uses_final_nonlocal_state(sim) {
     @omit_veryl;
     @setup { let code = r#"
