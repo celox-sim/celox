@@ -1124,37 +1124,40 @@ fn exec_one_detailed<B: SimBackend>(
             duration,
             assert_value,
             deassert_value,
-        } => {
-            sim_set_u64(sim, *reset_signal, (*assert_value).into());
-            let mut remaining = *duration;
-            while remaining != 0 {
-                if tick_limit_reached(ctx) {
-                    return ExecResult::Finished;
-                }
-                let mut batch = remaining;
-                if let Some(limit) = ctx.tick_limit {
-                    batch = batch.min(limit.saturating_sub(ctx.current_time));
-                }
-                let (completed, result) = sim.tick_deferred_comb_many(*clock_event, batch);
-                if completed == 0 || completed > batch {
-                    return ExecResult::Fail(
-                        "backend made invalid progress in a reset tick batch".into(),
-                    );
-                }
-                ctx.current_time = ctx.current_time.saturating_add(completed);
-                remaining -= completed;
-                if let Err(e) = result {
-                    let drained = drain_runtime_assertions(sim, ctx, None);
-                    if let Some(message) = drained.fatal_message {
-                        return ExecResult::Fail(message);
+        } => match eval_clock_count(sim, duration) {
+            Ok(duration) => {
+                sim_set_u64(sim, *reset_signal, (*assert_value).into());
+                let mut remaining = duration;
+                while remaining != 0 {
+                    if tick_limit_reached(ctx) {
+                        return ExecResult::Finished;
                     }
-                    return ExecResult::Fail(format!("reset: {e}"));
+                    let mut batch = remaining;
+                    if let Some(limit) = ctx.tick_limit {
+                        batch = batch.min(limit.saturating_sub(ctx.current_time));
+                    }
+                    let (completed, result) = sim.tick_deferred_comb_many(*clock_event, batch);
+                    if completed == 0 || completed > batch {
+                        return ExecResult::Fail(
+                            "backend made invalid progress in a reset tick batch".into(),
+                        );
+                    }
+                    ctx.current_time = ctx.current_time.saturating_add(completed);
+                    remaining -= completed;
+                    if let Err(e) = result {
+                        let drained = drain_runtime_assertions(sim, ctx, None);
+                        if let Some(message) = drained.fatal_message {
+                            return ExecResult::Fail(message);
+                        }
+                        return ExecResult::Fail(format!("reset: {e}"));
+                    }
+                    drain_runtime_assertions(sim, ctx, None);
                 }
-                drain_runtime_assertions(sim, ctx, None);
+                sim_set_u64(sim, *reset_signal, (*deassert_value).into());
+                ExecResult::Continue
             }
-            sim_set_u64(sim, *reset_signal, (*deassert_value).into());
-            ExecResult::Continue
-        }
+            Err(error) => ExecResult::Fail(error.to_string()),
+        },
         GenericTestbenchStatement::Assert {
             expr,
             site_id,

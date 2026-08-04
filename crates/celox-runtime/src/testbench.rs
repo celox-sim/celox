@@ -104,7 +104,7 @@ fn bind_statement<B: SimBackend>(
         } => Some(GenericTestbenchStatement::ResetAssert {
             reset_signal: backend.resolve_signal(&reset_signal.address),
             clock_event: backend.resolve_event_opt(&clock_event)?,
-            duration,
+            duration: bind_clock_count(backend, duration)?,
             assert_value,
             deassert_value,
         }),
