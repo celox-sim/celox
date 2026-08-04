@@ -153,9 +153,10 @@ impl<'a> FfParser<'a> {
                             || call.outputs.values().flatten().any(|dst| {
                                 (self.module.variables[&dst.id].affiliation
                                     != Affiliation::Function
-                                    && dst.index.0.is_empty()
-                                    && dst.select.0.is_empty()
-                                    && dst.select.1.is_none())
+                                    && (is_static_access(&dst.index, &dst.select)
+                                        || (dst.index.0.is_empty()
+                                            && dst.select.0.is_empty()
+                                            && dst.select.1.is_none())))
                                     || self.assignment_destination_has_runtime_effect(dst, visiting)
                             })
                             || self.function_call_has_runtime_effect(call, visiting)
@@ -1304,6 +1305,50 @@ impl<'a> FfParser<'a> {
         ))
     }
 
+    fn is_whole_variable_reference(expr: &Expression, var_id: VarId) -> bool {
+        matches!(
+            expr,
+            Expression::Term(factor)
+                if matches!(
+                    factor.as_ref(),
+                    Factor::Variable(id, index, select, _)
+                        if *id == var_id
+                            && index.0.is_empty()
+                            && select.0.is_empty()
+                            && select.1.is_none()
+                )
+        )
+    }
+
+    fn collect_guarded_nonlocal_writes(
+        var_id: VarId,
+        expr: &Expression,
+        active: FunctionPathCondition,
+        writes: &mut Vec<(VarId, Expression, FunctionPathCondition)>,
+    ) {
+        if matches!(active, FunctionPathCondition::Never)
+            || Self::is_whole_variable_reference(expr, var_id)
+        {
+            return;
+        }
+        if let Expression::Ternary(condition, then_expr, else_expr, _) = expr {
+            Self::collect_guarded_nonlocal_writes(
+                var_id,
+                then_expr,
+                Self::function_path_and(active.clone(), condition.as_ref().clone()),
+                writes,
+            );
+            Self::collect_guarded_nonlocal_writes(
+                var_id,
+                else_expr,
+                Self::function_path_and_not(active, condition.as_ref().clone()),
+                writes,
+            );
+        } else {
+            writes.push((var_id, expr.clone(), active));
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn emit_nonlocal_function_state_writes<A>(
         &mut self,
@@ -1318,12 +1363,23 @@ impl<'a> FfParser<'a> {
         // Any other entry was introduced by a nested output actual (or a
         // direct write in the function body) and needs an actual store in the
         // caller's FF region.
-        let mut writes = Vec::new();
+        let mut symbolic_writes = Vec::new();
         for (&var_id, expr) in state {
             let variable = &self.module.variables[&var_id];
             if variable.affiliation == Affiliation::Function {
                 continue;
             }
+            Self::collect_guarded_nonlocal_writes(
+                var_id,
+                expr,
+                FunctionPathCondition::Always,
+                &mut symbolic_writes,
+            );
+        }
+
+        let mut writes = Vec::new();
+        for (var_id, expr, active) in symbolic_writes {
+            let variable = &self.module.variables[&var_id];
             let dst = AssignDestination {
                 id: var_id,
                 path: variable.path.clone(),
@@ -1335,7 +1391,19 @@ impl<'a> FfParser<'a> {
                 },
                 token: TokenRange::default(),
             };
-            self.parse_expression(expr, targets, domain, convert, sources, ir_builder, None)?;
+            let guard = if let FunctionPathCondition::Conditional(condition) = active {
+                self.parse_expression(
+                    &condition, targets, domain, convert, sources, ir_builder, None,
+                )?;
+                let condition = self
+                    .stack
+                    .pop_back()
+                    .expect("Nonlocal function state guard evaluation failed");
+                Some(self.lower_procedural_condition(condition, ir_builder))
+            } else {
+                None
+            };
+            self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None)?;
             let value = self
                 .stack
                 .pop_back()
@@ -1343,17 +1411,30 @@ impl<'a> FfParser<'a> {
             let value = self.coerce_register_to_variable_type(
                 value,
                 var_id,
-                expression_signed(expr),
+                expression_signed(&expr),
                 ir_builder,
             )?;
-            writes.push((dst, value));
+            writes.push((dst, value, guard));
         }
 
         // Resolve every RHS against the caller's pre-copy-out state before
         // mutating any nonlocal destination. `state` is a hash map, so
         // interleaving evaluation and stores would make the result depend on
         // its iteration order when one final expression reads another target.
-        for (dst, value) in writes {
+        for (dst, value, guard) in writes {
+            let merge_block = if let Some(guard) = guard {
+                let write_block = ir_builder.new_block();
+                let merge_block = ir_builder.new_block();
+                ir_builder.seal_block(SIRTerminator::Branch {
+                    cond: guard,
+                    true_block: (write_block, vec![]),
+                    false_block: (merge_block, vec![]),
+                });
+                ir_builder.switch_to_block(write_block);
+                Some(merge_block)
+            } else {
+                None
+            };
             self.emit_multi_dst_assign(
                 value,
                 std::slice::from_ref(&dst),
@@ -1363,6 +1444,10 @@ impl<'a> FfParser<'a> {
                 sources,
                 ir_builder,
             )?;
+            if let Some(merge_block) = merge_block {
+                ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![]));
+                ir_builder.switch_to_block(merge_block);
+            }
         }
         Ok(())
     }

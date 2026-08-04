@@ -1423,6 +1423,40 @@ fn test_ff_statement_function_direct_nonlocal_assignment_is_observable(sim) {
     assert_eq!(sim.get(global_value), 0x5au8.into());
 }
 
+fn test_ff_skipped_conditional_nonlocal_write_preserves_prior_ff_assignment(sim) {
+    @omit_veryl;
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            gate: input logic,
+            global_value: output logic<8>
+        ) {
+            function maybe_write (gate: input logic) {
+                if gate {
+                    global_value = 8'h01;
+                }
+            }
+
+            always_ff (clk) {
+                global_value = 8'h05;
+                maybe_write(gate);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let gate = sim.signal("gate");
+    let global_value = sim.signal("global_value");
+
+    sim.modify(|io| io.set(gate, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 5u8.into());
+
+    sim.modify(|io| io.set(gate, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 1u8.into());
+}
+
 fn test_ff_nonlocal_write_precedes_aliased_formal_output_copyout(sim) {
     @omit_veryl;
     @setup { let code = r#"
@@ -1503,6 +1537,36 @@ fn test_ff_outputless_wrapper_expression_copyout_to_nonlocal_is_observable(sim) 
 
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(global_value), 0x5au8.into());
+}
+
+fn test_ff_outputless_wrapper_indexed_copyout_to_nonlocal_is_observable(sim) {
+    @omit_veryl;
+    @setup { let code = r#"
+        module Top (clk: input clock, global_value: output logic<8>) {
+            function set (
+                value: input logic,
+                written: output logic
+            ) -> logic {
+                written = value;
+                return 1'b0;
+            }
+
+            function outer () {
+                var ignored: logic;
+                ignored = set(1'b1, global_value[0]);
+            }
+
+            always_ff (clk) {
+                outer();
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let global_value = sim.signal("global_value");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 1u8.into());
 }
 
 fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
