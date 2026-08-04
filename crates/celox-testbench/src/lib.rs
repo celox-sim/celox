@@ -95,7 +95,7 @@ pub enum TestbenchStatement<Event, Signal, Expression, Argument> {
     ResetAssert {
         reset_signal: Signal,
         clock_event: Event,
-        duration: u64,
+        duration: ClockCount<Expression>,
         assert_value: u8,
         deassert_value: u8,
     },

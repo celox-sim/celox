@@ -23,6 +23,22 @@ const COUNTER: &str = r#"
     }
 "#;
 
+const CLOCK_TICK_COUNTER: &str = r#"
+    module ClockTickCounter (
+        clk  : input  clock    ,
+        rst  : input  reset    ,
+        ticks: output logic<32>,
+    ) {
+        always_ff {
+            if_reset {
+                ticks += 1;
+            } else {
+                ticks += 1;
+            }
+        }
+    }
+"#;
+
 const BENCH_NATIVE_TB_COUNTER_N1000: &str = concat!(
     include_str!("../../../benches/veryl/top_n1000.veryl"),
     include_str!("../../../benches/veryl/native_tb_counter_n1000.veryl"),
@@ -139,6 +155,38 @@ fn test_testbench_direct_reads_are_dead_store_roots() {
     );
 }
 
+#[test]
+fn test_clock_only_self_updating_ff_advances_in_native_testbench_instance() {
+    let code = r#"
+        module ClockTickCounter (
+            clk  : input  clock    ,
+            ticks: output logic<32>,
+        ) {
+            always_ff (clk) {
+                ticks += 1;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var ticks: logic<32>;
+            inst dut: ClockTickCounter (clk, ticks);
+
+            initial {
+                clk.next(5);
+                $assert(ticks == 32'd5, "ticks=%d", ticks);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
 // ── Wide signal (>64 bit) ──────────────────────────────────────────────
 
 #[test]
@@ -224,6 +272,93 @@ fn test_reset_explicit_duration() {
                 clk.next  (10);
                 $assert   (cnt == 32'd10);
                 $finish   ();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_reset_dynamic_duration_from_variable() {
+    let code = format!(
+        r#"
+        {CLOCK_TICK_COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var ticks: logic<32>;
+            var duration: logic<32>;
+            inst dut: ClockTickCounter (clk, rst, ticks);
+
+            initial {{
+                duration = 5;
+                rst.assert(duration);
+                $assert(ticks == 32'd5, "ticks=%d", ticks);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_reset_dynamic_duration_from_loop_variable() {
+    let code = format!(
+        r#"
+        {CLOCK_TICK_COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var ticks: logic<32>;
+            inst dut: ClockTickCounter (clk, rst, ticks);
+
+            initial {{
+                for i in 1..=3 {{
+                    rst.assert(i);
+                }}
+                $assert(ticks == 32'd6, "ticks=%d", ticks);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_reset_dynamic_duration_from_function_argument() {
+    let code = format!(
+        r#"
+        {CLOCK_TICK_COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var ticks: logic<32>;
+            inst dut: ClockTickCounter (clk, rst, ticks);
+
+            function reset_for(duration: input logic<32>) {{
+                rst.assert(duration);
+            }}
+
+            initial {{
+                reset_for(2);
+                reset_for(4);
+                $assert(ticks == 32'd6, "ticks=%d", ticks);
+                $finish();
             }}
         }}
     "#

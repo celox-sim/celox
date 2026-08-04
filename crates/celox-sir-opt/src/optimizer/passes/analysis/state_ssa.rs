@@ -749,7 +749,12 @@ impl StateSsa {
                 .def_blocks
                 .iter()
                 .any(|block| !cfg.dominance_frontier[cfg.index[block]].is_empty());
-            let needs_liveness = region == WORKING_REGION || may_need_phi;
+            // A single-block STABLE slot can be read before its first local
+            // definition without needing a phi.  It is still live on entry
+            // and must not be promoted as a comb-only temporary.
+            let needs_liveness = region == WORKING_REGION
+                || may_need_phi
+                || !facts[old].upward_use_blocks.is_empty();
             // Placement may query a block which did not contain a load in the
             // original program. Build unpruned MemorySSA for that mode;
             // pruning from only the original upward uses would omit a phi at

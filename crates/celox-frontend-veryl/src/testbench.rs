@@ -1236,7 +1236,13 @@ impl<'a> SemanticTestbenchBuilder<'a> {
     fn build_event_map(&mut self, stmts: &[Statement]) {
         let mut clock_insts: Vec<StrId> = Vec::new();
         let mut reset_insts: Vec<StrId> = Vec::new();
-        Self::scan_tb_methods(stmts, &mut clock_insts, &mut reset_insts);
+        let mut active_functions = FxHashSet::default();
+        self.scan_tb_methods(
+            stmts,
+            &mut clock_insts,
+            &mut reset_insts,
+            &mut active_functions,
+        );
         for inst in clock_insts.iter().chain(reset_insts.iter()) {
             if let Some((addr, info)) = self.lookup.root_named_variable(*inst) {
                 self.event_map.insert(*inst, addr);
@@ -1251,7 +1257,13 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         }
     }
 
-    fn scan_tb_methods(stmts: &[Statement], clks: &mut Vec<StrId>, rsts: &mut Vec<StrId>) {
+    fn scan_tb_methods(
+        &self,
+        stmts: &[Statement],
+        clks: &mut Vec<StrId>,
+        rsts: &mut Vec<StrId>,
+        active_functions: &mut FxHashSet<VarId>,
+    ) {
         for stmt in stmts {
             match stmt {
                 Statement::TbMethodCall(tb) => match &tb.method {
@@ -1279,10 +1291,18 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     | TbMethod::RandomGetSeed => {}
                 },
                 Statement::If(s) => {
-                    Self::scan_tb_methods(&s.true_side, clks, rsts);
-                    Self::scan_tb_methods(&s.false_side, clks, rsts);
+                    self.scan_tb_methods(&s.true_side, clks, rsts, active_functions);
+                    self.scan_tb_methods(&s.false_side, clks, rsts, active_functions);
                 }
-                Statement::For(s) => Self::scan_tb_methods(&s.body, clks, rsts),
+                Statement::For(s) => {
+                    self.scan_tb_methods(&s.body, clks, rsts, active_functions);
+                }
+                Statement::FunctionCall(call) if active_functions.insert(call.id) => {
+                    if let Some(body) = function_body(&self.testbench_source.functions, call) {
+                        self.scan_tb_methods(&body.statements, clks, rsts, active_functions);
+                    }
+                    active_functions.remove(&call.id);
+                }
                 _ => {}
             }
         }
@@ -1512,16 +1532,19 @@ impl<'a> SemanticTestbenchBuilder<'a> {
             TbMethod::ResetAssert { clock, duration } => {
                 let reset_signal = self.signal_map.get(&tb.inst).copied()?;
                 let clock_event = self.event_map.get(clock).copied()?;
-                let dur = duration
-                    .as_ref()
-                    .and_then(try_eval_const)
-                    .unwrap_or(self.default_reset_duration);
+                let duration = match duration {
+                    Some(expr) => match try_eval_const(expr) {
+                        Some(duration) => GenericClockCount::Static(duration),
+                        None => GenericClockCount::Dynamic(ec.compile(expr)),
+                    },
+                    None => GenericClockCount::Static(self.default_reset_duration),
+                };
                 // Determine reset polarity from the variable's DomainKind
                 let (assert_value, deassert_value) = self.resolve_reset_polarity(&tb.inst);
                 Some(GenericTestbenchStatement::ResetAssert {
                     reset_signal,
                     clock_event,
-                    duration: dur,
+                    duration,
                     assert_value,
                     deassert_value,
                 })
@@ -1860,15 +1883,6 @@ fn validate_testbench_statements(
                 TbMethod::ResetAssert { duration, .. } => {
                     if let Some(expression) = duration {
                         validate_testbench_expression(expression, source, active_functions)?;
-                        if try_eval_const(expression).is_none() {
-                            return Err(ParserError::unsupported(
-                                473,
-                                LoweringPhase::SimulatorParser,
-                                "dynamic reset duration",
-                                "runtime reset durations are not implemented",
-                                Some(&expression.comptime().token),
-                            ));
-                        }
                     }
                 }
                 TbMethod::FileOpen { name, .. } => {
