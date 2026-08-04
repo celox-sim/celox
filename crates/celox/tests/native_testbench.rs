@@ -155,6 +155,38 @@ fn test_testbench_direct_reads_are_dead_store_roots() {
     );
 }
 
+#[test]
+fn test_clock_only_self_updating_ff_advances_in_native_testbench_instance() {
+    let code = r#"
+        module ClockTickCounter (
+            clk  : input  clock    ,
+            ticks: output logic<32>,
+        ) {
+            always_ff (clk) {
+                ticks += 1;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var ticks: logic<32>;
+            inst dut: ClockTickCounter (clk, ticks);
+
+            initial {
+                clk.next(5);
+                $assert(ticks == 32'd5, "ticks=%d", ticks);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
 // ── Wide signal (>64 bit) ──────────────────────────────────────────────
 
 #[test]
