@@ -449,6 +449,43 @@ fn test_hierarchical_dynamic_reads_preserve_wide_values() {
 }
 
 #[test]
+fn test_hierarchical_read_ignores_same_named_function_local() {
+    let code = r#"
+        module Dut () {
+            var q: logic<8>;
+
+            function shadow() -> logic<8> {
+                var q: logic<8>;
+                q = 8'h11;
+                return q;
+            }
+
+            always_comb {
+                q = 8'h42;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst dut: Dut ();
+
+            initial {
+                $assert(dut.q == 8'h42);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
 fn test_hierarchical_select_widths_and_multidimensional_dynamic_indices() {
     let code = r#"
         module Dut () {

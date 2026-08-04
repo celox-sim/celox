@@ -12,6 +12,7 @@ use celox_slt::{
     scheduler::{self, SchedulerError},
 };
 use veryl_analyzer::ir::{Declaration, Module, VarId, VarPath};
+use veryl_analyzer::symbol::Affiliation;
 use veryl_metadata::{ClockType, ResetType};
 use veryl_parser::resource_table::{self, StrId};
 
@@ -852,13 +853,18 @@ fn module_variables(
         let mut variables = HashMap::default();
         let mut paths: HashMap<VarPath, Option<VarId>> = HashMap::default();
         for (id, varibale) in &module.variables {
-            match paths.entry(varibale.path.clone()) {
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(Some(*id));
-                }
-                std::collections::hash_map::Entry::Occupied(mut e) => {
-                    // Duplicate VarPath — mark as ambiguous
-                    e.insert(None);
+            // Only module-scope variables are externally addressable. Locals
+            // may share the same VarPath, but must not make a legal
+            // hierarchical or public lookup appear ambiguous.
+            if varibale.affiliation == Affiliation::Module {
+                match paths.entry(varibale.path.clone()) {
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(Some(*id));
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        // Duplicate visible VarPath — mark as ambiguous.
+                        e.insert(None);
+                    }
                 }
             }
             variables.insert(
