@@ -455,6 +455,8 @@ fn test_hierarchical_select_widths_and_multidimensional_dynamic_indices() {
             var word: logic<8>;
             var mem: logic<8>[2, 2];
             var narrow: logic<3>[2, 2];
+            var wide: logic<128>[2];
+            var pix: logic<4, 4>;
 
             always_comb {
                 word = 8'hab;
@@ -466,6 +468,9 @@ fn test_hierarchical_select_widths_and_multidimensional_dynamic_indices() {
                 narrow[0][1] = 3'h2;
                 narrow[1][0] = 3'h3;
                 narrow[1][1] = 3'h5;
+                wide[0] = 0;
+                wide[1] = 128'h0000_0000_0000_0002_0000_0000_0000_0000;
+                pix = 16'h0200;
             }
         }
 
@@ -474,15 +479,25 @@ fn test_hierarchical_select_widths_and_multidimensional_dynamic_indices() {
             inst dut: Dut ();
             var i: u32;
             var j: u32;
+            var anchor: u32;
+            var step_index: u32;
 
             initial {
                 i = 1;
                 j = 1;
+                anchor = 7;
+                step_index = 1;
                 $assert(dut.word[3 -: 4] == 4'hb, "minus-colon select");
+                $assert(dut.word[anchor -: 4] == 4'ha, "dynamic minus-colon select");
+                $assert(dut.word[step_index step 4] == 4'ha, "dynamic step select");
                 $assert({dut.word[7:4], dut.word[3:0]} == 8'hab, "selected concat widths");
                 $assert(dut.mem[i][1] == 8'h22, "dynamic outer index");
                 $assert(dut.mem[i][j] == 8'h22, "multiple dynamic indices");
                 $assert(dut.narrow[i][j] == 3'h5, "non-byte-aligned dynamic indices");
+                $assert(dut.narrow[1][0][j] == 1'b1, "sub-byte static index and dynamic select");
+                $assert(dut.wide[i][64:1] == 64'd0, "wide selected value is masked");
+                $assert(dut.pix[2][1] == 1'b1, "multi-dimensional packed index");
+                $assert(dut.pix[2][0] == 1'b0, "all packed indices are consumed");
                 $finish();
             }
         }

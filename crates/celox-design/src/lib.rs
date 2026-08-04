@@ -45,6 +45,9 @@ pub struct VariableMetadata {
     /// Per-dimension sizes for array ports (for example, `[4]` for `logic<32>[4]`).
     /// Empty means scalar.
     pub array_dims: Vec<usize>,
+    /// Per-dimension packed widths (for example, `[4, 4]` for `logic<4, 4>`).
+    /// Empty means a scalar one-bit value.
+    pub packed_dims: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -614,10 +617,12 @@ mod tests {
             kind: DomainKind::Other,
             type_kind: PortTypeKind::Logic,
             array_dims: vec![4],
+            packed_dims: vec![8],
         };
 
         assert_eq!(metadata.width, 32);
         assert_eq!(metadata.array_dims, vec![4]);
+        assert_eq!(metadata.packed_dims, vec![8]);
     }
 
     #[test]
@@ -631,6 +636,7 @@ mod tests {
                 kind: DomainKind::ClockPosedge,
                 type_kind: PortTypeKind::Clock,
                 array_dims: Vec::new(),
+                packed_dims: Vec::new(),
             },
         );
         design.events.aliases.insert(11, 10);

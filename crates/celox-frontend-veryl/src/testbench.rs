@@ -300,10 +300,8 @@ pub(crate) fn resolve_hierarchical_reference<'a>(
 
 /// Resolve the flattened state bits read by a hierarchical reference.
 ///
-/// Metadata intentionally does not retain source-level packed dimensions, so
-/// multi-dimensional packed selects conservatively cover the current slice.
-/// Static unpacked indices and ordinary bit/part selects retain their precise
-/// range, matching the testbench bytecode layout.
+/// Static unpacked and packed indices retain their precise range. A dynamic
+/// index conservatively covers the remaining slice at that dimension.
 pub(crate) fn hierarchical_reference_bits(
     info: &VariableInfo,
     reference: &HierVarRef,
@@ -372,26 +370,76 @@ pub(crate) fn hierarchical_reference_bits(
     if reference.select.0.is_empty() && reference.select.1.is_none() {
         return checked_reference_bits(reference, base, accessed_width, info.width);
     }
-    if reference.select.0.len() != 1 {
-        return checked_reference_bits(reference, base, accessed_width, info.width);
+
+    let packed_dimensions = if info.packed_dims.is_empty() {
+        vec![element_width]
+    } else {
+        info.packed_dims.clone()
+    };
+    let mut packed_strides = vec![1usize; packed_dimensions.len()];
+    let mut packed_stride = 1usize;
+    for (dimension, size) in packed_dimensions.iter().enumerate().rev() {
+        packed_strides[dimension] = packed_stride;
+        packed_stride = packed_stride
+            .checked_mul(*size)
+            .ok_or_else(|| invalid("packed stride overflows usize"))?;
     }
 
-    let anchor_expression = &reference.select.0[0];
-    let Some(anchor) = eval_constexpr(anchor_expression).and_then(|value| value.to_usize()) else {
-        return checked_reference_bits(reference, base, accessed_width, info.width);
+    let prefix_count = if reference.select.1.is_some() {
+        reference.select.0.len().saturating_sub(1)
+    } else {
+        reference.select.0.len()
     };
-    let (relative_lsb, selected_width) = if let Some((op, range_expression)) = &reference.select.1 {
+    for (dimension, expression) in reference.select.0[..prefix_count].iter().enumerate() {
+        let Some(&scale) = packed_strides.get(dimension) else {
+            return Err(invalid("too many packed indices"));
+        };
+        let Some(index) = eval_constexpr(expression).and_then(|value| value.to_usize()) else {
+            let width = if dimension == 0 {
+                accessed_width
+            } else {
+                packed_strides[dimension - 1]
+            };
+            return checked_reference_bits(reference, base, width, info.width);
+        };
+        base = base
+            .checked_add(
+                index
+                    .checked_mul(scale)
+                    .ok_or_else(|| invalid("packed index offset overflows usize"))?,
+            )
+            .ok_or_else(|| invalid("packed index offset overflows usize"))?;
+    }
+
+    let selected_width = if let Some((op, range_expression)) = &reference.select.1 {
+        let anchor_expression = reference
+            .select
+            .0
+            .last()
+            .ok_or_else(|| invalid("part select is missing its anchor"))?;
+        let current_width = if prefix_count == 0 {
+            accessed_width
+        } else {
+            packed_strides[prefix_count - 1]
+        };
+        let Some(anchor) = eval_constexpr(anchor_expression).and_then(|value| value.to_usize())
+        else {
+            return checked_reference_bits(reference, base, current_width, info.width);
+        };
         let Some(range) = eval_constexpr(range_expression).and_then(|value| value.to_usize())
         else {
-            return checked_reference_bits(reference, base, accessed_width, info.width);
+            return checked_reference_bits(reference, base, current_width, info.width);
         };
-        match op {
+        let scale = *packed_strides
+            .get(prefix_count)
+            .ok_or_else(|| invalid("part select exceeds packed dimensions"))?;
+        let (relative_lsb, elements) = match op {
             veryl_analyzer::ir::VarSelectOp::Colon => {
-                let width = anchor
+                let elements = anchor
                     .checked_sub(range)
                     .and_then(|width| width.checked_add(1))
                     .ok_or_else(|| invalid("part-select range underflows"))?;
-                (range, width)
+                (range, elements)
             }
             veryl_analyzer::ir::VarSelectOp::PlusColon => (anchor, range),
             veryl_analyzer::ir::VarSelectOp::MinusColon => {
@@ -407,21 +455,23 @@ pub(crate) fn hierarchical_reference_bits(
                     .ok_or_else(|| invalid("part-select offset overflows usize"))?;
                 (lsb, range)
             }
-        }
+        };
+        base = base
+            .checked_add(
+                relative_lsb
+                    .checked_mul(scale)
+                    .ok_or_else(|| invalid("part-select offset overflows usize"))?,
+            )
+            .ok_or_else(|| invalid("part-select offset overflows usize"))?;
+        elements
+            .checked_mul(scale)
+            .ok_or_else(|| invalid("part-select width overflows usize"))?
     } else {
-        (anchor, 1)
+        *packed_strides
+            .get(reference.select.0.len() - 1)
+            .ok_or_else(|| invalid("packed select exceeds variable dimensions"))?
     };
-    if selected_width == 0
-        || relative_lsb
-            .checked_add(selected_width)
-            .is_none_or(|end| end > accessed_width)
-    {
-        return Err(invalid("bit select is outside the selected variable slice"));
-    }
-    let absolute_lsb = base
-        .checked_add(relative_lsb)
-        .ok_or_else(|| invalid("bit-select offset overflows usize"))?;
-    checked_reference_bits(reference, absolute_lsb, selected_width, info.width)
+    checked_reference_bits(reference, base, selected_width, info.width)
 }
 
 fn checked_reference_bits(
@@ -467,20 +517,35 @@ fn variable_access_width(
             width.checked_mul(*dimension)
         })?;
 
+    let packed_dimensions = if info.packed_dims.is_empty() {
+        vec![element_width]
+    } else {
+        info.packed_dims.clone()
+    };
+    let mut packed_strides = vec![1usize; packed_dimensions.len()];
+    let mut stride = 1usize;
+    for (dimension, size) in packed_dimensions.iter().enumerate().rev() {
+        packed_strides[dimension] = stride;
+        stride = stride.checked_mul(*size)?;
+    }
+
     if let Some((op, range_expression)) = &select.1 {
         let range = eval_constexpr(range_expression)?.to_usize()?;
-        return match op {
+        let dimension = select.0.len().checked_sub(1)?;
+        let stride = *packed_strides.get(dimension)?;
+        let elements = match op {
             VarSelectOp::Colon => {
                 let anchor = eval_constexpr(select.0.last()?)?.to_usize()?;
                 anchor.checked_sub(range)?.checked_add(1)
             }
             VarSelectOp::PlusColon | VarSelectOp::MinusColon | VarSelectOp::Step => Some(range),
-        };
+        }?;
+        return elements.checked_mul(stride);
     }
     if select.0.is_empty() {
         Some(accessed_width)
     } else {
-        Some(1)
+        packed_strides.get(select.0.len() - 1).copied()
     }
 }
 
@@ -1268,7 +1333,8 @@ impl ExprCompiler<'_> {
             }
         }
 
-        // Process unpacked array indices
+        // Build one flattened bit offset for all unpacked and packed indices.
+        // Dynamic terms remain on the expression stack until the final load.
         let mut static_bit_offset: usize = 0;
         let mut dynamic_terms = 0usize;
 
@@ -1287,14 +1353,7 @@ impl ExprCompiler<'_> {
                 // loaded, so a dynamic outer index does not discard inner
                 // indices or force the result down to one scalar element.
                 self.emit(idx_expr, ops);
-                if stride != 1 {
-                    ops.push(TbOpcode::ConstU64(stride as u64));
-                    ops.push(TbOpcode::BinOp(Op::Mul));
-                }
-                if dynamic_terms != 0 {
-                    ops.push(TbOpcode::BinOp(Op::Add));
-                }
-                dynamic_terms += 1;
+                Self::finish_dynamic_offset_term(stride, ops, &mut dynamic_terms);
             }
         }
 
@@ -1306,146 +1365,146 @@ impl ExprCompiler<'_> {
             strides_bits[index.0.len() - 1]
         };
 
+        let (select_offset, selected_width) =
+            self.emit_select_offset(info, select, accessed_width, ops, &mut dynamic_terms);
+        static_bit_offset += select_offset;
+
         if dynamic_terms != 0 {
             ops.push(TbOpcode::LoadIndexed {
                 location: Self::state_location_at(address, 0),
                 stride_bits: 1,
                 base_bit_offset: static_bit_offset,
-                element_width: accessed_width,
-            });
-            // Apply bit select on top of dynamic result if present
-            if select.1.is_some() || !select.0.is_empty() {
-                self.emit_post_select(select, accessed_width, ops);
-            }
-            return;
-        }
-
-        // All indices were static — apply bit select
-        if select.0.is_empty() && select.1.is_none() {
-            // No bit select, just load the element
-            let byte_offset = static_bit_offset / 8;
-            let sub = static_bit_offset % 8;
-            if sub == 0 {
-                self.emit_load_at(address, byte_offset, accessed_width, ops);
-            } else {
-                let load_width = accessed_width + sub;
-                self.emit_load_at(address, byte_offset, load_width, ops);
-                ops.push(TbOpcode::ConstU64(sub as u64));
-                ops.push(TbOpcode::BinOp(Op::LogicShiftR));
-                if accessed_width < 64 {
-                    ops.push(TbOpcode::ConstU64((1u64 << accessed_width) - 1));
-                    ops.push(TbOpcode::BinOp(Op::BitAnd));
-                }
-            }
-            return;
-        }
-
-        // Static bit select
-        let (sel_lsb, sel_width, is_dynamic_select) = self.resolve_select(select, ops);
-
-        if is_dynamic_select {
-            // Dynamic bit select: load full value, shift by dynamic amount, mask
-            let byte_offset = static_bit_offset / 8;
-            let total_byte_size = get_byte_size(accessed_width);
-            ops.push(TbOpcode::LoadBitSelect {
-                location: Self::state_location_at(address, byte_offset),
-                base_byte_size: total_byte_size,
-                select_width: sel_width,
+                element_width: selected_width,
             });
             return;
         }
 
-        let bit_offset = static_bit_offset + sel_lsb;
+        let bit_offset = static_bit_offset;
         let byte_offset = bit_offset / 8;
         let sub = bit_offset % 8;
         if sub == 0 {
-            self.emit_load_at(address, byte_offset, sel_width, ops);
+            self.emit_load_at(address, byte_offset, selected_width, ops);
         } else {
-            let load_width = sel_width + sub;
+            let load_width = selected_width + sub;
             self.emit_load_at(address, byte_offset, load_width, ops);
             ops.push(TbOpcode::ConstU64(sub as u64));
             ops.push(TbOpcode::BinOp(Op::LogicShiftR));
-            if sel_width < 64 {
-                ops.push(TbOpcode::ConstU64((1u64 << sel_width) - 1));
+            if selected_width < 64 {
+                ops.push(TbOpcode::ConstU64((1u64 << selected_width) - 1));
                 ops.push(TbOpcode::BinOp(Op::BitAnd));
             }
         }
     }
 
-    /// Resolve a VarSelect to `(lsb, width, is_dynamic)`.
-    /// If any index is dynamic, emits the dynamic index expression to `ops`
-    /// and returns `is_dynamic = true`.
-    fn resolve_select(
-        &self,
-        select: &veryl_analyzer::ir::VarSelect,
+    fn finish_dynamic_offset_term(
+        multiplier: usize,
         ops: &mut Vec<UnboundTbOpcode>,
-    ) -> (usize, usize, bool) {
-        if let Some((op, range_expr)) = &select.1 {
-            let anchor_expr = select.0.last();
-            let anchor = anchor_expr.and_then(Self::try_const_usize);
-            let range_val = Self::try_const_usize(range_expr);
-
-            if let (Some(a), Some(v)) = (anchor, range_val) {
-                let (lsb, msb) = match op {
-                    veryl_analyzer::ir::VarSelectOp::Colon => (v, a),
-                    veryl_analyzer::ir::VarSelectOp::PlusColon => (a, a + v - 1),
-                    veryl_analyzer::ir::VarSelectOp::MinusColon => {
-                        (a.saturating_add(1).saturating_sub(v), a)
-                    }
-                    veryl_analyzer::ir::VarSelectOp::Step => (a * v, (a + 1) * v - 1),
-                };
-                return (lsb, msb - lsb + 1, false);
-            }
-
-            // Dynamic select: emit the anchor expression
-            if let Some(anchor_expr) = anchor_expr {
-                self.emit(anchor_expr, ops);
-            } else {
-                ops.push(TbOpcode::ConstU64(0));
-            }
-            let width = range_val.unwrap_or(1);
-            return (0, width, true);
-        }
-
-        // Simple bit index (no range)
-        if let Some(first) = select.0.first() {
-            if let Some(idx) = Self::try_const_usize(first) {
-                return (idx, 1, false);
-            }
-            // Dynamic single bit select
-            self.emit(first, ops);
-            return (0, 1, true);
-        }
-
-        (0, 0, false)
-    }
-
-    /// Emit post-load bit select operations on a value already on the stack
-    /// (for dynamic array element access followed by bit select).
-    fn emit_post_select(
-        &self,
-        select: &veryl_analyzer::ir::VarSelect,
-        _base_width: usize,
-        ops: &mut Vec<UnboundTbOpcode>,
+        dynamic_terms: &mut usize,
     ) {
-        let (lsb, width, is_dynamic) = self.resolve_select(select, ops);
-        if is_dynamic {
-            // Stack: [value, bit_index]
-            ops.push(TbOpcode::BinOp(Op::LogicShiftR));
-            if width < 64 {
-                ops.push(TbOpcode::ConstU64((1u64 << width) - 1));
-                ops.push(TbOpcode::BinOp(Op::BitAnd));
-            }
-        } else if lsb > 0 || width > 0 {
-            if lsb > 0 {
-                ops.push(TbOpcode::ConstU64(lsb as u64));
-                ops.push(TbOpcode::BinOp(Op::LogicShiftR));
-            }
-            if width > 0 && width < 64 {
-                ops.push(TbOpcode::ConstU64((1u64 << width) - 1));
-                ops.push(TbOpcode::BinOp(Op::BitAnd));
+        if multiplier != 1 {
+            ops.push(TbOpcode::ConstU64(multiplier as u64));
+            ops.push(TbOpcode::BinOp(Op::Mul));
+        }
+        if *dynamic_terms != 0 {
+            ops.push(TbOpcode::BinOp(Op::Add));
+        }
+        *dynamic_terms += 1;
+    }
+
+    /// Append packed indices to the flattened bit offset and return the
+    /// remaining static offset plus the selected result width.
+    fn emit_select_offset(
+        &self,
+        info: &VariableInfo,
+        select: &VarSelect,
+        accessed_width: usize,
+        ops: &mut Vec<UnboundTbOpcode>,
+        dynamic_terms: &mut usize,
+    ) -> (usize, usize) {
+        if select.0.is_empty() && select.1.is_none() {
+            return (0, accessed_width);
+        }
+
+        let packed_dimensions = if info.packed_dims.is_empty() {
+            vec![accessed_width]
+        } else {
+            info.packed_dims.clone()
+        };
+        let mut strides = vec![1usize; packed_dimensions.len()];
+        let mut stride = 1usize;
+        for (dimension, size) in packed_dimensions.iter().enumerate().rev() {
+            strides[dimension] = stride;
+            stride = stride.saturating_mul(*size);
+        }
+
+        let prefix_count = if select.1.is_some() {
+            select.0.len().saturating_sub(1)
+        } else {
+            select.0.len()
+        };
+        let mut static_offset = 0usize;
+        for (dimension, expression) in select.0[..prefix_count].iter().enumerate() {
+            let scale = strides[dimension];
+            if let Some(index) = Self::try_const_usize(expression) {
+                static_offset += index * scale;
+            } else {
+                self.emit(expression, ops);
+                Self::finish_dynamic_offset_term(scale, ops, dynamic_terms);
             }
         }
+
+        let Some((op, range_expression)) = &select.1 else {
+            let selected_width = strides[select.0.len() - 1];
+            return (static_offset, selected_width);
+        };
+        let anchor_expression = select
+            .0
+            .last()
+            .expect("validated part select has an anchor");
+        let range = Self::try_const_usize(range_expression)
+            .expect("validated part-select range is compile-time constant");
+        let scale = strides[prefix_count];
+        let elements = match op {
+            VarSelectOp::Colon => {
+                let anchor = Self::try_const_usize(anchor_expression)
+                    .expect("validated colon-select anchor is compile-time constant");
+                static_offset += range * scale;
+                anchor - range + 1
+            }
+            VarSelectOp::PlusColon => {
+                if let Some(anchor) = Self::try_const_usize(anchor_expression) {
+                    static_offset += anchor * scale;
+                } else {
+                    self.emit(anchor_expression, ops);
+                    Self::finish_dynamic_offset_term(scale, ops, dynamic_terms);
+                }
+                range
+            }
+            VarSelectOp::MinusColon => {
+                if let Some(anchor) = Self::try_const_usize(anchor_expression) {
+                    static_offset += (anchor + 1 - range) * scale;
+                } else {
+                    self.emit(anchor_expression, ops);
+                    ops.push(TbOpcode::ConstU64(1));
+                    ops.push(TbOpcode::BinOp(Op::Add));
+                    ops.push(TbOpcode::ConstU64(range as u64));
+                    ops.push(TbOpcode::BinOp(Op::Sub));
+                    Self::finish_dynamic_offset_term(scale, ops, dynamic_terms);
+                }
+                range
+            }
+            VarSelectOp::Step => {
+                let multiplier = range.saturating_mul(scale);
+                if let Some(anchor) = Self::try_const_usize(anchor_expression) {
+                    static_offset += anchor * multiplier;
+                } else {
+                    self.emit(anchor_expression, ops);
+                    Self::finish_dynamic_offset_term(multiplier, ops, dynamic_terms);
+                }
+                range
+            }
+        };
+        (static_offset, elements * scale)
     }
 
     /// Emit a LoadU64 or LoadWide opcode for the given byte offset and bit width.
@@ -2387,6 +2446,7 @@ mod tests {
                 kind: DomainKind::Other,
                 type_kind: PortTypeKind::Logic,
                 array_dims: Vec::new(),
+                packed_dims: vec![8],
             },
         };
 

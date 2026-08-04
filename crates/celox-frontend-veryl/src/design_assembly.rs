@@ -873,6 +873,21 @@ fn module_variables(
                         kind: type_kind_to_domain_kind(&varibale.r#type.kind, config),
                         type_kind: type_kind_to_port_type_kind(&varibale.r#type.kind, config),
                         array_dims: varibale.r#type.array.iter().filter_map(|d| *d).collect(),
+                        packed_dims: {
+                            let mut dimensions = varibale
+                                .r#type
+                                .width()
+                                .iter()
+                                .filter_map(|dimension| *dimension)
+                                .collect::<Vec<_>>();
+                            if dimensions.is_empty()
+                                && let Some(width) = varibale.r#type.kind.width()
+                                && width > 1
+                            {
+                                dimensions.push(width);
+                            }
+                            dimensions
+                        },
                     },
                 },
             );
