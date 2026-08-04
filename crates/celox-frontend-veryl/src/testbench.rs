@@ -1969,7 +1969,7 @@ pub fn compile_semantic_testbench(
     lookup: &VerylFrontendLookup,
     source: &VerylTestbenchSource,
     runtime_event_site_count: usize,
-    random_seed: u64,
+    random_seed: Option<u64>,
 ) -> Result<Option<TestbenchProgram<StateAddr>>, ParserError> {
     let Some(initial_stmts) = source.initial_statements.as_ref() else {
         return Ok(None);
@@ -1978,6 +1978,6 @@ pub fn compile_semantic_testbench(
     let mut builder = SemanticTestbenchBuilder::new(lookup, source, runtime_event_site_count);
     builder.build_event_map(initial_stmts);
     Ok(Some(
-        TestbenchProgram::new(builder.convert(initial_stmts)).with_random_seed(random_seed),
+        TestbenchProgram::new(builder.convert(initial_stmts)).with_random_seed_option(random_seed),
     ))
 }

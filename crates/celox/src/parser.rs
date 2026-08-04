@@ -307,7 +307,7 @@ pub fn parse(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
-    testbench_random_seed: u64,
+    testbench_random_seed: Option<u64>,
 ) -> Result<
     (
         crate::ir::OptimizedSir,

@@ -175,14 +175,14 @@ pub type SemanticStatement<A> =
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TestbenchProgram<A> {
     statements: Vec<SemanticStatement<A>>,
-    random_seed: u64,
+    random_seed: Option<u64>,
 }
 
 impl<A> Default for TestbenchProgram<A> {
     fn default() -> Self {
         Self {
             statements: Vec::new(),
-            random_seed: 0,
+            random_seed: None,
         }
     }
 }
@@ -191,11 +191,16 @@ impl<A> TestbenchProgram<A> {
     pub fn new(statements: Vec<SemanticStatement<A>>) -> Self {
         Self {
             statements,
-            random_seed: 0,
+            random_seed: None,
         }
     }
 
     pub fn with_random_seed(mut self, random_seed: u64) -> Self {
+        self.random_seed = Some(random_seed);
+        self
+    }
+
+    pub fn with_random_seed_option(mut self, random_seed: Option<u64>) -> Self {
         self.random_seed = random_seed;
         self
     }
@@ -208,7 +213,7 @@ impl<A> TestbenchProgram<A> {
         self.statements
     }
 
-    pub fn random_seed(&self) -> u64 {
+    pub fn random_seed(&self) -> Option<u64> {
         self.random_seed
     }
 
@@ -314,11 +319,18 @@ pub type ExecutableStatement<Event, Signal> =
 
 pub struct ExecutableTestbench<Event, Signal> {
     statements: Vec<ExecutableStatement<Event, Signal>>,
-    random_seed: u64,
+    random_seed: Option<u64>,
 }
 
 impl<Event, Signal> ExecutableTestbench<Event, Signal> {
     pub fn new(statements: Vec<ExecutableStatement<Event, Signal>>, random_seed: u64) -> Self {
+        Self::new_with_random_seed(statements, Some(random_seed))
+    }
+
+    pub fn new_with_random_seed(
+        statements: Vec<ExecutableStatement<Event, Signal>>,
+        random_seed: Option<u64>,
+    ) -> Self {
         Self {
             statements,
             random_seed,
@@ -333,7 +345,7 @@ impl<Event, Signal> ExecutableTestbench<Event, Signal> {
         self.statements
     }
 
-    pub fn random_seed(&self) -> u64 {
+    pub fn random_seed(&self) -> Option<u64> {
         self.random_seed
     }
 }

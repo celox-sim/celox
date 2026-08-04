@@ -170,6 +170,10 @@ fn sim_set_u64<B: SimBackend>(sim: &mut crate::Simulator<B>, sig: SignalRef, val
     }
 }
 
+fn execution_random_seed(seed: Option<u64>) -> u64 {
+    seed.unwrap_or_else(rand::random)
+}
+
 // Keep the generator, seed derivation, and range sampling byte-for-byte
 // compatible with Veryl's `$tb::random` runtime.
 struct RandomTable {
@@ -855,7 +859,7 @@ fn run_testbench_limited<B: SimBackend>(
         current_time: 0,
         tick_limit,
         tick_limit_reached: false,
-        random: RandomTable::new(testbench.random_seed()),
+        random: RandomTable::new(execution_random_seed(testbench.random_seed())),
     };
     let result = exec_detailed(sim, testbench.statements(), &mut ctx);
     let failed_messages = ctx
@@ -935,7 +939,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         current_time: 0,
         tick_limit: None,
         tick_limit_reached: false,
-        random: RandomTable::new(testbench.random_seed()),
+        random: RandomTable::new(execution_random_seed(testbench.random_seed())),
     };
     let result = exec_detailed(sim, testbench.statements(), &mut ctx);
     let passed = !matches!(result, ExecResult::Fail(_)) && ctx.assertions.iter().all(|a| a.passed);

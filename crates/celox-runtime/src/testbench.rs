@@ -231,5 +231,8 @@ pub fn bind_testbench_program<B: SimBackend>(
         .into_iter()
         .map(|statement| bind_statement(backend, statement))
         .collect::<Option<Vec<_>>>()?;
-    Some(ExecutableTestbench::new(statements, random_seed))
+    Some(ExecutableTestbench::new_with_random_seed(
+        statements,
+        random_seed,
+    ))
 }
