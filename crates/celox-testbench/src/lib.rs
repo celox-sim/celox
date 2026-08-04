@@ -129,6 +129,28 @@ pub enum TestbenchStatement<Event, Signal, Expression, Argument> {
         dst: Signal,
         expr: Expression,
     },
+    RandomSeed {
+        handle: String,
+        value: Expression,
+    },
+    RandomGet {
+        handle: String,
+        width: u32,
+        signed: bool,
+        ret: Option<Signal>,
+    },
+    RandomGetRange {
+        handle: String,
+        min: Expression,
+        max: Expression,
+        width: u32,
+        signed: bool,
+        ret: Option<Signal>,
+    },
+    RandomGetSeed {
+        handle: String,
+        ret: Option<Signal>,
+    },
     Break,
     Finish,
 }
@@ -153,19 +175,34 @@ pub type SemanticStatement<A> =
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TestbenchProgram<A> {
     statements: Vec<SemanticStatement<A>>,
+    random_seed: Option<u64>,
 }
 
 impl<A> Default for TestbenchProgram<A> {
     fn default() -> Self {
         Self {
             statements: Vec::new(),
+            random_seed: None,
         }
     }
 }
 
 impl<A> TestbenchProgram<A> {
     pub fn new(statements: Vec<SemanticStatement<A>>) -> Self {
-        Self { statements }
+        Self {
+            statements,
+            random_seed: None,
+        }
+    }
+
+    pub fn with_random_seed(mut self, random_seed: u64) -> Self {
+        self.random_seed = Some(random_seed);
+        self
+    }
+
+    pub fn with_random_seed_option(mut self, random_seed: Option<u64>) -> Self {
+        self.random_seed = random_seed;
+        self
     }
 
     pub fn statements(&self) -> &[SemanticStatement<A>] {
@@ -174,6 +211,14 @@ impl<A> TestbenchProgram<A> {
 
     pub fn into_statements(self) -> Vec<SemanticStatement<A>> {
         self.statements
+    }
+
+    pub fn random_seed(&self) -> u64 {
+        self.random_seed.unwrap_or_default()
+    }
+
+    pub fn configured_random_seed(&self) -> Option<u64> {
+        self.random_seed
     }
 
     pub fn is_empty(&self) -> bool {
@@ -278,11 +323,22 @@ pub type ExecutableStatement<Event, Signal> =
 
 pub struct ExecutableTestbench<Event, Signal> {
     statements: Vec<ExecutableStatement<Event, Signal>>,
+    random_seed: Option<u64>,
 }
 
 impl<Event, Signal> ExecutableTestbench<Event, Signal> {
-    pub fn new(statements: Vec<ExecutableStatement<Event, Signal>>) -> Self {
-        Self { statements }
+    pub fn new(statements: Vec<ExecutableStatement<Event, Signal>>, random_seed: u64) -> Self {
+        Self::new_with_random_seed(statements, Some(random_seed))
+    }
+
+    pub fn new_with_random_seed(
+        statements: Vec<ExecutableStatement<Event, Signal>>,
+        random_seed: Option<u64>,
+    ) -> Self {
+        Self {
+            statements,
+            random_seed,
+        }
     }
 
     pub fn statements(&self) -> &[ExecutableStatement<Event, Signal>] {
@@ -291,6 +347,14 @@ impl<Event, Signal> ExecutableTestbench<Event, Signal> {
 
     pub fn into_statements(self) -> Vec<ExecutableStatement<Event, Signal>> {
         self.statements
+    }
+
+    pub fn random_seed(&self) -> u64 {
+        self.random_seed.unwrap_or_default()
+    }
+
+    pub fn configured_random_seed(&self) -> Option<u64> {
+        self.random_seed
     }
 }
 

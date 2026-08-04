@@ -178,6 +178,44 @@ fn bind_statement<B: SimBackend>(
                 expr: bind_expr(backend, expr)?,
             })
         }
+        GenericTestbenchStatement::RandomSeed { handle, value } => {
+            Some(GenericTestbenchStatement::RandomSeed {
+                handle,
+                value: bind_expr(backend, value)?,
+            })
+        }
+        GenericTestbenchStatement::RandomGet {
+            handle,
+            width,
+            signed,
+            ret,
+        } => Some(GenericTestbenchStatement::RandomGet {
+            handle,
+            width,
+            signed,
+            ret: ret.map(|signal| backend.resolve_signal(&signal.address)),
+        }),
+        GenericTestbenchStatement::RandomGetRange {
+            handle,
+            min,
+            max,
+            width,
+            signed,
+            ret,
+        } => Some(GenericTestbenchStatement::RandomGetRange {
+            handle,
+            min: bind_expr(backend, min)?,
+            max: bind_expr(backend, max)?,
+            width,
+            signed,
+            ret: ret.map(|signal| backend.resolve_signal(&signal.address)),
+        }),
+        GenericTestbenchStatement::RandomGetSeed { handle, ret } => {
+            Some(GenericTestbenchStatement::RandomGetSeed {
+                handle,
+                ret: ret.map(|signal| backend.resolve_signal(&signal.address)),
+            })
+        }
         GenericTestbenchStatement::Break => Some(GenericTestbenchStatement::Break),
         GenericTestbenchStatement::Finish => Some(GenericTestbenchStatement::Finish),
     }
@@ -187,10 +225,14 @@ pub fn bind_testbench_program<B: SimBackend>(
     backend: &B,
     program: TestbenchProgram<AbsoluteAddr>,
 ) -> Option<ExecutableTestbench<B::Event, SignalRef>> {
+    let random_seed = program.configured_random_seed();
     let statements = program
         .into_statements()
         .into_iter()
         .map(|statement| bind_statement(backend, statement))
         .collect::<Option<Vec<_>>>()?;
-    Some(ExecutableTestbench::new(statements))
+    Some(ExecutableTestbench::new_with_random_seed(
+        statements,
+        random_seed,
+    ))
 }

@@ -22,6 +22,9 @@ use celox_testbench::{
 };
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
+use rand::{RngExt as _, SeedableRng as _};
+use rand_pcg::Pcg64;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ── Public types ───────────────────────────────────────────────────────
@@ -164,6 +167,95 @@ fn sim_set_u64<B: SimBackend>(sim: &mut crate::Simulator<B>, sig: SignalRef, val
         17..=32 => sim.set(sig, value as u32),
         33..=64 => sim.set(sig, value),
         _ => sim.set_wide(sig, BigUint::from(value)),
+    }
+}
+
+fn execution_random_seed(seed: Option<u64>) -> u64 {
+    seed.unwrap_or_else(rand::random)
+}
+
+// Keep the generator, seed derivation, and range sampling byte-for-byte
+// compatible with Veryl's `$tb::random` runtime.
+struct RandomTable {
+    base_seed: u64,
+    rngs: HashMap<String, (Pcg64, u64)>,
+}
+
+impl RandomTable {
+    fn new(base_seed: u64) -> Self {
+        Self {
+            base_seed,
+            rngs: HashMap::new(),
+        }
+    }
+
+    fn derive_seed(base_seed: u64, handle: &str) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for byte in base_seed
+            .to_le_bytes()
+            .iter()
+            .copied()
+            .chain(handle.bytes())
+        {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
+    }
+
+    fn entry(&mut self, handle: &str) -> &mut (Pcg64, u64) {
+        let base_seed = self.base_seed;
+        self.rngs.entry(handle.to_owned()).or_insert_with(|| {
+            let seed = Self::derive_seed(base_seed, handle);
+            (Pcg64::seed_from_u64(seed), seed)
+        })
+    }
+
+    fn seed(&mut self, handle: &str, seed: u64) {
+        self.rngs
+            .insert(handle.to_owned(), (Pcg64::seed_from_u64(seed), seed));
+    }
+
+    fn get_seed(&mut self, handle: &str) -> u64 {
+        self.entry(handle).1
+    }
+
+    fn get(&mut self, handle: &str, width: u32) -> u64 {
+        let mask = random_mask(width);
+        self.entry(handle).0.random_range(0..=mask)
+    }
+
+    fn get_range(&mut self, handle: &str, min: u64, max: u64, width: u32, signed: bool) -> u64 {
+        let mask = random_mask(width);
+        if signed {
+            let min = sign_extend_random(min & mask, width);
+            let max = sign_extend_random(max & mask, width);
+            let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
+            let sample: i64 = self.entry(handle).0.random_range(lo..=hi);
+            (sample as u64) & mask
+        } else {
+            let min = min & mask;
+            let max = max & mask;
+            let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
+            self.entry(handle).0.random_range(lo..=hi)
+        }
+    }
+}
+
+fn random_mask(width: u32) -> u64 {
+    if width >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    }
+}
+
+fn sign_extend_random(raw: u64, width: u32) -> i64 {
+    if width == 0 || width >= 64 {
+        raw as i64
+    } else {
+        let shift = 64 - width;
+        ((raw << shift) as i64) >> shift
     }
 }
 
@@ -379,6 +471,14 @@ fn mask_to_width(value: BigUint, width: usize) -> BigUint {
     }
 }
 
+fn width_mask(width: usize) -> BigUint {
+    if width == 0 {
+        BigUint::from(0u8)
+    } else {
+        (BigUint::from(1u8) << width) - BigUint::from(1u8)
+    }
+}
+
 fn sim_set_i128<B: SimBackend>(
     sim: &mut crate::Simulator<B>,
     sig: SignalRef,
@@ -402,6 +502,39 @@ fn sim_set_biguint<B: SimBackend>(sim: &mut crate::Simulator<B>, sig: SignalRef,
     } else {
         sim.set_wide(sig, mask_to_width(value, sig.width));
     }
+}
+
+fn random_value_for_destination(
+    value: u64,
+    source_width: u32,
+    signed: bool,
+    destination_width: usize,
+) -> BigUint {
+    let source_width = source_width as usize;
+    let source_mask = width_mask(source_width);
+    let source_value = BigUint::from(value) & &source_mask;
+    if destination_width < source_width {
+        source_value & width_mask(destination_width)
+    } else if signed
+        && source_width > 0
+        && source_width <= 64
+        && source_value.bit((source_width - 1) as u64)
+    {
+        source_value | (width_mask(destination_width) ^ source_mask)
+    } else {
+        source_value
+    }
+}
+
+fn sim_set_random<B: SimBackend>(
+    sim: &mut crate::Simulator<B>,
+    sig: SignalRef,
+    value: u64,
+    source_width: u32,
+    signed: bool,
+) {
+    let value = random_value_for_destination(value, source_width, signed, sig.width);
+    sim_set_biguint(sim, sig, value);
 }
 
 fn sim_set_bigint<B: SimBackend>(
@@ -752,14 +885,14 @@ fn exec_for_loop<B: SimBackend>(
 
 pub(crate) fn run_testbench<B: SimBackend>(
     sim: &mut Simulator<B>,
-    stmts: &[TestbenchStatement<B>],
+    testbench: &CompiledTestbench<B>,
 ) -> TestResult {
-    run_testbench_limited(sim, stmts, None).result
+    run_testbench_limited(sim, testbench, None).result
 }
 
 fn run_testbench_limited<B: SimBackend>(
     sim: &mut Simulator<B>,
-    stmts: &[TestbenchStatement<B>],
+    testbench: &CompiledTestbench<B>,
     tick_limit: Option<u64>,
 ) -> LimitedTestbenchResult {
     let mut ctx = DetailedExecContext {
@@ -767,8 +900,9 @@ fn run_testbench_limited<B: SimBackend>(
         current_time: 0,
         tick_limit,
         tick_limit_reached: false,
+        random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
     };
-    let result = exec_detailed(sim, stmts, &mut ctx);
+    let result = exec_detailed(sim, testbench.statements(), &mut ctx);
     let failed_messages = ctx
         .assertions
         .iter()
@@ -820,7 +954,7 @@ pub fn run_compiled_testbench<B: SimBackend>(
     sim: &mut Simulator<B>,
     tb: &CompiledTestbench<B>,
 ) -> TestResult {
-    run_testbench(sim, tb.statements())
+    run_testbench(sim, tb)
 }
 
 /// Execute at most `tick_limit` simulator ticks from a compiled testbench.
@@ -832,22 +966,23 @@ pub fn run_compiled_testbench_with_tick_limit<B: SimBackend>(
     tb: &CompiledTestbench<B>,
     tick_limit: u64,
 ) -> LimitedTestbenchResult {
-    run_testbench_limited(sim, tb.statements(), Some(tick_limit))
+    run_testbench_limited(sim, tb, Some(tick_limit))
 }
 
 /// Run the testbench and return assertion results observed before the test
 /// finishes or stops on a fatal failure.
 pub(crate) fn run_testbench_detailed<B: SimBackend>(
     sim: &mut Simulator<B>,
-    stmts: &[TestbenchStatement<B>],
+    testbench: &CompiledTestbench<B>,
 ) -> TestResultDetailed {
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
         current_time: 0,
         tick_limit: None,
         tick_limit_reached: false,
+        random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
     };
-    let result = exec_detailed(sim, stmts, &mut ctx);
+    let result = exec_detailed(sim, testbench.statements(), &mut ctx);
     let passed = !matches!(result, ExecResult::Fail(_)) && ctx.assertions.iter().all(|a| a.passed);
     TestResultDetailed {
         passed,
@@ -860,6 +995,7 @@ struct DetailedExecContext {
     current_time: u64,
     tick_limit: Option<u64>,
     tick_limit_reached: bool,
+    random: RandomTable,
 }
 
 fn assert_event_args(message: &Option<AssertMessage>) -> &[CompiledAssertArg] {
@@ -1249,6 +1385,53 @@ fn exec_one_detailed<B: SimBackend>(
             }
             ExecResult::Continue
         }
+        GenericTestbenchStatement::RandomSeed { handle, value } => {
+            if let Err(e) = sim.eval_comb() {
+                return ExecResult::Fail(format!("eval_comb: {e}"));
+            }
+            let (ptr, _) = sim.memory_as_mut_ptr();
+            ctx.random.seed(handle, value.eval_u64(ptr));
+            ExecResult::Continue
+        }
+        GenericTestbenchStatement::RandomGet {
+            handle,
+            width,
+            signed,
+            ret,
+        } => {
+            let value = ctx.random.get(handle, *width);
+            if let Some(ret) = ret {
+                sim_set_random(sim, *ret, value, *width, *signed);
+            }
+            ExecResult::Continue
+        }
+        GenericTestbenchStatement::RandomGetRange {
+            handle,
+            min,
+            max,
+            width,
+            signed,
+            ret,
+        } => {
+            if let Err(e) = sim.eval_comb() {
+                return ExecResult::Fail(format!("eval_comb: {e}"));
+            }
+            let (ptr, _) = sim.memory_as_mut_ptr();
+            let min = min.eval_u64(ptr);
+            let max = max.eval_u64(ptr);
+            let value = ctx.random.get_range(handle, min, max, *width, *signed);
+            if let Some(ret) = ret {
+                sim_set_random(sim, *ret, value, *width, *signed);
+            }
+            ExecResult::Continue
+        }
+        GenericTestbenchStatement::RandomGetSeed { handle, ret } => {
+            let seed = ctx.random.get_seed(handle);
+            if let Some(ret) = ret {
+                sim_set_u64(sim, *ret, seed);
+            }
+            ExecResult::Continue
+        }
         GenericTestbenchStatement::Break => ExecResult::Break,
         GenericTestbenchStatement::Finish => ExecResult::Finished,
     }
@@ -1268,6 +1451,22 @@ mod tests {
         };
 
         assert!(error.source().unwrap().is::<RuntimeErrorCode>());
+    }
+
+    #[test]
+    fn random_values_sign_extend_for_wider_destinations() {
+        assert_eq!(
+            random_value_for_destination(0x80, 8, true, 16),
+            BigUint::from(0xff80u16)
+        );
+        assert_eq!(
+            random_value_for_destination(0x7f, 8, true, 16),
+            BigUint::from(0x007fu16)
+        );
+        assert_eq!(
+            random_value_for_destination(0x80, 8, false, 16),
+            BigUint::from(0x0080u16)
+        );
     }
 
     #[test]
