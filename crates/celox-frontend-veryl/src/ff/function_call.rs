@@ -2864,7 +2864,8 @@ impl<'a> FfParser<'a> {
                 }
                 self.materialize_array_actual_items(
                     actual,
-                    must_snapshot_for_order && matches!(actual, Expression::ArrayLiteral(_, _)),
+                    (must_snapshot_for_order || callee_writes_dependency)
+                        && matches!(actual, Expression::ArrayLiteral(_, _)),
                     targets,
                     domain,
                     convert,

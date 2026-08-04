@@ -5518,6 +5518,42 @@ fn test_ff_function_call_array_literal_snapshots_scalar_before_later_write(sim) 
     assert_eq!(sim.get(out_q), 5u8.into());
 }
 
+fn test_ff_function_call_array_literal_snapshots_scalar_before_callee_write(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            global_value: output logic<8>,
+            out_q: output logic<8>
+        ) {
+            function mutate_global () -> logic {
+                global_value = 8'd9;
+                return 1'b0;
+            }
+
+            function pick (values: input logic<8>[2]) -> logic<8> {
+                var ignored: logic;
+                ignored = mutate_global();
+                return values[0];
+            }
+
+            always_ff (clk) {
+                out_q = pick('{global_value, default: 8'h00});
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let global_value = sim.signal("global_value");
+    let out_q = sim.signal("out_q");
+
+    sim.modify(|io| io.set(global_value, 5u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 9u8.into());
+    assert_eq!(sim.get(out_q), 5u8.into());
+}
+
 fn test_ff_case_range_skips_effectful_upper_bound_when_lower_is_false(sim) {
     @omit_veryl;
     @ignore_on(wasm);
