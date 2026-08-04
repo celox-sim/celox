@@ -200,10 +200,7 @@ fn collect_statement_reads(
             Statement::Assign(assign) => {
                 collect_expression_reads(&assign.expr, funcs, active_functions, reads);
                 for dst in &assign.dst {
-                    for expr in &dst.index.0 {
-                        collect_expression_reads(expr, funcs, active_functions, reads);
-                    }
-                    collect_select_reads(&dst.select, funcs, active_functions, reads);
+                    collect_target_reads(dst, funcs, active_functions, reads);
                 }
             }
             Statement::If(stmt) => {
@@ -243,45 +240,72 @@ fn collect_statement_reads(
             Statement::FunctionCall(call) => {
                 collect_function_call_reads(call, funcs, active_functions, reads);
             }
-            Statement::TbMethodCall(call) => match &call.method {
-                TbMethod::ClockNext { count, period } => {
-                    if let Some(expr) = count {
-                        collect_expression_reads(expr, funcs, active_functions, reads);
+            Statement::TbMethodCall(call) => {
+                // A selected random return is a read-modify-write in the
+                // host-side testbench runtime.  Keep both its dynamic
+                // addressing expressions and the old root value observable.
+                if let Some(ret) = call.ret.as_deref() {
+                    collect_target_reads(ret, funcs, active_functions, reads);
+                }
+                match &call.method {
+                    TbMethod::ClockNext { count, period } => {
+                        if let Some(expr) = count {
+                            collect_expression_reads(expr, funcs, active_functions, reads);
+                        }
+                        if let Some(expr) = period {
+                            collect_expression_reads(expr, funcs, active_functions, reads);
+                        }
                     }
-                    if let Some(expr) = period {
-                        collect_expression_reads(expr, funcs, active_functions, reads);
+                    TbMethod::ResetAssert { duration, .. } => {
+                        if let Some(expr) = duration {
+                            collect_expression_reads(expr, funcs, active_functions, reads);
+                        }
                     }
-                }
-                TbMethod::ResetAssert { duration, .. } => {
-                    if let Some(expr) = duration {
-                        collect_expression_reads(expr, funcs, active_functions, reads);
+                    TbMethod::FileOpen { name, .. } => {
+                        collect_expression_reads(&name.0, funcs, active_functions, reads);
                     }
-                }
-                TbMethod::FileOpen { name, .. } => {
-                    collect_expression_reads(&name.0, funcs, active_functions, reads);
-                }
-                TbMethod::FileWrite { args } => {
-                    for arg in args {
-                        collect_expression_reads(&arg.0, funcs, active_functions, reads);
+                    TbMethod::FileWrite { args } => {
+                        for arg in args {
+                            collect_expression_reads(&arg.0, funcs, active_functions, reads);
+                        }
                     }
-                }
-                TbMethod::FileClose | TbMethod::FileFlush => {}
-                TbMethod::Component { args, .. } => {
-                    for arg in args {
-                        collect_expression_reads(&arg.0, funcs, active_functions, reads);
+                    TbMethod::FileClose | TbMethod::FileFlush => {}
+                    TbMethod::Component { args, .. } => {
+                        for arg in args {
+                            collect_expression_reads(&arg.0, funcs, active_functions, reads);
+                        }
                     }
+                    TbMethod::RandomSeed { value } => {
+                        collect_expression_reads(value, funcs, active_functions, reads);
+                    }
+                    TbMethod::RandomGetRange { min, max, .. } => {
+                        collect_expression_reads(min, funcs, active_functions, reads);
+                        collect_expression_reads(max, funcs, active_functions, reads);
+                    }
+                    TbMethod::RandomGet { .. } | TbMethod::RandomGetSeed => {}
                 }
-                TbMethod::RandomSeed { value } => {
-                    collect_expression_reads(value, funcs, active_functions, reads);
-                }
-                TbMethod::RandomGetRange { min, max, .. } => {
-                    collect_expression_reads(min, funcs, active_functions, reads);
-                    collect_expression_reads(max, funcs, active_functions, reads);
-                }
-                TbMethod::RandomGet { .. } | TbMethod::RandomGetSeed => {}
-            },
+            }
             Statement::Break | Statement::Unsupported(_) | Statement::Null => {}
         }
+    }
+}
+
+fn collect_target_reads(
+    target: &veryl_analyzer::ir::AssignDestination,
+    funcs: &fxhash::FxHashMap<VarId, Function>,
+    active_functions: &mut FxHashSet<VarId>,
+    reads: &mut FxHashSet<VarId>,
+) {
+    for expr in &target.index.0 {
+        collect_expression_reads(expr, funcs, active_functions, reads);
+    }
+    collect_select_reads(&target.select, funcs, active_functions, reads);
+
+    // The native selected-target path reads the complete root signal before
+    // merging the new slice.  Model that read as a DSE root; a whole-root
+    // assignment does not need this extra liveness edge.
+    if !target.index.0.is_empty() || !target.select.0.is_empty() || target.select.1.is_some() {
+        reads.insert(target.id);
     }
 }
 
@@ -1121,59 +1145,132 @@ impl ExprCompiler<'_> {
     fn selection_offset(
         &self,
         select: &veryl_analyzer::ir::VarSelect,
+        packed_dims: &[usize],
     ) -> Option<(Vec<UnboundTbOpcode>, usize)> {
-        let anchor = select.0.last()?;
-        if let Some((op, range)) = &select.1 {
-            let width = Self::try_const_usize(range)?;
-            if width == 0 {
-                return None;
+        if packed_dims.is_empty() || select.0.is_empty() {
+            return None;
+        }
+
+        let mut strides = vec![1usize; packed_dims.len()];
+        let mut stride = 1usize;
+        for i in (0..packed_dims.len()).rev() {
+            strides[i] = stride;
+            stride = stride.checked_mul(packed_dims[i])?;
+        }
+
+        let mut ops = vec![TbOpcode::ConstU64(0)];
+        let append_index =
+            |ops: &mut Vec<UnboundTbOpcode>, expr: &Expression, scale: usize| -> Option<()> {
+                if let Some(index) = Self::try_const_usize(expr) {
+                    let offset = index.checked_mul(scale)?;
+                    Self::append_offset_term(ops, |ops| {
+                        ops.push(TbOpcode::ConstU64(offset as u64));
+                    });
+                } else {
+                    Self::append_offset_term(ops, |ops| {
+                        self.emit(expr, ops);
+                        if scale != 1 {
+                            ops.push(TbOpcode::ConstU64(scale as u64));
+                            ops.push(TbOpcode::BinOp(Op::Mul));
+                        }
+                    });
+                }
+                Some(())
+            };
+
+        if let Some((op, range_expr)) = &select.1 {
+            let dimension = select.0.len() - 1;
+            let scale = *strides.get(dimension)?;
+            for (index, expr) in select.0[..dimension].iter().enumerate() {
+                append_index(&mut ops, expr, *strides.get(index)?)?;
             }
-            let mut ops = Vec::new();
-            match op {
+
+            let anchor = select.0.last()?;
+            let range = Self::try_const_usize(range_expr)?;
+            let (part_ops, elements) = match op {
+                // In `base[msb:lsb]`, the second operand is the LSB, not
+                // the selected width.  In particular, `[3:0]` is four bits.
                 veryl_analyzer::ir::VarSelectOp::Colon => {
                     let anchor = Self::try_const_usize(anchor)?;
-                    let lsb = width;
-                    let width = anchor.checked_sub(lsb)?.saturating_add(1);
-                    Some((vec![TbOpcode::ConstU64(lsb as u64)], width))
+                    let elements = anchor.checked_sub(range)?.checked_add(1)?;
+                    let offset = range.checked_mul(scale)?;
+                    (vec![TbOpcode::ConstU64(offset as u64)], elements)
                 }
                 veryl_analyzer::ir::VarSelectOp::PlusColon => {
+                    if range == 0 {
+                        return None;
+                    }
                     if let Some(anchor) = Self::try_const_usize(anchor) {
-                        Some((vec![TbOpcode::ConstU64(anchor as u64)], width))
+                        let offset = anchor.checked_mul(scale)?;
+                        (vec![TbOpcode::ConstU64(offset as u64)], range)
                     } else {
-                        self.emit(anchor, &mut ops);
-                        Some((ops, width))
+                        let mut part_ops = Vec::new();
+                        self.emit(anchor, &mut part_ops);
+                        if scale != 1 {
+                            part_ops.push(TbOpcode::ConstU64(scale as u64));
+                            part_ops.push(TbOpcode::BinOp(Op::Mul));
+                        }
+                        (part_ops, range)
                     }
                 }
                 veryl_analyzer::ir::VarSelectOp::MinusColon => {
+                    if range == 0 {
+                        return None;
+                    }
                     if let Some(anchor) = Self::try_const_usize(anchor) {
-                        let lsb = anchor.checked_add(1)?.checked_sub(width)?;
-                        Some((vec![TbOpcode::ConstU64(lsb as u64)], width))
+                        let lsb = anchor.checked_add(1)?.checked_sub(range)?;
+                        let offset = lsb.checked_mul(scale)?;
+                        (vec![TbOpcode::ConstU64(offset as u64)], range)
                     } else {
-                        self.emit(anchor, &mut ops);
-                        ops.push(TbOpcode::ConstU64(1));
-                        ops.push(TbOpcode::BinOp(Op::Add));
-                        ops.push(TbOpcode::ConstU64(width as u64));
-                        ops.push(TbOpcode::BinOp(Op::Sub));
-                        Some((ops, width))
+                        let mut part_ops = Vec::new();
+                        self.emit(anchor, &mut part_ops);
+                        part_ops.push(TbOpcode::ConstU64(1));
+                        part_ops.push(TbOpcode::BinOp(Op::Add));
+                        part_ops.push(TbOpcode::ConstU64(range as u64));
+                        part_ops.push(TbOpcode::BinOp(Op::Sub));
+                        if scale != 1 {
+                            part_ops.push(TbOpcode::ConstU64(scale as u64));
+                            part_ops.push(TbOpcode::BinOp(Op::Mul));
+                        }
+                        (part_ops, range)
                     }
                 }
                 veryl_analyzer::ir::VarSelectOp::Step => {
+                    if range == 0 {
+                        return None;
+                    }
                     if let Some(anchor) = Self::try_const_usize(anchor) {
-                        Some((vec![TbOpcode::ConstU64((anchor * width) as u64)], width))
+                        let offset = anchor.checked_mul(range)?.checked_mul(scale)?;
+                        (vec![TbOpcode::ConstU64(offset as u64)], range)
                     } else {
-                        self.emit(anchor, &mut ops);
-                        ops.push(TbOpcode::ConstU64(width as u64));
-                        ops.push(TbOpcode::BinOp(Op::Mul));
-                        Some((ops, width))
+                        let mut part_ops = Vec::new();
+                        self.emit(anchor, &mut part_ops);
+                        part_ops.push(TbOpcode::ConstU64(range as u64));
+                        part_ops.push(TbOpcode::BinOp(Op::Mul));
+                        if scale != 1 {
+                            part_ops.push(TbOpcode::ConstU64(scale as u64));
+                            part_ops.push(TbOpcode::BinOp(Op::Mul));
+                        }
+                        (part_ops, range)
                     }
                 }
-            }
-        } else if let Some(anchor) = Self::try_const_usize(anchor) {
-            Some((vec![TbOpcode::ConstU64(anchor as u64)], 1))
+            };
+            let selected_width = elements.checked_mul(scale)?;
+            Self::append_offset_term(&mut ops, |ops| ops.extend(part_ops));
+            Some((ops, selected_width))
         } else {
-            let mut ops = Vec::new();
-            self.emit(anchor, &mut ops);
-            Some((ops, 1))
+            if select.0.len() > packed_dims.len() {
+                return None;
+            }
+            for (index, expr) in select.0.iter().enumerate() {
+                append_index(&mut ops, expr, *strides.get(index)?)?;
+            }
+            let selected_width = if select.0.is_empty() {
+                stride
+            } else {
+                *strides.get(select.0.len() - 1)?
+            };
+            Some((ops, selected_width))
         }
     }
 
@@ -1230,7 +1327,7 @@ impl ExprCompiler<'_> {
         let (select_ops, select_width) = if destination.select.is_empty() {
             (vec![TbOpcode::ConstU64(0)], accessed_width)
         } else {
-            self.selection_offset(&destination.select)?
+            self.selection_offset(&destination.select, &info.packed_dims)?
         };
         Self::append_offset_term(&mut offset_ops, |ops| ops.extend(select_ops));
 

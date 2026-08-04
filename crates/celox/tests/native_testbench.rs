@@ -318,6 +318,82 @@ fn test_selected_testbench_destinations_update_only_selected_targets() {
 }
 
 #[test]
+fn test_packed_prefix_and_low_bound_testbench_destinations() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var word: logic<8>;
+            var matrix: logic<4, 4>;
+            initial {
+                word = 8'hA0;
+                word[3:0] = 4'hF;
+                $assert(word == 8'hAF);
+
+                matrix = 16'h0000;
+                matrix[2][1] = 1'b1;
+                $assert(matrix == 16'h0200);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass
+    );
+    assert_eq!(
+        Simulator::builder(code, "t").run_test_cranelift().unwrap(),
+        TestResult::Pass
+    );
+}
+
+#[test]
+fn test_selected_testbench_destinations_keep_dynamic_reads_and_old_value_live() {
+    let random_handle = veryl_parser::resource_table::insert_str("r");
+    veryl_simulator::random_table::seed_handle(random_handle, 42);
+    let random_value = veryl_simulator::random_table::get(random_handle, 8, false).payload_u64();
+    let code = format!(
+        r#"
+        module Driver (
+            index: output logic<2>,
+        ) {{
+            always_comb {{
+                index = 2;
+            }}
+        }}
+
+        #[test(t)]
+        module t {{
+            var values: logic<8>[4];
+            var index: logic<2>;
+            var word: logic<8>;
+            var r: $tb::random::<u8>;
+            inst dut: Driver(index);
+
+            initial {{
+                values = '{{default: 8'h00}};
+                word = 8'hA0;
+                r.seed(42);
+                values[index] = r.get();
+                word[3] = 1'b1;
+                $assert(values[2] == 8'd{random_value});
+                $assert(word == 8'hA8);
+                $finish();
+            }}
+        }}
+        "#,
+    );
+
+    assert_eq!(
+        Simulator::builder(&code, "t")
+            .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
+}
+
+#[test]
 fn test_counter_pass() {
     let code = format!(
         r#"
