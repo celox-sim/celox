@@ -1,6 +1,6 @@
 use celox::{
     DeadStorePolicy, ParserError, ResetType, Simulator, SimulatorErrorKind, TestResult,
-    testbench::compile_initial_testbench,
+    testbench::{compile_initial_testbench, run_compiled_testbench},
 };
 use veryl_analyzer::{AnalyzerError, analyzer_error::InvalidForRangeKind};
 use veryl_metadata::Metadata;
@@ -150,23 +150,112 @@ fn test_random_methods_match_veryl_sequence() {
 }
 
 #[test]
-fn test_unset_testbench_seed_is_fresh_per_build() {
+fn test_random_signed_results_sign_extend_on_wider_stores() {
+    let handle = veryl_parser::resource_table::insert_str("r");
+    let get_seed = (0..10_000)
+        .find(|seed| {
+            veryl_simulator::random_table::seed_handle(handle, *seed);
+            let get_value = veryl_simulator::random_table::get(handle, 8, true).payload_u64();
+            get_value & 0x80 != 0
+        })
+        .expect("a signed random result with its sign bit set");
+    let range_seed = (0..10_000)
+        .find(|seed| {
+            veryl_simulator::random_table::seed_handle(handle, *seed);
+            let range_value =
+                veryl_simulator::random_table::get_range(handle, 0x80, 0x7f, 8, true).payload_u64();
+            range_value & 0x80 != 0
+        })
+        .expect("a signed ranged result with its sign bit set");
+    veryl_simulator::random_table::seed_handle(handle, get_seed);
+    let get_value = veryl_simulator::random_table::get(handle, 8, true).payload_u64();
+    veryl_simulator::random_table::seed_handle(handle, range_seed);
+    let range_value =
+        veryl_simulator::random_table::get_range(handle, 0x80, 0x7f, 8, true).payload_u64();
+
+    let code = format!(
+        r#"
+        #[test(t)]
+        module t {{
+            var r: $tb::random::<i8>;
+            var widened_get: logic<16>;
+            var widened_range: logic<16>;
+            initial {{
+                r.seed({get_seed});
+                widened_get = r.get() as i16;
+                r.seed({range_seed});
+                widened_range = r.get_range(-128, 127) as i16;
+                $finish();
+            }}
+        }}
+        "#,
+    );
+    let mut sim = Simulator::builder(&code, "t").build().unwrap();
+    let tb = compile_initial_testbench(&sim).unwrap();
+    assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+
+    let widened_get = sim.get_as::<u16>(sim.signal("widened_get"));
+    let widened_range = sim.get_as::<u16>(sim.signal("widened_range"));
+    let expected_get = if get_value & 0x80 != 0 {
+        0xff00 | get_value as u16
+    } else {
+        get_value as u16
+    };
+    let expected_range = if range_value & 0x80 != 0 {
+        0xff00 | range_value as u16
+    } else {
+        range_value as u16
+    };
+    assert_eq!(widened_get, expected_get);
+    assert_eq!(widened_range, expected_range);
+}
+
+#[test]
+fn test_unset_testbench_seed_is_fresh_per_execution() {
     let code = r#"
         #[test(t)]
         module t {
-            initial { $finish(); }
+            var random_seed: u64;
+            var r: $tb::random::<u64>;
+            initial {
+                random_seed = r.get_seed();
+                $finish();
+            }
         }
     "#;
-    let sim_a = Simulator::builder(code, "t").build().unwrap();
-    let sim_b = Simulator::builder(code, "t").build().unwrap();
-    let tb_a = compile_initial_testbench(&sim_a).unwrap();
-    let tb_b = compile_initial_testbench(&sim_b).unwrap();
+    let mut sim = Simulator::builder(code, "t").build().unwrap();
+    let tb = compile_initial_testbench(&sim).unwrap();
+    let random_seed = sim.signal("random_seed");
+
+    assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+    let first = sim.get_as::<u64>(random_seed);
+    assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+    let second = sim.get_as::<u64>(random_seed);
 
     assert_ne!(
-        tb_a.random_seed(),
-        tb_b.random_seed(),
-        "an omitted metadata seed must not silently become zero",
+        first, second,
+        "an omitted seed must be drawn for each execution"
     );
+
+    let mut metadata = Metadata::create_default("prj").unwrap();
+    metadata.test.seed = Some(42);
+    let mut explicit_sim = Simulator::builder(code, "t")
+        .with_metadata(metadata)
+        .build()
+        .unwrap();
+    let explicit_tb = compile_initial_testbench(&explicit_sim).unwrap();
+    let explicit_seed = explicit_sim.signal("random_seed");
+    assert_eq!(
+        run_compiled_testbench(&mut explicit_sim, &explicit_tb),
+        TestResult::Pass
+    );
+    let explicit_first = explicit_sim.get_as::<u64>(explicit_seed);
+    assert_eq!(
+        run_compiled_testbench(&mut explicit_sim, &explicit_tb),
+        TestResult::Pass
+    );
+    let explicit_second = explicit_sim.get_as::<u64>(explicit_seed);
+    assert_eq!(explicit_first, explicit_second);
 }
 
 #[test]
