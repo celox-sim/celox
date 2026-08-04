@@ -1,4 +1,7 @@
-use celox::{DeadStorePolicy, ResetType, Simulator, SimulatorErrorKind, TestResult};
+use celox::{
+    DeadStorePolicy, ParserError, ResetType, Simulator, SimulatorErrorKind, TestResult,
+    testbench::compile_initial_testbench,
+};
 use veryl_analyzer::{AnalyzerError, analyzer_error::InvalidForRangeKind};
 use veryl_metadata::Metadata;
 
@@ -144,6 +147,62 @@ fn test_random_methods_match_veryl_sequence() {
             .unwrap(),
         TestResult::Pass,
     );
+}
+
+#[test]
+fn test_unset_testbench_seed_is_fresh_per_build() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            initial { $finish(); }
+        }
+    "#;
+    let sim_a = Simulator::builder(code, "t").build().unwrap();
+    let sim_b = Simulator::builder(code, "t").build().unwrap();
+    let tb_a = compile_initial_testbench(&sim_a).unwrap();
+    let tb_b = compile_initial_testbench(&sim_b).unwrap();
+
+    assert_ne!(
+        tb_a.random_seed(),
+        tb_b.random_seed(),
+        "an omitted metadata seed must not silently become zero",
+    );
+}
+
+#[test]
+fn test_selected_testbench_destinations_are_rejected() {
+    for code in [
+        r#"
+            #[test(t)]
+            module t {
+                var values: logic<8>[4];
+                var index: logic<2>;
+                var r: $tb::random::<u8>;
+                initial {
+                    index = 1;
+                    values[index] = r.get();
+                    $finish();
+                }
+            }
+        "#,
+        r#"
+            #[test(t)]
+            module t {
+                var word: logic<8>;
+                initial {
+                    word[3] = 1;
+                    $finish();
+                }
+            }
+        "#,
+    ] {
+        let error = Simulator::builder(code, "t").build().unwrap_err();
+        let SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, .. }) = error.kind()
+        else {
+            panic!("expected selected destination diagnostic, got {error:?}");
+        };
+        assert_eq!(*issue, 478);
+    }
 }
 
 #[test]
