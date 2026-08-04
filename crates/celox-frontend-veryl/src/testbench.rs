@@ -1341,6 +1341,290 @@ impl ExprCompiler<'_> {
         })
     }
 
+    fn validate_target_bounds(
+        &self,
+        destination: &veryl_analyzer::ir::AssignDestination,
+    ) -> Result<(), ParserError> {
+        let Some((_, info)) = self.lookup.root_variable(destination.id) else {
+            return Ok(());
+        };
+
+        for (dimension, index) in destination.index.0.iter().enumerate() {
+            let Some(&size) = info.array_dims.get(dimension) else {
+                return Err(ParserError::illegal_context(
+                    "testbench selected destination",
+                    format!(
+                        "unpacked index dimension {dimension} exceeds the variable's {} dimensions",
+                        info.array_dims.len()
+                    ),
+                    None,
+                ));
+            };
+            if let Some(index) = Self::try_const_usize(index)
+                && index >= size
+            {
+                return Err(ParserError::illegal_context(
+                    "testbench selected destination",
+                    format!(
+                        "unpacked index {index} is outside dimension {dimension} of size {size}"
+                    ),
+                    None,
+                ));
+            }
+        }
+
+        if destination.select.0.is_empty() && destination.select.1.is_none() {
+            return Ok(());
+        }
+
+        let dims = &info.packed_dims;
+        let mut strides = vec![1usize; dims.len()];
+        let mut total_width = 1usize;
+        for i in (0..dims.len()).rev() {
+            strides[i] = total_width;
+            total_width = total_width.checked_mul(dims[i]).ok_or_else(|| {
+                ParserError::illegal_context(
+                    "testbench selected destination",
+                    "packed dimensions overflow the target width",
+                    None,
+                )
+            })?;
+        }
+
+        if let Some((op, range_expr)) = &destination.select.1 {
+            let Some(dimension) = destination.select.0.len().checked_sub(1) else {
+                return Err(ParserError::illegal_context(
+                    "testbench selected destination",
+                    "part select is missing its anchor",
+                    None,
+                ));
+            };
+            let Some(&dimension_size) = dims.get(dimension) else {
+                return Err(ParserError::illegal_context(
+                    "testbench selected destination",
+                    format!("packed part-select dimension {dimension} is out of range"),
+                    None,
+                ));
+            };
+            let scale = strides[dimension];
+            let mut prefix_offset = 0usize;
+            let mut prefix_is_static = true;
+            for (prefix_dimension, index) in destination.select.0[..dimension].iter().enumerate() {
+                if let Some(index) = Self::try_const_usize(index) {
+                    let size = dims[prefix_dimension];
+                    if index >= size {
+                        return Err(ParserError::illegal_context(
+                            "testbench selected destination",
+                            format!(
+                                "packed index {index} is outside dimension {prefix_dimension} of size {size}"
+                            ),
+                            None,
+                        ));
+                    }
+                    prefix_offset = prefix_offset
+                        .checked_add(index.checked_mul(strides[prefix_dimension]).ok_or_else(
+                            || {
+                                ParserError::illegal_context(
+                                    "testbench selected destination",
+                                    "packed index offset overflows usize",
+                                    None,
+                                )
+                            },
+                        )?)
+                        .ok_or_else(|| {
+                            ParserError::illegal_context(
+                                "testbench selected destination",
+                                "packed index offset overflows usize",
+                                None,
+                            )
+                        })?;
+                } else {
+                    prefix_is_static = false;
+                }
+            }
+
+            let Some(range) = Self::try_const_usize(range_expr) else {
+                return Ok(());
+            };
+            let anchor = Self::try_const_usize(destination.select.0.last().unwrap());
+            if !matches!(op, veryl_analyzer::ir::VarSelectOp::Colon) && range == 0 {
+                return Err(ParserError::illegal_context(
+                    "testbench selected destination",
+                    "part-select width must be nonzero",
+                    None,
+                ));
+            }
+            if matches!(op, veryl_analyzer::ir::VarSelectOp::Colon) {
+                if range >= dimension_size {
+                    return Err(ParserError::illegal_context(
+                        "testbench selected destination",
+                        format!(
+                            "colon-select low bound {range} is outside dimension size {dimension_size}"
+                        ),
+                        None,
+                    ));
+                }
+            } else if range > dimension_size {
+                return Err(ParserError::illegal_context(
+                    "testbench selected destination",
+                    format!("part-select width {range} exceeds dimension size {dimension_size}"),
+                    None,
+                ));
+            }
+
+            let Some(anchor) = anchor else {
+                return Ok(());
+            };
+            let (relative_offset, elements) = match op {
+                veryl_analyzer::ir::VarSelectOp::Colon => {
+                    if anchor >= dimension_size || range > anchor {
+                        return Err(ParserError::illegal_context(
+                            "testbench selected destination",
+                            format!(
+                                "colon-select [{anchor}:{range}] is outside dimension size {dimension_size}"
+                            ),
+                            None,
+                        ));
+                    }
+                    (range.checked_mul(scale), anchor - range + 1)
+                }
+                veryl_analyzer::ir::VarSelectOp::PlusColon => {
+                    if anchor >= dimension_size
+                        || anchor
+                            .checked_add(range)
+                            .is_none_or(|end| end > dimension_size)
+                    {
+                        return Err(ParserError::illegal_context(
+                            "testbench selected destination",
+                            format!(
+                                "plus-colon select anchor {anchor} and width {range} are outside dimension size {dimension_size}"
+                            ),
+                            None,
+                        ));
+                    }
+                    (anchor.checked_mul(scale), range)
+                }
+                veryl_analyzer::ir::VarSelectOp::MinusColon => {
+                    if anchor >= dimension_size || anchor + 1 < range {
+                        return Err(ParserError::illegal_context(
+                            "testbench selected destination",
+                            format!(
+                                "minus-colon select anchor {anchor} and width {range} are outside dimension size {dimension_size}"
+                            ),
+                            None,
+                        ));
+                    }
+                    ((anchor + 1 - range).checked_mul(scale), range)
+                }
+                veryl_analyzer::ir::VarSelectOp::Step => {
+                    if anchor
+                        .checked_mul(range)
+                        .and_then(|start| start.checked_add(range))
+                        .is_none_or(|end| end > dimension_size)
+                    {
+                        return Err(ParserError::illegal_context(
+                            "testbench selected destination",
+                            format!(
+                                "step select anchor {anchor} and width {range} are outside dimension size {dimension_size}"
+                            ),
+                            None,
+                        ));
+                    }
+                    (
+                        anchor
+                            .checked_mul(range)
+                            .and_then(|offset| offset.checked_mul(scale)),
+                        range,
+                    )
+                }
+            };
+            let relative_offset = relative_offset.ok_or_else(|| {
+                ParserError::illegal_context(
+                    "testbench selected destination",
+                    "packed part-select offset overflows usize",
+                    None,
+                )
+            })?;
+            let selected_width = elements.checked_mul(scale).ok_or_else(|| {
+                ParserError::illegal_context(
+                    "testbench selected destination",
+                    "packed part-select width overflows usize",
+                    None,
+                )
+            })?;
+            if prefix_is_static
+                && prefix_offset
+                    .checked_add(relative_offset)
+                    .and_then(|offset| offset.checked_add(selected_width))
+                    .is_none_or(|end| end > total_width)
+            {
+                return Err(ParserError::illegal_context(
+                    "testbench selected destination",
+                    "packed part-select exceeds the target width",
+                    None,
+                ));
+            }
+        } else {
+            if destination.select.0.len() > dims.len() {
+                return Err(ParserError::illegal_context(
+                    "testbench selected destination",
+                    "packed index count exceeds the variable's dimensions",
+                    None,
+                ));
+            }
+            let mut offset = 0usize;
+            let mut is_static = true;
+            for (dimension, index) in destination.select.0.iter().enumerate() {
+                if let Some(index) = Self::try_const_usize(index) {
+                    let size = dims[dimension];
+                    if index >= size {
+                        return Err(ParserError::illegal_context(
+                            "testbench selected destination",
+                            format!(
+                                "packed index {index} is outside dimension {dimension} of size {size}"
+                            ),
+                            None,
+                        ));
+                    }
+                    offset = offset
+                        .checked_add(index.checked_mul(strides[dimension]).ok_or_else(|| {
+                            ParserError::illegal_context(
+                                "testbench selected destination",
+                                "packed index offset overflows usize",
+                                None,
+                            )
+                        })?)
+                        .ok_or_else(|| {
+                            ParserError::illegal_context(
+                                "testbench selected destination",
+                                "packed index offset overflows usize",
+                                None,
+                            )
+                        })?;
+                } else {
+                    is_static = false;
+                }
+            }
+            let selected_width = if destination.select.0.is_empty() {
+                total_width
+            } else {
+                strides[destination.select.0.len() - 1]
+            };
+            if is_static
+                && offset
+                    .checked_add(selected_width)
+                    .is_none_or(|end| end > total_width)
+            {
+                return Err(ParserError::illegal_context(
+                    "testbench selected destination",
+                    "packed selection exceeds the target width",
+                    None,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Emit a LoadU64 or LoadWide opcode for the given byte offset and bit width.
     fn emit_load(
         &self,
@@ -1894,13 +2178,92 @@ fn extract_source_location(
     })
 }
 
-fn validate_testbench_function_call(
+fn has_selected_testbench_destination(destination: &veryl_analyzer::ir::AssignDestination) -> bool {
+    !destination.index.0.is_empty()
+        || !destination.select.0.is_empty()
+        || destination.select.1.is_some()
+}
+
+fn reject_selected_destinations_in_expression_statements(
+    statements: &[Statement],
+) -> Result<(), ParserError> {
+    for statement in statements {
+        match statement {
+            Statement::Assign(statement) => {
+                if statement.dst.iter().any(has_selected_testbench_destination) {
+                    return Err(ParserError::illegal_context(
+                        "selected destination in expression testbench function",
+                        "read-modify-write selected destinations are only supported for statement-level function calls",
+                        None,
+                    ));
+                }
+            }
+            Statement::If(statement) => {
+                reject_selected_destinations_in_expression_statements(&statement.true_side)?;
+                reject_selected_destinations_in_expression_statements(&statement.false_side)?;
+            }
+            Statement::IfReset(statement) => {
+                reject_selected_destinations_in_expression_statements(&statement.true_side)?;
+                reject_selected_destinations_in_expression_statements(&statement.false_side)?;
+            }
+            Statement::Case(statement) => {
+                for arm in &statement.arms {
+                    reject_selected_destinations_in_expression_statements(&arm.body)?;
+                }
+                reject_selected_destinations_in_expression_statements(&statement.default)?;
+            }
+            Statement::For(statement) => {
+                reject_selected_destinations_in_expression_statements(&statement.body)?;
+            }
+            Statement::TbMethodCall(call) => {
+                if call
+                    .ret
+                    .as_deref()
+                    .is_some_and(has_selected_testbench_destination)
+                {
+                    return Err(ParserError::illegal_context(
+                        "selected destination in expression testbench function",
+                        "read-modify-write selected destinations are only supported for statement-level function calls",
+                        None,
+                    ));
+                }
+            }
+            Statement::FunctionCall(_)
+            | Statement::SystemFunctionCall(_)
+            | Statement::Break
+            | Statement::Unsupported(_)
+            | Statement::Null => {}
+        }
+    }
+    Ok(())
+}
+
+fn reject_selected_destinations_in_expression_function_call(
     call: &FunctionCall,
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
+    let key = (call.id, call.index.clone());
+    if !active_functions.insert(key.clone()) {
+        return Ok(());
+    }
+    let result = if let Some(body) = function_body(&source.functions, call) {
+        reject_selected_destinations_in_expression_statements(&body.statements)
+    } else {
+        Ok(())
+    };
+    active_functions.remove(&key);
+    result
+}
+
+fn validate_testbench_function_call(
+    call: &FunctionCall,
+    lookup: &VerylFrontendLookup,
+    source: &VerylTestbenchSource,
+    active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
+) -> Result<(), ParserError> {
     for expression in call.inputs.values() {
-        validate_testbench_expression(expression, source, active_functions)?;
+        validate_testbench_expression(expression, lookup, source, active_functions)?;
     }
 
     let key = (call.id, call.index.clone());
@@ -1908,7 +2271,7 @@ fn validate_testbench_function_call(
         return Ok(());
     }
     let result = if let Some(body) = function_body(&source.functions, call) {
-        validate_testbench_statements(&body.statements, source, active_functions)
+        validate_testbench_statements(&body.statements, lookup, source, active_functions)
     } else {
         Ok(())
     };
@@ -1918,6 +2281,7 @@ fn validate_testbench_function_call(
 
 fn validate_testbench_expression(
     expression: &Expression,
+    lookup: &VerylFrontendLookup,
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
@@ -1932,18 +2296,23 @@ fn validate_testbench_expression(
             )),
             Factor::Variable(_, index, select, _) => {
                 for expression in index.0.iter().chain(select.0.iter()) {
-                    validate_testbench_expression(expression, source, active_functions)?;
+                    validate_testbench_expression(expression, lookup, source, active_functions)?;
                 }
                 if let Some((_, expression)) = &select.1 {
-                    validate_testbench_expression(expression, source, active_functions)?;
+                    validate_testbench_expression(expression, lookup, source, active_functions)?;
                 }
                 Ok(())
             }
             Factor::FunctionCall(call) => {
-                validate_testbench_function_call(call, source, active_functions)
+                validate_testbench_function_call(call, lookup, source, active_functions)?;
+                reject_selected_destinations_in_expression_function_call(
+                    call,
+                    source,
+                    active_functions,
+                )
             }
             Factor::SystemFunctionCall(call) => {
-                validate_testbench_system_function(&call.kind, source, active_functions)
+                validate_testbench_system_function(&call.kind, lookup, source, active_functions)
             }
             Factor::Anonymous(comptime) | Factor::Unknown(comptime)
                 if comptime.get_value().is_err() =>
@@ -1974,22 +2343,22 @@ fn validate_testbench_expression(
             Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => Ok(()),
         },
         Expression::Unary(_, inner, _) => {
-            validate_testbench_expression(inner, source, active_functions)
+            validate_testbench_expression(inner, lookup, source, active_functions)
         }
         Expression::Binary(lhs, _, rhs, _) => {
-            validate_testbench_expression(lhs, source, active_functions)?;
-            validate_testbench_expression(rhs, source, active_functions)
+            validate_testbench_expression(lhs, lookup, source, active_functions)?;
+            validate_testbench_expression(rhs, lookup, source, active_functions)
         }
         Expression::Ternary(condition, then_expression, else_expression, _) => {
-            validate_testbench_expression(condition, source, active_functions)?;
-            validate_testbench_expression(then_expression, source, active_functions)?;
-            validate_testbench_expression(else_expression, source, active_functions)
+            validate_testbench_expression(condition, lookup, source, active_functions)?;
+            validate_testbench_expression(then_expression, lookup, source, active_functions)?;
+            validate_testbench_expression(else_expression, lookup, source, active_functions)
         }
         Expression::Concatenation(items, _) => {
             for (expression, repeat) in items {
-                validate_testbench_expression(expression, source, active_functions)?;
+                validate_testbench_expression(expression, lookup, source, active_functions)?;
                 if let Some(repeat) = repeat {
-                    validate_testbench_expression(repeat, source, active_functions)?;
+                    validate_testbench_expression(repeat, lookup, source, active_functions)?;
                 }
             }
             Ok(())
@@ -1998,13 +2367,28 @@ fn validate_testbench_expression(
             for item in items {
                 match item {
                     ArrayLiteralItem::Value(expression, repeat) => {
-                        validate_testbench_expression(expression, source, active_functions)?;
+                        validate_testbench_expression(
+                            expression,
+                            lookup,
+                            source,
+                            active_functions,
+                        )?;
                         if let Some(repeat) = repeat {
-                            validate_testbench_expression(repeat, source, active_functions)?;
+                            validate_testbench_expression(
+                                repeat,
+                                lookup,
+                                source,
+                                active_functions,
+                            )?;
                         }
                     }
                     ArrayLiteralItem::Defaul(expression) => {
-                        validate_testbench_expression(expression, source, active_functions)?;
+                        validate_testbench_expression(
+                            expression,
+                            lookup,
+                            source,
+                            active_functions,
+                        )?;
                     }
                 }
             }
@@ -2012,7 +2396,7 @@ fn validate_testbench_expression(
         }
         Expression::StructConstructor(_, fields, _) => {
             for (_, expression) in fields {
-                validate_testbench_expression(expression, source, active_functions)?;
+                validate_testbench_expression(expression, lookup, source, active_functions)?;
             }
             Ok(())
         }
@@ -2021,11 +2405,12 @@ fn validate_testbench_expression(
 
 fn validate_testbench_system_function(
     kind: &SystemFunctionKind,
+    lookup: &VerylFrontendLookup,
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
     let mut validate = |input: &SystemFunctionInput| {
-        validate_testbench_expression(&input.0, source, active_functions)
+        validate_testbench_expression(&input.0, lookup, source, active_functions)
     };
     match kind {
         SystemFunctionKind::Bits(input)
@@ -2054,6 +2439,7 @@ fn validate_testbench_system_function(
 
 fn validate_testbench_statements(
     statements: &[Statement],
+    lookup: &VerylFrontendLookup,
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
@@ -2061,40 +2447,81 @@ fn validate_testbench_statements(
         match statement {
             Statement::Assign(statement) => {
                 for destination in &statement.dst {
-                    validate_testbench_destination(destination, source, active_functions)?;
+                    validate_testbench_destination(destination, lookup, source, active_functions)?;
                 }
-                validate_testbench_expression(&statement.expr, source, active_functions)?
+                validate_testbench_expression(&statement.expr, lookup, source, active_functions)?
             }
             Statement::If(statement) => {
-                validate_testbench_expression(&statement.cond, source, active_functions)?;
-                validate_testbench_statements(&statement.true_side, source, active_functions)?;
-                validate_testbench_statements(&statement.false_side, source, active_functions)?;
+                validate_testbench_expression(&statement.cond, lookup, source, active_functions)?;
+                validate_testbench_statements(
+                    &statement.true_side,
+                    lookup,
+                    source,
+                    active_functions,
+                )?;
+                validate_testbench_statements(
+                    &statement.false_side,
+                    lookup,
+                    source,
+                    active_functions,
+                )?;
             }
             Statement::IfReset(statement) => {
-                validate_testbench_statements(&statement.true_side, source, active_functions)?;
-                validate_testbench_statements(&statement.false_side, source, active_functions)?;
+                validate_testbench_statements(
+                    &statement.true_side,
+                    lookup,
+                    source,
+                    active_functions,
+                )?;
+                validate_testbench_statements(
+                    &statement.false_side,
+                    lookup,
+                    source,
+                    active_functions,
+                )?;
             }
             Statement::Case(statement) => {
-                validate_testbench_expression(&statement.case_target, source, active_functions)?;
+                validate_testbench_expression(
+                    &statement.case_target,
+                    lookup,
+                    source,
+                    active_functions,
+                )?;
                 for arm in &statement.arms {
                     for pattern in &arm.patterns {
                         match pattern {
                             CasePattern::Eq(expression) => {
                                 validate_testbench_expression(
                                     expression,
+                                    lookup,
                                     source,
                                     active_functions,
                                 )?;
                             }
                             CasePattern::Range { lo, hi, .. } => {
-                                validate_testbench_expression(lo, source, active_functions)?;
-                                validate_testbench_expression(hi, source, active_functions)?;
+                                validate_testbench_expression(
+                                    lo,
+                                    lookup,
+                                    source,
+                                    active_functions,
+                                )?;
+                                validate_testbench_expression(
+                                    hi,
+                                    lookup,
+                                    source,
+                                    active_functions,
+                                )?;
                             }
                         }
                     }
-                    validate_testbench_statements(&arm.body, source, active_functions)?;
+                    validate_testbench_statements(&arm.body, lookup, source, active_functions)?;
                 }
-                validate_testbench_statements(&statement.default, source, active_functions)?;
+                validate_testbench_statements(
+                    &statement.default,
+                    lookup,
+                    source,
+                    active_functions,
+                )?;
             }
             Statement::For(statement) => {
                 let (start, end) = match &statement.range {
@@ -2104,21 +2531,26 @@ fn validate_testbench_statements(
                 };
                 for bound in [start, end] {
                     if let ForBound::Expression(expression) = bound {
-                        validate_testbench_expression(expression, source, active_functions)?;
+                        validate_testbench_expression(
+                            expression,
+                            lookup,
+                            source,
+                            active_functions,
+                        )?;
                     }
                 }
-                validate_testbench_statements(&statement.body, source, active_functions)?;
+                validate_testbench_statements(&statement.body, lookup, source, active_functions)?;
             }
             Statement::SystemFunctionCall(call) => {
-                validate_testbench_system_function(&call.kind, source, active_functions)?;
+                validate_testbench_system_function(&call.kind, lookup, source, active_functions)?;
             }
             Statement::FunctionCall(call) => {
-                validate_testbench_function_call(call, source, active_functions)?;
+                validate_testbench_function_call(call, lookup, source, active_functions)?;
             }
             Statement::TbMethodCall(call) => {
                 // Selected return destinations are lowered together with ordinary assignments.
                 if let Some(destination) = call.ret.as_deref() {
-                    validate_testbench_destination(destination, source, active_functions)?;
+                    validate_testbench_destination(destination, lookup, source, active_functions)?;
                 }
                 match &call.method {
                     TbMethod::Component { .. } => {
@@ -2131,32 +2563,52 @@ fn validate_testbench_statements(
                         ));
                     }
                     TbMethod::RandomSeed { value } => {
-                        validate_testbench_expression(value, source, active_functions)?;
+                        validate_testbench_expression(value, lookup, source, active_functions)?;
                     }
                     TbMethod::RandomGetRange { min, max, .. } => {
-                        validate_testbench_expression(min, source, active_functions)?;
-                        validate_testbench_expression(max, source, active_functions)?;
+                        validate_testbench_expression(min, lookup, source, active_functions)?;
+                        validate_testbench_expression(max, lookup, source, active_functions)?;
                     }
                     TbMethod::RandomGet { .. } | TbMethod::RandomGetSeed => {}
                     TbMethod::ClockNext { count, period } => {
                         if let Some(expression) = count {
-                            validate_testbench_expression(expression, source, active_functions)?;
+                            validate_testbench_expression(
+                                expression,
+                                lookup,
+                                source,
+                                active_functions,
+                            )?;
                         }
                         if let Some(expression) = period {
-                            validate_testbench_expression(expression, source, active_functions)?;
+                            validate_testbench_expression(
+                                expression,
+                                lookup,
+                                source,
+                                active_functions,
+                            )?;
                         }
                     }
                     TbMethod::ResetAssert { duration, .. } => {
                         if let Some(expression) = duration {
-                            validate_testbench_expression(expression, source, active_functions)?;
+                            validate_testbench_expression(
+                                expression,
+                                lookup,
+                                source,
+                                active_functions,
+                            )?;
                         }
                     }
                     TbMethod::FileOpen { name, .. } => {
-                        validate_testbench_expression(&name.0, source, active_functions)?
+                        validate_testbench_expression(&name.0, lookup, source, active_functions)?
                     }
                     TbMethod::FileWrite { args } => {
                         for argument in args {
-                            validate_testbench_expression(&argument.0, source, active_functions)?;
+                            validate_testbench_expression(
+                                &argument.0,
+                                lookup,
+                                source,
+                                active_functions,
+                            )?;
                         }
                     }
                     TbMethod::FileClose | TbMethod::FileFlush => {}
@@ -2170,18 +2622,24 @@ fn validate_testbench_statements(
 
 fn validate_testbench_destination(
     destination: &veryl_analyzer::ir::AssignDestination,
+    lookup: &VerylFrontendLookup,
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
     for expression in &destination.index.0 {
-        validate_testbench_expression(expression, source, active_functions)?;
+        validate_testbench_expression(expression, lookup, source, active_functions)?;
     }
     for expression in &destination.select.0 {
-        validate_testbench_expression(expression, source, active_functions)?;
+        validate_testbench_expression(expression, lookup, source, active_functions)?;
     }
     if let Some((_, expression)) = &destination.select.1 {
-        validate_testbench_expression(expression, source, active_functions)?;
+        validate_testbench_expression(expression, lookup, source, active_functions)?;
     }
+    ExprCompiler {
+        lookup,
+        testbench_source: source,
+    }
+    .validate_target_bounds(destination)?;
     Ok(())
 }
 
@@ -2194,7 +2652,7 @@ pub fn compile_semantic_testbench(
     let Some(initial_stmts) = source.initial_statements.as_ref() else {
         return Ok(None);
     };
-    validate_testbench_statements(initial_stmts, source, &mut FxHashSet::default())?;
+    validate_testbench_statements(initial_stmts, lookup, source, &mut FxHashSet::default())?;
     let mut builder = SemanticTestbenchBuilder::new(lookup, source, runtime_event_site_count);
     builder.build_event_map(initial_stmts);
     Ok(Some(
