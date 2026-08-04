@@ -448,6 +448,88 @@ fn test_hierarchical_dynamic_reads_preserve_wide_values() {
     );
 }
 
+#[cfg(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+))]
+#[test]
+fn test_hierarchical_dynamic_array_read_uses_native_layout() {
+    let code = r#"
+        module Dut (
+            clk: input clock,
+            narrow: output logic<3>[2],
+        ) {
+            always_ff {
+                narrow[0] = 3'h1;
+                narrow[1] = 3'h5;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var narrow: logic<3>[2];
+            inst dut: Dut (clk, narrow);
+            var index: u32;
+
+            initial {
+                clk.next();
+                index = 1;
+                $assert(dut.narrow[index] == 3'h5);
+                $finish();
+            }
+        }
+    "#;
+
+    let mut sim = Simulator::builder(code, "t")
+        .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+        .build_native()
+        .unwrap();
+    assert!(
+        sim.program()
+            .runtime_schema
+            .testbench_read_roots
+            .iter()
+            .all(|address| !sim.layout().unpacked_arrays.contains_key(address))
+    );
+    let testbench = compile_initial_testbench(&sim).unwrap();
+    assert_eq!(
+        run_compiled_testbench(&mut sim, &testbench),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_hierarchical_assert_message_argument_preserves_selected_width() {
+    let code = r#"
+        module Dut () {
+            var word: logic<8>;
+
+            always_comb {
+                word = 8'hab;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst dut: Dut ();
+
+            initial {
+                $assert_continue(1'b0, "got %h", dut.word[3:0]);
+                $finish();
+            }
+        }
+    "#;
+
+    let detailed = Simulator::builder(code, "t")
+        .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+        .run_test_detailed()
+        .unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert_eq!(detailed.assertions[0].message.as_deref(), Some("got b"));
+}
+
 #[test]
 fn test_hierarchical_read_ignores_same_named_function_local() {
     let code = r#"

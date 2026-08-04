@@ -43,21 +43,9 @@ fn compile_assert_arg(
     ec: &ExprCompiler<'_>,
 ) -> SemanticArgument<StateAddr> {
     let expr = &input.0;
-    let width = {
-        let ctx_width = expr.comptime().expr_context.width;
-        if ctx_width > 0 {
-            ctx_width
-        } else if let Some(type_width) = expr.comptime().r#type.total_width() {
-            type_width
-        } else if let Ok(value) = expr.comptime().get_value() {
-            value.width()
-        } else {
-            0
-        }
-    };
     SemanticArgument {
         expr: ec.compile(expr),
-        width,
+        width: ec.natural_width(expr),
         signed: expression_signed(expr),
         is_string: expr.comptime().r#type.is_string(),
     }
@@ -933,9 +921,30 @@ impl ExprCompiler<'_> {
     }
 
     fn natural_width(&self, expr: &Expression) -> usize {
-        get_expr_width(expr)
+        self.resolved_variable_access_width(expr)
+            .or_else(|| get_expr_width(expr))
             .filter(|width| *width != 0)
             .unwrap_or_else(|| self.infer_expr_width(expr).max(1))
+    }
+
+    fn resolved_variable_access_width(&self, expr: &Expression) -> Option<usize> {
+        let Expression::Term(factor) = expr else {
+            return None;
+        };
+        match factor.as_ref() {
+            Factor::Variable(var_id, index, select, _) => {
+                let (_, info) = self.lookup.root_variable(*var_id)?;
+                Some(variable_access_width(info, index, select).unwrap_or(info.width))
+            }
+            Factor::HierVariable(reference) => {
+                let (_, info) = resolve_hierarchical_reference(self.lookup, reference).ok()?;
+                Some(
+                    variable_access_width(info, &reference.index, &reference.select)
+                        .unwrap_or(info.width),
+                )
+            }
+            _ => None,
+        }
     }
 
     fn root_context(&self, expr: &Expression) -> ValueContext {
@@ -1575,6 +1584,9 @@ impl ExprCompiler<'_> {
     /// Infer the bit width of an expression. Falls back to comptime if available,
     /// otherwise resolves from VariableInfo for variables.
     fn infer_expr_width(&self, expr: &Expression) -> usize {
+        if let Some(width) = self.resolved_variable_access_width(expr) {
+            return width;
+        }
         let ctx_width = expr.comptime().expr_context.width;
         if ctx_width > 0 {
             return ctx_width;
@@ -1585,26 +1597,12 @@ impl ExprCompiler<'_> {
                 return w;
             }
         }
-        // For terms, look up variable info
+        // For terms, use constant value widths as a final fallback.
         if let Expression::Term(f) = expr {
-            match f.as_ref() {
-                Factor::Variable(var_id, index, select, _) => {
-                    if let Some((_, info)) = self.lookup.root_variable(*var_id) {
-                        return variable_access_width(info, index, select).unwrap_or(info.width);
-                    }
-                }
-                Factor::HierVariable(reference) => {
-                    if let Ok((_, info)) = resolve_hierarchical_reference(self.lookup, reference) {
-                        return variable_access_width(info, &reference.index, &reference.select)
-                            .unwrap_or(info.width);
-                    }
-                }
-                Factor::Value(c) => {
-                    if let Ok(v) = c.get_value() {
-                        return v.width();
-                    }
-                }
-                _ => {}
+            if let Factor::Value(c) = f.as_ref()
+                && let Ok(v) = c.get_value()
+            {
+                return v.width();
             }
         }
         0
@@ -2510,5 +2508,22 @@ mod tests {
         };
         assert_eq!(feature, "hierarchical variable reference");
         assert!(detail.contains("variable `missing` was not found"));
+    }
+
+    #[test]
+    fn hierarchical_message_argument_width_uses_resolved_variable_metadata() {
+        let dut = resource_table::insert_str("dut");
+        let q = resource_table::insert_str("q");
+        let lookup = lookup_with_child(dut, q);
+        let source = VerylTestbenchSource::default();
+        let compiler = ExprCompiler {
+            lookup: &lookup,
+            testbench_source: &source,
+        };
+        let input = SystemFunctionInput(Expression::Term(Box::new(Factor::HierVariable(
+            Box::new(reference(vec![dut], VarPath(vec![q]))),
+        ))));
+
+        assert_eq!(compile_assert_arg(&input, &compiler).width, 8);
     }
 }
