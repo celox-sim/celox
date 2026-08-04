@@ -89,6 +89,39 @@ fn evaluates_sized_arithmetic_and_logical_right_shift_parameters() {
 }
 
 #[test]
+fn wraps_signed_division_and_preserves_oob_parameter_selects() {
+    let source = r#"
+        module Top(output logic division_wraps, output logic oob_is_unknown);
+            parameter logic [3:0] P = 4'b0000;
+            parameter OOB = P[4];
+            assign division_wraps = ((8'sh80 / 8'shff) == 8'sh80);
+            assign oob_is_unknown = (OOB === 1'bx);
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("constant_edge_cases.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("division_wraps")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("oob_is_unknown")), 1u8.into());
+}
+
+#[test]
+fn permits_disjoint_continuous_net_drivers() {
+    let source = r#"
+        module Top(output wire [1:0] y);
+            assign y[0] = 1'b0;
+            assign y[1] = 1'b1;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("disjoint_net_drivers.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
+}
+
+#[test]
 fn preserves_declared_width_for_parameter_logical_right_shifts() {
     let source = r#"
         module Top(output logic [7:0] shifted, output logic negation_matches);
@@ -1152,6 +1185,40 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(input logic clk, d, output logic q);
                 always_ff @(posedge clk)
                     assert (d) q <= 1'b1; else q <= 1'b0;
+            endmodule
+        "#,
+        ),
+        (
+            "named port connection expression",
+            r#"
+            module Child(input logic a); endmodule
+            module Top(input logic [3:0] x);
+                Child child(.a(x ** 2));
+            endmodule
+        "#,
+        ),
+        (
+            "loop-generate initializer",
+            r#"
+            module Top(output wire y);
+                for (genvar i = 2 ** 0; i < 2; i++) assign y = 1'b1;
+            endmodule
+        "#,
+        ),
+        (
+            "loop-generate condition",
+            r#"
+            module Top(output wire y);
+                for (genvar i = 0; i < 2 ** 1; i++) assign y = 1'b1;
+            endmodule
+        "#,
+        ),
+        (
+            "multiple net drivers for `y`",
+            r#"
+            module Top(output wire y);
+                assign y = 1'b0;
+                assign y = 1'b1;
             endmodule
         "#,
         ),

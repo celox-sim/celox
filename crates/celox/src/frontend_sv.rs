@@ -171,49 +171,41 @@ fn validate_instance_net_drivers(
     modules: &HashMap<resource_table::StrId, LoweredSvModule>,
 ) -> Result<(), sv::AnalyzerError> {
     for module in modules.values() {
-        for signal in module
+        let net_names = module
             .source
             .signals()
             .iter()
             .filter(|signal| signal.is_net())
-        {
-            let locally_driven = module.source.comb_processes().iter().any(|process| {
-                process
-                    .assignments()
+            .map(|signal| (signal.name(), true))
+            .chain(
+                module
+                    .source
+                    .ports()
                     .iter()
-                    .any(|assignment| assignment.lhs() == signal.name())
-            }) || module.source.ff_processes().iter().any(|process| {
-                process
-                    .assignments()
-                    .iter()
-                    .any(|assignment| assignment.assignment().lhs() == signal.name())
-            });
-            if locally_driven {
-                continue;
-            }
-            let driven_by_child = module.instances.iter().any(|instance| {
-                let Some(child) = modules.get(&instance.module_name) else {
-                    return false;
-                };
-                instance.port_connections.iter().any(|connection| {
-                    matches!(
-                        connection.actual_expr.as_ref(),
-                        Some(sv::ir::Expr::Ident(name)) if name == signal.name()
-                    ) && child.source.ports().iter().any(|port| {
-                        port.name() == connection.formal
-                            && matches!(
-                                port.direction(),
-                                sv::ir::PortDirection::Output | sv::ir::PortDirection::Inout
-                            )
+                    .filter(|port| port.is_net())
+                    .map(|port| (port.name(), false)),
+            );
+        for (signal_name, require_driver) in net_names {
+            let child_driver_count = module
+                .instances
+                .iter()
+                .filter_map(|instance| Some((instance, modules.get(&instance.module_name)?)))
+                .flat_map(|(instance, child)| {
+                    instance.port_connections.iter().filter(move |connection| {
+                        matches!(
+                            connection.actual_expr.as_ref(),
+                            Some(sv::ir::Expr::Ident(name)) if name == signal_name
+                        ) && child.source.ports().iter().any(|port| {
+                            port.name() == connection.formal
+                                && matches!(
+                                    port.direction(),
+                                    sv::ir::PortDirection::Output | sv::ir::PortDirection::Inout
+                                )
+                        })
                     })
                 })
-            });
-            if !driven_by_child {
-                return Err(sv::AnalyzerError::Unsupported(format!(
-                    "undriven net declaration `{}`",
-                    signal.name()
-                )));
-            }
+                .count();
+            validate_net_driver_ranges(module, signal_name, child_driver_count, require_driver)?;
         }
     }
     Ok(())
@@ -224,56 +216,150 @@ fn validate_specialized_instance_net_drivers(
     modules: &HashMap<ModuleId, LoweredSvModule>,
 ) -> Result<(), sv::AnalyzerError> {
     for module in modules.values() {
-        for signal in module
+        let net_names = module
             .source
             .signals()
             .iter()
             .filter(|signal| signal.is_net())
-        {
-            let locally_driven = module.source.comb_processes().iter().any(|process| {
-                process
-                    .assignments()
+            .map(|signal| (signal.name(), true))
+            .chain(
+                module
+                    .source
+                    .ports()
                     .iter()
-                    .any(|assignment| assignment.lhs() == signal.name())
-            }) || module.source.ff_processes().iter().any(|process| {
-                process
-                    .assignments()
-                    .iter()
-                    .any(|assignment| assignment.assignment().lhs() == signal.name())
-            });
-            if locally_driven {
-                continue;
-            }
-            let driven_by_child = module.instances.iter().any(|instance| {
-                let key = LoweredSvModuleKey::instance_key(instance);
-                let Some(child_id) = module_ids.get(&key) else {
-                    return false;
-                };
-                let Some(child) = modules.get(child_id) else {
-                    return false;
-                };
-                instance.port_connections.iter().any(|connection| {
-                    matches!(
-                        connection.actual_expr.as_ref(),
-                        Some(sv::ir::Expr::Ident(name)) if name == signal.name()
-                    ) && child.source.ports().iter().any(|port| {
-                        port.name() == connection.formal
-                            && matches!(
-                                port.direction(),
-                                sv::ir::PortDirection::Output | sv::ir::PortDirection::Inout
-                            )
+                    .filter(|port| port.is_net())
+                    .map(|port| (port.name(), false)),
+            );
+        for (signal_name, require_driver) in net_names {
+            let child_driver_count = module
+                .instances
+                .iter()
+                .filter_map(|instance| {
+                    let key = LoweredSvModuleKey::instance_key(instance);
+                    let child_id = module_ids.get(&key)?;
+                    Some((instance, modules.get(child_id)?))
+                })
+                .flat_map(|(instance, child)| {
+                    instance.port_connections.iter().filter(move |connection| {
+                        matches!(
+                            connection.actual_expr.as_ref(),
+                            Some(sv::ir::Expr::Ident(name)) if name == signal_name
+                        ) && child.source.ports().iter().any(|port| {
+                            port.name() == connection.formal
+                                && matches!(
+                                    port.direction(),
+                                    sv::ir::PortDirection::Output | sv::ir::PortDirection::Inout
+                                )
+                        })
                     })
                 })
-            });
-            if !driven_by_child {
-                return Err(sv::AnalyzerError::Unsupported(format!(
-                    "undriven net declaration `{}`",
-                    signal.name()
-                )));
-            }
+                .count();
+            validate_net_driver_ranges(module, signal_name, child_driver_count, require_driver)?;
         }
     }
     Ok(())
+}
+
+fn validate_net_driver_ranges(
+    module: &LoweredSvModule,
+    signal_name: &str,
+    child_driver_count: usize,
+    require_driver: bool,
+) -> Result<(), sv::AnalyzerError> {
+    let local_drivers = local_net_driver_ranges(module, signal_name);
+    let overlapping_local_drivers = local_drivers.iter().enumerate().any(|(index, left)| {
+        local_drivers[index + 1..]
+            .iter()
+            .any(|right| left.0 != right.0 && net_driver_ranges_overlap(left.1, right.1))
+    });
+    if child_driver_count > 1
+        || child_driver_count == 1 && !local_drivers.is_empty()
+        || overlapping_local_drivers
+    {
+        return Err(sv::AnalyzerError::Unsupported(format!(
+            "multiple net drivers for `{signal_name}`"
+        )));
+    }
+    if require_driver && child_driver_count == 0 && local_drivers.is_empty() {
+        return Err(sv::AnalyzerError::Unsupported(format!(
+            "undriven net declaration `{signal_name}`"
+        )));
+    }
+    Ok(())
+}
+
+fn local_net_driver_ranges(
+    module: &LoweredSvModule,
+    signal_name: &str,
+) -> Vec<(usize, Option<(i128, i128)>)> {
+    let mut drivers = Vec::new();
+    let mut driver_id = 0;
+    for process in module.source.comb_processes() {
+        let active = process.condition().is_none_or(|condition| {
+            sv::typecheck::eval_const_expr_with_types(
+                condition,
+                &module.constants,
+                &module.parameter_types,
+            )
+            .is_none_or(|value| value != 0)
+        });
+        if active {
+            for assignment in process.assignments() {
+                if assignment.lhs() == signal_name {
+                    drivers.push((
+                        driver_id,
+                        net_lvalue_range(assignment.lhs_value(), &module.constants),
+                    ));
+                }
+                if process.kind() == sv::ir::CombProcessKind::ContinuousAssign {
+                    driver_id += 1;
+                }
+            }
+            if process.kind() == sv::ir::CombProcessKind::AlwaysComb {
+                driver_id += 1;
+            }
+        } else {
+            driver_id += 1;
+        }
+    }
+    for process in module.source.ff_processes() {
+        drivers.extend(
+            process
+                .assignments()
+                .iter()
+                .map(|assignment| assignment.assignment())
+                .filter(|assignment| assignment.lhs() == signal_name)
+                .map(|assignment| {
+                    (
+                        driver_id,
+                        net_lvalue_range(assignment.lhs_value(), &module.constants),
+                    )
+                }),
+        );
+        driver_id += 1;
+    }
+    drivers
+}
+
+fn net_lvalue_range(
+    lvalue: &sv::ir::LValue,
+    constants: &std::collections::HashMap<String, i128>,
+) -> Option<(i128, i128)> {
+    let sv::ir::LValue::Select { msb, lsb, .. } = lvalue else {
+        return None;
+    };
+    let msb = sv::typecheck::eval_const_expr(msb, constants)?;
+    let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
+    Some((msb.min(lsb), msb.max(lsb)))
+}
+
+fn net_driver_ranges_overlap(left: Option<(i128, i128)>, right: Option<(i128, i128)>) -> bool {
+    match (left, right) {
+        (Some((left_start, left_end)), Some((right_start, right_end))) => {
+            left_start <= right_end && right_start <= left_end
+        }
+        _ => true,
+    }
 }
 
 /// Lower every SystemVerilog module into an embeddable hierarchy. The module

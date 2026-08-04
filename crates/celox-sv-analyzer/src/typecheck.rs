@@ -39,8 +39,16 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
         ConstExpr::Literal(value) => literal_as_i128(value),
         ConstExpr::Ident(name) => constants.get(name).copied(),
         ConstExpr::Select { expr, bit } => {
-            let value = eval_const_expr(expr, constants)?;
             let bit = eval_const_expr(bit, constants)?;
+            let bit = usize::try_from(bit).ok()?;
+            if let ConstExpr::Literal(value) = &**expr {
+                let value = parse_integral_literal(value)?;
+                if bit >= value.width || value.mask.bit(bit as u64) {
+                    return None;
+                }
+                return Some(value.value.bit(bit as u64) as i128);
+            }
+            let value = eval_const_expr(expr, constants)?;
             let bit = u32::try_from(bit).ok()?;
             value.checked_shr(bit).map(|value| value & 1)
         }
@@ -304,11 +312,23 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
         if signed {
             let left = integral_literal_as_i128(&left, true)?;
             let right = integral_literal_as_i128(&right, true)?;
-            return match op {
-                BinaryOp::Div => left.checked_div(right),
-                BinaryOp::Mod => left.checked_rem(right),
+            let value = match op {
+                BinaryOp::Div if left == i128::MIN && right == -1 => i128::MIN,
+                BinaryOp::Mod if left == i128::MIN && right == -1 => 0,
+                BinaryOp::Div => left.checked_div(right)?,
+                BinaryOp::Mod => left.checked_rem(right)?,
                 _ => unreachable!(),
             };
+            let value = BigUint::from(value as u128) & &width_mask;
+            return integral_literal_as_i128(
+                &IntegralLiteral {
+                    width,
+                    signed,
+                    value,
+                    mask: BigUint::default(),
+                },
+                true,
+            );
         }
         let value = match op {
             BinaryOp::Div => left.value / right.value,

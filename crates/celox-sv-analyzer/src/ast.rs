@@ -1933,6 +1933,8 @@ fn parameter_value_env(
                 Expr::Literal(value.to_string())
             }
         } else if let Some(value) = parameter.value().cloned() {
+            let value = substitute_typed_parameter_literals(value, const_env, &parameter_types);
+            let value = replace_oob_const_selects_with_unknown(value, const_env);
             let value = substitute_expr_constants_with_parameter_literals(
                 const_expr_to_expr(value),
                 const_env,
@@ -1953,6 +1955,64 @@ fn parameter_value_env(
         values.insert(parameter.name().to_string(), value);
     }
     values
+}
+
+fn replace_oob_const_selects_with_unknown(
+    expr: ConstExpr,
+    const_env: &HashMap<String, i128>,
+) -> ConstExpr {
+    match expr {
+        ConstExpr::Select { expr, bit } => {
+            let expr = replace_oob_const_selects_with_unknown(*expr, const_env);
+            let bit = replace_oob_const_selects_with_unknown(*bit, const_env);
+            if let ConstExpr::Literal(literal) = &expr
+                && let Some(bit_index) = typecheck::eval_const_expr(&bit.clone().into(), const_env)
+                    .and_then(|bit| usize::try_from(bit).ok())
+                && typecheck::parse_integral_literal(literal)
+                    .is_some_and(|literal| bit_index >= literal.width)
+            {
+                ConstExpr::Literal("1'bx".to_string())
+            } else {
+                ConstExpr::Select {
+                    expr: Box::new(expr),
+                    bit: Box::new(bit),
+                }
+            }
+        }
+        ConstExpr::Function { name, args } => ConstExpr::Function {
+            name,
+            args: args
+                .into_iter()
+                .map(|arg| replace_oob_const_selects_with_unknown(arg, const_env))
+                .collect(),
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op,
+            expr: Box::new(replace_oob_const_selects_with_unknown(*expr, const_env)),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: Box::new(replace_oob_const_selects_with_unknown(*left, const_env)),
+            op,
+            right: Box::new(replace_oob_const_selects_with_unknown(*right, const_env)),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: Box::new(replace_oob_const_selects_with_unknown(
+                *condition, const_env,
+            )),
+            then_expr: Box::new(replace_oob_const_selects_with_unknown(
+                *then_expr, const_env,
+            )),
+            else_expr: Box::new(replace_oob_const_selects_with_unknown(
+                *else_expr, const_env,
+            )),
+        },
+        ConstExpr::Ident(name) => ConstExpr::Ident(name),
+        ConstExpr::Literal(value) => ConstExpr::Literal(value),
+    }
 }
 
 fn const_expr_to_expr(expr: ConstExpr) -> Expr {
@@ -2552,39 +2612,40 @@ fn port_connections_from_hierarchical_instance(
             "ordered port connection".to_string(),
         ));
     };
-    Ok(connections
-        .nodes
-        .0
-        .contents()
-        .into_iter()
-        .filter_map(|connection| match connection {
+    let mut lowered = Vec::new();
+    for connection in connections.nodes.0.contents() {
+        match connection {
             sv_parser::NamedPortConnection::Identifier(connection) => {
                 let formal =
-                    identifier_text(RefNode::PortIdentifier(&connection.nodes.2), syntax_tree)?;
+                    identifier_text(RefNode::PortIdentifier(&connection.nodes.2), syntax_tree)
+                        .ok_or_else(|| {
+                            AnalyzerError::Unsupported(
+                                "named port connection identifier".to_string(),
+                            )
+                        })?;
                 let actual_expr = match connection.nodes.3.as_ref() {
                     None => Some(Expr::Ident(formal.clone())),
-                    Some(paren) => paren
-                        .nodes
-                        .1
-                        .as_ref()
-                        .and_then(|expr| expr_from_expression(expr, syntax_tree))
-                        .or_else(|| {
-                            primary_literal_text(
-                                RefNode::NamedPortConnectionIdentifier(connection),
-                                syntax_tree,
-                            )
-                            .map(Expr::Literal)
-                        }),
+                    Some(paren) => match paren.nodes.1.as_ref() {
+                        None => None,
+                        Some(expr) => {
+                            Some(expr_from_expression(expr, syntax_tree).ok_or_else(|| {
+                                AnalyzerError::Unsupported(
+                                    "named port connection expression".to_string(),
+                                )
+                            })?)
+                        }
+                    },
                 };
                 let actual = actual_expr
                     .as_ref()
                     .and_then(expr_ident_name)
                     .unwrap_or_else(|| formal.clone());
-                Some(PortConnection::new(formal, actual, actual_expr))
+                lowered.push(PortConnection::new(formal, actual, actual_expr));
             }
-            sv_parser::NamedPortConnection::Asterisk(_) => None,
-        })
-        .collect())
+            sv_parser::NamedPortConnection::Asterisk(_) => {}
+        }
+    }
+    Ok(lowered)
 }
 
 fn expr_ident_name(expr: &Expr) -> Option<String> {
@@ -3725,34 +3786,31 @@ fn comb_processes_from_loop_generate(
     if generate_block_has_data_declaration(&generate.nodes.2) {
         return Ok(());
     }
-    let Some(name) = identifier_text(
+    let name = identifier_text(
         RefNode::GenvarIdentifier(&generate.nodes.1.nodes.1.0.nodes.1),
         syntax_tree,
-    ) else {
-        return Ok(());
-    };
-    let Some(init) = const_expr_from_ref_node(
+    )
+    .ok_or_else(|| AnalyzerError::Unsupported("loop-generate variable".to_string()))?;
+    let init_expr = const_expr_from_ref_node(
         RefNode::ConstantExpression(&generate.nodes.1.nodes.1.0.nodes.3),
         syntax_tree,
     )
-    .and_then(|expr| eval_ast_const_expr(&expr, const_env)) else {
-        return Ok(());
-    };
-    let Some(condition_expr) = const_expr_from_ref_node(
+    .ok_or_else(|| AnalyzerError::Unsupported("loop-generate initializer".to_string()))?;
+    let init = eval_ast_const_expr(&init_expr, const_env)
+        .ok_or_else(|| AnalyzerError::Unsupported("loop-generate initializer".to_string()))?;
+    let condition_expr = const_expr_from_ref_node(
         RefNode::ConstantExpression(&generate.nodes.1.nodes.1.2.nodes.0),
         syntax_tree,
-    ) else {
-        return Ok(());
-    };
+    )
+    .ok_or_else(|| AnalyzerError::Unsupported("loop-generate condition".to_string()))?;
 
     let mut value = init;
     let mut iterations = 0;
     for _ in 0..10_000 {
         let mut loop_env = const_env.clone();
         loop_env.insert(name.clone(), value);
-        let Some(condition_value) = eval_ast_const_expr(&condition_expr, &loop_env) else {
-            break;
-        };
+        let condition_value = eval_ast_const_expr(&condition_expr, &loop_env)
+            .ok_or_else(|| AnalyzerError::Unsupported("loop-generate condition".to_string()))?;
         if condition_value == 0 {
             break;
         }
