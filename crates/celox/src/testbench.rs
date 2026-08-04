@@ -18,7 +18,8 @@ pub use celox_testbench::SourceLocation;
 use celox_testbench::{
     DisplayFormatArg, ExecutableArgument, ExecutableAssertMessage, ExecutableClockCount,
     ExecutableLoopBound, ExecutableStatement, ExecutableTestbench, TestbenchOperator as Op,
-    TestbenchStatement as GenericTestbenchStatement, TestbenchValue as TbValue, format_display_arg,
+    TestbenchStatement as GenericTestbenchStatement, TestbenchTarget, TestbenchValue as TbValue,
+    format_display_arg,
 };
 use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
@@ -168,6 +169,39 @@ fn sim_set_u64<B: SimBackend>(sim: &mut crate::Simulator<B>, sig: SignalRef, val
         33..=64 => sim.set(sig, value),
         _ => sim.set_wide(sig, BigUint::from(value)),
     }
+}
+
+fn sim_set_target<B: SimBackend>(
+    sim: &mut crate::Simulator<B>,
+    target: &TestbenchTarget<SignalRef, celox_testbench::CompiledExpr>,
+    value: TbValue,
+) {
+    let Some(selection) = &target.selection else {
+        match value {
+            TbValue::U64(value) => sim_set_u64(sim, target.signal, value),
+            TbValue::Wide(value) => sim.set_wide(target.signal, value),
+        }
+        return;
+    };
+
+    let (ptr, _) = sim.memory_as_mut_ptr();
+    let offset = selection.offset.eval_u64(ptr) as usize;
+    let width = selection
+        .width
+        .min(target.signal.width.saturating_sub(offset));
+    if width == 0 {
+        return;
+    }
+
+    let (root, root_mask) = sim.get_four_state(target.signal);
+    let selected_mask = width_mask(width) << offset;
+    let clear_mask = width_mask(target.signal.width) ^ &selected_mask;
+    let selected_value = (value.to_biguint() & width_mask(width)) << offset;
+    sim.set_four_state(
+        target.signal,
+        (root & &clear_mask) | selected_value,
+        root_mask & clear_mask,
+    );
 }
 
 fn execution_random_seed(seed: Option<u64>) -> u64 {
@@ -526,15 +560,15 @@ fn random_value_for_destination(
     }
 }
 
-fn sim_set_random<B: SimBackend>(
+fn sim_set_random_target<B: SimBackend>(
     sim: &mut crate::Simulator<B>,
-    sig: SignalRef,
+    target: &TestbenchTarget<SignalRef, celox_testbench::CompiledExpr>,
     value: u64,
     source_width: u32,
     signed: bool,
 ) {
-    let value = random_value_for_destination(value, source_width, signed, sig.width);
-    sim_set_biguint(sim, sig, value);
+    let value = random_value_for_destination(value, source_width, signed, target.width);
+    sim_set_target(sim, target, TbValue::Wide(value));
 }
 
 fn sim_set_bigint<B: SimBackend>(
@@ -1379,10 +1413,7 @@ fn exec_one_detailed<B: SimBackend>(
             }
             let (ptr, _) = sim.memory_as_mut_ptr();
             let val = expr.eval_value(ptr);
-            match val {
-                TbValue::U64(v) => sim_set_u64(sim, *dst, v),
-                TbValue::Wide(v) => sim.set_wide(*dst, v),
-            }
+            sim_set_target(sim, dst, val);
             ExecResult::Continue
         }
         GenericTestbenchStatement::RandomSeed { handle, value } => {
@@ -1401,7 +1432,12 @@ fn exec_one_detailed<B: SimBackend>(
         } => {
             let value = ctx.random.get(handle, *width);
             if let Some(ret) = ret {
-                sim_set_random(sim, *ret, value, *width, *signed);
+                if ret.selection.is_some()
+                    && let Err(e) = sim.eval_comb()
+                {
+                    return ExecResult::Fail(format!("eval_comb: {e}"));
+                }
+                sim_set_random_target(sim, ret, value, *width, *signed);
             }
             ExecResult::Continue
         }
@@ -1421,14 +1457,19 @@ fn exec_one_detailed<B: SimBackend>(
             let max = max.eval_u64(ptr);
             let value = ctx.random.get_range(handle, min, max, *width, *signed);
             if let Some(ret) = ret {
-                sim_set_random(sim, *ret, value, *width, *signed);
+                sim_set_random_target(sim, ret, value, *width, *signed);
             }
             ExecResult::Continue
         }
         GenericTestbenchStatement::RandomGetSeed { handle, ret } => {
             let seed = ctx.random.get_seed(handle);
             if let Some(ret) = ret {
-                sim_set_u64(sim, *ret, seed);
+                if ret.selection.is_some()
+                    && let Err(e) = sim.eval_comb()
+                {
+                    return ExecResult::Fail(format!("eval_comb: {e}"));
+                }
+                sim_set_target(sim, ret, TbValue::U64(seed));
             }
             ExecResult::Continue
         }

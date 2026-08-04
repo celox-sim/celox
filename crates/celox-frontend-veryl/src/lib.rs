@@ -68,6 +68,13 @@ pub struct VariableInfo {
     pub path: VarPath,
     pub var_kind: veryl_analyzer::ir::VarKind,
     pub metadata: VariableMetadata,
+    /// Per-dimension sizes for the packed shape of the variable.
+    ///
+    /// `VariableMetadata::array_dims` deliberately only describes unpacked
+    /// arrays because that is the source-independent storage shape.  The
+    /// testbench frontend also needs the packed shape to lower a chained
+    /// select such as `logic<4, 4> m; m[2][1]` to one linear bit offset.
+    pub packed_dims: Vec<usize>,
 }
 
 impl std::ops::Deref for VariableInfo {

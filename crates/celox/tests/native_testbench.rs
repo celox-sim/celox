@@ -1,5 +1,5 @@
 use celox::{
-    DeadStorePolicy, ParserError, ResetType, Simulator, SimulatorErrorKind, TestResult,
+    DeadStorePolicy, ResetType, Simulator, SimulatorErrorKind, TestResult,
     testbench::{compile_initial_testbench, run_compiled_testbench},
 };
 use veryl_analyzer::{AnalyzerError, analyzer_error::InvalidForRangeKind};
@@ -259,39 +259,143 @@ fn test_unset_testbench_seed_is_fresh_per_execution() {
 }
 
 #[test]
-fn test_selected_testbench_destinations_are_rejected() {
-    for code in [
-        r#"
+fn test_selected_testbench_destinations_update_only_selected_targets() {
+    let random_handle = veryl_parser::resource_table::insert_str("r");
+    veryl_simulator::random_table::seed_handle(random_handle, 42);
+    let random_value = veryl_simulator::random_table::get(random_handle, 8, false).payload_u64();
+
+    let cases = [
+        format!(
+            r#"
             #[test(t)]
-            module t {
+            module t {{
                 var values: logic<8>[4];
                 var index: logic<2>;
                 var r: $tb::random::<u8>;
-                initial {
+                initial {{
+                    values[0] = 8'h11;
+                    values[1] = 8'h22;
+                    values[2] = 8'h33;
+                    values[3] = 8'h44;
                     index = 1;
+                    r.seed(42);
                     values[index] = r.get();
+                    $assert(values[0] == 8'h11);
+                    $assert(values[1] == 8'd{random_value});
+                    $assert(values[2] == 8'h33);
+                    $assert(values[3] == 8'h44);
                     $finish();
-                }
-            }
-        "#,
+                }}
+            }}
+        "#
+        ),
         r#"
             #[test(t)]
             module t {
                 var word: logic<8>;
                 initial {
-                    word[3] = 1;
+                    word = 8'hAA;
+                    word[3] = 1'b0;
+                    $assert(word == 8'hA2);
+                    word[6:3] = 4'b0011;
+                    $assert(word == 8'h9A);
                     $finish();
                 }
             }
-        "#,
-    ] {
-        let error = Simulator::builder(code, "t").build().unwrap_err();
-        let SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, .. }) = error.kind()
-        else {
-            panic!("expected selected destination diagnostic, got {error:?}");
-        };
-        assert_eq!(*issue, 478);
+        "#
+        .to_string(),
+    ];
+    for code in cases {
+        assert_eq!(
+            Simulator::builder(&code, "t").run_test().unwrap(),
+            TestResult::Pass
+        );
+        assert_eq!(
+            Simulator::builder(&code, "t").run_test_cranelift().unwrap(),
+            TestResult::Pass
+        );
     }
+}
+
+#[test]
+fn test_packed_prefix_and_low_bound_testbench_destinations() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            const W: u32 = 4;
+            var word: logic<8>;
+            var matrix: logic<4, 4>;
+            initial {
+                word = 8'hA0;
+                word[W - 1:0] = 4'hF;
+                $assert(word == 8'hAF);
+
+                word = 8'hA0;
+                word[0 +: W] = 4'h5;
+                $assert(word == 8'hA5);
+
+                matrix = 16'h0000;
+                matrix[2][1] = 1'b1;
+                $assert(matrix == 16'h0200);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass
+    );
+    assert_eq!(
+        Simulator::builder(code, "t").run_test_cranelift().unwrap(),
+        TestResult::Pass
+    );
+}
+
+#[test]
+fn test_selected_testbench_destinations_keep_dynamic_reads_and_old_value_live() {
+    let random_handle = veryl_parser::resource_table::insert_str("r");
+    veryl_simulator::random_table::seed_handle(random_handle, 42);
+    let random_value = veryl_simulator::random_table::get(random_handle, 8, false).payload_u64();
+    let code = format!(
+        r#"
+        module Driver (
+            index: output logic<2>,
+        ) {{
+            always_comb {{
+                index = 2;
+            }}
+        }}
+
+        #[test(t)]
+        module t {{
+            var values: logic<8>[4];
+            var index: logic<2>;
+            var word: logic<8>;
+            var r: $tb::random::<u8>;
+            inst dut: Driver(index);
+
+            initial {{
+                values = '{{default: 8'h00}};
+                word = 8'hA0;
+                r.seed(42);
+                values[index] = r.get();
+                word[3] = 1'b1;
+                $assert(values[2] == 8'd{random_value});
+                $assert(word == 8'hA8);
+                $finish();
+            }}
+        }}
+        "#,
+    );
+
+    assert_eq!(
+        Simulator::builder(&code, "t")
+            .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
 }
 
 #[test]

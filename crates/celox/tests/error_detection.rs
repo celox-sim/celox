@@ -665,6 +665,122 @@ fn test_testbench_helper_hierarchical_read_returns_error_without_panicking() {
 }
 
 #[test]
+fn test_selected_random_return_hierarchical_index_returns_error_without_panicking() {
+    let code = r#"
+        module Driver (
+            idx: output logic<2>,
+        ) {
+            always_comb {
+                idx = 2;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst dut: Driver (idx);
+            var idx: logic<2>;
+            var values: logic<8>[4];
+            var r: $tb::random::<u8>;
+
+            initial {
+                values[dut.idx] = r.get();
+                $finish();
+            }
+        }
+    "#;
+
+    let outcome = std::panic::catch_unwind(|| Simulator::builder(code, "t").build());
+    let result = outcome.expect("hierarchical random return destination must not panic");
+    match result.as_ref().map_err(|error| error.kind()) {
+        Err(SimulatorErrorKind::Analyzer(errors)) => assert!(
+            errors.iter().any(|error| matches!(
+                error,
+                veryl_analyzer::AnalyzerError::InvisibleIndentifier { .. }
+            )),
+            "expected Veryl InvisibleIndentifier, got {errors:?}"
+        ),
+        Err(SimulatorErrorKind::SIRParser(ParserError::Unsupported {
+            issue,
+            phase: LoweringPhase::SimulatorParser,
+            feature,
+            ..
+        })) => {
+            assert_eq!(*issue, 467);
+            assert_eq!(*feature, "hierarchical variable reference");
+        }
+        Err(kind) => {
+            panic!("expected InvisibleIdentifier or Unsupported(SimulatorParser), got {kind:?}")
+        }
+        Ok(_) => panic!("expected hierarchical random return destination to be rejected"),
+    }
+}
+
+#[test]
+fn test_selected_testbench_destination_out_of_range_is_rejected() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var word: logic<8>;
+
+            initial {
+                word[6 +: 4] = 4'hf;
+                $finish();
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "t")
+        .build()
+        .expect_err("out-of-range selected destination must be rejected");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
+            assert_eq!(*feature, "testbench selected destination");
+        }
+        other => panic!("expected selected destination geometry error, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_expression_testbench_function_selected_destination_is_rejected() {
+    let code = r#"
+        module Driver (source: output logic<8>) {
+            assign source = 8'h05;
+        }
+
+        #[test(t)]
+        module t {
+            var source: logic<8>;
+            inst dut: Driver (source);
+
+            function update(x: input logic<8>) -> logic<8> {
+                var tmp: logic<8>;
+                tmp = 8'ha0;
+                tmp[3:0] = x;
+                return tmp;
+            }
+
+            initial {
+                $assert(update(source) == 8'ha5);
+                $finish();
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "t")
+        .build()
+        .expect_err("selected destination in an expression helper must be rejected");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
+            assert_eq!(
+                *feature,
+                "selected destination in expression testbench function"
+            );
+        }
+        other => panic!("expected expression helper selected destination error, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_reset_compile_time_expression_duration_is_accepted() {
     let code = r#"
         #[test(t)]

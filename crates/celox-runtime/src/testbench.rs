@@ -3,8 +3,8 @@ use celox_testbench::{
     AssertMessage as GenericAssertMessage, ClockCount as GenericClockCount, CompiledExpr,
     ExecutableArgument, ExecutableAssertMessage, ExecutableClockCount, ExecutableLoopBound,
     ExecutableStatement, ExecutableTestbench, ExprBytecode, LoopBound as GenericLoopBound,
-    SemanticArgument, SemanticStatement, StateLocation, TestbenchProgram,
-    TestbenchStatement as GenericTestbenchStatement,
+    SemanticArgument, SemanticStatement, StateLocation, TestbenchProgram, TestbenchSelection,
+    TestbenchStatement as GenericTestbenchStatement, TestbenchTarget,
 };
 
 use crate::{SignalRef, backend::SimBackend};
@@ -81,6 +81,41 @@ fn bind_loop_bound<B: SimBackend>(
             width,
             signed,
         }),
+    }
+}
+
+fn bind_target<B: SimBackend>(
+    backend: &B,
+    target: TestbenchTarget<
+        celox_testbench::SemanticSignal<AbsoluteAddr>,
+        ExprBytecode<StateLocation<AbsoluteAddr>>,
+    >,
+) -> Option<TestbenchTarget<SignalRef, CompiledExpr>> {
+    Some(TestbenchTarget {
+        signal: backend.resolve_signal(&target.signal.address),
+        selection: match target.selection {
+            Some(selection) => Some(TestbenchSelection {
+                offset: bind_expr(backend, selection.offset)?,
+                width: selection.width,
+            }),
+            None => None,
+        },
+        width: target.width,
+    })
+}
+
+fn bind_optional_target<B: SimBackend>(
+    backend: &B,
+    target: Option<
+        TestbenchTarget<
+            celox_testbench::SemanticSignal<AbsoluteAddr>,
+            ExprBytecode<StateLocation<AbsoluteAddr>>,
+        >,
+    >,
+) -> Option<Option<TestbenchTarget<SignalRef, CompiledExpr>>> {
+    match target {
+        Some(target) => Some(Some(bind_target(backend, target)?)),
+        None => Some(None),
     }
 }
 
@@ -174,7 +209,7 @@ fn bind_statement<B: SimBackend>(
         }),
         GenericTestbenchStatement::Assign { dst, expr } => {
             Some(GenericTestbenchStatement::Assign {
-                dst: backend.resolve_signal(&dst.address),
+                dst: bind_target(backend, dst)?,
                 expr: bind_expr(backend, expr)?,
             })
         }
@@ -193,7 +228,7 @@ fn bind_statement<B: SimBackend>(
             handle,
             width,
             signed,
-            ret: ret.map(|signal| backend.resolve_signal(&signal.address)),
+            ret: bind_optional_target(backend, ret)?,
         }),
         GenericTestbenchStatement::RandomGetRange {
             handle,
@@ -208,12 +243,12 @@ fn bind_statement<B: SimBackend>(
             max: bind_expr(backend, max)?,
             width,
             signed,
-            ret: ret.map(|signal| backend.resolve_signal(&signal.address)),
+            ret: bind_optional_target(backend, ret)?,
         }),
         GenericTestbenchStatement::RandomGetSeed { handle, ret } => {
             Some(GenericTestbenchStatement::RandomGetSeed {
                 handle,
-                ret: ret.map(|signal| backend.resolve_signal(&signal.address)),
+                ret: bind_optional_target(backend, ret)?,
             })
         }
         GenericTestbenchStatement::Break => Some(GenericTestbenchStatement::Break),
