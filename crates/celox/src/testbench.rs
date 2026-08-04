@@ -1262,6 +1262,7 @@ fn exec_one_detailed<B: SimBackend>(
             deassert_value,
         } => match eval_clock_count(sim, duration) {
             Ok(duration) => {
+                let duration = duration.max(1);
                 sim_set_u64(sim, *reset_signal, (*assert_value).into());
                 let mut remaining = duration;
                 while remaining != 0 {

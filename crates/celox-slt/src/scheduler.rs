@@ -2345,18 +2345,21 @@ pub trait ClockFfLowering<Addr> {
     type Error;
 
     fn summaries(&self) -> &[FfAccessSummary<Addr>];
-    fn begin(&mut self, builder: &mut SIRBuilder<Addr>, direct: &[bool])
-    -> Result<(), Self::Error>;
+    fn begin(
+        &mut self,
+        builder: &mut SIRBuilder<Addr>,
+        direct_writes: &[Vec<VarAtomBase<Addr>>],
+    ) -> Result<(), Self::Error>;
     fn lower(
         &mut self,
         index: usize,
-        direct: bool,
+        direct_writes: &[VarAtomBase<Addr>],
         builder: &mut SIRBuilder<Addr>,
     ) -> Result<(), Self::Error>;
     fn finish(
         &mut self,
         builder: &mut SIRBuilder<Addr>,
-        direct: &[bool],
+        direct_writes: &[Vec<VarAtomBase<Addr>>],
     ) -> Result<(), Self::Error>;
 }
 
@@ -2930,6 +2933,113 @@ fn logic_path_materialization_tokens<Addr: Clone + Eq + Hash>(
     (raw_tokens, weights)
 }
 
+fn exact_native_storage_store(width: usize) -> bool {
+    width != 0 && width <= 64 && matches!(width.div_ceil(8), 1 | 2 | 4 | 8)
+}
+
+fn static_store_avoids_native_rmw<Addr: Copy + Eq + Hash>(
+    write: &VarAtomBase<Addr>,
+    var_widths: &HashMap<Addr, usize>,
+    unpacked_element_widths: &HashMap<Addr, usize>,
+) -> bool {
+    let Some(width) = write
+        .access
+        .msb
+        .checked_sub(write.access.lsb)
+        .and_then(|width| width.checked_add(1))
+    else {
+        return false;
+    };
+
+    if let Some(&element_width) = unpacked_element_widths.get(&write.id) {
+        // Unpacked layout selection happens after scheduling. Only a complete
+        // byte-aligned native-width element avoids RMW in both packed and
+        // independently strided layouts.
+        return element_width != 0
+            && width == element_width
+            && write.access.lsb.is_multiple_of(element_width)
+            && matches!(width, 8 | 16 | 32 | 64);
+    }
+
+    let whole_object = write.access.lsb == 0
+        && var_widths.get(&write.id).copied() == Some(width)
+        && exact_native_storage_store(width);
+    let aligned_native_range =
+        write.access.lsb.is_multiple_of(8) && matches!(width, 8 | 16 | 32 | 64);
+    whole_object || aligned_native_range
+}
+
+fn direct_ff_write_ranges<Addr: Copy + Eq + Hash>(
+    input: &[LogicPath<Addr>],
+    summaries: &[FfAccessSummary<Addr>],
+    plan: &FfCombSchedulePlan,
+    retained: &HashSet<(usize, usize)>,
+    ff_node_base: usize,
+    var_widths: &HashMap<Addr, usize>,
+    unpacked_element_widths: &HashMap<Addr, usize>,
+) -> Vec<Vec<VarAtomBase<Addr>>> {
+    summaries
+        .iter()
+        .enumerate()
+        .map(|(writer, summary)| {
+            summary
+                .writes
+                .iter()
+                .filter(|write| {
+                    // Direct publication is only a throughput optimization.
+                    // Dynamic destinations and static bitfields requiring a
+                    // physical read-modify-write stay staged.
+                    if summary.dynamic_writes.contains(&write.id)
+                        || !static_store_avoids_native_rmw(
+                            write,
+                            var_widths,
+                            unpacked_element_widths,
+                        )
+                    {
+                        return false;
+                    }
+
+                    // A read in the same always_ff action cannot be ordered
+                    // before only one of its own Stores. Keep just the
+                    // overlapping range staged so lowering reads pre-edge
+                    // state without penalizing disjoint writes.
+                    if summary
+                        .reads
+                        .iter()
+                        .any(|read| read.id == write.id && read.access.overlaps(&write.access))
+                    {
+                        return false;
+                    }
+
+                    let writer_node = ff_node_base + writer;
+                    let comb_readers_proven = plan.comb_before_direct_write[writer]
+                        .iter()
+                        .filter(|&&reader| {
+                            input[reader]
+                                .sources
+                                .iter()
+                                .chain(&input[reader].previous_sources)
+                                .any(|read| {
+                                    read.id == write.id && read.access.overlaps(&write.access)
+                                })
+                        })
+                        .all(|&reader| retained.contains(&(reader, writer_node)));
+                    let ff_readers_proven = plan.ff_before_direct_write[writer]
+                        .iter()
+                        .filter(|&&reader| {
+                            summaries[reader].reads.iter().any(|read| {
+                                read.id == write.id && read.access.overlaps(&write.access)
+                            })
+                        })
+                        .all(|&reader| retained.contains(&(ff_node_base + reader, writer_node)));
+                    comb_readers_proven && ff_readers_proven
+                })
+                .copied()
+                .collect()
+        })
+        .collect()
+}
+
 fn schedule_acyclic_path_region(
     paths: &[usize],
     dependencies: &[Vec<usize>],
@@ -3060,7 +3170,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     ignored_loops: &HashSet<(Addr, Addr)>,
     true_loops: &HashMap<(Addr, Addr), usize>,
     four_state: bool,
-    _var_widths: &HashMap<Addr, usize>,
+    var_widths: &HashMap<Addr, usize>,
     unpacked_element_widths: &HashMap<Addr, usize>,
     first_runtime_error_code: i64,
     mut ff: Option<&mut dyn ClockFfLowering<Addr, Error = E>>,
@@ -3119,7 +3229,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     let ff_count = ff
         .as_deref()
         .map_or(0, |lowering| lowering.summaries().len());
-    let mut direct_ff = vec![false; ff_count];
+    let mut direct_ff_writes_by_action = vec![Vec::new(); ff_count];
     if let Some(plan) = &ff_plan {
         adj.resize_with(n + ff_count, Vec::new);
         value_users.resize_with(n + ff_count, Vec::new);
@@ -3152,36 +3262,27 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
             .collect::<Vec<_>>();
         let retained =
             add_acyclic_ff_write_order_edges(&mut adj, write_order_edges.iter().flatten().copied());
-        for (writer, requirements) in write_order_edges.iter().enumerate() {
-            // An FF action with no old-state users is directly publishable.
-            // Otherwise every reader-before-writer anti-dependence must have
-            // survived cycle removal.  A partial set is not a proof.
-            direct_ff[writer] = requirements.iter().all(|edge| retained.contains(edge));
-        }
+        direct_ff_writes_by_action = direct_ff_write_ranges(
+            &input,
+            ff.as_deref()
+                .expect("an FF schedule plan requires an FF lowering callback")
+                .summaries(),
+            plan,
+            &retained,
+            n,
+            var_widths,
+            unpacked_element_widths,
+        );
         for edges in adj.iter_mut().chain(&mut value_users) {
             edges.sort_unstable();
             edges.dedup();
         }
     }
-    let direct_ff_writes =
-        ff.as_deref()
-            .map(|lowering| {
-                lowering
-                    .summaries()
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, _)| direct_ff.get(*index).copied().unwrap_or(false))
-                    .flat_map(|(_, summary)| {
-                        summary.writes.iter().filter_map(|write| {
-                            let reads_old_value = summary.reads.iter().any(|read| {
-                                read.id == write.id && read.access.overlaps(&write.access)
-                            });
-                            (!reads_old_value).then_some(*write)
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+    let direct_ff_writes = direct_ff_writes_by_action
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
 
     // 2. SCC extraction identifies the synchronization boundaries at which
     // the dataflow equations must be iterated rather than freely reordered.
@@ -3235,7 +3336,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     let mut builder = SIRBuilder::new();
     if let Some(ff_lowering) = ff.as_deref_mut() {
         ff_lowering
-            .begin(&mut builder, &direct_ff)
+            .begin(&mut builder, &direct_ff_writes_by_action)
             .map_err(ClockSortError::Lowering)?;
     }
     let lowerer = crate::SLTToSIRLowerer::new(four_state)
@@ -3335,12 +3436,13 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                     .ok_or(ClockSortError::Scheduler(
                         SchedulerError::InvalidDependencyGraph,
                     ))?
-                    .lower(index, direct_ff[index], &mut builder)
+                    .lower(index, &direct_ff_writes_by_action[index], &mut builder)
                     .map_err(ClockSortError::Lowering)?;
-                // FF state is staged in WORKING/SPARSE_WORKING and is invisible
-                // to the STABLE-only comb graph until the final publish. Values
-                // computed before the FF CFG dominate its merge block, so the
-                // ordinary comb lowering cache remains valid.
+                // Any directly published range is ordered after all of its
+                // old-state readers. Other FF state stays invisible in
+                // WORKING/SPARSE_WORKING until the final publish, so values
+                // computed before the FF CFG keep the ordinary lowering cache
+                // valid.
                 continue;
             }
         };
@@ -3700,7 +3802,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
 
     if let Some(ff_lowering) = ff {
         ff_lowering
-            .finish(&mut builder, &direct_ff)
+            .finish(&mut builder, &direct_ff_writes_by_action)
             .map_err(ClockSortError::Lowering)?;
     }
     builder.seal_block(SIRTerminator::Return);
@@ -3800,9 +3902,10 @@ mod tests {
         ExactFoldGroup, ExactIndexedLoadKey, FfAccessSummary, FoldGroupReadFacts,
         NormalizedIndexExpr, add_acyclic_ff_write_order_edges, best_weighted_fold_family,
         build_fold_group_schedule_index, build_logic_path_memory_ssa, collect_node_input_deps,
-        plan_ff_comb_schedule, prepare_atomic_fold_group_results, sort, stable_topological_sccs,
+        direct_ff_write_ranges, plan_ff_comb_schedule, prepare_atomic_fold_group_results, sort,
+        stable_topological_sccs,
     };
-    use crate::HashSet;
+    use crate::{HashMap, HashSet};
     use crate::{
         LogicPath, LogicPathTarget, SLTForFoldGroupState, SLTNode, SLTNodeArena, SLTToSIRLowerer,
     };
@@ -4145,6 +4248,93 @@ mod tests {
         let plan = plan_ff_comb_schedule(&[], &[summary]).unwrap();
 
         assert_eq!(plan.ff_before_direct_write, vec![Vec::<usize>::new()]);
+    }
+
+    #[test]
+    fn ff_direct_write_proof_is_kept_per_bit_range() {
+        let summaries = vec![
+            FfAccessSummary {
+                reads: vec![VarAtomBase::new(30, 0, 7)],
+                writes: vec![VarAtomBase::new(20, 0, 7), VarAtomBase::new(20, 8, 15)],
+                dynamic_writes: HashSet::default(),
+            },
+            FfAccessSummary {
+                reads: vec![VarAtomBase::new(20, 0, 7)],
+                writes: vec![VarAtomBase::new(30, 0, 7)],
+                dynamic_writes: HashSet::default(),
+            },
+        ];
+        let plan = plan_ff_comb_schedule(&[], &summaries).unwrap();
+        // The FF0 -> FF1 edge is retained, while the inverse edge which only
+        // protects FF0's low byte is dropped to break the cycle.
+        let retained = [(0, 1)].into_iter().collect();
+        let var_widths = [(20, 16), (30, 8)].into_iter().collect();
+
+        let direct = direct_ff_write_ranges(
+            &[],
+            &summaries,
+            &plan,
+            &retained,
+            0,
+            &var_widths,
+            &HashMap::default(),
+        );
+
+        assert_eq!(direct[0], vec![VarAtomBase::new(20, 8, 15)]);
+        assert_eq!(direct[1], vec![VarAtomBase::new(30, 0, 7)]);
+
+        let local_old_read = vec![FfAccessSummary {
+            reads: vec![VarAtomBase::new(20, 0, 7)],
+            writes: vec![VarAtomBase::new(20, 0, 7), VarAtomBase::new(20, 8, 15)],
+            dynamic_writes: HashSet::default(),
+        }];
+        let local_plan = plan_ff_comb_schedule(&[], &local_old_read).unwrap();
+        let local_direct = direct_ff_write_ranges(
+            &[],
+            &local_old_read,
+            &local_plan,
+            &HashSet::default(),
+            0,
+            &var_widths,
+            &HashMap::default(),
+        );
+
+        assert_eq!(local_direct[0], vec![VarAtomBase::new(20, 8, 15)]);
+    }
+
+    #[test]
+    fn ff_direct_write_rejects_ranges_requiring_rmw() {
+        let summary = FfAccessSummary {
+            reads: Vec::new(),
+            writes: vec![
+                VarAtomBase::new(20, 0, 3),
+                VarAtomBase::new(21, 0, 0),
+                VarAtomBase::new(22, 0, 7),
+                VarAtomBase::new(23, 6, 11),
+                VarAtomBase::new(24, 8, 15),
+            ],
+            dynamic_writes: [22].into_iter().collect(),
+        };
+        let plan = plan_ff_comb_schedule(&[], std::slice::from_ref(&summary)).unwrap();
+        let var_widths = [(20, 8), (21, 1), (22, 8), (23, 24), (24, 24)]
+            .into_iter()
+            .collect();
+        let unpacked_element_widths = [(23, 6), (24, 8)].into_iter().collect();
+
+        let direct = direct_ff_write_ranges(
+            &[],
+            &[summary],
+            &plan,
+            &HashSet::default(),
+            0,
+            &var_widths,
+            &unpacked_element_widths,
+        );
+
+        assert_eq!(
+            direct[0],
+            vec![VarAtomBase::new(21, 0, 0), VarAtomBase::new(24, 8, 15)]
+        );
     }
 
     #[test]

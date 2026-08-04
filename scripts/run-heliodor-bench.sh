@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CELOX_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 HELIODOR_REPO="${HELIODOR_REPO:-https://github.com/dalance/heliodor.git}"
-HELIODOR_REF="${HELIODOR_REF:-7ad830fc0f8506c934b61a853ce2eadfa5926b82}"
+HELIODOR_REF="${HELIODOR_REF:-94e9c5821c24a8941c3ddc3b76daddc7124a855a}"
 HELIODOR_DIR="${HELIODOR_DIR:-$CELOX_ROOT/target/heliodor/source}"
 HELIODOR_RESULTS_DIR="${HELIODOR_RESULTS_DIR:-$CELOX_ROOT/target/heliodor/results}"
 HELIODOR_TOOLS_DIR="${HELIODOR_TOOLS_DIR:-$CELOX_ROOT/target/heliodor/tools}"
@@ -26,10 +26,10 @@ HELIODOR_INSTALL_TOOLS="${HELIODOR_INSTALL_TOOLS:-1}"
 HELIODOR_VERYL_VERSION="${HELIODOR_VERYL_VERSION:-0.20.3}"
 VERYL_BIN="${VERYL_BIN:-}"
 
-readonly GATE_HELIODOR_REF=7ad830fc0f8506c934b61a853ce2eadfa5926b82
+readonly GATE_HELIODOR_REF=94e9c5821c24a8941c3ddc3b76daddc7124a855a
 readonly GATE_TEST=test_soc_linux_boot
 readonly GATE_TIMEOUT_SEC=420
-readonly GATE_EXPECTED_CYCLE=9ae070
+readonly GATE_EXPECTED_CYCLE=d83790
 readonly GATE_EXPECTED_X3=aa
 
 # Populated only while `gate` owns detached Heliodor worktrees. Keeping these
