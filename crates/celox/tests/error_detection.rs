@@ -665,6 +665,57 @@ fn test_testbench_helper_hierarchical_read_returns_error_without_panicking() {
 }
 
 #[test]
+fn test_selected_random_return_hierarchical_index_returns_error_without_panicking() {
+    let code = r#"
+        module Driver (
+            idx: output logic<2>,
+        ) {
+            always_comb {
+                idx = 2;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst dut: Driver (idx);
+            var idx: logic<2>;
+            var values: logic<8>[4];
+            var r: $tb::random::<u8>;
+
+            initial {
+                values[dut.idx] = r.get();
+                $finish();
+            }
+        }
+    "#;
+
+    let outcome = std::panic::catch_unwind(|| Simulator::builder(code, "t").build());
+    let result = outcome.expect("hierarchical random return destination must not panic");
+    match result.as_ref().map_err(|error| error.kind()) {
+        Err(SimulatorErrorKind::Analyzer(errors)) => assert!(
+            errors.iter().any(|error| matches!(
+                error,
+                veryl_analyzer::AnalyzerError::InvisibleIndentifier { .. }
+            )),
+            "expected Veryl InvisibleIndentifier, got {errors:?}"
+        ),
+        Err(SimulatorErrorKind::SIRParser(ParserError::Unsupported {
+            issue,
+            phase: LoweringPhase::SimulatorParser,
+            feature,
+            ..
+        })) => {
+            assert_eq!(*issue, 467);
+            assert_eq!(*feature, "hierarchical variable reference");
+        }
+        Err(kind) => {
+            panic!("expected InvisibleIdentifier or Unsupported(SimulatorParser), got {kind:?}")
+        }
+        Ok(_) => panic!("expected hierarchical random return destination to be rejected"),
+    }
+}
+
+#[test]
 fn test_reset_compile_time_expression_duration_is_accepted() {
     let code = r#"
         #[test(t)]

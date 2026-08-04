@@ -1419,13 +1419,7 @@ impl ExprCompiler<'_> {
     }
 
     fn try_const_usize(expr: &Expression) -> Option<usize> {
-        match expr {
-            Expression::Term(f) => match f.as_ref() {
-                Factor::Value(c) => c.get_value().ok().map(|v| v.payload_u64() as usize),
-                _ => None,
-            },
-            _ => None,
-        }
+        usize::try_from(try_eval_const(expr)?).ok()
     }
 
     fn resolve_var(&self, var_id: &VarId) -> Option<SemanticSignal<StateAddr>> {
@@ -2067,15 +2061,7 @@ fn validate_testbench_statements(
         match statement {
             Statement::Assign(statement) => {
                 for destination in &statement.dst {
-                    for expression in &destination.index.0 {
-                        validate_testbench_expression(expression, source, active_functions)?;
-                    }
-                    for expression in &destination.select.0 {
-                        validate_testbench_expression(expression, source, active_functions)?;
-                    }
-                    if let Some((_, expression)) = &destination.select.1 {
-                        validate_testbench_expression(expression, source, active_functions)?;
-                    }
+                    validate_testbench_destination(destination, source, active_functions)?;
                 }
                 validate_testbench_expression(&statement.expr, source, active_functions)?
             }
@@ -2131,6 +2117,9 @@ fn validate_testbench_statements(
             }
             Statement::TbMethodCall(call) => {
                 // Selected return destinations are lowered together with ordinary assignments.
+                if let Some(destination) = call.ret.as_deref() {
+                    validate_testbench_destination(destination, source, active_functions)?;
+                }
                 match &call.method {
                     TbMethod::Component { .. } => {
                         return Err(ParserError::unsupported(
@@ -2175,6 +2164,23 @@ fn validate_testbench_statements(
             }
             Statement::Break | Statement::Unsupported(_) | Statement::Null => {}
         }
+    }
+    Ok(())
+}
+
+fn validate_testbench_destination(
+    destination: &veryl_analyzer::ir::AssignDestination,
+    source: &VerylTestbenchSource,
+    active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
+) -> Result<(), ParserError> {
+    for expression in &destination.index.0 {
+        validate_testbench_expression(expression, source, active_functions)?;
+    }
+    for expression in &destination.select.0 {
+        validate_testbench_expression(expression, source, active_functions)?;
+    }
+    if let Some((_, expression)) = &destination.select.1 {
+        validate_testbench_expression(expression, source, active_functions)?;
     }
     Ok(())
 }

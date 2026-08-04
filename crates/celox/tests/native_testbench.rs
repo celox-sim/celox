@@ -322,12 +322,17 @@ fn test_packed_prefix_and_low_bound_testbench_destinations() {
     let code = r#"
         #[test(t)]
         module t {
+            const W: u32 = 4;
             var word: logic<8>;
             var matrix: logic<4, 4>;
             initial {
                 word = 8'hA0;
-                word[3:0] = 4'hF;
+                word[W - 1:0] = 4'hF;
                 $assert(word == 8'hAF);
+
+                word = 8'hA0;
+                word[0 +: W] = 4'h5;
+                $assert(word == 8'hA5);
 
                 matrix = 16'h0000;
                 matrix[2][1] = 1'b1;
