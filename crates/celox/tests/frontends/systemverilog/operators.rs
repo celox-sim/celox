@@ -1528,4 +1528,68 @@ sv_backends! {
 
     assert_eq!(sim.get(sim.signal("y")), u64::MAX.into());
     }
+
+    fn converts_function_arguments_using_actual_signedness(sim) {
+        @setup {
+    let sv = r#"
+        module Top(
+            input logic [7:0] unsigned_value,
+            input logic signed [7:0] signed_value,
+            output logic [15:0] unsigned_result,
+            output logic [15:0] signed_result,
+            output logic [15:0] formal_signed_shift
+        );
+            function automatic logic signed [15:0] pass_signed(
+                input logic signed [15:0] value
+            );
+                return value;
+            endfunction
+            function automatic logic signed [15:0] shift_signed(
+                input logic signed [15:0] value
+            );
+                return value >>> 8;
+            endfunction
+
+            assign unsigned_result = pass_signed(unsigned_value);
+            assign signed_result = pass_signed(signed_value);
+            assign formal_signed_shift = shift_signed(unsigned_value);
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(
+            vec![(sv, Path::new("function_argument_signedness.sv"))],
+            "Top",
+        );
+
+    let unsigned_value = sim.signal("unsigned_value");
+    let signed_value = sim.signal("signed_value");
+    sim.modify(|io| {
+        io.set(unsigned_value, 0x80u8);
+        io.set(signed_value, 0x80u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("unsigned_result")), 0x0080u16.into());
+    assert_eq!(sim.get(sim.signal("signed_result")), 0xff80u16.into());
+    assert_eq!(sim.get(sim.signal("formal_signed_shift")), 0u16.into());
+    }
+
+    fn negates_wide_systemverilog_values(sim) {
+        @setup {
+    let sv = r#"
+        module Top(input logic [127:0] a, output logic [127:0] y);
+            assign y = -a;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_sv_sources(vec![(sv, Path::new("wide_negate.sv"))], "Top");
+
+    let modulus = BigUint::from(1u8) << 128usize;
+    let value = BigUint::from(1u8) << 64usize;
+    let a = sim.signal("a");
+    sim.set_wide(a, value.clone());
+    assert_eq!(sim.get(sim.signal("y")), &modulus - &value);
+
+    sim.set_wide(a, BigUint::from(0u8));
+    assert_eq!(sim.get(sim.signal("y")), BigUint::from(0u8));
+    }
 }

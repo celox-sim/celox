@@ -113,4 +113,44 @@ sv_backends! {
 
     assert_eq!(sim.get(y), 0x99u8.into());
     }
+
+    fn zero_extends_signed_veryl_selections_into_systemverilog_inputs(sim) {
+        @setup {
+    let veryl = r#"
+        module Top (
+            a: input signed logic<8>,
+            part_y: output logic<16>,
+            bit_y: output logic<16>,
+        ) {
+            inst child: $sv::SelectionInputs (
+                part_value: a[7:0],
+                bit_value: a[7],
+                part_y,
+                bit_y,
+            );
+        }
+    "#;
+    let sv = r#"
+        module SelectionInputs(
+            input logic [15:0] part_value,
+            input logic [15:0] bit_value,
+            output logic [15:0] part_y,
+            output logic [15:0] bit_y
+        );
+            assign part_y = part_value;
+            assign bit_y = bit_value;
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("signed_selection.veryl"))],
+            vec![(sv, Path::new("selection_inputs.sv"))],
+            "Top",
+        );
+
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 0x80u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("part_y")), 0x0080u16.into());
+    assert_eq!(sim.get(sim.signal("bit_y")), 1u16.into());
+    }
 }

@@ -3240,10 +3240,34 @@ fn compile_unary(
                 instrs.push(Instruction::LocalSet(d.value_idx));
             } else {
                 // Wide negate: two's complement = NOT + 1
-                // TODO: proper wide negate
+                let carry = locals.alloc(1);
+                instrs.push(Instruction::I64Const(1));
+                instrs.push(Instruction::LocalSet(carry));
                 for c in 0..d.num_chunks {
-                    instrs.push(Instruction::I64Const(0));
+                    emit_wide_get_chunk(instrs, &s, c);
+                    instrs.push(Instruction::I64Const(-1));
+                    instrs.push(Instruction::I64Xor);
+                    instrs.push(Instruction::LocalGet(carry));
+                    instrs.push(Instruction::I64Add);
                     instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
+
+                    // Adding the one-bit carry to the complemented chunk
+                    // overflows precisely when the result wraps to zero.
+                    instrs.push(Instruction::LocalGet(carry));
+                    instrs.push(Instruction::LocalGet(d.value_idx + c as u32));
+                    instrs.push(Instruction::I64Eqz);
+                    instrs.push(Instruction::I64ExtendI32U);
+                    instrs.push(Instruction::I64And);
+                    instrs.push(Instruction::LocalSet(carry));
+                }
+                let top_bits = d_width % 64;
+                if top_bits > 0 {
+                    let top = d.num_chunks - 1;
+                    let mask = (1u64 << top_bits) - 1;
+                    instrs.push(Instruction::LocalGet(d.value_idx + top as u32));
+                    instrs.push(Instruction::I64Const(mask as i64));
+                    instrs.push(Instruction::I64And);
+                    instrs.push(Instruction::LocalSet(d.value_idx + top as u32));
                 }
             }
         }

@@ -1656,12 +1656,15 @@ impl<'a> ModuleParser<'a> {
                 &parent_dst.select,
             )?;
             let parent_width = parent_access.msb - parent_access.lsb + 1;
+            let parent_expr_signed = parent_var.r#type.signed
+                && parent_dst.select.is_empty()
+                && parent_dst.select.1.is_none();
 
             match child_var.kind {
                 veryl_analyzer::ir::VarKind::Input => {
                     let parent_node = glue_arena.alloc(SLTNode::Input {
                         variable: GlueAddr::Parent(parent_dst.id),
-                        signed: parent_var.r#type.signed,
+                        signed: parent_expr_signed,
                         index: Vec::new(),
                         access: parent_access,
                     })?;
@@ -1669,7 +1672,7 @@ impl<'a> ModuleParser<'a> {
                         &mut glue_arena,
                         parent_node,
                         Some(child_width),
-                        parent_var.r#type.signed,
+                        parent_expr_signed,
                     )?;
                     if child_var.r#type.is_2state() {
                         expr = glue_arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;

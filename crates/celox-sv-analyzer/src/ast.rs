@@ -102,6 +102,20 @@ impl Module {
         reject_unsupported_multidimensional_packed_bounds(&ports, &signals, &const_env)?;
         let parameter_values = parameter_value_env(&parameters, &const_env);
         let packed_dimensions = packed_dimensions_from_ports_and_signals(&ports, &signals);
+        let mut expression_signedness = ports
+            .iter()
+            .map(|port| (port.name().to_string(), port.r#type().is_signed()))
+            .chain(
+                signals
+                    .iter()
+                    .map(|signal| (signal.name().to_string(), signal.r#type().is_signed())),
+            )
+            .collect::<HashMap<_, _>>();
+        expression_signedness.extend(
+            parameter_types_from_const_env(&const_env)
+                .into_iter()
+                .map(|(name, r#type)| (name, r#type.signed)),
+        );
         let functions =
             functions_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions)?;
         let comb_processes = comb_processes_from_module_node(
@@ -111,7 +125,7 @@ impl Module {
             &packed_dimensions,
         )?
         .into_iter()
-        .map(|process| expand_process_calls(process, &functions))
+        .map(|process| expand_process_calls(process, &functions, &expression_signedness))
         .map(|process| {
             substitute_process_constants_with_parameter_literals(
                 process,
@@ -128,7 +142,15 @@ impl Module {
             &packed_dimensions,
         )?
         .into_iter()
-        .map(|process| expand_ff_process_calls(process, &functions, &const_env, &parameter_values))
+        .map(|process| {
+            expand_ff_process_calls(
+                process,
+                &functions,
+                &expression_signedness,
+                &const_env,
+                &parameter_values,
+            )
+        })
         .collect::<Vec<_>>();
         if let Some(signal) = signals.iter().find(|signal| {
             signal.is_net()
@@ -4422,6 +4444,7 @@ fn substitute_expr_constants_with_parameter_literals(
 fn expand_process_calls(
     process: CombProcess,
     functions: &HashMap<String, Function>,
+    expression_signedness: &HashMap<String, bool>,
 ) -> CombProcess {
     CombProcess::new(
         process.kind,
@@ -4429,7 +4452,9 @@ fn expand_process_calls(
         process
             .assignments
             .into_iter()
-            .map(|assignment| expand_assignment_calls(assignment, functions, true))
+            .map(|assignment| {
+                expand_assignment_calls(assignment, functions, expression_signedness, true)
+            })
             .collect(),
     )
 }
@@ -4437,6 +4462,7 @@ fn expand_process_calls(
 fn expand_ff_process_calls(
     process: FfProcess,
     functions: &HashMap<String, Function>,
+    expression_signedness: &HashMap<String, bool>,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> FfProcess {
@@ -4448,13 +4474,18 @@ fn expand_ff_process_calls(
             .map(|assignment| {
                 let condition = assignment.condition.map(|condition| {
                     substitute_expr_constants_with_parameter_literals(
-                        expand_expr_calls(condition, functions, 0, true),
+                        expand_expr_calls(condition, functions, expression_signedness, 0, true),
                         const_env,
                         parameter_literals,
                     )
                 });
                 let assignment = substitute_assignment_constants_with_parameter_literals(
-                    expand_assignment_calls(assignment.assignment, functions, true),
+                    expand_assignment_calls(
+                        assignment.assignment,
+                        functions,
+                        expression_signedness,
+                        true,
+                    ),
                     const_env,
                     parameter_literals,
                 );
@@ -4467,17 +4498,85 @@ fn expand_ff_process_calls(
 fn expand_assignment_calls(
     assignment: Assignment,
     functions: &HashMap<String, Function>,
+    expression_signedness: &HashMap<String, bool>,
     apply_return_type: bool,
 ) -> Assignment {
     Assignment::new(
         assignment.lhs,
-        expand_expr_calls(assignment.rhs, functions, 0, apply_return_type),
+        expand_expr_calls(
+            assignment.rhs,
+            functions,
+            expression_signedness,
+            0,
+            apply_return_type,
+        ),
     )
+}
+
+fn expr_signedness(
+    expr: &Expr,
+    identifiers: &HashMap<String, bool>,
+    functions: &HashMap<String, Function>,
+) -> Option<bool> {
+    match expr {
+        Expr::Ident(name) => identifiers.get(name).copied(),
+        Expr::Literal(literal) => {
+            typecheck::parse_integral_literal(literal).map(|literal| literal.signed)
+        }
+        Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } => Some(false),
+        Expr::Resize { signed, .. } => Some(*signed),
+        Expr::Unary { op, expr } => {
+            if matches!(
+                op,
+                UnaryOp::LogicNot | UnaryOp::RedAnd | UnaryOp::RedOr | UnaryOp::RedXor
+            ) {
+                Some(false)
+            } else {
+                expr_signedness(expr, identifiers, functions)
+            }
+        }
+        Expr::Binary { left, op, right } => {
+            if matches!(
+                op,
+                BinaryOp::LogicAnd
+                    | BinaryOp::LogicOr
+                    | BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::EqCase
+                    | BinaryOp::NeCase
+                    | BinaryOp::EqWildcard
+                    | BinaryOp::NeWildcard
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+            ) {
+                Some(false)
+            } else if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) {
+                expr_signedness(left, identifiers, functions)
+            } else {
+                Some(
+                    expr_signedness(left, identifiers, functions)?
+                        && expr_signedness(right, identifiers, functions)?,
+                )
+            }
+        }
+        Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } => Some(
+            expr_signedness(then_expr, identifiers, functions)?
+                && expr_signedness(else_expr, identifiers, functions)?,
+        ),
+        Expr::Call { name, .. } => functions.get(name).map(|function| function.return_signed),
+    }
 }
 
 fn expand_expr_calls(
     expr: Expr,
     functions: &HashMap<String, Function>,
+    expression_signedness: &HashMap<String, bool>,
     depth: usize,
     apply_return_type: bool,
 ) -> Expr {
@@ -4491,6 +4590,7 @@ fn expand_expr_calls(
             expr: Box::new(expand_expr_calls(
                 *expr,
                 functions,
+                expression_signedness,
                 depth,
                 apply_return_type,
             )),
@@ -4500,14 +4600,30 @@ fn expand_expr_calls(
         Expr::Concat(parts) => Expr::Concat(
             parts
                 .into_iter()
-                .map(|part| expand_expr_calls(part, functions, depth, apply_return_type))
+                .map(|part| {
+                    expand_expr_calls(
+                        part,
+                        functions,
+                        expression_signedness,
+                        depth,
+                        apply_return_type,
+                    )
+                })
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
             count,
             parts: parts
                 .into_iter()
-                .map(|part| expand_expr_calls(part, functions, depth, apply_return_type))
+                .map(|part| {
+                    expand_expr_calls(
+                        part,
+                        functions,
+                        expression_signedness,
+                        depth,
+                        apply_return_type,
+                    )
+                })
                 .collect(),
         },
         Expr::Resize {
@@ -4518,6 +4634,7 @@ fn expand_expr_calls(
             expr: Box::new(expand_expr_calls(
                 *expr,
                 functions,
+                expression_signedness,
                 depth,
                 apply_return_type,
             )),
@@ -4529,6 +4646,7 @@ fn expand_expr_calls(
             expr: Box::new(expand_expr_calls(
                 *expr,
                 functions,
+                expression_signedness,
                 depth,
                 apply_return_type,
             )),
@@ -4537,6 +4655,7 @@ fn expand_expr_calls(
             left: Box::new(expand_expr_calls(
                 *left,
                 functions,
+                expression_signedness,
                 depth,
                 apply_return_type,
             )),
@@ -4544,6 +4663,7 @@ fn expand_expr_calls(
             right: Box::new(expand_expr_calls(
                 *right,
                 functions,
+                expression_signedness,
                 depth,
                 apply_return_type,
             )),
@@ -4556,18 +4676,21 @@ fn expand_expr_calls(
             condition: Box::new(expand_expr_calls(
                 *condition,
                 functions,
+                expression_signedness,
                 depth,
                 apply_return_type,
             )),
             then_expr: Box::new(expand_expr_calls(
                 *then_expr,
                 functions,
+                expression_signedness,
                 depth,
                 apply_return_type,
             )),
             else_expr: Box::new(expand_expr_calls(
                 *else_expr,
                 functions,
+                expression_signedness,
                 depth,
                 apply_return_type,
             )),
@@ -4575,7 +4698,15 @@ fn expand_expr_calls(
         Expr::Call { name, args } => {
             let args = args
                 .into_iter()
-                .map(|arg| expand_expr_calls(arg, functions, depth, apply_return_type))
+                .map(|arg| {
+                    expand_expr_calls(
+                        arg,
+                        functions,
+                        expression_signedness,
+                        depth,
+                        apply_return_type,
+                    )
+                })
                 .collect::<Vec<_>>();
             let Some(function) = functions.get(&name) else {
                 return Expr::Call { name, args };
@@ -4589,8 +4720,14 @@ fn expand_expr_calls(
                 .zip(args)
                 .map(|(param, arg)| {
                     let mut arg = if apply_return_type && let Some(width) = param.width {
-                        Expr::Resize {
+                        let assigned = Expr::Resize {
+                            signed: expr_signedness(&arg, expression_signedness, functions)
+                                .unwrap_or(false),
                             expr: Box::new(arg),
+                            width,
+                        };
+                        Expr::Resize {
+                            expr: Box::new(assigned),
                             width,
                             signed: param.signed,
                         }
@@ -4607,7 +4744,13 @@ fn expand_expr_calls(
                 })
                 .collect::<HashMap<_, _>>();
             let body = substitute_expr_idents(function.body.clone(), &env);
-            let expanded = expand_expr_calls(body, functions, depth + 1, apply_return_type);
+            let expanded = expand_expr_calls(
+                body,
+                functions,
+                expression_signedness,
+                depth + 1,
+                apply_return_type,
+            );
             let mut expanded = if apply_return_type && let Some(width) = function.return_width {
                 Expr::Resize {
                     expr: Box::new(expanded),

@@ -19,10 +19,12 @@ pub(crate) fn project_observability(program: &mut RuntimeProgram, source: &Veryl
 pub(crate) fn compile_semantic_testbench(
     program: &RuntimeProgram,
     source: &VerylTestbenchSource,
+    random_seed: Option<u64>,
 ) -> Result<Option<TestbenchProgram<AbsoluteAddr>>, celox_frontend_veryl::ParserError> {
     celox_frontend_veryl::compile_semantic_testbench(
         &program.frontend,
         source,
         program.runtime_schema.runtime_event_sites.len(),
+        random_seed,
     )
 }

@@ -15,6 +15,7 @@ host-runtime = [
     "dep:celox-backend-x86",
     "dep:celox-macros",
     "dep:wasmtime",
+    "rand/thread_rng",
     "celox-sir-opt/timing",
 ]
 systemverilog = ["dep:celox-sv-analyzer"]
@@ -42,6 +43,8 @@ thiserror             = { workspace = true }
 clap                  = { workspace = true }
 miette                = { workspace = true }
 num-bigint            = "0.5"
+rand                  = { workspace = true }
+rand_pcg              = { workspace = true }
 serde                 = { workspace = true }
 serde_json            = { workspace = true }
 num-traits            = { workspace = true }

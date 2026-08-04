@@ -1236,7 +1236,13 @@ impl<'a> SemanticTestbenchBuilder<'a> {
     fn build_event_map(&mut self, stmts: &[Statement]) {
         let mut clock_insts: Vec<StrId> = Vec::new();
         let mut reset_insts: Vec<StrId> = Vec::new();
-        Self::scan_tb_methods(stmts, &mut clock_insts, &mut reset_insts);
+        let mut active_functions = FxHashSet::default();
+        self.scan_tb_methods(
+            stmts,
+            &mut clock_insts,
+            &mut reset_insts,
+            &mut active_functions,
+        );
         for inst in clock_insts.iter().chain(reset_insts.iter()) {
             if let Some((addr, info)) = self.lookup.root_named_variable(*inst) {
                 self.event_map.insert(*inst, addr);
@@ -1251,7 +1257,13 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         }
     }
 
-    fn scan_tb_methods(stmts: &[Statement], clks: &mut Vec<StrId>, rsts: &mut Vec<StrId>) {
+    fn scan_tb_methods(
+        &self,
+        stmts: &[Statement],
+        clks: &mut Vec<StrId>,
+        rsts: &mut Vec<StrId>,
+        active_functions: &mut FxHashSet<VarId>,
+    ) {
         for stmt in stmts {
             match stmt {
                 Statement::TbMethodCall(tb) => match &tb.method {
@@ -1279,10 +1291,18 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     | TbMethod::RandomGetSeed => {}
                 },
                 Statement::If(s) => {
-                    Self::scan_tb_methods(&s.true_side, clks, rsts);
-                    Self::scan_tb_methods(&s.false_side, clks, rsts);
+                    self.scan_tb_methods(&s.true_side, clks, rsts, active_functions);
+                    self.scan_tb_methods(&s.false_side, clks, rsts, active_functions);
                 }
-                Statement::For(s) => Self::scan_tb_methods(&s.body, clks, rsts),
+                Statement::For(s) => {
+                    self.scan_tb_methods(&s.body, clks, rsts, active_functions);
+                }
+                Statement::FunctionCall(call) if active_functions.insert(call.id) => {
+                    if let Some(body) = function_body(&self.testbench_source.functions, call) {
+                        self.scan_tb_methods(&body.statements, clks, rsts, active_functions);
+                    }
+                    active_functions.remove(&call.id);
+                }
                 _ => {}
             }
         }
@@ -1512,29 +1532,73 @@ impl<'a> SemanticTestbenchBuilder<'a> {
             TbMethod::ResetAssert { clock, duration } => {
                 let reset_signal = self.signal_map.get(&tb.inst).copied()?;
                 let clock_event = self.event_map.get(clock).copied()?;
-                let dur = duration
-                    .as_ref()
-                    .and_then(try_eval_const)
-                    .unwrap_or(self.default_reset_duration);
+                let duration = match duration {
+                    Some(expr) => match try_eval_const(expr) {
+                        Some(duration) => GenericClockCount::Static(duration),
+                        None => GenericClockCount::Dynamic(ec.compile(expr)),
+                    },
+                    None => GenericClockCount::Static(self.default_reset_duration),
+                };
                 // Determine reset polarity from the variable's DomainKind
                 let (assert_value, deassert_value) = self.resolve_reset_polarity(&tb.inst);
                 Some(GenericTestbenchStatement::ResetAssert {
                     reset_signal,
                     clock_event,
-                    duration: dur,
+                    duration,
                     assert_value,
                     deassert_value,
+                })
+            }
+            TbMethod::RandomSeed { value } => Some(GenericTestbenchStatement::RandomSeed {
+                handle: resource_table::get_str_value(tb.inst).unwrap_or_default(),
+                value: ec.compile(value),
+            }),
+            TbMethod::RandomGet { width, signed } => {
+                let ret = match tb.ret.as_deref() {
+                    Some(dst) => Some(ec.resolve_var(&dst.id)?),
+                    None => None,
+                };
+                Some(GenericTestbenchStatement::RandomGet {
+                    handle: resource_table::get_str_value(tb.inst).unwrap_or_default(),
+                    width: *width,
+                    signed: *signed,
+                    ret,
+                })
+            }
+            TbMethod::RandomGetRange {
+                min,
+                max,
+                width,
+                signed,
+            } => {
+                let ret = match tb.ret.as_deref() {
+                    Some(dst) => Some(ec.resolve_var(&dst.id)?),
+                    None => None,
+                };
+                Some(GenericTestbenchStatement::RandomGetRange {
+                    handle: resource_table::get_str_value(tb.inst).unwrap_or_default(),
+                    min: ec.compile(min),
+                    max: ec.compile(max),
+                    width: *width,
+                    signed: *signed,
+                    ret,
+                })
+            }
+            TbMethod::RandomGetSeed => {
+                let ret = match tb.ret.as_deref() {
+                    Some(dst) => Some(ec.resolve_var(&dst.id)?),
+                    None => None,
+                };
+                Some(GenericTestbenchStatement::RandomGetSeed {
+                    handle: resource_table::get_str_value(tb.inst).unwrap_or_default(),
+                    ret,
                 })
             }
             TbMethod::FileOpen { .. }
             | TbMethod::FileWrite { .. }
             | TbMethod::FileClose
             | TbMethod::FileFlush
-            | TbMethod::Component { .. }
-            | TbMethod::RandomSeed { .. }
-            | TbMethod::RandomGet { .. }
-            | TbMethod::RandomGetRange { .. }
-            | TbMethod::RandomGetSeed => None,
+            | TbMethod::Component { .. } => None,
         }
     }
 
@@ -1759,6 +1823,24 @@ fn validate_testbench_system_function(
     }
 }
 
+fn validate_testbench_destination(
+    destination: &veryl_analyzer::ir::AssignDestination,
+) -> Result<(), ParserError> {
+    if !destination.index.0.is_empty()
+        || !destination.select.0.is_empty()
+        || destination.select.1.is_some()
+    {
+        return Err(ParserError::unsupported(
+            478,
+            LoweringPhase::SimulatorParser,
+            "selected native testbench assignment",
+            "selected destinations are not represented by the testbench AIR",
+            Some(&destination.token),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_testbench_statements(
     statements: &[Statement],
     source: &VerylTestbenchSource,
@@ -1767,6 +1849,18 @@ fn validate_testbench_statements(
     for statement in statements {
         match statement {
             Statement::Assign(statement) => {
+                for destination in &statement.dst {
+                    validate_testbench_destination(destination)?;
+                    for expression in &destination.index.0 {
+                        validate_testbench_expression(expression, source, active_functions)?;
+                    }
+                    for expression in &destination.select.0 {
+                        validate_testbench_expression(expression, source, active_functions)?;
+                    }
+                    if let Some((_, expression)) = &destination.select.1 {
+                        validate_testbench_expression(expression, source, active_functions)?;
+                    }
+                }
                 validate_testbench_expression(&statement.expr, source, active_functions)?
             }
             Statement::If(statement) => {
@@ -1819,68 +1913,52 @@ fn validate_testbench_statements(
             Statement::FunctionCall(call) => {
                 validate_testbench_function_call(call, source, active_functions)?;
             }
-            Statement::TbMethodCall(call) => match &call.method {
-                TbMethod::Component { .. } => {
-                    return Err(ParserError::unsupported(
-                        468,
-                        LoweringPhase::SimulatorParser,
-                        "testbench component method",
-                        "component runtime integration is not implemented",
-                        None,
-                    ));
+            Statement::TbMethodCall(call) => {
+                if let Some(destination) = call.ret.as_deref() {
+                    validate_testbench_destination(destination)?;
                 }
-                TbMethod::RandomSeed { value } => {
-                    return Err(ParserError::unsupported(
-                        469,
-                        LoweringPhase::SimulatorParser,
-                        "testbench random method",
-                        "random runtime integration is not implemented",
-                        Some(&value.comptime().token),
-                    ));
-                }
-                TbMethod::RandomGet { .. }
-                | TbMethod::RandomGetRange { .. }
-                | TbMethod::RandomGetSeed => {
-                    return Err(ParserError::unsupported(
-                        469,
-                        LoweringPhase::SimulatorParser,
-                        "testbench random method",
-                        "random runtime integration is not implemented",
-                        None,
-                    ));
-                }
-                TbMethod::ClockNext { count, period } => {
-                    if let Some(expression) = count {
-                        validate_testbench_expression(expression, source, active_functions)?;
+                match &call.method {
+                    TbMethod::Component { .. } => {
+                        return Err(ParserError::unsupported(
+                            468,
+                            LoweringPhase::SimulatorParser,
+                            "testbench component method",
+                            "component runtime integration is not implemented",
+                            None,
+                        ));
                     }
-                    if let Some(expression) = period {
-                        validate_testbench_expression(expression, source, active_functions)?;
+                    TbMethod::RandomSeed { value } => {
+                        validate_testbench_expression(value, source, active_functions)?;
                     }
-                }
-                TbMethod::ResetAssert { duration, .. } => {
-                    if let Some(expression) = duration {
-                        validate_testbench_expression(expression, source, active_functions)?;
-                        if try_eval_const(expression).is_none() {
-                            return Err(ParserError::unsupported(
-                                473,
-                                LoweringPhase::SimulatorParser,
-                                "dynamic reset duration",
-                                "runtime reset durations are not implemented",
-                                Some(&expression.comptime().token),
-                            ));
+                    TbMethod::RandomGetRange { min, max, .. } => {
+                        validate_testbench_expression(min, source, active_functions)?;
+                        validate_testbench_expression(max, source, active_functions)?;
+                    }
+                    TbMethod::RandomGet { .. } | TbMethod::RandomGetSeed => {}
+                    TbMethod::ClockNext { count, period } => {
+                        if let Some(expression) = count {
+                            validate_testbench_expression(expression, source, active_functions)?;
+                        }
+                        if let Some(expression) = period {
+                            validate_testbench_expression(expression, source, active_functions)?;
                         }
                     }
-                }
-                TbMethod::FileOpen { name, .. } => {
-                    validate_testbench_expression(&name.0, source, active_functions)?
-                }
-                TbMethod::FileWrite { args } => {
-                    for argument in args {
-                        validate_testbench_expression(&argument.0, source, active_functions)?;
+                    TbMethod::ResetAssert { duration, .. } => {
+                        if let Some(expression) = duration {
+                            validate_testbench_expression(expression, source, active_functions)?;
+                        }
                     }
+                    TbMethod::FileOpen { name, .. } => {
+                        validate_testbench_expression(&name.0, source, active_functions)?
+                    }
+                    TbMethod::FileWrite { args } => {
+                        for argument in args {
+                            validate_testbench_expression(&argument.0, source, active_functions)?;
+                        }
+                    }
+                    TbMethod::FileClose | TbMethod::FileFlush => {}
                 }
-                TbMethod::FileClose | TbMethod::FileFlush => {}
-            },
+            }
             Statement::Break | Statement::Unsupported(_) | Statement::Null => {}
         }
     }
@@ -1891,6 +1969,7 @@ pub fn compile_semantic_testbench(
     lookup: &VerylFrontendLookup,
     source: &VerylTestbenchSource,
     runtime_event_site_count: usize,
+    random_seed: Option<u64>,
 ) -> Result<Option<TestbenchProgram<StateAddr>>, ParserError> {
     let Some(initial_stmts) = source.initial_statements.as_ref() else {
         return Ok(None);
@@ -1898,5 +1977,7 @@ pub fn compile_semantic_testbench(
     validate_testbench_statements(initial_stmts, source, &mut FxHashSet::default())?;
     let mut builder = SemanticTestbenchBuilder::new(lookup, source, runtime_event_site_count);
     builder.build_event_map(initial_stmts);
-    Ok(Some(TestbenchProgram::new(builder.convert(initial_stmts))))
+    Ok(Some(
+        TestbenchProgram::new(builder.convert(initial_stmts)).with_random_seed_option(random_seed),
+    ))
 }
