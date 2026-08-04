@@ -538,6 +538,21 @@ impl<'a> FfParser<'a> {
         comptime
     }
 
+    fn function_state_merge_comptime(&self, id: VarId) -> Comptime {
+        let mut comptime = self.function_state_comptime(id);
+        // Token::default() allocates a fresh token id, so equality with a
+        // default TokenRange cannot identify synthetic expressions reliably.
+        // Source lines cannot use this value; keep it as an internal marker
+        // for procedural state merges that may be lowered into guarded writes.
+        comptime.token.beg.line = u32::MAX;
+        comptime.token.end.line = u32::MAX;
+        comptime
+    }
+
+    fn is_function_state_merge(comptime: &Comptime) -> bool {
+        comptime.token.beg.line == u32::MAX && comptime.token.end.line == u32::MAX
+    }
+
     fn state_value_expr(&self, id: VarId, state: &HashMap<VarId, Expression>) -> Expression {
         state.get(&id).cloned().unwrap_or_else(|| {
             Expression::Term(Box::new(Factor::Variable(
@@ -650,7 +665,7 @@ impl<'a> FfParser<'a> {
                         )),
                         Box::new(then_expr),
                         Box::new(else_expr),
-                        Box::new(self.function_state_comptime(id)),
+                        Box::new(self.function_state_merge_comptime(id)),
                     ),
                 )
             })
@@ -1499,7 +1514,9 @@ impl<'a> FfParser<'a> {
         {
             return;
         }
-        if let Expression::Ternary(condition, then_expr, else_expr, _) = expr {
+        if let Expression::Ternary(condition, then_expr, else_expr, comptime) = expr
+            && Self::is_function_state_merge(comptime)
+        {
             Self::collect_guarded_nonlocal_writes(
                 var_id,
                 then_expr,
@@ -1893,6 +1910,96 @@ impl<'a> FfParser<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn emit_dynamic_nonlocal_statement_call<A>(
+        &mut self,
+        call: &veryl_analyzer::ir::FunctionCall,
+        state: &mut HashMap<VarId, Expression>,
+        active: &FunctionPathCondition,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        if matches!(active, FunctionPathCondition::Never) {
+            return Ok(());
+        }
+
+        let mut call = call.clone();
+        let guard_state = state.clone();
+        if state
+            .iter()
+            .any(|(id, _)| self.module.variables[id].affiliation != Affiliation::Function)
+        {
+            let flushed_state = state.clone();
+            self.emit_nonlocal_function_state_writes(
+                &flushed_state,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+            )?;
+            for input in call.inputs.values_mut() {
+                *input = self.substitute_function_expr(input, &flushed_state);
+            }
+            for dsts in call.outputs.values_mut() {
+                *dsts = dsts
+                    .iter()
+                    .map(|dst| self.substitute_assignment_destination(dst, &flushed_state))
+                    .collect();
+            }
+            state.retain(|id, _| self.module.variables[id].affiliation == Affiliation::Function);
+        }
+
+        let pre_defined = self.defined_ranges.clone();
+        let pre_dynamic = self.dynamic_defined_vars.clone();
+        let merge_block = if let FunctionPathCondition::Conditional(condition) = active {
+            let condition = self.parse_function_path_condition(
+                condition,
+                &guard_state,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+            )?;
+            let call_block = ir_builder.new_block();
+            let merge_block = ir_builder.new_block();
+            ir_builder.seal_block(SIRTerminator::Branch {
+                cond: condition,
+                true_block: (call_block, vec![]),
+                false_block: (merge_block, vec![]),
+            });
+            ir_builder.switch_to_block(call_block);
+            Some(merge_block)
+        } else {
+            None
+        };
+
+        self.function_arg_stack.push(state.clone());
+        self.function_array_view_stack.push(HashMap::default());
+        self.function_array_view_enabled_stack.push(false);
+        let result = self
+            .parse_function_call_statement(&call, targets, domain, convert, sources, ir_builder);
+        self.function_array_view_enabled_stack.pop();
+        self.function_array_view_stack.pop();
+        self.function_arg_stack.pop();
+        result?;
+
+        if let Some(merge_block) = merge_block {
+            let call_defined = std::mem::replace(&mut self.defined_ranges, pre_defined.clone());
+            let call_dynamic =
+                std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone());
+            ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![]));
+            ir_builder.switch_to_block(merge_block);
+            self.defined_ranges = self.intersect_defined_states(pre_defined, call_defined);
+            self.dynamic_defined_vars = self.intersect_dynamic_vars(pre_dynamic, call_dynamic);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn emit_function_runtime_effects_in_path<A>(
         &mut self,
         statements: &[Statement],
@@ -2262,8 +2369,24 @@ impl<'a> FfParser<'a> {
                             )?;
                         }
                     }
+                    let mut state_call = call.clone();
+                    self.retain_direct_runtime_copyouts(&mut state_call, false);
+                    let mut direct_call = call.clone();
+                    self.retain_direct_runtime_copyouts(&mut direct_call, true);
+                    if direct_call.outputs.values().any(|dsts| !dsts.is_empty()) {
+                        self.emit_dynamic_nonlocal_statement_call(
+                            &direct_call,
+                            &mut state,
+                            &active,
+                            targets,
+                            domain,
+                            convert,
+                            sources,
+                            ir_builder,
+                        )?;
+                    }
                     let base = state.clone();
-                    let transitioned = self.apply_function_call_to_state(call, &base)?;
+                    let transitioned = self.apply_function_call_to_state(&state_call, &base)?;
                     state = self.apply_state_transition_on_path(&active, &base, transitioned);
                 }
                 Statement::IfReset(statement) => {
@@ -3488,7 +3611,7 @@ impl<'a> FfParser<'a> {
                             Box::new(FfParser::normalize_function_control_condition(cond.clone())),
                             Box::new(then_expr),
                             Box::new(else_expr.clone()),
-                            Box::new(parser.function_state_comptime(id)),
+                            Box::new(parser.function_state_merge_comptime(id)),
                         ),
                     );
                 }

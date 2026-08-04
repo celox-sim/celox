@@ -1785,6 +1785,79 @@ fn test_ff_guarded_system_task_merges_definition_state(sim) {
     );
 }
 
+fn test_ff_nonlocal_source_ternary_preserves_unknown_merge(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            select: input logic,
+            global_value: output logic<8>
+        ) {
+            function write_selected (select: input logic) {
+                global_value = if select ? 8'hf0 : 8'h0f;
+            }
+
+            always_ff (clk) {
+                write_selected(select);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top").four_state(true);
+    let clk = sim.event("clk");
+    let select = sim.signal("select");
+    let global_value = sim.signal("global_value");
+
+    sim.modify(|io| {
+        io.set_four_state(select, BigUint::from(0u8), BigUint::from(1u8));
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.get_four_state(global_value),
+        (BigUint::from(0xffu8), BigUint::from(0xffu8)),
+    );
+}
+
+fn test_ff_statement_helper_dynamic_nonlocal_copyout_is_observable(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            index: input logic<3>,
+            global_value: output logic<8>
+        ) {
+            function set (written: output logic) {
+                written = 1'b1;
+            }
+
+            function outer (index: input logic<3>) {
+                $display("set");
+                set(global_value[index]);
+            }
+
+            always_ff (clk) {
+                outer(index);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let index = sim.signal("index");
+    let global_value = sim.signal("global_value");
+
+    sim.modify(|io| io.set(index, 2u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 4u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "set".to_string(),
+        }],
+    );
+}
+
 fn test_ff_function_output_index_uses_final_nonlocal_state(sim) {
     @omit_veryl;
     @setup { let code = r#"
