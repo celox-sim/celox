@@ -2542,9 +2542,8 @@ impl<'a> FfParser<'a> {
                                     self.expression_writes_any_inner(&arg.0, candidates, visiting)
                                 })
                         }
-                        SystemFunctionKind::Bits(input)
-                        | SystemFunctionKind::Size(input)
-                        | SystemFunctionKind::Clog2(input)
+                        SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => false,
+                        SystemFunctionKind::Clog2(input)
                         | SystemFunctionKind::Onehot(input)
                         | SystemFunctionKind::Signed(input)
                         | SystemFunctionKind::Unsigned(input) => {
@@ -2684,9 +2683,8 @@ impl<'a> FfParser<'a> {
                             self.expression_writes_any_inner(&arg.0, candidates, visiting)
                         })
                 }
-                SystemFunctionKind::Bits(input)
-                | SystemFunctionKind::Size(input)
-                | SystemFunctionKind::Clog2(input)
+                SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => false,
+                SystemFunctionKind::Clog2(input)
                 | SystemFunctionKind::Onehot(input)
                 | SystemFunctionKind::Signed(input)
                 | SystemFunctionKind::Unsigned(input) => {

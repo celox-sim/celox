@@ -2834,13 +2834,15 @@ impl<'a> FfParser<'a> {
         let array_view_params =
             self.alloc_array_view_merge_params(&array_view_candidates, ir_builder)?;
         let pre_rhs_array_views = self.function_array_view_stack.clone();
-        let pre_rhs_state =
-            (expression_has_side_effect(right) || !array_view_candidates.is_empty()).then(|| {
-                (
-                    self.defined_ranges.clone(),
-                    self.dynamic_defined_vars.clone(),
-                )
-            });
+        let pre_rhs_state = (expression_has_side_effect(right)
+            || self.expression_has_runtime_effect(right)
+            || !array_view_candidates.is_empty())
+        .then(|| {
+            (
+                self.defined_ranges.clone(),
+                self.dynamic_defined_vars.clone(),
+            )
+        });
 
         // Only a definite dominant value may short-circuit.  Logical-not
         // produces a one-bit 4-state truth value; ToTwoState maps its X result

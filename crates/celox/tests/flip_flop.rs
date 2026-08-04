@@ -1577,6 +1577,56 @@ fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
     );
 }
 
+fn test_ff_short_circuit_runtime_write_preserves_later_state_source(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            gate: input logic,
+            d: input logic<8>,
+            state: output logic<8>,
+            q: output logic<8>
+        ) {
+            var ignored: logic;
+
+            function write_state (x: input logic<8>) -> logic {
+                state = x;
+                return 1'b1;
+            }
+
+            always_ff (clk) {
+                ignored = gate && write_state(d);
+                q = state;
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let gate = sim.signal("gate");
+    let d = sim.signal("d");
+    let state = sim.signal("state");
+    let q = sim.signal("q");
+
+    sim.modify(|io| {
+        io.set(gate, 1u8);
+        io.set(d, 0x5au8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(state), 0x5au8.into());
+    assert_eq!(sim.get(q), 0u8.into());
+
+    sim.modify(|io| {
+        io.set(gate, 0u8);
+        io.set(d, 0xa5u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(state), 0x5au8.into());
+    assert_eq!(sim.get(q), 0x5au8.into());
+}
+
 fn test_ff_pure_predicate_output_updates_outer_function_state(sim) {
     @omit_veryl;
     @ignore_on(wasm);
@@ -1798,6 +1848,51 @@ fn test_ff_bits_and_size_do_not_evaluate_output_writing_operand(sim) {
             message: "bits=8 size=8".to_string(),
         }],
     );
+}
+
+fn test_ff_bits_and_size_operands_do_not_alias_earlier_array_argument(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            q: output logic<8>
+        ) {
+            var samples: logic<8>[2];
+
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x;
+            }
+
+            function pick (
+                values: input logic<8>[2],
+                shape: input logic<32>
+            ) -> logic<8> {
+                return values[0] + shape[0];
+            }
+
+            always_ff (clk) {
+                samples = '{8'h12, 8'h34};
+                q = pick(
+                    samples,
+                    $bits(update(samples[0], samples[0]))
+                        + $size(update(samples[0], samples[0]))
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let q = sim.signal("q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0u8.into());
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0x12u8.into());
 }
 
 fn test_ff_statement_call_materializes_output_only_input_effect(sim) {
