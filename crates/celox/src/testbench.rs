@@ -471,6 +471,14 @@ fn mask_to_width(value: BigUint, width: usize) -> BigUint {
     }
 }
 
+fn width_mask(width: usize) -> BigUint {
+    if width == 0 {
+        BigUint::from(0u8)
+    } else {
+        (BigUint::from(1u8) << width) - BigUint::from(1u8)
+    }
+}
+
 fn sim_set_i128<B: SimBackend>(
     sim: &mut crate::Simulator<B>,
     sig: SignalRef,
@@ -494,6 +502,39 @@ fn sim_set_biguint<B: SimBackend>(sim: &mut crate::Simulator<B>, sig: SignalRef,
     } else {
         sim.set_wide(sig, mask_to_width(value, sig.width));
     }
+}
+
+fn random_value_for_destination(
+    value: u64,
+    source_width: u32,
+    signed: bool,
+    destination_width: usize,
+) -> BigUint {
+    let source_width = source_width as usize;
+    let source_mask = width_mask(source_width);
+    let source_value = BigUint::from(value) & &source_mask;
+    if destination_width < source_width {
+        source_value & width_mask(destination_width)
+    } else if signed
+        && source_width > 0
+        && source_width <= 64
+        && source_value.bit((source_width - 1) as u64)
+    {
+        source_value | (width_mask(destination_width) ^ source_mask)
+    } else {
+        source_value
+    }
+}
+
+fn sim_set_random<B: SimBackend>(
+    sim: &mut crate::Simulator<B>,
+    sig: SignalRef,
+    value: u64,
+    source_width: u32,
+    signed: bool,
+) {
+    let value = random_value_for_destination(value, source_width, signed, sig.width);
+    sim_set_biguint(sim, sig, value);
 }
 
 fn sim_set_bigint<B: SimBackend>(
@@ -1355,12 +1396,12 @@ fn exec_one_detailed<B: SimBackend>(
         GenericTestbenchStatement::RandomGet {
             handle,
             width,
-            signed: _,
+            signed,
             ret,
         } => {
             let value = ctx.random.get(handle, *width);
             if let Some(ret) = ret {
-                sim_set_u64(sim, *ret, value);
+                sim_set_random(sim, *ret, value, *width, *signed);
             }
             ExecResult::Continue
         }
@@ -1380,7 +1421,7 @@ fn exec_one_detailed<B: SimBackend>(
             let max = max.eval_u64(ptr);
             let value = ctx.random.get_range(handle, min, max, *width, *signed);
             if let Some(ret) = ret {
-                sim_set_u64(sim, *ret, value);
+                sim_set_random(sim, *ret, value, *width, *signed);
             }
             ExecResult::Continue
         }
@@ -1410,6 +1451,22 @@ mod tests {
         };
 
         assert!(error.source().unwrap().is::<RuntimeErrorCode>());
+    }
+
+    #[test]
+    fn random_values_sign_extend_for_wider_destinations() {
+        assert_eq!(
+            random_value_for_destination(0x80, 8, true, 16),
+            BigUint::from(0xff80u16)
+        );
+        assert_eq!(
+            random_value_for_destination(0x7f, 8, true, 16),
+            BigUint::from(0x007fu16)
+        );
+        assert_eq!(
+            random_value_for_destination(0x80, 8, false, 16),
+            BigUint::from(0x0080u16)
+        );
     }
 
     #[test]
