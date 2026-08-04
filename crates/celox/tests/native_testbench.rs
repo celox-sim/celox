@@ -374,6 +374,44 @@ fn test_testbench_direct_reads_are_dead_store_roots() {
 }
 
 #[test]
+fn test_hierarchical_testbench_read_resolves_nested_instance_index_and_select() {
+    let code = r#"
+        module Core () {
+            var words: logic<16>[2];
+
+            always_comb {
+                words[0] = 16'h1234;
+                words[1] = 16'habcd;
+            }
+        }
+
+        module Dut () {
+            inst u_core: Core ();
+        }
+
+        #[test(t)]
+        module t {
+            inst dut: Dut ();
+            var index: u32;
+
+            initial {
+                index = 1;
+                $assert(dut.u_core.words[index][11:4] == 8'hbc);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
 fn test_clock_only_self_updating_ff_advances_in_native_testbench_instance() {
     let code = r#"
         module ClockTickCounter (

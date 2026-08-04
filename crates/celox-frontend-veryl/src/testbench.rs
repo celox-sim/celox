@@ -8,14 +8,15 @@ use celox_testbench::{
 use fxhash::FxHashSet;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssertKind, CasePattern, Expression, Factor, ForBound, ForRange, Function,
-    FunctionCall, Op as VerylOp, Statement, SystemFunctionInput, SystemFunctionKind, TbMethod,
-    TbMethodCall, VarId,
+    FunctionCall, HierVarRef, Op as VerylOp, Statement, SystemFunctionInput, SystemFunctionKind,
+    TbMethod, TbMethodCall, VarId,
 };
 use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::{self, StrId};
 
 use crate::{
-    LoweringPhase, ParserError, VerylFrontendLookup, VerylTestbenchSource,
+    AbsoluteAddr, InstancePath, LoweringPhase, ParserError, VariableInfo, VerylFrontendLookup,
+    VerylTestbenchSource,
     context_width::{
         ValueContext, binary_semantics, cast_semantics, expression_signed, get_expr_width,
     },
@@ -175,25 +176,170 @@ fn count_assert_statements(
     count
 }
 
+fn source_name(id: StrId) -> String {
+    resource_table::get_str_value(id).unwrap_or_else(|| format!("{id}"))
+}
+
+fn hierarchical_reference_name(reference: &HierVarRef) -> String {
+    reference
+        .inst_path
+        .iter()
+        .copied()
+        .chain(reference.var_path.0.iter().copied())
+        .map(source_name)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn invalid_hierarchical_reference(
+    reference: &HierVarRef,
+    detail: impl Into<String>,
+) -> ParserError {
+    ParserError::illegal_context(
+        "hierarchical variable reference",
+        format!(
+            "`{}`: {}",
+            hierarchical_reference_name(reference),
+            detail.into()
+        ),
+        Some(&reference.comptime.token),
+    )
+}
+
+pub(crate) fn resolve_hierarchical_reference<'a>(
+    lookup: &'a VerylFrontendLookup,
+    reference: &HierVarRef,
+) -> Result<(StateAddr, &'a VariableInfo), ParserError> {
+    let mut resolved_path = Vec::with_capacity(reference.inst_path.len());
+    for &segment in &reference.inst_path {
+        let candidates = lookup
+            .instance_ids
+            .keys()
+            .filter(|candidate| {
+                candidate.0.len() == resolved_path.len() + 1
+                    && candidate.0.starts_with(&resolved_path)
+                    && candidate.0[resolved_path.len()].0 == segment
+            })
+            .map(|candidate| candidate.0[resolved_path.len()])
+            .collect::<Vec<_>>();
+        match candidates.as_slice() {
+            [part] => resolved_path.push(*part),
+            [] => {
+                return Err(invalid_hierarchical_reference(
+                    reference,
+                    format!("instance `{}` was not found", source_name(segment)),
+                ));
+            }
+            _ => {
+                return Err(invalid_hierarchical_reference(
+                    reference,
+                    format!(
+                        "instance `{}` is ambiguous because it elaborates to multiple array elements",
+                        source_name(segment)
+                    ),
+                ));
+            }
+        }
+    }
+
+    let instance_id = lookup
+        .instance_ids
+        .get(&InstancePath(resolved_path))
+        .copied()
+        .ok_or_else(|| {
+            invalid_hierarchical_reference(reference, "the elaborated instance path was not found")
+        })?;
+    let module_id = lookup
+        .instance_module
+        .get(&instance_id)
+        .copied()
+        .ok_or_else(|| {
+            invalid_hierarchical_reference(reference, "the target instance has no module")
+        })?;
+    let var_id = match lookup
+        .module_var_path_index
+        .get(&module_id)
+        .and_then(|variables| variables.get(&reference.var_path))
+    {
+        Some(Some(var_id)) => *var_id,
+        Some(None) => {
+            return Err(invalid_hierarchical_reference(
+                reference,
+                format!("variable `{}` is ambiguous", reference.var_path),
+            ));
+        }
+        None => {
+            return Err(invalid_hierarchical_reference(
+                reference,
+                format!("variable `{}` was not found", reference.var_path),
+            ));
+        }
+    };
+    let info = lookup
+        .module_variables
+        .get(&module_id)
+        .and_then(|variables| variables.get(&var_id))
+        .ok_or_else(|| {
+            invalid_hierarchical_reference(reference, "the target variable has no metadata")
+        })?;
+    let address = lookup
+        .state_address(&AbsoluteAddr {
+            instance_id,
+            var_id,
+        })
+        .ok_or_else(|| {
+            invalid_hierarchical_reference(
+                reference,
+                "the target variable has no elaborated state address",
+            )
+        })?;
+    Ok((address, info))
+}
+
+enum TestbenchRead {
+    Root(VarId),
+    Hierarchical(Box<HierVarRef>),
+}
+
 pub fn collect_testbench_observability(
+    lookup: &VerylFrontendLookup,
     source: &VerylTestbenchSource,
-) -> (Vec<RuntimeEventSite>, FxHashSet<VarId>) {
+) -> Result<(Vec<RuntimeEventSite>, FxHashSet<StateAddr>), ParserError> {
     let Some(stmts) = source.initial_statements.as_ref() else {
-        return Default::default();
+        return Ok(Default::default());
     };
     let mut sites = Vec::new();
     collect_runtime_event_sites(stmts, &source.functions, &mut sites);
-    let mut reads = FxHashSet::default();
+    let mut read_references = Vec::new();
     let mut active_functions = FxHashSet::default();
-    collect_statement_reads(stmts, &source.functions, &mut active_functions, &mut reads);
-    (sites, reads)
+    collect_statement_reads(
+        stmts,
+        &source.functions,
+        &mut active_functions,
+        &mut read_references,
+    );
+    let mut reads = FxHashSet::default();
+    for reference in read_references {
+        match reference {
+            TestbenchRead::Root(var_id) => {
+                if let Some((address, _)) = lookup.root_variable(var_id) {
+                    reads.insert(address);
+                }
+            }
+            TestbenchRead::Hierarchical(reference) => {
+                let (address, _) = resolve_hierarchical_reference(lookup, &reference)?;
+                reads.insert(address);
+            }
+        }
+    }
+    Ok((sites, reads))
 }
 
 fn collect_statement_reads(
     stmts: &[Statement],
     funcs: &fxhash::FxHashMap<VarId, Function>,
     active_functions: &mut FxHashSet<VarId>,
-    reads: &mut FxHashSet<VarId>,
+    reads: &mut Vec<TestbenchRead>,
 ) {
     for stmt in stmts {
         match stmt {
@@ -289,7 +435,7 @@ fn collect_for_bound_reads(
     range: &ForRange,
     funcs: &fxhash::FxHashMap<VarId, Function>,
     active_functions: &mut FxHashSet<VarId>,
-    reads: &mut FxHashSet<VarId>,
+    reads: &mut Vec<TestbenchRead>,
 ) {
     let (start, end) = match range {
         ForRange::Forward { start, end, .. }
@@ -307,12 +453,12 @@ fn collect_expression_reads(
     expr: &Expression,
     funcs: &fxhash::FxHashMap<VarId, Function>,
     active_functions: &mut FxHashSet<VarId>,
-    reads: &mut FxHashSet<VarId>,
+    reads: &mut Vec<TestbenchRead>,
 ) {
     match expr {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::Variable(var_id, index, select, _) => {
-                reads.insert(*var_id);
+                reads.push(TestbenchRead::Root(*var_id));
                 for expr in &index.0 {
                     collect_expression_reads(expr, funcs, active_functions, reads);
                 }
@@ -324,7 +470,13 @@ fn collect_expression_reads(
             Factor::FunctionCall(call) => {
                 collect_function_call_reads(call, funcs, active_functions, reads);
             }
-            Factor::HierVariable(_) => {}
+            Factor::HierVariable(reference) => {
+                reads.push(TestbenchRead::Hierarchical(reference.clone()));
+                for expr in &reference.index.0 {
+                    collect_expression_reads(expr, funcs, active_functions, reads);
+                }
+                collect_select_reads(&reference.select, funcs, active_functions, reads);
+            }
             Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
         },
         Expression::Unary(_, inner, _) => {
@@ -374,7 +526,7 @@ fn collect_select_reads(
     select: &veryl_analyzer::ir::VarSelect,
     funcs: &fxhash::FxHashMap<VarId, Function>,
     active_functions: &mut FxHashSet<VarId>,
-    reads: &mut FxHashSet<VarId>,
+    reads: &mut Vec<TestbenchRead>,
 ) {
     for expr in &select.0 {
         collect_expression_reads(expr, funcs, active_functions, reads);
@@ -388,7 +540,7 @@ fn collect_system_function_reads(
     kind: &SystemFunctionKind,
     funcs: &fxhash::FxHashMap<VarId, Function>,
     active_functions: &mut FxHashSet<VarId>,
-    reads: &mut FxHashSet<VarId>,
+    reads: &mut Vec<TestbenchRead>,
 ) {
     let mut collect_input = |input: &SystemFunctionInput| {
         collect_expression_reads(&input.0, funcs, active_functions, reads);
@@ -420,7 +572,7 @@ fn collect_function_call_reads(
     call: &FunctionCall,
     funcs: &fxhash::FxHashMap<VarId, Function>,
     active_functions: &mut FxHashSet<VarId>,
-    reads: &mut FxHashSet<VarId>,
+    reads: &mut Vec<TestbenchRead>,
 ) {
     for expr in call.inputs.values() {
         collect_expression_reads(expr, funcs, active_functions, reads);
@@ -761,8 +913,8 @@ impl ExprCompiler<'_> {
                     && let Ok(value) = comptime.get_value()
                 {
                     self.emit_constant_value(value, ops);
-                } else if let Some(sig) = self.resolve_var(var_id) {
-                    self.emit_var_access(var_id, sig, index, select, ops);
+                } else if let Some((address, info)) = self.lookup.root_variable(*var_id) {
+                    self.emit_var_access(address, info, index, select, ops);
                 } else if let Ok(value) = comptime.get_value() {
                     self.emit_constant_value(value, ops);
                 } else {
@@ -779,10 +931,10 @@ impl ExprCompiler<'_> {
             Factor::FunctionCall(fc) => {
                 self.emit_function_call(fc, ops);
             }
-            Factor::HierVariable(_) => {
-                unreachable!(
-                    "hierarchical testbench references are rejected before bytecode emission"
-                )
+            Factor::HierVariable(reference) => {
+                let (address, info) = resolve_hierarchical_reference(self.lookup, reference)
+                    .expect("hierarchical testbench references are validated before emission");
+                self.emit_var_access(address, info, &reference.index, &reference.select, ops);
             }
             Factor::SystemFunctionCall(call) => match &call.kind {
                 SystemFunctionKind::Signed(input) | SystemFunctionKind::Unsigned(input) => {
@@ -903,23 +1055,15 @@ impl ExprCompiler<'_> {
     /// array indices and bit selects.
     fn emit_var_access(
         &self,
-        var_id: &VarId,
-        sig: SemanticSignal<StateAddr>,
+        address: StateAddr,
+        info: &VariableInfo,
         index: &veryl_analyzer::ir::VarIndex,
         select: &veryl_analyzer::ir::VarSelect,
         ops: &mut Vec<UnboundTbOpcode>,
     ) {
-        let info = match self.lookup.root_variable(*var_id) {
-            Some((_, info)) => info,
-            None => {
-                self.emit_load(*var_id, 0, sig.width, ops);
-                return;
-            }
-        };
-
         // No index or select → whole variable
         if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
-            self.emit_load(*var_id, 0, sig.width, ops);
+            self.emit_load_at(address, 0, info.width, ops);
             return;
         }
 
@@ -956,7 +1100,7 @@ impl ExprCompiler<'_> {
                 let elem_byte_size = get_byte_size(element_width);
                 self.emit(idx_expr, ops);
                 ops.push(TbOpcode::LoadIndexed {
-                    location: self.state_location(*var_id, base_byte_offset),
+                    location: Self::state_location_at(address, base_byte_offset),
                     stride_bytes,
                     element_byte_size: elem_byte_size,
                     element_width,
@@ -990,10 +1134,10 @@ impl ExprCompiler<'_> {
             let byte_offset = static_bit_offset / 8;
             let sub = static_bit_offset % 8;
             if sub == 0 {
-                self.emit_load(*var_id, byte_offset, accessed_width, ops);
+                self.emit_load_at(address, byte_offset, accessed_width, ops);
             } else {
                 let load_width = accessed_width + sub;
-                self.emit_load(*var_id, byte_offset, load_width, ops);
+                self.emit_load_at(address, byte_offset, load_width, ops);
                 ops.push(TbOpcode::ConstU64(sub as u64));
                 ops.push(TbOpcode::BinOp(Op::LogicShiftR));
                 if accessed_width < 64 {
@@ -1012,7 +1156,7 @@ impl ExprCompiler<'_> {
             let byte_offset = static_bit_offset / 8;
             let total_byte_size = get_byte_size(accessed_width);
             ops.push(TbOpcode::LoadBitSelect {
-                location: self.state_location(*var_id, byte_offset),
+                location: Self::state_location_at(address, byte_offset),
                 base_byte_size: total_byte_size,
                 select_width: sel_width,
             });
@@ -1023,10 +1167,10 @@ impl ExprCompiler<'_> {
         let byte_offset = bit_offset / 8;
         let sub = bit_offset % 8;
         if sub == 0 {
-            self.emit_load(*var_id, byte_offset, sel_width, ops);
+            self.emit_load_at(address, byte_offset, sel_width, ops);
         } else {
             let load_width = sel_width + sub;
-            self.emit_load(*var_id, byte_offset, load_width, ops);
+            self.emit_load_at(address, byte_offset, load_width, ops);
             ops.push(TbOpcode::ConstU64(sub as u64));
             ops.push(TbOpcode::BinOp(Op::LogicShiftR));
             if sel_width < 64 {
@@ -1118,6 +1262,21 @@ impl ExprCompiler<'_> {
         width: usize,
         ops: &mut Vec<UnboundTbOpcode>,
     ) {
+        let address = self
+            .lookup
+            .root_variable(var_id)
+            .map(|(address, _)| address)
+            .expect("frontend state projection is complete");
+        self.emit_load_at(address, byte_offset, width, ops);
+    }
+
+    fn emit_load_at(
+        &self,
+        address: StateAddr,
+        byte_offset: usize,
+        width: usize,
+        ops: &mut Vec<UnboundTbOpcode>,
+    ) {
         let byte_size = get_byte_size(width);
         if byte_size <= 8 {
             let mask = if width >= 64 {
@@ -1126,13 +1285,13 @@ impl ExprCompiler<'_> {
                 (1u64 << width) - 1
             };
             ops.push(TbOpcode::LoadU64 {
-                location: self.state_location(var_id, byte_offset),
+                location: Self::state_location_at(address, byte_offset),
                 byte_size,
                 mask,
             });
         } else {
             ops.push(TbOpcode::LoadWide {
-                location: self.state_location(var_id, byte_offset),
+                location: Self::state_location_at(address, byte_offset),
                 byte_size,
                 width,
             });
@@ -1140,12 +1299,17 @@ impl ExprCompiler<'_> {
     }
 
     fn state_location(&self, var_id: VarId, byte_offset: usize) -> StateLocation<StateAddr> {
+        let address = self
+            .lookup
+            .root_variable(var_id)
+            .map(|(address, _)| address)
+            .expect("frontend state projection is complete");
+        Self::state_location_at(address, byte_offset)
+    }
+
+    fn state_location_at(address: StateAddr, byte_offset: usize) -> StateLocation<StateAddr> {
         StateLocation {
-            address: self
-                .lookup
-                .root_variable(var_id)
-                .map(|(address, _)| address)
-                .expect("frontend state projection is complete"),
+            address,
             byte_offset,
         }
     }
@@ -1173,6 +1337,11 @@ impl ExprCompiler<'_> {
             match f.as_ref() {
                 Factor::Variable(var_id, _, _, _) => {
                     if let Some((_, info)) = self.lookup.root_variable(*var_id) {
+                        return info.width;
+                    }
+                }
+                Factor::HierVariable(reference) => {
+                    if let Ok((_, info)) = resolve_hierarchical_reference(self.lookup, reference) {
                         return info.width;
                     }
                 }
@@ -1694,13 +1863,15 @@ fn validate_testbench_expression(
 ) -> Result<(), ParserError> {
     match expression {
         Expression::Term(factor) => match factor.as_ref() {
-            Factor::HierVariable(reference) => Err(ParserError::unsupported(
-                467,
-                LoweringPhase::SimulatorParser,
-                "hierarchical variable reference",
-                format!("{}", reference.var_path),
-                Some(&reference.comptime.token),
-            )),
+            Factor::HierVariable(reference) => {
+                for expression in reference.index.0.iter().chain(reference.select.0.iter()) {
+                    validate_testbench_expression(expression, source, active_functions)?;
+                }
+                if let Some((_, expression)) = &reference.select.1 {
+                    validate_testbench_expression(expression, source, active_functions)?;
+                }
+                Ok(())
+            }
             Factor::Variable(_, index, select, _) => {
                 for expression in index.0.iter().chain(select.0.iter()) {
                     validate_testbench_expression(expression, source, active_functions)?;
@@ -1725,11 +1896,9 @@ fn validate_testbench_expression(
                 let end = (token.end.pos + token.end.length) as usize;
                 let factor_text = source.get(start..end).unwrap_or_default();
                 if factor_text.contains('.') {
-                    Err(ParserError::unsupported(
-                        467,
-                        LoweringPhase::SimulatorParser,
+                    Err(ParserError::illegal_context(
                         "hierarchical variable reference",
-                        factor_text,
+                        format!("`{factor_text}` was not resolved by the analyzer"),
                         Some(token),
                     ))
                 } else {
@@ -1974,10 +2143,123 @@ pub fn compile_semantic_testbench(
     let Some(initial_stmts) = source.initial_statements.as_ref() else {
         return Ok(None);
     };
+    // Resolve every hierarchical read before the infallible bytecode emitter
+    // runs. The same walk also guarantees direct callers get path diagnostics,
+    // even when observability projection is not invoked separately.
+    let _ = collect_testbench_observability(lookup, source)?;
     validate_testbench_statements(initial_stmts, source, &mut FxHashSet::default())?;
     let mut builder = SemanticTestbenchBuilder::new(lookup, source, runtime_event_site_count);
     builder.build_event_map(initial_stmts);
     Ok(Some(
         TestbenchProgram::new(builder.convert(initial_stmts)).with_random_seed_option(random_seed),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use celox_design::{
+        DomainKind, InstanceId, ModuleId, PortTypeKind, StateObjectId, VariableMetadata,
+    };
+    use veryl_analyzer::ir::{Comptime, VarIndex, VarKind, VarPath, VarSelect};
+
+    fn reference(inst_path: Vec<StrId>, var_path: VarPath) -> HierVarRef {
+        HierVarRef {
+            inst_path,
+            var_path,
+            index: VarIndex::default(),
+            select: VarSelect::default(),
+            comptime: Comptime::default(),
+        }
+    }
+
+    fn lookup_with_child(child_name: StrId, variable_name: StrId) -> VerylFrontendLookup {
+        let root_instance = InstanceId(0);
+        let child_instance = InstanceId(1);
+        let root_module = ModuleId(0);
+        let child_module = ModuleId(1);
+        let var_id = VarId::from_raw(0);
+        let source_address = AbsoluteAddr {
+            instance_id: child_instance,
+            var_id,
+        };
+        let state_address = StateAddr {
+            instance_id: child_instance,
+            var_id: StateObjectId(0),
+        };
+        let path = VarPath(vec![variable_name]);
+        let info = VariableInfo {
+            id: var_id,
+            path: path.clone(),
+            var_kind: VarKind::Variable,
+            metadata: VariableMetadata {
+                width: 8,
+                is_4state: true,
+                kind: DomainKind::Other,
+                type_kind: PortTypeKind::Logic,
+                array_dims: Vec::new(),
+            },
+        };
+
+        let mut lookup = VerylFrontendLookup::default();
+        lookup
+            .instance_ids
+            .insert(InstancePath(Vec::new()), root_instance);
+        lookup
+            .instance_ids
+            .insert(InstancePath(vec![(child_name, 0)]), child_instance);
+        lookup.instance_module.insert(root_instance, root_module);
+        lookup.instance_module.insert(child_instance, child_module);
+        lookup
+            .module_variables
+            .entry(child_module)
+            .or_default()
+            .insert(var_id, info);
+        lookup
+            .module_var_path_index
+            .entry(child_module)
+            .or_default()
+            .insert(path, Some(var_id));
+        lookup.source_to_state.insert(source_address, state_address);
+        lookup.state_to_source.insert(state_address, source_address);
+        lookup
+    }
+
+    #[test]
+    fn hierarchical_reference_reports_missing_instance_segment() {
+        let dut = resource_table::insert_str("dut");
+        let missing = resource_table::insert_str("missing");
+        let q = resource_table::insert_str("q");
+        let lookup = lookup_with_child(dut, q);
+        let reference = reference(vec![missing], VarPath(vec![q]));
+
+        let error = resolve_hierarchical_reference(&lookup, &reference).unwrap_err();
+        let ParserError::IllegalContext {
+            feature, detail, ..
+        } = error
+        else {
+            panic!("expected invalid hierarchical path diagnostic");
+        };
+        assert_eq!(feature, "hierarchical variable reference");
+        assert!(detail.contains("instance `missing` was not found"));
+    }
+
+    #[test]
+    fn hierarchical_reference_reports_missing_target_variable() {
+        let dut = resource_table::insert_str("dut");
+        let q = resource_table::insert_str("q");
+        let missing = resource_table::insert_str("missing");
+        let lookup = lookup_with_child(dut, q);
+        let reference = reference(vec![dut], VarPath(vec![missing]));
+
+        let error = resolve_hierarchical_reference(&lookup, &reference).unwrap_err();
+        let ParserError::IllegalContext {
+            feature, detail, ..
+        } = error
+        else {
+            panic!("expected invalid hierarchical variable diagnostic");
+        };
+        assert_eq!(feature, "hierarchical variable reference");
+        assert!(detail.contains("variable `missing` was not found"));
+    }
 }

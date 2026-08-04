@@ -348,6 +348,40 @@ module t {
 }
 
 #[test]
+fn hierarchical_bound_warns_when_clock_advances_the_target_state() {
+    let code = r#"
+module Counter (
+    clk: input clock,
+    rst: input reset,
+) {
+    var count: logic<8>;
+
+    always_ff {
+        if_reset { count = 0; }
+        else       { count += 1; }
+    }
+}
+
+#[test(t)]
+module t {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen(clk);
+    inst dut: Counter (clk, rst);
+
+    initial {
+        rst.assert();
+        clk.next(2);
+        for _i in 0..dut.count {
+            clk.next();
+        }
+        $finish();
+    }
+}
+"#;
+    expect_time_advancing_bound_warning(code, "t");
+}
+
+#[test]
 fn time_advancing_body_effects_pass_when_the_bound_is_outside_the_event_write_closure() {
     let code = r#"
 module Counter (

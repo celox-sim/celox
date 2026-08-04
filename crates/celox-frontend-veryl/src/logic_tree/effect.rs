@@ -1120,11 +1120,12 @@ fn collect_factor_effects(
             }
             Ok(())
         }
-        Factor::HierVariable(reference) => Err(ParserError::unsupported(
-            467,
-            crate::LoweringPhase::CombLowering,
+        Factor::HierVariable(reference) => Err(ParserError::illegal_context(
             "hierarchical variable reference",
-            format!("{}", reference.var_path),
+            format!(
+                "`{}` is only valid in a native testbench block",
+                reference.var_path
+            ),
             Some(&reference.comptime.token),
         )),
         Factor::FunctionCall(call) => {
@@ -2577,11 +2578,12 @@ fn collect_factor_position_inputs(
             }
             Ok(())
         }
-        Factor::HierVariable(reference) => Err(ParserError::unsupported(
-            467,
-            crate::LoweringPhase::CombLowering,
+        Factor::HierVariable(reference) => Err(ParserError::illegal_context(
             "hierarchical variable reference",
-            format!("{}", reference.var_path),
+            format!(
+                "`{}` is only valid in a native testbench block",
+                reference.var_path
+            ),
             Some(&reference.comptime.token),
         )),
         Factor::Value(_) => Ok(()),

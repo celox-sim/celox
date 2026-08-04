@@ -646,20 +646,14 @@ fn test_testbench_helper_hierarchical_read_returns_error_without_panicking() {
             )),
             "expected Veryl InvisibleIndentifier for helper's hierarchical read, got {errors:?}"
         ),
-        Err(SimulatorErrorKind::SIRParser(ParserError::Unsupported {
-            issue,
-            phase: LoweringPhase::SimulatorParser,
-            feature,
-            ..
-        })) => {
-            assert_eq!(*issue, 467);
+        Err(SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. })) => {
             assert_eq!(*feature, "hierarchical variable reference");
         }
         Err(kind) => panic!(
-            "expected InvisibleIndentifier or Unsupported(SimulatorParser) for helper's hierarchical read, got {kind:?}"
+            "expected InvisibleIndentifier or IllegalContext for helper's hierarchical read, got {kind:?}"
         ),
         Ok(_) => panic!(
-            "expected InvisibleIndentifier or Unsupported(SimulatorParser) for helper's hierarchical read, got Ok"
+            "expected InvisibleIndentifier or IllegalContext for helper's hierarchical read, got Ok"
         ),
     }
 }

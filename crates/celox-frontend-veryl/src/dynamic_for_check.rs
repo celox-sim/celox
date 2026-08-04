@@ -90,6 +90,7 @@ enum StateChange {
 #[derive(Default)]
 struct Effects {
     reads: Vec<Access>,
+    hierarchical_reads: Vec<veryl_analyzer::ir::HierVarRef>,
     writes: Vec<Access>,
     state_changes: Vec<StateChange>,
     observable: bool,
@@ -105,6 +106,8 @@ impl Effects {
 
     fn append(&mut self, mut other: Effects) {
         self.reads.append(&mut other.reads);
+        self.hierarchical_reads
+            .append(&mut other.hierarchical_reads);
         self.writes.append(&mut other.writes);
         self.state_changes.append(&mut other.state_changes);
         self.observable |= other.observable;
@@ -294,6 +297,22 @@ fn check_elaborated_for(
         }) {
             conflict = true;
             break;
+        }
+    }
+    for reference in &bound_effects.hierarchical_reads {
+        match crate::testbench::resolve_hierarchical_reference(
+            &scheduled.frontend_lookup,
+            reference,
+        ) {
+            Ok((address, _)) => {
+                if writes.iter().any(|write| write.address == address) {
+                    conflict = true;
+                    break;
+                }
+            }
+            Err(error) => {
+                unknown.get_or_insert_with(|| error.to_string());
+            }
         }
     }
 
@@ -1259,8 +1278,15 @@ fn collect_expression_effects(
             Factor::Unknown(_) => {
                 effects.mark_unknown("bound expression contains an unknown value")
             }
-            Factor::HierVariable(_) => {
-                effects.mark_unknown("bound expression contains an unsupported hierarchical read")
+            Factor::HierVariable(reference) => {
+                collect_index_select_effects(
+                    &reference.index,
+                    &reference.select,
+                    module,
+                    active_functions,
+                    &mut effects,
+                );
+                effects.hierarchical_reads.push((**reference).clone());
             }
             Factor::Value(_) | Factor::Anonymous(_) => {}
         },

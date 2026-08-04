@@ -3181,11 +3181,12 @@ fn eval_factor(
                 Ok(((extracted_expr, all_sources), all_bounds))
             }
         }
-        Factor::HierVariable(reference) => Err(ParserError::unsupported(
-            467,
-            LoweringPhase::CombLowering,
+        Factor::HierVariable(reference) => Err(ParserError::illegal_context(
             "hierarchical variable reference",
-            format!("{}", reference.var_path),
+            format!(
+                "`{}` is only valid in a native testbench block",
+                reference.var_path
+            ),
             Some(&reference.comptime.token),
         )),
         Factor::Value(v) => {
