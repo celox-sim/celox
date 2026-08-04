@@ -3593,11 +3593,12 @@ impl<'a> FfParser<'a> {
                 }
             }
             Factor::HierVariable(reference) => {
-                return Err(ParserError::unsupported(
-                    467,
-                    LoweringPhase::FfLowering,
+                return Err(ParserError::illegal_context(
                     "hierarchical variable reference",
-                    format!("{}", reference.var_path),
+                    format!(
+                        "`{}` is only valid in a native testbench block",
+                        reference.var_path
+                    ),
                     Some(&reference.comptime.token),
                 ));
             }

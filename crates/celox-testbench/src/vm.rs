@@ -242,8 +242,8 @@ impl CompiledExpr {
             }
             TbOpcode::LoadIndexed {
                 location,
-                stride_bytes,
-                element_byte_size,
+                stride_bits,
+                base_bit_offset,
                 element_width,
             } => {
                 let idx = stack.pop().unwrap_or_else(|| {
@@ -251,14 +251,9 @@ impl CompiledExpr {
                     TestbenchValue::U64(0)
                 });
                 let i = idx.to_u64() as usize;
-                let offset = location + i * stride_bytes;
-                let mask = if *element_width >= 64 {
-                    u64::MAX
-                } else {
-                    (1u64 << element_width) - 1
-                };
-                let val = unsafe { read_le_u64(memory.add(offset), *element_byte_size) } & mask;
-                stack.push(TestbenchValue::U64(val));
+                let bit_offset = base_bit_offset.saturating_add(i.saturating_mul(*stride_bits));
+                let val = unsafe { read_bits(memory.add(*location), bit_offset, *element_width) };
+                stack.push(val);
                 *pc += 1;
             }
             TbOpcode::LoadBitSelect {
@@ -271,14 +266,21 @@ impl CompiledExpr {
                     TestbenchValue::U64(0)
                 });
                 let shift = bit_idx.to_u64() as usize;
-                let full_val = unsafe { read_le_u64(memory.add(*location), *base_byte_size) };
-                let mask = if *select_width >= 64 {
-                    u64::MAX
+                if *base_byte_size <= 8 && *select_width <= 64 {
+                    let full_val = unsafe { read_le_u64(memory.add(*location), *base_byte_size) };
+                    let mask = if *select_width == 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << select_width) - 1
+                    };
+                    stack.push(TestbenchValue::U64((full_val >> shift) & mask));
                 } else {
-                    (1u64 << select_width) - 1
-                };
-                let val = (full_val >> shift) & mask;
-                stack.push(TestbenchValue::U64(val));
+                    let full_width = base_byte_size.saturating_mul(8);
+                    let full_val =
+                        unsafe { read_le_wide(memory.add(*location), *base_byte_size, full_width) };
+                    let val = (full_val >> shift) & width_mask(*select_width);
+                    stack.push(tb_value_from_bits(val, *select_width));
+                }
                 *pc += 1;
             }
             TbOpcode::StoreU64 {
@@ -325,6 +327,22 @@ unsafe fn read_le_wide(ptr: *const u8, byte_size: usize, width: usize) -> BigUin
         val &= (BigUint::from(1u32) << width) - BigUint::from(1u32);
     }
     val
+}
+
+/// # Safety
+/// `ptr` must be valid for the byte span containing `bit_offset..bit_offset + width`.
+unsafe fn read_bits(ptr: *const u8, bit_offset: usize, width: usize) -> TestbenchValue {
+    let byte_offset = bit_offset / 8;
+    let sub = bit_offset % 8;
+    let span_width = sub.saturating_add(width);
+    let byte_size = span_width.div_ceil(8);
+    if span_width <= 64 {
+        let value = unsafe { read_le_u64(ptr.add(byte_offset), byte_size) } >> sub;
+        TestbenchValue::U64(value & width_mask_u64(width))
+    } else {
+        let value = unsafe { read_le_wide(ptr.add(byte_offset), byte_size, span_width) } >> sub;
+        tb_value_from_bits(value & width_mask(width), width)
+    }
 }
 
 // ── Typed evaluation ───────────────────────────────────────────────────

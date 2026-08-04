@@ -287,8 +287,8 @@ pub enum ExprOpcode<L = usize> {
     },
     LoadIndexed {
         location: L,
-        stride_bytes: usize,
-        element_byte_size: usize,
+        stride_bits: usize,
+        base_bit_offset: usize,
         element_width: usize,
     },
     LoadBitSelect {
@@ -455,13 +455,13 @@ impl<A> ExprBytecode<StateLocation<A>> {
                 }
                 ExprOpcode::LoadIndexed {
                     location,
-                    stride_bytes,
-                    element_byte_size,
+                    stride_bits,
+                    base_bit_offset,
                     element_width,
                 } => ExprOpcode::LoadIndexed {
                     location: bind_location(location, &mut resolve)?,
-                    stride_bytes,
-                    element_byte_size,
+                    stride_bits,
+                    base_bit_offset,
                     element_width,
                 },
                 ExprOpcode::LoadBitSelect {

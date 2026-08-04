@@ -348,6 +348,136 @@ module t {
 }
 
 #[test]
+fn hierarchical_bound_warns_when_clock_advances_the_target_state() {
+    let code = r#"
+module Counter (
+    clk: input clock,
+    rst: input reset,
+) {
+    var count: logic<8>;
+
+    always_ff {
+        if_reset { count = 0; }
+        else       { count += 1; }
+    }
+}
+
+#[test(t)]
+module t {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen(clk);
+    inst dut: Counter (clk, rst);
+
+    initial {
+        rst.assert();
+        clk.next(2);
+        for _i in 0..dut.count[3:0] {
+            clk.next();
+        }
+        $finish();
+    }
+}
+"#;
+    expect_time_advancing_bound_warning(code, "t");
+}
+
+#[test]
+fn hierarchical_bound_respects_disjoint_bit_ranges() {
+    let code = r#"
+module Counter (
+    clk: input clock,
+    rst: input reset,
+) {
+    var count: logic<8>;
+
+    always_ff {
+        if_reset { count[3:0] = 0; }
+        else       { count[3:0] += 1; }
+    }
+}
+
+#[test(t)]
+module t {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen(clk);
+    inst dut: Counter (clk, rst);
+
+    initial {
+        rst.assert();
+        for _i in 0..dut.count[7:4] {
+            clk.next();
+        }
+        $finish();
+    }
+}
+"#;
+    let simulator = Simulator::builder(code, "t")
+        .build()
+        .expect("hierarchical reads of disjoint bits must not conflict");
+    assert!(!simulator.warnings().iter().any(|warning| matches!(
+        warning,
+        CompilationWarning::Frontend(FrontendDiagnostic::TimeAdvancingForBound { .. })
+    )));
+}
+
+#[test]
+fn hierarchical_bound_connected_to_immediately_written_root_is_an_error() {
+    let code = r#"
+module Limit (
+    limit: input logic<8>,
+) {}
+
+#[test(t)]
+module t {
+    var limit: logic<8>;
+    inst dut: Limit (limit);
+
+    initial {
+        limit = 2;
+        for _i in 0..dut.limit {
+            limit = 0;
+        }
+        $finish();
+    }
+}
+"#;
+    expect_mutable_bound_error(code, "t");
+}
+
+#[test]
+fn hierarchical_bound_connected_to_disjoint_root_bits_is_allowed() {
+    let code = r#"
+module Limit (
+    limit: input logic<8>,
+) {}
+
+#[test(t)]
+module t {
+    var upper: logic<4>;
+    var lower: logic<4>;
+    var limit: logic<8>;
+    inst dut: Limit (limit);
+
+    always_comb {
+        limit = {upper, lower};
+    }
+
+    initial {
+        upper = 2;
+        lower = 0;
+        for _i in 0..dut.limit[7:4] {
+            lower = 1;
+        }
+        $finish();
+    }
+}
+"#;
+    Simulator::builder(code, "t")
+        .build()
+        .expect("writes to disjoint connected bits must not conflict");
+}
+
+#[test]
 fn time_advancing_body_effects_pass_when_the_bound_is_outside_the_event_write_closure() {
     let code = r#"
 module Counter (

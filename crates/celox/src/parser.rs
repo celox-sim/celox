@@ -396,7 +396,7 @@ pub fn parse(
     scheduled.scheduled.inject_triggers();
     let scheduled = scheduled.scheduled;
     let (sir, mut runtime, testbench_source) = RuntimeProgram::from_scheduled(scheduled);
-    crate::testbench_compile::project_observability(&mut runtime, &testbench_source);
+    crate::testbench_compile::project_observability(&mut runtime, &testbench_source)?;
     runtime.testbench = crate::testbench_compile::compile_semantic_testbench(
         &runtime,
         &testbench_source,

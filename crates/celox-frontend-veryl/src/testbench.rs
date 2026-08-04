@@ -1,4 +1,4 @@
-use celox_design::{PortTypeKind, RuntimeEventKind, RuntimeEventSite, StateAddr};
+use celox_design::{BitAccess, PortTypeKind, RuntimeEventKind, RuntimeEventSite, StateAddr};
 use celox_testbench::{
     AssertMessage as GenericAssertMessage, ClockCount as GenericClockCount, ExprBytecode,
     ExprOpcode as TbOpcode, LoopBound as GenericLoopBound, SemanticArgument, SemanticSignal,
@@ -6,16 +6,19 @@ use celox_testbench::{
     TestbenchSelection, TestbenchStatement as GenericTestbenchStatement, TestbenchTarget,
 };
 use fxhash::FxHashSet;
+use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssertKind, CasePattern, Expression, Factor, ForBound, ForRange, Function,
-    FunctionCall, Op as VerylOp, Statement, SystemFunctionInput, SystemFunctionKind, TbMethod,
-    TbMethodCall, VarId,
+    FunctionCall, HierVarRef, Op as VerylOp, Statement, SystemFunctionInput, SystemFunctionKind,
+    TbMethod, TbMethodCall, VarId, VarIndex, VarSelect, VarSelectOp,
 };
 use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::{self, StrId};
 
 use crate::{
-    LoweringPhase, ParserError, VerylFrontendLookup, VerylTestbenchSource,
+    AbsoluteAddr, InstancePath, LoweringPhase, ParserError, VariableInfo, VerylFrontendLookup,
+    VerylTestbenchSource,
+    bitaccess::eval_constexpr,
     context_width::{
         ValueContext, binary_semantics, cast_semantics, expression_signed, get_expr_width,
     },
@@ -40,21 +43,9 @@ fn compile_assert_arg(
     ec: &ExprCompiler<'_>,
 ) -> SemanticArgument<StateAddr> {
     let expr = &input.0;
-    let width = {
-        let ctx_width = expr.comptime().expr_context.width;
-        if ctx_width > 0 {
-            ctx_width
-        } else if let Some(type_width) = expr.comptime().r#type.total_width() {
-            type_width
-        } else if let Ok(value) = expr.comptime().get_value() {
-            value.width()
-        } else {
-            0
-        }
-    };
     SemanticArgument {
         expr: ec.compile(expr),
-        width,
+        width: ec.natural_width(expr),
         signed: expression_signed(expr),
         is_string: expr.comptime().r#type.is_string(),
     }
@@ -175,25 +166,421 @@ fn count_assert_statements(
     count
 }
 
+fn source_name(id: StrId) -> String {
+    resource_table::get_str_value(id).unwrap_or_else(|| format!("{id}"))
+}
+
+fn hierarchical_reference_name(reference: &HierVarRef) -> String {
+    reference
+        .inst_path
+        .iter()
+        .copied()
+        .chain(reference.var_path.0.iter().copied())
+        .map(source_name)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn invalid_hierarchical_reference(
+    reference: &HierVarRef,
+    detail: impl Into<String>,
+) -> ParserError {
+    ParserError::illegal_context(
+        "hierarchical variable reference",
+        format!(
+            "`{}`: {}",
+            hierarchical_reference_name(reference),
+            detail.into()
+        ),
+        Some(&reference.comptime.token),
+    )
+}
+
+pub(crate) fn resolve_hierarchical_reference<'a>(
+    lookup: &'a VerylFrontendLookup,
+    reference: &HierVarRef,
+) -> Result<(StateAddr, &'a VariableInfo), ParserError> {
+    let mut resolved_path = Vec::with_capacity(reference.inst_path.len());
+    for &segment in &reference.inst_path {
+        let candidates = lookup
+            .instance_ids
+            .keys()
+            .filter(|candidate| {
+                candidate.0.len() == resolved_path.len() + 1
+                    && candidate.0.starts_with(&resolved_path)
+                    && candidate.0[resolved_path.len()].0 == segment
+            })
+            .map(|candidate| candidate.0[resolved_path.len()])
+            .collect::<Vec<_>>();
+        match candidates.as_slice() {
+            [part] => resolved_path.push(*part),
+            [] => {
+                return Err(invalid_hierarchical_reference(
+                    reference,
+                    format!("instance `{}` was not found", source_name(segment)),
+                ));
+            }
+            _ => {
+                return Err(invalid_hierarchical_reference(
+                    reference,
+                    format!(
+                        "instance `{}` is ambiguous because it elaborates to multiple array elements",
+                        source_name(segment)
+                    ),
+                ));
+            }
+        }
+    }
+
+    let instance_id = lookup
+        .instance_ids
+        .get(&InstancePath(resolved_path))
+        .copied()
+        .ok_or_else(|| {
+            invalid_hierarchical_reference(reference, "the elaborated instance path was not found")
+        })?;
+    let module_id = lookup
+        .instance_module
+        .get(&instance_id)
+        .copied()
+        .ok_or_else(|| {
+            invalid_hierarchical_reference(reference, "the target instance has no module")
+        })?;
+    let var_id = match lookup
+        .module_var_path_index
+        .get(&module_id)
+        .and_then(|variables| variables.get(&reference.var_path))
+    {
+        Some(Some(var_id)) => *var_id,
+        Some(None) => {
+            return Err(invalid_hierarchical_reference(
+                reference,
+                format!("variable `{}` is ambiguous", reference.var_path),
+            ));
+        }
+        None => {
+            return Err(invalid_hierarchical_reference(
+                reference,
+                format!("variable `{}` was not found", reference.var_path),
+            ));
+        }
+    };
+    let info = lookup
+        .module_variables
+        .get(&module_id)
+        .and_then(|variables| variables.get(&var_id))
+        .ok_or_else(|| {
+            invalid_hierarchical_reference(reference, "the target variable has no metadata")
+        })?;
+    let address = lookup
+        .state_address(&AbsoluteAddr {
+            instance_id,
+            var_id,
+        })
+        .ok_or_else(|| {
+            invalid_hierarchical_reference(
+                reference,
+                "the target variable has no elaborated state address",
+            )
+        })?;
+    Ok((address, info))
+}
+
+/// Resolve the flattened state bits read by a hierarchical reference.
+///
+/// Static unpacked and packed indices retain their precise range. A dynamic
+/// index conservatively covers the remaining slice at that dimension.
+pub(crate) fn hierarchical_reference_bits(
+    info: &VariableInfo,
+    reference: &HierVarRef,
+) -> Result<BitAccess, ParserError> {
+    let invalid = |detail| invalid_hierarchical_reference(reference, detail);
+    let array_total = info
+        .array_dims
+        .iter()
+        .try_fold(1usize, |total, dimension| total.checked_mul(*dimension))
+        .ok_or_else(|| invalid("array dimensions overflow usize"))?;
+    if array_total == 0 || info.width == 0 || !info.width.is_multiple_of(array_total) {
+        return Err(invalid(
+            "the target variable has invalid flattened dimensions",
+        ));
+    }
+    let element_width = info.width / array_total;
+    let mut strides = vec![element_width; info.array_dims.len()];
+    let mut stride = element_width;
+    for (dimension, size) in info.array_dims.iter().enumerate().rev() {
+        strides[dimension] = stride;
+        stride = stride
+            .checked_mul(*size)
+            .ok_or_else(|| invalid("array stride overflows usize"))?;
+    }
+
+    let mut base = 0usize;
+    let mut consumed = 0usize;
+    for (dimension, expression) in reference.index.0.iter().enumerate() {
+        let Some(&dimension_stride) = strides.get(dimension) else {
+            return Err(invalid("too many unpacked array indices"));
+        };
+        let Some(index) = eval_constexpr(expression).and_then(|value| value.to_usize()) else {
+            let width = if dimension == 0 {
+                info.width
+            } else {
+                strides[dimension - 1]
+            };
+            return checked_reference_bits(reference, base, width, info.width);
+        };
+        if index >= info.array_dims[dimension] {
+            return Err(invalid_hierarchical_reference(
+                reference,
+                format!(
+                    "array index {index} is outside dimension width {}",
+                    info.array_dims[dimension]
+                ),
+            ));
+        }
+        base = base
+            .checked_add(
+                index
+                    .checked_mul(dimension_stride)
+                    .ok_or_else(|| invalid("array index offset overflows usize"))?,
+            )
+            .ok_or_else(|| invalid("array index offset overflows usize"))?;
+        consumed += 1;
+    }
+
+    let accessed_width = if consumed == 0 {
+        info.width
+    } else if consumed == info.array_dims.len() {
+        element_width
+    } else {
+        strides[consumed - 1]
+    };
+    if reference.select.0.is_empty() && reference.select.1.is_none() {
+        return checked_reference_bits(reference, base, accessed_width, info.width);
+    }
+
+    let packed_dimensions = if info.packed_dims.is_empty() {
+        vec![element_width]
+    } else {
+        info.packed_dims.clone()
+    };
+    let mut packed_strides = vec![1usize; packed_dimensions.len()];
+    let mut packed_stride = 1usize;
+    for (dimension, size) in packed_dimensions.iter().enumerate().rev() {
+        packed_strides[dimension] = packed_stride;
+        packed_stride = packed_stride
+            .checked_mul(*size)
+            .ok_or_else(|| invalid("packed stride overflows usize"))?;
+    }
+
+    let prefix_count = if reference.select.1.is_some() {
+        reference.select.0.len().saturating_sub(1)
+    } else {
+        reference.select.0.len()
+    };
+    for (dimension, expression) in reference.select.0[..prefix_count].iter().enumerate() {
+        let Some(&scale) = packed_strides.get(dimension) else {
+            return Err(invalid("too many packed indices"));
+        };
+        let Some(index) = eval_constexpr(expression).and_then(|value| value.to_usize()) else {
+            let width = if dimension == 0 {
+                accessed_width
+            } else {
+                packed_strides[dimension - 1]
+            };
+            return checked_reference_bits(reference, base, width, info.width);
+        };
+        base = base
+            .checked_add(
+                index
+                    .checked_mul(scale)
+                    .ok_or_else(|| invalid("packed index offset overflows usize"))?,
+            )
+            .ok_or_else(|| invalid("packed index offset overflows usize"))?;
+    }
+
+    let selected_width = if let Some((op, range_expression)) = &reference.select.1 {
+        let anchor_expression = reference
+            .select
+            .0
+            .last()
+            .ok_or_else(|| invalid("part select is missing its anchor"))?;
+        let current_width = if prefix_count == 0 {
+            accessed_width
+        } else {
+            packed_strides[prefix_count - 1]
+        };
+        let Some(anchor) = eval_constexpr(anchor_expression).and_then(|value| value.to_usize())
+        else {
+            return checked_reference_bits(reference, base, current_width, info.width);
+        };
+        let Some(range) = eval_constexpr(range_expression).and_then(|value| value.to_usize())
+        else {
+            return checked_reference_bits(reference, base, current_width, info.width);
+        };
+        let scale = *packed_strides
+            .get(prefix_count)
+            .ok_or_else(|| invalid("part select exceeds packed dimensions"))?;
+        let (relative_lsb, elements) = match op {
+            veryl_analyzer::ir::VarSelectOp::Colon => {
+                let elements = anchor
+                    .checked_sub(range)
+                    .and_then(|width| width.checked_add(1))
+                    .ok_or_else(|| invalid("part-select range underflows"))?;
+                (range, elements)
+            }
+            veryl_analyzer::ir::VarSelectOp::PlusColon => (anchor, range),
+            veryl_analyzer::ir::VarSelectOp::MinusColon => {
+                let lsb = anchor
+                    .checked_add(1)
+                    .and_then(|end| end.checked_sub(range))
+                    .ok_or_else(|| invalid("part-select range underflows"))?;
+                (lsb, range)
+            }
+            veryl_analyzer::ir::VarSelectOp::Step => {
+                let lsb = anchor
+                    .checked_mul(range)
+                    .ok_or_else(|| invalid("part-select offset overflows usize"))?;
+                (lsb, range)
+            }
+        };
+        base = base
+            .checked_add(
+                relative_lsb
+                    .checked_mul(scale)
+                    .ok_or_else(|| invalid("part-select offset overflows usize"))?,
+            )
+            .ok_or_else(|| invalid("part-select offset overflows usize"))?;
+        elements
+            .checked_mul(scale)
+            .ok_or_else(|| invalid("part-select width overflows usize"))?
+    } else {
+        *packed_strides
+            .get(reference.select.0.len() - 1)
+            .ok_or_else(|| invalid("packed select exceeds variable dimensions"))?
+    };
+    checked_reference_bits(reference, base, selected_width, info.width)
+}
+
+fn checked_reference_bits(
+    reference: &HierVarRef,
+    lsb: usize,
+    width: usize,
+    total_width: usize,
+) -> Result<BitAccess, ParserError> {
+    let msb = lsb
+        .checked_add(width.checked_sub(1).ok_or_else(|| {
+            invalid_hierarchical_reference(reference, "selected width must be nonzero")
+        })?)
+        .ok_or_else(|| invalid_hierarchical_reference(reference, "bit range overflows usize"))?;
+    if msb >= total_width {
+        return Err(invalid_hierarchical_reference(
+            reference,
+            "selected bit range is outside the target variable",
+        ));
+    }
+    Ok(BitAccess::new(lsb, msb))
+}
+
+fn variable_access_width(
+    info: &VariableInfo,
+    index: &VarIndex,
+    select: &VarSelect,
+) -> Option<usize> {
+    let array_total = info
+        .array_dims
+        .iter()
+        .try_fold(1usize, |total, dimension| total.checked_mul(*dimension))?;
+    if array_total == 0 || !info.width.is_multiple_of(array_total) {
+        return None;
+    }
+    let consumed = index.0.len();
+    if consumed > info.array_dims.len() {
+        return None;
+    }
+    let element_width = info.width / array_total;
+    let accessed_width = info.array_dims[consumed..]
+        .iter()
+        .try_fold(element_width, |width, dimension| {
+            width.checked_mul(*dimension)
+        })?;
+
+    let packed_dimensions = if info.packed_dims.is_empty() {
+        vec![element_width]
+    } else {
+        info.packed_dims.clone()
+    };
+    let mut packed_strides = vec![1usize; packed_dimensions.len()];
+    let mut stride = 1usize;
+    for (dimension, size) in packed_dimensions.iter().enumerate().rev() {
+        packed_strides[dimension] = stride;
+        stride = stride.checked_mul(*size)?;
+    }
+
+    if let Some((op, range_expression)) = &select.1 {
+        let range = eval_constexpr(range_expression)?.to_usize()?;
+        let dimension = select.0.len().checked_sub(1)?;
+        let stride = *packed_strides.get(dimension)?;
+        let elements = match op {
+            VarSelectOp::Colon => {
+                let anchor = eval_constexpr(select.0.last()?)?.to_usize()?;
+                anchor.checked_sub(range)?.checked_add(1)
+            }
+            VarSelectOp::PlusColon | VarSelectOp::MinusColon | VarSelectOp::Step => Some(range),
+        }?;
+        return elements.checked_mul(stride);
+    }
+    if select.0.is_empty() {
+        Some(accessed_width)
+    } else {
+        packed_strides.get(select.0.len() - 1).copied()
+    }
+}
+
+enum TestbenchRead {
+    Root(VarId),
+    Hierarchical(Box<HierVarRef>),
+}
+
 pub fn collect_testbench_observability(
+    lookup: &VerylFrontendLookup,
     source: &VerylTestbenchSource,
-) -> (Vec<RuntimeEventSite>, FxHashSet<VarId>) {
+) -> Result<(Vec<RuntimeEventSite>, FxHashSet<StateAddr>), ParserError> {
     let Some(stmts) = source.initial_statements.as_ref() else {
-        return Default::default();
+        return Ok(Default::default());
     };
     let mut sites = Vec::new();
     collect_runtime_event_sites(stmts, &source.functions, &mut sites);
-    let mut reads = FxHashSet::default();
+    let mut read_references = Vec::new();
     let mut active_functions = FxHashSet::default();
-    collect_statement_reads(stmts, &source.functions, &mut active_functions, &mut reads);
-    (sites, reads)
+    collect_statement_reads(
+        stmts,
+        &source.functions,
+        &mut active_functions,
+        &mut read_references,
+    );
+    let mut reads = FxHashSet::default();
+    for reference in read_references {
+        match reference {
+            TestbenchRead::Root(var_id) => {
+                if let Some((address, _)) = lookup.root_variable(var_id) {
+                    reads.insert(address);
+                }
+            }
+            TestbenchRead::Hierarchical(reference) => {
+                let (address, _) = resolve_hierarchical_reference(lookup, &reference)?;
+                reads.insert(address);
+            }
+        }
+    }
+    Ok((sites, reads))
 }
 
 fn collect_statement_reads(
     stmts: &[Statement],
     funcs: &fxhash::FxHashMap<VarId, Function>,
     active_functions: &mut FxHashSet<VarId>,
-    reads: &mut FxHashSet<VarId>,
+    reads: &mut Vec<TestbenchRead>,
 ) {
     for stmt in stmts {
         match stmt {
@@ -294,7 +681,7 @@ fn collect_target_reads(
     target: &veryl_analyzer::ir::AssignDestination,
     funcs: &fxhash::FxHashMap<VarId, Function>,
     active_functions: &mut FxHashSet<VarId>,
-    reads: &mut FxHashSet<VarId>,
+    reads: &mut Vec<TestbenchRead>,
 ) {
     for expr in &target.index.0 {
         collect_expression_reads(expr, funcs, active_functions, reads);
@@ -305,7 +692,7 @@ fn collect_target_reads(
     // merging the new slice.  Model that read as a DSE root; a whole-root
     // assignment does not need this extra liveness edge.
     if !target.index.0.is_empty() || !target.select.0.is_empty() || target.select.1.is_some() {
-        reads.insert(target.id);
+        reads.push(TestbenchRead::Root(target.id));
     }
 }
 
@@ -313,7 +700,7 @@ fn collect_for_bound_reads(
     range: &ForRange,
     funcs: &fxhash::FxHashMap<VarId, Function>,
     active_functions: &mut FxHashSet<VarId>,
-    reads: &mut FxHashSet<VarId>,
+    reads: &mut Vec<TestbenchRead>,
 ) {
     let (start, end) = match range {
         ForRange::Forward { start, end, .. }
@@ -331,12 +718,12 @@ fn collect_expression_reads(
     expr: &Expression,
     funcs: &fxhash::FxHashMap<VarId, Function>,
     active_functions: &mut FxHashSet<VarId>,
-    reads: &mut FxHashSet<VarId>,
+    reads: &mut Vec<TestbenchRead>,
 ) {
     match expr {
         Expression::Term(factor) => match factor.as_ref() {
             Factor::Variable(var_id, index, select, _) => {
-                reads.insert(*var_id);
+                reads.push(TestbenchRead::Root(*var_id));
                 for expr in &index.0 {
                     collect_expression_reads(expr, funcs, active_functions, reads);
                 }
@@ -348,7 +735,13 @@ fn collect_expression_reads(
             Factor::FunctionCall(call) => {
                 collect_function_call_reads(call, funcs, active_functions, reads);
             }
-            Factor::HierVariable(_) => {}
+            Factor::HierVariable(reference) => {
+                reads.push(TestbenchRead::Hierarchical(reference.clone()));
+                for expr in &reference.index.0 {
+                    collect_expression_reads(expr, funcs, active_functions, reads);
+                }
+                collect_select_reads(&reference.select, funcs, active_functions, reads);
+            }
             Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
         },
         Expression::Unary(_, inner, _) => {
@@ -398,7 +791,7 @@ fn collect_select_reads(
     select: &veryl_analyzer::ir::VarSelect,
     funcs: &fxhash::FxHashMap<VarId, Function>,
     active_functions: &mut FxHashSet<VarId>,
-    reads: &mut FxHashSet<VarId>,
+    reads: &mut Vec<TestbenchRead>,
 ) {
     for expr in &select.0 {
         collect_expression_reads(expr, funcs, active_functions, reads);
@@ -412,7 +805,7 @@ fn collect_system_function_reads(
     kind: &SystemFunctionKind,
     funcs: &fxhash::FxHashMap<VarId, Function>,
     active_functions: &mut FxHashSet<VarId>,
-    reads: &mut FxHashSet<VarId>,
+    reads: &mut Vec<TestbenchRead>,
 ) {
     let mut collect_input = |input: &SystemFunctionInput| {
         collect_expression_reads(&input.0, funcs, active_functions, reads);
@@ -444,7 +837,7 @@ fn collect_function_call_reads(
     call: &FunctionCall,
     funcs: &fxhash::FxHashMap<VarId, Function>,
     active_functions: &mut FxHashSet<VarId>,
-    reads: &mut FxHashSet<VarId>,
+    reads: &mut Vec<TestbenchRead>,
 ) {
     for expr in call.inputs.values() {
         collect_expression_reads(expr, funcs, active_functions, reads);
@@ -552,9 +945,30 @@ impl ExprCompiler<'_> {
     }
 
     fn natural_width(&self, expr: &Expression) -> usize {
-        get_expr_width(expr)
+        self.resolved_variable_access_width(expr)
+            .or_else(|| get_expr_width(expr))
             .filter(|width| *width != 0)
             .unwrap_or_else(|| self.infer_expr_width(expr).max(1))
+    }
+
+    fn resolved_variable_access_width(&self, expr: &Expression) -> Option<usize> {
+        let Expression::Term(factor) = expr else {
+            return None;
+        };
+        match factor.as_ref() {
+            Factor::Variable(var_id, index, select, _) => {
+                let (_, info) = self.lookup.root_variable(*var_id)?;
+                Some(variable_access_width(info, index, select).unwrap_or(info.width))
+            }
+            Factor::HierVariable(reference) => {
+                let (_, info) = resolve_hierarchical_reference(self.lookup, reference).ok()?;
+                Some(
+                    variable_access_width(info, &reference.index, &reference.select)
+                        .unwrap_or(info.width),
+                )
+            }
+            _ => None,
+        }
     }
 
     fn root_context(&self, expr: &Expression) -> ValueContext {
@@ -785,8 +1199,8 @@ impl ExprCompiler<'_> {
                     && let Ok(value) = comptime.get_value()
                 {
                     self.emit_constant_value(value, ops);
-                } else if let Some(sig) = self.resolve_var(var_id) {
-                    self.emit_var_access(var_id, sig, index, select, ops);
+                } else if let Some((address, info)) = self.lookup.root_variable(*var_id) {
+                    self.emit_var_access(address, info, index, select, ops);
                 } else if let Ok(value) = comptime.get_value() {
                     self.emit_constant_value(value, ops);
                 } else {
@@ -803,10 +1217,10 @@ impl ExprCompiler<'_> {
             Factor::FunctionCall(fc) => {
                 self.emit_function_call(fc, ops);
             }
-            Factor::HierVariable(_) => {
-                unreachable!(
-                    "hierarchical testbench references are rejected before bytecode emission"
-                )
+            Factor::HierVariable(reference) => {
+                let (address, info) = resolve_hierarchical_reference(self.lookup, reference)
+                    .expect("hierarchical testbench references are validated before emission");
+                self.emit_var_access(address, info, &reference.index, &reference.select, ops);
             }
             Factor::SystemFunctionCall(call) => match &call.kind {
                 SystemFunctionKind::Signed(input) | SystemFunctionKind::Unsigned(input) => {
@@ -927,23 +1341,15 @@ impl ExprCompiler<'_> {
     /// array indices and bit selects.
     fn emit_var_access(
         &self,
-        var_id: &VarId,
-        sig: SemanticSignal<StateAddr>,
+        address: StateAddr,
+        info: &VariableInfo,
         index: &veryl_analyzer::ir::VarIndex,
         select: &veryl_analyzer::ir::VarSelect,
         ops: &mut Vec<UnboundTbOpcode>,
     ) {
-        let info = match self.lookup.root_variable(*var_id) {
-            Some((_, info)) => info,
-            None => {
-                self.emit_load(*var_id, 0, sig.width, ops);
-                return;
-            }
-        };
-
         // No index or select → whole variable
         if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
-            self.emit_load(*var_id, 0, sig.width, ops);
+            self.emit_load_at(address, 0, info.width, ops);
             return;
         }
 
@@ -960,9 +1366,10 @@ impl ExprCompiler<'_> {
             }
         }
 
-        // Process unpacked array indices
+        // Build one flattened bit offset for all unpacked and packed indices.
+        // Dynamic terms remain on the expression stack until the final load.
         let mut static_bit_offset: usize = 0;
-        let mut dynamic_emitted = false;
+        let mut dynamic_terms = 0usize;
 
         for (i, idx_expr) in index.0.iter().enumerate() {
             if i >= info.array_dims.len() {
@@ -974,33 +1381,15 @@ impl ExprCompiler<'_> {
                 // Static index: accumulate into offset
                 static_bit_offset += idx_val * stride;
             } else {
-                // Dynamic index: emit the index expression, then LoadIndexed
-                let base_byte_offset = static_bit_offset / 8;
-                let stride_bytes = get_byte_size(stride);
-                let elem_byte_size = get_byte_size(element_width);
+                // Keep the dynamic flattened bit offset on the stack. All
+                // dimensions are consumed before the selected subarray is
+                // loaded, so a dynamic outer index does not discard inner
+                // indices or force the result down to one scalar element.
                 self.emit(idx_expr, ops);
-                ops.push(TbOpcode::LoadIndexed {
-                    location: self.state_location(*var_id, base_byte_offset),
-                    stride_bytes,
-                    element_byte_size: elem_byte_size,
-                    element_width,
-                });
-                dynamic_emitted = true;
-                // After a dynamic index, remaining indices would need chaining.
-                // For now, only single dynamic index is supported.
-                break;
+                Self::finish_dynamic_offset_term(stride, ops, &mut dynamic_terms);
             }
         }
 
-        if dynamic_emitted {
-            // Apply bit select on top of dynamic result if present
-            if select.1.is_some() || !select.0.is_empty() {
-                self.emit_post_select(select, element_width, ops);
-            }
-            return;
-        }
-
-        // All indices were static — apply bit select
         let accessed_width = if index.0.len() >= info.array_dims.len() {
             element_width
         } else if index.0.is_empty() {
@@ -1009,129 +1398,146 @@ impl ExprCompiler<'_> {
             strides_bits[index.0.len() - 1]
         };
 
-        if select.0.is_empty() && select.1.is_none() {
-            // No bit select, just load the element
-            let byte_offset = static_bit_offset / 8;
-            let sub = static_bit_offset % 8;
-            if sub == 0 {
-                self.emit_load(*var_id, byte_offset, accessed_width, ops);
-            } else {
-                let load_width = accessed_width + sub;
-                self.emit_load(*var_id, byte_offset, load_width, ops);
-                ops.push(TbOpcode::ConstU64(sub as u64));
-                ops.push(TbOpcode::BinOp(Op::LogicShiftR));
-                if accessed_width < 64 {
-                    ops.push(TbOpcode::ConstU64((1u64 << accessed_width) - 1));
-                    ops.push(TbOpcode::BinOp(Op::BitAnd));
-                }
-            }
-            return;
-        }
+        let (select_offset, selected_width) =
+            self.emit_select_offset(info, select, accessed_width, ops, &mut dynamic_terms);
+        static_bit_offset += select_offset;
 
-        // Static bit select
-        let (sel_lsb, sel_width, is_dynamic_select) = self.resolve_select(select, ops);
-
-        if is_dynamic_select {
-            // Dynamic bit select: load full value, shift by dynamic amount, mask
-            let byte_offset = static_bit_offset / 8;
-            let total_byte_size = get_byte_size(accessed_width);
-            ops.push(TbOpcode::LoadBitSelect {
-                location: self.state_location(*var_id, byte_offset),
-                base_byte_size: total_byte_size,
-                select_width: sel_width,
+        if dynamic_terms != 0 {
+            ops.push(TbOpcode::LoadIndexed {
+                location: Self::state_location_at(address, 0),
+                stride_bits: 1,
+                base_bit_offset: static_bit_offset,
+                element_width: selected_width,
             });
             return;
         }
 
-        let bit_offset = static_bit_offset + sel_lsb;
+        let bit_offset = static_bit_offset;
         let byte_offset = bit_offset / 8;
         let sub = bit_offset % 8;
         if sub == 0 {
-            self.emit_load(*var_id, byte_offset, sel_width, ops);
+            self.emit_load_at(address, byte_offset, selected_width, ops);
         } else {
-            let load_width = sel_width + sub;
-            self.emit_load(*var_id, byte_offset, load_width, ops);
+            let load_width = selected_width + sub;
+            self.emit_load_at(address, byte_offset, load_width, ops);
             ops.push(TbOpcode::ConstU64(sub as u64));
             ops.push(TbOpcode::BinOp(Op::LogicShiftR));
-            if sel_width < 64 {
-                ops.push(TbOpcode::ConstU64((1u64 << sel_width) - 1));
+            if selected_width < 64 {
+                ops.push(TbOpcode::ConstU64((1u64 << selected_width) - 1));
                 ops.push(TbOpcode::BinOp(Op::BitAnd));
             }
         }
     }
 
-    /// Resolve a VarSelect to `(lsb, width, is_dynamic)`.
-    /// If any index is dynamic, emits the dynamic index expression to `ops`
-    /// and returns `is_dynamic = true`.
-    fn resolve_select(
-        &self,
-        select: &veryl_analyzer::ir::VarSelect,
+    fn finish_dynamic_offset_term(
+        multiplier: usize,
         ops: &mut Vec<UnboundTbOpcode>,
-    ) -> (usize, usize, bool) {
-        if let Some((op, range_expr)) = &select.1 {
-            let anchor_expr = select.0.last();
-            let anchor = anchor_expr.and_then(Self::try_const_usize);
-            let range_val = Self::try_const_usize(range_expr);
-
-            if let (Some(a), Some(v)) = (anchor, range_val) {
-                let (lsb, msb) = match op {
-                    veryl_analyzer::ir::VarSelectOp::Colon => (v, a),
-                    veryl_analyzer::ir::VarSelectOp::PlusColon => (a, a + v - 1),
-                    veryl_analyzer::ir::VarSelectOp::MinusColon => (a.saturating_sub(v) + 1, a),
-                    veryl_analyzer::ir::VarSelectOp::Step => (a * v, (a + 1) * v - 1),
-                };
-                return (lsb, msb - lsb + 1, false);
-            }
-
-            // Dynamic select: emit the anchor expression
-            if let Some(anchor_expr) = anchor_expr {
-                self.emit(anchor_expr, ops);
-            } else {
-                ops.push(TbOpcode::ConstU64(0));
-            }
-            let width = range_val.unwrap_or(1);
-            return (0, width, true);
-        }
-
-        // Simple bit index (no range)
-        if let Some(first) = select.0.first() {
-            if let Some(idx) = Self::try_const_usize(first) {
-                return (idx, 1, false);
-            }
-            // Dynamic single bit select
-            self.emit(first, ops);
-            return (0, 1, true);
-        }
-
-        (0, 0, false)
-    }
-
-    /// Emit post-load bit select operations on a value already on the stack
-    /// (for dynamic array element access followed by bit select).
-    fn emit_post_select(
-        &self,
-        select: &veryl_analyzer::ir::VarSelect,
-        _base_width: usize,
-        ops: &mut Vec<UnboundTbOpcode>,
+        dynamic_terms: &mut usize,
     ) {
-        let (lsb, width, is_dynamic) = self.resolve_select(select, ops);
-        if is_dynamic {
-            // Stack: [value, bit_index]
-            ops.push(TbOpcode::BinOp(Op::LogicShiftR));
-            if width < 64 {
-                ops.push(TbOpcode::ConstU64((1u64 << width) - 1));
-                ops.push(TbOpcode::BinOp(Op::BitAnd));
-            }
-        } else if lsb > 0 || width > 0 {
-            if lsb > 0 {
-                ops.push(TbOpcode::ConstU64(lsb as u64));
-                ops.push(TbOpcode::BinOp(Op::LogicShiftR));
-            }
-            if width > 0 && width < 64 {
-                ops.push(TbOpcode::ConstU64((1u64 << width) - 1));
-                ops.push(TbOpcode::BinOp(Op::BitAnd));
+        if multiplier != 1 {
+            ops.push(TbOpcode::ConstU64(multiplier as u64));
+            ops.push(TbOpcode::BinOp(Op::Mul));
+        }
+        if *dynamic_terms != 0 {
+            ops.push(TbOpcode::BinOp(Op::Add));
+        }
+        *dynamic_terms += 1;
+    }
+
+    /// Append packed indices to the flattened bit offset and return the
+    /// remaining static offset plus the selected result width.
+    fn emit_select_offset(
+        &self,
+        info: &VariableInfo,
+        select: &VarSelect,
+        accessed_width: usize,
+        ops: &mut Vec<UnboundTbOpcode>,
+        dynamic_terms: &mut usize,
+    ) -> (usize, usize) {
+        if select.0.is_empty() && select.1.is_none() {
+            return (0, accessed_width);
+        }
+
+        let packed_dimensions = if info.packed_dims.is_empty() {
+            vec![accessed_width]
+        } else {
+            info.packed_dims.clone()
+        };
+        let mut strides = vec![1usize; packed_dimensions.len()];
+        let mut stride = 1usize;
+        for (dimension, size) in packed_dimensions.iter().enumerate().rev() {
+            strides[dimension] = stride;
+            stride = stride.saturating_mul(*size);
+        }
+
+        let prefix_count = if select.1.is_some() {
+            select.0.len().saturating_sub(1)
+        } else {
+            select.0.len()
+        };
+        let mut static_offset = 0usize;
+        for (dimension, expression) in select.0[..prefix_count].iter().enumerate() {
+            let scale = strides[dimension];
+            if let Some(index) = Self::try_const_usize(expression) {
+                static_offset += index * scale;
+            } else {
+                self.emit(expression, ops);
+                Self::finish_dynamic_offset_term(scale, ops, dynamic_terms);
             }
         }
+
+        let Some((op, range_expression)) = &select.1 else {
+            let selected_width = strides[select.0.len() - 1];
+            return (static_offset, selected_width);
+        };
+        let anchor_expression = select
+            .0
+            .last()
+            .expect("validated part select has an anchor");
+        let range = Self::try_const_usize(range_expression)
+            .expect("validated part-select range is compile-time constant");
+        let scale = strides[prefix_count];
+        let elements = match op {
+            VarSelectOp::Colon => {
+                let anchor = Self::try_const_usize(anchor_expression)
+                    .expect("validated colon-select anchor is compile-time constant");
+                static_offset += range * scale;
+                anchor - range + 1
+            }
+            VarSelectOp::PlusColon => {
+                if let Some(anchor) = Self::try_const_usize(anchor_expression) {
+                    static_offset += anchor * scale;
+                } else {
+                    self.emit(anchor_expression, ops);
+                    Self::finish_dynamic_offset_term(scale, ops, dynamic_terms);
+                }
+                range
+            }
+            VarSelectOp::MinusColon => {
+                if let Some(anchor) = Self::try_const_usize(anchor_expression) {
+                    static_offset += (anchor + 1 - range) * scale;
+                } else {
+                    self.emit(anchor_expression, ops);
+                    ops.push(TbOpcode::ConstU64(1));
+                    ops.push(TbOpcode::BinOp(Op::Add));
+                    ops.push(TbOpcode::ConstU64(range as u64));
+                    ops.push(TbOpcode::BinOp(Op::Sub));
+                    Self::finish_dynamic_offset_term(scale, ops, dynamic_terms);
+                }
+                range
+            }
+            VarSelectOp::Step => {
+                let multiplier = range.saturating_mul(scale);
+                if let Some(anchor) = Self::try_const_usize(anchor_expression) {
+                    static_offset += anchor * multiplier;
+                } else {
+                    self.emit(anchor_expression, ops);
+                    Self::finish_dynamic_offset_term(multiplier, ops, dynamic_terms);
+                }
+                range
+            }
+        };
+        (static_offset, elements * scale)
     }
 
     fn append_offset_term(
@@ -1633,6 +2039,21 @@ impl ExprCompiler<'_> {
         width: usize,
         ops: &mut Vec<UnboundTbOpcode>,
     ) {
+        let address = self
+            .lookup
+            .root_variable(var_id)
+            .map(|(address, _)| address)
+            .expect("frontend state projection is complete");
+        self.emit_load_at(address, byte_offset, width, ops);
+    }
+
+    fn emit_load_at(
+        &self,
+        address: StateAddr,
+        byte_offset: usize,
+        width: usize,
+        ops: &mut Vec<UnboundTbOpcode>,
+    ) {
         let byte_size = get_byte_size(width);
         if byte_size <= 8 {
             let mask = if width >= 64 {
@@ -1641,13 +2062,13 @@ impl ExprCompiler<'_> {
                 (1u64 << width) - 1
             };
             ops.push(TbOpcode::LoadU64 {
-                location: self.state_location(var_id, byte_offset),
+                location: Self::state_location_at(address, byte_offset),
                 byte_size,
                 mask,
             });
         } else {
             ops.push(TbOpcode::LoadWide {
-                location: self.state_location(var_id, byte_offset),
+                location: Self::state_location_at(address, byte_offset),
                 byte_size,
                 width,
             });
@@ -1655,12 +2076,17 @@ impl ExprCompiler<'_> {
     }
 
     fn state_location(&self, var_id: VarId, byte_offset: usize) -> StateLocation<StateAddr> {
+        let address = self
+            .lookup
+            .root_variable(var_id)
+            .map(|(address, _)| address)
+            .expect("frontend state projection is complete");
+        Self::state_location_at(address, byte_offset)
+    }
+
+    fn state_location_at(address: StateAddr, byte_offset: usize) -> StateLocation<StateAddr> {
         StateLocation {
-            address: self
-                .lookup
-                .root_variable(var_id)
-                .map(|(address, _)| address)
-                .expect("frontend state projection is complete"),
+            address,
             byte_offset,
         }
     }
@@ -1673,6 +2099,9 @@ impl ExprCompiler<'_> {
     /// Infer the bit width of an expression. Falls back to comptime if available,
     /// otherwise resolves from VariableInfo for variables.
     fn infer_expr_width(&self, expr: &Expression) -> usize {
+        if let Some(width) = self.resolved_variable_access_width(expr) {
+            return width;
+        }
         let ctx_width = expr.comptime().expr_context.width;
         if ctx_width > 0 {
             return ctx_width;
@@ -1683,27 +2112,19 @@ impl ExprCompiler<'_> {
                 return w;
             }
         }
-        // For terms, look up variable info
+        // For terms, use constant value widths as a final fallback.
         if let Expression::Term(f) = expr {
-            match f.as_ref() {
-                Factor::Variable(var_id, _, _, _) => {
-                    if let Some((_, info)) = self.lookup.root_variable(*var_id) {
-                        return info.width;
-                    }
-                }
-                Factor::Value(c) => {
-                    if let Ok(v) = c.get_value() {
-                        return v.width();
-                    }
-                }
-                _ => {}
+            if let Factor::Value(c) = f.as_ref()
+                && let Ok(v) = c.get_value()
+            {
+                return v.width();
             }
         }
         0
     }
 
     fn try_const_usize(expr: &Expression) -> Option<usize> {
-        usize::try_from(try_eval_const(expr)?).ok()
+        eval_constexpr(expr).and_then(|value| value.to_usize())
     }
 
     fn resolve_var(&self, var_id: &VarId) -> Option<SemanticSignal<StateAddr>> {
@@ -2287,13 +2708,15 @@ fn validate_testbench_expression(
 ) -> Result<(), ParserError> {
     match expression {
         Expression::Term(factor) => match factor.as_ref() {
-            Factor::HierVariable(reference) => Err(ParserError::unsupported(
-                467,
-                LoweringPhase::SimulatorParser,
-                "hierarchical variable reference",
-                format!("{}", reference.var_path),
-                Some(&reference.comptime.token),
-            )),
+            Factor::HierVariable(reference) => {
+                for expression in reference.index.0.iter().chain(reference.select.0.iter()) {
+                    validate_testbench_expression(expression, lookup, source, active_functions)?;
+                }
+                if let Some((_, expression)) = &reference.select.1 {
+                    validate_testbench_expression(expression, lookup, source, active_functions)?;
+                }
+                Ok(())
+            }
             Factor::Variable(_, index, select, _) => {
                 for expression in index.0.iter().chain(select.0.iter()) {
                     validate_testbench_expression(expression, lookup, source, active_functions)?;
@@ -2323,11 +2746,9 @@ fn validate_testbench_expression(
                 let end = (token.end.pos + token.end.length) as usize;
                 let factor_text = source.get(start..end).unwrap_or_default();
                 if factor_text.contains('.') {
-                    Err(ParserError::unsupported(
-                        467,
-                        LoweringPhase::SimulatorParser,
+                    Err(ParserError::illegal_context(
                         "hierarchical variable reference",
-                        factor_text,
+                        format!("`{factor_text}` was not resolved by the analyzer"),
                         Some(token),
                     ))
                 } else {
@@ -2652,10 +3073,141 @@ pub fn compile_semantic_testbench(
     let Some(initial_stmts) = source.initial_statements.as_ref() else {
         return Ok(None);
     };
+    // Resolve every hierarchical read before the infallible bytecode emitter
+    // runs. The same walk also guarantees direct callers get path diagnostics,
+    // even when observability projection is not invoked separately.
+    let _ = collect_testbench_observability(lookup, source)?;
     validate_testbench_statements(initial_stmts, lookup, source, &mut FxHashSet::default())?;
     let mut builder = SemanticTestbenchBuilder::new(lookup, source, runtime_event_site_count);
     builder.build_event_map(initial_stmts);
     Ok(Some(
         TestbenchProgram::new(builder.convert(initial_stmts)).with_random_seed_option(random_seed),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use celox_design::{
+        DomainKind, InstanceId, ModuleId, PortTypeKind, StateObjectId, VariableMetadata,
+    };
+    use veryl_analyzer::ir::{Comptime, VarIndex, VarKind, VarPath, VarSelect};
+
+    fn reference(inst_path: Vec<StrId>, var_path: VarPath) -> HierVarRef {
+        HierVarRef {
+            inst_path,
+            var_path,
+            index: VarIndex::default(),
+            select: VarSelect::default(),
+            comptime: Comptime::default(),
+        }
+    }
+
+    fn lookup_with_child(child_name: StrId, variable_name: StrId) -> VerylFrontendLookup {
+        let root_instance = InstanceId(0);
+        let child_instance = InstanceId(1);
+        let root_module = ModuleId(0);
+        let child_module = ModuleId(1);
+        let var_id = VarId::from_raw(0);
+        let source_address = AbsoluteAddr {
+            instance_id: child_instance,
+            var_id,
+        };
+        let state_address = StateAddr {
+            instance_id: child_instance,
+            var_id: StateObjectId(0),
+        };
+        let path = VarPath(vec![variable_name]);
+        let info = VariableInfo {
+            id: var_id,
+            path: path.clone(),
+            var_kind: VarKind::Variable,
+            packed_dims: vec![8],
+            metadata: VariableMetadata {
+                width: 8,
+                is_4state: true,
+                kind: DomainKind::Other,
+                type_kind: PortTypeKind::Logic,
+                array_dims: Vec::new(),
+            },
+        };
+
+        let mut lookup = VerylFrontendLookup::default();
+        lookup
+            .instance_ids
+            .insert(InstancePath(Vec::new()), root_instance);
+        lookup
+            .instance_ids
+            .insert(InstancePath(vec![(child_name, 0)]), child_instance);
+        lookup.instance_module.insert(root_instance, root_module);
+        lookup.instance_module.insert(child_instance, child_module);
+        lookup
+            .module_variables
+            .entry(child_module)
+            .or_default()
+            .insert(var_id, info);
+        lookup
+            .module_var_path_index
+            .entry(child_module)
+            .or_default()
+            .insert(path, Some(var_id));
+        lookup.source_to_state.insert(source_address, state_address);
+        lookup.state_to_source.insert(state_address, source_address);
+        lookup
+    }
+
+    #[test]
+    fn hierarchical_reference_reports_missing_instance_segment() {
+        let dut = resource_table::insert_str("dut");
+        let missing = resource_table::insert_str("missing");
+        let q = resource_table::insert_str("q");
+        let lookup = lookup_with_child(dut, q);
+        let reference = reference(vec![missing], VarPath(vec![q]));
+
+        let error = resolve_hierarchical_reference(&lookup, &reference).unwrap_err();
+        let ParserError::IllegalContext {
+            feature, detail, ..
+        } = error
+        else {
+            panic!("expected invalid hierarchical path diagnostic");
+        };
+        assert_eq!(feature, "hierarchical variable reference");
+        assert!(detail.contains("instance `missing` was not found"));
+    }
+
+    #[test]
+    fn hierarchical_reference_reports_missing_target_variable() {
+        let dut = resource_table::insert_str("dut");
+        let q = resource_table::insert_str("q");
+        let missing = resource_table::insert_str("missing");
+        let lookup = lookup_with_child(dut, q);
+        let reference = reference(vec![dut], VarPath(vec![missing]));
+
+        let error = resolve_hierarchical_reference(&lookup, &reference).unwrap_err();
+        let ParserError::IllegalContext {
+            feature, detail, ..
+        } = error
+        else {
+            panic!("expected invalid hierarchical variable diagnostic");
+        };
+        assert_eq!(feature, "hierarchical variable reference");
+        assert!(detail.contains("variable `missing` was not found"));
+    }
+
+    #[test]
+    fn hierarchical_message_argument_width_uses_resolved_variable_metadata() {
+        let dut = resource_table::insert_str("dut");
+        let q = resource_table::insert_str("q");
+        let lookup = lookup_with_child(dut, q);
+        let source = VerylTestbenchSource::default();
+        let compiler = ExprCompiler {
+            lookup: &lookup,
+            testbench_source: &source,
+        };
+        let input = SystemFunctionInput(Expression::Term(Box::new(Factor::HierVariable(
+            Box::new(reference(vec![dut], VarPath(vec![q]))),
+        ))));
+
+        assert_eq!(compile_assert_arg(&input, &compiler).width, 8);
+    }
 }
