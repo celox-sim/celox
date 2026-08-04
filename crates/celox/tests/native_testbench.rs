@@ -77,6 +77,76 @@ fn test_native_testbench_uses_metadata_project_name() {
 }
 
 #[test]
+fn test_random_methods_match_veryl_sequence() {
+    let explicit = veryl_parser::resource_table::insert_str("r");
+    veryl_simulator::random_table::reset(0);
+    veryl_simulator::random_table::seed_handle(explicit, 1234);
+    let exact =
+        veryl_simulator::random_table::get_range(explicit, 100, 100, 8, false).payload_u64();
+    let ranged = veryl_simulator::random_table::get_range(explicit, 0, 7, 8, false).payload_u64();
+    let full0 = veryl_simulator::random_table::get(explicit, 8, false).payload_u64();
+    let full1 = veryl_simulator::random_table::get(explicit, 8, false).payload_u64();
+
+    let signed = veryl_parser::resource_table::insert_str("s");
+    veryl_simulator::random_table::seed_handle(signed, 999);
+    let signed_range =
+        veryl_simulator::random_table::get_range(signed, 251, 5, 8, true).payload_u64();
+
+    let derived = veryl_parser::resource_table::insert_str("derived");
+    veryl_simulator::random_table::reset(42);
+    let derived_seed = veryl_simulator::random_table::get_seed_handle(derived);
+    let derived_value = veryl_simulator::random_table::get(derived, 16, false).payload_u64();
+
+    let code = format!(
+        r#"
+        #[test(t)]
+        module t {{
+            var r      : $tb::random::<u8> ;
+            var s      : $tb::random::<i8> ;
+            var derived: $tb::random::<u16>;
+            var x   : u8 ;
+            var sx  : i8 ;
+            var x16 : u16;
+            var seed: u64;
+            initial {{
+                r.seed(1234);
+                x = r.get_range(100, 100);
+                $assert(x == 8'd{exact});
+                x = r.get_range(0, 7);
+                $assert(x == 8'd{ranged});
+                x = r.get();
+                $assert(x == 8'd{full0});
+                x = r.get();
+                $assert(x == 8'd{full1});
+                seed = r.get_seed();
+                $assert(seed == 64'd1234);
+
+                s.seed(999);
+                sx = s.get_range(-5, 5);
+                $assert((sx as u8) == 8'd{signed_range});
+
+                seed = derived.get_seed();
+                $assert(seed == 64'd{derived_seed});
+                x16 = derived.get();
+                $assert(x16 == 16'd{derived_value});
+                $finish();
+            }}
+        }}
+        "#,
+    );
+    let mut metadata = Metadata::create_default("prj").unwrap();
+    metadata.test.seed = Some(42);
+
+    assert_eq!(
+        Simulator::builder(&code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
 fn test_counter_pass() {
     let code = format!(
         r#"
