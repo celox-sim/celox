@@ -2704,7 +2704,7 @@ fn functions_from_module_node(
         else {
             continue;
         };
-        validate_function_declaration_statements(declaration)?;
+        validate_function_declaration_statements(declaration, syntax_tree, packed_dimensions)?;
         if let Some(function) = function_from_declaration(
             declaration,
             syntax_tree,
@@ -2720,6 +2720,8 @@ fn functions_from_module_node(
 
 fn validate_function_declaration_statements(
     declaration: &sv_parser::FunctionDeclaration,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Result<(), AnalyzerError> {
     let statements = match &declaration.nodes.2 {
         sv_parser::FunctionBodyDeclaration::WithPort(body) => &body.nodes.6,
@@ -2729,21 +2731,27 @@ fn validate_function_declaration_statements(
         let sv_parser::FunctionStatementOrNull::Statement(statement) = statement else {
             continue;
         };
-        validate_function_statement(&statement.nodes.0)?;
+        validate_function_statement(&statement.nodes.0, syntax_tree, packed_dimensions)?;
     }
     Ok(())
 }
 
 fn validate_function_statement_or_null(
     statement: &sv_parser::StatementOrNull,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Result<(), AnalyzerError> {
     let sv_parser::StatementOrNull::Statement(statement) = statement else {
         return Ok(());
     };
-    validate_function_statement(statement)
+    validate_function_statement(statement, syntax_tree, packed_dimensions)
 }
 
-fn validate_function_statement(statement: &sv_parser::Statement) -> Result<(), AnalyzerError> {
+fn validate_function_statement(
+    statement: &sv_parser::Statement,
+    syntax_tree: &SyntaxTree,
+    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+) -> Result<(), AnalyzerError> {
     match &statement.nodes.2 {
         sv_parser::StatementItem::JumpStatement(statement)
             if matches!(&**statement, sv_parser::JumpStatement::Return(_)) =>
@@ -2753,17 +2761,33 @@ fn validate_function_statement(statement: &sv_parser::Statement) -> Result<(), A
         sv_parser::StatementItem::BlockingAssignment(_) => Ok(()),
         sv_parser::StatementItem::SeqBlock(block) => {
             for statement in &block.nodes.3 {
-                validate_function_statement_or_null(statement)?;
+                validate_function_statement_or_null(statement, syntax_tree, packed_dimensions)?;
             }
             Ok(())
         }
         sv_parser::StatementItem::ConditionalStatement(statement) => {
-            validate_function_statement_or_null(&statement.nodes.3)?;
-            for (_, _, _, branch) in &statement.nodes.4 {
-                validate_function_statement_or_null(branch)?;
+            expr_from_cond_predicate(&statement.nodes.2.nodes.1, syntax_tree, packed_dimensions)
+                .ok_or_else(|| {
+                    AnalyzerError::Unsupported(
+                        "unsupported function conditional predicate".to_string(),
+                    )
+                })?;
+            validate_function_statement_or_null(
+                &statement.nodes.3,
+                syntax_tree,
+                packed_dimensions,
+            )?;
+            for (_, _, predicate, branch) in &statement.nodes.4 {
+                expr_from_cond_predicate(&predicate.nodes.1, syntax_tree, packed_dimensions)
+                    .ok_or_else(|| {
+                        AnalyzerError::Unsupported(
+                            "unsupported function conditional predicate".to_string(),
+                        )
+                    })?;
+                validate_function_statement_or_null(branch, syntax_tree, packed_dimensions)?;
             }
             if let Some((_, branch)) = &statement.nodes.5 {
-                validate_function_statement_or_null(branch)?;
+                validate_function_statement_or_null(branch, syntax_tree, packed_dimensions)?;
             }
             Ok(())
         }
@@ -2778,7 +2802,7 @@ fn validate_function_statement(statement: &sv_parser::Statement) -> Result<(), A
                     sv_parser::CaseItem::NonDefault(item) => &item.nodes.2,
                     sv_parser::CaseItem::Default(item) => &item.nodes.2,
                 };
-                validate_function_statement_or_null(branch)?;
+                validate_function_statement_or_null(branch, syntax_tree, packed_dimensions)?;
             }
             Ok(())
         }

@@ -982,6 +982,76 @@ fn resolves_parent_parameters_in_input_port_connections() {
 }
 
 #[test]
+fn preserves_inferred_parameter_types_in_hierarchy_connections() {
+    let source = r#"
+        module Child(input logic signed [63:0] value, output logic [63:0] y);
+            assign y = value;
+        endmodule
+        module Top(output logic [63:0] y);
+            parameter P = 8'shff;
+            Child child(.value(P), .y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("inferred_parent_constant.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), u64::MAX.into());
+}
+
+#[test]
+fn accepts_reachable_parameter_specialized_net_drivers() {
+    let source = r#"
+        module Driver(output wire y); assign y = 1'b1; endmodule
+        module Child #(parameter ENABLE = 0) (output logic y);
+            wire w;
+            if (ENABLE) Driver driver(.y(w));
+            assign y = w;
+        endmodule
+        module Top(output logic y);
+            Child #(.ENABLE(1)) child(.y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("specialized_net_driver.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn counts_only_active_conditional_generate_instance_drivers() {
+    let source = r#"
+        module DriveZero(output wire y); assign y = 1'b0; endmodule
+        module DriveOne(output wire y); assign y = 1'b1; endmodule
+        module Top #(parameter SELECT = 1) (output wire y);
+            if (SELECT) DriveOne selected(.y(y));
+            else DriveZero unselected(.y(y));
+        endmodule
+    "#;
+    let mut selected = Simulator::from_sv_sources(
+        vec![(source, Path::new("conditional_instance_drivers.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(selected.get(selected.signal("y")), 1u8.into());
+
+    let mut unselected = Simulator::from_sv_sources(
+        vec![(source, Path::new("conditional_instance_drivers.sv"))],
+        "Top",
+    )
+    .param("SELECT", 0)
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(unselected.get(unselected.signal("y")), 0u8.into());
+}
+
+#[test]
 fn handles_fill_literals_ascending_ranges_atom_types_and_unary_constants() {
     let source = r#"
         module Top(input logic [0:7] ascending, input int a, b,
@@ -1531,6 +1601,18 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                 function automatic logic choose(input logic x);
                     if (x) return 1'b1;
                     return 1'b0;
+                endfunction
+                assign y = choose(a);
+            endmodule
+        "#,
+        ),
+        (
+            "unsupported function conditional predicate",
+            r#"
+            module Top(input logic [3:0] a, output logic y);
+                function automatic logic choose(input logic [3:0] value);
+                    if (value ** 2) return 1'b1;
+                    else return 1'b0;
                 endfunction
                 assign y = choose(a);
             endmodule

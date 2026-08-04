@@ -23,13 +23,16 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             if let Some(resolved_value) = resolved_value {
                 constants.insert(parameter.name().to_string(), resolved_value);
             }
-            if let Some(r#type) = parameter.resolved_type(&parameter_types) {
+            let resolved_type = parameter.resolved_type(&parameter_types);
+            if let Some(r#type) = resolved_type {
                 parameter_types.insert(parameter.name().to_string(), r#type);
             }
             parameters.push(ir::Parameter::new(
                 parameter.name().to_string(),
                 value,
                 resolved_value,
+                resolved_type.map(|r#type| r#type.width),
+                resolved_type.map(|r#type| r#type.signed),
                 parameter.declared_width(),
                 parameter.declared_signed(),
             ));

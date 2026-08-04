@@ -97,6 +97,8 @@ pub struct Parameter {
     name: String,
     value: Option<ConstExpr>,
     resolved_value: Option<i128>,
+    resolved_width: Option<usize>,
+    resolved_signed: Option<bool>,
     declared_width: Option<usize>,
     declared_signed: Option<bool>,
 }
@@ -106,6 +108,8 @@ impl Parameter {
         name: String,
         value: Option<ConstExpr>,
         resolved_value: Option<i128>,
+        resolved_width: Option<usize>,
+        resolved_signed: Option<bool>,
         declared_width: Option<usize>,
         declared_signed: Option<bool>,
     ) -> Self {
@@ -113,6 +117,8 @@ impl Parameter {
             name,
             value,
             resolved_value,
+            resolved_width,
+            resolved_signed,
             declared_width,
             declared_signed,
         }
@@ -128,6 +134,14 @@ impl Parameter {
 
     pub fn resolved_value(&self) -> Option<i128> {
         self.resolved_value
+    }
+
+    pub fn resolved_width(&self) -> Option<usize> {
+        self.resolved_width
+    }
+
+    pub fn resolved_signed(&self) -> Option<bool> {
+        self.resolved_signed
     }
 
     pub fn declared_width(&self) -> Option<usize> {

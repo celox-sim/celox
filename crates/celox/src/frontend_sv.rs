@@ -163,52 +163,7 @@ pub(crate) fn analyze_sources(
             modules.insert(name, lower_module(module, code, path)?);
         }
     }
-    validate_instance_net_drivers(&modules)?;
     Ok(modules)
-}
-
-fn validate_instance_net_drivers(
-    modules: &HashMap<resource_table::StrId, LoweredSvModule>,
-) -> Result<(), sv::AnalyzerError> {
-    for module in modules.values() {
-        let net_names = module
-            .source
-            .signals()
-            .iter()
-            .filter(|signal| signal.is_net())
-            .map(|signal| (signal.name(), true))
-            .chain(
-                module
-                    .source
-                    .ports()
-                    .iter()
-                    .filter(|port| port.is_net())
-                    .map(|port| (port.name(), false)),
-            );
-        for (signal_name, require_driver) in net_names {
-            let child_driver_count = module
-                .instances
-                .iter()
-                .filter_map(|instance| Some((instance, modules.get(&instance.module_name)?)))
-                .flat_map(|(instance, child)| {
-                    instance.port_connections.iter().filter(move |connection| {
-                        matches!(
-                            connection.actual_expr.as_ref(),
-                            Some(sv::ir::Expr::Ident(name)) if name == signal_name
-                        ) && child.source.ports().iter().any(|port| {
-                            port.name() == connection.formal
-                                && matches!(
-                                    port.direction(),
-                                    sv::ir::PortDirection::Output | sv::ir::PortDirection::Inout
-                                )
-                        })
-                    })
-                })
-                .count();
-            validate_net_driver_ranges(module, signal_name, child_driver_count, require_driver)?;
-        }
-    }
-    Ok(())
 }
 
 fn validate_specialized_instance_net_drivers(
@@ -713,8 +668,8 @@ fn lower_module_with_overrides(
             Some((
                 parameter.name().to_string(),
                 (
-                    parameter.declared_width()?,
-                    parameter.declared_signed().unwrap_or(false),
+                    parameter.resolved_width()?,
+                    parameter.resolved_signed().unwrap_or(false),
                 ),
             ))
         })
