@@ -900,7 +900,7 @@ fn run_testbench_limited<B: SimBackend>(
         current_time: 0,
         tick_limit,
         tick_limit_reached: false,
-        random: RandomTable::new(execution_random_seed(testbench.random_seed())),
+        random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
     };
     let result = exec_detailed(sim, testbench.statements(), &mut ctx);
     let failed_messages = ctx
@@ -980,7 +980,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         current_time: 0,
         tick_limit: None,
         tick_limit_reached: false,
-        random: RandomTable::new(execution_random_seed(testbench.random_seed())),
+        random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
     };
     let result = exec_detailed(sim, testbench.statements(), &mut ctx);
     let passed = !matches!(result, ExecResult::Fail(_)) && ctx.assertions.iter().all(|a| a.passed);

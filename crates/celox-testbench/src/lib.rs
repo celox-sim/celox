@@ -213,7 +213,11 @@ impl<A> TestbenchProgram<A> {
         self.statements
     }
 
-    pub fn random_seed(&self) -> Option<u64> {
+    pub fn random_seed(&self) -> u64 {
+        self.random_seed.unwrap_or_default()
+    }
+
+    pub fn configured_random_seed(&self) -> Option<u64> {
         self.random_seed
     }
 
@@ -345,7 +349,11 @@ impl<Event, Signal> ExecutableTestbench<Event, Signal> {
         self.statements
     }
 
-    pub fn random_seed(&self) -> Option<u64> {
+    pub fn random_seed(&self) -> u64 {
+        self.random_seed.unwrap_or_default()
+    }
+
+    pub fn configured_random_seed(&self) -> Option<u64> {
         self.random_seed
     }
 }

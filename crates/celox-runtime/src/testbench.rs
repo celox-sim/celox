@@ -225,7 +225,7 @@ pub fn bind_testbench_program<B: SimBackend>(
     backend: &B,
     program: TestbenchProgram<AbsoluteAddr>,
 ) -> Option<ExecutableTestbench<B::Event, SignalRef>> {
-    let random_seed = program.random_seed();
+    let random_seed = program.configured_random_seed();
     let statements = program
         .into_statements()
         .into_iter()
