@@ -102,7 +102,7 @@ Execution Unit 0:
     r87: bit<64>
     r88: bit<64>
     r89: logic<20>
-    r90: logic<64>
+    r90: logic<4>
     r91: logic<64>
     r92: logic<64>
     r93: logic<64>
@@ -118,7 +118,7 @@ Execution Unit 0:
     r3 = r2 LtU r1
     Branch(r3 ? b2 : b4)
   b2:
-    r90 = Load(addr=v (region=0), offset=0, bits=64)
+    r90 = Load(addr=v (region=0), offset=0, bits=4)
     r9 = Load(addr=v (region=0), offset=4, bits=1)
     r13 = Load(addr=v (region=0), offset=5, bits=1)
     r17 = Load(addr=v (region=0), offset=6, bits=1)
