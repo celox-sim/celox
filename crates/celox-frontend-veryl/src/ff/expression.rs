@@ -3374,6 +3374,18 @@ impl<'a> FfParser<'a> {
                         }
                     }
                 }
+                if Self::is_function_state_base(comptime) {
+                    self.op_load(
+                        *var_id, var_index, var_select, domain, convert, sources, ir_builder,
+                    )?;
+                    if let Some(context) = context {
+                        let src = self.stack.pop_back().unwrap();
+                        let adjusted =
+                            self.cast_reg_width_ext(ir_builder, src, context.width, context.signed);
+                        self.stack.push_back(adjusted);
+                    }
+                    return Ok(());
+                }
                 if let Some(bound_reg) = self.get_bound_function_arg_value(*var_id) {
                     let bound_reg = *bound_reg;
                     if var_index.0.is_empty() && var_select.0.is_empty() && var_select.1.is_none() {

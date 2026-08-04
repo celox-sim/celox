@@ -1858,6 +1858,86 @@ fn test_ff_statement_helper_dynamic_nonlocal_copyout_is_observable(sim) {
     );
 }
 
+fn test_ff_nested_dynamic_nonlocal_store_flushes_pending_outer_state(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            index: input logic<3>,
+            global_value: output logic<8>
+        ) {
+            function set_bit (index: input logic<3>) -> logic {
+                global_value[index] = 1'b1;
+                return 1'b0;
+            }
+
+            function outer (index: input logic<3>) {
+                global_value = 8'h00;
+                $display("result=%0d global=%0d", set_bit(index), global_value);
+            }
+
+            always_ff (clk) {
+                outer(index);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let index = sim.signal("index");
+    let global_value = sim.signal("global_value");
+
+    sim.modify(|io| io.set(index, 2u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 4u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "result=0 global=4".to_string(),
+        }],
+    );
+}
+
+fn test_ff_retained_dynamic_copyout_does_not_repeat_nonlocal_body_write(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            index: input logic<3>,
+            global_value: output logic<8>
+        ) {
+            function update (written: output logic) -> logic<8> {
+                global_value = global_value + 1;
+                written = 1'b1;
+                return global_value;
+            }
+
+            function outer (index: input logic<3>) {
+                $display("result=%0d global=%0d", update(global_value[index]), global_value);
+            }
+
+            always_ff (clk) {
+                outer(index);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let index = sim.signal("index");
+    let global_value = sim.signal("global_value");
+
+    sim.modify(|io| io.set(index, 2u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 5u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "result=1 global=1".to_string(),
+        }],
+    );
+}
+
 fn test_ff_function_output_index_uses_final_nonlocal_state(sim) {
     @omit_veryl;
     @setup { let code = r#"
@@ -7120,6 +7200,31 @@ fn test_ff_function_call_array_literal_element_uses_element_width(sim) {
 
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_q), 0xFu32.into());
+}
+
+fn test_ff_function_array_element_assignment_preserves_signedness(sim) {
+    @omit_veryl;
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output signed logic<8>
+        ) {
+            function f () -> signed logic<8> {
+                var values: signed logic<8>[2];
+                values[0] = 4'sh8;
+                return values[0] >>> 3;
+            }
+            always_ff (clk) {
+                out_q = f();
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let out_q = sim.signal("out_q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(out_q), 0xffu32.into());
 }
 
 fn test_ff_function_call_array_literal_default_fill_matches_formal_shape(sim) {

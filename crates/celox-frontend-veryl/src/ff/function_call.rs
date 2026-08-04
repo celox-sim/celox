@@ -1,7 +1,10 @@
 use super::{Domain, FfParser};
 use crate::{
     HashMap, HashSet, LoweringPhase, ParserError,
-    bitaccess::{build_partial_assign_expr, get_access_width, is_static_access},
+    bitaccess::{
+        build_dynamic_partial_assign_expr, build_partial_assign_expr, get_access_width,
+        is_static_access,
+    },
     case::case_arm_condition_expr,
     context_width::expression_signed,
     function_call_arg, resolve_total_width,
@@ -433,6 +436,70 @@ impl<'a> FfParser<'a> {
         }
     }
 
+    fn function_call_emits_nonlocal_runtime_write(
+        &self,
+        call: &veryl_analyzer::ir::FunctionCall,
+    ) -> bool {
+        if call
+            .outputs
+            .values()
+            .flatten()
+            .any(|dst| self.assignment_destination_needs_direct_runtime_copyout(dst))
+        {
+            return true;
+        }
+
+        let nonlocal_ids: HashSet<_> = self
+            .module
+            .variables
+            .iter()
+            .filter_map(|(id, variable)| {
+                (variable.affiliation != Affiliation::Function).then_some(*id)
+            })
+            .collect();
+        self.module
+            .functions
+            .get(&call.id)
+            .and_then(|function| {
+                if let Some(index) = &call.index {
+                    function.get_function(index)
+                } else {
+                    function.get_function(&[])
+                }
+            })
+            .is_some_and(|body| {
+                self.statements_write_any(&body.statements, &nonlocal_ids, &mut HashSet::default())
+            })
+    }
+
+    fn mark_emitted_call_state(
+        &self,
+        call: &veryl_analyzer::ir::FunctionCall,
+        state: &mut HashMap<VarId, Expression>,
+    ) {
+        // The retained runtime call has already performed its body-side
+        // nonlocal writes and dynamic copy-outs. Preserve their expressions
+        // for subsequent symbolic reads, but mark them so the enclosing call
+        // does not store them again. Nonlocal outputs filtered out of the
+        // runtime call still require an ordinary symbolic copy-out.
+        let symbolic_nonlocal_outputs: HashSet<_> = call
+            .outputs
+            .values()
+            .flatten()
+            .filter_map(|dst| {
+                (self.module.variables[&dst.id].affiliation != Affiliation::Function)
+                    .then_some(dst.id)
+            })
+            .collect();
+        for (id, expr) in state {
+            if self.module.variables[id].affiliation != Affiliation::Function
+                && !symbolic_nonlocal_outputs.contains(id)
+            {
+                Self::mark_emitted_function_state(expr);
+            }
+        }
+    }
+
     fn statements_have_runtime_effect(
         &self,
         statements: &[Statement],
@@ -549,8 +616,33 @@ impl<'a> FfParser<'a> {
         comptime
     }
 
+    fn function_state_base_comptime(&self, id: VarId) -> Comptime {
+        let mut comptime = self.function_state_comptime(id);
+        Self::mark_function_state_base_comptime(&mut comptime);
+        comptime
+    }
+
+    fn mark_function_state_base_comptime(comptime: &mut Comptime) {
+        comptime.token.beg.line = u32::MAX - 2;
+        comptime.token.end.line = u32::MAX - 2;
+    }
+
+    pub(super) fn is_function_state_base(comptime: &Comptime) -> bool {
+        comptime.token.beg.line == u32::MAX - 2 && comptime.token.end.line == u32::MAX - 2
+    }
+
     fn is_function_state_merge(comptime: &Comptime) -> bool {
         comptime.token.beg.line == u32::MAX && comptime.token.end.line == u32::MAX
+    }
+
+    fn mark_emitted_function_state(expr: &mut Expression) {
+        expr.comptime_mut().token.beg.line = u32::MAX - 1;
+        expr.comptime_mut().token.end.line = u32::MAX - 1;
+    }
+
+    fn is_emitted_function_state(expr: &Expression) -> bool {
+        expr.comptime().token.beg.line == u32::MAX - 1
+            && expr.comptime().token.end.line == u32::MAX - 1
     }
 
     fn state_value_expr(&self, id: VarId, state: &HashMap<VarId, Expression>) -> Expression {
@@ -559,7 +651,7 @@ impl<'a> FfParser<'a> {
                 id,
                 VarIndex::default(),
                 VarSelect::default(),
-                self.function_state_comptime(id),
+                self.function_state_base_comptime(id),
             )))
         })
     }
@@ -587,7 +679,9 @@ impl<'a> FfParser<'a> {
             } else {
                 TypeKind::Logic
             });
-            // Packed selections are unsigned even when their base is signed.
+            // Selecting only an unpacked array element preserves the packed
+            // element's signedness. Packed selections are always unsigned.
+            ty.signed = variable.r#type.signed && dst.select.0.is_empty() && dst.select.1.is_none();
             ty.set_concrete_width(Shape::new(vec![Some(width)]));
             ty
         };
@@ -778,6 +872,8 @@ impl<'a> FfParser<'a> {
                 }
                 Factor::FunctionCall(call) => {
                     let mut call = call.clone();
+                    let emits_nonlocal_runtime_write =
+                        self.function_call_emits_nonlocal_runtime_write(&call);
                     let Some(function) = self.module.functions.get(&call.id) else {
                         return Err(ParserError::unsupported(
                             43,
@@ -805,7 +901,11 @@ impl<'a> FfParser<'a> {
                     }
                     let mut state_call = call.clone();
                     self.retain_direct_runtime_copyouts(&mut state_call, false);
-                    *state = self.apply_function_call_to_state(&state_call, state)?;
+                    let mut transitioned = self.apply_function_call_to_state(&state_call, state)?;
+                    if emits_nonlocal_runtime_write {
+                        self.mark_emitted_call_state(&state_call, &mut transitioned);
+                    }
+                    *state = transitioned;
                     self.retain_direct_runtime_copyouts(&mut call, true);
                     Expression::Term(Box::new(Factor::FunctionCall(call)))
                 }
@@ -1307,9 +1407,9 @@ impl<'a> FfParser<'a> {
                 Some(&assign.token),
             ));
         }
-        let dst = &assign.dst[0];
+        let dst = self.substitute_assignment_destination(&assign.dst[0], state);
         let rhs = self.substitute_function_expr(rhs, state);
-        let rhs = self.coerce_function_state_assignment(rhs, dst)?;
+        let rhs = self.coerce_function_state_assignment(rhs, &dst)?;
         let mut next = state.clone();
         let is_whole_var =
             dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
@@ -1319,13 +1419,14 @@ impl<'a> FfParser<'a> {
             let old_value = self.state_value_expr(dst.id, state);
             next.insert(
                 dst.id,
-                build_partial_assign_expr(self.module, dst, rhs, old_value)?,
+                build_partial_assign_expr(self.module, &dst, rhs, old_value)?,
             );
         } else if self.module.variables[&dst.id].affiliation != Affiliation::Function {
-            // Runtime lowering emits dynamic nonlocal stores directly. They
-            // cannot be represented as a whole-variable expression here, so
-            // state-only capture leaves the binding unchanged while retaining
-            // the enclosing call for runtime evaluation.
+            let old_value = self.state_value_expr(dst.id, state);
+            next.insert(
+                dst.id,
+                build_dynamic_partial_assign_expr(self.module, &dst, rhs, old_value)?,
+            );
         } else {
             return Err(ParserError::unsupported(
                 66,
@@ -1511,6 +1612,7 @@ impl<'a> FfParser<'a> {
     ) {
         if matches!(active, FunctionPathCondition::Never)
             || Self::is_whole_variable_reference(expr, var_id)
+            || Self::is_emitted_function_state(expr)
         {
             return;
         }
@@ -1635,6 +1737,36 @@ impl<'a> FfParser<'a> {
             }
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn flush_captured_nonlocal_state_before_call<A>(
+        &mut self,
+        call: &veryl_analyzer::ir::FunctionCall,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        if !self.function_call_emits_nonlocal_runtime_write(call) {
+            return Ok(());
+        }
+        let Some(state) = self
+            .get_bound_function_event_arg_state(call.comptime.token)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        if !state
+            .keys()
+            .any(|id| self.module.variables[id].affiliation != Affiliation::Function)
+        {
+            return Ok(());
+        }
+        self.emit_nonlocal_function_state_writes(
+            &state, targets, domain, convert, sources, ir_builder,
+        )
     }
 
     fn materialize_function_runtime_expression<A>(
@@ -2373,7 +2505,9 @@ impl<'a> FfParser<'a> {
                     self.retain_direct_runtime_copyouts(&mut state_call, false);
                     let mut direct_call = call.clone();
                     self.retain_direct_runtime_copyouts(&mut direct_call, true);
-                    if direct_call.outputs.values().any(|dsts| !dsts.is_empty()) {
+                    let emitted_direct_call =
+                        direct_call.outputs.values().any(|dsts| !dsts.is_empty());
+                    if emitted_direct_call {
                         self.emit_dynamic_nonlocal_statement_call(
                             &direct_call,
                             &mut state,
@@ -2386,7 +2520,10 @@ impl<'a> FfParser<'a> {
                         )?;
                     }
                     let base = state.clone();
-                    let transitioned = self.apply_function_call_to_state(&state_call, &base)?;
+                    let mut transitioned = self.apply_function_call_to_state(&state_call, &base)?;
+                    if emitted_direct_call {
+                        self.mark_emitted_call_state(&state_call, &mut transitioned);
+                    }
                     state = self.apply_state_transition_on_path(&active, &base, transitioned);
                 }
                 Statement::IfReset(statement) => {
@@ -2770,15 +2907,12 @@ impl<'a> FfParser<'a> {
             if is_whole_var {
                 next.insert(dst.id, expr);
             } else if is_static_access(&dst.index, &dst.select) {
-                let old_value = next.get(&dst.id).cloned().unwrap_or_else(|| {
-                    Expression::Term(Box::new(Factor::Variable(
-                        dst.id,
-                        VarIndex::default(),
-                        VarSelect::default(),
-                        dst.comptime.clone(),
-                    )))
-                });
+                let old_value = self.state_value_expr(dst.id, &next);
                 let merged = build_partial_assign_expr(self.module, dst, expr, old_value)?;
+                next.insert(dst.id, merged);
+            } else if self.module.variables[&dst.id].affiliation != Affiliation::Function {
+                let old_value = self.state_value_expr(dst.id, &next);
+                let merged = build_dynamic_partial_assign_expr(self.module, dst, expr, old_value)?;
                 next.insert(dst.id, merged);
             } else {
                 return Err(ParserError::unsupported(
@@ -3486,16 +3620,30 @@ impl<'a> FfParser<'a> {
         }
         match expr {
             Expression::Term(factor) => match factor.as_ref() {
-                Factor::Variable(var_id, index, select, _)
-                    if index.0.is_empty() && select.0.is_empty() && select.1.is_none() =>
-                {
-                    if let Some(bound) = defs.get(var_id) {
+                Factor::Variable(var_id, index, select, comptime) => {
+                    if Self::is_function_state_base(comptime) {
+                        return expr.clone();
+                    }
+                    let is_whole = index.0.is_empty() && select.0.is_empty() && select.1.is_none();
+                    if is_whole && let Some(bound) = defs.get(var_id) {
                         if expanding.insert(*var_id) {
                             let result =
                                 self.substitute_function_expr_inner(bound, defs, expanding);
                             expanding.remove(var_id);
                             return result;
                         }
+                    }
+                    if !defs.contains_key(var_id)
+                        && self.module.variables[var_id].affiliation != Affiliation::Function
+                    {
+                        let mut comptime = comptime.clone();
+                        Self::mark_function_state_base_comptime(&mut comptime);
+                        return Expression::Term(Box::new(Factor::Variable(
+                            *var_id,
+                            index.clone(),
+                            select.clone(),
+                            comptime,
+                        )));
                     }
                     expr.clone()
                 }
@@ -4037,6 +4185,9 @@ impl<'a> FfParser<'a> {
             .collect();
 
         self.validate_function_call_bindings(call, &function_body)?;
+        self.flush_captured_nonlocal_state_before_call(
+            call, targets, domain, convert, sources, ir_builder,
+        )?;
 
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {

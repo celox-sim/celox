@@ -782,3 +782,89 @@ pub fn build_partial_assign_expr(
         ct(),
     ))
 }
+
+/// Build a read-modify-write expression for a partial assignment whose
+/// destination contains a dynamic index or select.
+pub fn build_dynamic_partial_assign_expr(
+    module: &Module,
+    dst: &AssignDestination,
+    rhs: Expression,
+    old_value: Expression,
+) -> Result<Expression, ParserError> {
+    let geometry = select_geometry(module, dst.id, &dst.index, &dst.select)?;
+    let mut indices = dst.index.0.clone();
+    indices.extend(dst.select.0.iter().cloned());
+    let token = TokenRange::default();
+    let ct = || Box::new(Comptime::create_unknown(token));
+    let offset_literal =
+        |value: usize| Expression::create_value(Value::new(value as u64, 64, false), token);
+    let scaled = |expr: Expression, stride: usize| {
+        if stride == 1 {
+            expr
+        } else {
+            Expression::Binary(
+                Box::new(expr),
+                Op::Mul,
+                Box::new(offset_literal(stride)),
+                ct(),
+            )
+        }
+    };
+
+    let mut offset = None;
+    for (dimension, expr) in indices
+        .iter()
+        .take(geometry.dimension_count)
+        .cloned()
+        .enumerate()
+    {
+        let term = scaled(expr, geometry.strides[dimension]);
+        offset = Some(match offset {
+            Some(offset) => Expression::Binary(Box::new(offset), Op::Add, Box::new(term), ct()),
+            None => term,
+        });
+    }
+    if let Some((op, range)) = &dst.select.1 {
+        let anchor = indices
+            .get(geometry.dimension_count)
+            .expect("validated part-select anchor is present");
+        let (_, lsb) = op.eval_expr(anchor, range);
+        let term = scaled(lsb, geometry.strides[geometry.dimension_count]);
+        offset = Some(match offset {
+            Some(offset) => Expression::Binary(Box::new(offset), Op::Add, Box::new(term), ct()),
+            None => term,
+        });
+    }
+    let offset = offset.unwrap_or_else(|| offset_literal(0));
+
+    let mask_big = (BigUint::from(1u8) << geometry.selected_width) - BigUint::from(1u8);
+    let mask = Expression::create_value(
+        Value::new_biguint(mask_big, geometry.total_width, false),
+        token,
+    );
+    let shifted_mask = Expression::Binary(
+        Box::new(mask.clone()),
+        Op::LogicShiftL,
+        Box::new(offset.clone()),
+        ct(),
+    );
+    let cleared = Expression::Binary(
+        Box::new(old_value),
+        Op::BitAnd,
+        Box::new(Expression::Unary(Op::BitNot, Box::new(shifted_mask), ct())),
+        ct(),
+    );
+    let masked_rhs = Expression::Binary(Box::new(rhs), Op::BitAnd, Box::new(mask), ct());
+    let shifted_rhs = Expression::Binary(
+        Box::new(masked_rhs),
+        Op::LogicShiftL,
+        Box::new(offset),
+        ct(),
+    );
+    Ok(Expression::Binary(
+        Box::new(cleared),
+        Op::BitOr,
+        Box::new(shifted_rhs),
+        ct(),
+    ))
+}
