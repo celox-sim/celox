@@ -6,7 +6,7 @@ use crate::{ExprBytecode, ExprOpcode as TbOpcode, TestbenchOperator as Op};
 // ── Bytecode VM ────────────────────────────────────────────────────────
 
 /// A compiled expression: flat bytecode evaluated on a stack VM.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CompiledExpr {
     bytecode: ExprBytecode,
 }

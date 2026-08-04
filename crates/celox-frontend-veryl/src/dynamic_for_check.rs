@@ -1309,6 +1309,15 @@ fn collect_statement_effects(
                             active_functions,
                         ));
                     }
+                    if let Some(destination) = call.ret.as_deref() {
+                        collect_destination_effects(
+                            destination,
+                            module,
+                            active_functions,
+                            &mut effects,
+                            from_ff,
+                        );
+                    }
                 }
                 TbMethod::RandomSeed { value } => {
                     effects.observable = true;

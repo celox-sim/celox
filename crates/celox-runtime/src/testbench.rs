@@ -3,8 +3,8 @@ use celox_testbench::{
     AssertMessage as GenericAssertMessage, ClockCount as GenericClockCount, CompiledExpr,
     ExecutableArgument, ExecutableAssertMessage, ExecutableClockCount, ExecutableLoopBound,
     ExecutableStatement, ExecutableTestbench, ExprBytecode, LoopBound as GenericLoopBound,
-    SemanticArgument, SemanticStatement, StateLocation, TestbenchProgram, TestbenchSelection,
-    TestbenchStatement as GenericTestbenchStatement, TestbenchTarget,
+    SemanticArgument, SemanticComponentBinding, SemanticStatement, StateLocation, TestbenchProgram,
+    TestbenchSelection, TestbenchStatement as GenericTestbenchStatement, TestbenchTarget,
 };
 
 use crate::{SignalRef, backend::SimBackend};
@@ -18,6 +18,45 @@ fn bind_expr<B: SimBackend>(
         .bind_with(|address| layout.offsets.get(address).copied())
         .ok()?;
     Some(CompiledExpr::new(bytecode))
+}
+
+fn bind_component<B: SimBackend, S: std::hash::BuildHasher>(
+    backend: &B,
+    component: SemanticComponentBinding<AbsoluteAddr>,
+    rtl_write_roots: &std::collections::HashSet<AbsoluteAddr, S>,
+) -> Option<celox_testbench::ExecutableComponentBinding<B::Event, SignalRef>> {
+    Some(celox_testbench::ComponentBinding {
+        instance: component.instance,
+        connections: component
+            .connections
+            .into_iter()
+            .map(|connection| {
+                let output_rtl_driven = connection
+                    .output
+                    .as_ref()
+                    .is_some_and(|output| rtl_write_roots.contains(&output.signal.address));
+                Some(celox_testbench::ComponentConnectionBinding {
+                    port: connection.port,
+                    input: match connection.input {
+                        Some(input) => Some(bind_expr(backend, input)?),
+                        None => None,
+                    },
+                    input_signal: connection
+                        .input_signal
+                        .map(|input| backend.resolve_signal(&input.address)),
+                    output: match connection.output {
+                        Some(output) => Some(bind_target(backend, output)?),
+                        None => None,
+                    },
+                    output_rtl_driven,
+                    event: match connection.event {
+                        Some(event) => Some(backend.resolve_event_opt(&event)?),
+                        None => None,
+                    },
+                })
+            })
+            .collect::<Option<Vec<_>>>()?,
+    })
 }
 
 fn bind_assert_arg<B: SimBackend>(
@@ -132,12 +171,14 @@ fn bind_statement<B: SimBackend>(
         }
         GenericTestbenchStatement::ResetAssert {
             reset_signal,
+            reset_event,
             clock_event,
             duration,
             assert_value,
             deassert_value,
         } => Some(GenericTestbenchStatement::ResetAssert {
             reset_signal: backend.resolve_signal(&reset_signal.address),
+            reset_event: reset_event.and_then(|event| backend.resolve_event_opt(&event)),
             clock_event: backend.resolve_event_opt(&clock_event)?,
             duration: bind_clock_count(backend, duration)?,
             assert_value,
@@ -251,23 +292,57 @@ fn bind_statement<B: SimBackend>(
                 ret: bind_optional_target(backend, ret)?,
             })
         }
+        GenericTestbenchStatement::ComponentMethod {
+            instance,
+            method,
+            args,
+            ret,
+            ret_width,
+            ret_signed,
+            ret_strict,
+        } => Some(GenericTestbenchStatement::ComponentMethod {
+            instance,
+            method,
+            args: args
+                .into_iter()
+                .map(|arg| bind_assert_arg(backend, arg))
+                .collect::<Option<Vec<_>>>()?,
+            ret: bind_optional_target(backend, ret)?,
+            ret_width,
+            ret_signed,
+            ret_strict,
+        }),
         GenericTestbenchStatement::Break => Some(GenericTestbenchStatement::Break),
         GenericTestbenchStatement::Finish => Some(GenericTestbenchStatement::Finish),
     }
 }
 
-pub fn bind_testbench_program<B: SimBackend>(
+pub fn bind_testbench_program<B: SimBackend, S: std::hash::BuildHasher>(
     backend: &B,
     program: TestbenchProgram<AbsoluteAddr>,
+    rtl_write_roots: &std::collections::HashSet<AbsoluteAddr, S>,
 ) -> Option<ExecutableTestbench<B::Event, SignalRef>> {
     let random_seed = program.configured_random_seed();
+    let components = program.components().to_vec();
+    let component_libraries = program.component_libraries().to_vec();
+    let component_file_base = program.component_file_base().map(ToOwned::to_owned);
+    let component_bindings = program
+        .component_bindings()
+        .to_vec()
+        .into_iter()
+        .map(|component| bind_component(backend, component, rtl_write_roots))
+        .collect::<Option<Vec<_>>>()?;
     let statements = program
         .into_statements()
         .into_iter()
         .map(|statement| bind_statement(backend, statement))
         .collect::<Option<Vec<_>>>()?;
-    Some(ExecutableTestbench::new_with_random_seed(
-        statements,
-        random_seed,
-    ))
+    Some(
+        ExecutableTestbench::new_with_random_seed(statements, random_seed).with_component_runtime(
+            components,
+            component_libraries,
+            component_file_base,
+            component_bindings,
+        ),
+    )
 }

@@ -5,6 +5,7 @@
 //! part of the bytecode representation.
 
 use num_bigint::BigUint;
+use std::path::PathBuf;
 
 mod format;
 mod vm;
@@ -81,6 +82,59 @@ pub enum LoopBound<Expression> {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ComponentParameterValue {
+    Bits { words: Vec<u64>, width: u32 },
+    String(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComponentConnection {
+    pub port: String,
+    pub group: Option<String>,
+    pub member: Option<String>,
+    pub input: bool,
+    pub has_output: bool,
+    pub is_clock: bool,
+    pub is_reset: bool,
+    pub width: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestbenchComponent {
+    pub instance: String,
+    pub component: String,
+    pub params: Vec<(String, ComponentParameterValue)>,
+    pub connections: Vec<ComponentConnection>,
+    pub is_var_form: bool,
+    pub source: Option<SourceLocation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComponentLibrary {
+    pub export: String,
+    pub type_name: String,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComponentConnectionBinding<Event, Signal, Expression> {
+    pub port: String,
+    pub input: Option<Expression>,
+    /// Direct source signal for a whole-variable input connection. Runtime
+    /// hosts use this alongside `input` to preserve the four-state mask.
+    pub input_signal: Option<Signal>,
+    pub output: Option<TestbenchTarget<Signal, Expression>>,
+    pub output_rtl_driven: bool,
+    pub event: Option<Event>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComponentBinding<Event, Signal, Expression> {
+    pub instance: String,
+    pub connections: Vec<ComponentConnectionBinding<Event, Signal, Expression>>,
+}
+
 /// Source-independent testbench control program.
 ///
 /// Frontends instantiate this with semantic state/event identities and
@@ -94,6 +148,7 @@ pub enum TestbenchStatement<Event, Signal, Expression, Argument, Target = Signal
     },
     ResetAssert {
         reset_signal: Signal,
+        reset_event: Option<Event>,
         clock_event: Event,
         duration: ClockCount<Expression>,
         assert_value: u8,
@@ -151,6 +206,15 @@ pub enum TestbenchStatement<Event, Signal, Expression, Argument, Target = Signal
         handle: String,
         ret: Option<Target>,
     },
+    ComponentMethod {
+        instance: String,
+        method: String,
+        args: Vec<Argument>,
+        ret: Option<Target>,
+        ret_width: Option<u32>,
+        ret_signed: bool,
+        ret_strict: bool,
+    },
     Break,
     Finish,
 }
@@ -189,11 +253,17 @@ pub type SemanticStatement<A> = TestbenchStatement<
     SemanticArgument<A>,
     TestbenchTarget<SemanticSignal<A>, ExprBytecode<StateLocation<A>>>,
 >;
+pub type SemanticComponentBinding<A> =
+    ComponentBinding<A, SemanticSignal<A>, ExprBytecode<StateLocation<A>>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TestbenchProgram<A> {
     statements: Vec<SemanticStatement<A>>,
     random_seed: Option<u64>,
+    components: Vec<TestbenchComponent>,
+    component_libraries: Vec<ComponentLibrary>,
+    component_file_base: Option<PathBuf>,
+    component_bindings: Vec<SemanticComponentBinding<A>>,
 }
 
 impl<A> Default for TestbenchProgram<A> {
@@ -201,6 +271,10 @@ impl<A> Default for TestbenchProgram<A> {
         Self {
             statements: Vec::new(),
             random_seed: None,
+            components: Vec::new(),
+            component_libraries: Vec::new(),
+            component_file_base: None,
+            component_bindings: Vec::new(),
         }
     }
 }
@@ -210,6 +284,10 @@ impl<A> TestbenchProgram<A> {
         Self {
             statements,
             random_seed: None,
+            components: Vec::new(),
+            component_libraries: Vec::new(),
+            component_file_base: None,
+            component_bindings: Vec::new(),
         }
     }
 
@@ -237,6 +315,39 @@ impl<A> TestbenchProgram<A> {
 
     pub fn configured_random_seed(&self) -> Option<u64> {
         self.random_seed
+    }
+
+    pub fn with_components(mut self, components: Vec<TestbenchComponent>) -> Self {
+        self.components = components;
+        self
+    }
+
+    pub fn with_component_runtime(
+        mut self,
+        libraries: Vec<ComponentLibrary>,
+        file_base: Option<PathBuf>,
+        bindings: Vec<SemanticComponentBinding<A>>,
+    ) -> Self {
+        self.component_libraries = libraries;
+        self.component_file_base = file_base;
+        self.component_bindings = bindings;
+        self
+    }
+
+    pub fn components(&self) -> &[TestbenchComponent] {
+        &self.components
+    }
+
+    pub fn component_libraries(&self) -> &[ComponentLibrary] {
+        &self.component_libraries
+    }
+
+    pub fn component_file_base(&self) -> Option<&std::path::Path> {
+        self.component_file_base.as_deref()
+    }
+
+    pub fn component_bindings(&self) -> &[SemanticComponentBinding<A>] {
+        &self.component_bindings
     }
 
     pub fn is_empty(&self) -> bool {
@@ -343,10 +454,15 @@ pub type ExecutableStatement<Event, Signal> = TestbenchStatement<
     ExecutableArgument,
     TestbenchTarget<Signal, CompiledExpr>,
 >;
+pub type ExecutableComponentBinding<Event, Signal> = ComponentBinding<Event, Signal, CompiledExpr>;
 
 pub struct ExecutableTestbench<Event, Signal> {
     statements: Vec<ExecutableStatement<Event, Signal>>,
     random_seed: Option<u64>,
+    components: Vec<TestbenchComponent>,
+    component_libraries: Vec<ComponentLibrary>,
+    component_file_base: Option<PathBuf>,
+    component_bindings: Vec<ExecutableComponentBinding<Event, Signal>>,
 }
 
 impl<Event, Signal> ExecutableTestbench<Event, Signal> {
@@ -361,7 +477,25 @@ impl<Event, Signal> ExecutableTestbench<Event, Signal> {
         Self {
             statements,
             random_seed,
+            components: Vec::new(),
+            component_libraries: Vec::new(),
+            component_file_base: None,
+            component_bindings: Vec::new(),
         }
+    }
+
+    pub fn with_component_runtime(
+        mut self,
+        components: Vec<TestbenchComponent>,
+        libraries: Vec<ComponentLibrary>,
+        file_base: Option<PathBuf>,
+        bindings: Vec<ExecutableComponentBinding<Event, Signal>>,
+    ) -> Self {
+        self.components = components;
+        self.component_libraries = libraries;
+        self.component_file_base = file_base;
+        self.component_bindings = bindings;
+        self
     }
 
     pub fn statements(&self) -> &[ExecutableStatement<Event, Signal>] {
@@ -378,6 +512,22 @@ impl<Event, Signal> ExecutableTestbench<Event, Signal> {
 
     pub fn configured_random_seed(&self) -> Option<u64> {
         self.random_seed
+    }
+
+    pub fn components(&self) -> &[TestbenchComponent] {
+        &self.components
+    }
+
+    pub fn component_libraries(&self) -> &[ComponentLibrary] {
+        &self.component_libraries
+    }
+
+    pub fn component_file_base(&self) -> Option<&std::path::Path> {
+        self.component_file_base.as_deref()
+    }
+
+    pub fn component_bindings(&self) -> &[ExecutableComponentBinding<Event, Signal>] {
+        &self.component_bindings
     }
 }
 

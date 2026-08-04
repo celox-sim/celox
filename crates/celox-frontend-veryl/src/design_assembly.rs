@@ -11,8 +11,14 @@ use celox_slt::{
     CombObserver, FfAccessSummary, LogicPath, LogicPathId, LogicPathTarget, NodeId, SLTNodeArena,
     scheduler::{self, SchedulerError},
 };
+use celox_testbench::{
+    ComponentConnection, ComponentParameterValue, SourceLocation as TestbenchSourceLocation,
+    TestbenchComponent,
+};
+use veryl_analyzer::ir::ExternalParamValue;
 use veryl_analyzer::ir::{Declaration, Module, VarId, VarPath};
 use veryl_analyzer::symbol::Affiliation;
+use veryl_analyzer::value::Value;
 use veryl_metadata::{ClockType, ResetType};
 use veryl_parser::resource_table::{self, StrId};
 
@@ -20,9 +26,174 @@ use crate::{
     AbsoluteAddr, BuildConfig, FfRuntimeRelocation, FrontendTrace, FrontendTraceOptions,
     FusedSirOptimizationHints, GlueAddr, HashMap, HashSet, InstancePath, ParserError,
     RegionedAbsoluteAddr, RegionedVarAddr, RelocationModule, ScheduledRtl, ScheduledRtlOutput,
-    SharedClockLowering, SimModule, SourceLocation, SymbolicRtl, VariableInfo, VerylFrontendLookup,
-    VerylTestbenchSource, bitaccess, build_ff_clock_recipes, flattening, resolve_total_width,
+    SharedClockLowering, SimModule, SourceLocation, SymbolicRtl, VariableInfo,
+    VerylComponentBinding, VerylComponentConnectionBinding, VerylComponentEventBinding,
+    VerylFrontendLookup, VerylTestbenchSource, bitaccess, build_ff_clock_recipes, flattening,
+    resolve_total_width,
 };
+
+fn string_of(id: StrId) -> String {
+    resource_table::get_str_value(id).unwrap_or_default()
+}
+
+fn testbench_source_location(
+    token: &veryl_parser::token_range::TokenRange,
+) -> Option<TestbenchSourceLocation> {
+    let file = token
+        .beg
+        .source
+        .get_path()
+        .and_then(resource_table::get_path_value)?;
+    Some(TestbenchSourceLocation {
+        file: file.to_string_lossy().into_owned(),
+        line: token.beg.line,
+        column: token.beg.column,
+    })
+}
+
+fn component_parameter(value: &ExternalParamValue) -> ComponentParameterValue {
+    match value {
+        ExternalParamValue::Str(value) => ComponentParameterValue::String(value.clone()),
+        ExternalParamValue::Value(value) => {
+            let mut words = match value {
+                Value::U64(value) => vec![value.payload],
+                Value::BigUint(value) => value.payload().iter_u64_digits().collect(),
+            };
+            words.resize(value.width().div_ceil(64).max(1), 0);
+            ComponentParameterValue::Bits {
+                words,
+                width: value.width() as u32,
+            }
+        }
+    }
+}
+
+fn collect_testbench_components(
+    module: &Module,
+    parent_instance: InstanceId,
+    parent_path: &InstancePath,
+    names: &mut HashSet<String>,
+) -> Result<(Vec<TestbenchComponent>, Vec<VerylComponentBinding>), ParserError> {
+    let mut components = Vec::new();
+    let mut bindings = Vec::new();
+    for declaration in &module.declarations {
+        let Declaration::External(external) = declaration else {
+            continue;
+        };
+        let local_name = string_of(external.name);
+        let prefix = parent_path
+            .0
+            .iter()
+            .map(|(name, index)| format!("{}[{index}]", string_of(*name)))
+            .collect::<Vec<_>>()
+            .join(".");
+        let instance = if prefix.is_empty() {
+            local_name
+        } else {
+            format!("{prefix}.{local_name}")
+        };
+        if !names.insert(instance.clone()) {
+            return Err(ParserError::illegal_context(
+                "testbench component elaboration",
+                format!("duplicate component instance `{instance}`"),
+                Some(&external.token),
+            ));
+        }
+        let connections = external
+            .connects
+            .iter()
+            .map(|connection| ComponentConnection {
+                port: string_of(connection.port),
+                group: connection.group.map(string_of),
+                member: connection.member.map(string_of),
+                input: connection.input,
+                has_output: connection.output.is_some(),
+                is_clock: connection.is_clock,
+                is_reset: connection.is_reset,
+                width: connection.width,
+            })
+            .collect();
+        let connection_bindings = external
+            .connects
+            .iter()
+            .map(|connection| {
+                let output = connection.output.clone();
+                let input_signal = if connection.input {
+                    match &connection.expr {
+                        veryl_analyzer::ir::Expression::Term(term) => match term.as_ref() {
+                            veryl_analyzer::ir::Factor::Variable(id, index, select, _)
+                                if index.0.is_empty()
+                                    && select.0.is_empty()
+                                    && select.1.is_none() =>
+                            {
+                                Some(VerylComponentEventBinding::Root(*id))
+                            }
+                            veryl_analyzer::ir::Factor::HierVariable(reference)
+                                if reference.index.0.is_empty()
+                                    && reference.select.0.is_empty()
+                                    && reference.select.1.is_none() =>
+                            {
+                                Some(VerylComponentEventBinding::Hierarchical(reference.clone()))
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let event = if connection.is_clock || connection.is_reset {
+                    output
+                        .as_ref()
+                        .map(|output| VerylComponentEventBinding::Root(output.id))
+                        .or_else(|| input_signal.clone())
+                        .or_else(|| {
+                            let veryl_analyzer::ir::Expression::Term(term) = &connection.expr
+                            else {
+                                return None;
+                            };
+                            match term.as_ref() {
+                                veryl_analyzer::ir::Factor::Variable(id, _, _, _) => {
+                                    Some(VerylComponentEventBinding::Root(*id))
+                                }
+                                veryl_analyzer::ir::Factor::HierVariable(reference) => Some(
+                                    VerylComponentEventBinding::Hierarchical(reference.clone()),
+                                ),
+                                _ => None,
+                            }
+                        })
+                } else {
+                    None
+                };
+                VerylComponentConnectionBinding {
+                    port: string_of(connection.port),
+                    input: connection.input.then(|| connection.expr.clone()),
+                    input_signal,
+                    output,
+                    event,
+                }
+            })
+            .collect();
+        components.push(TestbenchComponent {
+            instance: instance.clone(),
+            component: string_of(external.component),
+            params: external
+                .params
+                .iter()
+                .map(|(name, value)| (string_of(*name), component_parameter(value)))
+                .collect(),
+            connections,
+            is_var_form: external.is_var_form,
+            source: testbench_source_location(&external.token),
+        });
+        bindings.push(VerylComponentBinding {
+            instance,
+            parent_instance,
+            connections: connection_bindings,
+        });
+    }
+    Ok((components, bindings))
+}
 
 fn flatten_with_trace(
     module: &SimModule,
@@ -525,6 +696,7 @@ pub fn schedule_symbolic_rtl(
                 module_names: module_names.clone(),
                 source_to_state: HashMap::default(),
                 state_to_source: HashMap::default(),
+                event_aliases: HashMap::default(),
             };
             let source_locations =
                 scheduler_source_locations(&error, &module_ir, &instance_modules);
@@ -698,12 +870,33 @@ pub fn schedule_symbolic_rtl(
             written_inputs: observer.written_inputs.clone(),
         })
         .collect();
+    let mut components = Vec::new();
+    let mut component_bindings = Vec::new();
+    let mut component_names = HashSet::default();
+    let mut elaborated_instances = expanded.iter().collect::<Vec<_>>();
+    elaborated_instances.sort_by_key(|(path, _)| path.0.clone());
+    for (path, &instance_id) in elaborated_instances {
+        let Some(module_id) = instance_modules.get(&instance_id) else {
+            continue;
+        };
+        let Some(module) = module_ir.get(module_id) else {
+            continue;
+        };
+        let (mut instance_components, mut instance_bindings) =
+            collect_testbench_components(module, instance_id, path, &mut component_names)?;
+        components.append(&mut instance_components);
+        component_bindings.append(&mut instance_bindings);
+    }
     let testbench_source = VerylTestbenchSource {
         initial_statements,
         functions: module_ir
             .get(&root_id)
             .map(|m| m.functions.clone())
             .unwrap_or_default(),
+        components,
+        component_bindings,
+        component_libraries: Vec::new(),
+        component_file_base: None,
     };
     let source_sir = SirProgram {
         eval_apply_ffs,
@@ -762,6 +955,7 @@ pub fn schedule_symbolic_rtl(
             .map(|(reset, clock)| (project(reset), project(clock)))
             .collect(),
     };
+    let event_aliases = events.aliases.clone();
     let runtime_errors = runtime_errors
         .into_iter()
         .map(|(code, info)| {
@@ -806,6 +1000,27 @@ pub fn schedule_symbolic_rtl(
         })
         .collect();
 
+    let mut rtl_write_roots = HashSet::default();
+    for unit in sir
+        .eval_comb
+        .iter()
+        .chain(sir.eval_apply_ffs.values().flatten())
+        .chain(sir.eval_comb_apply_ffs.values().flatten())
+        .chain(sir.eval_only_ffs.values().flatten())
+        .chain(sir.apply_ffs.values().flatten())
+    {
+        for block in unit.blocks.values() {
+            for instruction in &block.instructions {
+                match instruction {
+                    SIRInstruction::Store(address, ..) | SIRInstruction::Commit(_, address, ..) => {
+                        rtl_write_roots.insert(address.absolute_addr());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     let scheduled = ScheduledRtl {
         sir,
         design: ElaboratedDesign {
@@ -821,12 +1036,14 @@ pub fn schedule_symbolic_rtl(
             module_names,
             source_to_state,
             state_to_source,
+            event_aliases,
         },
         runtime_schema: RuntimeSchema {
             runtime_errors,
             runtime_event_sites,
             comb_observers,
             testbench_read_roots: Default::default(),
+            rtl_write_roots,
         },
         testbench_source,
     };
@@ -2285,6 +2502,35 @@ fn analyze_clock_dependencies(
     let mut ff_outputs: BTreeSet<AbsoluteAddr> = BTreeSet::new();
     unique_clocks.extend(eval_apply_ffs.keys().copied());
 
+    // Include event-typed signals even when no FF is directly driven by them.
+    // A testbench clock may only feed a combinationally gated clock, in which
+    // case it would otherwise be absent from the dependency graph entirely.
+    for id in expanded.values() {
+        let module_id = &instance_modules[id];
+        let sim_module = &modules[module_id];
+        for (var_id, var) in &sim_module.variables {
+            let kind = type_kind_to_domain_kind(&var.r#type.kind, config);
+            if !matches!(
+                kind,
+                DomainKind::ClockPosedge
+                    | DomainKind::ClockNegedge
+                    | DomainKind::ResetAsyncHigh
+                    | DomainKind::ResetAsyncLow
+            ) {
+                continue;
+            }
+            let addr = AbsoluteAddr {
+                instance_id: *id,
+                var_id: *var_id,
+            };
+            let canonical = clock_domains.get(&addr).copied().unwrap_or(addr);
+            unique_clocks.insert(canonical);
+            eval_apply_ffs.entry(canonical).or_default();
+            eval_only_ffs.entry(canonical).or_default();
+            apply_ffs.entry(canonical).or_default();
+        }
+    }
+
     for (domain_clock, eus) in &*eval_apply_ffs {
         for eu in eus {
             for bb in eu.blocks.values() {
@@ -2331,6 +2577,57 @@ fn analyze_clock_dependencies(
             comb_deps.len(),
             s.elapsed()
         );
+    }
+
+    // Record clock-to-clock dependencies through combinational logic.  FF
+    // propagation below finds divided clocks, but a plain gated clock such as
+    // `gated_clk = clk & enable` has no FF source and needs this separate walk.
+    fn collect_upstream_clocks(
+        node: AbsoluteAddr,
+        target_clock: AbsoluteAddr,
+        comb_deps: &BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>>,
+        clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+        clocks: &BTreeSet<AbsoluteAddr>,
+        visited: &mut BTreeSet<AbsoluteAddr>,
+        found: &mut BTreeSet<AbsoluteAddr>,
+    ) {
+        if !visited.insert(node) {
+            return;
+        }
+        let Some(sources) = comb_deps.get(&node) else {
+            return;
+        };
+        for source in sources {
+            let canonical = clock_domains.get(source).copied().unwrap_or(*source);
+            if canonical != target_clock && clocks.contains(&canonical) {
+                found.insert(canonical);
+            }
+            collect_upstream_clocks(
+                *source,
+                target_clock,
+                comb_deps,
+                clock_domains,
+                clocks,
+                visited,
+                found,
+            );
+        }
+    }
+
+    for target_clock in &unique_clocks {
+        let mut sources = BTreeSet::new();
+        collect_upstream_clocks(
+            *target_clock,
+            *target_clock,
+            &comb_deps,
+            clock_domains,
+            &unique_clocks,
+            &mut BTreeSet::new(),
+            &mut sources,
+        );
+        if !sources.is_empty() {
+            clock_deps.entry(*target_clock).or_default().extend(sources);
+        }
     }
 
     // 3. Propagate FF outputs through combinational graph to find all derived variables

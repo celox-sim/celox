@@ -43,7 +43,7 @@ pub use types::{resolve_dims, resolve_total_width};
 use celox_design::{InstanceId, ModuleId, StateAddr, VariableMetadata};
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::fmt;
-use veryl_analyzer::ir::{Function, Statement, VarId, VarPath};
+use veryl_analyzer::ir::{Expression, Function, Statement, VarId, VarPath};
 use veryl_parser::resource_table::StrId;
 
 pub type RegionedVarAddr = celox_design::RegionedVarAddrBase<VarId>;
@@ -116,6 +116,8 @@ pub struct VerylFrontendLookup {
     /// dense source-independent state identities consumed by later phases.
     pub source_to_state: HashMap<AbsoluteAddr, StateAddr>,
     pub state_to_source: HashMap<StateAddr, AbsoluteAddr>,
+    /// Event aliases projected to the canonical runtime event domain.
+    pub event_aliases: HashMap<StateAddr, StateAddr>,
 }
 
 impl fmt::Debug for VerylFrontendLookup {
@@ -136,7 +138,16 @@ impl VerylFrontendLookup {
     }
 
     pub fn root_variable(&self, var_id: VarId) -> Option<(StateAddr, &VariableInfo)> {
-        let (instance_id, module_id) = self.root_instance_and_module()?;
+        let (instance_id, _) = self.root_instance_and_module()?;
+        self.instance_variable(instance_id, var_id)
+    }
+
+    pub fn instance_variable(
+        &self,
+        instance_id: InstanceId,
+        var_id: VarId,
+    ) -> Option<(StateAddr, &VariableInfo)> {
+        let module_id = *self.instance_module.get(&instance_id)?;
         let info = self.module_variables.get(&module_id)?.get(&var_id)?;
         let address = self.state_address(&AbsoluteAddr {
             instance_id,
@@ -216,6 +227,32 @@ impl VerylFrontendLookup {
 pub struct VerylTestbenchSource {
     pub initial_statements: Option<Vec<Statement>>,
     pub functions: HashMap<VarId, Function>,
+    pub components: Vec<celox_testbench::TestbenchComponent>,
+    pub component_bindings: Vec<VerylComponentBinding>,
+    pub component_libraries: Vec<celox_testbench::ComponentLibrary>,
+    pub component_file_base: Option<std::path::PathBuf>,
+}
+
+#[derive(Clone)]
+pub struct VerylComponentBinding {
+    pub instance: String,
+    pub parent_instance: InstanceId,
+    pub connections: Vec<VerylComponentConnectionBinding>,
+}
+
+#[derive(Clone)]
+pub struct VerylComponentConnectionBinding {
+    pub port: String,
+    pub input: Option<Expression>,
+    pub input_signal: Option<VerylComponentEventBinding>,
+    pub output: Option<veryl_analyzer::ir::AssignDestination>,
+    pub event: Option<VerylComponentEventBinding>,
+}
+
+#[derive(Clone)]
+pub enum VerylComponentEventBinding {
+    Root(VarId),
+    Hierarchical(Box<veryl_analyzer::ir::HierVarRef>),
 }
 
 impl fmt::Debug for VerylTestbenchSource {
@@ -226,6 +263,9 @@ impl fmt::Debug for VerylTestbenchSource {
                 &self.initial_statements.as_ref().map(Vec::len),
             )
             .field("functions", &self.functions.len())
+            .field("components", &self.components.len())
+            .field("component_bindings", &self.component_bindings.len())
+            .field("component_libraries", &self.component_libraries.len())
             .finish()
     }
 }
@@ -251,5 +291,8 @@ mod tests {
         let source = VerylTestbenchSource::default();
         assert!(source.initial_statements.is_none());
         assert!(source.functions.is_empty());
+        assert!(source.components.is_empty());
+        assert!(source.component_libraries.is_empty());
+        assert!(source.component_file_base.is_none());
     }
 }
