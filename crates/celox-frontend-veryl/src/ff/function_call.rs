@@ -151,12 +151,7 @@ impl<'a> FfParser<'a> {
                             .values()
                             .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
                             || call.outputs.values().flatten().any(|dst| {
-                                (self.module.variables[&dst.id].affiliation
-                                    != Affiliation::Function
-                                    && (is_static_access(&dst.index, &dst.select)
-                                        || (dst.index.0.is_empty()
-                                            && dst.select.0.is_empty()
-                                            && dst.select.1.is_none())))
+                                self.module.variables[&dst.id].affiliation != Affiliation::Function
                                     || self.assignment_destination_has_runtime_effect(dst, visiting)
                             })
                             || self.function_call_has_runtime_effect(call, visiting)
@@ -270,6 +265,28 @@ impl<'a> FfParser<'a> {
                 .1
                 .as_ref()
                 .is_some_and(|(_, expr)| self.expression_needs_eager_evaluation(expr))
+    }
+
+    fn assignment_destination_needs_direct_runtime_copyout(&self, dst: &AssignDestination) -> bool {
+        self.module.variables[&dst.id].affiliation != Affiliation::Function
+            && !is_static_access(&dst.index, &dst.select)
+    }
+
+    fn retain_direct_runtime_copyouts(
+        &self,
+        call: &mut veryl_analyzer::ir::FunctionCall,
+        retain_direct: bool,
+    ) {
+        // Dynamic nonlocal destinations cannot be represented by the
+        // whole-variable symbolic state. Leave them on the runtime call so
+        // normal store lowering computes their offsets. CallArgs preserves
+        // argument positions, so filtered entries remain as empty vectors and
+        // output consumers skip them.
+        for dsts in call.outputs.values_mut() {
+            dsts.retain(|dst| {
+                self.assignment_destination_needs_direct_runtime_copyout(dst) == retain_direct
+            });
+        }
     }
 
     fn statements_have_runtime_effect(
@@ -627,8 +644,10 @@ impl<'a> FfParser<'a> {
                             *input = self.substitute_function_expr(&captured, &input_state);
                         }
                     }
-                    *state = self.apply_function_call_to_state(&call, state)?;
-                    call.outputs = Default::default();
+                    let mut state_call = call.clone();
+                    self.retain_direct_runtime_copyouts(&mut state_call, false);
+                    *state = self.apply_function_call_to_state(&state_call, state)?;
+                    self.retain_direct_runtime_copyouts(&mut call, true);
                     Expression::Term(Box::new(Factor::FunctionCall(call)))
                 }
                 Factor::SystemFunctionCall(call) => {
@@ -1488,6 +1507,8 @@ impl<'a> FfParser<'a> {
                     .expect("Function runtime expression evaluation failed")
             }
             FunctionPathCondition::Conditional(condition) => {
+                let pre_defined = self.defined_ranges.clone();
+                let pre_dynamic = self.dynamic_defined_vars.clone();
                 *state = self.merge_expression_states(
                     condition,
                     &guard_state,
@@ -1539,6 +1560,10 @@ impl<'a> FfParser<'a> {
                     .expect("Guarded function runtime expression evaluation failed");
                 let effect_value =
                     self.coerce_register_to_type(effect_value, &result_type, signed, ir_builder);
+                let effect_defined =
+                    std::mem::replace(&mut self.defined_ranges, pre_defined.clone());
+                let effect_dynamic =
+                    std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone());
                 ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![effect_value]));
 
                 ir_builder.switch_to_block(skip_block);
@@ -1546,6 +1571,9 @@ impl<'a> FfParser<'a> {
                 ir_builder.emit(SIRInstruction::Imm(dummy, SIRValue::new(0u8)));
                 ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![dummy]));
                 ir_builder.switch_to_block(merge_block);
+                self.defined_ranges = self.intersect_defined_states(pre_defined, effect_defined);
+                self.dynamic_defined_vars =
+                    self.intersect_dynamic_vars(pre_dynamic, effect_dynamic);
                 result
             }
         };
@@ -2197,6 +2225,24 @@ impl<'a> FfParser<'a> {
         Ok(())
     }
 
+    fn substitute_assignment_destination(
+        &self,
+        dst: &AssignDestination,
+        defs: &HashMap<VarId, Expression>,
+    ) -> AssignDestination {
+        let mut dst = dst.clone();
+        for expr in &mut dst.index.0 {
+            *expr = self.substitute_function_expr(expr, defs);
+        }
+        for expr in &mut dst.select.0 {
+            *expr = self.substitute_function_expr(expr, defs);
+        }
+        if let Some((_, expr)) = &mut dst.select.1 {
+            *expr = self.substitute_function_expr(expr, defs);
+        }
+        dst
+    }
+
     fn apply_function_call_to_state(
         &self,
         call: &veryl_analyzer::ir::FunctionCall,
@@ -2278,6 +2324,9 @@ impl<'a> FfParser<'a> {
             let Some(dsts) = function_call_arg(&call.outputs, arg_path) else {
                 continue;
             };
+            if dsts.is_empty() {
+                continue;
+            }
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
                 return Err(ParserError::unsupported(
                     61,
@@ -3658,6 +3707,9 @@ impl<'a> FfParser<'a> {
                 let Some(dsts) = function_call_arg(&call.outputs, arg_path) else {
                     continue;
                 };
+                if dsts.is_empty() {
+                    continue;
+                }
                 let Some(arg_id) = function_body.arg_map.get(arg_path) else {
                     return Err(ParserError::unsupported(
                         61,
@@ -3687,7 +3739,14 @@ impl<'a> FfParser<'a> {
                     expression_signed(&expr),
                     ir_builder,
                 )?;
-                pending_outputs.push((rhs_reg, dsts.clone()));
+                let dsts = if let Some(state) = runtime_state.as_ref() {
+                    dsts.iter()
+                        .map(|dst| self.substitute_assignment_destination(dst, state))
+                        .collect()
+                } else {
+                    dsts.clone()
+                };
+                pending_outputs.push((rhs_reg, dsts));
             }
 
             let Some(ret_id) = function_body.ret else {
@@ -3847,6 +3906,9 @@ impl<'a> FfParser<'a> {
                 let Some(dsts) = function_call_arg(&call.outputs, arg_path) else {
                     continue;
                 };
+                if dsts.is_empty() {
+                    continue;
+                }
                 let Some(arg_id) = function_body.arg_map.get(arg_path) else {
                     return Err(ParserError::unsupported(
                         61,
@@ -3876,7 +3938,14 @@ impl<'a> FfParser<'a> {
                     expression_signed(&expr),
                     ir_builder,
                 )?;
-                pending_outputs.push((rhs_reg, dsts.clone()));
+                let dsts = if let Some(state) = runtime_state.as_ref() {
+                    dsts.iter()
+                        .map(|dst| self.substitute_assignment_destination(dst, state))
+                        .collect()
+                } else {
+                    dsts.clone()
+                };
+                pending_outputs.push((rhs_reg, dsts));
             }
 
             if let Some(state) = runtime_state.as_ref() {

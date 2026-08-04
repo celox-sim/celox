@@ -1569,6 +1569,129 @@ fn test_ff_outputless_wrapper_indexed_copyout_to_nonlocal_is_observable(sim) {
     assert_eq!(sim.get(global_value), 1u8.into());
 }
 
+fn test_ff_outputless_wrapper_dynamic_indexed_copyout_to_nonlocal_is_observable(sim) {
+    @omit_veryl;
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            index: input logic,
+            global_value: output logic<8>
+        ) {
+            function set (
+                value: input logic,
+                written: output logic
+            ) -> logic {
+                written = value;
+                return 1'b0;
+            }
+
+            function outer (index: input logic) {
+                var ignored: logic;
+                ignored = set(1'b1, global_value[index]);
+            }
+
+            always_ff (clk) {
+                outer(index);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let index = sim.signal("index");
+    let global_value = sim.signal("global_value");
+
+    sim.modify(|io| io.set(index, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 2u8.into());
+}
+
+fn test_ff_function_output_index_uses_final_nonlocal_state(sim) {
+    @omit_veryl;
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            index: output logic,
+            entries: output logic<8>[2]
+        ) {
+            function set (written: output logic<8>) {
+                index = 1'b1;
+                written = 8'ha5;
+            }
+
+            always_ff (clk) {
+                set(entries[index]);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let index = sim.signal("index");
+    let entries = sim.signal("entries");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(index), 1u8.into());
+    assert_eq!(sim.get(entries), 0xa500u16.into());
+}
+
+fn test_ff_guarded_runtime_expression_merges_definition_state(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            gate: input logic,
+            index: input logic<3>,
+            global_value: output logic<8>
+        ) {
+            function update (written: output logic) -> logic {
+                written = 1'b1;
+                return 1'b0;
+            }
+
+            function outer (gate: input logic, index: input logic<3>) {
+                var ignored: logic;
+                if gate {
+                    ignored = update(global_value[index]);
+                }
+                $display("global=%0d", global_value);
+            }
+
+            always_ff (clk) {
+                outer(gate, index);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let gate = sim.signal("gate");
+    let index = sim.signal("index");
+    let global_value = sim.signal("global_value");
+
+    sim.modify(|io| {
+        io.set(gate, 1u8);
+        io.set(index, 1u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 2u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "global=0".to_string(),
+        }],
+    );
+
+    sim.modify(|io| io.set(gate, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 2u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "global=2".to_string(),
+        }],
+    );
+}
+
 fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
     @omit_veryl;
     @ignore_on(wasm);
