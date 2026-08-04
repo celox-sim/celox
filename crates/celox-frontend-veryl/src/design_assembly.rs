@@ -21,7 +21,7 @@ use crate::{
     FusedSirOptimizationHints, GlueAddr, HashMap, HashSet, InstancePath, ParserError,
     RegionedAbsoluteAddr, RegionedVarAddr, RelocationModule, ScheduledRtl, ScheduledRtlOutput,
     SharedClockLowering, SimModule, SourceLocation, SymbolicRtl, VariableInfo, VerylFrontendLookup,
-    VerylTestbenchSource, build_ff_clock_recipes, flattening, resolve_total_width,
+    VerylTestbenchSource, bitaccess, build_ff_clock_recipes, flattening, resolve_total_width,
 };
 
 fn flatten_with_trace(
@@ -867,33 +867,24 @@ fn module_variables(
                     }
                 }
             }
+            let (dimensions, _, _) = bitaccess::get_dimensions_and_strides(module, *id)?;
+            let packed_dims = dimensions
+                .into_iter()
+                .skip(varibale.r#type.array.iter().count())
+                .collect();
             variables.insert(
                 *id,
                 VariableInfo {
                     id: *id,
                     path: varibale.path.clone(),
                     var_kind: varibale.kind,
+                    packed_dims,
                     metadata: VariableMetadata {
                         width: resolve_total_width(module, varibale)?,
                         is_4state: is_4state_type(&varibale.r#type.kind),
                         kind: type_kind_to_domain_kind(&varibale.r#type.kind, config),
                         type_kind: type_kind_to_port_type_kind(&varibale.r#type.kind, config),
                         array_dims: varibale.r#type.array.iter().filter_map(|d| *d).collect(),
-                        packed_dims: {
-                            let mut dimensions = varibale
-                                .r#type
-                                .width()
-                                .iter()
-                                .filter_map(|dimension| *dimension)
-                                .collect::<Vec<_>>();
-                            if dimensions.is_empty()
-                                && let Some(width) = varibale.r#type.kind.width()
-                                && width > 1
-                            {
-                                dimensions.push(width);
-                            }
-                            dimensions
-                        },
                     },
                 },
             );
