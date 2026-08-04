@@ -766,11 +766,18 @@ fn lower_module_with_overrides(
             &variables,
             &name_to_id,
             &constants,
+            &parameter_types,
             &mut arena,
         )?);
     }
     let (eval_only_ff_blocks, apply_ff_blocks, eval_apply_ff_blocks, reset_clock_map) =
-        lower_ff_processes(module, &variables, &name_to_id, &constants)?;
+        lower_ff_processes(
+            module,
+            &variables,
+            &name_to_id,
+            &constants,
+            &parameter_types,
+        )?;
     mark_ff_event_domains(module, &mut variables, &name_to_id);
 
     let shared_variables = variables
@@ -794,7 +801,7 @@ fn lower_module_with_overrides(
         instances.push(LoweredSvInstance {
             module_name: resource_table::insert_str(instance.module_name()),
             instance_name: resource_table::insert_str(instance.name()),
-            parameter_overrides: lower_parameter_overrides(instance, &constants),
+            parameter_overrides: lower_parameter_overrides(instance, &constants, &parameter_types),
             port_connections: instance
                 .port_connections()
                 .iter()
@@ -900,6 +907,7 @@ fn evaluated_parameter_overrides(
 fn lower_parameter_overrides(
     instance: &sv::ir::Instance,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Vec<LoweredSvParameterOverride> {
     instance
         .parameter_overrides()
@@ -907,7 +915,9 @@ fn lower_parameter_overrides(
         .map(|parameter| {
             let value = parameter
                 .value()
-                .and_then(|value| sv::typecheck::eval_const_expr(value, constants))
+                .and_then(|value| {
+                    sv::typecheck::eval_const_expr_with_types(value, constants, parameter_types)
+                })
                 .map(|value| sv::ir::ConstExpr::Literal(value.to_string()))
                 .or_else(|| parameter.value().cloned());
             LoweredSvParameterOverride {
@@ -1315,10 +1325,7 @@ fn lower_glue_parent_expr(
                     access,
                 })
                 .ok()?;
-            let sources = sources
-                .into_iter()
-                .map(|source| VarAtomBase::new(source.id, access.lsb, access.msb))
-                .collect();
+            let sources = select_sources(expr, sources, access)?;
             Some((
                 coerce_node_width(arena, node, context_width, context_signed.unwrap_or(false))
                     .ok()?,
@@ -1524,7 +1531,7 @@ fn lower_glue_parent_expr(
                 && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
             let operation_context = context_width.map(|context_width| {
                 context_width.max(
-                    sv_expr_natural_width(expr, variables, name_to_id, constants)
+                    sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
                         .unwrap_or(context_width),
                 )
             });
@@ -1727,6 +1734,7 @@ fn lower_comb_process(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<Vec<LogicPath<VarId>>, sv::AnalyzerError> {
     let assignments = process.assignments();
@@ -1764,7 +1772,14 @@ fn lower_comb_process(
         {
             continue;
         }
-        let path = lower_assignment(assignment, variables, name_to_id, constants, arena)?;
+        let path = lower_assignment(
+            assignment,
+            variables,
+            name_to_id,
+            constants,
+            parameter_types,
+            arena,
+        )?;
         merge_overlapping_comb_path(&mut paths, path, arena)?;
     }
     Ok(paths)
@@ -1923,6 +1938,7 @@ fn lower_assignment(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<LogicPath<VarId>, sv::AnalyzerError> {
     let target = lower_lvalue_target(assignment.lhs_value(), variables, name_to_id, constants)
@@ -1956,9 +1972,15 @@ fn lower_assignment(
             variables,
             name_to_id,
             constants,
+            parameter_types,
             arena,
             Some(target_width),
-            Some(sv_expr_is_signed(assignment.rhs(), variables, name_to_id)),
+            Some(sv_expr_is_signed_with_parameters(
+                assignment.rhs(),
+                variables,
+                name_to_id,
+                parameter_types,
+            )),
         )
         .ok_or_else(|| {
             sv::AnalyzerError::Unsupported(format!(
@@ -1971,7 +1993,7 @@ fn lower_assignment(
         arena,
         expr,
         Some(target_width),
-        sv_expr_is_signed(assignment.rhs(), variables, name_to_id),
+        sv_expr_is_signed_with_parameters(assignment.rhs(), variables, name_to_id, parameter_types),
     )
     .map_err(|error| {
         sv::AnalyzerError::Unsupported(format!(
@@ -2035,9 +2057,19 @@ fn lower_expr(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Option<(celox_slt::NodeId, HashSet<VarAtomBase<VarId>>)> {
-    lower_expr_with_context(expr, variables, name_to_id, constants, arena, None, None)
+    lower_expr_with_context(
+        expr,
+        variables,
+        name_to_id,
+        constants,
+        parameter_types,
+        arena,
+        None,
+        None,
+    )
 }
 
 fn lower_expr_with_context(
@@ -2045,6 +2077,7 @@ fn lower_expr_with_context(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
     arena: &mut SLTNodeArena<VarId>,
     context_width: Option<usize>,
     context_signed: Option<bool>,
@@ -2053,16 +2086,18 @@ fn lower_expr_with_context(
         sv::ir::Expr::Ident(name) => {
             let Some(id) = name_to_id.get(name).copied() else {
                 let value = constants.get(name)?;
+                let (width, signed) = parameter_types.get(name).copied().unwrap_or((32, false));
+                let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
                 let node = arena
                     .alloc(SLTNode::Constant(
-                        BigUint::from(*value as u128),
+                        BigUint::from(*value as u128) & width_mask,
                         BigUint::from(0u32),
-                        32,
-                        false,
+                        width,
+                        signed,
                     ))
                     .ok()?;
                 return Some((
-                    coerce_node_width(arena, node, context_width, context_signed.unwrap_or(true))
+                    coerce_node_width(arena, node, context_width, context_signed.unwrap_or(signed))
                         .ok()?,
                     HashSet::default(),
                 ));
@@ -2091,7 +2126,14 @@ fn lower_expr_with_context(
             ))
         }
         sv::ir::Expr::Select { expr, msb, lsb } => {
-            let (inner, mut sources) = lower_expr(expr, variables, name_to_id, constants, arena)?;
+            let (inner, mut sources) = lower_expr(
+                expr,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                arena,
+            )?;
             let msb_value = sv::typecheck::eval_const_expr(msb, constants)?;
             let lsb_value = sv::typecheck::eval_const_expr(lsb, constants)?;
             let (msb, lsb) = if let sv::ir::Expr::Ident(name) = &**expr {
@@ -2113,18 +2155,7 @@ fn lower_expr_with_context(
                     access,
                 })
                 .ok()?;
-            if select_can_narrow_source_ranges(expr) {
-                sources = sources
-                    .into_iter()
-                    .map(|source| {
-                        Some(VarAtomBase::new(
-                            source.id,
-                            source.access.lsb.checked_add(access.lsb)?,
-                            source.access.lsb.checked_add(access.msb)?,
-                        ))
-                    })
-                    .collect::<Option<HashSet<_>>>()?;
-            }
+            sources = select_sources(expr, sources, access)?;
             Some((node, sources))
         }
         sv::ir::Expr::Concat(parts) => {
@@ -2136,6 +2167,7 @@ fn lower_expr_with_context(
                     variables,
                     name_to_id,
                     constants,
+                    parameter_types,
                     arena,
                     expr_unbased_fill_literal(part).map(|_| 1),
                     None,
@@ -2158,6 +2190,7 @@ fn lower_expr_with_context(
                         variables,
                         name_to_id,
                         constants,
+                        parameter_types,
                         arena,
                         expr_unbased_fill_literal(part).map(|_| 1),
                         None,
@@ -2208,6 +2241,7 @@ fn lower_expr_with_context(
                 variables,
                 name_to_id,
                 constants,
+                parameter_types,
                 arena,
                 operand_context,
                 context_signed,
@@ -2229,6 +2263,7 @@ fn lower_expr_with_context(
                 variables,
                 name_to_id,
                 constants,
+                parameter_types,
                 arena,
                 Some(*width),
                 Some(*signed),
@@ -2237,10 +2272,16 @@ fn lower_expr_with_context(
             Some((resized, sources))
         }
         sv::ir::Expr::Binary { left, op, right } => {
-            let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
-                && sv_expr_is_signed(right, variables, name_to_id);
+            let operands_signed =
+                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types)
+                    && sv_expr_is_signed_with_parameters(
+                        right,
+                        variables,
+                        name_to_id,
+                        parameter_types,
+                    );
             let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
-                sv_expr_is_signed(left, variables, name_to_id)
+                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types)
             } else {
                 operands_signed
             };
@@ -2261,7 +2302,7 @@ fn lower_expr_with_context(
                 && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
             let operation_context = context_width.map(|context_width| {
                 context_width.max(
-                    sv_expr_natural_width(expr, variables, name_to_id, constants)
+                    sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
                         .unwrap_or(context_width),
                 )
             });
@@ -2297,6 +2338,7 @@ fn lower_expr_with_context(
                             variables,
                             name_to_id,
                             constants,
+                            parameter_types,
                             arena,
                             right_context,
                             Some(operands_signed),
@@ -2316,6 +2358,7 @@ fn lower_expr_with_context(
                             variables,
                             name_to_id,
                             constants,
+                            parameter_types,
                             arena,
                             left_context,
                             Some(operands_signed),
@@ -2335,6 +2378,7 @@ fn lower_expr_with_context(
                             variables,
                             name_to_id,
                             constants,
+                            parameter_types,
                             arena,
                             left_context,
                             Some(operands_signed),
@@ -2344,6 +2388,7 @@ fn lower_expr_with_context(
                             variables,
                             name_to_id,
                             constants,
+                            parameter_types,
                             arena,
                             right_context,
                             Some(operands_signed),
@@ -2374,20 +2419,37 @@ fn lower_expr_with_context(
             then_expr,
             else_expr,
         } => {
-            let arms_signed = sv_expr_is_signed(then_expr, variables, name_to_id)
-                && sv_expr_is_signed(else_expr, variables, name_to_id);
-            let arm_context = sv_expr_natural_width(expr, variables, name_to_id, constants)
-                .map(|natural_width| {
-                    context_width.map_or(natural_width, |width| width.max(natural_width))
-                })
-                .or(context_width);
-            let (condition, mut sources) =
-                lower_expr(condition, variables, name_to_id, constants, arena)?;
+            let arms_signed = sv_expr_is_signed_with_parameters(
+                then_expr,
+                variables,
+                name_to_id,
+                parameter_types,
+            ) && sv_expr_is_signed_with_parameters(
+                else_expr,
+                variables,
+                name_to_id,
+                parameter_types,
+            );
+            let arm_context =
+                sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
+                    .map(|natural_width| {
+                        context_width.map_or(natural_width, |width| width.max(natural_width))
+                    })
+                    .or(context_width);
+            let (condition, mut sources) = lower_expr(
+                condition,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                arena,
+            )?;
             let (mut then_expr, then_sources) = lower_expr_with_context(
                 then_expr,
                 variables,
                 name_to_id,
                 constants,
+                parameter_types,
                 arena,
                 arm_context,
                 Some(arms_signed),
@@ -2397,6 +2459,7 @@ fn lower_expr_with_context(
                 variables,
                 name_to_id,
                 constants,
+                parameter_types,
                 arena,
                 arm_context,
                 Some(arms_signed),
@@ -2428,6 +2491,26 @@ fn select_can_narrow_source_ranges(expr: &sv::ir::Expr) -> bool {
         sv::ir::Expr::Select { expr, .. } => select_can_narrow_source_ranges(expr),
         _ => false,
     }
+}
+
+fn select_sources<A: std::hash::Hash + Eq + Clone>(
+    expr: &sv::ir::Expr,
+    sources: HashSet<VarAtomBase<A>>,
+    access: BitAccess,
+) -> Option<HashSet<VarAtomBase<A>>> {
+    if !select_can_narrow_source_ranges(expr) {
+        return Some(sources);
+    }
+    sources
+        .into_iter()
+        .map(|source| {
+            Some(VarAtomBase::new(
+                source.id,
+                source.access.lsb.checked_add(access.lsb)?,
+                source.access.lsb.checked_add(access.msb)?,
+            ))
+        })
+        .collect()
 }
 
 fn packed_index_offset(variable: &SvVariable, index: i128) -> Option<usize> {
@@ -2471,6 +2554,7 @@ fn lower_ff_processes(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Result<SvFfBlocks, sv::AnalyzerError> {
     let mut eval_only_ff_blocks = HashMap::default();
     let mut apply_ff_blocks = HashMap::default();
@@ -2531,10 +2615,17 @@ fn lower_ff_processes(
         for reset in &trigger_set.resets {
             reset_clock_map.insert(*reset, trigger_set.clock);
         }
-        let (eval_only, apply, eval_apply) =
-            lower_ff_process(process, &trigger_set, variables, name_to_id, constants).ok_or_else(
-                || sv::AnalyzerError::Unsupported("always_ff assignment lowering".to_string()),
-            )?;
+        let (eval_only, apply, eval_apply) = lower_ff_process(
+            process,
+            &trigger_set,
+            variables,
+            name_to_id,
+            constants,
+            parameter_types,
+        )
+        .ok_or_else(|| {
+            sv::AnalyzerError::Unsupported("always_ff assignment lowering".to_string())
+        })?;
         insert_or_merge_ff_unit(&mut eval_only_ff_blocks, trigger_set.clone(), eval_only);
         insert_or_merge_ff_unit(&mut apply_ff_blocks, trigger_set.clone(), apply);
         insert_or_merge_ff_unit(&mut eval_apply_ff_blocks, trigger_set, eval_apply);
@@ -2601,6 +2692,7 @@ fn lower_ff_process(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<(
     ExecutionUnit<RegionedVarAddr>,
     ExecutionUnit<RegionedVarAddr>,
@@ -2616,6 +2708,7 @@ fn lower_ff_process(
         variables,
         name_to_id,
         constants,
+        parameter_types,
     )?;
     let eval_only = seal_builder(eval_builder);
 
@@ -2632,6 +2725,7 @@ fn lower_ff_process(
         variables,
         name_to_id,
         constants,
+        parameter_types,
     )?;
     emit_ff_commits(&mut eval_apply_builder, &targets);
     let eval_apply = seal_builder(eval_apply_builder);
@@ -2716,6 +2810,7 @@ fn emit_ff_assignment_stores(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<()> {
     let mut target_ids = Vec::new();
     for target in targets {
@@ -2761,14 +2856,25 @@ fn emit_ff_assignment_stores(
                             variables,
                             name_to_id,
                             constants,
+                            parameter_types,
                             Some(target_width),
-                            Some(sv_expr_is_signed(rhs_expr, variables, name_to_id)),
+                            Some(sv_expr_is_signed_with_parameters(
+                                rhs_expr,
+                                variables,
+                                name_to_id,
+                                parameter_types,
+                            )),
                         )?;
                         resize_sir_register(
                             builder,
                             rhs,
                             target_width,
-                            sv_expr_is_signed(rhs_expr, variables, name_to_id),
+                            sv_expr_is_signed_with_parameters(
+                                rhs_expr,
+                                variables,
+                                name_to_id,
+                                parameter_types,
+                            ),
                         )?
                     }
                 },
@@ -2779,14 +2885,25 @@ fn emit_ff_assignment_stores(
                         variables,
                         name_to_id,
                         constants,
+                        parameter_types,
                         Some(target_width),
-                        Some(sv_expr_is_signed(rhs_expr, variables, name_to_id)),
+                        Some(sv_expr_is_signed_with_parameters(
+                            rhs_expr,
+                            variables,
+                            name_to_id,
+                            parameter_types,
+                        )),
                     )?;
                     resize_sir_register(
                         builder,
                         rhs,
                         target_width,
-                        sv_expr_is_signed(rhs_expr, variables, name_to_id),
+                        sv_expr_is_signed_with_parameters(
+                            rhs_expr,
+                            variables,
+                            name_to_id,
+                            parameter_types,
+                        ),
                     )?
                 }
             };
@@ -2802,7 +2919,12 @@ fn emit_ff_assignment_stores(
             value = match assignment.condition() {
                 Some(condition) => {
                     let condition = lower_procedural_condition(
-                        builder, condition, variables, name_to_id, constants,
+                        builder,
+                        condition,
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
                     )?;
                     let mux = builder.alloc_logic(width);
                     builder.emit(SIRInstruction::Mux(mux, condition, assigned, value));
@@ -2847,8 +2969,16 @@ fn lower_procedural_condition(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<celox_sir::RegisterId> {
-    let condition = lower_expr_to_sir(builder, condition, variables, name_to_id, constants)?;
+    let condition = lower_expr_to_sir(
+        builder,
+        condition,
+        variables,
+        name_to_id,
+        constants,
+        parameter_types,
+    )?;
     let width = builder.register(&condition).width();
     let two_state = builder.alloc_bit(width, false);
     builder.emit(SIRInstruction::Unary(
@@ -2977,16 +3107,20 @@ fn sv_glue_expr_is_signed(
     }
 }
 
-fn sv_expr_is_signed(
+fn sv_expr_is_signed_with_parameters(
     expr: &sv::ir::Expr,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
+    parameter_types: &HashMap<String, (usize, bool)>,
 ) -> bool {
     match expr {
         sv::ir::Expr::Ident(name) => name_to_id
             .get(name)
             .and_then(|id| variables.get(id))
-            .is_some_and(|variable| variable.signed),
+            .map_or_else(
+                || parameter_types.get(name).is_some_and(|(_, signed)| *signed),
+                |variable| variable.signed,
+            ),
         sv::ir::Expr::Literal(literal) => {
             sv::typecheck::parse_integral_literal(literal).is_some_and(|literal| literal.signed)
         }
@@ -2999,11 +3133,11 @@ fn sv_expr_is_signed(
             matches!(
                 op,
                 sv::ir::UnaryOp::Plus | sv::ir::UnaryOp::Minus | sv::ir::UnaryOp::BitNot
-            ) && sv_expr_is_signed(expr, variables, name_to_id)
+            ) && sv_expr_is_signed_with_parameters(expr, variables, name_to_id, parameter_types)
         }
         sv::ir::Expr::Binary { left, op, right } => match op {
             sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar => {
-                sv_expr_is_signed(left, variables, name_to_id)
+                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types)
             }
             sv::ir::BinaryOp::Add
             | sv::ir::BinaryOp::Sub
@@ -3013,8 +3147,13 @@ fn sv_expr_is_signed(
             | sv::ir::BinaryOp::BitAnd
             | sv::ir::BinaryOp::BitOr
             | sv::ir::BinaryOp::BitXor => {
-                sv_expr_is_signed(left, variables, name_to_id)
-                    && sv_expr_is_signed(right, variables, name_to_id)
+                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types)
+                    && sv_expr_is_signed_with_parameters(
+                        right,
+                        variables,
+                        name_to_id,
+                        parameter_types,
+                    )
             }
             _ => false,
         },
@@ -3023,8 +3162,13 @@ fn sv_expr_is_signed(
             else_expr,
             ..
         } => {
-            sv_expr_is_signed(then_expr, variables, name_to_id)
-                && sv_expr_is_signed(else_expr, variables, name_to_id)
+            sv_expr_is_signed_with_parameters(then_expr, variables, name_to_id, parameter_types)
+                && sv_expr_is_signed_with_parameters(
+                    else_expr,
+                    variables,
+                    name_to_id,
+                    parameter_types,
+                )
         }
     }
 }
@@ -3133,8 +3277,18 @@ fn lower_expr_to_sir(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<celox_sir::RegisterId> {
-    lower_expr_to_sir_with_context(builder, expr, variables, name_to_id, constants, None, None)
+    lower_expr_to_sir_with_context(
+        builder,
+        expr,
+        variables,
+        name_to_id,
+        constants,
+        parameter_types,
+        None,
+        None,
+    )
 }
 
 fn sv_expr_natural_width(
@@ -3142,13 +3296,18 @@ fn sv_expr_natural_width(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<usize> {
     match expr {
         sv::ir::Expr::Ident(name) => name_to_id
             .get(name)
             .and_then(|id| variables.get(id))
             .map_or_else(
-                || constants.contains_key(name).then_some(32),
+                || {
+                    constants
+                        .contains_key(name)
+                        .then(|| parameter_types.get(name).map_or(32, |(width, _)| *width))
+                },
                 |var| Some(var.width),
             ),
         sv::ir::Expr::Literal(literal) => Some(
@@ -3170,7 +3329,7 @@ fn sv_expr_natural_width(
                 | sv::ir::UnaryOp::RedXor
         )
         .then_some(1)
-        .or_else(|| sv_expr_natural_width(expr, variables, name_to_id, constants)),
+        .or_else(|| sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)),
         sv::ir::Expr::Binary { left, op, right } => {
             if matches!(
                 op,
@@ -3192,25 +3351,38 @@ fn sv_expr_natural_width(
                 op,
                 sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar
             ) {
-                sv_expr_natural_width(left, variables, name_to_id, constants)
+                sv_expr_natural_width(left, variables, name_to_id, constants, parameter_types)
             } else {
                 Some(
-                    sv_expr_natural_width(left, variables, name_to_id, constants)?.max(
-                        sv_expr_natural_width(right, variables, name_to_id, constants)?,
-                    ),
+                    sv_expr_natural_width(left, variables, name_to_id, constants, parameter_types)?
+                        .max(sv_expr_natural_width(
+                            right,
+                            variables,
+                            name_to_id,
+                            constants,
+                            parameter_types,
+                        )?),
                 )
             }
         }
         sv::ir::Expr::Concat(parts) => parts.iter().try_fold(0usize, |width, part| {
             width.checked_add(sv_expr_natural_width(
-                part, variables, name_to_id, constants,
+                part,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
             )?)
         }),
         sv::ir::Expr::RepeatConcat { count, parts } => {
             let count = usize::try_from(sv::typecheck::eval_const_expr(count, constants)?).ok()?;
             let parts_width = parts.iter().try_fold(0usize, |width, part| {
                 width.checked_add(sv_expr_natural_width(
-                    part, variables, name_to_id, constants,
+                    part,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
                 )?)
             })?;
             count.checked_mul(parts_width)
@@ -3220,9 +3392,14 @@ fn sv_expr_natural_width(
             else_expr,
             ..
         } => Some(
-            sv_expr_natural_width(then_expr, variables, name_to_id, constants)?.max(
-                sv_expr_natural_width(else_expr, variables, name_to_id, constants)?,
-            ),
+            sv_expr_natural_width(then_expr, variables, name_to_id, constants, parameter_types)?
+                .max(sv_expr_natural_width(
+                    else_expr,
+                    variables,
+                    name_to_id,
+                    constants,
+                    parameter_types,
+                )?),
         ),
         sv::ir::Expr::Call { .. } => None,
     }
@@ -3234,6 +3411,7 @@ fn lower_expr_to_sir_with_context(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
     context_width: Option<usize>,
     context_signed: Option<bool>,
 ) -> Option<celox_sir::RegisterId> {
@@ -3241,16 +3419,22 @@ fn lower_expr_to_sir_with_context(
         sv::ir::Expr::Ident(name) => {
             let Some(id) = name_to_id.get(name).copied() else {
                 let value = constants.get(name)?;
-                let reg = builder.alloc_logic(32);
+                let (width, signed) = parameter_types.get(name).copied().unwrap_or((32, false));
+                let reg = builder.alloc_logic(width);
+                let mask = if width >= 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << width) - 1
+                };
                 builder.emit(SIRInstruction::Imm(
                     reg,
-                    SIRValue::new_four_state(*value as u128, 0u32),
+                    SIRValue::new_four_state((*value as u128) & mask, 0u32),
                 ));
                 return resize_sir_register(
                     builder,
                     reg,
-                    context_width.unwrap_or(32),
-                    context_signed.unwrap_or(true),
+                    context_width.unwrap_or(width),
+                    context_signed.unwrap_or(signed),
                 );
             };
             let var = variables.get(&id)?;
@@ -3298,7 +3482,14 @@ fn lower_expr_to_sir_with_context(
         }
         sv::ir::Expr::Select { expr, msb, lsb } => {
             let inner = lower_expr_to_sir_with_context(
-                builder, expr, variables, name_to_id, constants, None, None,
+                builder,
+                expr,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                None,
+                None,
             )?;
             let msb = sv::typecheck::eval_const_expr(msb, constants)?;
             let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
@@ -3321,6 +3512,7 @@ fn lower_expr_to_sir_with_context(
                 variables,
                 name_to_id,
                 constants,
+                parameter_types,
                 Some(*width),
                 Some(*signed),
             )?;
@@ -3340,6 +3532,7 @@ fn lower_expr_to_sir_with_context(
                 variables,
                 name_to_id,
                 constants,
+                parameter_types,
                 (!one_bit_result).then_some(context_width).flatten(),
                 context_signed,
             )?;
@@ -3357,10 +3550,16 @@ fn lower_expr_to_sir_with_context(
             Some(reg)
         }
         sv::ir::Expr::Binary { left, op, right } => {
-            let operands_signed = sv_expr_is_signed(left, variables, name_to_id)
-                && sv_expr_is_signed(right, variables, name_to_id);
+            let operands_signed =
+                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types)
+                    && sv_expr_is_signed_with_parameters(
+                        right,
+                        variables,
+                        name_to_id,
+                        parameter_types,
+                    );
             let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
-                sv_expr_is_signed(left, variables, name_to_id)
+                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types)
             } else {
                 operands_signed
             };
@@ -3381,7 +3580,7 @@ fn lower_expr_to_sir_with_context(
                 && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
             let operation_context = context_width.map(|context_width| {
                 context_width.max(
-                    sv_expr_natural_width(expr, variables, name_to_id, constants)
+                    sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
                         .unwrap_or(context_width),
                 )
             });
@@ -3408,6 +3607,7 @@ fn lower_expr_to_sir_with_context(
                     variables,
                     name_to_id,
                     constants,
+                    parameter_types,
                     left_context,
                     Some(operands_signed),
                 )?;
@@ -3420,6 +3620,7 @@ fn lower_expr_to_sir_with_context(
                     variables,
                     name_to_id,
                     constants,
+                    parameter_types,
                     right_context,
                     Some(operands_signed),
                 )?;
@@ -3433,6 +3634,7 @@ fn lower_expr_to_sir_with_context(
                         variables,
                         name_to_id,
                         constants,
+                        parameter_types,
                         left_context,
                         Some(operands_signed),
                     )?,
@@ -3442,6 +3644,7 @@ fn lower_expr_to_sir_with_context(
                         variables,
                         name_to_id,
                         constants,
+                        parameter_types,
                         right_context,
                         Some(operands_signed),
                     )?,
@@ -3498,6 +3701,7 @@ fn lower_expr_to_sir_with_context(
                     variables,
                     name_to_id,
                     constants,
+                    parameter_types,
                     expr_unbased_fill_literal(part).map(|_| 1),
                     None,
                 )?);
@@ -3522,6 +3726,7 @@ fn lower_expr_to_sir_with_context(
                         variables,
                         name_to_id,
                         constants,
+                        parameter_types,
                         expr_unbased_fill_literal(part).map(|_| 1),
                         None,
                     )?);
@@ -3540,15 +3745,32 @@ fn lower_expr_to_sir_with_context(
             then_expr,
             else_expr,
         } => {
-            let arms_signed = sv_expr_is_signed(then_expr, variables, name_to_id)
-                && sv_expr_is_signed(else_expr, variables, name_to_id);
-            let arm_context = sv_expr_natural_width(expr, variables, name_to_id, constants)
-                .map(|natural_width| {
-                    context_width.map_or(natural_width, |width| width.max(natural_width))
-                })
-                .or(context_width);
+            let arms_signed = sv_expr_is_signed_with_parameters(
+                then_expr,
+                variables,
+                name_to_id,
+                parameter_types,
+            ) && sv_expr_is_signed_with_parameters(
+                else_expr,
+                variables,
+                name_to_id,
+                parameter_types,
+            );
+            let arm_context =
+                sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
+                    .map(|natural_width| {
+                        context_width.map_or(natural_width, |width| width.max(natural_width))
+                    })
+                    .or(context_width);
             let condition = lower_expr_to_sir_with_context(
-                builder, condition, variables, name_to_id, constants, None, None,
+                builder,
+                condition,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                None,
+                None,
             )?;
             let mut then_expr = lower_expr_to_sir_with_context(
                 builder,
@@ -3556,6 +3778,7 @@ fn lower_expr_to_sir_with_context(
                 variables,
                 name_to_id,
                 constants,
+                parameter_types,
                 arm_context,
                 Some(arms_signed),
             )?;
@@ -3565,6 +3788,7 @@ fn lower_expr_to_sir_with_context(
                 variables,
                 name_to_id,
                 constants,
+                parameter_types,
                 arm_context,
                 Some(arms_signed),
             )?;
@@ -3686,4 +3910,33 @@ pub(crate) fn unsupported_sv_inout(path: String, token: &TokenRange) -> ParserEr
         path,
         Some(token),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_sources_adds_nested_offsets_and_keeps_computed_dependencies() {
+        let nested = sv::ir::Expr::Select {
+            expr: Box::new(sv::ir::Expr::Ident("a".to_string())),
+            msb: sv::ir::ConstExpr::Literal("15".to_string()),
+            lsb: sv::ir::ConstExpr::Literal("8".to_string()),
+        };
+        let nested_sources = HashSet::from_iter([VarAtomBase::new(1u8, 8, 15)]);
+        let narrowed = select_sources(&nested, nested_sources, BitAccess::new(0, 0)).unwrap();
+        assert_eq!(narrowed, HashSet::from_iter([VarAtomBase::new(1u8, 8, 8)]));
+
+        let computed = sv::ir::Expr::Binary {
+            left: Box::new(sv::ir::Expr::Ident("a".to_string())),
+            op: sv::ir::BinaryOp::Add,
+            right: Box::new(sv::ir::Expr::Ident("b".to_string())),
+        };
+        let computed_sources =
+            HashSet::from_iter([VarAtomBase::new(1u8, 0, 7), VarAtomBase::new(2u8, 0, 7)]);
+        assert_eq!(
+            select_sources(&computed, computed_sources.clone(), BitAccess::new(7, 7)).unwrap(),
+            computed_sources
+        );
+    }
 }

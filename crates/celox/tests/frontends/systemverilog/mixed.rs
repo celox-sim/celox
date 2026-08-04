@@ -1,6 +1,43 @@
 use super::*;
 
 sv_backends! {
+    fn preserves_out_of_order_named_veryl_to_systemverilog_ports(sim) {
+        @setup {
+    let veryl = r#"
+        module Top (
+            xa: input logic,
+            xb: input logic,
+            y: output logic<2>,
+        ) {
+            inst child: $sv::NamedPorts (
+                b: xb,
+                a: xa,
+                y,
+            );
+        }
+    "#;
+    let sv = r#"
+        module NamedPorts(input logic a, input logic b, output logic [1:0] y);
+            assign y = {a, b};
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("named_ports.veryl"))],
+            vec![(sv, Path::new("named_ports.sv"))],
+            "Top",
+        );
+
+    let xa = sim.signal("xa");
+    let xb = sim.signal("xb");
+    sim.modify(|io| {
+        io.set(xa, 1u8);
+        io.set(xb, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
+    }
+
     fn converts_veryl_logic_to_systemverilog_bit_input(sim) {
         @setup {
     let veryl = r#"

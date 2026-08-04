@@ -1002,6 +1002,50 @@ fn preserves_inferred_parameter_types_in_hierarchy_connections() {
 }
 
 #[test]
+fn applies_parent_parameter_types_to_child_overrides() {
+    let source = r#"
+        module Child #(parameter SELECT = 1) (output logic y);
+            if (SELECT) assign y = 1'b1;
+            else assign y = 1'b0;
+        endmodule
+        module Top #(
+            parameter logic signed [7:0] BASE = -1
+        ) (output logic y);
+            Child #(.SELECT(BASE < 8'h01)) child(.y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("typed_parameter_override.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0u8.into());
+}
+
+#[test]
+fn preserves_parameter_types_in_regular_rhs_lowering() {
+    let source = r#"
+        module Top(
+            input logic clk,
+            output logic [15:0] comb_y,
+            output logic [15:0] ff_y
+        );
+            parameter logic signed [7:0] P = -1;
+            assign comb_y = P;
+            always_ff @(posedge clk) ff_y <= P;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("typed_parameter_rhs.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("comb_y")), u16::MAX.into());
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(sim.signal("ff_y")), u16::MAX.into());
+}
+
+#[test]
 fn accepts_reachable_parameter_specialized_net_drivers() {
     let source = r#"
         module Driver(output wire y); assign y = 1'b1; endmodule
@@ -1282,6 +1326,14 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             r#"
             module Top(input logic s, a, b, output logic y);
                 always_comb if (s) y = a; else y = b;
+            endmodule
+        "#,
+        ),
+        (
+            "unsupported statement inside always_comb",
+            r#"
+            module Top(input logic a, output logic y);
+                always_comb $display("%0d", a);
             endmodule
         "#,
         ),

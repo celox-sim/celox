@@ -4962,6 +4962,7 @@ fn comb_process_from_always_construct(
     if !matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_)) {
         return Ok(None);
     }
+    validate_always_comb_statement(&always.nodes.1)?;
     let assignments = assignments_from_statement(&always.nodes.1, syntax_tree, packed_dimensions);
     let assignment_count = RefNode::Statement(&always.nodes.1)
         .into_iter()
@@ -4974,6 +4975,23 @@ fn comb_process_from_always_construct(
     }
     Ok((!assignments.is_empty())
         .then(|| CombProcess::new(CombProcessKind::AlwaysComb, condition, assignments)))
+}
+
+fn validate_always_comb_statement(stmt: &sv_parser::Statement) -> Result<(), AnalyzerError> {
+    match &stmt.nodes.2 {
+        sv_parser::StatementItem::BlockingAssignment(_) => Ok(()),
+        sv_parser::StatementItem::SeqBlock(block) => {
+            for stmt in &block.nodes.3 {
+                if let sv_parser::StatementOrNull::Statement(stmt) = stmt {
+                    validate_always_comb_statement(stmt)?;
+                }
+            }
+            Ok(())
+        }
+        _ => Err(AnalyzerError::Unsupported(
+            "unsupported statement inside always_comb".to_string(),
+        )),
+    }
 }
 
 fn ff_processes_from_module_node(

@@ -62,6 +62,147 @@ pub struct ModuleParser<'a> {
 static EMPTY_EXTERNAL_MODULES: std::sync::LazyLock<HashMap<ModuleId, ExternalModule>> =
     std::sync::LazyLock::new(HashMap::default);
 
+fn external_port_formal_names(decl: &InstDeclaration) -> Result<Vec<String>, ParserError> {
+    let source = decl.token.source().get_text();
+    let start = decl.token.beg.pos as usize;
+    let declaration = source
+        .get(start..)
+        .and_then(|source| source.split_once(';').map(|(declaration, _)| declaration))
+        .ok_or_else(|| {
+            ParserError::illegal_context(
+                "external module port connections",
+                "instance source range is unavailable",
+                Some(&decl.token),
+            )
+        })?;
+    let port_list = last_outer_parenthesized(declaration).ok_or_else(|| {
+        ParserError::illegal_context(
+            "external module port connections",
+            "instance port list is unavailable",
+            Some(&decl.token),
+        )
+    })?;
+
+    split_top_level(port_list, ',')
+        .into_iter()
+        .map(|item| {
+            let item = item.trim();
+            let formal = find_top_level_connection_colon(item)
+                .map_or(item, |colon| &item[..colon])
+                .trim();
+            if formal.is_empty()
+                || !formal
+                    .chars()
+                    .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+            {
+                Err(ParserError::illegal_context(
+                    "external module port connections",
+                    format!("unsupported named port association `{item}`"),
+                    Some(&decl.token),
+                ))
+            } else {
+                Ok(formal.to_string())
+            }
+        })
+        .collect()
+}
+
+fn last_outer_parenthesized(text: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    let mut start = None;
+    let mut last = None;
+    let mut string = false;
+    let mut escaped = false;
+    for (index, ch) in text.char_indices() {
+        if string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                string = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            string = true;
+        } else if ch == '(' {
+            if depth == 0 {
+                start = Some(index + ch.len_utf8());
+            }
+            depth += 1;
+        } else if ch == ')' {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                last = Some((start?, index));
+            }
+        }
+    }
+    let (start, end) = last?;
+    text.get(start..end)
+}
+
+fn split_top_level(text: &str, separator: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depths = [0usize; 3];
+    let mut string = false;
+    let mut escaped = false;
+    for (index, ch) in text.char_indices() {
+        if string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => string = true,
+            '(' => depths[0] += 1,
+            ')' => depths[0] = depths[0].saturating_sub(1),
+            '[' => depths[1] += 1,
+            ']' => depths[1] = depths[1].saturating_sub(1),
+            '{' => depths[2] += 1,
+            '}' => depths[2] = depths[2].saturating_sub(1),
+            _ if ch == separator && depths == [0, 0, 0] => {
+                parts.push(&text[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if !text[start..].trim().is_empty() {
+        parts.push(&text[start..]);
+    }
+    parts
+}
+
+fn find_top_level_connection_colon(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depths = [0usize; 3];
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match byte {
+            b'(' => depths[0] += 1,
+            b')' => depths[0] = depths[0].saturating_sub(1),
+            b'[' => depths[1] += 1,
+            b']' => depths[1] = depths[1].saturating_sub(1),
+            b'{' => depths[2] += 1,
+            b'}' => depths[2] = depths[2].saturating_sub(1),
+            b':' if depths == [0, 0, 0]
+                && bytes.get(index.wrapping_sub(1)) != Some(&b':')
+                && bytes.get(index + 1) != Some(&b':') =>
+            {
+                return Some(index);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn build_dynamic_output_glue(
     module: &Module,
     parent_store: &mut SymbolicStore<VarId>,
@@ -1627,8 +1768,20 @@ impl<'a> ModuleParser<'a> {
         let mut input_ports = Vec::new();
         let mut output_ports = Vec::new();
         let mut glue_arena = SLTNodeArena::<GlueAddr>::new();
+        let formal_names = external_port_formal_names(decl)?;
+        if formal_names.len() != system_verilog.connects.len() {
+            return Err(ParserError::illegal_context(
+                "external module port connections",
+                "could not preserve the named SystemVerilog port associations",
+                Some(&decl.token),
+            ));
+        }
+        let connections: HashMap<_, _> = formal_names
+            .into_iter()
+            .zip(&system_verilog.connects)
+            .collect();
 
-        for (child_port_id, parent_dst) in child.port_order.iter().zip(&system_verilog.connects) {
+        for child_port_id in &child.port_order {
             let child_var = child
                 .sim_module
                 .variables
@@ -1637,9 +1790,19 @@ impl<'a> ModuleParser<'a> {
                     ParserError::illegal_context(
                         "external module port connections",
                         format!("port {child_port_id} is absent from module \"{external_name}\""),
-                        Some(&parent_dst.token),
+                        None,
                     )
                 })?;
+            let formal_name = child_var.path.to_string();
+            let parent_dst = connections.get(formal_name.as_str()).ok_or_else(|| {
+                ParserError::illegal_context(
+                    "external module port connections",
+                    format!(
+                        "port \"{formal_name}\" is not connected on module \"{external_name}\""
+                    ),
+                    Some(&decl.token),
+                )
+            })?;
             let child_width = resolve_total_width(&child.metadata, child_var)?;
             if child_width == 0 {
                 return Err(ParserError::illegal_context(
