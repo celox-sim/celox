@@ -1650,6 +1650,141 @@ fn test_ff_outputless_wrapper_direct_dynamic_nonlocal_assignment_is_observable(s
     assert_eq!(sim.get(global_value), 4u8.into());
 }
 
+fn test_ff_pure_helper_nonlocal_read_is_snapshotted_before_runtime_write(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (clk: input clock, global_value: output logic<8>) {
+            function read_global () -> logic<8> {
+                return global_value;
+            }
+
+            function update (
+                value: input logic<8>,
+                written: output logic<8>
+            ) -> logic {
+                written = value;
+                return 1'b0;
+            }
+
+            function outer () {
+                var captured: logic<8>;
+                var ignored: logic;
+                captured = read_global();
+                ignored = update(8'h5a, global_value);
+                $display("captured=%0d", captured);
+            }
+
+            always_ff (clk) {
+                outer();
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let global_value = sim.signal("global_value");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 0x5au8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "captured=0".to_string(),
+        }],
+    );
+}
+
+fn test_ff_dynamic_nonlocal_store_follows_pending_whole_write(sim) {
+    @omit_veryl;
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            index: input logic<3>,
+            global_value: output logic<8>
+        ) {
+            function write_at (index: input logic<3>) {
+                global_value = 8'hff;
+                global_value[index] = 1'b0;
+            }
+
+            always_ff (clk) {
+                write_at(index);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let index = sim.signal("index");
+    let global_value = sim.signal("global_value");
+
+    sim.modify(|io| io.set(index, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 0xfdu8.into());
+}
+
+fn test_ff_guarded_system_task_merges_definition_state(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            gate: input logic,
+            index: input logic<3>,
+            global_value: output logic<8>
+        ) {
+            function update (written: output logic) -> logic {
+                written = 1'b1;
+                return 1'b0;
+            }
+
+            function outer (gate: input logic, index: input logic<3>) {
+                if gate {
+                    $display("update=%0d", update(global_value[index]));
+                }
+                $display("global=%0d", global_value);
+            }
+
+            always_ff (clk) {
+                outer(gate, index);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let gate = sim.signal("gate");
+    let index = sim.signal("index");
+    let global_value = sim.signal("global_value");
+
+    sim.modify(|io| {
+        io.set(gate, 1u8);
+        io.set(index, 1u8);
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 2u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "update=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "global=0".to_string(),
+            },
+        ],
+    );
+
+    sim.modify(|io| io.set(gate, 0u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 2u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "global=2".to_string(),
+        }],
+    );
+}
+
 fn test_ff_function_output_index_uses_final_nonlocal_state(sim) {
     @omit_veryl;
     @setup { let code = r#"

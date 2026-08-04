@@ -50,8 +50,16 @@ impl<'a> FfParser<'a> {
     }
 
     fn expression_needs_assignment_snapshot(&self, expr: &Expression) -> bool {
-        let input_needs_snapshot = |input: &veryl_analyzer::ir::SystemFunctionInput| {
-            self.expression_needs_assignment_snapshot(&input.0)
+        self.expression_needs_assignment_snapshot_inner(expr, &mut HashSet::default())
+    }
+
+    fn expression_needs_assignment_snapshot_inner(
+        &self,
+        expr: &Expression,
+        visiting: &mut HashSet<VarId>,
+    ) -> bool {
+        let mut input_needs_snapshot = |input: &veryl_analyzer::ir::SystemFunctionInput| {
+            self.expression_needs_assignment_snapshot_inner(&input.0, visiting)
         };
         match expr {
             Expression::Term(factor) => match factor.as_ref() {
@@ -62,10 +70,12 @@ impl<'a> FfParser<'a> {
                         || select.1.is_some()
                 }
                 Factor::HierVariable(_) => true,
-                Factor::FunctionCall(call) => call
-                    .inputs
-                    .values()
-                    .any(|expr| self.expression_needs_assignment_snapshot(expr)),
+                Factor::FunctionCall(call) => {
+                    call.inputs
+                        .values()
+                        .any(|expr| self.expression_needs_assignment_snapshot_inner(expr, visiting))
+                        || self.function_call_reads_nonlocal(call, visiting)
+                }
                 Factor::SystemFunctionCall(call) => match &call.kind {
                     SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
                         args.iter().any(input_needs_snapshot)
@@ -83,34 +93,168 @@ impl<'a> FfParser<'a> {
                 Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
             },
             Expression::Binary(lhs, _, rhs, _) => {
-                self.expression_needs_assignment_snapshot(lhs)
-                    || self.expression_needs_assignment_snapshot(rhs)
+                self.expression_needs_assignment_snapshot_inner(lhs, visiting)
+                    || self.expression_needs_assignment_snapshot_inner(rhs, visiting)
             }
-            Expression::Unary(_, inner, _) => self.expression_needs_assignment_snapshot(inner),
+            Expression::Unary(_, inner, _) => {
+                self.expression_needs_assignment_snapshot_inner(inner, visiting)
+            }
             Expression::Ternary(cond, then_expr, else_expr, _) => {
-                self.expression_needs_assignment_snapshot(cond)
-                    || self.expression_needs_assignment_snapshot(then_expr)
-                    || self.expression_needs_assignment_snapshot(else_expr)
+                self.expression_needs_assignment_snapshot_inner(cond, visiting)
+                    || self.expression_needs_assignment_snapshot_inner(then_expr, visiting)
+                    || self.expression_needs_assignment_snapshot_inner(else_expr, visiting)
             }
             Expression::Concatenation(items, _) => items.iter().any(|(expr, repeat)| {
-                self.expression_needs_assignment_snapshot(expr)
-                    || repeat
-                        .as_ref()
-                        .is_some_and(|repeat| self.expression_needs_assignment_snapshot(repeat))
+                self.expression_needs_assignment_snapshot_inner(expr, visiting)
+                    || repeat.as_ref().is_some_and(|repeat| {
+                        self.expression_needs_assignment_snapshot_inner(repeat, visiting)
+                    })
             }),
             Expression::ArrayLiteral(items, _) => items.iter().any(|item| match item {
                 ArrayLiteralItem::Value(expr, repeat) => {
-                    self.expression_needs_assignment_snapshot(expr)
-                        || repeat
-                            .as_ref()
-                            .is_some_and(|repeat| self.expression_needs_assignment_snapshot(repeat))
+                    self.expression_needs_assignment_snapshot_inner(expr, visiting)
+                        || repeat.as_ref().is_some_and(|repeat| {
+                            self.expression_needs_assignment_snapshot_inner(repeat, visiting)
+                        })
                 }
-                ArrayLiteralItem::Defaul(expr) => self.expression_needs_assignment_snapshot(expr),
+                ArrayLiteralItem::Defaul(expr) => {
+                    self.expression_needs_assignment_snapshot_inner(expr, visiting)
+                }
             }),
             Expression::StructConstructor(_, fields, _) => fields
                 .iter()
-                .any(|(_, expr)| self.expression_needs_assignment_snapshot(expr)),
+                .any(|(_, expr)| self.expression_needs_assignment_snapshot_inner(expr, visiting)),
         }
+    }
+
+    fn assignment_destination_reads_nonlocal(
+        &self,
+        dst: &AssignDestination,
+        visiting: &mut HashSet<VarId>,
+    ) -> bool {
+        dst.index
+            .0
+            .iter()
+            .any(|expr| self.expression_needs_assignment_snapshot_inner(expr, visiting))
+            || dst
+                .select
+                .0
+                .iter()
+                .any(|expr| self.expression_needs_assignment_snapshot_inner(expr, visiting))
+            || dst.select.1.as_ref().is_some_and(|(_, expr)| {
+                self.expression_needs_assignment_snapshot_inner(expr, visiting)
+            })
+    }
+
+    fn function_call_reads_nonlocal(
+        &self,
+        call: &veryl_analyzer::ir::FunctionCall,
+        visiting: &mut HashSet<VarId>,
+    ) -> bool {
+        if !visiting.insert(call.id) {
+            return false;
+        }
+        let reads = self
+            .module
+            .functions
+            .get(&call.id)
+            .and_then(|function| {
+                if let Some(index) = &call.index {
+                    function.get_function(index)
+                } else {
+                    function.get_function(&[])
+                }
+            })
+            .is_none_or(|body| self.statements_read_nonlocal(&body.statements, visiting));
+        visiting.remove(&call.id);
+        reads
+    }
+
+    fn statements_read_nonlocal(
+        &self,
+        statements: &[Statement],
+        visiting: &mut HashSet<VarId>,
+    ) -> bool {
+        statements.iter().any(|statement| match statement {
+            Statement::Assign(assign) => {
+                self.expression_needs_assignment_snapshot_inner(&assign.expr, visiting)
+                    || assign
+                        .dst
+                        .iter()
+                        .any(|dst| self.assignment_destination_reads_nonlocal(dst, visiting))
+            }
+            Statement::If(statement) => {
+                self.expression_needs_assignment_snapshot_inner(&statement.cond, visiting)
+                    || self.statements_read_nonlocal(&statement.true_side, visiting)
+                    || self.statements_read_nonlocal(&statement.false_side, visiting)
+            }
+            Statement::Case(statement) => {
+                self.expression_needs_assignment_snapshot_inner(&statement.case_target, visiting)
+                    || statement.arms.iter().any(|arm| {
+                        arm.patterns.iter().any(|pattern| match pattern {
+                            CasePattern::Eq(expr) => {
+                                self.expression_needs_assignment_snapshot_inner(expr, visiting)
+                            }
+                            CasePattern::Range { lo, hi, .. } => {
+                                self.expression_needs_assignment_snapshot_inner(lo, visiting)
+                                    || self.expression_needs_assignment_snapshot_inner(hi, visiting)
+                            }
+                        }) || self.statements_read_nonlocal(&arm.body, visiting)
+                    })
+                    || self.statements_read_nonlocal(&statement.default, visiting)
+            }
+            Statement::For(statement) => {
+                let (start, end) = match &statement.range {
+                    ForRange::Forward { start, end, .. }
+                    | ForRange::Reverse { start, end, .. }
+                    | ForRange::Stepped { start, end, .. } => (start, end),
+                };
+                [start, end].into_iter().any(|bound| match bound {
+                    ForBound::Const(_) => false,
+                    ForBound::Expression(expr) => {
+                        self.expression_needs_assignment_snapshot_inner(expr, visiting)
+                    }
+                }) || self.statements_read_nonlocal(&statement.body, visiting)
+            }
+            Statement::FunctionCall(call) => {
+                call.inputs
+                    .values()
+                    .any(|expr| self.expression_needs_assignment_snapshot_inner(expr, visiting))
+                    || call
+                        .outputs
+                        .values()
+                        .flatten()
+                        .any(|dst| self.assignment_destination_reads_nonlocal(dst, visiting))
+                    || self.function_call_reads_nonlocal(call, visiting)
+            }
+            Statement::SystemFunctionCall(call) => match &call.kind {
+                SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => args
+                    .iter()
+                    .any(|arg| self.expression_needs_assignment_snapshot_inner(&arg.0, visiting)),
+                SystemFunctionKind::Assert { cond, args, .. } => {
+                    self.expression_needs_assignment_snapshot_inner(&cond.0, visiting)
+                        || args.iter().any(|arg| {
+                            self.expression_needs_assignment_snapshot_inner(&arg.0, visiting)
+                        })
+                }
+                SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => false,
+                SystemFunctionKind::Clog2(input)
+                | SystemFunctionKind::Onehot(input)
+                | SystemFunctionKind::Signed(input)
+                | SystemFunctionKind::Unsigned(input) => {
+                    self.expression_needs_assignment_snapshot_inner(&input.0, visiting)
+                }
+                SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
+            },
+            Statement::IfReset(statement) => {
+                self.statements_read_nonlocal(&statement.true_side, visiting)
+                    || self.statements_read_nonlocal(&statement.false_side, visiting)
+            }
+            Statement::TbMethodCall(_)
+            | Statement::Break
+            | Statement::Unsupported(_)
+            | Statement::Null => false,
+        })
     }
 
     fn expression_has_runtime_effect_inner(
@@ -1606,6 +1750,8 @@ impl<'a> FfParser<'a> {
         let guard_state = state.clone();
         let (call, next_state, arg_states) = self.prepare_system_function_call(call, state)?;
         *state = self.apply_state_transition_on_path(active, &guard_state, next_state);
+        let pre_defined = self.defined_ranges.clone();
+        let pre_dynamic = self.dynamic_defined_vars.clone();
         let merge_block = if let FunctionPathCondition::Conditional(condition) = active {
             let condition = self.parse_function_path_condition(
                 condition,
@@ -1636,8 +1782,13 @@ impl<'a> FfParser<'a> {
         result?;
 
         if let Some(merge_block) = merge_block {
+            let effect_defined = std::mem::replace(&mut self.defined_ranges, pre_defined.clone());
+            let effect_dynamic =
+                std::mem::replace(&mut self.dynamic_defined_vars, pre_dynamic.clone());
             ir_builder.seal_block(SIRTerminator::Jump(merge_block, vec![]));
             ir_builder.switch_to_block(merge_block);
+            self.defined_ranges = self.intersect_defined_states(pre_defined, effect_defined);
+            self.dynamic_defined_vars = self.intersect_dynamic_vars(pre_dynamic, effect_dynamic);
         }
         Ok(())
     }
@@ -1659,6 +1810,28 @@ impl<'a> FfParser<'a> {
         }
 
         let mut assign = assign.clone();
+        let guard_state = state.clone();
+        if state
+            .iter()
+            .any(|(id, _)| self.module.variables[id].affiliation != Affiliation::Function)
+        {
+            let flushed_state = state.clone();
+            self.emit_nonlocal_function_state_writes(
+                &flushed_state,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+            )?;
+            assign.expr = self.substitute_function_expr(&assign.expr, &flushed_state);
+            assign.dst = assign
+                .dst
+                .iter()
+                .map(|dst| self.substitute_assignment_destination(dst, &flushed_state))
+                .collect();
+            state.retain(|id, _| self.module.variables[id].affiliation == Affiliation::Function);
+        }
         if self.expression_needs_runtime_materialization(&assign.expr) {
             assign.expr = self.materialize_function_runtime_expression(
                 &assign.expr,
@@ -1676,7 +1849,13 @@ impl<'a> FfParser<'a> {
         let pre_dynamic = self.dynamic_defined_vars.clone();
         let merge_block = if let FunctionPathCondition::Conditional(condition) = active {
             let condition = self.parse_function_path_condition(
-                condition, state, targets, domain, convert, sources, ir_builder,
+                condition,
+                &guard_state,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
             )?;
             let store_block = ir_builder.new_block();
             let merge_block = ir_builder.new_block();
