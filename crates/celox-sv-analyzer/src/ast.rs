@@ -665,7 +665,14 @@ fn apply_parameter_overrides(
     }
     for parameter in parameters {
         if let Some(value) = overrides.get(parameter.name()) {
-            parameter.value = Some(ConstExpr::Literal(value.to_string()));
+            parameter.value = Some(if *value < 0 {
+                ConstExpr::Unary {
+                    op: UnaryOp::Minus,
+                    expr: Box::new(ConstExpr::Literal(value.unsigned_abs().to_string())),
+                }
+            } else {
+                ConstExpr::Literal(value.to_string())
+            });
         }
     }
     Ok(())
@@ -2756,9 +2763,40 @@ fn validate_function_statement(
         sv_parser::StatementItem::JumpStatement(statement)
             if matches!(&**statement, sv_parser::JumpStatement::Return(_)) =>
         {
+            if let sv_parser::JumpStatement::Return(statement) = &**statement
+                && let Some(expr) = &statement.nodes.1
+            {
+                expr_from_expression_with_types(expr, syntax_tree, packed_dimensions).ok_or_else(
+                    || {
+                        AnalyzerError::Unsupported(
+                            "unsupported function return expression".to_string(),
+                        )
+                    },
+                )?;
+            }
             Ok(())
         }
-        sv_parser::StatementItem::BlockingAssignment(_) => Ok(()),
+        sv_parser::StatementItem::BlockingAssignment(assignment) => {
+            let rhs = match &assignment.0 {
+                sv_parser::BlockingAssignment::Variable(assignment) => &assignment.nodes.3,
+                sv_parser::BlockingAssignment::OperatorAssignment(assignment) => {
+                    &assignment.nodes.2
+                }
+                _ => {
+                    return Err(AnalyzerError::Unsupported(
+                        "unsupported function assignment".to_string(),
+                    ));
+                }
+            };
+            expr_from_expression_with_types(rhs, syntax_tree, packed_dimensions).ok_or_else(
+                || {
+                    AnalyzerError::Unsupported(
+                        "unsupported function assignment expression".to_string(),
+                    )
+                },
+            )?;
+            Ok(())
+        }
         sv_parser::StatementItem::SeqBlock(block) => {
             for statement in &block.nodes.3 {
                 validate_function_statement_or_null(statement, syntax_tree, packed_dimensions)?;
@@ -2797,9 +2835,31 @@ fn validate_function_statement(
                     "unsupported statement inside function".to_string(),
                 ));
             };
+            expr_from_expression_with_types(
+                &statement.nodes.2.nodes.1.nodes.0,
+                syntax_tree,
+                packed_dimensions,
+            )
+            .ok_or_else(|| {
+                AnalyzerError::Unsupported("unsupported function case selector".to_string())
+            })?;
             for item in std::iter::once(&statement.nodes.3).chain(statement.nodes.4.iter()) {
                 let branch = match item {
-                    sv_parser::CaseItem::NonDefault(item) => &item.nodes.2,
+                    sv_parser::CaseItem::NonDefault(item) => {
+                        for expr in item.nodes.0.contents() {
+                            expr_from_expression_with_types(
+                                &expr.nodes.0,
+                                syntax_tree,
+                                packed_dimensions,
+                            )
+                            .ok_or_else(|| {
+                                AnalyzerError::Unsupported(
+                                    "unsupported function case item expression".to_string(),
+                                )
+                            })?;
+                        }
+                        &item.nodes.2
+                    }
                     sv_parser::CaseItem::Default(item) => &item.nodes.2,
                 };
                 validate_function_statement_or_null(branch, syntax_tree, packed_dimensions)?;
@@ -4776,8 +4836,19 @@ fn expand_expr_calls(
                 apply_return_type,
             );
             let mut expanded = if apply_return_type && let Some(width) = function.return_width {
+                let expression_signed =
+                    expr_signedness(&expanded, expression_signedness, functions).unwrap_or(false);
+                let assigned = if expression_signed == function.return_signed {
+                    expanded
+                } else {
+                    Expr::Resize {
+                        signed: expression_signed,
+                        expr: Box::new(expanded),
+                        width,
+                    }
+                };
                 Expr::Resize {
-                    expr: Box::new(expanded),
+                    expr: Box::new(assigned),
                     width,
                     signed: function.return_signed,
                 }

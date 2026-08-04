@@ -62,7 +62,7 @@ pub struct ModuleParser<'a> {
 static EMPTY_EXTERNAL_MODULES: std::sync::LazyLock<HashMap<ModuleId, ExternalModule>> =
     std::sync::LazyLock::new(HashMap::default);
 
-fn external_port_formal_names(decl: &InstDeclaration) -> Result<Vec<String>, ParserError> {
+fn external_port_formal_names(decl: &InstDeclaration) -> Result<(bool, Vec<String>), ParserError> {
     let source = decl.token.source().get_text();
     let start = decl.token.beg.pos as usize;
     let declaration = source
@@ -83,7 +83,11 @@ fn external_port_formal_names(decl: &InstDeclaration) -> Result<Vec<String>, Par
         )
     })?;
 
-    split_top_level(port_list, ',')
+    let items = split_top_level(port_list, ',');
+    let uses_named_associations = items
+        .iter()
+        .any(|item| find_top_level_connection_colon(item).is_some());
+    let formal_names = items
         .into_iter()
         .map(|item| {
             let item = item.trim();
@@ -104,7 +108,8 @@ fn external_port_formal_names(decl: &InstDeclaration) -> Result<Vec<String>, Par
                 Ok(formal.to_string())
             }
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((uses_named_associations, formal_names))
 }
 
 fn last_outer_parenthesized(text: &str) -> Option<&str> {
@@ -1768,7 +1773,7 @@ impl<'a> ModuleParser<'a> {
         let mut input_ports = Vec::new();
         let mut output_ports = Vec::new();
         let mut glue_arena = SLTNodeArena::<GlueAddr>::new();
-        let formal_names = external_port_formal_names(decl)?;
+        let (uses_named_associations, formal_names) = external_port_formal_names(decl)?;
         if formal_names.len() != system_verilog.connects.len() {
             return Err(ParserError::illegal_context(
                 "external module port connections",
@@ -1776,12 +1781,16 @@ impl<'a> ModuleParser<'a> {
                 Some(&decl.token),
             ));
         }
-        let connections: HashMap<_, _> = formal_names
-            .into_iter()
-            .zip(&system_verilog.connects)
-            .collect();
+        let connections: HashMap<_, _> = if uses_named_associations {
+            formal_names
+                .into_iter()
+                .zip(&system_verilog.connects)
+                .collect()
+        } else {
+            HashMap::default()
+        };
 
-        for child_port_id in &child.port_order {
+        for (port_index, child_port_id) in child.port_order.iter().enumerate() {
             let child_var = child
                 .sim_module
                 .variables
@@ -1793,16 +1802,20 @@ impl<'a> ModuleParser<'a> {
                         None,
                     )
                 })?;
-            let formal_name = child_var.path.to_string();
-            let parent_dst = connections.get(formal_name.as_str()).ok_or_else(|| {
-                ParserError::illegal_context(
-                    "external module port connections",
-                    format!(
-                        "port \"{formal_name}\" is not connected on module \"{external_name}\""
-                    ),
-                    Some(&decl.token),
-                )
-            })?;
+            let parent_dst = if uses_named_associations {
+                let formal_name = child_var.path.to_string();
+                connections.get(formal_name.as_str()).ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "external module port connections",
+                        format!(
+                            "port \"{formal_name}\" is not connected on module \"{external_name}\""
+                        ),
+                        Some(&decl.token),
+                    )
+                })?
+            } else {
+                &system_verilog.connects[port_index]
+            };
             let child_width = resolve_total_width(&child.metadata, child_var)?;
             if child_width == 0 {
                 return Err(ParserError::illegal_context(

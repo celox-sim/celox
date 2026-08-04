@@ -918,7 +918,7 @@ fn lower_parameter_overrides(
                 .and_then(|value| {
                     sv::typecheck::eval_const_expr_with_types(value, constants, parameter_types)
                 })
-                .map(|value| sv::ir::ConstExpr::Literal(value.to_string()))
+                .map(const_expr_from_i128)
                 .or_else(|| parameter.value().cloned());
             LoweredSvParameterOverride {
                 name: parameter.name().to_string(),
@@ -926,6 +926,31 @@ fn lower_parameter_overrides(
             }
         })
         .collect()
+}
+
+fn const_expr_from_i128(value: i128) -> sv::ir::ConstExpr {
+    if value < 0 {
+        sv::ir::ConstExpr::Unary {
+            op: sv::ir::UnaryOp::Minus,
+            expr: Box::new(sv::ir::ConstExpr::Literal(value.unsigned_abs().to_string())),
+        }
+    } else {
+        sv::ir::ConstExpr::Literal(value.to_string())
+    }
+}
+
+fn parameter_value_bits(value: i128, width: usize) -> BigUint {
+    let modulus = BigUint::from(1u8) << width;
+    if value >= 0 {
+        BigUint::from(value as u128) % modulus
+    } else {
+        let remainder = BigUint::from(value.unsigned_abs()) % &modulus;
+        if remainder == BigUint::default() {
+            remainder
+        } else {
+            modulus - remainder
+        }
+    }
 }
 
 pub(crate) fn attach_instance_glue(
@@ -959,9 +984,10 @@ pub(crate) fn attach_instance_glue(
             module,
             &mut parent_variables,
             &mut signal_names,
+            &lowered.constants,
             child,
             &instance.port_connections,
-        );
+        )?;
         resolved_instances.push((instance, child_id, child));
     }
     for (instance, child_id, child) in resolved_instances {
@@ -991,9 +1017,10 @@ fn ensure_parent_output_signals(
     parent: &mut SimModule,
     parent_variables: &mut HashMap<VarId, SvVariable>,
     parent_signal_names: &mut HashMap<String, VarId>,
+    parent_constants: &std::collections::HashMap<String, i128>,
     child: &LoweredSvModule,
     connections: &[LoweredSvPortConnection],
-) {
+) -> Result<(), ParserError> {
     for child_port_id in &child.port_order {
         let child_var = &child.variables[child_port_id];
         if child_var.kind != VarKind::Output {
@@ -1015,6 +1042,13 @@ fn ensure_parent_output_signals(
         };
         if parent_signal_names.contains_key(actual) {
             continue;
+        }
+        if parent_constants.contains_key(actual) {
+            return Err(ParserError::illegal_context(
+                "systemverilog output port connection",
+                format!("cannot drive parameter `{actual}`"),
+                None,
+            ));
         }
         let mut next_id = VarId::default();
         while parent.variables.contains_key(&next_id) {
@@ -1038,6 +1072,7 @@ fn ensure_parent_output_signals(
             .insert(next_id, variable.to_shared_variable());
         parent_variables.insert(next_id, variable);
     }
+    Ok(())
 }
 
 type SvGlue = (
@@ -1263,10 +1298,9 @@ fn lower_glue_parent_expr(
             let Some(id) = name_to_id.get(name).copied() else {
                 let value = constants.get(name)?;
                 let (width, signed) = parameter_types.get(name).copied().unwrap_or((32, false));
-                let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
                 let node = arena
                     .alloc(SLTNode::Constant(
-                        BigUint::from(*value as u128) & width_mask,
+                        parameter_value_bits(*value, width),
                         BigUint::from(0u32),
                         width,
                         signed,
@@ -2087,10 +2121,9 @@ fn lower_expr_with_context(
             let Some(id) = name_to_id.get(name).copied() else {
                 let value = constants.get(name)?;
                 let (width, signed) = parameter_types.get(name).copied().unwrap_or((32, false));
-                let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
                 let node = arena
                     .alloc(SLTNode::Constant(
-                        BigUint::from(*value as u128) & width_mask,
+                        parameter_value_bits(*value, width),
                         BigUint::from(0u32),
                         width,
                         signed,
@@ -3421,14 +3454,9 @@ fn lower_expr_to_sir_with_context(
                 let value = constants.get(name)?;
                 let (width, signed) = parameter_types.get(name).copied().unwrap_or((32, false));
                 let reg = builder.alloc_logic(width);
-                let mask = if width >= 128 {
-                    u128::MAX
-                } else {
-                    (1u128 << width) - 1
-                };
                 builder.emit(SIRInstruction::Imm(
                     reg,
-                    SIRValue::new_four_state((*value as u128) & mask, 0u32),
+                    SIRValue::new_four_state(parameter_value_bits(*value, width), 0u32),
                 ));
                 return resize_sir_register(
                     builder,

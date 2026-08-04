@@ -488,6 +488,81 @@ fn preserves_declared_parameter_width_in_comb_expressions() {
 }
 
 #[test]
+fn specializes_negative_parameter_overrides() {
+    let source = r#"
+        module Child #(parameter P = 0) (output logic y);
+            if (P == -1) assign y = 1'b1;
+            else assign y = 1'b0;
+        endmodule
+        module Top(output logic y);
+            Child #(.P(-1)) child(.y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("negative_parameter_override.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn sign_extends_wide_negative_parameters() {
+    let source = r#"
+        module Top(output logic [255:0] y);
+            parameter logic signed [255:0] P = -1;
+            assign y = P;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("wide_negative_parameter.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let expected: BigUint = (BigUint::from(1u8) << 256usize) - BigUint::from(1u8);
+    assert_eq!(sim.get(sim.signal("y")), expected.into());
+}
+
+#[test]
+fn zero_extends_unsigned_function_return_expressions() {
+    let source = r#"
+        module Top(output logic [15:0] y);
+            function automatic logic signed [15:0] value();
+                return 8'h80;
+            endfunction
+            assign y = value();
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("unsigned_function_return.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0x0080u16.into());
+}
+
+#[test]
+fn rejects_child_outputs_connected_to_parameters() {
+    let error = cranelift_build_error(
+        r#"
+        module Child(output logic y); assign y = 1'b1; endmodule
+        module Top(output logic out);
+            parameter P = 0;
+            Child child(.y(P));
+            assign out = P;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("cannot drive parameter `P`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn applies_unsigned_coercion_to_mixed_signed_constant_division() {
     let source = r#"
         module Top(output logic [7:0] quotient, output logic [7:0] remainder);
@@ -1667,6 +1742,50 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                     else return 1'b0;
                 endfunction
                 assign y = choose(a);
+            endmodule
+        "#,
+        ),
+        (
+            "unsupported function assignment expression",
+            r#"
+            module Top(input logic [3:0] a, output logic [3:0] y);
+                function automatic logic [3:0] square(input logic [3:0] value);
+                    logic [3:0] tmp;
+                    tmp = value ** 2;
+                    return tmp;
+                endfunction
+                assign y = square(a);
+            endmodule
+        "#,
+        ),
+        (
+            "unsupported function case selector",
+            r#"
+            module Top(input logic [3:0] a, output logic y);
+                function automatic logic choose(input logic [3:0] value);
+                    case (value ** 2)
+                        1: return 1'b1;
+                        default: return 1'b0;
+                    endcase
+                endfunction
+                assign y = choose(a);
+            endmodule
+        "#,
+        ),
+        (
+            "unsupported function case item expression",
+            r#"
+            module Top(input logic [3:0] a, b, output logic y);
+                function automatic logic choose(
+                    input logic [3:0] value,
+                    input logic [3:0] item
+                );
+                    case (value)
+                        item ** 2: return 1'b1;
+                        default: return 1'b0;
+                    endcase
+                endfunction
+                assign y = choose(a, b);
             endmodule
         "#,
         ),

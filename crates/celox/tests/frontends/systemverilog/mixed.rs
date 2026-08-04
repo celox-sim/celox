@@ -1,6 +1,39 @@
 use super::*;
 
 sv_backends! {
+    fn preserves_positional_veryl_to_systemverilog_port_order(sim) {
+        @setup {
+    let veryl = r#"
+        module Top (
+            a: input logic,
+            b: input logic,
+            y: output logic<2>,
+        ) {
+            inst child: $sv::PositionalPorts (b, a, y);
+        }
+    "#;
+    let sv = r#"
+        module PositionalPorts(input logic a, input logic b, output logic [1:0] y);
+            assign y = {a, b};
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("positional_ports.veryl"))],
+            vec![(sv, Path::new("positional_ports.sv"))],
+            "Top",
+        );
+
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    sim.modify(|io| {
+        io.set(a, 1u8);
+        io.set(b, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+    }
+
     fn preserves_out_of_order_named_veryl_to_systemverilog_ports(sim) {
         @setup {
     let veryl = r#"
