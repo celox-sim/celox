@@ -84,9 +84,10 @@ fn external_port_formal_names(decl: &InstDeclaration) -> Result<(bool, Vec<Strin
     })?;
 
     let items = split_top_level(port_list, ',');
-    let uses_named_associations = items
-        .iter()
-        .any(|item| find_top_level_connection_colon(item).is_some());
+    let uses_named_associations = uses_named_external_port_associations(&items);
+    if !uses_named_associations {
+        return Ok((false, vec![String::new(); items.len()]));
+    }
     let formal_names = items
         .into_iter()
         .map(|item| {
@@ -110,6 +111,12 @@ fn external_port_formal_names(decl: &InstDeclaration) -> Result<(bool, Vec<Strin
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((uses_named_associations, formal_names))
+}
+
+fn uses_named_external_port_associations(items: &[&str]) -> bool {
+    items
+        .iter()
+        .any(|item| find_top_level_connection_colon(item).is_some())
 }
 
 fn last_outer_parenthesized(text: &str) -> Option<&str> {
@@ -2943,11 +2950,16 @@ mod tests {
 
     use super::{
         collect_glue_sources, collect_parent_output_address_sources,
-        resolve_readmem_path_with_fallback,
+        resolve_readmem_path_with_fallback, uses_named_external_port_associations,
     };
     use crate::{GlueAddr, HashMap};
     use celox_design::{BinaryOp, BitAccess, VarAtomBase};
     use celox_slt::{SLTForFoldGroupState, SLTNode, SLTNodeArena};
+
+    #[test]
+    fn selected_positional_external_ports_are_not_treated_as_formal_names() {
+        assert!(!uses_named_external_port_associations(&["a[7:0]", "y"]));
+    }
 
     fn parse_top_module(code: &str) -> veryl_analyzer::ir::Module {
         symbol_table::clear();

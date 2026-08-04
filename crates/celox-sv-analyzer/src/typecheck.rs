@@ -212,20 +212,14 @@ fn format_typed_constant_literal(value: i128, width: usize, signed: bool) -> Str
 }
 
 fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Option<i128> {
-    let ConstExpr::Literal(left_text) = left else {
-        return None;
-    };
-    let ConstExpr::Literal(right_text) = right else {
-        return None;
-    };
-    let mut left = parse_integral_literal(left_text)?;
-    let mut right = parse_integral_literal(right_text)?;
+    let mut left = integral_literal_from_const_expr(left)?;
+    let mut right = integral_literal_from_const_expr(right)?;
     if left.mask != BigUint::default() || right.mask != BigUint::default() {
         return None;
     }
 
     if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) {
-        let amount = usize::try_from(literal_as_i128(right_text)?).ok()?;
+        let amount = usize::try_from(integral_literal_as_i128(&right, right.signed)?).ok()?;
         let width = left.width;
         let signed = left.signed;
         let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
@@ -355,6 +349,25 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
         },
         signed,
     )
+}
+
+fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral> {
+    match expr {
+        ConstExpr::Literal(literal) => parse_integral_literal(literal),
+        ConstExpr::Unary {
+            op: UnaryOp::BitNot,
+            expr,
+        } => {
+            let ConstExpr::Literal(literal) = &**expr else {
+                return None;
+            };
+            let mut literal = parse_integral_literal(literal)?;
+            let width_mask = (BigUint::from(1u8) << literal.width) - BigUint::from(1u8);
+            literal.value = width_mask ^ literal.value;
+            Some(literal)
+        }
+        _ => None,
+    }
 }
 
 fn integral_literal_as_i128(literal: &IntegralLiteral, signed: bool) -> Option<i128> {

@@ -962,6 +962,7 @@ pub(crate) fn attach_instance_glue(
 ) -> Result<(), ParserError> {
     let mut signal_names = lowered.signal_names.clone();
     let mut parent_variables = lowered.variables.clone();
+    let mut implicit_output_signals = HashSet::default();
     let mut resolved_instances = Vec::new();
     for instance in &lowered.instances {
         let child_key = LoweredSvModuleKey::instance_key(instance);
@@ -984,6 +985,7 @@ pub(crate) fn attach_instance_glue(
             module,
             &mut parent_variables,
             &mut signal_names,
+            &mut implicit_output_signals,
             &lowered.constants,
             child,
             &instance.port_connections,
@@ -1017,6 +1019,7 @@ fn ensure_parent_output_signals(
     parent: &mut SimModule,
     parent_variables: &mut HashMap<VarId, SvVariable>,
     parent_signal_names: &mut HashMap<String, VarId>,
+    implicit_output_signals: &mut HashSet<String>,
     parent_constants: &std::collections::HashMap<String, i128>,
     child: &LoweredSvModule,
     connections: &[LoweredSvPortConnection],
@@ -1041,6 +1044,13 @@ fn ensure_parent_output_signals(
             continue;
         };
         if parent_signal_names.contains_key(actual) {
+            if implicit_output_signals.contains(actual) {
+                return Err(ParserError::illegal_context(
+                    "systemverilog output port connection",
+                    format!("multiple child outputs drive implicit net `{actual}`"),
+                    None,
+                ));
+            }
             continue;
         }
         if parent_constants.contains_key(actual) {
@@ -1055,6 +1065,7 @@ fn ensure_parent_output_signals(
             next_id.inc();
         }
         parent_signal_names.insert(actual.to_string(), next_id);
+        implicit_output_signals.insert(actual.to_string());
         let variable = SvVariable {
             id: next_id,
             path: VarPath::new(resource_table::insert_str(actual)),

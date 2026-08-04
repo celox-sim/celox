@@ -96,9 +96,9 @@ impl Module {
         {
             return Err(AnalyzerError::Unsupported("ref port direction".to_string()));
         }
-        let signals = signals_from_module_node(node.clone(), syntax_tree)?;
-        let instances = instances_from_module_node(node.clone(), syntax_tree)?;
         let const_env = const_env_from_parameters(&parameters);
+        let signals = signals_from_module_node(node.clone(), syntax_tree, &const_env)?;
+        let instances = instances_from_module_node(node.clone(), syntax_tree, &const_env)?;
         reject_unsupported_multidimensional_packed_bounds(&ports, &signals, &const_env)?;
         let parameter_values = parameter_value_env(&parameters, &const_env);
         let packed_dimensions = packed_dimensions_from_ports_and_signals(&ports, &signals);
@@ -1382,7 +1382,31 @@ fn parameters_from_module_node(
 ) -> Result<Vec<Parameter>, AnalyzerError> {
     let mut parameters = Vec::new();
     if let Some(parameter_port_list) = module_parameter_port_list(node.clone()) {
-        parameters_from_ref_node(parameter_port_list, syntax_tree, &mut parameters, false)?;
+        parameters_from_ref_node(
+            parameter_port_list.clone(),
+            syntax_tree,
+            &mut parameters,
+            false,
+        )?;
+        let mut local_parameters = Vec::new();
+        for child in parameter_port_list {
+            if let RefNode::LocalParameterDeclaration(localparam) = child {
+                parameters_from_ref_node(
+                    RefNode::LocalParameterDeclaration(localparam),
+                    syntax_tree,
+                    &mut local_parameters,
+                    true,
+                )?;
+            }
+        }
+        for local in local_parameters {
+            if let Some(parameter) = parameters
+                .iter_mut()
+                .find(|parameter| parameter.name == local.name)
+            {
+                parameter.is_local = true;
+            }
+        }
     }
 
     for item in module_non_port_items(node.clone()) {
@@ -1409,76 +1433,192 @@ fn parameters_from_module_node(
         }
     }
 
-    for child in node.clone() {
-        let RefNode::ParamAssignment(param) = child else {
-            continue;
-        };
-        let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
-        if parameters.iter().any(|parameter| parameter.name() == name) {
-            continue;
-        }
-        let value = param
-            .nodes
-            .2
-            .as_ref()
-            .and_then(|(_, expr)| const_expr_from_constant_param(expr, syntax_tree));
-        parameters.push(Parameter::new(name, value, None, None, false));
-    }
-
     Ok(parameters)
 }
 
 fn signals_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
 ) -> Result<Vec<Signal>, AnalyzerError> {
     let mut signals = Vec::new();
     let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
-    signals.extend(signals_from_type_alias_instantiations(
-        node.clone(),
-        syntax_tree,
-        &type_aliases,
-    )?);
-    for child in node.clone() {
-        if let RefNode::DataDeclaration(data) = child {
-            signals.extend(signals_from_data_declaration(
-                data,
-                syntax_tree,
-                &type_aliases,
-            )?);
-        }
-    }
     for item in module_non_port_items(node) {
-        if let Some(alias_signals) =
-            signals_from_type_like_module_item(item, syntax_tree, &type_aliases)?
-        {
-            signals.extend(alias_signals);
-            continue;
-        }
-        let Some(declaration) = package_or_generate_declaration_from_non_port_item(item) else {
-            continue;
-        };
-        match declaration {
-            sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) => {
-                signals.extend(signals_from_data_declaration(
-                    data,
-                    syntax_tree,
-                    &type_aliases,
-                )?);
-            }
-            sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(net) => {
-                signals.extend(signals_from_net_declaration(
-                    net,
-                    syntax_tree,
-                    &type_aliases,
-                )?);
-            }
-            _ => {}
-        }
+        signals_from_non_port_module_item(
+            item,
+            syntax_tree,
+            &type_aliases,
+            const_env,
+            &mut signals,
+        )?;
     }
     signals.sort_by(|a, b| a.name.cmp(&b.name));
-    signals.dedup_by(|a, b| a.name == b.name);
+    if let Some(name) = signals
+        .windows(2)
+        .find(|pair| pair[0].name == pair[1].name)
+        .map(|pair| pair[0].name.clone())
+    {
+        return Err(AnalyzerError::Unsupported(format!(
+            "duplicate internal signal `{name}`"
+        )));
+    }
     Ok(signals)
+}
+
+fn signals_from_non_port_module_item(
+    item: &sv_parser::NonPortModuleItem,
+    syntax_tree: &SyntaxTree,
+    type_aliases: &HashMap<String, Type>,
+    const_env: &HashMap<String, i128>,
+    signals: &mut Vec<Signal>,
+) -> Result<(), AnalyzerError> {
+    match item {
+        sv_parser::NonPortModuleItem::GenerateRegion(region) => {
+            for item in &region.nodes.1 {
+                signals_from_generate_item(item, syntax_tree, type_aliases, const_env, signals)?;
+            }
+        }
+        sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) => {
+            signals_from_module_or_generate_item(
+                item,
+                syntax_tree,
+                type_aliases,
+                const_env,
+                signals,
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn signals_from_generate_item(
+    item: &sv_parser::GenerateItem,
+    syntax_tree: &SyntaxTree,
+    type_aliases: &HashMap<String, Type>,
+    const_env: &HashMap<String, i128>,
+    signals: &mut Vec<Signal>,
+) -> Result<(), AnalyzerError> {
+    if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
+        signals_from_module_or_generate_item(item, syntax_tree, type_aliases, const_env, signals)?;
+    }
+    Ok(())
+}
+
+fn signals_from_module_or_generate_item(
+    item: &sv_parser::ModuleOrGenerateItem,
+    syntax_tree: &SyntaxTree,
+    type_aliases: &HashMap<String, Type>,
+    const_env: &HashMap<String, i128>,
+    signals: &mut Vec<Signal>,
+) -> Result<(), AnalyzerError> {
+    match item {
+        sv_parser::ModuleOrGenerateItem::Module(module) => {
+            let mut alias_signals =
+                signals_from_type_alias_instantiation(&module.nodes.1, syntax_tree, type_aliases)?;
+            substitute_signal_local_constants(&mut alias_signals, const_env);
+            signals.extend(alias_signals);
+        }
+        sv_parser::ModuleOrGenerateItem::ModuleItem(item) => {
+            signals_from_module_common_item(
+                &item.nodes.1,
+                syntax_tree,
+                type_aliases,
+                const_env,
+                signals,
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn signals_from_module_common_item(
+    item: &sv_parser::ModuleCommonItem,
+    syntax_tree: &SyntaxTree,
+    type_aliases: &HashMap<String, Type>,
+    const_env: &HashMap<String, i128>,
+    signals: &mut Vec<Signal>,
+) -> Result<(), AnalyzerError> {
+    match item {
+        sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(declaration) => {
+            let sv_parser::ModuleOrGenerateItemDeclaration::PackageOrGenerateItemDeclaration(
+                declaration,
+            ) = &**declaration
+            else {
+                return Ok(());
+            };
+            let mut declared = match &**declaration {
+                sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) => {
+                    signals_from_data_declaration(data, syntax_tree, type_aliases)?
+                }
+                sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(net) => {
+                    signals_from_net_declaration(net, syntax_tree, type_aliases)?
+                }
+                _ => Vec::new(),
+            };
+            substitute_signal_local_constants(&mut declared, const_env);
+            signals.extend(declared);
+        }
+        sv_parser::ModuleCommonItem::ConditionalGenerateConstruct(generate) => {
+            let sv_parser::ConditionalGenerateConstruct::If(generate) = &**generate else {
+                return Ok(());
+            };
+            let condition = const_expr_from_ref_node(
+                RefNode::ConstantExpression(&generate.nodes.1.nodes.1),
+                syntax_tree,
+            )
+            .ok_or_else(|| {
+                AnalyzerError::Unsupported("conditional-generate condition lowering".to_string())
+            })?;
+            let condition = eval_ast_const_expr(&condition, const_env).ok_or_else(|| {
+                AnalyzerError::Unsupported("unknown conditional-generate condition".to_string())
+            })?;
+            let block = if condition != 0 {
+                Some(&generate.nodes.2)
+            } else {
+                generate.nodes.3.as_ref().map(|(_, block)| block)
+            };
+            if let Some(block) = block {
+                signals_from_generate_block(block, syntax_tree, type_aliases, const_env, signals)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn signals_from_generate_block(
+    block: &sv_parser::GenerateBlock,
+    syntax_tree: &SyntaxTree,
+    type_aliases: &HashMap<String, Type>,
+    const_env: &HashMap<String, i128>,
+    signals: &mut Vec<Signal>,
+) -> Result<(), AnalyzerError> {
+    match block {
+        sv_parser::GenerateBlock::GenerateItem(item) => {
+            signals_from_generate_item(item, syntax_tree, type_aliases, const_env, signals)?;
+        }
+        sv_parser::GenerateBlock::Multiple(block) => {
+            let mut block_env = const_env.clone();
+            for item in &block.nodes.3 {
+                if add_localparams_from_generate_item(item, syntax_tree, &mut block_env) {
+                    continue;
+                }
+                signals_from_generate_item(item, syntax_tree, type_aliases, &block_env, signals)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn substitute_signal_local_constants(signals: &mut [Signal], const_env: &HashMap<String, i128>) {
+    for signal in signals {
+        for range in &mut signal.r#type.packed_ranges {
+            range.left = substitute_const_expr_constants(range.left.clone(), const_env);
+            range.right = substitute_const_expr_constants(range.right.clone(), const_env);
+        }
+    }
 }
 
 fn signals_from_net_declaration(
@@ -1524,36 +1664,29 @@ fn signals_from_net_declaration(
     Ok(signals)
 }
 
-fn signals_from_type_alias_instantiations(
-    node: RefNode<'_>,
+fn signals_from_type_alias_instantiation(
+    instantiation: &sv_parser::ModuleInstantiation,
     syntax_tree: &SyntaxTree,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Signal>, AnalyzerError> {
     let mut signals = Vec::new();
-    for child in node {
-        let RefNode::ModuleInstantiation(instantiation) = child else {
-            continue;
-        };
-        let module_name = identifier_text(
-            RefNode::ModuleIdentifier(&instantiation.nodes.0),
+    let module_name = identifier_text(
+        RefNode::ModuleIdentifier(&instantiation.nodes.0),
+        syntax_tree,
+    )
+    .ok_or_else(|| {
+        AnalyzerError::Unsupported("unsupported module instantiation identifier".to_string())
+    })?;
+    let Some(r#type) = type_aliases.get(&module_name) else {
+        return Ok(signals);
+    };
+    for instance in instantiation.nodes.2.contents() {
+        let name = identifier_text(
+            RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
             syntax_tree,
         )
-        .ok_or_else(|| {
-            AnalyzerError::Unsupported("unsupported module instantiation identifier".to_string())
-        })?;
-        let Some(r#type) = type_aliases.get(&module_name) else {
-            continue;
-        };
-        for instance in instantiation.nodes.2.contents() {
-            let name = identifier_text(
-                RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
-                syntax_tree,
-            )
-            .ok_or_else(|| {
-                AnalyzerError::Unsupported("unsupported signal identifier".to_string())
-            })?;
-            signals.push(Signal::new(name, r#type.clone()));
-        }
+        .ok_or_else(|| AnalyzerError::Unsupported("unsupported signal identifier".to_string()))?;
+        signals.push(Signal::new(name, r#type.clone()));
     }
     Ok(signals)
 }
@@ -1714,45 +1847,6 @@ fn add_type_alias_from_type_assignment(
         return;
     };
     aliases.insert(name, r#type);
-}
-
-fn signals_from_type_like_module_item(
-    item: &sv_parser::NonPortModuleItem,
-    syntax_tree: &SyntaxTree,
-    type_aliases: &HashMap<String, Type>,
-) -> Result<Option<Vec<Signal>>, AnalyzerError> {
-    let sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) = item else {
-        return Ok(None);
-    };
-    let sv_parser::ModuleOrGenerateItem::Module(module) = &**item else {
-        return Ok(None);
-    };
-    let module_name = identifier_text(
-        RefNode::ModuleIdentifier(&module.nodes.1.nodes.0),
-        syntax_tree,
-    )
-    .ok_or_else(|| {
-        AnalyzerError::Unsupported("unsupported module instantiation identifier".to_string())
-    })?;
-    let Some(r#type) = type_aliases.get(&module_name) else {
-        return Ok(None);
-    };
-    let signals = module
-        .nodes
-        .1
-        .nodes
-        .2
-        .contents()
-        .into_iter()
-        .filter_map(|instance| {
-            identifier_text(
-                RefNode::InstanceIdentifier(&instance.nodes.0.nodes.0),
-                syntax_tree,
-            )
-            .map(|name| Signal::new(name, r#type.clone()))
-        })
-        .collect();
-    Ok(Some(signals))
 }
 
 fn signals_from_data_declaration(
@@ -2403,11 +2497,12 @@ fn port_name(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Result<String, Anal
 fn instances_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
 ) -> Result<Vec<Instance>, AnalyzerError> {
     let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
     let mut instances = Vec::new();
     for item in module_non_port_items(node) {
-        instances_from_non_port_module_item(item, None, syntax_tree, &mut instances)?;
+        instances_from_non_port_module_item(item, None, syntax_tree, const_env, &mut instances)?;
     }
     instances.retain(|instance| !type_aliases.contains_key(instance.module_name()));
     Ok(instances)
@@ -2417,16 +2512,29 @@ fn instances_from_non_port_module_item(
     item: &sv_parser::NonPortModuleItem,
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     match item {
         sv_parser::NonPortModuleItem::GenerateRegion(region) => {
             for item in &region.nodes.1 {
-                instances_from_generate_item(item, condition.clone(), syntax_tree, instances)?;
+                instances_from_generate_item(
+                    item,
+                    condition.clone(),
+                    syntax_tree,
+                    const_env,
+                    instances,
+                )?;
             }
         }
         sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) => {
-            instances_from_module_or_generate_item(item, condition, syntax_tree, instances)?;
+            instances_from_module_or_generate_item(
+                item,
+                condition,
+                syntax_tree,
+                const_env,
+                instances,
+            )?;
         }
         _ => {}
     }
@@ -2437,10 +2545,11 @@ fn instances_from_generate_item(
     item: &sv_parser::GenerateItem,
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
-        instances_from_module_or_generate_item(item, condition, syntax_tree, instances)?;
+        instances_from_module_or_generate_item(item, condition, syntax_tree, const_env, instances)?;
     }
     Ok(())
 }
@@ -2449,6 +2558,7 @@ fn instances_from_module_or_generate_item(
     item: &sv_parser::ModuleOrGenerateItem,
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -2457,11 +2567,18 @@ fn instances_from_module_or_generate_item(
                 &module.nodes.1,
                 condition,
                 syntax_tree,
+                const_env,
                 instances,
             )?;
         }
         sv_parser::ModuleOrGenerateItem::ModuleItem(item) => {
-            instances_from_module_common_item(&item.nodes.1, condition, syntax_tree, instances)?;
+            instances_from_module_common_item(
+                &item.nodes.1,
+                condition,
+                syntax_tree,
+                const_env,
+                instances,
+            )?;
         }
         _ => {}
     }
@@ -2472,11 +2589,18 @@ fn instances_from_module_common_item(
     item: &sv_parser::ModuleCommonItem,
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     match item {
         sv_parser::ModuleCommonItem::ConditionalGenerateConstruct(generate) => {
-            instances_from_conditional_generate(generate, condition, syntax_tree, instances)?;
+            instances_from_conditional_generate(
+                generate,
+                condition,
+                syntax_tree,
+                const_env,
+                instances,
+            )?;
         }
         sv_parser::ModuleCommonItem::ModuleOrGenerateItemDeclaration(_) => {}
         _ => {}
@@ -2488,6 +2612,7 @@ fn instances_from_conditional_generate(
     generate: &sv_parser::ConditionalGenerateConstruct,
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     let sv_parser::ConditionalGenerateConstruct::If(generate) = generate else {
@@ -2501,8 +2626,15 @@ fn instances_from_conditional_generate(
             "conditional-generate condition lowering".to_string(),
         ));
     };
+    let generate_condition = substitute_const_expr_constants(generate_condition, const_env);
     let then_condition = combine_conditions(condition.clone(), generate_condition.clone());
-    instances_from_generate_block(&generate.nodes.2, then_condition, syntax_tree, instances)?;
+    instances_from_generate_block(
+        &generate.nodes.2,
+        then_condition,
+        syntax_tree,
+        const_env,
+        instances,
+    )?;
     if let Some((_, block)) = &generate.nodes.3 {
         let else_condition = combine_conditions(
             condition,
@@ -2511,7 +2643,7 @@ fn instances_from_conditional_generate(
                 expr: Box::new(generate_condition),
             },
         );
-        instances_from_generate_block(block, else_condition, syntax_tree, instances)?;
+        instances_from_generate_block(block, else_condition, syntax_tree, const_env, instances)?;
     }
     Ok(())
 }
@@ -2520,15 +2652,26 @@ fn instances_from_generate_block(
     block: &sv_parser::GenerateBlock,
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     match block {
         sv_parser::GenerateBlock::GenerateItem(item) => {
-            instances_from_generate_item(item, condition, syntax_tree, instances)?;
+            instances_from_generate_item(item, condition, syntax_tree, const_env, instances)?;
         }
         sv_parser::GenerateBlock::Multiple(block) => {
+            let mut block_env = const_env.clone();
             for item in &block.nodes.3 {
-                instances_from_generate_item(item, condition.clone(), syntax_tree, instances)?;
+                if add_localparams_from_generate_item(item, syntax_tree, &mut block_env) {
+                    continue;
+                }
+                instances_from_generate_item(
+                    item,
+                    condition.clone(),
+                    syntax_tree,
+                    &block_env,
+                    instances,
+                )?;
             }
         }
     }
@@ -2550,6 +2693,7 @@ fn instances_from_module_instantiation(
     instantiation: &sv_parser::ModuleInstantiation,
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     let module_name = identifier_text(
@@ -2559,8 +2703,16 @@ fn instances_from_module_instantiation(
     .ok_or_else(|| {
         AnalyzerError::Unsupported("unsupported module instantiation identifier".to_string())
     })?;
-    let parameter_overrides =
+    let mut parameter_overrides =
         parameter_overrides_from_value_assignment(instantiation.nodes.1.as_ref(), syntax_tree)?;
+    for override_ in &mut parameter_overrides {
+        override_.value = override_
+            .value
+            .take()
+            .map(|value| substitute_const_expr_constants(value, const_env));
+    }
+    let condition =
+        condition.map(|condition| substitute_const_expr_constants(condition, const_env));
     let parameter_names: Vec<String> = parameter_overrides
         .iter()
         .map(|parameter| parameter.name().to_string())
@@ -5192,10 +5344,14 @@ fn ff_processes_from_module_common_item(
                 RefNode::ConstantExpression(&generate.nodes.1.nodes.1),
                 syntax_tree,
             ) else {
-                return Ok(());
+                return Err(AnalyzerError::Unsupported(
+                    "unknown conditional-generate condition".to_string(),
+                ));
             };
             let Some(condition_value) = eval_ast_const_expr(&condition, const_env) else {
-                return Ok(());
+                return Err(AnalyzerError::Unsupported(
+                    "unknown conditional-generate condition".to_string(),
+                ));
             };
             let block = if condition_value != 0 {
                 Some(&generate.nodes.2)

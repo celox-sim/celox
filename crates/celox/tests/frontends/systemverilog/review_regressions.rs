@@ -563,6 +563,42 @@ fn rejects_child_outputs_connected_to_parameters() {
 }
 
 #[test]
+fn rejects_multiple_child_outputs_driving_an_implicit_net() {
+    let error = cranelift_build_error(
+        r#"
+        module Source(output wire y); assign y = 1'b1; endmodule
+        module Sink(input logic a, output logic y); assign y = a; endmodule
+        module Top(output logic out);
+            Source first(.y(w));
+            Source second(.y(w));
+            Sink sink(.a(w), .y(out));
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("multiple child outputs drive implicit net `w`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn preserves_signed_bitwise_complement_width_in_constants() {
+    let source = r#"
+        module Top(output logic y);
+            parameter FLAG = (~4'sh0 == 4'hf);
+            assign y = FLAG;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("signed_constant_complement.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
 fn applies_unsigned_coercion_to_mixed_signed_constant_division() {
     let source = r#"
         module Top(output logic [7:0] quotient, output logic [7:0] remainder);
@@ -1786,6 +1822,44 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                     endcase
                 endfunction
                 assign y = choose(a, b);
+            endmodule
+        "#,
+        ),
+        (
+            "conditional-generate condition",
+            r#"
+            module Top #(
+                parameter logic [3:0] P = 4'hf
+            ) (input logic clk, d, output logic q);
+                if (P ** 2) always_ff @(posedge clk) q <= d;
+            endmodule
+        "#,
+        ),
+        (
+            "duplicate internal signal `w`",
+            r#"
+            module Top(output logic y);
+                logic [7:0] w;
+                logic w;
+                assign y = w;
+            endmodule
+        "#,
+        ),
+        (
+            "localparam override `P`",
+            r#"
+            module Child #(localparam P = 0) (output logic y); assign y = P; endmodule
+            module Top(output logic y); Child #(.P(1)) child(.y(y)); endmodule
+        "#,
+        ),
+        (
+            "combinational expression assigned to `y`",
+            r#"
+            module Top(output logic y);
+                if (0) begin : inactive
+                    localparam P = 1;
+                end
+                assign y = P;
             endmodule
         "#,
         ),
