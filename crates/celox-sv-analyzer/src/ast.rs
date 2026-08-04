@@ -1461,6 +1461,11 @@ fn signals_from_net_declaration(
         sv_parser::NetDeclaration::NetType(net) => {
             let r#type = type_from_ref_node(RefNode::DataTypeOrImplicit(&net.nodes.3), syntax_tree)
                 .unwrap_or_else(Type::implicit);
+            let r#type = type_with_fallback_ranges(
+                r#type,
+                RefNode::DataTypeOrImplicit(&net.nodes.3),
+                syntax_tree,
+            );
             (r#type, net.nodes.5.nodes.0.contents(), true)
         }
         sv_parser::NetDeclaration::NetTypeIdentifier(net) => {
@@ -2785,9 +2790,15 @@ fn function_from_declaration(
                 const_env,
                 type_aliases,
             )?;
+            let local_names = local_types.keys().cloned().collect::<HashSet<_>>();
             insert_function_param_types(&params, &mut local_types);
-            let expr =
-                function_body_expr(&body.nodes.6, syntax_tree, packed_dimensions, &local_types)?;
+            let expr = function_body_expr(
+                &body.nodes.6,
+                syntax_tree,
+                packed_dimensions,
+                &local_types,
+                &local_names,
+            )?;
             let return_type =
                 function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
             let return_is_2state =
@@ -2814,9 +2825,15 @@ fn function_from_declaration(
                 const_env,
                 type_aliases,
             )?;
+            let local_names = local_types.keys().cloned().collect::<HashSet<_>>();
             insert_function_param_types(&params, &mut local_types);
-            let expr =
-                function_body_expr(&body.nodes.5, syntax_tree, packed_dimensions, &local_types)?;
+            let expr = function_body_expr(
+                &body.nodes.5,
+                syntax_tree,
+                packed_dimensions,
+                &local_types,
+                &local_names,
+            )?;
             let return_type =
                 function_return_type(&body.nodes.0, syntax_tree, const_env, type_aliases);
             let return_is_2state =
@@ -3177,8 +3194,18 @@ fn function_body_expr(
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     local_types: &HashMap<String, FunctionLocalType>,
+    local_names: &HashSet<String>,
 ) -> Option<Expr> {
-    let mut locals = HashMap::new();
+    let mut locals = local_names
+        .iter()
+        .filter_map(|name| {
+            let r#type = local_types.get(name).copied()?;
+            Some((
+                name.clone(),
+                coerce_function_local_assignment(Expr::Literal("'x".to_string()), r#type),
+            ))
+        })
+        .collect::<HashMap<_, _>>();
     for statement in statements {
         if let Some(expr) = function_expr_from_statement_or_null(
             statement,
@@ -3715,6 +3742,11 @@ fn comb_processes_from_module_common_item(
                 packed_dimensions,
                 processes,
             )?;
+        }
+        sv_parser::ModuleCommonItem::NetAlias(_) => {
+            return Err(AnalyzerError::Unsupported(
+                "module-level net alias".to_string(),
+            ));
         }
         _ => {}
     }

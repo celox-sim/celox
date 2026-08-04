@@ -1,5 +1,6 @@
 use crate::build::{Build, Target};
 use crate::build_info::BuildInfo;
+use crate::component::Component;
 use crate::doc::Doc;
 use crate::format::Format;
 use crate::git::Git;
@@ -17,7 +18,7 @@ use regex::Regex;
 use semver::VersionReq;
 use serde::{Deserialize, Serialize};
 use spdx::Expression;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fmt;
 use std::fs;
@@ -53,6 +54,10 @@ pub struct Metadata {
     #[serde(default)]
     pub synth: Synth,
     #[serde(default)]
+    pub properties: BTreeMap<String, ProjectProperty>,
+    #[serde(default)]
+    pub components: Vec<Component>,
+    #[serde(default)]
     pub dependencies: HashMap<String, Dependency>,
     #[serde(default)]
     pub metadata: HashMap<String, toml::Value>,
@@ -77,6 +82,44 @@ pub struct Metadata {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(untagged)]
+pub enum ProjectProperty {
+    Int(i64),
+    Bool(bool),
+}
+
+impl ProjectProperty {
+    pub fn is_compatible(&self, other: &ProjectProperty) -> bool {
+        matches!(
+            (self, other),
+            (ProjectProperty::Int(_), ProjectProperty::Int(_))
+                | (ProjectProperty::Bool(_), ProjectProperty::Bool(_))
+        )
+    }
+
+    pub fn type_name(&self) -> String {
+        match self {
+            ProjectProperty::Int(_) => "int".to_string(),
+            ProjectProperty::Bool(_) => "bool".to_string(),
+        }
+    }
+
+    pub fn value_string(&self) -> String {
+        match self {
+            ProjectProperty::Int(x) => x.to_string(),
+            ProjectProperty::Bool(x) => x.to_string(),
+        }
+    }
+
+    pub fn verilog_value_string(&self) -> String {
+        match self {
+            ProjectProperty::Int(x) => x.to_string(),
+            ProjectProperty::Bool(x) => (if *x { "1'b1" } else { "1'b0" }).to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(untagged)]
 pub enum UrlPath {
     Url(Url),
     Path(PathBuf),
@@ -97,7 +140,8 @@ impl fmt::Display for UrlPath {
 static VALID_PROJECT_NAME: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-zA-Z_][0-9a-zA-Z_]*$").unwrap());
 
-fn check_project_name(name: &str) -> Result<(), MetadataError> {
+/// Validates a project or component name: identifiers only, `__` reserved.
+pub fn check_project_name(name: &str) -> Result<(), MetadataError> {
     if !VALID_PROJECT_NAME.is_match(name) {
         return Err(MetadataError::InvalidProjectName(name.to_string()));
     }
@@ -200,6 +244,10 @@ impl Metadata {
             info!(
                 "Committing metadata ({})",
                 self.pubfile_path.to_string_lossy()
+            );
+        } else {
+            warn!(
+                "Please git add and commit Veryl.pub (set `publish_commit = true` in [publish] to automate this)"
             );
         }
 
@@ -339,15 +387,33 @@ impl Metadata {
         };
         let mut explicit_routed = canonical_files.as_ref().map(|v| vec![false; v.len()]);
 
-        for source in &sources {
-            let src_base = base.join(source);
+        // `examples/` is reserved; dependency source collection
+        // (`Lockfile::paths`) skips it entirely.
+        let examples_base = base.join("examples");
+        if let Some(source) = sources
+            .iter()
+            .find(|x| base.join(x).starts_with(&examples_base))
+        {
+            return Err(MetadataError::ReservedSourceDir(base.join(source)));
+        }
 
+        let mut source_dirs: Vec<(PathBuf, bool)> =
+            sources.iter().map(|x| (base.join(x), false)).collect();
+        if examples_base.exists() {
+            source_dirs.push((examples_base.clone(), true));
+        }
+
+        for (src_base, is_example) in source_dirs {
             let src_files = if let Some(cf) = canonical_files.as_ref() {
                 // Only keep files that live under this source dir; other
-                // source dirs in `sources` will pick them up.
+                // source dirs in `sources` will pick them up. Files under
+                // `examples/` belong to the examples dir only, even when a
+                // source dir contains it.
                 let mut ret = Vec::new();
                 for (i, path) in cf.iter().enumerate() {
-                    if path.starts_with(&src_base) {
+                    if path.starts_with(&src_base)
+                        && (is_example || !path.starts_with(&examples_base))
+                    {
                         ret.push(path.clone());
                         if let Some(ref mut flags) = explicit_routed {
                             flags[i] = true;
@@ -356,7 +422,12 @@ impl Metadata {
                 }
                 ret
             } else {
-                veryl_path::gather_files_with_extension(&src_base, "veryl", symlink)?
+                let mut files =
+                    veryl_path::gather_files_with_extension(&src_base, "veryl", symlink)?;
+                if !is_example {
+                    files.retain(|x| !x.starts_with(&examples_base));
+                }
+                files
             };
 
             for src in src_files {
@@ -400,6 +471,7 @@ impl Metadata {
                     src: src.to_path_buf(),
                     dst,
                     map,
+                    example: is_example,
                 });
             }
         }
@@ -420,16 +492,8 @@ impl Metadata {
 
         if include_dependencies {
             if !self.build.exclude_std {
-                #[cfg(not(target_family = "wasm"))]
-                {
-                    veryl_std::expand()?;
-                    ret.append(&mut veryl_std::paths(&base_dst)?);
-                }
-                #[cfg(target_family = "wasm")]
-                return Err(MetadataError::UnsupportedTarget {
-                    operation: "expanding veryl-std dependencies",
-                    target: "WebAssembly",
-                });
+                veryl_std::expand()?;
+                ret.append(&mut veryl_std::paths(&base_dst)?);
             }
 
             self.update_lockfile()?;
@@ -510,6 +574,78 @@ obj_dir/
     pub fn doc_path(&self) -> PathBuf {
         self.metadata_path.parent().unwrap().join(&self.doc.path)
     }
+
+    /// Collects `[[components]]` declared by direct dependencies. Requires a
+    /// loaded lockfile; the dependency checkouts are already present when
+    /// this is called from the build/test flow.
+    pub fn collect_dependency_components(
+        &self,
+    ) -> Result<Vec<crate::lockfile::DependencyComponents>, MetadataError> {
+        self.lockfile.collect_components()
+    }
+
+    /// Collects the interface manifests of this project's and its direct
+    /// dependencies' components, keyed like the `$comp` symbols
+    /// (`<name>` / `<project>::<name>`). The names are the packages'
+    /// `veryl_component_export!` export names, enumerated per
+    /// `[[components]]` entry (see [`Component::collect_manifests`] for
+    /// the source priority). On a name collision the earlier entry wins.
+    pub fn collect_component_manifests(
+        &self,
+    ) -> Vec<(String, crate::component_manifest::ComponentManifest)> {
+        // Enumerates one project's entries with first-declaration-wins
+        // dedup; the same policy must hold wherever exports are collected
+        // (`veryl test` mirrors it when registering libraries).
+        fn collect_project(
+            components: &[crate::Component],
+            root: &Path,
+            target_dir: &Path,
+            project: Option<&str>,
+            ret: &mut Vec<(String, crate::component_manifest::ComponentManifest)>,
+        ) {
+            let mut seen = std::collections::HashSet::new();
+            for def in components {
+                for (name, manifest) in def.collect_manifests(root, target_dir) {
+                    if seen.insert(name.clone()) {
+                        let key = match project {
+                            Some(project) => format!("{project}::{name}"),
+                            None => name,
+                        };
+                        ret.push((key, manifest));
+                    } else {
+                        let scope = project
+                            .map(|p| format!(" of dependency `{p}`"))
+                            .unwrap_or_default();
+                        log::warn!(
+                            "component `{name}` is exported by more than one [[components]] package{scope}; the first declaration wins"
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut ret = vec![];
+        // An in-memory metadata (no backing Veryl.toml) has no project
+        // directory to read manifests from.
+        if self.metadata_path.as_os_str().is_empty() {
+            return ret;
+        }
+        let root = self.project_path();
+        let target_dir = root.join("target/veryl-components");
+        collect_project(&self.components, &root, &target_dir, None, &mut ret);
+        if let Ok(deps) = self.collect_dependency_components() {
+            for dep in &deps {
+                collect_project(
+                    &dep.components,
+                    &dep.root,
+                    &dep.target_dir,
+                    Some(&dep.project),
+                    &mut ret,
+                );
+            }
+        }
+        ret
+    }
 }
 
 impl FromStr for Metadata {
@@ -526,7 +662,7 @@ impl FromStr for Metadata {
 #[serde(deny_unknown_fields)]
 pub enum Dependency {
     Version(VersionReq),
-    Entry(DependencyEntry),
+    Entry(Box<DependencyEntry>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -537,4 +673,6 @@ pub struct DependencyEntry {
     pub github: Option<String>,
     pub project: Option<String>,
     pub path: Option<PathBuf>,
+    #[serde(default)]
+    pub properties: HashMap<String, ProjectProperty>,
 }

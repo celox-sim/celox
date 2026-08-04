@@ -21,7 +21,7 @@ celox-sir           = { path = "../celox-sir" }
 celox-state-layout  = { path = "../celox-state-layout" }
 fxhash              = { workspace = true }
 itertools           = { workspace = true }
-num-bigint          = "0.4"
+num-bigint          = "0.5"
 num-traits          = { workspace = true }
 thiserror           = { workspace = true }
 

@@ -227,7 +227,7 @@ pub fn build_veryl_adapter(sources: &[(&str, &Path)], top: &str) -> VerylSimAdap
     let mut context = Context::default();
     let mut ir = air::Ir::default();
     for parsed in &parsers {
-        analyzer.analyze_pass2("prj", &parsed.veryl, &mut context, Some(&mut ir));
+        analyzer.analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir));
     }
     Analyzer::analyze_post_pass2(&ir);
 

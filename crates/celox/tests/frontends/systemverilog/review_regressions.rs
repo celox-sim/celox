@@ -122,6 +122,77 @@ fn permits_disjoint_continuous_net_drivers() {
 }
 
 #[test]
+fn initializes_partially_driven_internal_nets_to_z() {
+    let source = r#"
+        module Top(output logic undriven_bits_are_z);
+            wire [7:0] w;
+            assign w[0] = 1'b0;
+            assign undriven_bits_are_z = (w[7:1] === 7'bzzzzzzz);
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("partial_internal_net.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("undriven_bits_are_z")), 1u8.into());
+}
+
+#[test]
+fn preserves_implicit_net_ranges_and_computed_select_dependencies() {
+    let source = r#"
+        module Top(input logic [7:0] a, b,
+                   output logic [7:0] copied,
+                   output logic carry);
+            wire [7:0] w;
+            assign w = a;
+            assign copied = w;
+            function automatic logic high_bit(
+                input logic [7:0] lhs,
+                input logic [7:0] rhs
+            );
+                logic [7:0] sum;
+                sum = lhs + rhs;
+                return sum[7];
+            endfunction
+            assign carry = high_bit(a, b);
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("net_range_and_select_deps.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    sim.set(sim.signal("a"), 0x7eu8);
+    sim.set(sim.signal("b"), 1u8);
+    assert_eq!(sim.get(sim.signal("copied")), 0x7eu8.into());
+    assert_eq!(sim.get(sim.signal("carry")), 0u8.into());
+    sim.set(sim.signal("a"), 0x7fu8);
+    assert_eq!(sim.get(sim.signal("copied")), 0x7fu8.into());
+    assert_eq!(sim.get(sim.signal("carry")), 1u8.into());
+}
+
+#[test]
+fn initializes_shadowing_function_locals_to_unknown() {
+    let source = r#"
+        module Top(output logic local_is_unknown);
+            logic tmp;
+            assign tmp = 1'b1;
+            function automatic logic f();
+                logic tmp;
+                return tmp;
+            endfunction
+            assign local_is_unknown = (f() === 1'bx);
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("function_local_shadow.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("local_is_unknown")), 1u8.into());
+}
+
+#[test]
 fn preserves_declared_width_for_parameter_logical_right_shifts() {
     let source = r#"
         module Top(output logic [7:0] shifted, output logic negation_matches);
@@ -1219,6 +1290,14 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(output wire y);
                 assign y = 1'b0;
                 assign y = 1'b1;
+            endmodule
+        "#,
+        ),
+        (
+            "module-level net alias",
+            r#"
+            module Top(input wire a, output wire y);
+                alias y = a;
             endmodule
         "#,
         ),

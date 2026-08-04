@@ -777,6 +777,17 @@ fn lower_module_with_overrides(
             token,
         };
         name_to_id.insert(signal.name().to_string(), id);
+        if signal.is_net() {
+            let written_mask = (BigUint::from(1u8) << type_info.width) - BigUint::from(1u8);
+            initial_memory_values.push(InitialStateValue {
+                address: id,
+                data: InitialStateData::Packed {
+                    value: BigUint::default(),
+                    mask: written_mask.clone(),
+                    written_mask,
+                },
+            });
+        }
         variables.insert(id, variable);
     }
 
@@ -2147,16 +2158,18 @@ fn lower_expr_with_context(
                     access,
                 })
                 .ok()?;
-            sources = sources
-                .into_iter()
-                .map(|source| {
-                    Some(VarAtomBase::new(
-                        source.id,
-                        source.access.lsb.checked_add(access.lsb)?,
-                        source.access.lsb.checked_add(access.msb)?,
-                    ))
-                })
-                .collect::<Option<HashSet<_>>>()?;
+            if select_can_narrow_source_ranges(expr) {
+                sources = sources
+                    .into_iter()
+                    .map(|source| {
+                        Some(VarAtomBase::new(
+                            source.id,
+                            source.access.lsb.checked_add(access.lsb)?,
+                            source.access.lsb.checked_add(access.msb)?,
+                        ))
+                    })
+                    .collect::<Option<HashSet<_>>>()?;
+            }
             Some((node, sources))
         }
         sv::ir::Expr::Concat(parts) => {
@@ -2451,6 +2464,14 @@ fn lower_expr_with_context(
             ))
         }
         sv::ir::Expr::Call { .. } => None,
+    }
+}
+
+fn select_can_narrow_source_ranges(expr: &sv::ir::Expr) -> bool {
+    match expr {
+        sv::ir::Expr::Ident(_) => true,
+        sv::ir::Expr::Select { expr, .. } => select_can_narrow_source_ranges(expr),
+        _ => false,
     }
 }
 

@@ -31,18 +31,19 @@ fn emit_sv(code: &str) -> String {
     assert!(errors.is_empty(), "analyze_pass1 errors: {errors:?}");
     let errors = Analyzer::analyze_post_pass1();
     assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
-    let errors = analyzer.analyze_pass2(&"prj", &parser.veryl, &mut context, Some(&mut ir));
+    let errors = analyzer.analyze_pass2(&parser.veryl, &mut context, Some(&mut ir));
     assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
     let errors = Analyzer::analyze_post_pass2(&ir);
     assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
 
     let mut emitter = Emitter::new(
         &metadata,
+        "prj",
         &PathBuf::from("bench.veryl"),
         &PathBuf::from("bench.sv"),
         &PathBuf::from("bench.sv.map"),
     );
-    emitter.emit("prj", &parser.veryl, code);
+    emitter.emit(&parser.veryl, code);
     emitter.as_str().to_string()
 }
 

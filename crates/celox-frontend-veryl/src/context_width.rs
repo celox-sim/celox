@@ -115,6 +115,7 @@ pub fn factor_signed(factor: &Factor) -> bool {
         Factor::Variable(_, _, select, comptime) => {
             select.is_empty() && comptime.expr_context.signed
         }
+        Factor::HierVariable(reference) => reference.comptime.expr_context.signed,
         Factor::FunctionCall(call) => call.comptime.r#type.signed,
         Factor::Anonymous(comptime) | Factor::Unknown(comptime) => comptime.r#type.signed,
     }

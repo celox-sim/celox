@@ -3,6 +3,7 @@ use crate::{
     HashMap, HashSet, LoweringPhase, ParserError,
     bitaccess::{build_partial_assign_expr, is_static_access},
     case::case_arm_condition_expr,
+    function_call_arg,
 };
 use celox_design::VarAtomBase;
 use celox_sir::SIRBuilder;
@@ -79,6 +80,11 @@ impl<'a> FfParser<'a> {
 
     fn expr_shape_matches_formal(expr: &Expression, formal_shape: &[usize]) -> bool {
         match expr {
+            Expression::Term(factor)
+                if matches!(factor.as_ref(), Factor::Anonymous(_) | Factor::Unknown(_)) =>
+            {
+                false
+            }
             Expression::ArrayLiteral(items, _) => {
                 let Some((&formal_len, formal_tail)) = formal_shape.split_first() else {
                     return false;
@@ -152,7 +158,7 @@ impl<'a> FfParser<'a> {
         function_body: &veryl_analyzer::ir::FunctionBody,
     ) -> Result<(), ParserError> {
         for (arg_path, arg_id) in &function_body.arg_map {
-            let Some(arg_expr) = call.inputs.get(arg_path) else {
+            let Some(arg_expr) = function_call_arg(&call.inputs, arg_path) else {
                 continue;
             };
             let formal = &self.module.variables[arg_id];
@@ -205,7 +211,7 @@ impl<'a> FfParser<'a> {
 
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
-            if let Some(arg_expr) = call.inputs.get(arg_path) {
+            if let Some(arg_expr) = function_call_arg(&call.inputs, arg_path) {
                 bindings.insert(*arg_id, Self::substitute_function_expr(arg_expr, state));
             }
         }
@@ -271,6 +277,18 @@ impl<'a> FfParser<'a> {
             .iter()
             .rev()
             .find_map(|bindings| bindings.get(&var_id))
+    }
+
+    pub(super) fn get_bound_function_array_view(&self, var_id: VarId) -> Option<VarId> {
+        for frame in (0..self.function_arg_stack.len()).rev() {
+            if self.function_arg_stack[frame].contains_key(&var_id) {
+                return self.function_array_view_stack[frame]
+                    .get(&var_id)
+                    .filter(|view| view.initialized.is_none())
+                    .map(|view| view.backing_var_id);
+            }
+        }
+        None
     }
 
     pub(super) fn substitute_function_expr(
@@ -799,11 +817,15 @@ impl<'a> FfParser<'a> {
 
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
-            if let Some(arg_expr) = call.inputs.get(arg_path) {
+            if let Some(arg_expr) = function_call_arg(&call.inputs, arg_path) {
                 bindings.insert(*arg_id, arg_expr.clone());
             }
         }
+        let mut array_views = HashMap::default();
+        let mut symbolic_bindings = bindings.clone();
+        symbolic_bindings.retain(|var_id, _| self.module.variables[var_id].r#type.array.is_empty());
 
+        let mut output_exprs = Vec::with_capacity(call.outputs.len());
         for (arg_path, dsts) in &call.outputs {
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
                 return Err(ParserError::unsupported(
@@ -815,18 +837,9 @@ impl<'a> FfParser<'a> {
                 ));
             };
 
-            let expr = self.extract_function_target_expr(&function_body, *arg_id, &bindings)?;
-            self.function_arg_stack.push(bindings.clone());
-            self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None)?;
-            self.function_arg_stack.pop();
-
-            let rhs_reg = self
-                .stack
-                .pop_back()
-                .expect("Function output expression evaluation failed");
-            self.emit_multi_dst_assign(
-                rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
-            )?;
+            let expr =
+                self.extract_function_target_expr(&function_body, *arg_id, &symbolic_bindings)?;
+            output_exprs.push((dsts, expr));
         }
 
         let Some(ret_id) = function_body.ret else {
@@ -836,14 +849,34 @@ impl<'a> FfParser<'a> {
                 Some(&call.comptime.token),
             ));
         };
-
         let ret_expr = self.extract_function_return_expr(&function_body, ret_id)?;
 
+        for (dsts, expr) in output_exprs {
+            self.function_arg_stack.push(bindings.clone());
+            self.function_array_view_stack.push(array_views);
+            let assign_result = (|| {
+                self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None)?;
+                let rhs_reg = self
+                    .stack
+                    .pop_back()
+                    .expect("Function output expression evaluation failed");
+                self.emit_multi_dst_assign(
+                    rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
+                )
+            })();
+            array_views = self.function_array_view_stack.pop().unwrap();
+            self.function_arg_stack.pop();
+            assign_result?;
+        }
+
         self.function_arg_stack.push(bindings);
+        self.function_array_view_stack.push(array_views);
         let result = self.parse_expression(
             &ret_expr, targets, domain, convert, sources, ir_builder, None,
         );
+        let finished_views = self.function_array_view_stack.pop().unwrap();
         self.function_arg_stack.pop();
+        self.restore_active_function_array_views(&finished_views, convert, ir_builder)?;
 
         result
     }
@@ -893,11 +926,15 @@ impl<'a> FfParser<'a> {
 
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
-            if let Some(arg_expr) = call.inputs.get(arg_path) {
+            if let Some(arg_expr) = function_call_arg(&call.inputs, arg_path) {
                 bindings.insert(*arg_id, arg_expr.clone());
             }
         }
+        let mut array_views = HashMap::default();
+        let mut symbolic_bindings = bindings.clone();
+        symbolic_bindings.retain(|var_id, _| self.module.variables[var_id].r#type.array.is_empty());
 
+        let mut output_exprs = Vec::with_capacity(call.outputs.len());
         for (arg_path, dsts) in &call.outputs {
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
                 return Err(ParserError::unsupported(
@@ -909,19 +946,30 @@ impl<'a> FfParser<'a> {
                 ));
             };
 
-            let expr = self.extract_function_target_expr(&function_body, *arg_id, &bindings)?;
-            self.function_arg_stack.push(bindings.clone());
-            self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None)?;
-            self.function_arg_stack.pop();
-
-            let rhs_reg = self
-                .stack
-                .pop_back()
-                .expect("Function output expression evaluation failed");
-            self.emit_multi_dst_assign(
-                rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
-            )?;
+            let expr =
+                self.extract_function_target_expr(&function_body, *arg_id, &symbolic_bindings)?;
+            output_exprs.push((dsts, expr));
         }
+
+        for (dsts, expr) in output_exprs {
+            self.function_arg_stack.push(bindings.clone());
+            self.function_array_view_stack.push(array_views);
+            let assign_result = (|| {
+                self.parse_expression(&expr, targets, domain, convert, sources, ir_builder, None)?;
+                let rhs_reg = self
+                    .stack
+                    .pop_back()
+                    .expect("Function output expression evaluation failed");
+                self.emit_multi_dst_assign(
+                    rhs_reg, dsts, targets, domain, convert, sources, ir_builder,
+                )
+            })();
+            array_views = self.function_array_view_stack.pop().unwrap();
+            self.function_arg_stack.pop();
+            assign_result?;
+        }
+
+        self.restore_active_function_array_views(&array_views, convert, ir_builder)?;
 
         Ok(())
     }

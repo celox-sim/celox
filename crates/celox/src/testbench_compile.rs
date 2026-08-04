@@ -19,7 +19,7 @@ pub(crate) fn project_observability(program: &mut RuntimeProgram, source: &Veryl
 pub(crate) fn compile_semantic_testbench(
     program: &RuntimeProgram,
     source: &VerylTestbenchSource,
-) -> Option<TestbenchProgram<AbsoluteAddr>> {
+) -> Result<Option<TestbenchProgram<AbsoluteAddr>>, celox_frontend_veryl::ParserError> {
     celox_frontend_veryl::compile_semantic_testbench(
         &program.frontend,
         source,

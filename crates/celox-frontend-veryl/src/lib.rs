@@ -56,6 +56,15 @@ pub type GlueAddr = celox_slt::GlueAddrBase<VarId>;
 pub type GlueBlock = celox_slt::GlueBlockBase<VarId>;
 pub type ModuleInitialMemoryValue = celox_design::InitialStateValue<VarId>;
 
+pub(crate) fn function_call_arg<'a, T>(args: &'a [(VarPath, T)], path: &VarPath) -> Option<&'a T> {
+    args.iter()
+        .find_map(|(candidate, value)| (candidate == path).then_some(value))
+}
+
+pub(crate) fn function_call_has_arg<T>(args: &[(VarPath, T)], path: &VarPath) -> bool {
+    args.iter().any(|(candidate, _)| candidate == path)
+}
+
 #[derive(Clone)]
 pub struct VariableInfo {
     pub id: VarId,
