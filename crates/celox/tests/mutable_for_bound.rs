@@ -421,6 +421,63 @@ module t {
 }
 
 #[test]
+fn hierarchical_bound_connected_to_immediately_written_root_is_an_error() {
+    let code = r#"
+module Limit (
+    limit: input logic<8>,
+) {}
+
+#[test(t)]
+module t {
+    var limit: logic<8>;
+    inst dut: Limit (limit);
+
+    initial {
+        limit = 2;
+        for _i in 0..dut.limit {
+            limit = 0;
+        }
+        $finish();
+    }
+}
+"#;
+    expect_mutable_bound_error(code, "t");
+}
+
+#[test]
+fn hierarchical_bound_connected_to_disjoint_root_bits_is_allowed() {
+    let code = r#"
+module Limit (
+    limit: input logic<8>,
+) {}
+
+#[test(t)]
+module t {
+    var upper: logic<4>;
+    var lower: logic<4>;
+    var limit: logic<8>;
+    inst dut: Limit (limit);
+
+    always_comb {
+        limit = {upper, lower};
+    }
+
+    initial {
+        upper = 2;
+        lower = 0;
+        for _i in 0..dut.limit[7:4] {
+            lower = 1;
+        }
+        $finish();
+    }
+}
+"#;
+    Simulator::builder(code, "t")
+        .build()
+        .expect("writes to disjoint connected bits must not conflict");
+}
+
+#[test]
 fn time_advancing_body_effects_pass_when_the_bound_is_outside_the_event_write_closure() {
     let code = r#"
 module Counter (
