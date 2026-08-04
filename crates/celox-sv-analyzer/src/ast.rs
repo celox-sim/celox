@@ -2757,12 +2757,18 @@ fn parameter_overrides_from_value_assignment(
         ));
     };
     let mut overrides = Vec::new();
+    let mut names = HashSet::new();
     for assignment in assignments.nodes.0.contents() {
         let name = identifier_text(
             RefNode::ParameterIdentifier(&assignment.nodes.1),
             syntax_tree,
         )
         .ok_or_else(|| AnalyzerError::Unsupported("parameter override identifier".to_string()))?;
+        if !names.insert(name.clone()) {
+            return Err(AnalyzerError::Unsupported(format!(
+                "duplicate parameter override `{name}`"
+            )));
+        }
         let value = match assignment.nodes.2.nodes.1.as_ref() {
             Some(expr) => Some(
                 const_expr_from_param_expression(expr, syntax_tree).ok_or_else(|| {
@@ -2871,7 +2877,12 @@ fn functions_from_module_node(
             &type_aliases,
             packed_dimensions,
         ) {
-            functions.insert(function.name.clone(), function);
+            let name = function.name.clone();
+            if functions.insert(name.clone(), function).is_some() {
+                return Err(AnalyzerError::Unsupported(format!(
+                    "duplicate function declaration `{name}`"
+                )));
+            }
         }
     }
     Ok(functions)
@@ -4033,7 +4044,9 @@ fn comb_processes_from_conditional_generate(
     if has_local_constants(const_env)
         && eval_ast_const_expr(&generate_condition, const_env).is_none()
     {
-        return Ok(());
+        return Err(AnalyzerError::Unsupported(
+            "unknown conditional-generate condition".to_string(),
+        ));
     }
     let generate_condition = substitute_const_expr_constants(generate_condition, const_env);
     let then_condition = combine_conditions(condition.clone(), generate_condition.clone());
@@ -4440,6 +4453,15 @@ fn add_localparams_from_generate_item(
     syntax_tree: &SyntaxTree,
     const_env: &mut HashMap<String, i128>,
 ) -> bool {
+    add_localparams_from_generate_item_with_literals(item, syntax_tree, const_env, None)
+}
+
+fn add_localparams_from_generate_item_with_literals(
+    item: &sv_parser::GenerateItem,
+    syntax_tree: &SyntaxTree,
+    const_env: &mut HashMap<String, i128>,
+    mut parameter_literals: Option<&mut HashMap<String, Expr>>,
+) -> bool {
     let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item else {
         return false;
     };
@@ -4476,9 +4498,18 @@ fn add_localparams_from_generate_item(
         let Some(value) = parameter.resolved_value(const_env, &parameter_types) else {
             continue;
         };
-        if let Some(r#type) = parameter.resolved_type(&parameter_types) {
+        let resolved_type = parameter.resolved_type(&parameter_types);
+        if let Some(r#type) = resolved_type {
             parameter_types.insert(parameter.name().to_string(), r#type);
             insert_parameter_type_markers(const_env, parameter.name(), r#type);
+        }
+        if let Some(parameter_literals) = parameter_literals.as_deref_mut() {
+            let literal = if let Some(r#type) = resolved_type {
+                format_typed_parameter_literal(value, r#type.width, r#type.signed)
+            } else {
+                value.to_string()
+            };
+            parameter_literals.insert(parameter.name().to_string(), Expr::Literal(literal));
         }
         const_env.insert(parameter.name().to_string(), value);
     }
@@ -5394,12 +5425,22 @@ fn ff_processes_from_generate_block(
             )?;
         }
         sv_parser::GenerateBlock::Multiple(block) => {
+            let mut block_env = const_env.clone();
+            let mut block_parameter_literals = parameter_literals.clone();
             for item in &block.nodes.3 {
+                if add_localparams_from_generate_item_with_literals(
+                    item,
+                    syntax_tree,
+                    &mut block_env,
+                    Some(&mut block_parameter_literals),
+                ) {
+                    continue;
+                }
                 ff_processes_from_generate_item(
                     item,
                     syntax_tree,
-                    const_env,
-                    parameter_literals,
+                    &block_env,
+                    &block_parameter_literals,
                     packed_dimensions,
                     processes,
                 )?;
@@ -5933,22 +5974,27 @@ fn lvalue_from_select(
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Option<LValue> {
-    if let Some(range) = &select.nodes.2 {
-        let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
-            return None;
-        };
-        let msb =
-            const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
-        let lsb =
-            const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
-        return Some(LValue::Select { name, msb, lsb });
-    }
-
     let bit_selects = select.nodes.1.nodes.0.as_slice();
     let indices = bit_selects
         .iter()
         .map(|bit_select| const_expr_from_expr(&bit_select.nodes.1, syntax_tree))
         .collect::<Option<Vec<_>>>()?;
+    if let Some(range) = &select.nodes.2 {
+        let sv_parser::PartSelectRange::ConstantRange(range) = &range.nodes.1 else {
+            return None;
+        };
+        let mut msb =
+            const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
+        let mut lsb =
+            const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
+        if !indices.is_empty() {
+            let (_, prefix_offset) = flatten_packed_select(&name, &indices, packed_dimensions)?;
+            msb = add_expr(prefix_offset.clone(), msb);
+            lsb = add_expr(prefix_offset, lsb);
+        }
+        return Some(LValue::Select { name, msb, lsb });
+    }
+
     if let Some((msb, lsb)) = flatten_packed_select(&name, &indices, packed_dimensions) {
         return Some(LValue::Select { name, msb, lsb });
     }
@@ -5970,17 +6016,6 @@ fn lvalue_from_constant_select(
     syntax_tree: &SyntaxTree,
     packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Option<LValue> {
-    if let Some(range) = &select.nodes.2 {
-        let sv_parser::ConstantPartSelectRange::ConstantRange(range) = &range.nodes.1 else {
-            return None;
-        };
-        let msb =
-            const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
-        let lsb =
-            const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
-        return Some(LValue::Select { name, msb, lsb });
-    }
-
     let bit_selects = select.nodes.1.nodes.0.as_slice();
     let indices = bit_selects
         .iter()
@@ -5991,6 +6026,22 @@ fn lvalue_from_constant_select(
             )
         })
         .collect::<Option<Vec<_>>>()?;
+    if let Some(range) = &select.nodes.2 {
+        let sv_parser::ConstantPartSelectRange::ConstantRange(range) = &range.nodes.1 else {
+            return None;
+        };
+        let mut msb =
+            const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
+        let mut lsb =
+            const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
+        if !indices.is_empty() {
+            let (_, prefix_offset) = flatten_packed_select(&name, &indices, packed_dimensions)?;
+            msb = add_expr(prefix_offset.clone(), msb);
+            lsb = add_expr(prefix_offset, lsb);
+        }
+        return Some(LValue::Select { name, msb, lsb });
+    }
+
     if let Some((msb, lsb)) = flatten_packed_select(&name, &indices, packed_dimensions) {
         return Some(LValue::Select { name, msb, lsb });
     }

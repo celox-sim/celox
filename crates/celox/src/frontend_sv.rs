@@ -1589,13 +1589,7 @@ fn lower_glue_parent_expr(
             .then_some(operation_context)
             .flatten();
             let operand_context_signed = Some(operands_signed);
-            let context_sized_comparison = matches!(
-                op,
-                sv::ir::BinaryOp::EqCase
-                    | sv::ir::BinaryOp::NeCase
-                    | sv::ir::BinaryOp::EqWildcard
-                    | sv::ir::BinaryOp::NeWildcard
-            );
+            let context_sized_comparison = comparison;
             let left_fill = context_sized_comparison
                 .then(|| expr_unbased_fill_literal(left))
                 .flatten();

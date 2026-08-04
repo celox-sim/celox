@@ -522,7 +522,7 @@ fn sign_extends_wide_negative_parameters() {
     .build_cranelift()
     .unwrap();
     let expected: BigUint = (BigUint::from(1u8) << 256usize) - BigUint::from(1u8);
-    assert_eq!(sim.get(sim.signal("y")), expected.into());
+    assert_eq!(sim.get(sim.signal("y")), expected);
 }
 
 #[test]
@@ -1402,6 +1402,66 @@ fn converts_unknown_ff_values_when_storing_to_bit() {
 }
 
 #[test]
+fn context_sizes_unbased_fill_literals_in_glue_comparisons() {
+    let source = r#"
+        module Child(input logic value, output logic y); assign y = value; endmodule
+        module Top(input logic [3:0] a, output logic y);
+            Child child(.value(a == '1), .y(y));
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("glue_fill_comparison.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 0x0fu8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+    sim.modify(|io| io.set(a, 0x07u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0u8.into());
+}
+
+#[test]
+fn preserves_multidimensional_packed_offsets_on_lvalue_part_selects() {
+    let source = r#"
+        module Top(input logic [7:0] a, output logic [1:0][7:0] y);
+            always_comb begin
+                y = '0;
+                y[1][7:0] = a;
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("packed_lvalue_prefix.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 0xabu8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xab00u16.into());
+}
+
+#[test]
+fn applies_generate_localparams_inside_always_ff() {
+    let source = r#"
+        module Top #(
+            parameter P = 0
+        ) (input logic clk, output logic q);
+            if (1) begin : active
+                localparam P = 1;
+                always_ff @(posedge clk) q <= P;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("ff_generate_localparam.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), 1u8.into());
+}
+
+#[test]
 fn rejects_constructs_that_are_not_yet_lowered() {
     let cases = [
         (
@@ -1832,6 +1892,33 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                 parameter logic [3:0] P = 4'hf
             ) (input logic clk, d, output logic q);
                 if (P ** 2) always_ff @(posedge clk) q <= d;
+            endmodule
+        "#,
+        ),
+        (
+            "unknown conditional-generate condition",
+            r#"
+            module Top(output logic y);
+                for (genvar i = -1; i < 0; i++) begin : outer
+                    if (&i) assign y = 1'b1;
+                end
+            endmodule
+        "#,
+        ),
+        (
+            "duplicate parameter override `P`",
+            r#"
+            module Child #(parameter P = 0) (output logic y); assign y = P; endmodule
+            module Top(output logic y); Child #(.P(0), .P(1)) child(.y(y)); endmodule
+        "#,
+        ),
+        (
+            "duplicate function declaration `f`",
+            r#"
+            module Top(output logic y);
+                function logic f(); return 1'b0; endfunction
+                function logic f(); return 1'b1; endfunction
+                assign y = f();
             endmodule
         "#,
         ),
