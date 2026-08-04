@@ -412,6 +412,43 @@ fn test_hierarchical_testbench_read_resolves_nested_instance_index_and_select() 
 }
 
 #[test]
+fn test_hierarchical_dynamic_reads_preserve_wide_values() {
+    let code = r#"
+        module Dut () {
+            var words: logic<128>[2];
+
+            always_comb {
+                words[0] = 128'h0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+                words[1] = 128'hffff_eeee_dddd_cccc_bbbb_aaaa_9999_8888;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst dut: Dut ();
+            var index: u32;
+            var bit_index: u32;
+
+            initial {
+                index = 1;
+                bit_index = 68;
+                $assert(dut.words[index] == 128'hffff_eeee_dddd_cccc_bbbb_aaaa_9999_8888, "wide indexed read");
+                $assert(dut.words[0][bit_index +: 8] == 8'hde, "wide dynamic select");
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
 fn test_clock_only_self_updating_ff_advances_in_native_testbench_instance() {
     let code = r#"
         module ClockTickCounter (

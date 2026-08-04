@@ -1,4 +1,4 @@
-use celox_design::{PortTypeKind, RuntimeEventKind, RuntimeEventSite, StateAddr};
+use celox_design::{BitAccess, PortTypeKind, RuntimeEventKind, RuntimeEventSite, StateAddr};
 use celox_testbench::{
     AssertMessage as GenericAssertMessage, ClockCount as GenericClockCount, ExprBytecode,
     ExprOpcode as TbOpcode, LoopBound as GenericLoopBound, SemanticArgument, SemanticSignal,
@@ -6,6 +6,7 @@ use celox_testbench::{
     TestbenchStatement as GenericTestbenchStatement,
 };
 use fxhash::FxHashSet;
+use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssertKind, CasePattern, Expression, Factor, ForBound, ForRange, Function,
     FunctionCall, HierVarRef, Op as VerylOp, Statement, SystemFunctionInput, SystemFunctionKind,
@@ -17,6 +18,7 @@ use veryl_parser::resource_table::{self, StrId};
 use crate::{
     AbsoluteAddr, InstancePath, LoweringPhase, ParserError, VariableInfo, VerylFrontendLookup,
     VerylTestbenchSource,
+    bitaccess::eval_constexpr,
     context_width::{
         ValueContext, binary_semantics, cast_semantics, expression_signed, get_expr_width,
     },
@@ -294,6 +296,152 @@ pub(crate) fn resolve_hierarchical_reference<'a>(
             )
         })?;
     Ok((address, info))
+}
+
+/// Resolve the flattened state bits read by a hierarchical reference.
+///
+/// Metadata intentionally does not retain source-level packed dimensions, so
+/// multi-dimensional packed selects conservatively cover the current slice.
+/// Static unpacked indices and ordinary bit/part selects retain their precise
+/// range, matching the testbench bytecode layout.
+pub(crate) fn hierarchical_reference_bits(
+    info: &VariableInfo,
+    reference: &HierVarRef,
+) -> Result<BitAccess, ParserError> {
+    let invalid = |detail| invalid_hierarchical_reference(reference, detail);
+    let array_total = info
+        .array_dims
+        .iter()
+        .try_fold(1usize, |total, dimension| total.checked_mul(*dimension))
+        .ok_or_else(|| invalid("array dimensions overflow usize"))?;
+    if array_total == 0 || info.width == 0 || !info.width.is_multiple_of(array_total) {
+        return Err(invalid(
+            "the target variable has invalid flattened dimensions",
+        ));
+    }
+    let element_width = info.width / array_total;
+    let mut strides = vec![element_width; info.array_dims.len()];
+    let mut stride = element_width;
+    for (dimension, size) in info.array_dims.iter().enumerate().rev() {
+        strides[dimension] = stride;
+        stride = stride
+            .checked_mul(*size)
+            .ok_or_else(|| invalid("array stride overflows usize"))?;
+    }
+
+    let mut base = 0usize;
+    let mut consumed = 0usize;
+    for (dimension, expression) in reference.index.0.iter().enumerate() {
+        let Some(&dimension_stride) = strides.get(dimension) else {
+            return Err(invalid("too many unpacked array indices"));
+        };
+        let Some(index) = eval_constexpr(expression).and_then(|value| value.to_usize()) else {
+            let width = if dimension == 0 {
+                info.width
+            } else {
+                strides[dimension - 1]
+            };
+            return checked_reference_bits(reference, base, width, info.width);
+        };
+        if index >= info.array_dims[dimension] {
+            return Err(invalid_hierarchical_reference(
+                reference,
+                format!(
+                    "array index {index} is outside dimension width {}",
+                    info.array_dims[dimension]
+                ),
+            ));
+        }
+        base = base
+            .checked_add(
+                index
+                    .checked_mul(dimension_stride)
+                    .ok_or_else(|| invalid("array index offset overflows usize"))?,
+            )
+            .ok_or_else(|| invalid("array index offset overflows usize"))?;
+        consumed += 1;
+    }
+
+    let accessed_width = if consumed == 0 {
+        info.width
+    } else if consumed == info.array_dims.len() {
+        element_width
+    } else {
+        strides[consumed - 1]
+    };
+    if reference.select.0.is_empty() && reference.select.1.is_none() {
+        return checked_reference_bits(reference, base, accessed_width, info.width);
+    }
+    if reference.select.0.len() != 1 {
+        return checked_reference_bits(reference, base, accessed_width, info.width);
+    }
+
+    let anchor_expression = &reference.select.0[0];
+    let Some(anchor) = eval_constexpr(anchor_expression).and_then(|value| value.to_usize()) else {
+        return checked_reference_bits(reference, base, accessed_width, info.width);
+    };
+    let (relative_lsb, selected_width) = if let Some((op, range_expression)) = &reference.select.1 {
+        let Some(range) = eval_constexpr(range_expression).and_then(|value| value.to_usize())
+        else {
+            return checked_reference_bits(reference, base, accessed_width, info.width);
+        };
+        match op {
+            veryl_analyzer::ir::VarSelectOp::Colon => {
+                let width = anchor
+                    .checked_sub(range)
+                    .and_then(|width| width.checked_add(1))
+                    .ok_or_else(|| invalid("part-select range underflows"))?;
+                (range, width)
+            }
+            veryl_analyzer::ir::VarSelectOp::PlusColon => (anchor, range),
+            veryl_analyzer::ir::VarSelectOp::MinusColon => {
+                let lsb = anchor
+                    .checked_add(1)
+                    .and_then(|end| end.checked_sub(range))
+                    .ok_or_else(|| invalid("part-select range underflows"))?;
+                (lsb, range)
+            }
+            veryl_analyzer::ir::VarSelectOp::Step => {
+                let lsb = anchor
+                    .checked_mul(range)
+                    .ok_or_else(|| invalid("part-select offset overflows usize"))?;
+                (lsb, range)
+            }
+        }
+    } else {
+        (anchor, 1)
+    };
+    if selected_width == 0
+        || relative_lsb
+            .checked_add(selected_width)
+            .is_none_or(|end| end > accessed_width)
+    {
+        return Err(invalid("bit select is outside the selected variable slice"));
+    }
+    let absolute_lsb = base
+        .checked_add(relative_lsb)
+        .ok_or_else(|| invalid("bit-select offset overflows usize"))?;
+    checked_reference_bits(reference, absolute_lsb, selected_width, info.width)
+}
+
+fn checked_reference_bits(
+    reference: &HierVarRef,
+    lsb: usize,
+    width: usize,
+    total_width: usize,
+) -> Result<BitAccess, ParserError> {
+    let msb = lsb
+        .checked_add(width.checked_sub(1).ok_or_else(|| {
+            invalid_hierarchical_reference(reference, "selected width must be nonzero")
+        })?)
+        .ok_or_else(|| invalid_hierarchical_reference(reference, "bit range overflows usize"))?;
+    if msb >= total_width {
+        return Err(invalid_hierarchical_reference(
+            reference,
+            "selected bit range is outside the target variable",
+        ));
+    }
+    Ok(BitAccess::new(lsb, msb))
 }
 
 enum TestbenchRead {
@@ -1357,13 +1505,7 @@ impl ExprCompiler<'_> {
     }
 
     fn try_const_usize(expr: &Expression) -> Option<usize> {
-        match expr {
-            Expression::Term(f) => match f.as_ref() {
-                Factor::Value(c) => c.get_value().ok().map(|v| v.payload_u64() as usize),
-                _ => None,
-            },
-            _ => None,
-        }
+        eval_constexpr(expr).and_then(|value| value.to_usize())
     }
 
     fn resolve_var(&self, var_id: &VarId) -> Option<SemanticSignal<StateAddr>> {

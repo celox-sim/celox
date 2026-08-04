@@ -304,10 +304,22 @@ fn check_elaborated_for(
             &scheduled.frontend_lookup,
             reference,
         ) {
-            Ok((address, _)) => {
-                if writes.iter().any(|write| write.address == address) {
-                    conflict = true;
-                    break;
+            Ok((address, info)) => {
+                match crate::testbench::hierarchical_reference_bits(info, reference) {
+                    Ok(read_bits) => {
+                        if writes.iter().any(|write| {
+                            write.address == address
+                                && write
+                                    .bits
+                                    .is_none_or(|write_bits| write_bits.overlaps(&read_bits))
+                        }) {
+                            conflict = true;
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        unknown.get_or_insert_with(|| error.to_string());
+                    }
                 }
             }
             Err(error) => {
@@ -1050,7 +1062,7 @@ fn check_for(
     }
 
     let unknown = bound_effects.unknown.or_else(|| {
-        (!bound_effects.reads.is_empty())
+        (!bound_effects.reads.is_empty() || !bound_effects.hierarchical_reads.is_empty())
             .then_some(body_effects.unknown)
             .flatten()
     });
@@ -1653,6 +1665,55 @@ mod tests {
             ports: HashMap::default(),
             port_types: HashMap::default(),
             variables: [(bound_id, variable)].into_iter().collect(),
+            functions: HashMap::default(),
+            declarations: vec![Declaration::new_comb(vec![statement])],
+            suppress_unassigned: false,
+            per_decl_refs: HashMap::default(),
+            assign_tokens: HashMap::default(),
+            ff_table: FfTable::default(),
+        };
+        let ir = Ir {
+            components: vec![Component::Module(module)],
+        };
+
+        let diagnostics = check_dynamic_for_bounds(&ir);
+        assert!(matches!(
+            diagnostics.as_slice(),
+            [FrontendDiagnostic::UnknownForBoundEffect { .. }]
+        ));
+    }
+
+    #[test]
+    fn unknown_body_effect_ir_is_reported_for_a_hierarchical_bound() {
+        let token = TokenRange::default();
+        let bound = Expression::Term(Box::new(Factor::HierVariable(Box::new(
+            veryl_analyzer::ir::HierVarRef {
+                inst_path: vec![StrId::default()],
+                var_path: VarPath(vec![StrId::default()]),
+                index: VarIndex::default(),
+                select: VarSelect::default(),
+                comptime: Comptime::default(),
+            },
+        ))));
+        let statement = Statement::For(Box::new(ForStatement {
+            var_id: VarId::default(),
+            var_name: StrId::default(),
+            var_type: Type::default(),
+            range: ForRange::Forward {
+                start: ForBound::Const(0),
+                end: ForBound::Expression(Box::new(bound)),
+                inclusive: false,
+                step: 1,
+            },
+            body: vec![Statement::Unsupported(token)],
+            token,
+        }));
+        let module = Module {
+            name: StrId::default(),
+            token,
+            ports: HashMap::default(),
+            port_types: HashMap::default(),
+            variables: HashMap::default(),
             functions: HashMap::default(),
             declarations: vec![Declaration::new_comb(vec![statement])],
             suppress_unassigned: false,

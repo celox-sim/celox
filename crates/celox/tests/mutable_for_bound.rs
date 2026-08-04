@@ -371,7 +371,7 @@ module t {
     initial {
         rst.assert();
         clk.next(2);
-        for _i in 0..dut.count {
+        for _i in 0..dut.count[3:0] {
             clk.next();
         }
         $finish();
@@ -379,6 +379,45 @@ module t {
 }
 "#;
     expect_time_advancing_bound_warning(code, "t");
+}
+
+#[test]
+fn hierarchical_bound_respects_disjoint_bit_ranges() {
+    let code = r#"
+module Counter (
+    clk: input clock,
+    rst: input reset,
+) {
+    var count: logic<8>;
+
+    always_ff {
+        if_reset { count[3:0] = 0; }
+        else       { count[3:0] += 1; }
+    }
+}
+
+#[test(t)]
+module t {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen(clk);
+    inst dut: Counter (clk, rst);
+
+    initial {
+        rst.assert();
+        for _i in 0..dut.count[7:4] {
+            clk.next();
+        }
+        $finish();
+    }
+}
+"#;
+    let simulator = Simulator::builder(code, "t")
+        .build()
+        .expect("hierarchical reads of disjoint bits must not conflict");
+    assert!(!simulator.warnings().iter().any(|warning| matches!(
+        warning,
+        CompilationWarning::Frontend(FrontendDiagnostic::TimeAdvancingForBound { .. })
+    )));
 }
 
 #[test]
