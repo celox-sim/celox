@@ -3,7 +3,7 @@ use celox_testbench::{
     AssertMessage as GenericAssertMessage, ClockCount as GenericClockCount, ExprBytecode,
     ExprOpcode as TbOpcode, LoopBound as GenericLoopBound, SemanticArgument, SemanticSignal,
     SemanticStatement, SourceLocation, StateLocation, TestbenchOperator as Op, TestbenchProgram,
-    TestbenchStatement as GenericTestbenchStatement,
+    TestbenchSelection, TestbenchStatement as GenericTestbenchStatement, TestbenchTarget,
 };
 use fxhash::FxHashSet;
 use veryl_analyzer::ir::{
@@ -1110,6 +1110,140 @@ impl ExprCompiler<'_> {
         }
     }
 
+    fn append_offset_term(
+        ops: &mut Vec<UnboundTbOpcode>,
+        term: impl FnOnce(&mut Vec<UnboundTbOpcode>),
+    ) {
+        term(ops);
+        ops.push(TbOpcode::BinOp(Op::Add));
+    }
+
+    fn selection_offset(
+        &self,
+        select: &veryl_analyzer::ir::VarSelect,
+    ) -> Option<(Vec<UnboundTbOpcode>, usize)> {
+        let anchor = select.0.last()?;
+        if let Some((op, range)) = &select.1 {
+            let width = Self::try_const_usize(range)?;
+            if width == 0 {
+                return None;
+            }
+            let mut ops = Vec::new();
+            match op {
+                veryl_analyzer::ir::VarSelectOp::Colon => {
+                    let anchor = Self::try_const_usize(anchor)?;
+                    let lsb = width;
+                    let width = anchor.checked_sub(lsb)?.saturating_add(1);
+                    Some((vec![TbOpcode::ConstU64(lsb as u64)], width))
+                }
+                veryl_analyzer::ir::VarSelectOp::PlusColon => {
+                    if let Some(anchor) = Self::try_const_usize(anchor) {
+                        Some((vec![TbOpcode::ConstU64(anchor as u64)], width))
+                    } else {
+                        self.emit(anchor, &mut ops);
+                        Some((ops, width))
+                    }
+                }
+                veryl_analyzer::ir::VarSelectOp::MinusColon => {
+                    if let Some(anchor) = Self::try_const_usize(anchor) {
+                        let lsb = anchor.checked_add(1)?.checked_sub(width)?;
+                        Some((vec![TbOpcode::ConstU64(lsb as u64)], width))
+                    } else {
+                        self.emit(anchor, &mut ops);
+                        ops.push(TbOpcode::ConstU64(1));
+                        ops.push(TbOpcode::BinOp(Op::Add));
+                        ops.push(TbOpcode::ConstU64(width as u64));
+                        ops.push(TbOpcode::BinOp(Op::Sub));
+                        Some((ops, width))
+                    }
+                }
+                veryl_analyzer::ir::VarSelectOp::Step => {
+                    if let Some(anchor) = Self::try_const_usize(anchor) {
+                        Some((vec![TbOpcode::ConstU64((anchor * width) as u64)], width))
+                    } else {
+                        self.emit(anchor, &mut ops);
+                        ops.push(TbOpcode::ConstU64(width as u64));
+                        ops.push(TbOpcode::BinOp(Op::Mul));
+                        Some((ops, width))
+                    }
+                }
+            }
+        } else if let Some(anchor) = Self::try_const_usize(anchor) {
+            Some((vec![TbOpcode::ConstU64(anchor as u64)], 1))
+        } else {
+            let mut ops = Vec::new();
+            self.emit(anchor, &mut ops);
+            Some((ops, 1))
+        }
+    }
+
+    fn resolve_target(
+        &self,
+        destination: &veryl_analyzer::ir::AssignDestination,
+    ) -> Option<TestbenchTarget<SemanticSignal<StateAddr>, ExprBytecode<StateLocation<StateAddr>>>>
+    {
+        let signal = self.resolve_var(&destination.id)?;
+        if destination.index.0.is_empty()
+            && destination.select.0.is_empty()
+            && destination.select.1.is_none()
+        {
+            return Some(TestbenchTarget {
+                signal,
+                selection: None,
+                width: signal.width,
+            });
+        }
+
+        let info = self.lookup.root_variable(destination.id)?.1;
+        let array_total: usize = info.array_dims.iter().product::<usize>().max(1);
+        let element_width = info.width / array_total;
+        let mut strides_bits = vec![element_width; info.array_dims.len()];
+        if !info.array_dims.is_empty() {
+            let mut stride = element_width;
+            for i in (0..info.array_dims.len()).rev() {
+                strides_bits[i] = stride;
+                stride *= info.array_dims[i];
+            }
+        }
+
+        let mut offset_ops = vec![TbOpcode::ConstU64(0)];
+        for (i, index) in destination.index.0.iter().enumerate() {
+            let stride = *strides_bits.get(i)?;
+            Self::append_offset_term(&mut offset_ops, |ops| {
+                if let Some(index) = Self::try_const_usize(index) {
+                    ops.push(TbOpcode::ConstU64((index * stride) as u64));
+                } else {
+                    self.emit(index, ops);
+                    ops.push(TbOpcode::ConstU64(stride as u64));
+                    ops.push(TbOpcode::BinOp(Op::Mul));
+                }
+            });
+        }
+
+        let accessed_width = if destination.index.0.len() >= info.array_dims.len() {
+            element_width
+        } else if destination.index.0.is_empty() {
+            info.width
+        } else {
+            *strides_bits.get(destination.index.0.len() - 1)?
+        };
+        let (select_ops, select_width) = if destination.select.is_empty() {
+            (vec![TbOpcode::ConstU64(0)], accessed_width)
+        } else {
+            self.selection_offset(&destination.select)?
+        };
+        Self::append_offset_term(&mut offset_ops, |ops| ops.extend(select_ops));
+
+        Some(TestbenchTarget {
+            signal,
+            selection: Some(TestbenchSelection {
+                offset: ExprBytecode::new(offset_ops),
+                width: select_width,
+            }),
+            width: select_width,
+        })
+    }
+
     /// Emit a LoadU64 or LoadWide opcode for the given byte offset and bit width.
     fn emit_load(
         &self,
@@ -1439,14 +1573,14 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     }),
                 }
             }
-            Statement::Assign(a) => a
-                .dst
-                .first()
-                .and_then(|d| ec.resolve_var(&d.id))
-                .map(|dst| GenericTestbenchStatement::Assign {
+            Statement::Assign(a) => a.dst.first().and_then(|destination| {
+                let dst = ec.resolve_target(destination)?;
+                let dst_width = dst.width;
+                Some(GenericTestbenchStatement::Assign {
                     dst,
-                    expr: ec.compile_with_width(&a.expr, dst.width),
-                }),
+                    expr: ec.compile_with_width(&a.expr, dst_width),
+                })
+            }),
             Statement::Break => Some(GenericTestbenchStatement::Break),
             Statement::FunctionCall(fc) => self.convert_function_call(fc, ec, next_assert_site_id),
             _ => None,
@@ -1476,7 +1610,11 @@ impl<'a> SemanticTestbenchBuilder<'a> {
             if let Some(&arg_var_id) = func_body.arg_map.get(arg_path) {
                 if let Some(sig) = ec.resolve_var(&arg_var_id) {
                     stmts.push(GenericTestbenchStatement::Assign {
-                        dst: sig,
+                        dst: TestbenchTarget {
+                            signal: sig,
+                            selection: None,
+                            width: sig.width,
+                        },
                         expr: ec.compile_with_width(arg_expr, sig.width),
                     });
                 }
@@ -1555,7 +1693,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
             }),
             TbMethod::RandomGet { width, signed } => {
                 let ret = match tb.ret.as_deref() {
-                    Some(dst) => Some(ec.resolve_var(&dst.id)?),
+                    Some(dst) => Some(ec.resolve_target(dst)?),
                     None => None,
                 };
                 Some(GenericTestbenchStatement::RandomGet {
@@ -1572,7 +1710,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                 signed,
             } => {
                 let ret = match tb.ret.as_deref() {
-                    Some(dst) => Some(ec.resolve_var(&dst.id)?),
+                    Some(dst) => Some(ec.resolve_target(dst)?),
                     None => None,
                 };
                 Some(GenericTestbenchStatement::RandomGetRange {
@@ -1586,7 +1724,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
             }
             TbMethod::RandomGetSeed => {
                 let ret = match tb.ret.as_deref() {
-                    Some(dst) => Some(ec.resolve_var(&dst.id)?),
+                    Some(dst) => Some(ec.resolve_target(dst)?),
                     None => None,
                 };
                 Some(GenericTestbenchStatement::RandomGetSeed {
@@ -1823,24 +1961,6 @@ fn validate_testbench_system_function(
     }
 }
 
-fn validate_testbench_destination(
-    destination: &veryl_analyzer::ir::AssignDestination,
-) -> Result<(), ParserError> {
-    if !destination.index.0.is_empty()
-        || !destination.select.0.is_empty()
-        || destination.select.1.is_some()
-    {
-        return Err(ParserError::unsupported(
-            478,
-            LoweringPhase::SimulatorParser,
-            "selected native testbench assignment",
-            "selected destinations are not represented by the testbench AIR",
-            Some(&destination.token),
-        ));
-    }
-    Ok(())
-}
-
 fn validate_testbench_statements(
     statements: &[Statement],
     source: &VerylTestbenchSource,
@@ -1850,7 +1970,6 @@ fn validate_testbench_statements(
         match statement {
             Statement::Assign(statement) => {
                 for destination in &statement.dst {
-                    validate_testbench_destination(destination)?;
                     for expression in &destination.index.0 {
                         validate_testbench_expression(expression, source, active_functions)?;
                     }
@@ -1914,9 +2033,7 @@ fn validate_testbench_statements(
                 validate_testbench_function_call(call, source, active_functions)?;
             }
             Statement::TbMethodCall(call) => {
-                if let Some(destination) = call.ret.as_deref() {
-                    validate_testbench_destination(destination)?;
-                }
+                // Selected return destinations are lowered together with ordinary assignments.
                 match &call.method {
                     TbMethod::Component { .. } => {
                         return Err(ParserError::unsupported(

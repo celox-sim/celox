@@ -87,7 +87,7 @@ pub enum LoopBound<Expression> {
 /// unbound expressions. Runtime binding instantiates the same contract with
 /// backend event/signal handles and executable expressions.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TestbenchStatement<Event, Signal, Expression, Argument> {
+pub enum TestbenchStatement<Event, Signal, Expression, Argument, Target = Signal> {
     ClockNext {
         clock_event: Event,
         count: ClockCount<Expression>,
@@ -126,7 +126,7 @@ pub enum TestbenchStatement<Event, Signal, Expression, Argument> {
         body: Vec<Self>,
     },
     Assign {
-        dst: Signal,
+        dst: Target,
         expr: Expression,
     },
     RandomSeed {
@@ -137,7 +137,7 @@ pub enum TestbenchStatement<Event, Signal, Expression, Argument> {
         handle: String,
         width: u32,
         signed: bool,
-        ret: Option<Signal>,
+        ret: Option<Target>,
     },
     RandomGetRange {
         handle: String,
@@ -145,11 +145,11 @@ pub enum TestbenchStatement<Event, Signal, Expression, Argument> {
         max: Expression,
         width: u32,
         signed: bool,
-        ret: Option<Signal>,
+        ret: Option<Target>,
     },
     RandomGetSeed {
         handle: String,
-        ret: Option<Signal>,
+        ret: Option<Target>,
     },
     Break,
     Finish,
@@ -162,6 +162,19 @@ pub struct SemanticSignal<A> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestbenchSelection<Expression> {
+    pub offset: Expression,
+    pub width: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestbenchTarget<Signal, Expression> {
+    pub signal: Signal,
+    pub selection: Option<TestbenchSelection<Expression>>,
+    pub width: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SemanticArgument<A> {
     pub expr: ExprBytecode<StateLocation<A>>,
     pub width: usize,
@@ -169,8 +182,13 @@ pub struct SemanticArgument<A> {
     pub is_string: bool,
 }
 
-pub type SemanticStatement<A> =
-    TestbenchStatement<A, SemanticSignal<A>, ExprBytecode<StateLocation<A>>, SemanticArgument<A>>;
+pub type SemanticStatement<A> = TestbenchStatement<
+    A,
+    SemanticSignal<A>,
+    ExprBytecode<StateLocation<A>>,
+    SemanticArgument<A>,
+    TestbenchTarget<SemanticSignal<A>, ExprBytecode<StateLocation<A>>>,
+>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TestbenchProgram<A> {
@@ -318,8 +336,13 @@ pub struct ExecutableArgument {
 pub type ExecutableAssertMessage = AssertMessage<ExecutableArgument>;
 pub type ExecutableClockCount = ClockCount<CompiledExpr>;
 pub type ExecutableLoopBound = LoopBound<CompiledExpr>;
-pub type ExecutableStatement<Event, Signal> =
-    TestbenchStatement<Event, Signal, CompiledExpr, ExecutableArgument>;
+pub type ExecutableStatement<Event, Signal> = TestbenchStatement<
+    Event,
+    Signal,
+    CompiledExpr,
+    ExecutableArgument,
+    TestbenchTarget<Signal, CompiledExpr>,
+>;
 
 pub struct ExecutableTestbench<Event, Signal> {
     statements: Vec<ExecutableStatement<Event, Signal>>,
