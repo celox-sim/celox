@@ -1355,6 +1355,47 @@ fn test_ff_runtime_function_snapshots_input_before_callee_nonlocal_write(sim) {
     assert_eq!(sim.get(q), 7u8.into());
 }
 
+fn test_ff_outputless_nested_nonlocal_write_updates_later_event_argument(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            global_value: output logic<8>,
+            q: output logic
+        ) {
+            function set_global () -> logic<8> {
+                global_value = 8'd9;
+                return 8'd1;
+            }
+
+            function observed () -> logic {
+                global_value = 8'd0;
+                $display("values=%0d,%0d", set_global(), global_value);
+                return 1'b0;
+            }
+
+            always_ff (clk) {
+                q = observed();
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let global_value = sim.signal("global_value");
+    let q = sim.signal("q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 9u8.into());
+    assert_eq!(sim.get(q), 0u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "values=1,9".to_string(),
+        }],
+    );
+}
+
 fn test_ff_statement_function_direct_nonlocal_assignment_is_observable(sim) {
     @omit_veryl;
     @setup { let code = r#"
@@ -1893,6 +1934,44 @@ fn test_ff_bits_and_size_operands_do_not_alias_earlier_array_argument(sim) {
     assert_eq!(sim.get(q), 0u8.into());
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(q), 0x12u8.into());
+}
+
+fn test_ff_bits_and_size_array_dependencies_do_not_alias_later_write(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            q: output logic<32>
+        ) {
+            var samples: logic<8>[2];
+
+            function set_sample (written: output logic<8>) -> logic<32> {
+                written = 8'h5a;
+                return 0;
+            }
+
+            function pick (
+                values: input logic<32>[2],
+                ignored: input logic<32>
+            ) -> logic<32> {
+                return values[0];
+            }
+
+            always_ff (clk) {
+                q = pick(
+                    '{$bits(samples), default: 0},
+                    set_sample(samples[0])
+                );
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let q = sim.signal("q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 16u32.into());
 }
 
 fn test_ff_statement_call_materializes_output_only_input_effect(sim) {

@@ -2153,7 +2153,20 @@ impl<'a> FfParser<'a> {
                 );
             }
         }
-        let function_state = if call.outputs.is_empty() {
+        let nonlocal_ids: HashSet<VarId> = self
+            .module
+            .variables
+            .iter()
+            .filter_map(|(id, variable)| {
+                (variable.affiliation != Affiliation::Function).then_some(*id)
+            })
+            .collect();
+        let writes_nonlocal = self.statements_write_any(
+            &function_body.statements,
+            &nonlocal_ids,
+            &mut HashSet::default(),
+        );
+        let function_state = if call.outputs.is_empty() && !writes_nonlocal {
             None
         } else {
             Some(
@@ -2223,6 +2236,13 @@ impl<'a> FfParser<'a> {
         }
 
         let mut next = state.clone();
+        if let Some(function_state) = &function_state {
+            for (&id, expr) in function_state {
+                if nonlocal_ids.contains(&id) {
+                    next.insert(id, self.substitute_function_expr(expr, state));
+                }
+            }
+        }
         for (dst, is_whole_var, expr) in output_values {
             if is_whole_var {
                 next.insert(dst.id, expr);
@@ -2331,9 +2351,8 @@ impl<'a> FfParser<'a> {
                     SystemFunctionKind::Assert { cond, args, .. } => {
                         input_references(cond) || args.iter().any(input_references)
                     }
-                    SystemFunctionKind::Bits(input)
-                    | SystemFunctionKind::Size(input)
-                    | SystemFunctionKind::Clog2(input)
+                    SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => false,
+                    SystemFunctionKind::Clog2(input)
                     | SystemFunctionKind::Onehot(input)
                     | SystemFunctionKind::Signed(input)
                     | SystemFunctionKind::Unsigned(input) => input_references(input),
@@ -2443,9 +2462,8 @@ impl<'a> FfParser<'a> {
                             collect_input(arg, variables);
                         }
                     }
-                    SystemFunctionKind::Bits(input)
-                    | SystemFunctionKind::Size(input)
-                    | SystemFunctionKind::Clog2(input)
+                    SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => {}
+                    SystemFunctionKind::Clog2(input)
                     | SystemFunctionKind::Onehot(input)
                     | SystemFunctionKind::Signed(input)
                     | SystemFunctionKind::Unsigned(input) => collect_input(input, variables),
