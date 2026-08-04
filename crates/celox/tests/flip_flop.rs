@@ -1434,6 +1434,36 @@ fn test_ff_outputless_wrapper_nested_copyout_to_nonlocal_is_observable(sim) {
     assert_eq!(sim.get(global_value), 0x5au8.into());
 }
 
+fn test_ff_outputless_wrapper_expression_copyout_to_nonlocal_is_observable(sim) {
+    @omit_veryl;
+    @setup { let code = r#"
+        module Top (clk: input clock, global_value: output logic<8>) {
+            function set (
+                value: input logic<8>,
+                written: output logic<8>
+            ) -> logic {
+                written = value;
+                return 1'b0;
+            }
+
+            function outer () {
+                var ignored: logic;
+                ignored = set(8'h5a, global_value);
+            }
+
+            always_ff (clk) {
+                outer();
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let global_value = sim.signal("global_value");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 0x5au8.into());
+}
+
 fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
     @omit_veryl;
     @ignore_on(wasm);
@@ -5391,6 +5421,53 @@ fn test_ff_function_call_array_literal_snapshots_scalar_before_later_write(sim) 
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(changing), 6u8.into());
     assert_eq!(sim.get(out_q), 5u8.into());
+}
+
+fn test_ff_case_range_skips_effectful_upper_bound_when_lower_is_false(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            q: output logic
+        ) {
+            function observed_upper () -> logic<8> {
+                $display("upper");
+                return 8'd10;
+            }
+
+            function select (target: input logic<8>) -> logic {
+                case target {
+                    8'd5 .. observed_upper(): return 1'b1;
+                    default: return 1'b0;
+                }
+            }
+
+            always_ff (clk) {
+                q = select(d);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 0u8.into());
+    assert!(sim.drain_runtime_events().is_empty());
+
+    sim.modify(|io| io.set(d, 6u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(q), 1u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "upper".to_string(),
+        }],
+    );
 }
 
 fn test_ff_function_call_array_literal_branch_view_is_reused_after_merge(sim) {

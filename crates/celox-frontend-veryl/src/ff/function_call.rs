@@ -151,7 +151,12 @@ impl<'a> FfParser<'a> {
                             .values()
                             .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
                             || call.outputs.values().flatten().any(|dst| {
-                                self.assignment_destination_has_runtime_effect(dst, visiting)
+                                (self.module.variables[&dst.id].affiliation
+                                    != Affiliation::Function
+                                    && dst.index.0.is_empty()
+                                    && dst.select.0.is_empty()
+                                    && dst.select.1.is_none())
+                                    || self.assignment_destination_has_runtime_effect(dst, visiting)
                             })
                             || self.function_call_has_runtime_effect(call, visiting)
                     }
@@ -1694,27 +1699,52 @@ impl<'a> FfParser<'a> {
                                     }
                                 }
                                 CasePattern::Range { lo, hi, .. } => {
-                                    let bounds = [lo, hi];
-                                    let last_effectful_bound = bounds.iter().rposition(|expr| {
-                                        self.expression_needs_eager_evaluation(expr)
-                                    });
-                                    for (bound_index, expr) in bounds.iter().enumerate() {
-                                        if snapshot_for_later_effect
-                                            || last_effectful_bound
-                                                .is_some_and(|last| bound_index <= last)
-                                            || self.expression_needs_assignment_snapshot(expr)
-                                        {
-                                            self.materialize_function_runtime_expression(
-                                                expr,
-                                                &mut state,
-                                                &pattern_remaining,
-                                                targets,
-                                                domain,
-                                                convert,
-                                                sources,
-                                                ir_builder,
-                                            )?;
-                                        }
+                                    let hi_is_effectful =
+                                        self.expression_needs_eager_evaluation(hi);
+                                    if snapshot_for_later_effect
+                                        || hi_is_effectful
+                                        || self.expression_needs_runtime_materialization(lo)
+                                    {
+                                        self.materialize_function_runtime_expression(
+                                            lo,
+                                            &mut state,
+                                            &pattern_remaining,
+                                            targets,
+                                            domain,
+                                            convert,
+                                            sources,
+                                            ir_builder,
+                                        )?;
+                                    }
+                                    if snapshot_for_later_effect
+                                        || hi_is_effectful
+                                        || self.expression_needs_assignment_snapshot(hi)
+                                    {
+                                        let lower_condition = self.substitute_function_expr(
+                                            &Expression::Binary(
+                                                lo.clone(),
+                                                Op::LessEq,
+                                                statement.case_target.clone(),
+                                                Box::new(Comptime::create_unknown(
+                                                    TokenRange::default(),
+                                                )),
+                                            ),
+                                            &state,
+                                        );
+                                        let upper_active = Self::function_path_and(
+                                            pattern_remaining.clone(),
+                                            Self::function_control_may_be_true(lower_condition),
+                                        );
+                                        self.materialize_function_runtime_expression(
+                                            hi,
+                                            &mut state,
+                                            &upper_active,
+                                            targets,
+                                            domain,
+                                            convert,
+                                            sources,
+                                            ir_builder,
+                                        )?;
                                     }
                                 }
                             }
