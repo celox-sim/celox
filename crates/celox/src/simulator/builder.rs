@@ -1,5 +1,10 @@
 use std::path::Path;
 
+#[cfg(not(feature = "host-runtime"))]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(feature = "host-runtime"))]
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use veryl_analyzer::ir::{Comptime, Expression, VarPath};
 use veryl_analyzer::value::Value;
 use veryl_analyzer::{Analyzer, AnalyzerError, Context, attribute_table, ir::Ir, symbol_table};
@@ -12,6 +17,25 @@ use crate::{
     CompilationWarning, FrontendDiagnostic, ParserError, SimulatorError, SimulatorErrorKind,
     ir::OptimizedSir, parser,
 };
+
+#[cfg(feature = "host-runtime")]
+fn fresh_testbench_seed() -> u64 {
+    rand::random()
+}
+
+#[cfg(not(feature = "host-runtime"))]
+fn fresh_testbench_seed() -> u64 {
+    // The host simulator uses the operating system RNG above. Keep the
+    // portable compiler path independent of getrandom's target-specific
+    // backends while still ensuring that two builds in the same tick receive
+    // distinct seeds.
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos() as u64);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    time ^ sequence.rotate_left(32)
+}
 
 fn analyze(
     sources: &[(&str, &Path)],
@@ -44,7 +68,7 @@ fn analyze(
     attribute_table::clear();
 
     let metadata = metadata.unwrap_or_else(|| Metadata::create_default("prj").unwrap());
-    let testbench_random_seed = metadata.test.seed.unwrap_or_default();
+    let testbench_random_seed = metadata.test.seed.unwrap_or_else(fresh_testbench_seed);
     let analyzer = Analyzer::new(&metadata);
     let project_name = metadata.project.name.clone();
 

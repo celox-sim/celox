@@ -1823,6 +1823,24 @@ fn validate_testbench_system_function(
     }
 }
 
+fn validate_testbench_destination(
+    destination: &veryl_analyzer::ir::AssignDestination,
+) -> Result<(), ParserError> {
+    if !destination.index.0.is_empty()
+        || !destination.select.0.is_empty()
+        || destination.select.1.is_some()
+    {
+        return Err(ParserError::unsupported(
+            478,
+            LoweringPhase::SimulatorParser,
+            "selected native testbench assignment",
+            "selected destinations are not represented by the testbench AIR",
+            Some(&destination.token),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_testbench_statements(
     statements: &[Statement],
     source: &VerylTestbenchSource,
@@ -1831,6 +1849,18 @@ fn validate_testbench_statements(
     for statement in statements {
         match statement {
             Statement::Assign(statement) => {
+                for destination in &statement.dst {
+                    validate_testbench_destination(destination)?;
+                    for expression in &destination.index.0 {
+                        validate_testbench_expression(expression, source, active_functions)?;
+                    }
+                    for expression in &destination.select.0 {
+                        validate_testbench_expression(expression, source, active_functions)?;
+                    }
+                    if let Some((_, expression)) = &destination.select.1 {
+                        validate_testbench_expression(expression, source, active_functions)?;
+                    }
+                }
                 validate_testbench_expression(&statement.expr, source, active_functions)?
             }
             Statement::If(statement) => {
@@ -1883,47 +1913,52 @@ fn validate_testbench_statements(
             Statement::FunctionCall(call) => {
                 validate_testbench_function_call(call, source, active_functions)?;
             }
-            Statement::TbMethodCall(call) => match &call.method {
-                TbMethod::Component { .. } => {
-                    return Err(ParserError::unsupported(
-                        468,
-                        LoweringPhase::SimulatorParser,
-                        "testbench component method",
-                        "component runtime integration is not implemented",
-                        None,
-                    ));
+            Statement::TbMethodCall(call) => {
+                if let Some(destination) = call.ret.as_deref() {
+                    validate_testbench_destination(destination)?;
                 }
-                TbMethod::RandomSeed { value } => {
-                    validate_testbench_expression(value, source, active_functions)?;
-                }
-                TbMethod::RandomGetRange { min, max, .. } => {
-                    validate_testbench_expression(min, source, active_functions)?;
-                    validate_testbench_expression(max, source, active_functions)?;
-                }
-                TbMethod::RandomGet { .. } | TbMethod::RandomGetSeed => {}
-                TbMethod::ClockNext { count, period } => {
-                    if let Some(expression) = count {
-                        validate_testbench_expression(expression, source, active_functions)?;
+                match &call.method {
+                    TbMethod::Component { .. } => {
+                        return Err(ParserError::unsupported(
+                            468,
+                            LoweringPhase::SimulatorParser,
+                            "testbench component method",
+                            "component runtime integration is not implemented",
+                            None,
+                        ));
                     }
-                    if let Some(expression) = period {
-                        validate_testbench_expression(expression, source, active_functions)?;
+                    TbMethod::RandomSeed { value } => {
+                        validate_testbench_expression(value, source, active_functions)?;
                     }
-                }
-                TbMethod::ResetAssert { duration, .. } => {
-                    if let Some(expression) = duration {
-                        validate_testbench_expression(expression, source, active_functions)?;
+                    TbMethod::RandomGetRange { min, max, .. } => {
+                        validate_testbench_expression(min, source, active_functions)?;
+                        validate_testbench_expression(max, source, active_functions)?;
                     }
-                }
-                TbMethod::FileOpen { name, .. } => {
-                    validate_testbench_expression(&name.0, source, active_functions)?
-                }
-                TbMethod::FileWrite { args } => {
-                    for argument in args {
-                        validate_testbench_expression(&argument.0, source, active_functions)?;
+                    TbMethod::RandomGet { .. } | TbMethod::RandomGetSeed => {}
+                    TbMethod::ClockNext { count, period } => {
+                        if let Some(expression) = count {
+                            validate_testbench_expression(expression, source, active_functions)?;
+                        }
+                        if let Some(expression) = period {
+                            validate_testbench_expression(expression, source, active_functions)?;
+                        }
                     }
+                    TbMethod::ResetAssert { duration, .. } => {
+                        if let Some(expression) = duration {
+                            validate_testbench_expression(expression, source, active_functions)?;
+                        }
+                    }
+                    TbMethod::FileOpen { name, .. } => {
+                        validate_testbench_expression(&name.0, source, active_functions)?
+                    }
+                    TbMethod::FileWrite { args } => {
+                        for argument in args {
+                            validate_testbench_expression(&argument.0, source, active_functions)?;
+                        }
+                    }
+                    TbMethod::FileClose | TbMethod::FileFlush => {}
                 }
-                TbMethod::FileClose | TbMethod::FileFlush => {}
-            },
+            }
             Statement::Break | Statement::Unsupported(_) | Statement::Null => {}
         }
     }

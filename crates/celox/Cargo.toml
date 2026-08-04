@@ -15,6 +15,7 @@ host-runtime = [
     "dep:celox-backend-x86",
     "dep:celox-macros",
     "dep:wasmtime",
+    "rand/thread_rng",
     "celox-sir-opt/timing",
 ]
 experimental-arm64-backend = ["host-runtime", "dep:celox-backend-arm64"]
