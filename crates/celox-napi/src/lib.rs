@@ -586,7 +586,7 @@ fn load_project_sources(
         .paths::<&str>(&[], false, false)
         .map_err(|e| Error::from_reason(format!("Failed to gather sources: {e}")))?;
     let mut sources = Vec::new();
-    for p in &paths {
+    for p in paths.iter().filter(|path| !path.example) {
         let content = std::fs::read_to_string(&p.src)
             .map_err(|e| Error::from_reason(format!("{}: {e}", p.src.display())))?;
         sources.push((content, p.src.clone()));
@@ -1986,6 +1986,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
     let mut paths = metadata
         .paths::<std::path::PathBuf>(&[], true, true)
         .map_err(|e| Error::from_reason(format!("Failed to gather sources: {e}")))?;
+    paths.retain(|path| !path.example);
 
     // Append test-only sources declared in celox.toml
     let project_root = toml_path.parent().unwrap_or(&toml_path).to_path_buf();
@@ -2002,6 +2003,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
                 src: src.clone(),
                 dst: src.with_extension("sv"),
                 map: src.with_extension("map"),
+                example: false,
             });
         }
     }
@@ -2078,15 +2080,10 @@ pub fn gen_ts(project_path: String) -> Result<String> {
     let mut file_modules: HashMap<String, Vec<String>> = HashMap::new();
     let mut post_pass_ir = Ir::default();
 
-    for (i, (path, parser)) in parsers.iter().enumerate() {
+    for (i, (_path, parser)) in parsers.iter().enumerate() {
         let mut analyzer_context = Context::default();
         let mut ir = Ir::default();
-        let results = analyzer.analyze_pass2(
-            &path.prj,
-            &parser.veryl,
-            &mut analyzer_context,
-            Some(&mut ir),
-        );
+        let results = analyzer.analyze_pass2(&parser.veryl, &mut analyzer_context, Some(&mut ir));
         let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
         if !real_errors.is_empty() {
             return Err(Error::from_reason(format_errors_with_warnings(
@@ -2230,11 +2227,10 @@ pub fn gen_ts_from_source(sources: Vec<NapiSourceFile>) -> Result<String> {
     let mut file_modules: HashMap<String, Vec<String>> = HashMap::new();
     let mut post_pass_ir = Ir::default();
 
-    for (i, (prj, _path, parser)) in parsers.iter().enumerate() {
+    for (i, (_prj, _path, parser)) in parsers.iter().enumerate() {
         let mut analyzer_context = Context::default();
         let mut ir = Ir::default();
-        let results =
-            analyzer.analyze_pass2(prj, &parser.veryl, &mut analyzer_context, Some(&mut ir));
+        let results = analyzer.analyze_pass2(&parser.veryl, &mut analyzer_context, Some(&mut ir));
         let real_errors: Vec<_> = results.iter().filter(|e| e.is_error()).collect();
         if !real_errors.is_empty() {
             return Err(Error::from_reason(format_errors_with_warnings(
@@ -2336,6 +2332,31 @@ mod tests {
             .iter()
             .map(|(content, path)| (content.to_string(), std::path::PathBuf::from(path)))
             .collect()
+    }
+
+    #[test]
+    fn normal_project_loading_excludes_example_sources() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join("src")).unwrap();
+        std::fs::create_dir(project.path().join("examples")).unwrap();
+        std::fs::write(
+            project.path().join("Veryl.toml"),
+            "[project]\nname = \"example_filter\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(project.path().join("src/top.veryl"), "module Top () {}\n").unwrap();
+        std::fs::write(
+            project.path().join("examples/demo.veryl"),
+            "module Demo () {}\n",
+        )
+        .unwrap();
+
+        let (sources, _, _) = load_project_sources(project.path().to_str().unwrap()).unwrap();
+        let source_names = sources
+            .iter()
+            .map(|(_, path)| path.file_name().unwrap().to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(source_names, ["top.veryl"]);
     }
 
     #[test]

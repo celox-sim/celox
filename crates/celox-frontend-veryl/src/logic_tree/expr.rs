@@ -244,6 +244,7 @@ pub(super) fn eval_function_body_return(
                     validate_function_body_system_function(module, call)
                 }
                 Factor::Variable(_, _, _, _)
+                | Factor::HierVariable(_)
                 | Factor::FunctionCall(_)
                 | Factor::Value(_)
                 | Factor::Anonymous(_)
@@ -1283,31 +1284,31 @@ pub(super) fn eval_function_body_return(
         next_live_sources.extend(start_sources.iter().copied());
         next_live_sources.extend(end_sources.iter().copied());
 
-        let next_live_expr = if statement_contains_return(&Statement::For(for_stmt.clone()), ret_id)
-        {
-            let initial = bool_node(arena, true)?;
-            arena.alloc(SLTNode::ForFold {
-                loop_var: for_stmt.var_id,
-                loop_width,
-                loop_signed: for_stmt.var_type.signed,
-                start,
-                end,
-                inclusive,
-                step,
-                step_op,
-                reverse,
-                result: SLTForFoldResult::Transient {
-                    initial,
-                    update: iter_state.function.live_expr,
-                },
-                initials: initial_updates,
-                updates: folded_updates,
-                effects: Vec::new(),
-                continue_cond: loop_effective_continue,
-            })?
-        } else {
-            bool_node(arena, true)?
-        };
+        let next_live_expr =
+            if statement_contains_return(&Statement::For(Box::new(for_stmt.clone())), ret_id) {
+                let initial = bool_node(arena, true)?;
+                arena.alloc(SLTNode::ForFold {
+                    loop_var: for_stmt.var_id,
+                    loop_width,
+                    loop_signed: for_stmt.var_type.signed,
+                    start,
+                    end,
+                    inclusive,
+                    step,
+                    step_op,
+                    reverse,
+                    result: SLTForFoldResult::Transient {
+                        initial,
+                        update: iter_state.function.live_expr,
+                    },
+                    initials: initial_updates,
+                    updates: folded_updates,
+                    effects: Vec::new(),
+                    continue_cond: loop_effective_continue,
+                })?
+            } else {
+                bool_node(arena, true)?
+            };
 
         apply_function_guard(
             module,
@@ -2103,7 +2104,9 @@ fn eval_function_call_expression(
     }
 
     for arg_path in function_body.arg_map.keys() {
-        if !call.inputs.contains_key(arg_path) && !call.outputs.contains_key(arg_path) {
+        if !crate::function_call_has_arg(&call.inputs, arg_path)
+            && !crate::function_call_has_arg(&call.outputs, arg_path)
+        {
             return Err(super::invalid_function_call_argument_error(
                 function,
                 arg_path,
@@ -3178,6 +3181,13 @@ fn eval_factor(
                 Ok(((extracted_expr, all_sources), all_bounds))
             }
         }
+        Factor::HierVariable(reference) => Err(ParserError::unsupported(
+            467,
+            LoweringPhase::CombLowering,
+            "hierarchical variable reference",
+            format!("{}", reference.var_path),
+            Some(&reference.comptime.token),
+        )),
         Factor::Value(v) => {
             let (celox_value, mask_xz, effective_width, signed) =
                 celox_value_from_comptime_in_context(v, context_width)

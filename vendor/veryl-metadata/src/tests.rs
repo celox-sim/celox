@@ -2,7 +2,7 @@ use crate::git::Git;
 use crate::*;
 use semver::Version;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 const GIT_IGNORE: &str = r#"
@@ -23,6 +23,17 @@ target = {type = "source"}
 
 [format]
 indent_width = 4
+
+[[components]]
+path = "models/rv_iss"
+
+[[components]]
+path = "models/golden"
+wasm = "prebuilt/golden.wasm"
+
+[test]
+seed = 42
+component_backend = "wasm"
 "#;
 
 const EXTENSION_EXTERNAL_TOOL_TOML: &str = r#"
@@ -223,7 +234,7 @@ version = "0.1.0"
 inner_a = {{git = "file://{repo}", project = "inner_a", version = "0.1.0"}}
 inner_b = {{git = "file://{repo}", project = "inner_b", version = "0.1.0"}}
 "#,
-        repo = repo_path.to_string_lossy().replace("\\", "/"),
+        repo = path_to_toml_str(&repo_path),
     );
     let metadata = create_project(tempdir.path(), "main", &main_toml, false);
 
@@ -241,11 +252,7 @@ fn create_project(root: &Path, name: &str, toml: &str, publish: bool) -> Metadat
     let path = root.join(name);
     fs::create_dir(&path).unwrap();
     let toml_path = path.join("Veryl.toml");
-    fs::write(
-        &toml_path,
-        toml.replace("{}", &root.to_string_lossy().replace("\\", "/")),
-    )
-    .unwrap();
+    fs::write(&toml_path, toml.replace("{}", &path_to_toml_str(root))).unwrap();
     let git_ignore_path = path.join(".gitignore");
     fs::write(&git_ignore_path, GIT_IGNORE).unwrap();
     let git = Git::init(&path).unwrap();
@@ -263,6 +270,13 @@ fn create_project(root: &Path, name: &str, toml: &str, publish: bool) -> Metadat
         metadata.publish().unwrap();
     }
     metadata
+}
+
+// Convert a path into a form that can be embedded in a TOML basic string.
+// On Windows the backslash separators would otherwise be interpreted as
+// escape sequences, so replace them with forward slashes.
+fn path_to_toml_str(path: &Path) -> String {
+    path.to_string_lossy().replace("\\", "/")
 }
 
 #[test]
@@ -284,6 +298,59 @@ fn check_toml() {
     assert!(metadata.build.reset_low_prefix.is_none());
     assert_eq!(metadata.build.reset_low_suffix.unwrap(), "_n");
     assert_eq!(metadata.format.indent_width, 4);
+    assert_eq!(metadata.test.seed, Some(42));
+    assert_eq!(metadata.components.len(), 2);
+    let rv_iss = &metadata.components[0];
+    assert_eq!(rv_iss.path, PathBuf::from("models/rv_iss"));
+    assert!(rv_iss.wasm.is_none());
+    let golden = &metadata.components[1];
+    assert_eq!(golden.path, PathBuf::from("models/golden"));
+    assert_eq!(golden.wasm, Some(PathBuf::from("prebuilt/golden.wasm")));
+}
+
+#[test]
+fn four_state_defaults_off_and_parses() {
+    let metadata: Metadata = toml::from_str(TEST_TOML).unwrap();
+    assert!(!metadata.test.four_state);
+
+    let toml = r#"
+[project]
+name = "test"
+version = "0.1.0"
+
+[test]
+four_state = true
+"#;
+    let metadata: Metadata = toml::from_str(toml).unwrap();
+    assert!(metadata.test.four_state);
+}
+
+#[test]
+fn synth_ram_thresholds_default_and_override() {
+    // Omitted RAM thresholds fall back to the built-in defaults.
+    let metadata: Metadata = toml::from_str(TEST_TOML).unwrap();
+    assert_eq!(metadata.synth.ram_min_bits, 1024);
+    assert_eq!(metadata.synth.ram_max_read_ports, 16);
+    assert_eq!(metadata.synth.ram_max_write_ports, 8);
+    assert_eq!(metadata.synth.ram_max_ff_bits, 1 << 16);
+
+    // Explicit values in `[synth]` override the defaults.
+    let toml = r#"
+[project]
+name = "test"
+version = "0.1.0"
+
+[synth]
+ram_min_bits = 256
+ram_max_read_ports = 4
+ram_max_write_ports = 2
+ram_max_ff_bits = 4096
+"#;
+    let metadata: Metadata = toml::from_str(toml).unwrap();
+    assert_eq!(metadata.synth.ram_min_bits, 256);
+    assert_eq!(metadata.synth.ram_max_read_ports, 4);
+    assert_eq!(metadata.synth.ram_max_write_ports, 2);
+    assert_eq!(metadata.synth.ram_max_ff_bits, 4096);
 }
 
 #[test]
@@ -647,6 +714,71 @@ fn lockfile() {
     let _ = lockfile.clear_cache();
 }
 
+const VIP_TOML: &str = r#"
+[project]
+name = "vip"
+version = "0.1.0"
+
+[publish]
+bump_commit = true
+publish_commit = true
+
+[[components]]
+path = "models/mirror"
+
+[dependencies]
+trans = {git = "file://{}/trans", version = "0.1.0"}
+"#;
+
+const TRANS_TOML: &str = r#"
+[project]
+name = "trans"
+version = "0.1.0"
+
+[publish]
+bump_commit = true
+publish_commit = true
+
+[[components]]
+path = "models/hidden"
+"#;
+
+#[test]
+fn collect_dependency_components() {
+    let main_toml = r#"
+[project]
+name = "main"
+version = "0.1.0"
+
+[dependencies]
+the_vip = {git = "file://{}/vip", project = "vip", version = "0.1.0"}
+"#;
+
+    let tempdir = tempfile::tempdir().unwrap();
+    create_project(tempdir.path(), "trans", TRANS_TOML, true);
+    create_project(tempdir.path(), "vip", VIP_TOML, true);
+    let mut metadata = create_project(tempdir.path(), "main", main_toml, false);
+
+    metadata.lockfile = Lockfile::new(&metadata).unwrap();
+    let deps = metadata.collect_dependency_components().unwrap();
+
+    // Only the direct dependency's components are collected, under its
+    // alias name; the transitive `trans` component stays hidden.
+    assert_eq!(deps.len(), 1);
+    let dep = &deps[0];
+    assert_eq!(dep.project, "the_vip");
+    assert_eq!(dep.components.len(), 1);
+    assert_eq!(dep.components[0].path, PathBuf::from("models/mirror"));
+    assert!(dep.root.join("Veryl.toml").exists());
+    // Repository dependencies build into the revision-keyed shared cache.
+    assert!(
+        dep.target_dir
+            .starts_with(veryl_path::cache_path().join("components"))
+    );
+
+    let _ = metadata.lockfile.clear_cache();
+}
+
 #[test]
 fn lockfile_inner_projects() {
     let (metadata, _tempdir) = create_metadata_inner_repo();
@@ -717,4 +849,330 @@ fn lockfile_save_is_atomic() {
     for r in readers {
         r.join().unwrap();
     }
+}
+
+const EXAMPLES_TOML: &str = r#"
+[project]
+name = "test"
+version = "0.1.0"
+
+[build]
+sources = ["src"]
+target = {type = "directory", path = "target"}
+"#;
+
+fn create_metadata_with_examples() -> (Metadata, TempDir) {
+    let tempdir = tempfile::tempdir().unwrap();
+    let metadata = create_project(tempdir.path(), "test", EXAMPLES_TOML, false);
+    let project_path = metadata.project_path();
+    fs::create_dir_all(project_path.join("src")).unwrap();
+    fs::write(project_path.join("src/a.veryl"), "module A {}\n").unwrap();
+    fs::create_dir_all(project_path.join("examples")).unwrap();
+    fs::write(project_path.join("examples/ex.veryl"), "module Ex {}\n").unwrap();
+
+    (metadata, tempdir)
+}
+
+#[test]
+fn paths_include_root_examples() {
+    let (mut metadata, _tempdir) = create_metadata_with_examples();
+
+    let paths = metadata.paths::<&str>(&[], false, false).unwrap();
+    assert_eq!(paths.len(), 2);
+
+    let src = paths.iter().find(|x| x.src.ends_with("a.veryl")).unwrap();
+    let example = paths.iter().find(|x| x.src.ends_with("ex.veryl")).unwrap();
+    assert!(!src.example);
+    assert!(example.example);
+}
+
+#[test]
+fn paths_include_examples_with_default_sources() {
+    // The default `sources = [""]` walks the whole project.
+    let toml = r#"
+[project]
+name = "test"
+version = "0.1.0"
+
+[build]
+target = {type = "directory", path = "target"}
+"#;
+    let tempdir = tempfile::tempdir().unwrap();
+    let mut metadata = create_project(tempdir.path(), "test", toml, false);
+    let project_path = metadata.project_path();
+    fs::create_dir_all(project_path.join("src")).unwrap();
+    fs::write(project_path.join("src/a.veryl"), "module A {}\n").unwrap();
+    fs::create_dir_all(project_path.join("examples")).unwrap();
+    fs::write(project_path.join("examples/ex.veryl"), "module Ex {}\n").unwrap();
+
+    let paths = metadata.paths::<&str>(&[], false, false).unwrap();
+    assert_eq!(paths.len(), 2);
+
+    let src = paths.iter().find(|x| x.src.ends_with("a.veryl")).unwrap();
+    let example = paths.iter().find(|x| x.src.ends_with("ex.veryl")).unwrap();
+    assert!(!src.example);
+    assert!(example.example);
+}
+
+#[test]
+fn sources_under_examples_are_rejected() {
+    for source in ["examples", "examples/sub"] {
+        let toml = format!(
+            r#"
+[project]
+name = "test"
+version = "0.1.0"
+
+[build]
+sources = ["src", "{source}"]
+target = {{type = "directory", path = "target"}}
+"#
+        );
+        let tempdir = tempfile::tempdir().unwrap();
+        let mut metadata = create_project(tempdir.path(), "test", &toml, false);
+        let project_path = metadata.project_path();
+        fs::create_dir_all(project_path.join("src")).unwrap();
+        fs::write(project_path.join("src/a.veryl"), "module A {}\n").unwrap();
+        fs::create_dir_all(project_path.join("examples/sub")).unwrap();
+        fs::write(project_path.join("examples/ex.veryl"), "module Ex {}\n").unwrap();
+
+        let result = metadata.paths::<&str>(&[], false, false);
+        assert!(matches!(result, Err(MetadataError::ReservedSourceDir(_))));
+    }
+}
+
+#[test]
+fn paths_route_explicit_example_file() {
+    let (mut metadata, _tempdir) = create_metadata_with_examples();
+    let file = metadata.project_path().join("examples/ex.veryl");
+
+    let paths = metadata.paths(&[file], false, false).unwrap();
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0].example);
+}
+
+#[test]
+fn lockfile_paths_exclude_dependency_examples() {
+    let tempdir = tempfile::tempdir().unwrap();
+
+    let dep_path = tempdir.path().join("dep");
+    fs::create_dir_all(dep_path.join("src")).unwrap();
+    fs::create_dir_all(dep_path.join("examples")).unwrap();
+    fs::write(
+        dep_path.join("Veryl.toml"),
+        r#"
+[project]
+name = "dep"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+    fs::write(dep_path.join("src/a.veryl"), "module A {}\n").unwrap();
+    fs::write(dep_path.join("examples/ex.veryl"), "module Ex {}\n").unwrap();
+
+    let main_toml = r#"
+[project]
+name = "main"
+version = "0.1.0"
+
+[dependencies]
+dep = {path = "../dep"}
+"#;
+    let metadata = create_project(tempdir.path(), "main", main_toml, false);
+
+    let lockfile = Lockfile::new(&metadata).unwrap();
+    let paths = lockfile.paths(Path::new("target")).unwrap();
+    assert!(paths.iter().any(|x| x.src.ends_with("a.veryl")));
+    assert!(!paths.iter().any(|x| x.src.ends_with("ex.veryl")));
+}
+
+#[test]
+fn define_global_properties() {
+    let toml = r#"
+[project]
+name = "main"
+[properties]
+foo = 32
+bar = true
+"#;
+
+    let tempdir = tempfile::tempdir().unwrap();
+    let metadata = create_project(tempdir.path(), "main", toml, false);
+
+    assert_eq!(metadata.properties["foo"], ProjectProperty::Int(32));
+    assert_eq!(metadata.properties["bar"], ProjectProperty::Bool(true));
+}
+
+#[test]
+fn override_global_properties_of_dependencies() {
+    let tempdir = tempfile::tempdir().unwrap();
+
+    let sub_toml = r#"
+[project]
+name = "sub"
+version = "0.1.0"
+[properties]
+foo = 32
+bar = false
+"#;
+
+    create_project(tempdir.path(), "sub", sub_toml, false);
+
+    let sub_path = tempdir.path().join("sub");
+    let main_toml = format!(
+        r#"
+[project]
+name = "main"
+[dependencies]
+sub = {{
+    path = "{}",
+    properties = {{ foo = 16 }}
+}}
+"#,
+        path_to_toml_str(&sub_path)
+    );
+
+    let metadata = create_project(tempdir.path(), "main", &main_toml, false);
+    let lockfile = Lockfile::new(&metadata).unwrap();
+
+    let sub_metadata = lockfile
+        .lock_table
+        .iter()
+        .find_map(|(_, x)| x.iter().find(|x| x.name == "sub"))
+        .unwrap();
+    assert_eq!(sub_metadata.properties["foo"], ProjectProperty::Int(16));
+    assert_eq!(sub_metadata.properties["bar"], ProjectProperty::Bool(false));
+}
+
+#[test]
+fn override_unknown_global_property() {
+    let tempdir = tempfile::tempdir().unwrap();
+
+    let sub_toml = r#"
+[project]
+name = "sub"
+version = "0.1.0"
+[properties]
+foo = 32
+bar = false
+"#;
+
+    create_project(tempdir.path(), "sub", sub_toml, false);
+
+    let sub_path = tempdir.path().join("sub");
+    let main_toml = format!(
+        r#"
+[project]
+name = "main"
+[dependencies]
+sub = {{
+    path = "{}",
+    properties = {{ baz = 1 }}
+}}
+"#,
+        path_to_toml_str(&sub_path)
+    );
+
+    let metadata = create_project(tempdir.path(), "main", &main_toml, false);
+    let err = Lockfile::new(&metadata).unwrap_err();
+    assert!(matches!(err, MetadataError::UnknownProperty { .. }));
+}
+
+#[test]
+fn type_mismatch_on_global_property_override() {
+    let tempdir = tempfile::tempdir().unwrap();
+
+    let sub_toml = r#"
+[project]
+name = "sub"
+version = "0.1.0"
+[properties]
+foo = 32
+bar = false
+"#;
+
+    create_project(tempdir.path(), "sub", sub_toml, false);
+
+    let sub_path = tempdir.path().join("sub");
+    let main_toml = format!(
+        r#"
+[project]
+name = "main"
+[dependencies]
+sub = {{
+    path = "{}",
+    properties = {{ foo = true }}
+}}
+"#,
+        path_to_toml_str(&sub_path)
+    );
+
+    let metadata = create_project(tempdir.path(), "main", &main_toml, false);
+    let err = Lockfile::new(&metadata).unwrap_err();
+    assert!(matches!(err, MetadataError::MismatchType { .. }));
+}
+
+#[test]
+fn unpublished_dependency_error() {
+    let unpub_toml = r#"
+[project]
+name = "unpub"
+version = "0.1.0"
+"#;
+    let main_toml = r#"
+[project]
+name = "main"
+version = "0.1.0"
+
+[dependencies]
+unpub = {git = "file://{}/unpub", version = "0.1.0"}
+"#;
+
+    let tempdir = tempfile::tempdir().unwrap();
+    create_project(tempdir.path(), "unpub", unpub_toml, false);
+    let metadata = create_project(tempdir.path(), "main", main_toml, false);
+
+    let err = Lockfile::new(&metadata).unwrap_err();
+    assert!(matches!(err, MetadataError::UnpublishedDependency { .. }));
+    let msg = err.to_string();
+    assert!(
+        msg.contains("dependency `unpub` has no published release"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn version_only_dependency_error() {
+    let toml = r#"
+[project]
+name = "main"
+version = "0.1.0"
+
+[dependencies]
+bare = "1.0"
+"#;
+
+    let tempdir = tempfile::tempdir().unwrap();
+    let toml_path = tempdir.path().join("Veryl.toml");
+    fs::write(&toml_path, toml).unwrap();
+    let metadata = Metadata::load(&toml_path).unwrap();
+
+    let err = Lockfile::new(&metadata).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("bare") && msg.contains("version-only dependencies are not supported yet"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn project_name_validation() {
+    assert!(check_project_name("valid_name").is_ok());
+    assert!(check_project_name("_leading").is_ok());
+    assert!(check_project_name("Name1").is_ok());
+    assert!(check_project_name("kebab-case").is_err());
+    assert!(check_project_name("1leading").is_err());
+    assert!(check_project_name("").is_err());
+    assert!(check_project_name("has space").is_err());
+    assert!(check_project_name("__reserved").is_err());
 }

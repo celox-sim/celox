@@ -558,6 +558,13 @@ fn collect_parent_output_address_sources(
                 }
                 Ok(())
             }
+            Factor::HierVariable(reference) => Err(ParserError::unsupported(
+                467,
+                LoweringPhase::SimulatorParser,
+                "hierarchical variable reference",
+                format!("{}", reference.var_path),
+                Some(&reference.comptime.token),
+            )),
             Factor::SystemFunctionCall(call) => {
                 let mut collect = |input: &SystemFunctionInput| {
                     collect_parent_output_address_sources(module, store, &input.0, arena, out)
@@ -2561,7 +2568,7 @@ mod tests {
         assert!(Analyzer::analyze_post_pass1().is_empty());
         assert!(
             analyzer
-                .analyze_pass2("prj", &parser.veryl, &mut context, Some(&mut ir))
+                .analyze_pass2(&parser.veryl, &mut context, Some(&mut ir))
                 .is_empty()
         );
         assert!(Analyzer::analyze_post_pass2(&ir).is_empty());
@@ -2591,6 +2598,7 @@ module Top (
         return 1'b1;
     }
     always_comb {
+        data = 2'b0;
         q = exponent(idx, data[idx]);
         q = base ** 2;
     }
@@ -2605,7 +2613,7 @@ module Top (
                 _ => None,
             })
             .expect("No always_comb found in Top");
-        let Statement::Assign(seed) = &comb.statements[0] else {
+        let Statement::Assign(seed) = &comb.statements[1] else {
             panic!("expected seed assignment");
         };
         let seed = seed.expr.clone();
@@ -2622,7 +2630,7 @@ module Top (
             .next()
             .expect("missing output actual")
             .id;
-        let Statement::Assign(pow_assign) = &mut comb.statements[1] else {
+        let Statement::Assign(pow_assign) = &mut comb.statements[2] else {
             panic!("expected power assignment");
         };
         let Expression::Binary(_, Op::Pow, exponent, _) = &mut pow_assign.expr else {

@@ -1,13 +1,13 @@
 use crate::git::Git;
-use crate::lockfile_compat;
 use crate::metadata::{Dependency, Metadata, UrlPath};
 use crate::metadata_error::MetadataError;
 use crate::pubfile::{Pubfile, Release};
+use crate::{ProjectProperty, lockfile_compat};
 use log::info;
 use pathdiff::diff_paths;
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,9 +37,25 @@ pub struct Lockfile {
 pub struct Lock {
     pub name: String,
     pub source: LockSource,
+    #[serde(default)]
+    pub properties: BTreeMap<String, ProjectProperty>,
     pub dependencies: Vec<LockDependency>,
     #[serde(skip)]
     pub visible: bool,
+}
+
+impl Lock {
+    pub fn uuid(&self) -> Uuid {
+        match &self.source {
+            LockSource::Path(path) => {
+                let url = self.source.to_url();
+                Lockfile::gen_uuid(&url, path, "", &self.properties)
+            }
+            LockSource::Repository(repo) => {
+                Lockfile::gen_uuid(&repo.url, &repo.path, &repo.revision, &self.properties)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -150,6 +166,21 @@ pub struct LockDependency {
     pub source: LockSource,
 }
 
+/// The `[[components]]` provided by a resolved dependency.
+#[derive(Clone, Debug)]
+pub struct DependencyComponents {
+    /// Project name as seen from the root project (`lock.name`, so a
+    /// dependency alias is reflected).
+    pub project: String,
+    /// Root directory of the dependency project (checkout cache or local path).
+    pub root: PathBuf,
+    /// Cargo target directory for building the components. Repository
+    /// dependencies use a revision-keyed shared cache so identical revisions
+    /// are built once across projects.
+    pub target_dir: PathBuf,
+    pub components: Vec<crate::Component>,
+}
+
 impl Lockfile {
     pub fn projects(&self) -> Vec<&Lock> {
         let mut ret = self
@@ -246,7 +277,7 @@ impl Lockfile {
 
         for lock in &locks {
             let add = if let Some(old_locks) = old_table.get(&lock.source.to_url()) {
-                !old_locks.iter().any(|x| x.source == lock.source)
+                !old_locks.iter().any(|x| x.uuid() == lock.uuid())
             } else {
                 true
             };
@@ -265,7 +296,7 @@ impl Lockfile {
 
         for old_locks in old_table.values() {
             for old_lock in old_locks {
-                if !locks.iter().any(|x| x.source == old_lock.source) {
+                if !locks.iter().any(|x| x.uuid() == old_lock.uuid()) {
                     info!("Removing dependency ({})", old_lock.source);
                     modified = true;
                 }
@@ -282,8 +313,13 @@ impl Lockfile {
             for lock in locks {
                 let metadata = self.get_metadata(&lock.source)?;
                 let path = metadata.project_path();
+                // Analyzed only for the build root (`Metadata::paths`).
+                let examples = path.join("examples");
 
                 for src in &veryl_path::gather_files_with_extension(&path, "veryl", false)? {
+                    if src.starts_with(&examples) {
+                        continue;
+                    }
                     let Ok(rel) = src.strip_prefix(&path) else {
                         return Err(MetadataError::InvalidSourceLocation(src.clone()));
                     };
@@ -297,11 +333,49 @@ impl Lockfile {
                         src: src.to_path_buf(),
                         dst,
                         map,
+                        example: false,
                     });
                 }
             }
         }
 
+        Ok(ret)
+    }
+
+    /// Collects `[[components]]` declared by direct (visible) dependencies.
+    /// Transitive dependencies are skipped, matching the visibility of
+    /// dependency symbols.
+    pub fn collect_components(&self) -> Result<Vec<DependencyComponents>, MetadataError> {
+        let mut ret = Vec::new();
+
+        for locks in self.lock_table.values() {
+            for lock in locks {
+                if !lock.visible {
+                    continue;
+                }
+                let metadata = self.get_metadata(&lock.source)?;
+                if metadata.components.is_empty() {
+                    continue;
+                }
+                let root = metadata.project_path();
+                let target_dir = match &lock.source {
+                    LockSource::Repository(x) => veryl_path::cache_path()
+                        .join("components")
+                        .join(x.uuid.simple().to_string()),
+                    // A path dependency is a local project; share its own
+                    // component target directory.
+                    LockSource::Path(_) => root.join("target/veryl-components"),
+                };
+                ret.push(DependencyComponents {
+                    project: lock.name.clone(),
+                    root,
+                    target_dir,
+                    components: metadata.components.clone(),
+                });
+            }
+        }
+
+        ret.sort_by(|a, b| a.project.cmp(&b.project));
         Ok(ret)
     }
 
@@ -354,18 +428,27 @@ impl Lockfile {
         }
     }
 
-    fn gen_uuid(url: &UrlPath, path: &Path, revision: &str) -> Result<Uuid, MetadataError> {
+    fn gen_uuid(
+        url: &UrlPath,
+        path: &Path,
+        revision: &str,
+        properties: &BTreeMap<String, ProjectProperty>,
+    ) -> Uuid {
         let mut url = url.to_string();
         url.push_str(&path.to_string_lossy());
         url.push_str(revision);
-        Ok(Uuid::new_v5(&Uuid::NAMESPACE_URL, url.as_bytes()))
+        for (name, value) in properties {
+            url.push_str(name);
+            url.push_str(&value.value_string());
+        }
+        Uuid::new_v5(&Uuid::NAMESPACE_URL, url.as_bytes())
     }
 
     fn gen_locks(
         &mut self,
         metadata: &Metadata,
         name_table: &mut HashSet<String>,
-        src_table: &mut HashMap<LockSource, String>,
+        src_table: &mut HashMap<Uuid, String>,
         root: bool,
         root_metadata: &Metadata,
     ) -> Result<Vec<Lock>, MetadataError> {
@@ -395,6 +478,30 @@ impl Lockfile {
             }
             name_table.insert(name.clone());
 
+            let mut properties: BTreeMap<_, _> = metadata.properties.clone().into_iter().collect();
+            if let Dependency::Entry(dep_entry) = dep {
+                for (prop_name, prop_value) in &dep_entry.properties {
+                    let Some(value) = properties.get_mut(prop_name) else {
+                        let err = MetadataError::UnknownProperty {
+                            property: prop_name.clone(),
+                            project: dependency.name.clone(),
+                        };
+                        return Err(err);
+                    };
+
+                    if !value.is_compatible(prop_value) {
+                        let err = MetadataError::MismatchType {
+                            name: prop_name.clone(),
+                            expected: value.type_name(),
+                            actual: prop_value.type_name(),
+                        };
+                        return Err(err);
+                    }
+
+                    *value = prop_value.clone();
+                }
+            }
+
             let mut dependencies = Vec::new();
             for (name, dep) in &metadata.dependencies {
                 let dependency =
@@ -403,7 +510,15 @@ impl Lockfile {
                 dependencies.push(dependency);
             }
 
-            if let Some(x) = src_table.get(&dependency.source) {
+            let lock = Lock {
+                name: name.clone(),
+                source: dependency.source.clone(),
+                properties,
+                dependencies,
+                visible: root,
+            };
+            let uuid = lock.uuid();
+            if let Some(x) = src_table.get(&uuid) {
                 if root {
                     return Err(MetadataError::InvalidDependency {
                         name: dependency.name.clone(),
@@ -411,15 +526,8 @@ impl Lockfile {
                     });
                 }
             } else {
-                let lock = Lock {
-                    name: name.clone(),
-                    source: dependency.source.clone(),
-                    dependencies,
-                    visible: root,
-                };
-
                 ret.push(lock);
-                src_table.insert(dependency.source.clone(), name.clone());
+                src_table.insert(uuid, name.clone());
                 dependencies_metadata.push(metadata);
             }
         }
@@ -443,7 +551,10 @@ impl Lockfile {
     ) -> Result<LockDependency, MetadataError> {
         Ok(match dep {
             Dependency::Version(_) => {
-                unimplemented!();
+                return Err(MetadataError::InvalidDependency {
+                    name: name.to_string(),
+                    cause: "version-only dependencies are not supported yet; specify `git`, `github`, or `path`".to_string(),
+                });
             }
             Dependency::Entry(x) => {
                 let url = if let Some(git) = &x.git {
@@ -464,7 +575,7 @@ impl Lockfile {
                         });
                     };
                     let (release, path) = self.resolve_version(url, &project, version)?;
-                    let uuid = Self::gen_uuid(url, &path, &release.revision)?;
+                    let uuid = Self::gen_uuid(url, &path, &release.revision, &BTreeMap::new());
 
                     // Path override is disabled if it is not root
                     let r#override = if root { x.path.clone() } else { None };
@@ -493,6 +604,7 @@ impl Lockfile {
                         }
                         diff_paths(path.canonicalize().unwrap(), base).unwrap()
                     };
+
                     LockSource::Path(path)
                 } else {
                     return Err(MetadataError::InvalidDependency {
@@ -553,7 +665,7 @@ impl Lockfile {
 
     fn resolve_path(url: &UrlPath) -> Result<PathBuf, MetadataError> {
         let resolve_dir = veryl_path::cache_path().join("resolve");
-        let uuid = Self::gen_uuid(url, &PathBuf::new(), "")?;
+        let uuid = Self::gen_uuid(url, &PathBuf::new(), "", &BTreeMap::new());
         Ok(resolve_dir.join(uuid.simple().encode_lower(&mut Uuid::encode_buffer())))
     }
 
@@ -599,6 +711,11 @@ impl Lockfile {
         };
 
         let toml = path.join(&prj_path).join("Veryl.pub");
+        if !toml.exists() {
+            return Err(MetadataError::UnpublishedDependency {
+                name: project.to_string(),
+            });
+        }
         let mut pubfile = Pubfile::load(toml)?;
 
         pubfile.releases.sort_by(|a, b| b.version.cmp(&a.version));
@@ -621,14 +738,14 @@ impl Lockfile {
         revision: &str,
     ) -> Result<PathBuf, MetadataError> {
         let dependencies_dir = veryl_path::cache_path().join("dependencies");
-        let uuid = Self::gen_uuid(url, path, revision)?;
+        let uuid = Self::gen_uuid(url, path, revision, &BTreeMap::new());
         Ok(dependencies_dir.join(uuid.simple().encode_lower(&mut Uuid::encode_buffer())))
     }
 
     pub(crate) fn get_metadata(&self, source: &LockSource) -> Result<Metadata, MetadataError> {
         // try to load from local path
         let path = match source {
-            LockSource::Path(x) => Some(x.clone()),
+            LockSource::Path(path) => Some(path.clone()),
             LockSource::Repository(x) => x.r#override.clone(),
         };
         let mut searched_path = None;
@@ -768,7 +885,8 @@ impl Lockfile {
         for lock in x.projects {
             let mut dependencies = Vec::new();
             for dep in lock.dependencies {
-                let uuid = Lockfile::gen_uuid(&dep.url, &PathBuf::new(), &dep.revision)?;
+                let uuid =
+                    Lockfile::gen_uuid(&dep.url, &PathBuf::new(), &dep.revision, &BTreeMap::new());
                 let source = LockSource::Repository(Box::new(LockSourceRepository {
                     uuid,
                     url: dep.url,
@@ -786,7 +904,8 @@ impl Lockfile {
                 dependencies.push(new_dep);
             }
 
-            let uuid = Lockfile::gen_uuid(&lock.url, &PathBuf::new(), &lock.revision).unwrap();
+            let uuid =
+                Lockfile::gen_uuid(&lock.url, &PathBuf::new(), &lock.revision, &BTreeMap::new());
             let source = LockSource::Repository(Box::new(LockSourceRepository {
                 uuid,
                 url: lock.url,
@@ -801,6 +920,7 @@ impl Lockfile {
             let new_lock = Lock {
                 name: lock.name,
                 source,
+                properties: BTreeMap::new(),
                 dependencies,
                 visible: false,
             };

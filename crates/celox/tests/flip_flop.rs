@@ -1321,6 +1321,40 @@ fn test_ff_runtime_function_snapshots_nonlocal_read_before_later_write(sim) {
     assert_eq!(sim.get(q), 7u8.into());
 }
 
+fn test_ff_runtime_function_snapshots_input_before_callee_nonlocal_write(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            global_value: output logic<8>,
+            q: output logic<8>
+        ) {
+            function update_global (value: input logic<8>) -> logic<8> {
+                global_value = 8'd9;
+                if value == 8'd1 {
+                    return 8'd7;
+                } else {
+                    return 8'd8;
+                }
+            }
+
+            always_ff (clk) {
+                q = update_global(global_value);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let global_value = sim.signal("global_value");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(global_value, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 9u8.into());
+    assert_eq!(sim.get(q), 7u8.into());
+}
+
 fn test_ff_statement_function_direct_nonlocal_assignment_is_observable(sim) {
     @omit_veryl;
     @setup { let code = r#"
@@ -1618,6 +1652,66 @@ fn test_ff_nested_wrapper_predicate_output_updates_caller_state(sim) {
         sim.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
             message: "wrapper=13".to_string(),
+        }],
+    );
+}
+
+fn test_ff_nested_call_predicate_uses_pre_copyout_input(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            d: input logic<8>,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function update (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x + 8'd1;
+                return x;
+            }
+
+            function wrapper (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = x;
+                if update(written, written) == x {
+                    written = 8'd42;
+                }
+                return written;
+            }
+
+            function observed (
+                x: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                $display("wrapper=%0d", wrapper(x, written));
+                return written;
+            }
+
+            always_ff (clk) {
+                q = observed(d, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let d = sim.signal("d");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(d, 5u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 42u8.into());
+    assert_eq!(sim.get(q), 42u8.into());
+    assert_eq!(
+        sim.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "wrapper=42".to_string(),
         }],
     );
 }
@@ -5258,6 +5352,45 @@ fn test_ff_function_call_array_literal_view_preserves_expression_order(sim) {
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(out_q), 0x33u32.into());
     assert_eq!(sim.get(side), 0x11u32.into());
+}
+
+fn test_ff_function_call_array_literal_snapshots_scalar_before_later_write(sim) {
+    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            changing: output logic<8>,
+            out_q: output logic<8>
+        ) {
+            function pick (
+                values: input logic<8>[2],
+                ignored: input logic<8>
+            ) -> logic<8> {
+                return values[0];
+            }
+
+            function update (
+                value: input logic<8>,
+                written: output logic<8>
+            ) -> logic<8> {
+                written = value + 8'd1;
+                return 8'h00;
+            }
+
+            always_ff (clk) {
+                out_q = pick('{changing, default: 8'h00}, update(changing, changing));
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let changing = sim.signal("changing");
+    let out_q = sim.signal("out_q");
+
+    sim.modify(|io| io.set(changing, 5u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(changing), 6u8.into());
+    assert_eq!(sim.get(out_q), 5u8.into());
 }
 
 fn test_ff_function_call_array_literal_branch_view_is_reused_after_merge(sim) {

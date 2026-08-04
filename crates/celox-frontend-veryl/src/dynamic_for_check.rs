@@ -926,7 +926,10 @@ fn check_module(module: &Module, diagnostics: &mut Vec<FrontendDiagnostic>) {
             Declaration::Ff(declaration) => Some((declaration.statements.as_slice(), true)),
             Declaration::Initial(declaration) => Some((declaration.statements.as_slice(), false)),
             Declaration::Final(declaration) => Some((declaration.statements.as_slice(), false)),
-            Declaration::Inst(_) | Declaration::Unsupported(_) | Declaration::Null => None,
+            Declaration::Inst(_)
+            | Declaration::External(_)
+            | Declaration::Unsupported(_)
+            | Declaration::Null => None,
         };
         if let Some((statements, from_ff)) = statements {
             check_statements(statements, module, diagnostics, from_ff);
@@ -1205,6 +1208,26 @@ fn collect_statement_effects(
                     }
                 }
                 TbMethod::FileClose | TbMethod::FileFlush => effects.observable = true,
+                TbMethod::Component { args, .. } => {
+                    effects.observable = true;
+                    for argument in args {
+                        effects.append(collect_expression_effects(
+                            &argument.0,
+                            module,
+                            active_functions,
+                        ));
+                    }
+                }
+                TbMethod::RandomSeed { value } => {
+                    effects.observable = true;
+                    effects.append(collect_expression_effects(value, module, active_functions));
+                }
+                TbMethod::RandomGetRange { min, max, .. } => {
+                    effects.observable = true;
+                    effects.append(collect_expression_effects(min, module, active_functions));
+                    effects.append(collect_expression_effects(max, module, active_functions));
+                }
+                TbMethod::RandomGet { .. } | TbMethod::RandomGetSeed => effects.observable = true,
             },
             Statement::Unsupported(_) => {
                 effects.mark_unknown("unsupported statement has unknown effects")
@@ -1235,6 +1258,9 @@ fn collect_expression_effects(
             }
             Factor::Unknown(_) => {
                 effects.mark_unknown("bound expression contains an unknown value")
+            }
+            Factor::HierVariable(_) => {
+                effects.mark_unknown("bound expression contains an unsupported hierarchical read")
             }
             Factor::Value(_) | Factor::Anonymous(_) => {}
         },
@@ -1518,7 +1544,7 @@ mod tests {
         // lower to Unknown before Celox receives the IR. Build that boundary
         // state directly so the fail-open warning policy remains covered.
         let token = TokenRange::default();
-        let statement = Statement::For(ForStatement {
+        let statement = Statement::For(Box::new(ForStatement {
             var_id: VarId::default(),
             var_name: StrId::default(),
             var_type: Type::default(),
@@ -1532,7 +1558,7 @@ mod tests {
             },
             body: Vec::new(),
             token,
-        });
+        }));
         let module = Module {
             name: StrId::default(),
             token,
@@ -1572,7 +1598,7 @@ mod tests {
                 ..Default::default()
             },
         )));
-        let statement = Statement::For(ForStatement {
+        let statement = Statement::For(Box::new(ForStatement {
             var_id: VarId::default(),
             var_name: StrId::default(),
             var_type: Type::default(),
@@ -1584,7 +1610,7 @@ mod tests {
             },
             body: vec![Statement::Unsupported(token)],
             token,
-        });
+        }));
         let variable = Variable {
             id: bound_id,
             path: VarPath::default(),
@@ -1648,7 +1674,7 @@ mod tests {
             expr: bound.clone(),
             token,
         });
-        let statement = Statement::For(ForStatement {
+        let statement = Statement::For(Box::new(ForStatement {
             var_id: VarId::default(),
             var_name: StrId::default(),
             var_type: Type::default(),
@@ -1660,7 +1686,7 @@ mod tests {
             },
             body: vec![body_write],
             token,
-        });
+        }));
         let variable = Variable {
             id: bound_id,
             path: VarPath::default(),

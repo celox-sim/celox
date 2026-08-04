@@ -4,7 +4,7 @@ use crate::{
     bitaccess::{build_partial_assign_expr, get_access_width, is_static_access},
     case::case_arm_condition_expr,
     context_width::expression_signed,
-    resolve_total_width,
+    function_call_arg, resolve_total_width,
 };
 use celox_design::VarAtomBase;
 use celox_sir::{
@@ -24,6 +24,14 @@ enum FunctionPathCondition {
     Always,
     Never,
     Conditional(Box<Expression>),
+}
+
+fn function_call_arg_mut<'a, T>(
+    args: &'a mut [(veryl_analyzer::ir::VarPath, T)],
+    path: &veryl_analyzer::ir::VarPath,
+) -> Option<&'a mut T> {
+    args.iter_mut()
+        .find_map(|(candidate, value)| (candidate == path).then_some(value))
 }
 
 impl<'a> FfParser<'a> {
@@ -53,6 +61,7 @@ impl<'a> FfParser<'a> {
                         || !select.0.is_empty()
                         || select.1.is_some()
                 }
+                Factor::HierVariable(_) => true,
                 Factor::FunctionCall(call) => call
                     .inputs
                     .values()
@@ -110,42 +119,56 @@ impl<'a> FfParser<'a> {
         visiting: &mut HashSet<VarId>,
     ) -> bool {
         match expr {
-            Expression::Term(factor) => match factor.as_ref() {
-                Factor::Variable(_, index, select, _) => {
-                    index
-                        .0
-                        .iter()
-                        .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
-                        || select
+            Expression::Term(factor) => {
+                match factor.as_ref() {
+                    Factor::Variable(_, index, select, _) => {
+                        index
                             .0
                             .iter()
                             .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
-                        || select.1.as_ref().is_some_and(|(_, expr)| {
-                            self.expression_has_runtime_effect_inner(expr, visiting)
-                        })
-                }
-                Factor::FunctionCall(call) => {
-                    call.inputs
-                        .values()
-                        .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
-                        || call.outputs.values().flatten().any(|dst| {
-                            self.assignment_destination_has_runtime_effect(dst, visiting)
-                        })
-                        || self.function_call_has_runtime_effect(call, visiting)
-                }
-                Factor::SystemFunctionCall(call) => match &call.kind {
-                    veryl_analyzer::ir::SystemFunctionKind::Bits(_)
-                    | veryl_analyzer::ir::SystemFunctionKind::Size(_) => false,
-                    veryl_analyzer::ir::SystemFunctionKind::Clog2(input)
-                    | veryl_analyzer::ir::SystemFunctionKind::Onehot(input)
-                    | veryl_analyzer::ir::SystemFunctionKind::Signed(input)
-                    | veryl_analyzer::ir::SystemFunctionKind::Unsigned(input) => {
-                        self.expression_has_runtime_effect_inner(&input.0, visiting)
+                            || select.0.iter().any(|expr| {
+                                self.expression_has_runtime_effect_inner(expr, visiting)
+                            })
+                            || select.1.as_ref().is_some_and(|(_, expr)| {
+                                self.expression_has_runtime_effect_inner(expr, visiting)
+                            })
                     }
-                    _ => true,
-                },
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
-            },
+                    Factor::HierVariable(reference) => {
+                        reference
+                            .index
+                            .0
+                            .iter()
+                            .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
+                            || reference.select.0.iter().any(|expr| {
+                                self.expression_has_runtime_effect_inner(expr, visiting)
+                            })
+                            || reference.select.1.as_ref().is_some_and(|(_, expr)| {
+                                self.expression_has_runtime_effect_inner(expr, visiting)
+                            })
+                    }
+                    Factor::FunctionCall(call) => {
+                        call.inputs
+                            .values()
+                            .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
+                            || call.outputs.values().flatten().any(|dst| {
+                                self.assignment_destination_has_runtime_effect(dst, visiting)
+                            })
+                            || self.function_call_has_runtime_effect(call, visiting)
+                    }
+                    Factor::SystemFunctionCall(call) => match &call.kind {
+                        veryl_analyzer::ir::SystemFunctionKind::Bits(_)
+                        | veryl_analyzer::ir::SystemFunctionKind::Size(_) => false,
+                        veryl_analyzer::ir::SystemFunctionKind::Clog2(input)
+                        | veryl_analyzer::ir::SystemFunctionKind::Onehot(input)
+                        | veryl_analyzer::ir::SystemFunctionKind::Signed(input)
+                        | veryl_analyzer::ir::SystemFunctionKind::Unsigned(input) => {
+                            self.expression_has_runtime_effect_inner(&input.0, visiting)
+                        }
+                        _ => true,
+                    },
+                    Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                }
+            }
             Expression::Binary(lhs, _, rhs, _) => {
                 self.expression_has_runtime_effect_inner(lhs, visiting)
                     || self.expression_has_runtime_effect_inner(rhs, visiting)
@@ -516,10 +539,12 @@ impl<'a> FfParser<'a> {
         let mut call = call.clone();
         let mut next = state.clone();
         for path in ordered_paths {
-            if let Some(input) = call.inputs.get_mut(&path) {
-                *input = self
+            if let Some(input) = function_call_arg_mut(&mut call.inputs, &path) {
+                let input_state = next.clone();
+                let captured = self
                     .capture_nested_function_outputs_with_states(input, &mut next)?
                     .0;
+                *input = self.substitute_function_expr(&captured, &input_state);
             }
         }
         self.apply_function_call_to_state(&call, &next)
@@ -586,16 +611,18 @@ impl<'a> FfParser<'a> {
                         .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path.clone()))
                         .collect();
                     for path in ordered_paths {
-                        if let Some(input) = call.inputs.get_mut(&path) {
-                            *input = self.capture_nested_function_outputs_inner(
+                        if let Some(input) = function_call_arg_mut(&mut call.inputs, &path) {
+                            let input_state = state.clone();
+                            let captured = self.capture_nested_function_outputs_inner(
                                 input,
                                 state,
                                 expression_states,
                             )?;
+                            *input = self.substitute_function_expr(&captured, &input_state);
                         }
                     }
                     *state = self.apply_function_call_to_state(&call, state)?;
-                    call.outputs.clear();
+                    call.outputs = Default::default();
                     Expression::Term(Box::new(Factor::FunctionCall(call)))
                 }
                 Factor::SystemFunctionCall(call) => {
@@ -604,6 +631,31 @@ impl<'a> FfParser<'a> {
                     expression_states.extend(nested_states);
                     *state = next;
                     Expression::Term(Box::new(Factor::SystemFunctionCall(call)))
+                }
+                Factor::HierVariable(reference) => {
+                    let mut reference = reference.as_ref().clone();
+                    for expr in &mut reference.index.0 {
+                        *expr = self.capture_nested_function_outputs_inner(
+                            expr,
+                            state,
+                            expression_states,
+                        )?;
+                    }
+                    for expr in &mut reference.select.0 {
+                        *expr = self.capture_nested_function_outputs_inner(
+                            expr,
+                            state,
+                            expression_states,
+                        )?;
+                    }
+                    if let Some((_, expr)) = &mut reference.select.1 {
+                        *expr = self.capture_nested_function_outputs_inner(
+                            expr,
+                            state,
+                            expression_states,
+                        )?;
+                    }
+                    Expression::Term(Box::new(Factor::HierVariable(Box::new(reference))))
                 }
                 Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => expr.clone(),
             },
@@ -1788,7 +1840,7 @@ impl<'a> FfParser<'a> {
                         .args
                         .iter()
                         .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path))
-                        .filter_map(|path| call.inputs.get(path).cloned())
+                        .filter_map(|path| function_call_arg(&call.inputs, path).cloned())
                         .collect();
                     let last_effectful = ordered_inputs
                         .iter()
@@ -1932,6 +1984,11 @@ impl<'a> FfParser<'a> {
 
     fn expr_shape_matches_formal(expr: &Expression, formal_shape: &[usize]) -> bool {
         match expr {
+            Expression::Term(factor)
+                if matches!(factor.as_ref(), Factor::Anonymous(_) | Factor::Unknown(_)) =>
+            {
+                false
+            }
             Expression::ArrayLiteral(items, _) => {
                 let Some((&formal_len, formal_tail)) = formal_shape.split_first() else {
                     return false;
@@ -2005,7 +2062,7 @@ impl<'a> FfParser<'a> {
         function_body: &veryl_analyzer::ir::FunctionBody,
     ) -> Result<(), ParserError> {
         for (arg_path, arg_id) in &function_body.arg_map {
-            let Some(arg_expr) = call.inputs.get(arg_path) else {
+            let Some(arg_expr) = function_call_arg(&call.inputs, arg_path) else {
                 continue;
             };
             let formal = &self.module.variables[arg_id];
@@ -2058,7 +2115,7 @@ impl<'a> FfParser<'a> {
 
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
-            if let Some(arg_expr) = call.inputs.get(arg_path) {
+            if let Some(arg_expr) = function_call_arg(&call.inputs, arg_path) {
                 let arg_expr = self.substitute_function_expr(arg_expr, state);
                 bindings.insert(
                     *arg_id,
@@ -2090,7 +2147,7 @@ impl<'a> FfParser<'a> {
             .flat_map(|arg| arg.members.iter().map(|(path, _, _)| path));
         let mut output_values = Vec::with_capacity(call.outputs.len());
         for arg_path in ordered_paths {
-            let Some(dsts) = call.outputs.get(arg_path) else {
+            let Some(dsts) = function_call_arg(&call.outputs, arg_path) else {
                 continue;
             };
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
@@ -2218,6 +2275,21 @@ impl<'a> FfParser<'a> {
                             Self::expression_references_any(expr, candidates)
                         })
                 }
+                Factor::HierVariable(reference) => {
+                    reference
+                        .index
+                        .0
+                        .iter()
+                        .any(|expr| Self::expression_references_any(expr, candidates))
+                        || reference
+                            .select
+                            .0
+                            .iter()
+                            .any(|expr| Self::expression_references_any(expr, candidates))
+                        || reference.select.1.as_ref().is_some_and(|(_, expr)| {
+                            Self::expression_references_any(expr, candidates)
+                        })
+                }
                 Factor::FunctionCall(call) => call
                     .inputs
                     .values()
@@ -2299,6 +2371,17 @@ impl<'a> FfParser<'a> {
                         self.collect_expression_variables(expr, variables, arrays_only);
                     }
                     if let Some((_, expr)) = &select.1 {
+                        self.collect_expression_variables(expr, variables, arrays_only);
+                    }
+                }
+                Factor::HierVariable(reference) => {
+                    for expr in &reference.index.0 {
+                        self.collect_expression_variables(expr, variables, arrays_only);
+                    }
+                    for expr in &reference.select.0 {
+                        self.collect_expression_variables(expr, variables, arrays_only);
+                    }
+                    if let Some((_, expr)) = &reference.select.1 {
                         self.collect_expression_variables(expr, variables, arrays_only);
                     }
                 }
@@ -2394,44 +2477,54 @@ impl<'a> FfParser<'a> {
         visiting: &mut HashSet<VarId>,
     ) -> bool {
         match expr {
-            Expression::Term(factor) => match factor.as_ref() {
-                Factor::FunctionCall(call) => {
-                    self.function_call_writes_any(call, candidates, visiting)
-                }
-                Factor::Variable(_, index, select, _) => {
-                    index
-                        .0
-                        .iter()
-                        .any(|expr| self.expression_writes_any_inner(expr, candidates, visiting))
-                        || select.0.iter().any(|expr| {
+            Expression::Term(factor) => {
+                match factor.as_ref() {
+                    Factor::FunctionCall(call) => {
+                        self.function_call_writes_any(call, candidates, visiting)
+                    }
+                    Factor::Variable(_, index, select, _) => {
+                        index.0.iter().any(|expr| {
+                            self.expression_writes_any_inner(expr, candidates, visiting)
+                        }) || select.0.iter().any(|expr| {
+                            self.expression_writes_any_inner(expr, candidates, visiting)
+                        }) || select.1.as_ref().is_some_and(|(_, expr)| {
                             self.expression_writes_any_inner(expr, candidates, visiting)
                         })
-                        || select.1.as_ref().is_some_and(|(_, expr)| {
+                    }
+                    Factor::HierVariable(reference) => {
+                        reference.index.0.iter().any(|expr| {
+                            self.expression_writes_any_inner(expr, candidates, visiting)
+                        }) || reference.select.0.iter().any(|expr| {
+                            self.expression_writes_any_inner(expr, candidates, visiting)
+                        }) || reference.select.1.as_ref().is_some_and(|(_, expr)| {
                             self.expression_writes_any_inner(expr, candidates, visiting)
                         })
-                }
-                Factor::SystemFunctionCall(call) => match &call.kind {
-                    SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => args
-                        .iter()
-                        .any(|arg| self.expression_writes_any_inner(&arg.0, candidates, visiting)),
-                    SystemFunctionKind::Assert { cond, args, .. } => {
-                        self.expression_writes_any_inner(&cond.0, candidates, visiting)
-                            || args.iter().any(|arg| {
+                    }
+                    Factor::SystemFunctionCall(call) => match &call.kind {
+                        SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
+                            args.iter().any(|arg| {
                                 self.expression_writes_any_inner(&arg.0, candidates, visiting)
                             })
-                    }
-                    SystemFunctionKind::Bits(input)
-                    | SystemFunctionKind::Size(input)
-                    | SystemFunctionKind::Clog2(input)
-                    | SystemFunctionKind::Onehot(input)
-                    | SystemFunctionKind::Signed(input)
-                    | SystemFunctionKind::Unsigned(input) => {
-                        self.expression_writes_any_inner(&input.0, candidates, visiting)
-                    }
-                    SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
-                },
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
-            },
+                        }
+                        SystemFunctionKind::Assert { cond, args, .. } => {
+                            self.expression_writes_any_inner(&cond.0, candidates, visiting)
+                                || args.iter().any(|arg| {
+                                    self.expression_writes_any_inner(&arg.0, candidates, visiting)
+                                })
+                        }
+                        SystemFunctionKind::Bits(input)
+                        | SystemFunctionKind::Size(input)
+                        | SystemFunctionKind::Clog2(input)
+                        | SystemFunctionKind::Onehot(input)
+                        | SystemFunctionKind::Signed(input)
+                        | SystemFunctionKind::Unsigned(input) => {
+                            self.expression_writes_any_inner(&input.0, candidates, visiting)
+                        }
+                        SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
+                    },
+                    Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                }
+            }
             Expression::Binary(lhs, _, rhs, _) => {
                 self.expression_writes_any_inner(lhs, candidates, visiting)
                     || self.expression_writes_any_inner(rhs, candidates, visiting)
@@ -2692,7 +2785,7 @@ impl<'a> FfParser<'a> {
             .flatten()
             .any(|dst| self.assignment_destination_needs_eager_evaluation(dst));
         let last_effectful_arg = ordered_arg_paths.iter().rposition(|arg_path| {
-            call.inputs.get(arg_path).is_some_and(|actual| {
+            function_call_arg(&call.inputs, arg_path).is_some_and(|actual| {
                 super::expression::expression_has_side_effect(actual)
                     || self.expression_has_runtime_effect(actual)
             })
@@ -2701,28 +2794,38 @@ impl<'a> FfParser<'a> {
             let Some(arg_id) = function_body.arg_map.get(arg_path) else {
                 continue;
             };
-            let Some(actual) = call.inputs.get(arg_path) else {
+            let Some(actual) = function_call_arg(&call.inputs, arg_path) else {
                 continue;
             };
             let must_snapshot_for_order = last_effectful_arg.is_some_and(|last| arg_index <= last);
             let formal = &self.module.variables[arg_id];
+            let mut dependencies = HashSet::default();
+            self.collect_expression_variables(actual, &mut dependencies, false);
+            let callee_writes_dependency = self.statements_write_any(
+                &function_body.statements,
+                &dependencies,
+                &mut HashSet::default(),
+            );
             if !formal.r#type.array.is_empty() {
                 let mut array_variables = HashSet::default();
                 self.collect_expression_variables(actual, &mut array_variables, true);
                 let aliases_later_write = ordered_arg_paths
                     .iter()
                     .skip(arg_index + 1)
-                    .filter_map(|path| call.inputs.get(path))
+                    .filter_map(|path| function_call_arg(&call.inputs, path))
                     .any(|expr| self.expression_writes_any(expr, &array_variables));
-                let mut dependencies = HashSet::default();
-                self.collect_expression_variables(actual, &mut dependencies, false);
                 let aliases_output_write = !dependencies.is_disjoint(&output_ids)
                     || call
                         .outputs
                         .values()
                         .flatten()
                         .any(|dst| self.assignment_destination_writes_any(dst, &dependencies));
-                if aliases_later_write || aliases_output_write {
+                let callee_writes_array = self.statements_write_any(
+                    &function_body.statements,
+                    &array_variables,
+                    &mut HashSet::default(),
+                );
+                if aliases_later_write || aliases_output_write || callee_writes_array {
                     return Err(ParserError::unsupported(
                         43,
                         LoweringPhase::FfLowering,
@@ -2732,7 +2835,13 @@ impl<'a> FfParser<'a> {
                     ));
                 }
                 self.materialize_array_actual_items(
-                    actual, false, targets, domain, convert, sources, ir_builder,
+                    actual,
+                    must_snapshot_for_order && matches!(actual, Expression::ArrayLiteral(_, _)),
+                    targets,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
                 )?;
                 // Array arguments are represented by call-scoped views. The
                 // view snapshots each observed element in source order while
@@ -2743,6 +2852,7 @@ impl<'a> FfParser<'a> {
             if !must_snapshot_for_order
                 && !has_effectful_output_destination
                 && !Self::expression_references_any(actual, &output_ids)
+                && !callee_writes_dependency
             {
                 continue;
             }
@@ -3360,7 +3470,7 @@ impl<'a> FfParser<'a> {
 
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
-            if let Some(arg_expr) = call.inputs.get(arg_path) {
+            if let Some(arg_expr) = function_call_arg(&call.inputs, arg_path) {
                 let arg_expr = self.coerce_function_input_expression(arg_expr.clone(), *arg_id);
                 bindings.insert(*arg_id, arg_expr);
             }
@@ -3413,7 +3523,7 @@ impl<'a> FfParser<'a> {
 
             let mut pending_outputs = Vec::new();
             for arg_path in &ordered_arg_paths {
-                let Some(dsts) = call.outputs.get(arg_path) else {
+                let Some(dsts) = function_call_arg(&call.outputs, arg_path) else {
                     continue;
                 };
                 let Some(arg_id) = function_body.arg_map.get(arg_path) else {
@@ -3551,7 +3661,7 @@ impl<'a> FfParser<'a> {
 
         let mut bindings: HashMap<VarId, Expression> = HashMap::default();
         for (arg_path, arg_id) in &function_body.arg_map {
-            if let Some(arg_expr) = call.inputs.get(arg_path) {
+            if let Some(arg_expr) = function_call_arg(&call.inputs, arg_path) {
                 let arg_expr = self.coerce_function_input_expression(arg_expr.clone(), *arg_id);
                 bindings.insert(*arg_id, arg_expr);
             }
@@ -3602,7 +3712,7 @@ impl<'a> FfParser<'a> {
 
             let mut pending_outputs = Vec::new();
             for arg_path in &ordered_arg_paths {
-                let Some(dsts) = call.outputs.get(arg_path) else {
+                let Some(dsts) = function_call_arg(&call.outputs, arg_path) else {
                     continue;
                 };
                 let Some(arg_id) = function_body.arg_map.get(arg_path) else {

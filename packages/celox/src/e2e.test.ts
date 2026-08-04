@@ -2745,7 +2745,7 @@ module CounterTbPass {
     var cnt: logic<32>;
     inst dut: Counter_tb (clk, rst, cnt);
     initial {
-        rst.assert(clk);
+        rst.assert();
         clk.next  (10);
         $assert   (cnt == 32'd10);
         $finish   ();
@@ -2762,7 +2762,7 @@ module CounterTbFail {
     var cnt: logic<32>;
     inst dut: Counter_tb (clk, rst, cnt);
     initial {
-        rst.assert(clk);
+        rst.assert();
         clk.next  (5);
         $assert   (cnt == 32'd99);
         $assert   (cnt == 32'd5);
@@ -2780,7 +2780,7 @@ module CounterTbFailFirst {
     var cnt: logic<32>;
     inst dut: Counter_tb (clk, rst, cnt);
     initial {
-        rst.assert(clk);
+        rst.assert();
         clk.next  (5);
         $assert   (cnt == 32'd99, "fail first");
         $assert   (cnt == 32'd5, "should not run");
@@ -2795,7 +2795,7 @@ module CounterTbPassSecond {
     var cnt: logic<32>;
     inst dut: Counter_tb (clk, rst, cnt);
     initial {
-        rst.assert(clk);
+        rst.assert();
         clk.next  (5);
         $assert   (cnt == 32'd5, "pass second");
         $finish   ();

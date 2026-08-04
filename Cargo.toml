@@ -39,13 +39,13 @@ description = "Celox HDL Simulator"
 rust-version = "1.97.1"
 
 [workspace.dependencies]
-veryl-analyzer = "0.20.2"
-veryl-emitter  = "0.20.2"
-veryl-metadata = "0.20.2"
-veryl-parser   = { version = "0.20.2", default-features = false }
-veryl-path      = "0.20.2"
-veryl-simulator = "0.20.2"
-veryl-std       = "0.20.2"
+veryl-analyzer = "0.20.3"
+veryl-emitter  = "0.20.3"
+veryl-metadata = "0.20.3"
+veryl-parser   = { version = "0.20.3", default-features = false }
+veryl-path      = "0.20.3"
+veryl-simulator = "0.20.3"
+veryl-std       = "0.20.3"
 
 bit-set         = "0.11"
 clap            = { version = "4.5.60", features = ["derive"] }
@@ -53,7 +53,7 @@ fxhash          = "0.2.1"
 itertools       = "0.15.0"
 libc            = "0.2"
 miette          = { version = "7.6" }
-num-bigint      = "0.4"
+num-bigint      = "0.5"
 num-traits      = "0.2.19"
 serde           = { version = "1.0", features = ["derive"] }
 serde_json      = "1.0"

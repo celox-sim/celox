@@ -38,12 +38,7 @@ mod tests {
 
         let mut ir = Ir::default();
         let mut context = Context::default();
-        let errors = analyzer.analyze_pass2(
-            &metadata.project.name,
-            &parser.veryl,
-            &mut context,
-            Some(&mut ir),
-        );
+        let errors = analyzer.analyze_pass2(&parser.veryl, &mut context, Some(&mut ir));
         assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
         let errors = Analyzer::analyze_post_pass2(&ir);
         assert!(errors.is_empty(), "analyze_post_pass2 errors: {errors:?}");
@@ -90,10 +85,9 @@ mod tests {
         let errors = Analyzer::analyze_post_pass1();
         assert!(errors.is_empty(), "analyze_post_pass1 errors: {errors:?}");
 
-        for (i, (path_set, _code)) in parsed_files.iter().enumerate() {
+        for (i, (_path_set, _code)) in parsed_files.iter().enumerate() {
             let parser = &parsers[i];
-            let errors =
-                analyzer.analyze_pass2(&path_set.prj, &parser.veryl, &mut context, Some(&mut ir));
+            let errors = analyzer.analyze_pass2(&parser.veryl, &mut context, Some(&mut ir));
             assert!(errors.is_empty(), "analyze_pass2 errors: {errors:?}");
         }
         let errors = Analyzer::analyze_post_pass2(&ir);

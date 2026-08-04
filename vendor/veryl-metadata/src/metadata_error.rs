@@ -31,6 +31,15 @@ pub enum MetadataError {
     #[error("source file \"{0}\" is outside the project")]
     InvalidSourceLocation(PathBuf),
 
+    #[diagnostic(
+        code(MetadataError::ReservedSourceDir),
+        help("remove it from [build] sources")
+    )]
+    #[error(
+        "\"{0}\" cannot be used as a source directory: `examples/` is reserved and analyzed automatically for the root project"
+    )]
+    ReservedSourceDir(PathBuf),
+
     #[diagnostic(code(MetadataError::Git), help(""))]
     #[error("git operation failure: {0}")]
     Git(Box<dyn std::error::Error + Sync + Send>),
@@ -76,6 +85,15 @@ pub enum MetadataError {
     #[error("{project} @ {url} is not found")]
     ProjectNotFound { url: UrlPath, project: String },
 
+    #[diagnostic(
+        code(MetadataError::UnpublishedDependency),
+        help(
+            "run `veryl publish` in the dependency to create Veryl.pub; for local development, a path dependency (`{name} = {{ path = \"...\" }}`) does not require publishing"
+        )
+    )]
+    #[error("dependency `{name}` has no published release (Veryl.pub not found in the repository)")]
+    UnpublishedDependency { name: String },
+
     #[diagnostic(code(MetadataError::InvalidDependency), help(""))]
     #[error("dependency to {name} is invalid because {cause}")]
     InvalidDependency { name: String, cause: String },
@@ -96,11 +114,16 @@ pub enum MetadataError {
     #[error("Version field is required in Veryl.toml to publish")]
     MissingVersion,
 
-    #[diagnostic(code(MetadataError::UnsupportedTarget), help(""))]
-    #[error("{operation} is not supported on {target}")]
-    UnsupportedTarget {
-        operation: &'static str,
-        target: &'static str,
+    #[diagnostic(code(MetadataError::UnknownProperty), help(""))]
+    #[error("property \"{property}\" is not defined in project \"{project}\"")]
+    UnknownProperty { property: String, project: String },
+
+    #[diagnostic(code(MetadataError::MismatchType), help(""))]
+    #[error("\"{name}\" is expected to \"{expected}\", but it is \"{actual}\"")]
+    MismatchType {
+        name: String,
+        expected: String,
+        actual: String,
     },
 }
 

@@ -55,7 +55,10 @@ pub fn veryl_test(input: TokenStream) -> TokenStream {
     analyzer.clear();
 
     let paths = match metadata.paths::<PathBuf>(&[], false, true) {
-        Ok(p) => p,
+        Ok(p) => p
+            .into_iter()
+            .filter(|path| !path.example)
+            .collect::<Vec<_>>(),
         Err(e) => exit_with_error!(&format!("Failed to gather paths: {}", e)),
     };
 
@@ -141,10 +144,9 @@ pub fn veryl_test(input: TokenStream) -> TokenStream {
         exit_with_error!(&format!("Analysis post-pass1 errors: {}", msgs.join("; ")));
     }
 
-    for (i, (path_set, _code)) in parsed_files.iter().enumerate() {
+    for (i, (_path_set, _code)) in parsed_files.iter().enumerate() {
         let parser = &parsers[i];
-        let errors =
-            analyzer.analyze_pass2(&path_set.prj, &parser.veryl, &mut context, Some(&mut ir));
+        let errors = analyzer.analyze_pass2(&parser.veryl, &mut context, Some(&mut ir));
         if !errors.is_empty() {
             let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
             exit_with_error!(&format!("Analysis pass2 errors: {}", msgs.join("; ")));
