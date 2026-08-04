@@ -449,6 +449,55 @@ fn test_hierarchical_dynamic_reads_preserve_wide_values() {
 }
 
 #[test]
+fn test_hierarchical_select_widths_and_multidimensional_dynamic_indices() {
+    let code = r#"
+        module Dut () {
+            var word: logic<8>;
+            var mem: logic<8>[2, 2];
+            var narrow: logic<3>[2, 2];
+
+            always_comb {
+                word = 8'hab;
+                mem[0][0] = 8'h11;
+                mem[0][1] = 8'h12;
+                mem[1][0] = 8'h21;
+                mem[1][1] = 8'h22;
+                narrow[0][0] = 3'h1;
+                narrow[0][1] = 3'h2;
+                narrow[1][0] = 3'h3;
+                narrow[1][1] = 3'h5;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst dut: Dut ();
+            var i: u32;
+            var j: u32;
+
+            initial {
+                i = 1;
+                j = 1;
+                $assert(dut.word[3 -: 4] == 4'hb, "minus-colon select");
+                $assert({dut.word[7:4], dut.word[3:0]} == 8'hab, "selected concat widths");
+                $assert(dut.mem[i][1] == 8'h22, "dynamic outer index");
+                $assert(dut.mem[i][j] == 8'h22, "multiple dynamic indices");
+                $assert(dut.narrow[i][j] == 3'h5, "non-byte-aligned dynamic indices");
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
 fn test_clock_only_self_updating_ff_advances_in_native_testbench_instance() {
     let code = r#"
         module ClockTickCounter (

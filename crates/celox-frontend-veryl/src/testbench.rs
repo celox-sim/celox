@@ -10,7 +10,7 @@ use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssertKind, CasePattern, Expression, Factor, ForBound, ForRange, Function,
     FunctionCall, HierVarRef, Op as VerylOp, Statement, SystemFunctionInput, SystemFunctionKind,
-    TbMethod, TbMethodCall, VarId,
+    TbMethod, TbMethodCall, VarId, VarIndex, VarSelect, VarSelectOp,
 };
 use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::{self, StrId};
@@ -442,6 +442,46 @@ fn checked_reference_bits(
         ));
     }
     Ok(BitAccess::new(lsb, msb))
+}
+
+fn variable_access_width(
+    info: &VariableInfo,
+    index: &VarIndex,
+    select: &VarSelect,
+) -> Option<usize> {
+    let array_total = info
+        .array_dims
+        .iter()
+        .try_fold(1usize, |total, dimension| total.checked_mul(*dimension))?;
+    if array_total == 0 || !info.width.is_multiple_of(array_total) {
+        return None;
+    }
+    let consumed = index.0.len();
+    if consumed > info.array_dims.len() {
+        return None;
+    }
+    let element_width = info.width / array_total;
+    let accessed_width = info.array_dims[consumed..]
+        .iter()
+        .try_fold(element_width, |width, dimension| {
+            width.checked_mul(*dimension)
+        })?;
+
+    if let Some((op, range_expression)) = &select.1 {
+        let range = eval_constexpr(range_expression)?.to_usize()?;
+        return match op {
+            VarSelectOp::Colon => {
+                let anchor = eval_constexpr(select.0.last()?)?.to_usize()?;
+                anchor.checked_sub(range)?.checked_add(1)
+            }
+            VarSelectOp::PlusColon | VarSelectOp::MinusColon | VarSelectOp::Step => Some(range),
+        };
+    }
+    if select.0.is_empty() {
+        Some(accessed_width)
+    } else {
+        Some(1)
+    }
 }
 
 enum TestbenchRead {
@@ -1230,7 +1270,7 @@ impl ExprCompiler<'_> {
 
         // Process unpacked array indices
         let mut static_bit_offset: usize = 0;
-        let mut dynamic_emitted = false;
+        let mut dynamic_terms = 0usize;
 
         for (i, idx_expr) in index.0.iter().enumerate() {
             if i >= info.array_dims.len() {
@@ -1242,33 +1282,22 @@ impl ExprCompiler<'_> {
                 // Static index: accumulate into offset
                 static_bit_offset += idx_val * stride;
             } else {
-                // Dynamic index: emit the index expression, then LoadIndexed
-                let base_byte_offset = static_bit_offset / 8;
-                let stride_bytes = get_byte_size(stride);
-                let elem_byte_size = get_byte_size(element_width);
+                // Keep the dynamic flattened bit offset on the stack. All
+                // dimensions are consumed before the selected subarray is
+                // loaded, so a dynamic outer index does not discard inner
+                // indices or force the result down to one scalar element.
                 self.emit(idx_expr, ops);
-                ops.push(TbOpcode::LoadIndexed {
-                    location: Self::state_location_at(address, base_byte_offset),
-                    stride_bytes,
-                    element_byte_size: elem_byte_size,
-                    element_width,
-                });
-                dynamic_emitted = true;
-                // After a dynamic index, remaining indices would need chaining.
-                // For now, only single dynamic index is supported.
-                break;
+                if stride != 1 {
+                    ops.push(TbOpcode::ConstU64(stride as u64));
+                    ops.push(TbOpcode::BinOp(Op::Mul));
+                }
+                if dynamic_terms != 0 {
+                    ops.push(TbOpcode::BinOp(Op::Add));
+                }
+                dynamic_terms += 1;
             }
         }
 
-        if dynamic_emitted {
-            // Apply bit select on top of dynamic result if present
-            if select.1.is_some() || !select.0.is_empty() {
-                self.emit_post_select(select, element_width, ops);
-            }
-            return;
-        }
-
-        // All indices were static — apply bit select
         let accessed_width = if index.0.len() >= info.array_dims.len() {
             element_width
         } else if index.0.is_empty() {
@@ -1277,6 +1306,21 @@ impl ExprCompiler<'_> {
             strides_bits[index.0.len() - 1]
         };
 
+        if dynamic_terms != 0 {
+            ops.push(TbOpcode::LoadIndexed {
+                location: Self::state_location_at(address, 0),
+                stride_bits: 1,
+                base_bit_offset: static_bit_offset,
+                element_width: accessed_width,
+            });
+            // Apply bit select on top of dynamic result if present
+            if select.1.is_some() || !select.0.is_empty() {
+                self.emit_post_select(select, accessed_width, ops);
+            }
+            return;
+        }
+
+        // All indices were static — apply bit select
         if select.0.is_empty() && select.1.is_none() {
             // No bit select, just load the element
             let byte_offset = static_bit_offset / 8;
@@ -1345,7 +1389,9 @@ impl ExprCompiler<'_> {
                 let (lsb, msb) = match op {
                     veryl_analyzer::ir::VarSelectOp::Colon => (v, a),
                     veryl_analyzer::ir::VarSelectOp::PlusColon => (a, a + v - 1),
-                    veryl_analyzer::ir::VarSelectOp::MinusColon => (a.saturating_sub(v) + 1, a),
+                    veryl_analyzer::ir::VarSelectOp::MinusColon => {
+                        (a.saturating_add(1).saturating_sub(v), a)
+                    }
                     veryl_analyzer::ir::VarSelectOp::Step => (a * v, (a + 1) * v - 1),
                 };
                 return (lsb, msb - lsb + 1, false);
@@ -1483,14 +1529,15 @@ impl ExprCompiler<'_> {
         // For terms, look up variable info
         if let Expression::Term(f) = expr {
             match f.as_ref() {
-                Factor::Variable(var_id, _, _, _) => {
+                Factor::Variable(var_id, index, select, _) => {
                     if let Some((_, info)) = self.lookup.root_variable(*var_id) {
-                        return info.width;
+                        return variable_access_width(info, index, select).unwrap_or(info.width);
                     }
                 }
                 Factor::HierVariable(reference) => {
                     if let Ok((_, info)) = resolve_hierarchical_reference(self.lookup, reference) {
-                        return info.width;
+                        return variable_access_width(info, &reference.index, &reference.select)
+                            .unwrap_or(info.width);
                     }
                 }
                 Factor::Value(c) => {
