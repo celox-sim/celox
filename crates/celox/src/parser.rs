@@ -307,6 +307,7 @@ pub fn parse(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
+    testbench_random_seed: u64,
 ) -> Result<
     (
         crate::ir::OptimizedSir,
@@ -396,8 +397,11 @@ pub fn parse(
     let scheduled = scheduled.scheduled;
     let (sir, mut runtime, testbench_source) = RuntimeProgram::from_scheduled(scheduled);
     crate::testbench_compile::project_observability(&mut runtime, &testbench_source);
-    runtime.testbench =
-        crate::testbench_compile::compile_semantic_testbench(&runtime, &testbench_source)?;
+    runtime.testbench = crate::testbench_compile::compile_semantic_testbench(
+        &runtime,
+        &testbench_source,
+        testbench_random_seed,
+    )?;
     dump_addr_map_if_requested(&runtime, diagnostics);
     let mut program = UnoptimizedSir::new(sir, runtime);
     if let Some(t) = trace.as_deref_mut()

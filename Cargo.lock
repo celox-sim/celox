@@ -430,6 +430,8 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "proptest",
+ "rand 0.10.2",
+ "rand_pcg",
  "serde",
  "serde_json",
  "tempfile",

@@ -44,6 +44,7 @@ fn analyze(
     attribute_table::clear();
 
     let metadata = metadata.unwrap_or_else(|| Metadata::create_default("prj").unwrap());
+    let testbench_random_seed = metadata.test.seed.unwrap_or_default();
     let analyzer = Analyzer::new(&metadata);
     let project_name = metadata.project.name.clone();
 
@@ -121,6 +122,7 @@ fn analyze(
         optimize_options,
         diagnostics,
         preserve_element_storage_layout,
+        testbench_random_seed,
     )
     .map(|(sir, mut elaborated_diagnostics)| {
         frontend_diagnostics.append(&mut elaborated_diagnostics);
@@ -886,8 +888,7 @@ mod host {
                 )))
             })?;
             Ok(crate::testbench::run_testbench_detailed(
-                &mut sim,
-                testbench.statements(),
+                &mut sim, &testbench,
             ))
         }
 
@@ -985,7 +986,7 @@ mod host {
                 "no initial block found — this module is not a native testbench",
             )))
         })?;
-        let result = crate::testbench::run_testbench(&mut sim, testbench.statements());
+        let result = crate::testbench::run_testbench(&mut sim, &testbench);
         if let Some(start) = testbench_start {
             tracing::debug!("[phase-timing] testbench: {:?}", start.elapsed());
         }

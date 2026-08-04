@@ -1549,15 +1549,56 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     deassert_value,
                 })
             }
+            TbMethod::RandomSeed { value } => Some(GenericTestbenchStatement::RandomSeed {
+                handle: resource_table::get_str_value(tb.inst).unwrap_or_default(),
+                value: ec.compile(value),
+            }),
+            TbMethod::RandomGet { width, signed } => {
+                let ret = match tb.ret.as_deref() {
+                    Some(dst) => Some(ec.resolve_var(&dst.id)?),
+                    None => None,
+                };
+                Some(GenericTestbenchStatement::RandomGet {
+                    handle: resource_table::get_str_value(tb.inst).unwrap_or_default(),
+                    width: *width,
+                    signed: *signed,
+                    ret,
+                })
+            }
+            TbMethod::RandomGetRange {
+                min,
+                max,
+                width,
+                signed,
+            } => {
+                let ret = match tb.ret.as_deref() {
+                    Some(dst) => Some(ec.resolve_var(&dst.id)?),
+                    None => None,
+                };
+                Some(GenericTestbenchStatement::RandomGetRange {
+                    handle: resource_table::get_str_value(tb.inst).unwrap_or_default(),
+                    min: ec.compile(min),
+                    max: ec.compile(max),
+                    width: *width,
+                    signed: *signed,
+                    ret,
+                })
+            }
+            TbMethod::RandomGetSeed => {
+                let ret = match tb.ret.as_deref() {
+                    Some(dst) => Some(ec.resolve_var(&dst.id)?),
+                    None => None,
+                };
+                Some(GenericTestbenchStatement::RandomGetSeed {
+                    handle: resource_table::get_str_value(tb.inst).unwrap_or_default(),
+                    ret,
+                })
+            }
             TbMethod::FileOpen { .. }
             | TbMethod::FileWrite { .. }
             | TbMethod::FileClose
             | TbMethod::FileFlush
-            | TbMethod::Component { .. }
-            | TbMethod::RandomSeed { .. }
-            | TbMethod::RandomGet { .. }
-            | TbMethod::RandomGetRange { .. }
-            | TbMethod::RandomGetSeed => None,
+            | TbMethod::Component { .. } => None,
         }
     }
 
@@ -1853,25 +1894,13 @@ fn validate_testbench_statements(
                     ));
                 }
                 TbMethod::RandomSeed { value } => {
-                    return Err(ParserError::unsupported(
-                        469,
-                        LoweringPhase::SimulatorParser,
-                        "testbench random method",
-                        "random runtime integration is not implemented",
-                        Some(&value.comptime().token),
-                    ));
+                    validate_testbench_expression(value, source, active_functions)?;
                 }
-                TbMethod::RandomGet { .. }
-                | TbMethod::RandomGetRange { .. }
-                | TbMethod::RandomGetSeed => {
-                    return Err(ParserError::unsupported(
-                        469,
-                        LoweringPhase::SimulatorParser,
-                        "testbench random method",
-                        "random runtime integration is not implemented",
-                        None,
-                    ));
+                TbMethod::RandomGetRange { min, max, .. } => {
+                    validate_testbench_expression(min, source, active_functions)?;
+                    validate_testbench_expression(max, source, active_functions)?;
                 }
+                TbMethod::RandomGet { .. } | TbMethod::RandomGetSeed => {}
                 TbMethod::ClockNext { count, period } => {
                     if let Some(expression) = count {
                         validate_testbench_expression(expression, source, active_functions)?;
@@ -1905,6 +1934,7 @@ pub fn compile_semantic_testbench(
     lookup: &VerylFrontendLookup,
     source: &VerylTestbenchSource,
     runtime_event_site_count: usize,
+    random_seed: u64,
 ) -> Result<Option<TestbenchProgram<StateAddr>>, ParserError> {
     let Some(initial_stmts) = source.initial_statements.as_ref() else {
         return Ok(None);
@@ -1912,5 +1942,7 @@ pub fn compile_semantic_testbench(
     validate_testbench_statements(initial_stmts, source, &mut FxHashSet::default())?;
     let mut builder = SemanticTestbenchBuilder::new(lookup, source, runtime_event_site_count);
     builder.build_event_map(initial_stmts);
-    Ok(Some(TestbenchProgram::new(builder.convert(initial_stmts))))
+    Ok(Some(
+        TestbenchProgram::new(builder.convert(initial_stmts)).with_random_seed(random_seed),
+    ))
 }
