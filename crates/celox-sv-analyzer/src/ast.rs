@@ -6330,20 +6330,19 @@ fn expr_from_primary_with_types(
         sv_parser::Primary::PrimaryLiteral(_) => {
             primary_literal_text(RefNode::Primary(primary), syntax_tree).map(Expr::Literal)
         }
-        sv_parser::Primary::Hierarchical(hierarchical) => identifier_text(
-            RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
-            syntax_tree,
-        )
-        .map(|name| {
-            let base = Expr::Ident(name);
-            expr_select_from_select(
-                base.clone(),
-                &hierarchical.nodes.2,
+        sv_parser::Primary::Hierarchical(hierarchical) => {
+            let name = identifier_text(
+                RefNode::HierarchicalIdentifier(&hierarchical.nodes.1),
                 syntax_tree,
-                packed_dimensions,
-            )
-            .unwrap_or(base)
-        }),
+            )?;
+            let base = Expr::Ident(name);
+            let select = &hierarchical.nodes.2;
+            if select.nodes.1.nodes.0.is_empty() && select.nodes.2.is_none() {
+                Some(base)
+            } else {
+                expr_select_from_select(base, select, syntax_tree, packed_dimensions)
+            }
+        }
         sv_parser::Primary::Concatenation(concat) => {
             let parts = concat
                 .nodes

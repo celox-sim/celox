@@ -144,6 +144,20 @@ fn rejects_child_outputs_that_multiply_drive_a_variable() {
 }
 
 #[test]
+fn rejects_child_outputs_connected_to_input_ports() {
+    let error = cranelift_build_error(
+        r#"
+        module Child(output logic y); assign y = 1'b1; endmodule
+        module Top(input logic a); Child child(.y(a)); endmodule
+        "#,
+    );
+    assert!(
+        error.contains("write to input port `a`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn rejects_writes_to_input_ports() {
     let error = cranelift_build_error(
         r#"
@@ -2552,6 +2566,59 @@ fn preserves_assignment_context_width_for_selected_shift_operands() {
     let a = sim.signal("a");
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get(sim.signal("y")), 0x100u16.into());
+}
+
+#[test]
+fn preserves_ff_context_width_for_selected_shift_operands() {
+    let source = r#"
+        module Top(input logic clk, input logic a, output logic [15:0] y);
+            always_ff @(posedge clk) y <= a[0] << 8;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("ff_selected_shift_context.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0x100u16.into());
+}
+
+#[test]
+fn sizes_ff_left_fill_literals_from_the_shift_context() {
+    let source = r#"
+        module Top(input logic clk, input logic [5:0] sh, output logic [63:0] y);
+            always_ff @(posedge clk) y <= '1 << sh;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("ff_fill_shift_context.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let clk = sim.event("clk");
+    let sh = sim.signal("sh");
+    sim.modify(|io| io.set(sh, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xffff_ffff_ffff_fffeu64.into());
+}
+
+#[test]
+fn rejects_unrepresentable_dynamic_selects_instead_of_dropping_them() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic [1:0] a, input logic sel, output logic y);
+            assign y = a[sel ? 1 : 0];
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("continuous assignment expression"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

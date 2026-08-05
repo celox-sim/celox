@@ -180,6 +180,20 @@ fn validate_specialized_instance_net_drivers(
     modules: &HashMap<ModuleId, LoweredSvModule>,
 ) -> Result<(), sv::AnalyzerError> {
     for module in modules.values() {
+        for port in module
+            .source
+            .ports()
+            .iter()
+            .filter(|port| port.direction() == sv::ir::PortDirection::Input)
+        {
+            if child_output_driver_count(module, port.name(), module_ids, modules) != 0 {
+                return Err(sv::AnalyzerError::Unsupported(format!(
+                    "write to input port `{}`",
+                    port.name()
+                )));
+            }
+        }
+
         let net_names = module
             .source
             .signals()
@@ -3660,7 +3674,12 @@ fn lower_expr_to_sir_with_context(
             let width = high - low + 1;
             let reg = builder.alloc_logic(width);
             builder.emit(SIRInstruction::Slice(reg, inner, low, width));
-            Some(reg)
+            resize_sir_register(
+                builder,
+                reg,
+                context_width.unwrap_or(width),
+                context_signed.unwrap_or(false),
+            )
         }
         sv::ir::Expr::Resize {
             expr,
@@ -3785,7 +3804,7 @@ fn lower_expr_to_sir_with_context(
                     right_context,
                     Some(operands_signed),
                 )?;
-                let width = builder.register(&right).width();
+                let width = left_context.unwrap_or_else(|| builder.register(&right).width());
                 (lower_unbased_fill_literal(builder, fill, width)?, right)
             } else {
                 (
