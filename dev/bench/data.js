@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785893107109,
+  "lastUpdate": 1785921320967,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -155860,6 +155860,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
             "value": 67698.440617,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "29139614+renovate[bot]@users.noreply.github.com",
+            "name": "renovate[bot]",
+            "username": "renovate[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b2713aeb21b782bd91b8a4cd8a6e7600f1287118",
+          "message": "Merge pull request #489 from celox-sim/renovate/pnpm-11.x\n\nchore(deps): update pnpm to v11.18.0",
+          "timestamp": "2026-08-05T08:36:30Z",
+          "tree_id": "8c347b2a82a4c7ba6f5689ec7f72b245e3e4087f",
+          "url": "https://github.com/celox-sim/celox/commit/b2713aeb21b782bd91b8a4cd8a6e7600f1287118"
+        },
+        "date": 1785921305492,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-jit/heliodor_linux_boot_execution",
+            "value": 191191.229642,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-total/heliodor_linux_boot_execution",
+            "value": 191227.463516,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl/heliodor_linux_boot_execution",
+            "value": 223284.732342,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-compile/heliodor_linux_boot_compilation",
+            "value": 133604.227515,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
+            "value": 63081.780208,
             "unit": "ms"
           }
         ]
