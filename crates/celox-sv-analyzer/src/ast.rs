@@ -3909,10 +3909,24 @@ fn function_expr_from_conditional_statement(
 
     if branches.iter().all(|(_, expr, _)| expr.is_none()) && else_expr.is_none() {
         let mut merged = locals.clone();
-        for name in locals.keys() {
-            let mut value = else_locals.get(name)?.clone();
+        let mut names = locals.keys().cloned().collect::<HashSet<_>>();
+        names.extend(else_locals.keys().cloned());
+        names.extend(
+            branches
+                .iter()
+                .flat_map(|(_, _, branch_locals)| branch_locals.keys().cloned()),
+        );
+        for name in names {
+            let mut value = else_locals
+                .get(&name)
+                .or_else(|| locals.get(&name))
+                .cloned()
+                .unwrap_or_else(|| Expr::Ident(name.clone()));
             for (condition, _, branch_locals) in branches.iter().rev() {
-                let branch_value = branch_locals.get(name)?.clone();
+                let branch_value = branch_locals
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| value.clone());
                 if branch_value != value {
                     value = Expr::Mux {
                         condition: Box::new(condition.clone()),
@@ -3921,7 +3935,7 @@ fn function_expr_from_conditional_statement(
                     };
                 }
             }
-            merged.insert(name.clone(), value);
+            merged.insert(name, value);
         }
         *locals = merged;
         return None;
@@ -6537,25 +6551,41 @@ fn expr_from_function_subroutine_call(
         RefNode::PsOrHierarchicalTfIdentifier(&call.nodes.0),
         syntax_tree,
     )?;
-    let args = call
-        .nodes
-        .2
-        .as_ref()
-        .and_then(|paren| match &paren.nodes.1 {
-            sv_parser::ListOfArguments::Ordered(args) => Some(
-                args.nodes
-                    .0
-                    .contents()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|expr| {
+    let args = match call.nodes.2.as_ref().map(|paren| &paren.nodes.1) {
+        None => Vec::new(),
+        Some(sv_parser::ListOfArguments::Ordered(args)) => {
+            let contents = args.nodes.0.contents();
+            if contents.len() == 1 && contents[0].is_none() {
+                Vec::new()
+            } else {
+                let mut lowered = Vec::new();
+                for expr in contents {
+                    let Some(expr) = expr.as_ref() else {
+                        return Some(Expr::Call {
+                            name: "$unsupported_function_call".to_string(),
+                            args: Vec::new(),
+                        });
+                    };
+                    let Some(expr) =
                         expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-            sv_parser::ListOfArguments::Named(_) => None,
-        })
-        .unwrap_or_default();
+                    else {
+                        return Some(Expr::Call {
+                            name: "$unsupported_function_call".to_string(),
+                            args: Vec::new(),
+                        });
+                    };
+                    lowered.push(expr);
+                }
+                lowered
+            }
+        }
+        Some(sv_parser::ListOfArguments::Named(_)) => {
+            return Some(Expr::Call {
+                name: "$unsupported_function_call".to_string(),
+                args: Vec::new(),
+            });
+        }
+    };
     Some(Expr::Call { name, args })
 }
 

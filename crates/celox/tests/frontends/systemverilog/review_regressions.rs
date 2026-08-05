@@ -318,6 +318,24 @@ fn merges_function_formals_updated_in_conditional_branches() {
 }
 
 #[test]
+fn rejects_dropped_unrepresentable_function_call_actuals() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic a, b, output logic y);
+            function automatic logic f(input logic value);
+                return value;
+            endfunction
+            assign y = f(a ** b, b);
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("combinational expression") || error.contains("function call"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn preserves_selected_parameter_constants_in_hierarchy_glue() {
     let source = r#"
         module Child(input logic a, output logic y); assign y = a; endmodule
