@@ -45,7 +45,7 @@ jobs:
             exit 0
           fi
 
-          git push origin "${GITHUB_SHA}:refs/heads/develop"
+          git push origin "HEAD:refs/heads/develop"
           echo "created=true" >> "$GITHUB_OUTPUT"
 
       - name: Open or update the master synchronization pull request
@@ -55,6 +55,7 @@ jobs:
         shell: bash
         run: |
           git fetch --no-tags origin refs/heads/develop:refs/remotes/origin/develop
+          master_sha="$(git rev-parse HEAD)"
 
           # Do not use master itself as a pull request head. A queued develop
           # synchronization would then hold the branch that master's own merge
@@ -73,12 +74,12 @@ jobs:
             gh pr close "$legacy_pr" --repo "$GITHUB_REPOSITORY"
           fi
 
-          if git merge-base --is-ancestor "$GITHUB_SHA" origin/develop; then
-            echo "develop already contains master $GITHUB_SHA."
+          if git merge-base --is-ancestor "$master_sha" origin/develop; then
+            echo "develop already contains master $master_sha."
             exit 0
           fi
 
-          git push origin "$GITHUB_SHA:refs/heads/$SYNC_BRANCH"
+          git push origin "$master_sha:refs/heads/$SYNC_BRANCH"
 
           sync_pr="$(
             gh pr list \
