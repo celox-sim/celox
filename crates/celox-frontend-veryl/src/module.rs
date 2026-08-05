@@ -57,6 +57,7 @@ pub struct ModuleParser<'a> {
     reset_clock_map: HashMap<VarId, VarId>,
     loop_candidates: Vec<LoopRecoveryCandidate>,
     external_modules: &'a HashMap<ModuleId, ExternalModule>,
+    external_output_targets: Vec<(VarId, BitAccess)>,
 }
 
 static EMPTY_EXTERNAL_MODULES: std::sync::LazyLock<HashMap<ModuleId, ExternalModule>> =
@@ -1177,6 +1178,7 @@ impl<'a> ModuleParser<'a> {
             reset_clock_map: HashMap::default(),
             loop_candidates,
             external_modules,
+            external_output_targets: Vec::new(),
         })
     }
 
@@ -1780,7 +1782,6 @@ impl<'a> ModuleParser<'a> {
 
         let mut input_ports = Vec::new();
         let mut output_ports = Vec::new();
-        let mut output_targets = Vec::<(VarId, BitAccess)>::new();
         let mut glue_arena = SLTNodeArena::<GlueAddr>::new();
         let (uses_named_associations, formal_names) = external_port_formal_names(decl)?;
         if formal_names.len() != system_verilog.connects.len() {
@@ -1889,7 +1890,15 @@ impl<'a> ModuleParser<'a> {
                     ));
                 }
                 veryl_analyzer::ir::VarKind::Output => {
-                    if output_targets
+                    if parent_var.kind == veryl_analyzer::ir::VarKind::Input {
+                        return Err(ParserError::illegal_context(
+                            "external module output connections",
+                            format!("child output cannot drive input port {}", parent_var.path),
+                            Some(&parent_dst.token),
+                        ));
+                    }
+                    if self
+                        .external_output_targets
                         .iter()
                         .any(|(id, access)| *id == parent_dst.id && access.overlaps(&parent_access))
                     {
@@ -1902,7 +1911,8 @@ impl<'a> ModuleParser<'a> {
                             Some(&parent_dst.token),
                         ));
                     }
-                    output_targets.push((parent_dst.id, parent_access));
+                    self.external_output_targets
+                        .push((parent_dst.id, parent_access));
                     let child_node = glue_arena.alloc(SLTNode::Input {
                         variable: GlueAddr::Child(*child_port_id),
                         signed: child_var.r#type.signed,

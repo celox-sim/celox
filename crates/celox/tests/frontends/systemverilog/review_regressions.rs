@@ -2617,6 +2617,27 @@ fn ignores_unreachable_unsupported_systemverilog_modules_in_mixed_designs() {
 }
 
 #[test]
+fn ignores_missing_sv_components_referenced_only_by_unreachable_veryl_modules() {
+    let veryl = r#"
+        module Helper (y: output logic) {
+            inst missing: $sv::Missing (y);
+        }
+        module Top (y: output logic) {
+            inst good: $sv::Good (y);
+        }
+    "#;
+    let sv = "module Good(output logic y); assign y = 1'b1; endmodule";
+    let mut sim = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("good.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
 fn preserves_assignment_context_width_for_selected_shift_operands() {
     let source = r#"
         module Top(input logic a, output logic [15:0] y);
@@ -2625,6 +2646,27 @@ fn preserves_assignment_context_width_for_selected_shift_operands() {
     "#;
     let mut sim = Simulator::from_sv_sources(
         vec![(source, Path::new("selected_shift_context.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0x100u16.into());
+}
+
+#[test]
+fn preserves_assignment_context_width_through_resized_function_results() {
+    let source = r#"
+        module Top(input logic a, output logic [15:0] y);
+            function automatic logic [7:0] widen(input logic value);
+                return {7'b0, value};
+            endfunction
+            assign y = widen(a) << 8;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("function_resize_context.sv"))],
         "Top",
     )
     .build_cranelift()
@@ -2708,6 +2750,55 @@ fn rejects_duplicate_external_systemverilog_output_targets() {
     .build_cranelift()
     {
         Ok(_) => panic!("duplicate external output targets unexpectedly compiled"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("multiple output ports drive overlapping target"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_external_systemverilog_outputs_connected_to_veryl_inputs() {
+    let veryl = r#"
+        module Top (a: input logic) {
+            inst child: $sv::OneOut (a);
+        }
+    "#;
+    let sv = "module OneOut(output logic y); assign y = 1'b1; endmodule";
+    let error = match Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("one_out.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    {
+        Ok(_) => panic!("external child output unexpectedly drove a Veryl input"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("child output cannot drive input port"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_duplicate_external_outputs_across_instances() {
+    let veryl = r#"
+        module Top (y: output logic) {
+            inst first: $sv::Source (y);
+            inst second: $sv::Source (y);
+        }
+    "#;
+    let sv = "module Source(output logic y); assign y = 1'b1; endmodule";
+    let error = match Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("source.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    {
+        Ok(_) => panic!("duplicate external outputs unexpectedly compiled"),
         Err(error) => error.to_string(),
     };
     assert!(

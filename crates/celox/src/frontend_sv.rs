@@ -2571,7 +2571,16 @@ fn lower_expr_with_context(
                 Some(*signed),
             )?;
             let resized = coerce_node_width(arena, inner, Some(*width), *signed).ok()?;
-            Some((resized, sources))
+            Some((
+                coerce_node_width(
+                    arena,
+                    resized,
+                    context_width,
+                    context_signed.unwrap_or(*signed),
+                )
+                .ok()?,
+                sources,
+            ))
         }
         sv::ir::Expr::Binary { left, op, right } => {
             let operands_signed =

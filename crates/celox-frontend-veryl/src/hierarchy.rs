@@ -81,17 +81,7 @@ pub fn parse_ir_with_external_hierarchy<'a>(
             Component::Interface(_) => {
                 unreachable!("Interface component must be eliminated before simulator parse_ir")
             }
-            Component::SystemVerilog(sv) => {
-                if !external.roots.contains_key(&sv.name) {
-                    return Err(ParserError::unsupported(
-                        64,
-                        LoweringPhase::SimulatorParser,
-                        "systemverilog component",
-                        format!("module \"{}\" was not supplied", sv.name),
-                        None,
-                    ));
-                }
-            }
+            Component::SystemVerilog(_) => {}
         }
     }
 
