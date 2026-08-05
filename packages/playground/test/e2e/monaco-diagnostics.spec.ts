@@ -29,6 +29,9 @@ describe("bigint literals", () => {
 
 async function openPlayground(page: Page) {
 	const browserErrors: string[] = [];
+	page.on("console", (message) => {
+		if (message.type() === "error") browserErrors.push(message.text());
+	});
 	const pageError = new Promise<never>((_, reject) => {
 		page.on("pageerror", (error) => {
 			browserErrors.push(error.message);
@@ -48,19 +51,17 @@ async function openPlayground(page: Page) {
 	const status = await page.evaluate(() =>
 		window.__CELOX_PLAYGROUND_TEST_API__?.getStatusText(),
 	);
-	expect(status).toBe("Ready");
+	expect(
+		status,
+		`Browser errors: ${browserErrors.join("\n") || "none"}`,
+	).toBe("Ready");
 
 	return browserErrors;
 }
 
-test("playground reaches Ready without browser errors", async ({ page }) => {
+test("playground starts and accepts bigint literals", async ({ page }) => {
 	const browserErrors = await openPlayground(page);
 	await expect(page.locator("#editor .monaco-editor")).toBeVisible();
-	expect(browserErrors).toEqual([]);
-});
-
-test("playground does not report TS2737 for bigint literals", async ({ page }) => {
-	const browserErrors = await openPlayground(page);
 
 	await page.evaluate((source) => {
 		const api = window.__CELOX_PLAYGROUND_TEST_API__;
