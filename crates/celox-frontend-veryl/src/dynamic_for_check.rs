@@ -1309,6 +1309,37 @@ fn collect_statement_effects(
                             active_functions,
                         ));
                     }
+                    if let Some(destination) = call.ret.as_deref() {
+                        collect_destination_effects(
+                            destination,
+                            module,
+                            active_functions,
+                            &mut effects,
+                            from_ff,
+                        );
+                    }
+                    if let Some(external) = module.declarations.iter().find_map(|declaration| {
+                        let Declaration::External(external) = declaration else {
+                            return None;
+                        };
+                        (external.name == call.inst).then_some(external)
+                    }) {
+                        for destination in external
+                            .connects
+                            .iter()
+                            .filter_map(|connection| connection.output.as_ref())
+                        {
+                            collect_destination_effects(
+                                destination,
+                                module,
+                                active_functions,
+                                &mut effects,
+                                from_ff,
+                            );
+                        }
+                    } else {
+                        effects.mark_unknown("component method may write connected output state");
+                    }
                 }
                 TbMethod::RandomSeed { value } => {
                     effects.observable = true;

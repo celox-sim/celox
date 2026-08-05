@@ -1,11 +1,14 @@
-use celox_design::{BitAccess, PortTypeKind, RuntimeEventKind, RuntimeEventSite, StateAddr};
+use celox_design::{
+    BitAccess, InstanceId, PortTypeKind, RuntimeEventKind, RuntimeEventSite, StateAddr,
+};
 use celox_testbench::{
     AssertMessage as GenericAssertMessage, ClockCount as GenericClockCount, ExprBytecode,
-    ExprOpcode as TbOpcode, LoopBound as GenericLoopBound, SemanticArgument, SemanticSignal,
-    SemanticStatement, SourceLocation, StateLocation, TestbenchOperator as Op, TestbenchProgram,
-    TestbenchSelection, TestbenchStatement as GenericTestbenchStatement, TestbenchTarget,
+    ExprOpcode as TbOpcode, LoopBound as GenericLoopBound, SemanticArgument,
+    SemanticComponentBinding, SemanticSignal, SemanticStatement, SourceLocation, StateLocation,
+    TestbenchOperator as Op, TestbenchProgram, TestbenchSelection,
+    TestbenchStatement as GenericTestbenchStatement, TestbenchTarget,
 };
-use fxhash::FxHashSet;
+use fxhash::{FxHashMap as HashMap, FxHashSet};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssertKind, CasePattern, Expression, Factor, ForBound, ForRange, Function,
@@ -16,7 +19,8 @@ use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::{self, StrId};
 
 use crate::{
-    AbsoluteAddr, InstancePath, LoweringPhase, ParserError, VariableInfo, VerylFrontendLookup,
+    AbsoluteAddr, InstancePath, LoweringPhase, ParserError, VariableInfo,
+    VerylComponentEventBinding, VerylComponentInputBinding, VerylFrontendLookup,
     VerylTestbenchSource,
     bitaccess::eval_constexpr,
     context_width::{
@@ -46,6 +50,19 @@ fn compile_assert_arg(
     SemanticArgument {
         expr: ec.compile(expr),
         width: ec.natural_width(expr),
+        signed: expression_signed(expr),
+        is_string: expr.comptime().r#type.is_string(),
+    }
+}
+
+fn compile_component_arg(
+    input: &SystemFunctionInput,
+    ec: &ExprCompiler<'_>,
+) -> SemanticArgument<StateAddr> {
+    let expr = &input.0;
+    SemanticArgument {
+        expr: ec.compile(expr),
+        width: assert_arg_width(input),
         signed: expression_signed(expr),
         is_string: expr.comptime().r#type.is_string(),
     }
@@ -200,7 +217,25 @@ pub(crate) fn resolve_hierarchical_reference<'a>(
     lookup: &'a VerylFrontendLookup,
     reference: &HierVarRef,
 ) -> Result<(StateAddr, &'a VariableInfo), ParserError> {
-    let mut resolved_path = Vec::with_capacity(reference.inst_path.len());
+    let (root_instance, _) = lookup.root_instance_and_module().ok_or_else(|| {
+        invalid_hierarchical_reference(reference, "the root instance was not found")
+    })?;
+    resolve_hierarchical_reference_from(lookup, root_instance, reference)
+}
+
+fn resolve_hierarchical_reference_from<'a>(
+    lookup: &'a VerylFrontendLookup,
+    base_instance: InstanceId,
+    reference: &HierVarRef,
+) -> Result<(StateAddr, &'a VariableInfo), ParserError> {
+    let mut resolved_path = lookup
+        .instance_ids
+        .iter()
+        .find_map(|(path, instance)| (*instance == base_instance).then(|| path.0.clone()))
+        .ok_or_else(|| {
+            invalid_hierarchical_reference(reference, "the base instance path was not found")
+        })?;
+    resolved_path.reserve(reference.inst_path.len());
     for &segment in &reference.inst_path {
         let candidates = lookup
             .instance_ids
@@ -573,6 +608,52 @@ pub fn collect_testbench_observability(
             }
         }
     }
+    for component in &source.component_bindings {
+        let mut component_reads = Vec::new();
+        for connection in &component.connections {
+            if let Some(input) = &connection.input {
+                collect_expression_reads(
+                    input,
+                    &component.functions,
+                    &mut active_functions,
+                    &mut component_reads,
+                );
+            }
+            if let Some(output) = &connection.output {
+                collect_target_reads(
+                    output,
+                    &component.functions,
+                    &mut active_functions,
+                    &mut component_reads,
+                );
+            }
+        }
+        for reference in component_reads {
+            let address = match reference {
+                TestbenchRead::Root(var_id) => lookup
+                    .instance_variable(component.parent_instance, var_id)
+                    .map(|(address, _)| address),
+                TestbenchRead::Hierarchical(reference) => resolve_hierarchical_reference_from(
+                    lookup,
+                    component.parent_instance,
+                    &reference,
+                )
+                .ok()
+                .map(|(address, _)| address),
+            }
+            .ok_or_else(|| {
+                ParserError::illegal_context(
+                    "testbench component elaboration",
+                    format!(
+                        "component `{}` input has no runtime state binding",
+                        component.instance
+                    ),
+                    None,
+                )
+            })?;
+            reads.insert(address);
+        }
+    }
     Ok((sites, reads))
 }
 
@@ -917,10 +998,22 @@ fn lower_testbench_operator(op: VerylOp) -> Op {
 
 struct ExprCompiler<'a> {
     lookup: &'a VerylFrontendLookup,
-    testbench_source: &'a VerylTestbenchSource,
+    functions: &'a HashMap<VarId, Function>,
+    base_instance: InstanceId,
 }
 
 impl ExprCompiler<'_> {
+    fn local_variable(&self, var_id: VarId) -> Option<(StateAddr, &VariableInfo)> {
+        self.lookup.instance_variable(self.base_instance, var_id)
+    }
+
+    fn hierarchical_variable(
+        &self,
+        reference: &HierVarRef,
+    ) -> Result<(StateAddr, &VariableInfo), ParserError> {
+        resolve_hierarchical_reference_from(self.lookup, self.base_instance, reference)
+    }
+
     fn compile(&self, expr: &Expression) -> ExprBytecode<StateLocation<StateAddr>> {
         let mut ops = Vec::new();
         self.emit(expr, &mut ops);
@@ -957,11 +1050,11 @@ impl ExprCompiler<'_> {
         };
         match factor.as_ref() {
             Factor::Variable(var_id, index, select, _) => {
-                let (_, info) = self.lookup.root_variable(*var_id)?;
+                let (_, info) = self.local_variable(*var_id)?;
                 Some(variable_access_width(info, index, select).unwrap_or(info.width))
             }
             Factor::HierVariable(reference) => {
-                let (_, info) = resolve_hierarchical_reference(self.lookup, reference).ok()?;
+                let (_, info) = self.hierarchical_variable(reference).ok()?;
                 Some(
                     variable_access_width(info, &reference.index, &reference.select)
                         .unwrap_or(info.width),
@@ -1199,7 +1292,7 @@ impl ExprCompiler<'_> {
                     && let Ok(value) = comptime.get_value()
                 {
                     self.emit_constant_value(value, ops);
-                } else if let Some((address, info)) = self.lookup.root_variable(*var_id) {
+                } else if let Some((address, info)) = self.local_variable(*var_id) {
                     self.emit_var_access(address, info, index, select, ops);
                 } else if let Ok(value) = comptime.get_value() {
                     self.emit_constant_value(value, ops);
@@ -1218,7 +1311,8 @@ impl ExprCompiler<'_> {
                 self.emit_function_call(fc, ops);
             }
             Factor::HierVariable(reference) => {
-                let (address, info) = resolve_hierarchical_reference(self.lookup, reference)
+                let (address, info) = self
+                    .hierarchical_variable(reference)
                     .expect("hierarchical testbench references are validated before emission");
                 self.emit_var_access(address, info, &reference.index, &reference.select, ops);
             }
@@ -1262,7 +1356,7 @@ impl ExprCompiler<'_> {
         fc: &veryl_analyzer::ir::FunctionCall,
         ops: &mut Vec<UnboundTbOpcode>,
     ) {
-        let func = match self.testbench_source.functions.get(&fc.id) {
+        let func = match self.functions.get(&fc.id) {
             Some(f) => f,
             None => {
                 ops.push(TbOpcode::ConstU64(0));
@@ -1686,10 +1780,19 @@ impl ExprCompiler<'_> {
     ) -> Option<TestbenchTarget<SemanticSignal<StateAddr>, ExprBytecode<StateLocation<StateAddr>>>>
     {
         let signal = self.resolve_var(&destination.id)?;
-        if destination.index.0.is_empty()
-            && destination.select.0.is_empty()
-            && destination.select.1.is_none()
-        {
+        let info = self.local_variable(destination.id)?.1;
+        self.resolve_target_parts(signal, info, &destination.index, &destination.select)
+    }
+
+    fn resolve_target_parts(
+        &self,
+        signal: SemanticSignal<StateAddr>,
+        info: &VariableInfo,
+        index: &VarIndex,
+        select: &VarSelect,
+    ) -> Option<TestbenchTarget<SemanticSignal<StateAddr>, ExprBytecode<StateLocation<StateAddr>>>>
+    {
+        if index.0.is_empty() && select.0.is_empty() && select.1.is_none() {
             return Some(TestbenchTarget {
                 signal,
                 selection: None,
@@ -1697,7 +1800,6 @@ impl ExprCompiler<'_> {
             });
         }
 
-        let info = self.lookup.root_variable(destination.id)?.1;
         let array_total: usize = info.array_dims.iter().product::<usize>().max(1);
         let element_width = info.width / array_total;
         let mut strides_bits = vec![element_width; info.array_dims.len()];
@@ -1710,7 +1812,7 @@ impl ExprCompiler<'_> {
         }
 
         let mut offset_ops = vec![TbOpcode::ConstU64(0)];
-        for (i, index) in destination.index.0.iter().enumerate() {
+        for (i, index) in index.0.iter().enumerate() {
             let stride = *strides_bits.get(i)?;
             Self::append_offset_term(&mut offset_ops, |ops| {
                 if let Some(index) = Self::try_const_usize(index) {
@@ -1723,17 +1825,17 @@ impl ExprCompiler<'_> {
             });
         }
 
-        let accessed_width = if destination.index.0.len() >= info.array_dims.len() {
+        let accessed_width = if index.0.len() >= info.array_dims.len() {
             element_width
-        } else if destination.index.0.is_empty() {
+        } else if index.0.is_empty() {
             info.width
         } else {
-            *strides_bits.get(destination.index.0.len() - 1)?
+            *strides_bits.get(index.0.len() - 1)?
         };
-        let (select_ops, select_width) = if destination.select.is_empty() {
+        let (select_ops, select_width) = if select.is_empty() {
             (vec![TbOpcode::ConstU64(0)], accessed_width)
         } else {
-            self.selection_offset(&destination.select, &info.packed_dims)?
+            self.selection_offset(select, &info.packed_dims)?
         };
         Self::append_offset_term(&mut offset_ops, |ops| ops.extend(select_ops));
 
@@ -1747,11 +1849,35 @@ impl ExprCompiler<'_> {
         })
     }
 
+    fn resolve_component_input_target(
+        &self,
+        input: &VerylComponentInputBinding,
+    ) -> Option<TestbenchTarget<SemanticSignal<StateAddr>, ExprBytecode<StateLocation<StateAddr>>>>
+    {
+        match input {
+            VerylComponentInputBinding::Root { id, index, select } => {
+                let signal = self.resolve_var(id)?;
+                let info = self.local_variable(*id)?.1;
+                self.resolve_target_parts(signal, info, index, select)
+            }
+            VerylComponentInputBinding::Hierarchical(reference) => {
+                let (address, info) =
+                    resolve_hierarchical_reference_from(self.lookup, self.base_instance, reference)
+                        .ok()?;
+                let signal = SemanticSignal {
+                    address,
+                    width: info.width,
+                };
+                self.resolve_target_parts(signal, info, &reference.index, &reference.select)
+            }
+        }
+    }
+
     fn validate_target_bounds(
         &self,
         destination: &veryl_analyzer::ir::AssignDestination,
     ) -> Result<(), ParserError> {
-        let Some((_, info)) = self.lookup.root_variable(destination.id) else {
+        let Some((_, info)) = self.local_variable(destination.id) else {
             return Ok(());
         };
 
@@ -2040,8 +2166,7 @@ impl ExprCompiler<'_> {
         ops: &mut Vec<UnboundTbOpcode>,
     ) {
         let address = self
-            .lookup
-            .root_variable(var_id)
+            .local_variable(var_id)
             .map(|(address, _)| address)
             .expect("frontend state projection is complete");
         self.emit_load_at(address, byte_offset, width, ops);
@@ -2077,8 +2202,7 @@ impl ExprCompiler<'_> {
 
     fn state_location(&self, var_id: VarId, byte_offset: usize) -> StateLocation<StateAddr> {
         let address = self
-            .lookup
-            .root_variable(var_id)
+            .local_variable(var_id)
             .map(|(address, _)| address)
             .expect("frontend state projection is complete");
         Self::state_location_at(address, byte_offset)
@@ -2128,7 +2252,7 @@ impl ExprCompiler<'_> {
     }
 
     fn resolve_var(&self, var_id: &VarId) -> Option<SemanticSignal<StateAddr>> {
-        let (address, info) = self.lookup.root_variable(*var_id)?;
+        let (address, info) = self.local_variable(*var_id)?;
         Some(SemanticSignal {
             address,
             width: info.width,
@@ -2239,9 +2363,11 @@ impl<'a> SemanticTestbenchBuilder<'a> {
     }
 
     fn convert(&mut self, stmts: &[Statement]) -> Vec<SemanticStatement<StateAddr>> {
+        let base_instance = self.lookup.root_instance_and_module().unwrap().0;
         let ec = ExprCompiler {
             lookup: self.lookup,
-            testbench_source: self.testbench_source,
+            functions: &self.testbench_source.functions,
+            base_instance,
         };
         let site_count = count_assert_statements(stmts, &self.testbench_source.functions) as u32;
         let mut next_assert_site_id = self
@@ -2250,6 +2376,102 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         stmts
             .iter()
             .filter_map(|s| self.convert_stmt(s, &ec, &mut next_assert_site_id))
+            .collect()
+    }
+
+    fn convert_component_bindings(
+        &self,
+    ) -> Result<Vec<SemanticComponentBinding<StateAddr>>, ParserError> {
+        self.testbench_source
+            .component_bindings
+            .iter()
+            .map(|component| {
+                let ec = ExprCompiler {
+                    lookup: self.lookup,
+                    functions: &component.functions,
+                    base_instance: component.parent_instance,
+                };
+                let connections = component
+                    .connections
+                    .iter()
+                    .map(|connection| {
+                        let output = match &connection.output {
+                            Some(destination) => Some(ec.resolve_target(destination).ok_or_else(|| {
+                                ParserError::illegal_context(
+                                    "testbench component elaboration",
+                                    format!(
+                                        "component `{}` output `{}` has no runtime state binding",
+                                        component.instance, connection.port
+                                    ),
+                                    None,
+                                )
+                            })?),
+                            None => None,
+                        };
+                        let event = match &connection.event {
+                            Some(reference) => Some({
+                                let address = match reference {
+                                    VerylComponentEventBinding::Root(id) => self
+                                        .lookup
+                                        .instance_variable(component.parent_instance, *id)
+                                        .map(|(address, _)| address),
+                                    VerylComponentEventBinding::Hierarchical(reference) => {
+                                        resolve_hierarchical_reference_from(
+                                            self.lookup,
+                                            component.parent_instance,
+                                            reference,
+                                        )
+                                            .ok()
+                                            .map(|(address, _)| address)
+                                    }
+                                };
+                                let address = address.ok_or_else(|| {
+                                    ParserError::illegal_context(
+                                        "testbench component elaboration",
+                                        format!(
+                                            "component `{}` event port `{}` has no runtime event binding",
+                                            component.instance, connection.port
+                                        ),
+                                        None,
+                                    )
+                                })?;
+                                self.lookup
+                                    .event_aliases
+                                    .get(&address)
+                                    .copied()
+                                    .unwrap_or(address)
+                            }),
+                            None => None,
+                        };
+                        Ok(celox_testbench::ComponentConnectionBinding {
+                            port: connection.port.clone(),
+                            input: connection.input.as_ref().map(|expr| ec.compile(expr)),
+                            input_target: match &connection.input_target {
+                                Some(input) => Some(
+                                    ec.resolve_component_input_target(input).ok_or_else(|| {
+                                        ParserError::illegal_context(
+                                            "testbench component elaboration",
+                                            format!(
+                                                "component `{}` input port `{}` has no runtime state binding",
+                                                component.instance, connection.port
+                                            ),
+                                            None,
+                                        )
+                                    })?,
+                                ),
+                                None => None,
+                            },
+                            output,
+                            output_rtl_driven: false,
+                            event,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ParserError>>()?;
+                Ok(celox_testbench::ComponentBinding {
+                    instance: component.instance.clone(),
+                    connections,
+                })
+            })
             .collect()
     }
 
@@ -2465,6 +2687,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
             }
             TbMethod::ResetAssert { clock, duration } => {
                 let reset_signal = self.signal_map.get(&tb.inst).copied()?;
+                let reset_event = self.event_map.get(&tb.inst).copied();
                 let clock_event = self.event_map.get(clock).copied()?;
                 let duration = match duration {
                     Some(expr) => match try_eval_const(expr) {
@@ -2477,6 +2700,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                 let (assert_value, deassert_value) = self.resolve_reset_polarity(&tb.inst);
                 Some(GenericTestbenchStatement::ResetAssert {
                     reset_signal,
+                    reset_event,
                     clock_event,
                     duration,
                     assert_value,
@@ -2528,11 +2752,28 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                     ret,
                 })
             }
+            TbMethod::Component { method, args } => {
+                let ret = match tb.ret.as_deref() {
+                    Some(dst) => Some(ec.resolve_target(dst)?),
+                    None => None,
+                };
+                Some(GenericTestbenchStatement::ComponentMethod {
+                    instance: resource_table::get_str_value(tb.inst).unwrap_or_default(),
+                    method: resource_table::get_str_value(*method).unwrap_or_default(),
+                    args: args
+                        .iter()
+                        .map(|arg| compile_component_arg(arg, ec))
+                        .collect(),
+                    ret,
+                    ret_width: tb.ret_width,
+                    ret_signed: tb.ret_signed,
+                    ret_strict: tb.ret_strict,
+                })
+            }
             TbMethod::FileOpen { .. }
             | TbMethod::FileWrite { .. }
             | TbMethod::FileClose
-            | TbMethod::FileFlush
-            | TbMethod::Component { .. } => None,
+            | TbMethod::FileFlush => None,
         }
     }
 
@@ -2974,14 +3215,15 @@ fn validate_testbench_statements(
                     validate_testbench_destination(destination, lookup, source, active_functions)?;
                 }
                 match &call.method {
-                    TbMethod::Component { .. } => {
-                        return Err(ParserError::unsupported(
-                            468,
-                            LoweringPhase::SimulatorParser,
-                            "testbench component method",
-                            "component runtime integration is not implemented",
-                            None,
-                        ));
+                    TbMethod::Component { args, .. } => {
+                        for argument in args {
+                            validate_testbench_expression(
+                                &argument.0,
+                                lookup,
+                                source,
+                                active_functions,
+                            )?;
+                        }
                     }
                     TbMethod::RandomSeed { value } => {
                         validate_testbench_expression(value, lookup, source, active_functions)?;
@@ -3058,7 +3300,8 @@ fn validate_testbench_destination(
     }
     ExprCompiler {
         lookup,
-        testbench_source: source,
+        functions: &source.functions,
+        base_instance: lookup.root_instance_and_module().unwrap().0,
     }
     .validate_target_bounds(destination)?;
     Ok(())
@@ -3080,8 +3323,17 @@ pub fn compile_semantic_testbench(
     validate_testbench_statements(initial_stmts, lookup, source, &mut FxHashSet::default())?;
     let mut builder = SemanticTestbenchBuilder::new(lookup, source, runtime_event_site_count);
     builder.build_event_map(initial_stmts);
+    let component_bindings = builder.convert_component_bindings()?;
+    let statements = builder.convert(initial_stmts);
     Ok(Some(
-        TestbenchProgram::new(builder.convert(initial_stmts)).with_random_seed_option(random_seed),
+        TestbenchProgram::new(statements)
+            .with_random_seed_option(random_seed)
+            .with_components(source.components.clone())
+            .with_component_runtime(
+                source.component_libraries.clone(),
+                source.component_file_base.clone(),
+                component_bindings,
+            ),
     ))
 }
 
@@ -3202,12 +3454,34 @@ mod tests {
         let source = VerylTestbenchSource::default();
         let compiler = ExprCompiler {
             lookup: &lookup,
-            testbench_source: &source,
+            functions: &source.functions,
+            base_instance: lookup.root_instance_and_module().unwrap().0,
         };
         let input = SystemFunctionInput(Expression::Term(Box::new(Factor::HierVariable(
             Box::new(reference(vec![dut], VarPath(vec![q]))),
         ))));
 
         assert_eq!(compile_assert_arg(&input, &compiler).width, 8);
+    }
+
+    #[test]
+    fn component_argument_width_prefers_expression_context() {
+        let dut = resource_table::insert_str("dut");
+        let q = resource_table::insert_str("q");
+        let lookup = lookup_with_child(dut, q);
+        let source = VerylTestbenchSource::default();
+        let compiler = ExprCompiler {
+            lookup: &lookup,
+            functions: &source.functions,
+            base_instance: lookup.root_instance_and_module().unwrap().0,
+        };
+        let mut reference = reference(vec![dut], VarPath(vec![q]));
+        reference.comptime.expr_context.width = 16;
+        let input = SystemFunctionInput(Expression::Term(Box::new(Factor::HierVariable(
+            Box::new(reference),
+        ))));
+
+        assert_eq!(compile_assert_arg(&input, &compiler).width, 8);
+        assert_eq!(compile_component_arg(&input, &compiler).width, 16);
     }
 }

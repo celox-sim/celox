@@ -15,6 +15,8 @@ host-runtime = [
     "dep:celox-backend-x86",
     "dep:celox-macros",
     "dep:wasmtime",
+    "dep:veryl-component-sys",
+    "dep:libloading",
     "rand/thread_rng",
     "celox-sir-opt/timing",
 ]
@@ -27,6 +29,8 @@ veryl-analyzer        = { workspace = true }
 veryl-metadata        = { workspace = true }
 veryl-parser          = { workspace = true }
 veryl-path            = { workspace = true }
+veryl-component-sys   = { version = "0.1.1", optional = true }
+libloading            = { version = "0.9", optional = true }
 celox-analysis        = { path = "../celox-analysis" }
 celox-backend-wasm    = { path = "../celox-backend-wasm" }
 celox-design          = { path = "../celox-design" }
@@ -70,8 +74,8 @@ criterion  = "0.8"
 proptest   = "1.10"
 test-case  = "3"
 tempfile.workspace = true
-veryl-simulator = { workspace = true }
 veryl-std = { workspace = true }
+veryl-simulator = { workspace = true }
 
 [[bench]]
 name = "simulation"

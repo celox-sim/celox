@@ -12,6 +12,8 @@ on:
       - "crates/**"
       - "!crates/celox-napi/package.json"
       - "scripts/convert-heliodor-bench.mjs"
+      - "scripts/ci-changes.mjs"
+      - "scripts/ci-changes.test.mjs"
       - "scripts/run-heliodor-bench.sh"
   schedule:
     - cron: "37 2 * * *"
@@ -30,6 +32,28 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'schedule' }}
 
 jobs:
+  # PRs use this gate to avoid spending a dedicated ARM runner on unrelated
+  # Rust changes. Detection failures fail open in arm64-linux-boot below.
+  arm64-changes:
+    name: Detect ARM64 changes
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      heliodor_arm64: ${{ steps.classify.outputs.heliodor_arm64 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed files
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci-changes.mjs "$BASE_SHA" "$HEAD_SHA"
+
   heliodor:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
@@ -176,7 +200,13 @@ jobs:
 
   arm64-linux-boot:
     name: ARM64 Linux boot
-    if: github.event_name != 'schedule'
+    needs: arm64-changes
+    if: >-
+      !cancelled() &&
+      github.event_name != 'schedule' &&
+      (github.event_name != 'pull_request' ||
+      needs.arm64-changes.result != 'success' ||
+      needs.arm64-changes.outputs.heliodor_arm64 == 'true')
     permissions:
       contents: read
     runs-on: ubuntu-24.04-arm

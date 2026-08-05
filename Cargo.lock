@@ -433,6 +433,7 @@ dependencies = [
  "fxhash",
  "insta",
  "itertools 0.15.0",
+ "libloading",
  "miette",
  "num-bigint",
  "num-traits",
@@ -447,6 +448,7 @@ dependencies = [
  "toml 1.1.4+spec-1.1.0",
  "tracing",
  "veryl-analyzer",
+ "veryl-component-sys",
  "veryl-metadata",
  "veryl-parser",
  "veryl-path",
@@ -628,6 +630,7 @@ dependencies = [
  "celox-testbench",
  "chrono",
  "num-bigint",
+ "tempfile",
 ]
 
 [[package]]

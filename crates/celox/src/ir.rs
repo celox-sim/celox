@@ -1,8 +1,9 @@
 use crate::HashMap;
 pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
-    AbsoluteAddrBase, InstanceId, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
-    RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION, WORKING_REGION,
+    AbsoluteAddrBase, BitAccess, InstanceId, ModuleId, RegionedAbsoluteAddrBase,
+    RegionedVarAddrBase, RuntimeSchema, SPARSE_WORKING_REGION, STABLE_REGION, VarAtomBase,
+    WORKING_REGION,
 };
 #[cfg(test)]
 pub(crate) use celox_design::{BinaryOp, UnaryOp};
@@ -253,6 +254,7 @@ impl OptimizedSir {
                 );
             }
         }
+        rebuild_rtl_writes(&mut program);
         program.layout_requirements.clear();
         let OptimizedSir {
             sir,
@@ -266,6 +268,55 @@ impl OptimizedSir {
             layout,
         }
     }
+}
+
+fn rebuild_rtl_writes(program: &mut OptimizedSir) {
+    let mut rtl_writes = crate::HashSet::default();
+    for unit in program
+        .sir
+        .eval_comb
+        .iter()
+        .chain(program.sir.eval_apply_ffs.values().flatten())
+        .chain(program.sir.eval_comb_apply_ffs.values().flatten())
+        .chain(program.sir.eval_only_ffs.values().flatten())
+        .chain(program.sir.apply_ffs.values().flatten())
+    {
+        for block in unit.blocks.values() {
+            for instruction in &block.instructions {
+                let (address, offset, width) = match instruction {
+                    SIRInstruction::Store(address, offset, width, ..)
+                    | SIRInstruction::Commit(_, address, offset, width, _) => {
+                        (address.absolute_addr(), offset, *width)
+                    }
+                    _ => continue,
+                };
+                let access = offset
+                    .constant_bit_offset()
+                    .and_then(|lsb| {
+                        width
+                            .checked_sub(1)
+                            .and_then(|tail| lsb.checked_add(tail))
+                            .map(|msb| BitAccess::new(lsb, msb))
+                    })
+                    .or_else(|| {
+                        program
+                            .runtime
+                            .design
+                            .state_objects
+                            .get(&address)
+                            .and_then(|object| object.width.checked_sub(1))
+                            .map(|msb| BitAccess::new(0, msb))
+                    });
+                if let Some(access) = access {
+                    rtl_writes.insert(VarAtomBase {
+                        id: address,
+                        access,
+                    });
+                }
+            }
+        }
+    }
+    program.runtime.runtime_schema.rtl_writes = rtl_writes;
 }
 
 impl RuntimeProgram {

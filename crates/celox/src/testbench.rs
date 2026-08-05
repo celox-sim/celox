@@ -11,7 +11,7 @@ use crate::backend::memory_layout::{
     RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET, RUNTIME_EVENT_SLOT_SEQ_OFFSET,
     RUNTIME_EVENT_SLOT_SITE_OFFSET, RUNTIME_EVENT_WRITING,
 };
-use crate::backend::traits::SimBackend;
+use crate::backend::traits::{EventHandle, SimBackend};
 use crate::ir::SignalRef;
 use crate::simulator::{RuntimeEvent, RuntimeFormatContext, Simulator};
 pub use celox_testbench::SourceLocation;
@@ -929,6 +929,41 @@ fn run_testbench_limited<B: SimBackend>(
     testbench: &CompiledTestbench<B>,
     tick_limit: Option<u64>,
 ) -> LimitedTestbenchResult {
+    let test_name = root_testbench_name(sim);
+    let use_4state = sim.backend.layout().four_state;
+    let initial_writes = match sim.components.initialize(
+        testbench.components(),
+        testbench.component_bindings(),
+        testbench.component_libraries(),
+        testbench.component_file_base(),
+        execution_random_seed(testbench.configured_random_seed()),
+        &test_name,
+        use_4state,
+        &mut sim.backend,
+    ) {
+        Ok(writes) => writes,
+        Err(message) => {
+            return LimitedTestbenchResult {
+                result: TestResult::Fail(message),
+                ticks: 0,
+                tick_limit_reached: false,
+            };
+        }
+    };
+    if let Some(writer) = sim.vcd_writer.as_mut()
+        && let Err(error) = writer.add_external_signals(&sim.components.trace_descriptors())
+    {
+        return LimitedTestbenchResult {
+            result: TestResult::Fail(format!("component VCD registration failed: {error}")),
+            ticks: 0,
+            tick_limit_reached: false,
+        };
+    }
+    apply_component_writes(sim, initial_writes);
+    sim.component_simulation = sim
+        .components
+        .has_scheduled_components()
+        .then(|| crate::simulation::simulation_state(sim));
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
         current_time: 0,
@@ -936,7 +971,16 @@ fn run_testbench_limited<B: SimBackend>(
         tick_limit_reached: false,
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
     };
-    let result = exec_detailed(sim, testbench.statements(), &mut ctx);
+    let mut result = if sim.components.finish_requested() {
+        ExecResult::Finished
+    } else {
+        exec_detailed(sim, testbench.statements(), &mut ctx)
+    };
+    if let Err(message) = sim.components.finish(ctx.current_time)
+        && !matches!(result, ExecResult::Fail(_))
+    {
+        result = ExecResult::Fail(message);
+    }
     let failed_messages = ctx
         .assertions
         .iter()
@@ -980,7 +1024,11 @@ pub fn compile_initial_testbench<B: SimBackend>(
     sim: &Simulator<B>,
 ) -> Option<CompiledTestbench<B>> {
     let semantic = sim.program().testbench.clone()?;
-    celox_runtime::bind_testbench_program(sim.backend_ref(), semantic)
+    celox_runtime::bind_testbench_program(
+        sim.backend_ref(),
+        semantic,
+        &sim.program().runtime_schema.rtl_writes,
+    )
 }
 
 /// Execute a previously compiled native testbench against a built simulator.
@@ -1009,6 +1057,41 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
     sim: &mut Simulator<B>,
     testbench: &CompiledTestbench<B>,
 ) -> TestResultDetailed {
+    let test_name = root_testbench_name(sim);
+    let use_4state = sim.backend.layout().four_state;
+    let initial_writes = match sim.components.initialize(
+        testbench.components(),
+        testbench.component_bindings(),
+        testbench.component_libraries(),
+        testbench.component_file_base(),
+        execution_random_seed(testbench.configured_random_seed()),
+        &test_name,
+        use_4state,
+        &mut sim.backend,
+    ) {
+        Ok(writes) => writes,
+        Err(_) => {
+            return TestResultDetailed {
+                passed: false,
+                assertions: Vec::new(),
+            };
+        }
+    };
+    if let Some(writer) = sim.vcd_writer.as_mut()
+        && writer
+            .add_external_signals(&sim.components.trace_descriptors())
+            .is_err()
+    {
+        return TestResultDetailed {
+            passed: false,
+            assertions: Vec::new(),
+        };
+    }
+    apply_component_writes(sim, initial_writes);
+    sim.component_simulation = sim
+        .components
+        .has_scheduled_components()
+        .then(|| crate::simulation::simulation_state(sim));
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
         current_time: 0,
@@ -1016,8 +1099,15 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         tick_limit_reached: false,
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
     };
-    let result = exec_detailed(sim, testbench.statements(), &mut ctx);
-    let passed = !matches!(result, ExecResult::Fail(_)) && ctx.assertions.iter().all(|a| a.passed);
+    let result = if sim.components.finish_requested() {
+        ExecResult::Finished
+    } else {
+        exec_detailed(sim, testbench.statements(), &mut ctx)
+    };
+    let finish_ok = sim.components.finish(ctx.current_time).is_ok();
+    let passed = finish_ok
+        && !matches!(result, ExecResult::Fail(_))
+        && ctx.assertions.iter().all(|a| a.passed);
     TestResultDetailed {
         passed,
         assertions: ctx.assertions,
@@ -1260,7 +1350,13 @@ fn exec_one_detailed<B: SimBackend>(
                         if let Some(every) = progress_every.filter(|every| *every != 0) {
                             batch = batch.min(every - ctx.current_time % every);
                         }
-                        let (completed, result) = sim.tick_deferred_comb_many(*clock_event, batch);
+                        let (completed, result) = if sim.components.has_scheduled_components() {
+                            (1, tick_component_clock(sim, *clock_event, ctx.current_time))
+                        } else {
+                            let (completed, result) =
+                                sim.tick_deferred_comb_many(*clock_event, batch);
+                            (completed, result.map_err(|error| error.to_string()))
+                        };
                         if completed == 0 || completed > batch {
                             return ExecResult::Fail(
                                 "backend made invalid progress in a deferred tick batch".into(),
@@ -1273,7 +1369,7 @@ fn exec_one_detailed<B: SimBackend>(
                             if let Some(message) = drained.fatal_message {
                                 return ExecResult::Fail(message);
                             }
-                            return ExecResult::Fail(format!("{e}"));
+                            return ExecResult::Fail(e);
                         }
                         if let Some(every) = progress_every
                             && every != 0
@@ -1281,7 +1377,13 @@ fn exec_one_detailed<B: SimBackend>(
                         {
                             tracing::debug!("[testbench-progress] tick={}", ctx.current_time);
                         }
-                        drain_runtime_assertions(sim, ctx, None);
+                        let drained = drain_runtime_assertions(sim, ctx, None);
+                        if let Some(message) = drained.fatal_message {
+                            return ExecResult::Fail(message);
+                        }
+                        if sim.components.finish_requested() {
+                            return ExecResult::Finished;
+                        }
                     }
                     ExecResult::Continue
                 }
@@ -1290,6 +1392,7 @@ fn exec_one_detailed<B: SimBackend>(
         }
         GenericTestbenchStatement::ResetAssert {
             reset_signal,
+            reset_event,
             clock_event,
             duration,
             assert_value,
@@ -1307,7 +1410,21 @@ fn exec_one_detailed<B: SimBackend>(
                     if let Some(limit) = ctx.tick_limit {
                         batch = batch.min(limit.saturating_sub(ctx.current_time));
                     }
-                    let (completed, result) = sim.tick_deferred_comb_many(*clock_event, batch);
+                    let component_aware = sim.components.has_scheduled_components();
+                    let (completed, result) = if component_aware {
+                        (
+                            1,
+                            tick_component_reset(
+                                sim,
+                                *reset_event,
+                                *clock_event,
+                                ctx.current_time.saturating_add(1),
+                            ),
+                        )
+                    } else {
+                        let (completed, result) = sim.tick_deferred_comb_many(*clock_event, batch);
+                        (completed, result.map_err(|error| error.to_string()))
+                    };
                     if completed == 0 || completed > batch {
                         return ExecResult::Fail(
                             "backend made invalid progress in a reset tick batch".into(),
@@ -1322,7 +1439,13 @@ fn exec_one_detailed<B: SimBackend>(
                         }
                         return ExecResult::Fail(format!("reset: {e}"));
                     }
-                    drain_runtime_assertions(sim, ctx, None);
+                    let drained = drain_runtime_assertions(sim, ctx, None);
+                    if let Some(message) = drained.fatal_message {
+                        return ExecResult::Fail(message);
+                    }
+                    if sim.components.finish_requested() {
+                        return ExecResult::Finished;
+                    }
                 }
                 sim_set_u64(sim, *reset_signal, (*deassert_value).into());
                 ExecResult::Continue
@@ -1474,9 +1597,174 @@ fn exec_one_detailed<B: SimBackend>(
             }
             ExecResult::Continue
         }
+        GenericTestbenchStatement::ComponentMethod {
+            instance,
+            method,
+            args,
+            ret,
+            ret_width,
+            ret_signed,
+            ret_strict,
+        } => {
+            if sim.dirty
+                && let Err(error) = sim.eval_comb()
+            {
+                return ExecResult::Fail(format!("eval_comb: {error}"));
+            }
+            let (ptr, _) = sim.memory_as_mut_ptr();
+            let host_args = args
+                .iter()
+                .map(|arg| {
+                    crate::component::host_value_from_argument(
+                        arg.expr.eval_value(ptr),
+                        arg.width,
+                        arg.is_string,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let (returned, writes) = match sim.components.call_method(
+                instance,
+                method,
+                &host_args,
+                ctx.current_time,
+                &mut sim.backend,
+            ) {
+                Ok(value) => value,
+                Err(message) => return ExecResult::Fail(message),
+            };
+            apply_component_writes(sim, writes);
+            if sim.components.finish_requested() {
+                return ExecResult::Finished;
+            }
+            let Some(ret) = ret else {
+                return ExecResult::Continue;
+            };
+            let Some((value, width)) = crate::component::host_bits(&returned) else {
+                return ExecResult::Fail(format!(
+                    "component method `{instance}.{method}` returned no bit value"
+                ));
+            };
+            if let Some(expected) = ret_width
+                && width != *expected
+            {
+                return ExecResult::Fail(format!(
+                    "component method `{method}` declares a {expected}-bit return value but returned {width} bits"
+                ));
+            }
+            if ret_width.is_none() && *ret_strict && width > 64 {
+                return ExecResult::Fail(format!(
+                    "component method `{method}` returned {width} bits; the expression form carries at most 64 bits"
+                ));
+            }
+            sim_set_target(
+                sim,
+                ret,
+                TbValue::Wide(resize_component_return(
+                    value,
+                    width as usize,
+                    *ret_signed,
+                    ret.width,
+                )),
+            );
+            ExecResult::Continue
+        }
         GenericTestbenchStatement::Break => ExecResult::Break,
         GenericTestbenchStatement::Finish => ExecResult::Finished,
     }
+}
+
+fn tick_component_reset<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    reset_event: Option<B::Event>,
+    clock_event: B::Event,
+    time: u64,
+) -> Result<(), String> {
+    sim.components
+        .begin_reset_cycles(reset_event.map(|event| event.id()));
+    let result = tick_component_clock(sim, clock_event, time.saturating_sub(1));
+    sim.components.end_reset_cycles();
+    result
+}
+
+fn tick_component_clock<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    event: B::Event,
+    completed_cycles: u64,
+) -> Result<(), String> {
+    let mut state = sim
+        .component_simulation
+        .take()
+        .ok_or_else(|| "component event scheduler is not initialized".to_string())?;
+    if sim.dirty {
+        if let Err(error) = sim.eval_comb() {
+            sim.component_simulation = Some(state);
+            return Err(error.to_string());
+        }
+    }
+    state.synchronize_event_values(&sim.backend);
+    let signal = sim.backend.resolve_signal(&event.addr());
+    let high_time = completed_cycles.saturating_mul(2);
+    state.schedule(event, signal, high_time, 1);
+    let result = state
+        .step(sim)
+        .and_then(|_| {
+            state.schedule(event, signal, high_time.saturating_add(1), 0);
+            state.step(sim)
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string());
+    sim.component_simulation = Some(state);
+    result
+}
+
+fn apply_component_writes<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    writes: Vec<crate::component::ComponentWrite>,
+) {
+    if writes.is_empty() {
+        return;
+    }
+    for write in writes {
+        write.apply(&mut sim.backend);
+    }
+    sim.dirty = true;
+}
+
+fn root_testbench_name<B: SimBackend>(sim: &Simulator<B>) -> String {
+    sim.program
+        .frontend
+        .root_instance_and_module()
+        .and_then(|(_, module)| sim.program.frontend.module_names.get(&module))
+        .and_then(|name| veryl_parser::resource_table::get_str_value(*name))
+        .unwrap_or_else(|| "testbench".to_string())
+}
+
+fn resize_component_return(
+    value: BigUint,
+    source_width: usize,
+    signed: bool,
+    destination_width: usize,
+) -> BigUint {
+    if destination_width == 0 {
+        return BigUint::default();
+    }
+    let source_mask = if source_width == 0 {
+        BigUint::default()
+    } else {
+        (BigUint::from(1u8) << source_width) - BigUint::from(1u8)
+    };
+    let mut value = value & source_mask;
+    if signed
+        && source_width != 0
+        && source_width < destination_width
+        && value.bit((source_width - 1) as u64)
+    {
+        let destination_mask = (BigUint::from(1u8) << destination_width) - BigUint::from(1u8);
+        let extension = destination_mask ^ ((BigUint::from(1u8) << source_width) - 1u8);
+        value |= extension;
+    }
+    let destination_mask = (BigUint::from(1u8) << destination_width) - BigUint::from(1u8);
+    value & destination_mask
 }
 
 #[cfg(all(test, feature = "host-runtime"))]
@@ -1508,6 +1796,22 @@ mod tests {
         assert_eq!(
             random_value_for_destination(0x80, 8, false, 16),
             BigUint::from(0x0080u16)
+        );
+    }
+
+    #[test]
+    fn component_returns_resize_with_declared_signedness() {
+        assert_eq!(
+            resize_component_return(BigUint::from(0x80u8), 8, true, 16),
+            BigUint::from(0xff80u16)
+        );
+        assert_eq!(
+            resize_component_return(BigUint::from(0x80u8), 8, false, 16),
+            BigUint::from(0x0080u16)
+        );
+        assert_eq!(
+            resize_component_return(BigUint::from(0x1234u16), 16, false, 8),
+            BigUint::from(0x34u8)
         );
     }
 

@@ -296,6 +296,8 @@ fn finalize_scheduled_rtl(
     diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
     testbench_random_seed: Option<u64>,
+    component_libraries: Vec<celox_testbench::ComponentLibrary>,
+    component_file_base: Option<std::path::PathBuf>,
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
     let phase_timing = diagnostics.phase_timing;
     macro_rules! timed_phase {
@@ -313,7 +315,10 @@ fn finalize_scheduled_rtl(
 
     apply_fused_optimization_hints(&mut scheduled.scheduled, scheduled.fused_optimization_hints)?;
     scheduled.scheduled.inject_triggers();
-    let (sir, mut runtime, testbench_source) = RuntimeProgram::from_scheduled(scheduled.scheduled);
+    let (sir, mut runtime, mut testbench_source) =
+        RuntimeProgram::from_scheduled(scheduled.scheduled);
+    testbench_source.component_libraries = component_libraries;
+    testbench_source.component_file_base = component_file_base;
     crate::testbench_compile::project_observability(&mut runtime, &testbench_source)?;
     runtime.testbench = crate::testbench_compile::compile_semantic_testbench(
         &runtime,
@@ -414,6 +419,8 @@ pub fn parse(
     diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
     testbench_random_seed: Option<u64>,
+    component_libraries: Vec<celox_testbench::ComponentLibrary>,
+    component_file_base: Option<std::path::PathBuf>,
 ) -> Result<
     (
         crate::ir::OptimizedSir,
@@ -477,6 +484,8 @@ pub fn parse(
         diagnostics,
         preserve_element_storage_layout,
         testbench_random_seed,
+        component_libraries,
+        component_file_base,
     )?;
     Ok((program, dynamic_for_diagnostics))
 }
@@ -503,6 +512,8 @@ pub fn parse_sv(
     diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
     testbench_random_seed: Option<u64>,
+    component_libraries: Vec<celox_testbench::ComponentLibrary>,
+    component_file_base: Option<std::path::PathBuf>,
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
     let frontend_trace_options = trace_opts.frontend(diagnostics);
     let mut frontend_trace = celox_frontend_veryl::FrontendTrace::default();
@@ -539,6 +550,8 @@ pub fn parse_sv(
         diagnostics,
         preserve_element_storage_layout,
         testbench_random_seed,
+        component_libraries,
+        component_file_base,
     )
 }
 
@@ -566,6 +579,8 @@ pub fn parse_mixed(
     diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
     testbench_random_seed: Option<u64>,
+    component_libraries: Vec<celox_testbench::ComponentLibrary>,
+    component_file_base: Option<std::path::PathBuf>,
 ) -> Result<
     (
         crate::ir::OptimizedSir,
@@ -621,6 +636,8 @@ pub fn parse_mixed(
         diagnostics,
         preserve_element_storage_layout,
         testbench_random_seed,
+        component_libraries,
+        component_file_base,
     )?;
     Ok((program, dynamic_for_diagnostics))
 }
