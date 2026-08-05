@@ -359,6 +359,16 @@ unsafe extern "C" fn clock_init(state: *mut c_void, ctx: *mut sys::VrlCtx) -> i3
     0
 }
 
+unsafe extern "C" fn clock_init_from_input(state: *mut c_void, ctx: *mut sys::VrlCtx) -> i32 {
+    let state = unsafe { &mut *state.cast::<ClockState>() };
+    let api = unsafe { &*state.api };
+    let mut word = 0;
+    let mut mask_xz = 0;
+    unsafe { (api.read_input)(ctx, state.input, &mut word, &mut mask_xz) };
+    unsafe { (api.write_output)(ctx, state.output, &word, &mask_xz) };
+    0
+}
+
 static CLOCK_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
     abi_version: sys::VRL_COMPONENT_ABI_VERSION,
     kind: sys::VRL_KIND_CLOCKED,
@@ -367,6 +377,18 @@ static CLOCK_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
     on_init: clock_init,
     on_reset: hook,
     on_clock: clock_hook,
+    call_method: clock_call_method,
+    on_finish: hook,
+};
+
+static INIT_INPUT_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
+    abi_version: sys::VRL_COMPONENT_ABI_VERSION,
+    kind: sys::VRL_KIND_CLOCKED,
+    create: create_clock,
+    destroy: destroy_clock,
+    on_init: clock_init_from_input,
+    on_reset: hook,
+    on_clock: hook,
     call_method: clock_call_method,
     on_finish: hook,
 };
@@ -608,6 +630,18 @@ static FINISH_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
     on_finish: hook,
 };
 
+static INIT_FINISH_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
+    abi_version: sys::VRL_COMPONENT_ABI_VERSION,
+    kind: sys::VRL_KIND_CLOCKED,
+    create: create_finisher,
+    destroy: destroy_finisher,
+    on_init: finish_clock_hook,
+    on_reset: hook,
+    on_clock: hook,
+    call_method,
+    on_finish: hook,
+};
+
 static CLEANUP_DROPS: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" fn destroy_cleanup(state: *mut c_void) {
@@ -655,11 +689,13 @@ fn register_component() {
         celox::register_static_component("celox_unchecked", &COMPONENT);
         celox::register_static_component("celox_param", &COMPONENT);
         celox::register_static_component("celox_clocked", &CLOCK_COMPONENT);
+        celox::register_static_component("celox_init_input", &INIT_INPUT_COMPONENT);
         celox::register_static_component("celox_wide_clocked", &WIDE_CLOCK_COMPONENT);
         celox::register_static_component("celox_modport", &MODPORT_COMPONENT);
         celox::register_static_component("celox_bad_clock", &BAD_CLOCK_COMPONENT);
         celox::register_static_component("celox_reset", &RESET_COMPONENT);
         celox::register_static_component("celox_finisher", &FINISH_COMPONENT);
+        celox::register_static_component("celox_init_finisher", &INIT_FINISH_COMPONENT);
         celox::register_static_component("celox_cleanup", &CLEANUP_COMPONENT);
         celox::register_static_component("celox_create_failure", &FAILING_COMPONENT);
     });
@@ -723,6 +759,14 @@ fn component_metadata() -> (tempfile::TempDir, veryl_metadata::Metadata) {
                     ],
                     "params": [{"name":"STEP","type":"value"}]
                 },
+                "celox_init_input": {
+                    "kind": "clocked",
+                    "ports": [
+                        {"name":"clk","dir":"input","role":"clock"},
+                        {"name":"d","dir":"input"},
+                        {"name":"q","dir":"output"}
+                    ]
+                },
                 "celox_wide_clocked": {
                     "kind": "clocked",
                     "ports": [
@@ -770,6 +814,12 @@ fn component_metadata() -> (tempfile::TempDir, veryl_metadata::Metadata) {
                     ]
                 },
                 "celox_finisher": {
+                    "kind": "clocked",
+                    "ports": [
+                        {"name":"clk","dir":"input","role":"clock"}
+                    ]
+                },
+                "celox_init_finisher": {
                     "kind": "clocked",
                     "ports": [
                         {"name":"clk","dir":"input","role":"clock"}
@@ -910,6 +960,32 @@ fn connected_clocked_component_stages_inputs_and_applies_outputs() {
     let testbench = celox::testbench::compile_initial_testbench(&simulator).unwrap();
     assert_eq!(
         celox::testbench::run_compiled_testbench(&mut simulator, &testbench),
+        TestResult::Pass
+    );
+}
+
+#[test]
+fn component_on_init_observes_connected_inputs() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var q: logic<8>;
+            inst component: $comp::celox_init_input (clk, d: 8'h5a, q);
+            initial {
+                $assert(q == 8'h5a, "on_init input was staged: %h", q);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
         TestResult::Pass
     );
 }
@@ -1388,6 +1464,47 @@ fn timed_simulation_ff_derived_clock_fires_five_times() {
 }
 
 #[test]
+fn falling_source_edge_preserves_opposite_derived_clock_events() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            let inverted: '_ clock = ~clk;
+            var d: logic<8>;
+            var q: logic<8>;
+            var cnt: logic<8>;
+
+            always_ff (inverted) {
+                cnt += 1;
+            }
+            inst component: $comp::celox_clocked #(STEP: 0) (
+                clk: inverted,
+                d,
+                q,
+            );
+
+            initial {
+                d = 8'h5a;
+                clk.next();
+                $assert(cnt == 1, "RTL derived negated clock fired: %d", cnt);
+                $assert(q == 8'h5a, "component derived negated clock fired: %h", q);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
+}
+
+#[test]
 fn clocked_inst_component_accepts_zero_time_methods() {
     register_component();
     let (_dir, metadata) = component_metadata();
@@ -1622,7 +1739,10 @@ fn component_declared_in_nested_module_is_elaborated_and_runs() {
             d: input logic<8>,
             q: output logic<8>,
         ) {
-            inst component: $comp::celox_clocked #(STEP: 1) (clk, d, q);
+            function munge(x: input logic<8>) -> logic<8> {
+                return x + 1;
+            }
+            inst component: $comp::celox_clocked #(STEP: 0) (clk, d: munge(d), q);
         }
         #[test(t)]
         module t {
@@ -1716,6 +1836,44 @@ fn component_reset_hook_uses_reset_event_and_precedes_clock_hooks() {
 }
 
 #[test]
+fn component_reset_settles_comb_observers_after_every_cycle() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var q: logic<8>;
+            inst component: $comp::celox_reset (clk, rst, q);
+
+            always_comb {
+                if !rst {
+                    $assert(q != 3, "final reset-cycle component write was observed");
+                }
+            }
+
+            initial {
+                rst.assert();
+                $finish();
+            }
+        }
+    "#;
+
+    let TestResult::Fail(message) = Simulator::builder(code, "t")
+        .with_metadata(metadata)
+        .run_test()
+        .unwrap()
+    else {
+        panic!("expected the final reset-cycle observer to fire");
+    };
+    assert!(
+        message.contains("final reset-cycle component write was observed"),
+        "{message}"
+    );
+}
+
+#[test]
 fn component_finish_request_stops_the_clock_loop() {
     register_component();
     let (_dir, metadata) = component_metadata();
@@ -1738,6 +1896,38 @@ fn component_finish_request_stops_the_clock_loop() {
             .unwrap(),
         TestResult::Pass
     );
+}
+
+#[test]
+fn component_finish_request_during_init_skips_testbench_execution() {
+    register_component();
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst component: $comp::celox_init_finisher (clk);
+            initial {
+                $assert(0, "on_init finish must skip this statement");
+            }
+        }
+    "#;
+
+    let (_dir, metadata) = component_metadata();
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
+
+    let (_dir, metadata) = component_metadata();
+    let detailed = Simulator::builder(code, "t")
+        .with_metadata(metadata)
+        .run_test_detailed()
+        .unwrap();
+    assert!(detailed.passed);
+    assert!(detailed.assertions.is_empty());
 }
 
 #[test]

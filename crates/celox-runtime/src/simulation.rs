@@ -236,13 +236,18 @@ impl<B: SimBackend> SimulationState<B> {
 
         executor.eval_comb()?;
         if has_scheduled_event_signal {
-            // Combinational settling before the explicitly scheduled source
-            // domain commits may expose a transient derived-clock edge.  Keep
-            // the source event, then rediscover derived edges from the stable
-            // post-commit state below.
-            executor.backend_mut().clear_triggered_bits();
-            for id in scheduled_trigger_ids.iter() {
-                executor.backend_mut().mark_triggered_bit(id);
+            // Combinational settling before an active scheduled source domain
+            // commits may expose transient derived-clock edges. In that case,
+            // keep only the source event and rediscover stable edges after the
+            // commit. If the source edge is inactive, preserve derived edges
+            // while filtering out the scheduled signal's own transition.
+            if scheduled_trigger_ids.is_empty() {
+                self.replace_triggers_with_stable_edges(executor.backend_mut());
+            } else {
+                executor.backend_mut().clear_triggered_bits();
+                for id in scheduled_trigger_ids.iter() {
+                    executor.backend_mut().mark_triggered_bit(id);
+                }
             }
         }
 

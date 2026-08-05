@@ -189,6 +189,7 @@ fn collect_testbench_components(
         bindings.push(VerylComponentBinding {
             instance,
             parent_instance,
+            functions: module.functions.clone(),
             connections: connection_bindings,
         });
     }

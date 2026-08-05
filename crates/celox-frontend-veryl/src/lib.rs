@@ -237,6 +237,7 @@ pub struct VerylTestbenchSource {
 pub struct VerylComponentBinding {
     pub instance: String,
     pub parent_instance: InstanceId,
+    pub functions: HashMap<VarId, Function>,
     pub connections: Vec<VerylComponentConnectionBinding>,
 }
 

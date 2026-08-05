@@ -278,7 +278,7 @@ fn stage_component_inputs<B: SimBackend>(component: &mut LiveComponent, backend:
 }
 
 impl ComponentRuntime {
-    pub(crate) fn initialize(
+    pub(crate) fn initialize<B: SimBackend>(
         &mut self,
         descriptors: &[TestbenchComponent],
         bindings: &[ExecutableComponentBinding<impl EventHandle, SignalRef>],
@@ -287,6 +287,7 @@ impl ComponentRuntime {
         seed_base: u64,
         test_name: &str,
         use_4state: bool,
+        simulator_backend: &B,
     ) -> Result<Vec<ComponentWrite>, String> {
         self.components.clear();
         self.last_trace_values.clear();
@@ -318,13 +319,13 @@ impl ComponentRuntime {
             let type_name = library
                 .map(|library| library.type_name.as_str())
                 .unwrap_or(descriptor.component.as_str());
-            let backend =
+            let component_backend =
                 lookup_component_backend(library.map(|library| library.path.as_path()), type_name)
                     .map_err(|error| format!("component `{}`: {error}", descriptor.instance))?;
             if let Some(manifest) = component_manifest(library, type_name)? {
                 validate_manifest(descriptor, type_name, &manifest)?;
             }
-            let kind = backend.kind();
+            let kind = component_backend.kind();
             if descriptor.is_var_form && kind == veryl_component_sys::VRL_KIND_CLOCKED {
                 return Err(format!(
                     "component `{}`: clocked component `{type_name}` must use inst form",
@@ -449,7 +450,7 @@ impl ComponentRuntime {
                 ));
             }
 
-            let instance = ExternalInstance::create(backend, &mut host)
+            let instance = ExternalInstance::create(component_backend, &mut host)
                 .map_err(|error| format!("component `{}`: {error}", descriptor.instance))?;
             for (port_name, group, input, output, is_clock, is_reset) in &offered_ports {
                 if group.is_none()
@@ -540,6 +541,7 @@ impl ComponentRuntime {
                 events,
                 fire_count: 0,
             };
+            stage_component_inputs(&mut component, simulator_backend);
             let failures_before = component.host.failures().len();
             let rc = component.instance.on_init(&mut component.host);
             drain_logs(&mut component);

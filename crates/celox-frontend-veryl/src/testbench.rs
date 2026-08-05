@@ -8,7 +8,7 @@ use celox_testbench::{
     TestbenchOperator as Op, TestbenchProgram, TestbenchSelection,
     TestbenchStatement as GenericTestbenchStatement, TestbenchTarget,
 };
-use fxhash::FxHashSet;
+use fxhash::{FxHashMap as HashMap, FxHashSet};
 use num_traits::ToPrimitive as _;
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssertKind, CasePattern, Expression, Factor, ForBound, ForRange, Function,
@@ -600,7 +600,7 @@ pub fn collect_testbench_observability(
             if let Some(input) = &connection.input {
                 collect_expression_reads(
                     input,
-                    &source.functions,
+                    &component.functions,
                     &mut active_functions,
                     &mut component_reads,
                 );
@@ -608,7 +608,7 @@ pub fn collect_testbench_observability(
             if let Some(output) = &connection.output {
                 collect_target_reads(
                     output,
-                    &source.functions,
+                    &component.functions,
                     &mut active_functions,
                     &mut component_reads,
                 );
@@ -984,7 +984,7 @@ fn lower_testbench_operator(op: VerylOp) -> Op {
 
 struct ExprCompiler<'a> {
     lookup: &'a VerylFrontendLookup,
-    testbench_source: &'a VerylTestbenchSource,
+    functions: &'a HashMap<VarId, Function>,
     base_instance: InstanceId,
 }
 
@@ -1342,7 +1342,7 @@ impl ExprCompiler<'_> {
         fc: &veryl_analyzer::ir::FunctionCall,
         ops: &mut Vec<UnboundTbOpcode>,
     ) {
-        let func = match self.testbench_source.functions.get(&fc.id) {
+        let func = match self.functions.get(&fc.id) {
             Some(f) => f,
             None => {
                 ops.push(TbOpcode::ConstU64(0));
@@ -2320,7 +2320,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         let base_instance = self.lookup.root_instance_and_module().unwrap().0;
         let ec = ExprCompiler {
             lookup: self.lookup,
-            testbench_source: self.testbench_source,
+            functions: &self.testbench_source.functions,
             base_instance,
         };
         let site_count = count_assert_statements(stmts, &self.testbench_source.functions) as u32;
@@ -2342,7 +2342,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
             .map(|component| {
                 let ec = ExprCompiler {
                     lookup: self.lookup,
-                    testbench_source: self.testbench_source,
+                    functions: &component.functions,
                     base_instance: component.parent_instance,
                 };
                 let connections = component
@@ -3272,7 +3272,7 @@ fn validate_testbench_destination(
     }
     ExprCompiler {
         lookup,
-        testbench_source: source,
+        functions: &source.functions,
         base_instance: lookup.root_instance_and_module().unwrap().0,
     }
     .validate_target_bounds(destination)?;
@@ -3426,7 +3426,7 @@ mod tests {
         let source = VerylTestbenchSource::default();
         let compiler = ExprCompiler {
             lookup: &lookup,
-            testbench_source: &source,
+            functions: &source.functions,
             base_instance: lookup.root_instance_and_module().unwrap().0,
         };
         let input = SystemFunctionInput(Expression::Term(Box::new(Factor::HierVariable(

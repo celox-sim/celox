@@ -938,6 +938,7 @@ fn run_testbench_limited<B: SimBackend>(
         execution_random_seed(testbench.configured_random_seed()),
         &test_name,
         sim.backend_ref().layout().four_state,
+        &sim.backend,
     ) {
         Ok(writes) => writes,
         Err(message) => {
@@ -969,7 +970,11 @@ fn run_testbench_limited<B: SimBackend>(
         tick_limit_reached: false,
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
     };
-    let mut result = exec_detailed(sim, testbench.statements(), &mut ctx);
+    let mut result = if sim.components.finish_requested() {
+        ExecResult::Finished
+    } else {
+        exec_detailed(sim, testbench.statements(), &mut ctx)
+    };
     if let Err(message) = sim.components.finish()
         && !matches!(result, ExecResult::Fail(_))
     {
@@ -1060,6 +1065,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         execution_random_seed(testbench.configured_random_seed()),
         &test_name,
         sim.backend_ref().layout().four_state,
+        &sim.backend,
     ) {
         Ok(writes) => writes,
         Err(_) => {
@@ -1091,7 +1097,11 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         tick_limit_reached: false,
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
     };
-    let result = exec_detailed(sim, testbench.statements(), &mut ctx);
+    let result = if sim.components.finish_requested() {
+        ExecResult::Finished
+    } else {
+        exec_detailed(sim, testbench.statements(), &mut ctx)
+    };
     let finish_ok = sim.components.finish().is_ok();
     let passed = finish_ok
         && !matches!(result, ExecResult::Fail(_))
@@ -1686,6 +1696,9 @@ fn tick_component_reset<B: SimBackend>(
         time,
     )?;
     apply_component_writes(sim, writes);
+    if !sim.program.runtime_schema.comb_observers.is_empty() && sim.dirty {
+        sim.eval_comb().map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
