@@ -46,7 +46,24 @@ impl ConstraintError {
 }
 
 impl ConstraintModel {
+    #[cfg(test)]
     pub(super) fn build(func: &MFunction, cfg: &NormalizedCfg) -> Result<Self, ConstraintError> {
+        Self::build_with_verification(func, cfg, true)
+    }
+
+    pub(super) fn build_for_codegen(
+        func: &MFunction,
+        cfg: &NormalizedCfg,
+        verify: bool,
+    ) -> Result<Self, ConstraintError> {
+        Self::build_with_verification(func, cfg, verify)
+    }
+
+    fn build_with_verification(
+        func: &MFunction,
+        cfg: &NormalizedCfg,
+        verify: bool,
+    ) -> Result<Self, ConstraintError> {
         if func.blocks.len() != cfg.predecessors.len() {
             return Err(ConstraintError::new(
                 "CONSTRAINT.CFG_SHAPE",
@@ -92,24 +109,26 @@ impl ConstraintModel {
         for (facts_block, successors) in facts.blocks.iter_mut().zip(&cfg.successors) {
             facts_block.successors.clone_from(successors);
         }
-        facts.verify().map_err(|error| {
-            ConstraintError::new(
-                "CONSTRAINT.ALLOCATION_FACTS",
-                None,
-                None,
-                Vec::new(),
-                error.to_string(),
-            )
-        })?;
-        celox_backend_common::regalloc::analyze_live_intervals(&facts).map_err(|error| {
-            ConstraintError::new(
-                "CONSTRAINT.LIVE_INTERVALS",
-                error.block.map(|block| func.blocks[block].id),
-                error.instruction,
-                error.values,
-                error.message,
-            )
-        })?;
+        if verify {
+            facts.verify().map_err(|error| {
+                ConstraintError::new(
+                    "CONSTRAINT.ALLOCATION_FACTS",
+                    None,
+                    None,
+                    Vec::new(),
+                    error.to_string(),
+                )
+            })?;
+            celox_backend_common::regalloc::analyze_live_intervals(&facts).map_err(|error| {
+                ConstraintError::new(
+                    "CONSTRAINT.LIVE_INTERVALS",
+                    error.block.map(|block| func.blocks[block].id),
+                    error.instruction,
+                    error.values,
+                    error.message,
+                )
+            })?;
+        }
         let instructions = facts
             .blocks
             .iter()
@@ -167,7 +186,7 @@ impl ConstraintModel {
             for (instruction_index, constraints) in
                 self.instructions[block_index].iter().enumerate()
             {
-                let mut required = std::collections::HashMap::new();
+                let mut required = crate::HashMap::default();
                 for &(value, register) in &constraints.fixed_uses {
                     if let Some(previous) = required.insert(value, register) {
                         if previous != register {

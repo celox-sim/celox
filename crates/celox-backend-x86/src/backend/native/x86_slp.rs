@@ -4,13 +4,14 @@
 //! whose complete scalar use graph is covered by a cheaper executable x86
 //! recipe, so unsupported packs remain ordinary scalar MIR.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 
 use super::memory_effect::{self, UnknownMemory};
 use super::mir::{
     BaseReg, MFunction, MInst, OpSize, VReg, X86SimdBinaryOp, X86SimdInst, X86VecReg,
 };
 use super::regalloc::assignment::{X86PhysVec, X86VectorLocation};
+use crate::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct SlpStats {
@@ -75,8 +76,8 @@ struct ScalarLoad {
 /// replaced, yielding `1 + N` vector instructions instead of `2 + 2N`.
 pub(crate) fn select(func: &mut MFunction) -> SlpStats {
     let mut stats = SlpStats::default();
-    let mut function_uses = HashMap::<VReg, Vec<(usize, usize)>>::new();
-    let mut phi_uses = HashSet::<VReg>::new();
+    let mut function_uses = HashMap::<VReg, Vec<(usize, usize)>>::default();
+    let mut phi_uses = HashSet::<VReg>::default();
     for (block_index, block) in func.blocks.iter().enumerate() {
         for phi in &block.phis {
             phi_uses.extend(phi.sources.iter().map(|(_, source)| *source));
@@ -93,7 +94,7 @@ pub(crate) fn select(func: &mut MFunction) -> SlpStats {
 
     let mut plans = Vec::new();
     for (block_index, block) in func.blocks.iter().enumerate() {
-        let mut loads = HashMap::<VReg, ScalarLoad>::new();
+        let mut loads = HashMap::<VReg, ScalarLoad>::default();
         for (instruction, inst) in block.insts.iter().enumerate() {
             if let MInst::Load {
                 dst,
@@ -213,7 +214,7 @@ pub(crate) fn select(func: &mut MFunction) -> SlpStats {
 
     for (block_index, plans) in by_block {
         let block = &mut func.blocks[block_index];
-        let mut replacements = HashMap::<usize, Option<MInst>>::new();
+        let mut replacements = HashMap::<usize, Option<MInst>>::default();
         for (vector, plan) in plans {
             if replacements.contains_key(&plan.first_load)
                 || replacements.contains_key(&plan.second_load)
@@ -340,8 +341,8 @@ fn exact_scalar_load_pair(
 /// small complete-cone subset: it never lengthens a scalar live range and it
 /// never leaves a GPR/XMM crossing behind for a later pass to repair.
 fn select_binary_store_pairs(func: &mut MFunction, stats: &mut SlpStats) {
-    let mut function_uses = HashMap::<VReg, Vec<(usize, usize)>>::new();
-    let mut phi_uses = HashSet::<VReg>::new();
+    let mut function_uses = HashMap::<VReg, Vec<(usize, usize)>>::default();
+    let mut phi_uses = HashSet::<VReg>::default();
     for (block_index, block) in func.blocks.iter().enumerate() {
         for phi in &block.phis {
             phi_uses.extend(phi.sources.iter().map(|(_, source)| *source));
@@ -510,7 +511,7 @@ fn select_binary_store_pairs(func: &mut MFunction, stats: &mut SlpStats) {
     }
     for (block_index, plans) in by_block {
         let block = &mut func.blocks[block_index];
-        let mut replacements = HashMap::<usize, Option<MInst>>::new();
+        let mut replacements = HashMap::<usize, Option<MInst>>::default();
         for (lhs_vector, rhs_vector, result_vector, plan) in plans {
             let touched = [
                 plan.lhs.low_instruction,
@@ -788,7 +789,7 @@ fn allocate_from_registers(
     };
 
     for block in &func.blocks {
-        let mut intervals = HashMap::<X86VecReg, (usize, usize)>::new();
+        let mut intervals = HashMap::<X86VecReg, (usize, usize)>::default();
         for (instruction, inst) in block.insts.iter().enumerate() {
             if let Some(definition) = inst.x86_vec_def() {
                 intervals.insert(definition, (instruction, instruction));

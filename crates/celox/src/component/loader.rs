@@ -5,7 +5,7 @@
 //! registry that bypasses dlopen — used by tests and available for builtin
 //! components.
 
-use std::collections::HashMap;
+use crate::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use thiserror::Error;
@@ -160,7 +160,7 @@ pub(crate) fn library_export_names(path: &Path) -> Vec<String> {
 /// The `&'static` in the value is sound because registered vtables either
 /// live in a leaked (never-unloaded) library or in guest `static` tables.
 static STATIC_REGISTRY: LazyLock<Mutex<HashMap<String, &'static sys::VrlComponentVTable>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+    LazyLock::new(|| Mutex::new(HashMap::default()));
 
 pub fn register_static_component(name: &str, vtable: &'static sys::VrlComponentVTable) {
     STATIC_REGISTRY
@@ -171,7 +171,7 @@ pub fn register_static_component(name: &str, vtable: &'static sys::VrlComponentV
 
 /// Per-type manifest JSON registered alongside static components.
 static STATIC_MANIFESTS: LazyLock<Mutex<HashMap<String, String>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+    LazyLock::new(|| Mutex::new(HashMap::default()));
 
 pub fn register_static_manifest(name: &str, json: &str) {
     STATIC_MANIFESTS
@@ -277,7 +277,7 @@ pub fn lookup_component(
 #[cfg(not(target_family = "wasm"))]
 fn get_library(path: &Path) -> Result<&'static libloading::Library, ComponentError> {
     static LIBRARIES: LazyLock<Mutex<HashMap<PathBuf, &'static libloading::Library>>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
+        LazyLock::new(|| Mutex::new(HashMap::default()));
 
     let mut libraries = LIBRARIES.lock().unwrap();
     match libraries.get(path) {

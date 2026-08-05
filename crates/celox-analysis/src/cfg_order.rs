@@ -1,5 +1,6 @@
-use std::collections::HashMap;
 use std::hash::Hash;
+
+use fxhash::FxHashMap;
 
 /// Return blocks in dominator-tree preorder.
 ///
@@ -27,7 +28,7 @@ where
         .iter()
         .enumerate()
         .map(|(index, &id)| (id, index))
-        .collect::<HashMap<_, _>>();
+        .collect::<FxHashMap<_, _>>();
 
     let successors = ids
         .iter()

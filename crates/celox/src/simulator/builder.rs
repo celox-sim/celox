@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use veryl_analyzer::ir::{Comptime, Expression, VarPath};
@@ -10,8 +9,8 @@ use veryl_parser::resource_table;
 
 use crate::parser::BuildConfig;
 use crate::{
-    CompilationWarning, FrontendDiagnostic, ParserError, SimulatorError, SimulatorErrorKind,
-    ir::OptimizedSir, parser,
+    CompilationWarning, FrontendDiagnostic, HashMap, ParserError, SimulatorError,
+    SimulatorErrorKind, ir::OptimizedSir, parser,
 };
 
 fn component_library_path(
@@ -417,6 +416,69 @@ mod host {
         pub emit_triggers: bool,
         /// Dead store elimination policy.
         pub dead_store_policy: DeadStorePolicy,
+    }
+
+    /// A fully code-generated native simulator that has not run any simulator
+    /// initialization yet.
+    ///
+    /// Keeping compilation separate from initialization lets compiler-only
+    /// clients stop after native code generation without applying initial
+    /// values or executing the first combinational settle.
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
+    #[must_use]
+    pub struct NativeCompilation {
+        backend: crate::backend::native::NativeBackend,
+        program: LaidOutProgram,
+        warnings: Vec<CompilationWarning>,
+        options: SimulatorOptions,
+        vcd_path: Option<std::path::PathBuf>,
+    }
+
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
+    impl NativeCompilation {
+        /// Warnings emitted while compiling this artifact.
+        pub fn warnings(&self) -> &[CompilationWarning] {
+            &self.warnings
+        }
+
+        /// Allocate and initialize the runtime state for this compiled artifact.
+        pub fn initialize(
+            self,
+        ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
+            let Self {
+                backend,
+                program,
+                warnings,
+                options,
+                vcd_path,
+            } = self;
+            let mut sim =
+                Simulator::with_backend_and_program(backend, program.into_runtime(), warnings);
+            sim.diagnostics = options.diagnostics.clone();
+            if let Some(path) = vcd_path {
+                let descs = sim.build_vcd_descs(options.four_state);
+                let vcd_writer = crate::VcdWriter::new(path, &descs)
+                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+                sim.vcd_writer = Some(vcd_writer);
+            }
+            let apply_initial_start = options.diagnostics.phase_timing.then(crate::timing::now);
+            sim.apply_initial_values();
+            if let Some(start) = apply_initial_start {
+                tracing::debug!("[phase-timing] apply_initial_values: {:?}", start.elapsed());
+            }
+            let settle_start = options.diagnostics.phase_timing.then(crate::timing::now);
+            sim.modify(|_| {}).map_err(SimulatorError::from)?;
+            if let Some(start) = settle_start {
+                tracing::debug!("[phase-timing] initial_settle: {:?}", start.elapsed());
+            }
+            Ok(sim)
+        }
     }
 
     impl Default for SimulatorOptions {
@@ -930,9 +992,7 @@ mod host {
             target_arch = "x86_64",
             all(target_arch = "aarch64", feature = "experimental-arm64-backend")
         ))]
-        pub fn build_native(
-            self,
-        ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
+        pub fn compile_native(self) -> Result<NativeCompilation, SimulatorError> {
             let phase_timing = self.options.diagnostics.phase_timing;
             let sir_start = phase_timing.then(crate::timing::now);
             let (laid_out, warnings, options, vcd_path) = self.into_laid_out_program(
@@ -949,26 +1009,24 @@ mod host {
             if let Some(start) = backend_start {
                 tracing::debug!("[phase-timing] native_backend: {:?}", start.elapsed());
             }
-            let mut sim =
-                Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
-            sim.diagnostics = options.diagnostics.clone();
-            if let Some(path) = vcd_path {
-                let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new(path, &descs)
-                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
-                sim.vcd_writer = Some(vcd_writer);
-            }
-            let apply_initial_start = phase_timing.then(crate::timing::now);
-            sim.apply_initial_values();
-            if let Some(start) = apply_initial_start {
-                tracing::debug!("[phase-timing] apply_initial_values: {:?}", start.elapsed());
-            }
-            let settle_start = phase_timing.then(crate::timing::now);
-            sim.modify(|_| {}).map_err(SimulatorError::from)?;
-            if let Some(start) = settle_start {
-                tracing::debug!("[phase-timing] initial_settle: {:?}", start.elapsed());
-            }
-            Ok(sim)
+            Ok(NativeCompilation {
+                backend,
+                program: laid_out,
+                warnings,
+                options,
+                vcd_path,
+            })
+        }
+
+        /// Compiles using the custom native backend and initializes the simulator.
+        #[cfg(any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        ))]
+        pub fn build_native(
+            self,
+        ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
+            self.compile_native()?.initialize()
         }
 
         /// Compiles using the Wasmtime WASM backend.

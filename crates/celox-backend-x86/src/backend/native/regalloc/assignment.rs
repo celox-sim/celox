@@ -3,7 +3,6 @@
 //! Defines `PhysReg`, `RegConstraint`, `AssignmentMap`, and helpers for
 //! querying instruction constraints and clobbers.
 
-use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use celox_backend_common::regalloc::{
@@ -12,6 +11,7 @@ use celox_backend_common::regalloc::{
 
 use crate::native::features::VariableShiftEncoding;
 use crate::native::mir::*;
+use crate::{HashMap, HashSet};
 
 // ────────────────────────────────────────────────────────────────
 // Physical registers

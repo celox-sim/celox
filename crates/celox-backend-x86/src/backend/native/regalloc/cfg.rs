@@ -1,11 +1,12 @@
 //! Normalized CFG information shared by every allocation phase.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use celox_analysis::cfg::ForwardControlFlowGraph;
 pub(super) use celox_analysis::cfg::NaturalLoop;
 use celox_analysis::ssa::SsaCfg;
 
+use crate::HashMap;
 use crate::native::mir::{BlockId, MBlock, MFunction, MInst};
 
 #[derive(Debug)]

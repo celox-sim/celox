@@ -1,12 +1,13 @@
 //! Exact dependency DAGs for allocation-owned machine scheduling.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 #[cfg(test)]
 use std::fmt;
 
 use celox_analysis::dependence::MemoryDependencyTracker;
 
+use crate::HashMap;
 use crate::native::memory_effect::{self, MemoryObject, analysis_effects};
 #[cfg(test)]
 use crate::native::mir::BlockId;
@@ -303,7 +304,7 @@ impl InstructionDag {
             .collect::<Vec<_>>();
         let mut dependencies = vec![Vec::<usize>::new(); region.len()];
         let mut dependents = vec![Vec::<usize>::new(); region.len()];
-        let mut use_candidates = HashMap::<VReg, Vec<usize>>::new();
+        let mut use_candidates = HashMap::<VReg, Vec<usize>>::default();
         for (user, uses) in unique_uses.iter().enumerate() {
             for &used in uses {
                 use_candidates.entry(used).or_default().push(user);
@@ -422,7 +423,7 @@ impl ForwardReadyRegion {
             .filter_map(|(instruction, &dependencies)| (dependencies == 0).then_some(instruction))
             .collect();
         let remaining_uses = dag.unique_uses.iter().flatten().copied().fold(
-            HashMap::<VReg, usize>::new(),
+            HashMap::<VReg, usize>::default(),
             |mut counts, value| {
                 *counts.entry(value).or_default() += 1;
                 counts

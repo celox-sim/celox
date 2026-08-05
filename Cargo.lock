@@ -463,6 +463,9 @@ dependencies = [
 [[package]]
 name = "celox-analysis"
 version = "0.0.0"
+dependencies = [
+ "fxhash",
+]
 
 [[package]]
 name = "celox-backend-arm64"
@@ -472,6 +475,7 @@ dependencies = [
  "celox-backend-x86",
  "celox-state-layout",
  "dynasmrt",
+ "fxhash",
  "libc",
 ]
 
@@ -591,6 +595,7 @@ dependencies = [
 name = "celox-macros"
 version = "0.0.0"
 dependencies = [
+ "fxhash",
  "insta",
  "num-bigint",
  "prettyplease",
@@ -608,6 +613,7 @@ version = "0.0.0"
 dependencies = [
  "celox",
  "celox-ts-gen",
+ "fxhash",
  "globset",
  "miette",
  "napi",
@@ -632,6 +638,7 @@ dependencies = [
  "celox-state-layout",
  "celox-testbench",
  "chrono",
+ "fxhash",
  "num-bigint",
  "tempfile",
 ]
@@ -701,6 +708,7 @@ dependencies = [
 name = "celox-ts-gen"
 version = "0.0.0"
 dependencies = [
+ "fxhash",
  "insta",
  "serde",
  "serde_json",

@@ -28,8 +28,7 @@ fn preload_trigger_old_values<'a>(
         return HashMap::default();
     }
 
-    let mut trigger_addrs: std::collections::HashSet<(AbsoluteAddr, u32)> =
-        std::collections::HashSet::new();
+    let mut trigger_addrs = crate::HashSet::<(AbsoluteAddr, u32)>::default();
     for block in blocks {
         for inst in &block.instructions {
             match inst {

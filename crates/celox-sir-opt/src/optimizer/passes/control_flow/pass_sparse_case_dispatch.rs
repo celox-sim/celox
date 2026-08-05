@@ -129,19 +129,48 @@ impl ExecutionUnitPass for SparseCaseDispatchPass {
         let diagnostics = &options.optimize_options.diagnostics;
         let stats = diagnostics.branchify_stats;
         let mut applied = 0usize;
+        let Some(mut next_block) = eu
+            .blocks
+            .keys()
+            .map(|id| id.0)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+        else {
+            return;
+        };
+        let Some(mut next_register) = eu
+            .register_map
+            .keys()
+            .map(|id| id.0)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+        else {
+            return;
+        };
+        let mut candidate_blocks: Option<HashSet<BlockId>> = None;
         loop {
-            let plans = find_sparse_case_plans(eu, &self.stable_alias_class);
+            let plans =
+                find_sparse_case_plans(eu, &self.stable_alias_class, candidate_blocks.as_ref());
             if plans.is_empty() {
                 break;
             }
+            let mut next_candidates = HashSet::default();
             for plan in plans {
-                apply_sparse_case_plan(eu, plan);
+                next_candidates.extend(apply_sparse_case_plan(
+                    eu,
+                    plan,
+                    &mut next_block,
+                    &mut next_register,
+                ));
                 changed = true;
                 applied += 1;
                 if stats && applied.is_multiple_of(100) {
                     tracing::debug!("[branchify-stats] sparse_case applied={applied}");
                 }
             }
+            candidate_blocks = Some(next_candidates);
         }
         if stats || diagnostics.pass_timing {
             tracing::debug!("[branchify-stats] sparse_case done applied={applied}");
@@ -159,10 +188,16 @@ impl ExecutionUnitPass for SparseCaseDispatchPass {
 fn find_sparse_case_plans(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     stable_alias_class: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    candidate_blocks: Option<&HashSet<BlockId>>,
 ) -> Vec<SparseCasePlan> {
     let use_counts = count_uses(eu);
     let def_sites = definition_sites(eu);
-    let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
+    let mut block_ids = eu
+        .blocks
+        .keys()
+        .copied()
+        .filter(|block| candidate_blocks.is_none_or(|candidates| candidates.contains(block)))
+        .collect::<Vec<_>>();
     block_ids.sort_unstable();
     let mut planned_blocks = HashSet::default();
     let mut plans = Vec::new();
@@ -1567,8 +1602,16 @@ fn runtime_instruction_cost(
     }
 }
 
-fn apply_sparse_case_plan(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: SparseCasePlan) {
-    let original = eu.blocks[&plan.block_id].clone();
+fn apply_sparse_case_plan(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    plan: SparseCasePlan,
+    next_block: &mut usize,
+    next_register: &mut usize,
+) -> Vec<BlockId> {
+    let original = eu
+        .blocks
+        .remove(&plan.block_id)
+        .expect("sparse case plan must reference an existing block");
     let chain_indices = plan
         .stages
         .iter()
@@ -1583,14 +1626,12 @@ fn apply_sparse_case_plan(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: Sp
     removed.extend(plan.dead_defs.iter().copied());
     removed.extend(sink_indices);
 
-    let mut next_block = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0) + 1;
-    let mut next_register = eu.register_map.keys().map(|id| id.0).max().unwrap_or(0) + 1;
-    let merge_id = fresh_block(&mut next_block);
+    let merge_id = fresh_block(next_block);
 
     let mut generated = HashMap::<BlockId, BasicBlock<RegionedAbsoluteAddr>>::default();
     let mut arm_blocks = HashMap::<usize, BlockId>::default();
     for &arm_index in &plan.reachable_arms {
-        let id = fresh_block(&mut next_block);
+        let id = fresh_block(next_block);
         let instructions = plan.arms[arm_index]
             .sink_defs
             .iter()
@@ -1644,8 +1685,8 @@ fn apply_sparse_case_plan(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: Sp
             &arm_blocks,
             plan.selector,
             &selector_type,
-            &mut next_block,
-            &mut next_register,
+            next_block,
+            next_register,
             &mut eu.register_map,
             &mut generated,
         );
@@ -1681,9 +1722,13 @@ fn apply_sparse_case_plan(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, plan: Sp
         terminator: original.terminator,
     };
 
+    let mut touched = generated.keys().copied().collect::<Vec<_>>();
+    touched.push(plan.block_id);
+    touched.push(merge_id);
     eu.blocks.insert(plan.block_id, head);
     eu.blocks.insert(merge_id, merge);
     eu.blocks.extend(generated);
+    touched
 }
 
 fn prune_dead_pure_instructions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {

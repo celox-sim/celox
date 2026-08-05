@@ -26,6 +26,9 @@ struct Options {
     test: String,
     #[arg(long = "source-file")]
     source_files: Vec<PathBuf>,
+    /// Build the complete AOT-C simulator without running the testbench.
+    #[arg(long)]
+    compile_only: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -73,8 +76,8 @@ fn run() -> Result<(), VerylHeliodorError> {
         .collect::<Result<Vec<_>, _>>()?;
 
     println!(
-        "VERYL_TEST_CONFIG test={} backend=cc aot_c_async=false",
-        options.test
+        "VERYL_TEST_CONFIG test={} backend=cc aot_c_async=false compile_only={}",
+        options.test, options.compile_only
     );
 
     let total_start = Instant::now();
@@ -133,6 +136,21 @@ fn run() -> Result<(), VerylHeliodorError> {
         })?;
     let testbench = convert_initial_to_testbench(initial_stmts, &event_map, &clock_periods, 3);
     let compile_elapsed = compile_start.elapsed();
+
+    if options.compile_only {
+        let elapsed = total_start.elapsed();
+        println!(
+            "VERYL_TEST_TIMING test={} compile_ns={} execute_ns=0",
+            options.test,
+            compile_elapsed.as_nanos()
+        );
+        println!(
+            "VERYL_TEST_RESULT test={} status=compile-only elapsed_ns={}",
+            options.test,
+            elapsed.as_nanos()
+        );
+        return Ok(());
+    }
 
     let execute_cpu_start = process_cpu_time();
     let execute_start = Instant::now();

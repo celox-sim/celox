@@ -3,7 +3,7 @@ use crate::PassOptions;
 use crate::ir::{AbsoluteAddr, ExecutionUnit, RegionedAbsoluteAddr, SIRInstruction, SIROffset};
 use std::sync::Arc;
 
-pub(in crate::optimizer) trait ExecutionUnitPass {
+pub(in crate::optimizer) trait ExecutionUnitPass: Send + Sync {
     fn name(&self) -> &'static str;
     fn run(&self, eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, options: &PassOptions);
 }
@@ -79,6 +79,78 @@ impl ExecutionUnitPassManager {
                 panic!("after SIR pass pipeline: {error}");
             }
         }
+    }
+
+    /// Run the same ordered pipeline over independent execution units.
+    ///
+    /// Units are owned by workers while being optimized and restored to their
+    /// original order afterward.  This keeps event semantics deterministic;
+    /// only unrelated per-unit work overlaps.
+    pub(in crate::optimizer) fn run_parallel(
+        &self,
+        units: &mut Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+        options: &PassOptions,
+    ) {
+        const MAX_PARALLEL_UNITS: usize = 4;
+
+        let worker_count = units.len().min(
+            std::thread::available_parallelism()
+                .map_or(1, usize::from)
+                .min(MAX_PARALLEL_UNITS),
+        );
+        if worker_count <= 1 {
+            for unit in units {
+                self.run(unit, options);
+            }
+            return;
+        }
+
+        let mut pending = std::mem::take(units)
+            .into_iter()
+            .enumerate()
+            .map(|(index, unit)| {
+                let work = unit.blocks.len()
+                    + unit
+                        .blocks
+                        .values()
+                        .map(|block| block.instructions.len())
+                        .sum::<usize>();
+                (work, index, unit)
+            })
+            .collect::<Vec<_>>();
+        // Workers pop the largest units first to keep the long tail bounded.
+        pending.sort_unstable_by_key(|(work, index, _)| (*work, *index));
+        let pending = std::sync::Mutex::new(pending);
+        let completed = std::sync::Mutex::new(Vec::with_capacity(units.capacity()));
+
+        std::thread::scope(|scope| {
+            for _ in 0..worker_count {
+                let pending = &pending;
+                let completed = &completed;
+                scope.spawn(move || {
+                    loop {
+                        let task = pending
+                            .lock()
+                            .expect("SIR optimization work queue must not be poisoned")
+                            .pop();
+                        let Some((_, index, mut unit)) = task else {
+                            break;
+                        };
+                        self.run(&mut unit, options);
+                        completed
+                            .lock()
+                            .expect("SIR optimization result queue must not be poisoned")
+                            .push((index, unit));
+                    }
+                });
+            }
+        });
+
+        let mut completed = completed
+            .into_inner()
+            .expect("SIR optimization result queue must not be poisoned");
+        completed.sort_unstable_by_key(|(index, _)| *index);
+        units.extend(completed.into_iter().map(|(_, unit)| unit));
     }
 }
 

@@ -1,7 +1,6 @@
-use std::collections::HashMap;
-
 use bit_set::BitSet;
 use celox_design::DomainKind;
+use fxhash::FxHashMap;
 
 use crate::{
     SignalRef, SimulatorErrorCode,
@@ -92,7 +91,7 @@ pub struct SimulationState<B: SimBackend> {
     topo_signals: Vec<(SignalRef, usize, usize)>,
     domain_kinds: Vec<Option<DomainKind>>,
     event_info: Vec<EventInfo<B>>,
-    signal_to_id: HashMap<SignalRef, usize>,
+    signal_to_id: FxHashMap<SignalRef, usize>,
 }
 
 impl<B: SimBackend> SimulationState<B> {
@@ -141,7 +140,7 @@ impl<B: SimBackend> SimulationState<B> {
         event_info: Vec<EventInfo<B>>,
     ) -> Self {
         let mut last_clock_values = BitSet::with_capacity(backend.num_events());
-        let mut signal_to_id = HashMap::new();
+        let mut signal_to_id = FxHashMap::default();
         for (signal, id, _) in topo_signals.iter().copied() {
             if id == usize::MAX {
                 continue;
