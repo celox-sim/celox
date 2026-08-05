@@ -6,6 +6,53 @@ mod test_utils;
 
 all_backends! {
 
+    fn test_subbyte_arithmetic_padding_does_not_corrupt_concat(sim) {
+        @omit_veryl;
+        @setup { let code = r#"
+module Top (
+    bound: input  logic<4>,
+    o    : output logic<72>,
+) {
+    var occupied: logic    [8];
+    var rs1_rdy : logic    [8];
+    var rs2_rdy : logic    [8];
+    var rob_idx : logic<5> [8];
+    var cand    : logic<9> [8];
+
+    always_comb {
+        for i in 0..8 {
+            occupied[i] = 1'b0;
+            rs1_rdy[i]  = 1'b0;
+            rs2_rdy[i]  = 1'b0;
+            rob_idx[i]  = 5'd0;
+        }
+        occupied[1] = 1'b1;
+        rs1_rdy[0]  = 1'b1;
+        rs2_rdy[0]  = 1'b1;
+        rs2_rdy[1]  = 1'b1;
+
+        for i in 0..bound {
+            let age    : logic<5> = rob_idx[i] - 5'd2;
+            let ready: logic = occupied[i] && rs1_rdy[i] && rs2_rdy[i];
+            cand[i] = {ready, age, i as 3};
+        }
+        o = {cand[7], cand[6], cand[5], cand[4], cand[3], cand[2], cand[1], cand[0]};
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+
+        let bound = sim.signal("bound");
+        let o = sim.signal("o");
+        sim.modify(|io| io.set(bound, 8u8)).unwrap();
+        let mut expected = BigUint::from(0u8);
+        for i in 0usize..8 {
+            let candidate = (30 << 3) | i;
+            expected |= BigUint::from(candidate) << (i * 9);
+        }
+        assert_eq!(sim.get(o), expected);
+    }
+
     fn test_child_dynamic_ff_read_reaches_parent_after_same_edge_enable(sim) {
         @setup { let code = r#"
 module Cache (

@@ -163,6 +163,43 @@ jobs:
         if: always() && steps.gate.outputs.status != '0'
         run: exit 1
 
+  cranelift-linux-boot:
+    name: Cranelift Linux boot
+    if: github.event_name != 'schedule'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HELIODOR_DIR: ${{ github.workspace }}/target/heliodor-cranelift/source
+      HELIODOR_RESULTS_DIR: ${{ github.workspace }}/target/heliodor-cranelift/results
+      HELIODOR_TOOLS_DIR: ${{ github.workspace }}/target/heliodor-cranelift/tools
+      HELIODOR_RUNNERS: celox-cranelift
+      HELIODOR_TESTS: test_soc_linux_boot
+      HELIODOR_TIMEOUT_SEC: "1200"
+      CELOX_OPT_LEVEL: O2
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Boot Linux with the Cranelift backend
+        shell: bash
+        run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-cranelift-output.txt
+
+      - name: Upload Cranelift Linux boot results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: heliodor-cranelift-linux-boot
+          path: |
+            heliodor-cranelift-output.txt
+            target/heliodor-cranelift/results/results.tsv
+            target/heliodor-cranelift/results/*.log
+
   heliodor-head:
     name: Heliodor HEAD compatibility
     if: github.event_name == 'schedule'

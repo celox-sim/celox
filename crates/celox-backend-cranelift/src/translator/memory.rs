@@ -1240,6 +1240,20 @@ impl SIRTranslator {
         src_val: Value,   // source
         max_bit_shift: usize,
     ) {
+        // A scalar whose packed bit range crosses an i64 boundary needs two
+        // memory words even though its logical value still fits in one CLIF
+        // value. Reuse the chunked RMW path so the high fragment is preserved.
+        if op_width.saturating_add(max_bit_shift) > 64 {
+            self.translate_store_multi_word_from_chunks(
+                state,
+                addr,
+                bit_shift,
+                op_width,
+                &[src_val],
+            );
+            return;
+        }
+
         // 1. Determine minimum necessary access type
         let access_ty = scalar_access_type(op_width, max_bit_shift);
         let m_raw = if op_width >= 64 {
@@ -1305,6 +1319,17 @@ impl SIRTranslator {
         d_phys_width: usize,
         max_bit_shift: usize,
     ) -> Value {
+        // Packed scalar fields can straddle two i64 words. The ordinary
+        // scalar path cannot represent `op_width + bit_shift > 64`, so use
+        // the slide-combine implementation and return its single value chunk.
+        if op_width.saturating_add(max_bit_shift) > 64 {
+            return self
+                .translate_load_multi_word(state, addr, bit_shift, op_width, d_phys_width)
+                .into_iter()
+                .next()
+                .expect("a scalar load produces one chunk");
+        }
+
         // 1. Determine minimum necessary access type
         let access_ty = scalar_access_type(op_width, max_bit_shift);
 
