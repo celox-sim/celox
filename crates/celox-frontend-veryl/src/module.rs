@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::time::Instant;
 
 use crate::{
-    BuildConfig, GlueAddr, GlueBlock, HashMap, HashSet, LoweringPhase, ModuleInitialMemoryValue,
-    ParserError, RegionedVarAddr, SimModule,
+    BuildConfig, ExternalModule, GlueAddr, GlueBlock, HashMap, HashSet, LoweringPhase,
+    ModuleInitialMemoryValue, ParserError, RegionedVarAddr, SimModule,
     bitaccess::{
         PartSelectGeometry, eval_var_select, get_access_width, is_static_access, select_geometry,
     },
@@ -56,6 +56,182 @@ pub struct ModuleParser<'a> {
     arena: SLTNodeArena<VarId>,
     reset_clock_map: HashMap<VarId, VarId>,
     loop_candidates: Vec<LoopRecoveryCandidate>,
+    external_modules: &'a HashMap<ModuleId, ExternalModule>,
+    external_output_targets: Vec<(VarId, BitAccess)>,
+}
+
+static EMPTY_EXTERNAL_MODULES: std::sync::LazyLock<HashMap<ModuleId, ExternalModule>> =
+    std::sync::LazyLock::new(HashMap::default);
+
+fn external_port_formal_names(decl: &InstDeclaration) -> Result<(bool, Vec<String>), ParserError> {
+    let source = decl.token.source().get_text();
+    let start = decl.token.beg.pos as usize;
+    let declaration = source
+        .get(start..)
+        .and_then(|source| source.split_once(';').map(|(declaration, _)| declaration))
+        .ok_or_else(|| {
+            ParserError::illegal_context(
+                "external module port connections",
+                "instance source range is unavailable",
+                Some(&decl.token),
+            )
+        })?;
+    let port_list = last_outer_parenthesized(declaration).ok_or_else(|| {
+        ParserError::illegal_context(
+            "external module port connections",
+            "instance port list is unavailable",
+            Some(&decl.token),
+        )
+    })?;
+
+    let items = split_top_level(port_list, ',');
+    let uses_named_associations = uses_named_external_port_associations(&items);
+    if !uses_named_associations {
+        return Ok((false, vec![String::new(); items.len()]));
+    }
+    let formal_names = items
+        .into_iter()
+        .map(|item| {
+            let item = item.trim();
+            let formal = find_top_level_connection_colon(item)
+                .map_or(item, |colon| &item[..colon])
+                .trim();
+            if formal.is_empty()
+                || !formal
+                    .chars()
+                    .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+            {
+                Err(ParserError::illegal_context(
+                    "external module port connections",
+                    format!("unsupported named port association `{item}`"),
+                    Some(&decl.token),
+                ))
+            } else {
+                Ok(formal.to_string())
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut unique_formals = HashSet::default();
+    if let Some(formal) = formal_names
+        .iter()
+        .find(|formal| !unique_formals.insert(formal.as_str()))
+    {
+        return Err(ParserError::illegal_context(
+            "external module port connections",
+            format!("duplicate named SystemVerilog port association `{formal}`"),
+            Some(&decl.token),
+        ));
+    }
+    Ok((uses_named_associations, formal_names))
+}
+
+fn uses_named_external_port_associations(items: &[&str]) -> bool {
+    items.iter().any(|item| {
+        let Some(colon) = find_top_level_connection_colon(item) else {
+            return false;
+        };
+        let formal = item[..colon].trim();
+        !formal.is_empty()
+            && formal
+                .chars()
+                .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    })
+}
+
+fn last_outer_parenthesized(text: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    let mut start = None;
+    let mut last = None;
+    let mut string = false;
+    let mut escaped = false;
+    for (index, ch) in text.char_indices() {
+        if string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                string = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            string = true;
+        } else if ch == '(' {
+            if depth == 0 {
+                start = Some(index + ch.len_utf8());
+            }
+            depth += 1;
+        } else if ch == ')' {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                last = Some((start?, index));
+            }
+        }
+    }
+    let (start, end) = last?;
+    text.get(start..end)
+}
+
+fn split_top_level(text: &str, separator: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depths = [0usize; 3];
+    let mut string = false;
+    let mut escaped = false;
+    for (index, ch) in text.char_indices() {
+        if string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => string = true,
+            '(' => depths[0] += 1,
+            ')' => depths[0] = depths[0].saturating_sub(1),
+            '[' => depths[1] += 1,
+            ']' => depths[1] = depths[1].saturating_sub(1),
+            '{' => depths[2] += 1,
+            '}' => depths[2] = depths[2].saturating_sub(1),
+            _ if ch == separator && depths == [0, 0, 0] => {
+                parts.push(&text[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if !text[start..].trim().is_empty() {
+        parts.push(&text[start..]);
+    }
+    parts
+}
+
+fn find_top_level_connection_colon(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depths = [0usize; 3];
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match byte {
+            b'(' => depths[0] += 1,
+            b')' => depths[0] = depths[0].saturating_sub(1),
+            b'[' => depths[1] += 1,
+            b']' => depths[1] = depths[1].saturating_sub(1),
+            b'{' => depths[2] += 1,
+            b'}' => depths[2] = depths[2].saturating_sub(1),
+            b':' if depths == [0, 0, 0]
+                && bytes.get(index.wrapping_sub(1)) != Some(&b':')
+                && bytes.get(index + 1) != Some(&b':') =>
+            {
+                return Some(index);
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn build_dynamic_output_glue(
@@ -953,7 +1129,13 @@ impl<'a> ModuleParser<'a> {
         config: &BuildConfig,
         inst_ids: &'a [ModuleId],
     ) -> Result<SimModule, ParserError> {
-        let parser = Self::new(module, Vec::new(), config, inst_ids)?;
+        let parser = Self::new(
+            module,
+            Vec::new(),
+            config,
+            inst_ids,
+            &EMPTY_EXTERNAL_MODULES,
+        )?;
         parser.parse_inner()
     }
 
@@ -968,6 +1150,24 @@ impl<'a> ModuleParser<'a> {
             loop_provenance.candidates_for_module(module),
             config,
             inst_ids,
+            &EMPTY_EXTERNAL_MODULES,
+        )?;
+        parser.parse_inner()
+    }
+
+    pub fn parse_with_loop_provenance_and_external_modules(
+        module: &'a Module,
+        loop_provenance: &LoopProvenance,
+        config: &BuildConfig,
+        inst_ids: &'a [ModuleId],
+        external_modules: &'a HashMap<ModuleId, ExternalModule>,
+    ) -> Result<SimModule, ParserError> {
+        let parser = Self::new(
+            module,
+            loop_provenance.candidates_for_module(module),
+            config,
+            inst_ids,
+            external_modules,
         )?;
         parser.parse_inner()
     }
@@ -977,6 +1177,7 @@ impl<'a> ModuleParser<'a> {
         loop_candidates: Vec<LoopRecoveryCandidate>,
         config: &BuildConfig,
         inst_ids: &'a [ModuleId],
+        external_modules: &'a HashMap<ModuleId, ExternalModule>,
     ) -> Result<Self, ParserError> {
         Ok(Self {
             module,
@@ -994,6 +1195,8 @@ impl<'a> ModuleParser<'a> {
             arena: SLTNodeArena::new(),
             reset_clock_map: HashMap::default(),
             loop_candidates,
+            external_modules,
+            external_output_targets: Vec::new(),
         })
     }
 
@@ -1095,13 +1298,7 @@ impl<'a> ModuleParser<'a> {
         module_id: ModuleId,
     ) -> Result<(), ParserError> {
         if let Component::SystemVerilog(system_verilog) = &*decl.component {
-            return Err(ParserError::unsupported(
-                64,
-                LoweringPhase::SimulatorParser,
-                "systemverilog module instantiation",
-                format!("name: \"{}\"", system_verilog.name),
-                None,
-            ));
+            return self.parse_external_inst_declaration(decl, system_verilog.name, module_id);
         }
 
         let child_module = match &*decl.component {
@@ -1571,6 +1768,253 @@ impl<'a> ModuleParser<'a> {
         Ok(())
     }
 
+    fn parse_external_inst_declaration(
+        &mut self,
+        decl: &InstDeclaration,
+        external_name: StrId,
+        module_id: ModuleId,
+    ) -> Result<(), ParserError> {
+        let child = self.external_modules.get(&module_id).ok_or_else(|| {
+            ParserError::unsupported(
+                64,
+                LoweringPhase::SimulatorParser,
+                "external module instantiation",
+                format!("module \"{external_name}\" was not supplied"),
+                None,
+            )
+        })?;
+        let Component::SystemVerilog(system_verilog) = decl.component.as_ref() else {
+            unreachable!();
+        };
+        if child.port_order.len() != system_verilog.connects.len() {
+            return Err(ParserError::illegal_context(
+                "external module port connections",
+                format!(
+                    "module \"{external_name}\" has {} ports but the instance connects {}",
+                    child.port_order.len(),
+                    system_verilog.connects.len()
+                ),
+                None,
+            ));
+        }
+
+        let mut input_ports = Vec::new();
+        let mut output_ports = Vec::new();
+        let mut glue_arena = SLTNodeArena::<GlueAddr>::new();
+        let (uses_named_associations, formal_names) = external_port_formal_names(decl)?;
+        if formal_names.len() != system_verilog.connects.len() {
+            return Err(ParserError::illegal_context(
+                "external module port connections",
+                "could not preserve the named SystemVerilog port associations",
+                Some(&decl.token),
+            ));
+        }
+        let connections: HashMap<_, _> = if uses_named_associations {
+            formal_names
+                .into_iter()
+                .zip(&system_verilog.connects)
+                .collect()
+        } else {
+            HashMap::default()
+        };
+
+        for (port_index, child_port_id) in child.port_order.iter().enumerate() {
+            let child_var = child
+                .sim_module
+                .variables
+                .get(child_port_id)
+                .ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "external module port connections",
+                        format!("port {child_port_id} is absent from module \"{external_name}\""),
+                        None,
+                    )
+                })?;
+            let parent_dst = if uses_named_associations {
+                let formal_name = child_var.path.to_string();
+                connections.get(formal_name.as_str()).ok_or_else(|| {
+                    ParserError::illegal_context(
+                        "external module port connections",
+                        format!(
+                            "port \"{formal_name}\" is not connected on module \"{external_name}\""
+                        ),
+                        Some(&decl.token),
+                    )
+                })?
+            } else {
+                &system_verilog.connects[port_index]
+            };
+            let child_width = resolve_total_width(&child.metadata, child_var)?;
+            if child_width == 0 {
+                return Err(ParserError::illegal_context(
+                    "external module port connections",
+                    "child port has zero width",
+                    Some(&parent_dst.token),
+                ));
+            }
+            let parent_var = &self.module.variables[&parent_dst.id];
+            let parent_access = eval_var_select(
+                self.module,
+                parent_dst.id,
+                &parent_dst.index,
+                &parent_dst.select,
+            )?;
+            let parent_width = parent_access.msb - parent_access.lsb + 1;
+            let parent_expr_signed = parent_var.r#type.signed
+                && parent_dst.select.is_empty()
+                && parent_dst.select.1.is_none();
+
+            match child_var.kind {
+                veryl_analyzer::ir::VarKind::Input => {
+                    let parent_node = glue_arena.alloc(SLTNode::Input {
+                        variable: GlueAddr::Parent(parent_dst.id),
+                        signed: parent_expr_signed,
+                        index: Vec::new(),
+                        access: parent_access,
+                    })?;
+                    let mut expr = coerce_node_width(
+                        &mut glue_arena,
+                        parent_node,
+                        Some(child_width),
+                        parent_expr_signed,
+                    )?;
+                    if child_var.r#type.is_2state() {
+                        expr = glue_arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
+                    }
+                    let mut sources = HashSet::default();
+                    sources.insert(VarAtomBase::new(
+                        GlueAddr::Parent(parent_dst.id),
+                        parent_access.lsb,
+                        parent_access.msb,
+                    ));
+                    input_ports.push((
+                        vec![parent_dst.id],
+                        LogicPath {
+                            target: LogicPathTarget::Var(VarAtomBase::new(
+                                GlueAddr::Child(*child_port_id),
+                                0,
+                                child_width - 1,
+                            )),
+                            expr,
+                            sources,
+                            previous_sources: HashSet::default(),
+                            address_sources: HashSet::default(),
+                            local_inputs: Vec::new(),
+                            order_before: HashSet::default(),
+                            comb_capture_enable_sites: Vec::new(),
+                            comb_capture_enable_always: false,
+                            pre_lower_nodes: Vec::new(),
+                        },
+                    ));
+                }
+                veryl_analyzer::ir::VarKind::Output => {
+                    if parent_var.kind == veryl_analyzer::ir::VarKind::Input {
+                        return Err(ParserError::illegal_context(
+                            "external module output connections",
+                            format!("child output cannot drive input port {}", parent_var.path),
+                            Some(&parent_dst.token),
+                        ));
+                    }
+                    if self
+                        .external_output_targets
+                        .iter()
+                        .any(|(id, access)| *id == parent_dst.id && access.overlaps(&parent_access))
+                    {
+                        return Err(ParserError::illegal_context(
+                            "external module output connections",
+                            format!(
+                                "multiple output ports drive overlapping target {}",
+                                parent_var.path
+                            ),
+                            Some(&parent_dst.token),
+                        ));
+                    }
+                    self.external_output_targets
+                        .push((parent_dst.id, parent_access));
+                    let child_node = glue_arena.alloc(SLTNode::Input {
+                        variable: GlueAddr::Child(*child_port_id),
+                        signed: child_var.r#type.signed,
+                        index: Vec::new(),
+                        access: BitAccess::new(0, child_width - 1),
+                    })?;
+                    let mut expr = coerce_node_width(
+                        &mut glue_arena,
+                        child_node,
+                        Some(parent_width),
+                        child_var.r#type.signed,
+                    )?;
+                    if parent_var.r#type.is_2state() {
+                        expr = glue_arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
+                    }
+                    let mut sources = HashSet::default();
+                    sources.insert(VarAtomBase::new(
+                        GlueAddr::Child(*child_port_id),
+                        0,
+                        child_width - 1,
+                    ));
+                    output_ports.push((
+                        vec![parent_dst.id],
+                        LogicPath {
+                            target: LogicPathTarget::Var(VarAtomBase::new(
+                                GlueAddr::Parent(parent_dst.id),
+                                parent_access.lsb,
+                                parent_access.msb,
+                            )),
+                            expr,
+                            sources,
+                            previous_sources: HashSet::default(),
+                            address_sources: HashSet::default(),
+                            local_inputs: Vec::new(),
+                            order_before: HashSet::default(),
+                            comb_capture_enable_sites: Vec::new(),
+                            comb_capture_enable_always: false,
+                            pre_lower_nodes: Vec::new(),
+                        },
+                    ));
+                }
+                veryl_analyzer::ir::VarKind::Inout => {
+                    return Err(ParserError::unsupported(
+                        64,
+                        LoweringPhase::SimulatorParser,
+                        "external inout port",
+                        child_var.path.to_string(),
+                        Some(&parent_dst.token),
+                    ));
+                }
+                _ => {
+                    return Err(ParserError::illegal_context(
+                        "external module port connections",
+                        format!("port {} has no input/output direction", child_var.path),
+                        Some(&parent_dst.token),
+                    ));
+                }
+            }
+        }
+
+        let block = GlueBlock {
+            module_id,
+            input_ports,
+            output_ports,
+            arena: glue_arena,
+        };
+        let mut glue_widths = HashMap::default();
+        for (id, variable) in &self.module.variables {
+            glue_widths.insert(
+                GlueAddr::Parent(*id),
+                resolve_total_width(self.module, variable)?,
+            );
+        }
+        for (id, variable) in &child.metadata.variables {
+            glue_widths.insert(
+                GlueAddr::Child(*id),
+                resolve_total_width(&child.metadata, variable)?,
+            );
+        }
+        verify_glue_block(&block, &glue_widths)?;
+        self.glue_blocks.entry(decl.name).or_default().push(block);
+        Ok(())
+    }
+
     fn static_string_expr(expr: &Expression) -> Option<String> {
         if !expr.comptime().r#type.is_string() {
             return None;
@@ -1946,6 +2390,33 @@ impl<'a> ModuleParser<'a> {
             eval_only_ff_blocks.insert(trigger_set.clone(), eval_only_eu);
             apply_ff_blocks.insert(trigger_set.clone(), apply_eu);
             eval_apply_ff_blocks.insert(trigger_set.clone(), eval_apply_eu);
+        }
+
+        for (external_id, external_access) in &self.external_output_targets {
+            let overlaps_comb = self.comb_blocks.iter().any(|path| {
+                path.target.var().is_some_and(|target| {
+                    target.id == *external_id && target.access.overlaps(external_access)
+                })
+            });
+            let overlaps_ff = ff_access_summaries.values().any(|summary| {
+                summary.writes.iter().any(|target| {
+                    target.id.var_id == *external_id && target.access.overlaps(external_access)
+                }) || summary
+                    .dynamic_writes
+                    .iter()
+                    .any(|target| target.var_id == *external_id)
+            });
+            if overlaps_comb || overlaps_ff {
+                let variable = &self.module.variables[external_id];
+                return Err(ParserError::illegal_context(
+                    "external module output connections",
+                    format!(
+                        "external output overlaps local driver for {}",
+                        variable.path
+                    ),
+                    None,
+                ));
+            }
         }
 
         // Keep both boundary sources:
@@ -2550,11 +3021,24 @@ mod tests {
 
     use super::{
         collect_glue_sources, collect_parent_output_address_sources,
-        resolve_readmem_path_with_fallback,
+        resolve_readmem_path_with_fallback, uses_named_external_port_associations,
     };
     use crate::{GlueAddr, HashMap};
     use celox_design::{BinaryOp, BitAccess, VarAtomBase};
     use celox_slt::{SLTForFoldGroupState, SLTNode, SLTNodeArena};
+
+    #[test]
+    fn selected_positional_external_ports_are_not_treated_as_formal_names() {
+        assert!(!uses_named_external_port_associations(&["a[7:0]", "y"]));
+    }
+
+    #[test]
+    fn positional_ternary_external_ports_are_not_treated_as_formal_names() {
+        assert!(!uses_named_external_port_associations(&[
+            "if sel ? a : b",
+            "y",
+        ]));
+    }
 
     fn parse_top_module(code: &str) -> veryl_analyzer::ir::Module {
         symbol_table::clear();

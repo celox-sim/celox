@@ -2881,6 +2881,8 @@ fn proof_node_signed(node: NodeId, arena: &SLTNodeArena<VarId>) -> bool {
         SLTNode::Binary(lhs, op, rhs) => match op {
             BinaryOp::Eq
             | BinaryOp::Ne
+            | BinaryOp::EqCase
+            | BinaryOp::NeCase
             | BinaryOp::EqWildcard
             | BinaryOp::NeWildcard
             | BinaryOp::LtU
@@ -3030,6 +3032,8 @@ fn specialized_binary_result_signed(
     match op {
         BinaryOp::Eq
         | BinaryOp::Ne
+        | BinaryOp::EqCase
+        | BinaryOp::NeCase
         | BinaryOp::EqWildcard
         | BinaryOp::NeWildcard
         | BinaryOp::LtU
@@ -3159,7 +3163,12 @@ fn specialize_binary_constant(
         BinaryOp::LtS | BinaryOp::LeS | BinaryOp::GtS | BinaryOp::GeS
     ) || matches!(
         op,
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard
+        BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::EqCase
+            | BinaryOp::NeCase
+            | BinaryOp::EqWildcard
+            | BinaryOp::NeWildcard
     ) && lhs.signed
         && rhs.signed;
     let extend_comparison = |operand: &SpecializedConstant| {
@@ -3230,8 +3239,12 @@ fn specialize_binary_constant(
             let shift = shift?;
             signed_to_bits(bits_to_signed(&lhs.value, lhs.width) >> shift, result_width)?
         }
-        BinaryOp::Eq | BinaryOp::EqWildcard => bool_value(comparison_lhs == comparison_rhs),
-        BinaryOp::Ne | BinaryOp::NeWildcard => bool_value(comparison_lhs != comparison_rhs),
+        BinaryOp::Eq | BinaryOp::EqCase | BinaryOp::EqWildcard => {
+            bool_value(comparison_lhs == comparison_rhs)
+        }
+        BinaryOp::Ne | BinaryOp::NeCase | BinaryOp::NeWildcard => {
+            bool_value(comparison_lhs != comparison_rhs)
+        }
         BinaryOp::LtU => bool_value(comparison_lhs < comparison_rhs),
         BinaryOp::LeU => bool_value(comparison_lhs <= comparison_rhs),
         BinaryOp::GtU => bool_value(comparison_lhs > comparison_rhs),
@@ -3263,6 +3276,8 @@ fn specialize_binary_constant(
             op,
             BinaryOp::Eq
                 | BinaryOp::Ne
+                | BinaryOp::EqCase
+                | BinaryOp::NeCase
                 | BinaryOp::EqWildcard
                 | BinaryOp::NeWildcard
                 | BinaryOp::LtU
@@ -5070,11 +5085,15 @@ mod tests {
         let signed_eq =
             specialize_binary_constant(BinaryOp::Eq, &signed_narrow, &signed_wide, 1, false)
                 .unwrap();
+        let signed_eq_case =
+            specialize_binary_constant(BinaryOp::EqCase, &signed_narrow, &signed_wide, 1, false)
+                .unwrap();
         let unsigned_eq =
             specialize_binary_constant(BinaryOp::Eq, &unsigned_narrow, &signed_wide, 1, false)
                 .unwrap();
 
         assert_eq!(signed_eq.value, BigUint::from(1u8));
+        assert_eq!(signed_eq_case.value, BigUint::from(1u8));
         assert_eq!(unsigned_eq.value, BigUint::from(0u8));
     }
 

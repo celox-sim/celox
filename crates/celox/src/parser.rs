@@ -287,6 +287,117 @@ fn verify_region_contract(
     Ok(())
 }
 
+fn finalize_scheduled_rtl(
+    mut scheduled: celox_frontend_veryl::ScheduledRtlOutput,
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    mut trace: Option<&mut crate::debug::CompilationTrace>,
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostics: &crate::RuntimeDiagnostics,
+    preserve_element_storage_layout: bool,
+    testbench_random_seed: Option<u64>,
+    component_libraries: Vec<celox_testbench::ComponentLibrary>,
+    component_file_base: Option<std::path::PathBuf>,
+) -> Result<crate::ir::OptimizedSir, ParserError> {
+    let phase_timing = diagnostics.phase_timing;
+    macro_rules! timed_phase {
+        ($label:expr, $body:expr) => {{
+            if phase_timing {
+                let start = crate::timing::now();
+                let result = $body;
+                tracing::debug!("[phase-timing] {}: {:?}", $label, start.elapsed());
+                result
+            } else {
+                $body
+            }
+        }};
+    }
+
+    apply_fused_optimization_hints(&mut scheduled.scheduled, scheduled.fused_optimization_hints)?;
+    scheduled.scheduled.inject_triggers();
+    let (sir, mut runtime, mut testbench_source) =
+        RuntimeProgram::from_scheduled(scheduled.scheduled);
+    testbench_source.component_libraries = component_libraries;
+    testbench_source.component_file_base = component_file_base;
+    crate::testbench_compile::project_observability(&mut runtime, &testbench_source)?;
+    runtime.testbench = crate::testbench_compile::compile_semantic_testbench(
+        &runtime,
+        &testbench_source,
+        testbench_random_seed,
+    )?;
+    dump_addr_map_if_requested(&runtime, diagnostics);
+    let mut program = UnoptimizedSir::new(sir, runtime);
+    if let Some(t) = trace.as_deref_mut()
+        && trace_opts.pre_optimized_sir
+    {
+        t.pre_optimized_sir = Some(program.clone());
+    }
+
+    timed_phase!(
+        "verify_sir_before_optimize",
+        verify_program_sir(&program.sir, &program.runtime, "before optimization")
+    )?;
+    timed_phase!("optimize", {
+        if preserve_element_storage_layout {
+            crate::optimizer::optimize_preserving_element_storage(
+                &mut program,
+                four_state,
+                optimize_options,
+            )
+        } else {
+            crate::optimizer::optimize(&mut program, four_state, optimize_options)
+        }
+    });
+    timed_phase!(
+        "verify_sir_after_optimize",
+        verify_program_sir(&program.sir, &program.runtime, "after optimization")
+    )?;
+
+    let program = program.into_optimized();
+    if let Some(t) = trace
+        && trace_opts.post_optimized_sir
+    {
+        t.post_optimized_sir = Some(program.clone());
+    }
+    Ok(program)
+}
+
+fn dynamic_for_diagnostics(
+    scheduled: &celox_frontend_veryl::ScheduledRtlOutput,
+    ir: &veryl_analyzer::ir::Ir,
+) -> Vec<celox_frontend_veryl::FrontendDiagnostic> {
+    scheduled
+        .scheduled
+        .frontend_lookup
+        .root_instance_and_module()
+        .and_then(|(_, module)| {
+            scheduled
+                .scheduled
+                .frontend_lookup
+                .module_names
+                .get(&module)
+                .copied()
+        })
+        .and_then(|root_module_name| {
+            ir.components.iter().find_map(|component| match component {
+                veryl_analyzer::ir::Component::Module(module)
+                    if module.name == root_module_name =>
+                {
+                    Some(module)
+                }
+                _ => None,
+            })
+        })
+        .map(|module| {
+            celox_frontend_veryl::check_elaborated_dynamic_for_bounds(
+                &scheduled.scheduled,
+                module,
+                &scheduled.fused_optimization_hints,
+            )
+        })
+        .unwrap_or_default()
+}
+
 pub fn parse(
     top: &StrId,
     ir: &veryl_analyzer::ir::Ir,
@@ -362,89 +473,211 @@ pub fn parse(
     if let Some(trace) = trace.as_deref_mut() {
         trace.absorb_frontend(frontend_trace);
     }
-    let mut scheduled = scheduled?;
-    let root_module_name = scheduled
-        .scheduled
-        .frontend_lookup
-        .root_instance_and_module()
-        .and_then(|(_, module)| {
-            scheduled
-                .scheduled
-                .frontend_lookup
-                .module_names
-                .get(&module)
-                .copied()
-        });
-    let dynamic_for_diagnostics = root_module_name
-        .and_then(|root_module_name| {
-            ir.components.iter().find_map(|component| match component {
-                veryl_analyzer::ir::Component::Module(module)
-                    if module.name == root_module_name =>
-                {
-                    Some(module)
-                }
-                _ => None,
-            })
-        })
-        .map(|module| {
-            celox_frontend_veryl::check_elaborated_dynamic_for_bounds(
-                &scheduled.scheduled,
-                module,
-                &scheduled.fused_optimization_hints,
-            )
-        })
-        .unwrap_or_default();
-    apply_fused_optimization_hints(&mut scheduled.scheduled, scheduled.fused_optimization_hints)?;
-    scheduled.scheduled.inject_triggers();
-    let scheduled = scheduled.scheduled;
-    let (sir, mut runtime, mut testbench_source) = RuntimeProgram::from_scheduled(scheduled);
-    testbench_source.component_libraries = component_libraries;
-    testbench_source.component_file_base = component_file_base;
-    crate::testbench_compile::project_observability(&mut runtime, &testbench_source)?;
-    runtime.testbench = crate::testbench_compile::compile_semantic_testbench(
-        &runtime,
-        &testbench_source,
+    let scheduled = scheduled?;
+    let dynamic_for_diagnostics = dynamic_for_diagnostics(&scheduled, ir);
+    let program = finalize_scheduled_rtl(
+        scheduled,
+        four_state,
+        trace_opts,
+        trace,
+        optimize_options,
+        diagnostics,
+        preserve_element_storage_layout,
         testbench_random_seed,
+        component_libraries,
+        component_file_base,
     )?;
-    dump_addr_map_if_requested(&runtime, diagnostics);
-    let mut program = UnoptimizedSir::new(sir, runtime);
-    if let Some(t) = trace.as_deref_mut()
-        && trace_opts.pre_optimized_sir
-    {
-        t.pre_optimized_sir = Some(program.clone());
-    }
-
-    timed_phase!(
-        "verify_sir_before_optimize",
-        verify_program_sir(&program.sir, &program.runtime, "before optimization")
-    )?;
-
-    // Always run the SIR pipeline so required canonicalization and explicit
-    // per-pass overrides are applied consistently. Concrete backend planning
-    // (including Cranelift function splitting) happens after this phase.
-    timed_phase!("optimize", {
-        if preserve_element_storage_layout {
-            crate::optimizer::optimize_preserving_element_storage(
-                &mut program,
-                four_state,
-                optimize_options,
-            )
-        } else {
-            crate::optimizer::optimize(&mut program, four_state, optimize_options)
-        }
-    });
-    timed_phase!(
-        "verify_sir_after_optimize",
-        verify_program_sir(&program.sir, &program.runtime, "after optimization")
-    )?;
-
-    let program = program.into_optimized();
-
-    if let Some(t) = trace
-        && trace_opts.post_optimized_sir
-    {
-        t.post_optimized_sir = Some(program.clone());
-    }
-
     Ok((program, dynamic_for_diagnostics))
+}
+
+#[cfg(feature = "systemverilog")]
+pub fn parse_sv(
+    sources: &[(&str, &std::path::Path)],
+    top: &str,
+    parameter_overrides: &[(String, u64)],
+    config: &BuildConfig,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    mut trace: Option<&mut crate::debug::CompilationTrace>,
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostics: &crate::RuntimeDiagnostics,
+    preserve_element_storage_layout: bool,
+    testbench_random_seed: Option<u64>,
+    component_libraries: Vec<celox_testbench::ComponentLibrary>,
+    component_file_base: Option<std::path::PathBuf>,
+) -> Result<crate::ir::OptimizedSir, ParserError> {
+    let frontend_trace_options = trace_opts.frontend(diagnostics);
+    let mut frontend_trace = celox_frontend_veryl::FrontendTrace::default();
+    let scheduled = crate::frontend_sv::schedule_sources(
+        sources,
+        top,
+        parameter_overrides,
+        config,
+        ignored_loops,
+        true_loops,
+        four_state,
+        &frontend_trace_options,
+        trace.is_some().then_some(&mut frontend_trace),
+    )
+    .map_err(|error| match error {
+        crate::frontend_sv::FrontendError::Lowering(error) => error,
+        crate::frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
+            64,
+            celox_frontend_veryl::LoweringPhase::SimulatorParser,
+            "systemverilog analysis",
+            error.to_string(),
+            None,
+        ),
+    })?;
+    if let Some(trace) = trace.as_deref_mut() {
+        trace.absorb_frontend(frontend_trace);
+    }
+    finalize_scheduled_rtl(
+        scheduled,
+        four_state,
+        trace_opts,
+        trace,
+        optimize_options,
+        diagnostics,
+        preserve_element_storage_layout,
+        testbench_random_seed,
+        component_libraries,
+        component_file_base,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(feature = "systemverilog")]
+pub fn parse_mixed(
+    top: &StrId,
+    ir: &veryl_analyzer::ir::Ir,
+    loop_provenance: &loop_provenance::LoopProvenance,
+    sv_sources: &[(&str, &std::path::Path)],
+    config: &BuildConfig,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    mut trace: Option<&mut crate::debug::CompilationTrace>,
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostics: &crate::RuntimeDiagnostics,
+    preserve_element_storage_layout: bool,
+    testbench_random_seed: Option<u64>,
+    component_libraries: Vec<celox_testbench::ComponentLibrary>,
+    component_file_base: Option<std::path::PathBuf>,
+) -> Result<
+    (
+        crate::ir::OptimizedSir,
+        Vec<celox_frontend_veryl::FrontendDiagnostic>,
+    ),
+    ParserError,
+> {
+    let external_roots = reachable_external_sv_roots(ir, top);
+    let external =
+        crate::frontend_sv::prepare_external_hierarchy(sv_sources, &external_roots, four_state)
+            .map_err(|error| match error {
+                crate::frontend_sv::FrontendError::Lowering(error) => error,
+                crate::frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
+                    64,
+                    celox_frontend_veryl::LoweringPhase::SimulatorParser,
+                    "systemverilog analysis",
+                    error.to_string(),
+                    None,
+                ),
+            })?;
+    let symbolic = celox_frontend_veryl::parse_ir_with_external_hierarchy(
+        ir,
+        loop_provenance,
+        &external,
+        config,
+        top,
+    )?;
+    if let Some(trace) = trace.as_deref_mut()
+        && trace_opts.analyzer_ir
+    {
+        trace.analyzer_ir = Some(ir.to_string());
+    }
+    let frontend_trace_options = trace_opts.frontend(diagnostics);
+    let mut frontend_trace = celox_frontend_veryl::FrontendTrace::default();
+    let scheduled = celox_frontend_veryl::schedule_symbolic_rtl(
+        symbolic,
+        config,
+        ignored_loops,
+        true_loops,
+        four_state,
+        &frontend_trace_options,
+        trace.is_some().then_some(&mut frontend_trace),
+    )?;
+    if let Some(trace) = trace.as_deref_mut() {
+        trace.absorb_frontend(frontend_trace);
+    }
+    let dynamic_for_diagnostics = dynamic_for_diagnostics(&scheduled, ir);
+    let program = finalize_scheduled_rtl(
+        scheduled,
+        four_state,
+        trace_opts,
+        trace,
+        optimize_options,
+        diagnostics,
+        preserve_element_storage_layout,
+        testbench_random_seed,
+        component_libraries,
+        component_file_base,
+    )?;
+    Ok((program, dynamic_for_diagnostics))
+}
+
+#[cfg(feature = "systemverilog")]
+fn reachable_external_sv_roots(ir: &veryl_analyzer::ir::Ir, top: &StrId) -> HashSet<StrId> {
+    use veryl_analyzer::ir::{Component, Declaration};
+
+    let Some(root) = ir
+        .components
+        .iter()
+        .rev()
+        .find_map(|component| match component {
+            Component::Module(module) if module.name == *top => Some(module),
+            _ => None,
+        })
+    else {
+        return HashSet::default();
+    };
+
+    let mut roots = HashSet::default();
+    let mut visited = HashSet::default();
+    let mut queue = vec![root];
+    while let Some(module) = queue.pop() {
+        if !visited.insert(std::ptr::from_ref(module) as usize) {
+            continue;
+        }
+        for declaration in &module.declarations {
+            let Declaration::Inst(instance) = declaration else {
+                continue;
+            };
+            match instance.component.as_ref() {
+                Component::SystemVerilog(system_verilog) => {
+                    roots.insert(system_verilog.name);
+                }
+                Component::Module(child) => queue.push(child),
+                Component::Interface(_) => {}
+            }
+        }
+    }
+    roots
 }

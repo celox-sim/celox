@@ -14,6 +14,7 @@ members = [
     "crates/celox-sir-opt",
     "crates/celox-slt",
     "crates/celox-state-layout",
+    "crates/celox-sv-analyzer",
     "crates/celox-runtime",
     "crates/celox-testbench",
     "crates/celox-bench-sv",
@@ -46,6 +47,7 @@ veryl-parser   = { version = "0.20.3", default-features = false }
 veryl-path      = "0.20.3"
 veryl-simulator = "0.20.3"
 veryl-std       = "0.20.3"
+sv-parser       = "0.13.5"
 
 bit-set         = "0.11"
 clap            = { version = "4.5.60", features = ["derive"] }

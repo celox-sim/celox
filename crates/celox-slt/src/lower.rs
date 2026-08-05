@@ -2558,6 +2558,8 @@ impl SLTToSIRLowerer {
                     op,
                     BinaryOp::Eq
                         | BinaryOp::Ne
+                        | BinaryOp::EqCase
+                        | BinaryOp::NeCase
                         | BinaryOp::LtU
                         | BinaryOp::LtS
                         | BinaryOp::LeU
@@ -2578,7 +2580,12 @@ impl SLTToSIRLowerer {
                         BinaryOp::LtS | BinaryOp::LeS | BinaryOp::GtS | BinaryOp::GeS
                     ) || matches!(
                         op,
-                        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard
+                        BinaryOp::Eq
+                            | BinaryOp::Ne
+                            | BinaryOp::EqCase
+                            | BinaryOp::NeCase
+                            | BinaryOp::EqWildcard
+                            | BinaryOp::NeWildcard
                     ) && self.get_bound_signed(*lhs, arena)
                         && self.get_bound_signed(*rhs, arena);
                     l = self.cast_reg_width_ext(builder, l, operand_width, signed);
@@ -3120,6 +3127,8 @@ impl SLTToSIRLowerer {
             SLTNode::Binary(lhs, op, rhs) => match op {
                 BinaryOp::Eq
                 | BinaryOp::Ne
+                | BinaryOp::EqCase
+                | BinaryOp::NeCase
                 | BinaryOp::LtU
                 | BinaryOp::LtS
                 | BinaryOp::LeU
@@ -3472,6 +3481,8 @@ impl SLTToSIRLowerer {
                         BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => lhs,
                         BinaryOp::Eq
                         | BinaryOp::Ne
+                        | BinaryOp::EqCase
+                        | BinaryOp::NeCase
                         | BinaryOp::EqWildcard
                         | BinaryOp::NeWildcard
                         | BinaryOp::LtU
@@ -4009,6 +4020,8 @@ impl SLTToSIRLowerer {
             BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar => 4 * chunks,
             BinaryOp::Eq
             | BinaryOp::Ne
+            | BinaryOp::EqCase
+            | BinaryOp::NeCase
             | BinaryOp::EqWildcard
             | BinaryOp::NeWildcard
             | BinaryOp::LtU

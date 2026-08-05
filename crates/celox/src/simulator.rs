@@ -4,6 +4,8 @@ mod error;
 pub use builder::compile_to_sir;
 #[cfg(feature = "host-runtime")]
 pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions};
+#[cfg(feature = "systemverilog")]
+pub use builder::{compile_mixed_to_sir, compile_sv_to_sir};
 pub use error::render_diagnostic;
 pub use error::{CodegenError, CompilationWarning, SimulatorError, SimulatorErrorKind};
 
@@ -565,10 +567,11 @@ mod host {
                         let (current_value, current_mask) = self.backend.get_four_state(signal);
                         let value = (current_value & &preserve_mask) | (value & written_mask);
                         let mask = (current_mask & &preserve_mask) | (mask & written_mask);
-                        if signal.is_4state {
+                        if self.backend.layout().four_state && signal.is_4state {
                             self.backend.set_four_state(signal, value, mask);
                         } else {
-                            self.backend.set_wide(signal, value);
+                            let known_mask = &width_mask ^ (&mask & &width_mask);
+                            self.backend.set_wide(signal, value & known_mask);
                         }
                     }
                     InitialMemoryData::Writes(runs) => {
@@ -1437,6 +1440,25 @@ mod host {
             top: &'a str,
         ) -> SimulatorBuilder<'a, Simulator> {
             SimulatorBuilder::<Simulator>::from_sources(sources, top)
+        }
+
+        /// Build a simulator directly from SystemVerilog sources.
+        #[cfg(feature = "systemverilog")]
+        pub fn from_sv_sources<'a>(
+            sources: Vec<(&'a str, &'a std::path::Path)>,
+            top: &'a str,
+        ) -> SimulatorBuilder<'a, Simulator> {
+            SimulatorBuilder::<Simulator>::from_sv_sources(sources, top)
+        }
+
+        /// Build a simulator from a Veryl hierarchy with SystemVerilog children.
+        #[cfg(feature = "systemverilog")]
+        pub fn from_mixed_sources<'a>(
+            sources: Vec<(&'a str, &'a std::path::Path)>,
+            sv_sources: Vec<(&'a str, &'a std::path::Path)>,
+            top: &'a str,
+        ) -> SimulatorBuilder<'a, Simulator> {
+            SimulatorBuilder::<Simulator>::from_mixed_sources(sources, sv_sources, top)
         }
     }
 
