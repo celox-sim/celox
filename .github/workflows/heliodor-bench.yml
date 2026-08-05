@@ -202,7 +202,7 @@ jobs:
     name: ARM64 Linux boot
     needs: arm64-changes
     if: >-
-      always() &&
+      !cancelled() &&
       github.event_name != 'schedule' &&
       (github.event_name != 'pull_request' ||
       needs.arm64-changes.result != 'success' ||
