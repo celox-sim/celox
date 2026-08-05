@@ -3,7 +3,8 @@ name = "celox_vip_registry_test"
 version = "0.1.0"
 
 [build]
-# VIP 0.1.0 handles a high ResetPort value as asserted.
+# VIP 0.1.0 hard-codes a raw ResetPort value of 1 as asserted. Veryl's
+# async_low default would therefore hold the VIP in reset after deassertion.
 reset_type = "async_high"
 
 [dependencies]
