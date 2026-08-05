@@ -25,6 +25,7 @@ cat >"$TMP/arm64-results.tsv" <<'EOF'
 runner	test	status	elapsed_ns	log	semantic_status	exit_status	process_elapsed_ns	reported_elapsed_ns	compile_elapsed_ns	execute_elapsed_ns	jit_execute_elapsed_ns
 celox	test_soc_linux_boot	0	1150	arm64.log	pass	0	1150	1100	7000000	8000000	7500000
 celox-cranelift	test_soc_linux_boot	0	1350	cranelift-arm64.log	pass	0	1350	1300	9000000	10000000	NA
+veryl-cc-sync	test_soc_linux_boot	0	1550	veryl-arm64.log	pass	0	1550	1500	11000000	12000000	NA
 EOF
 
 node "$ROOT/scripts/convert-heliodor-bench.mjs" \
@@ -49,16 +50,20 @@ if (values.length !== 1 || values[0].name !== "heliodor-celox-jit/heliodor_linux
 node -e '
 const fs = require("fs");
 const values = Object.fromEntries(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).map((x) => [x.name, x.value]));
-if (Object.keys(values).length !== 13) process.exit(1);
+if (Object.keys(values).length !== 17) process.exit(1);
 const expected = {
   "heliodor-native-x86_64/heliodor_linux_boot_compilation": 1,
   "heliodor-native-x86_64/heliodor_linux_boot_execution": 2.5,
   "heliodor-cranelift-x86_64/heliodor_linux_boot_compilation": 5,
   "heliodor-cranelift-x86_64/heliodor_linux_boot_execution": 6,
+  "heliodor-veryl-cc-x86_64/heliodor_linux_boot_compilation": 3,
+  "heliodor-veryl-cc-x86_64/heliodor_linux_boot_execution": 4,
   "heliodor-native-aarch64/heliodor_linux_boot_compilation": 7,
   "heliodor-native-aarch64/heliodor_linux_boot_execution": 8,
   "heliodor-cranelift-aarch64/heliodor_linux_boot_compilation": 9,
   "heliodor-cranelift-aarch64/heliodor_linux_boot_execution": 10,
+  "heliodor-veryl-cc-aarch64/heliodor_linux_boot_compilation": 11,
+  "heliodor-veryl-cc-aarch64/heliodor_linux_boot_execution": 12,
 };
 for (const [name, value] of Object.entries(expected)) {
   if (values[name] !== value) process.exit(1);
