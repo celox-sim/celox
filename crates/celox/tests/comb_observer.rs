@@ -4489,7 +4489,6 @@ module Top (sel: input logic, a: input logic<8>, out: output logic<8>) {
 
 fn test_comb_function_loop_bounds_apply_output_effects_left_to_right(sim) {
     @omit_veryl;
-    @ignore_on(wasm);
     @build Simulator::builder(r#"
 module Top (value: input logic<4>, out: output logic<8>) {
     function start_bound (x: input logic<4>, seen: output logic<8>) -> logic<4> {
@@ -4519,7 +4518,6 @@ module Top (value: input logic<4>, out: output logic<8>) {
 
 fn test_comb_function_loop_skips_conditions_after_break(sim) {
     @omit_veryl;
-    @ignore_on(wasm);
     @build Simulator::builder(r#"
 module Top (
     stop: input logic,
