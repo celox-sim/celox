@@ -5,7 +5,8 @@ import type { TestbenchComponentManifests } from "./types.js";
 
 export const TESTBENCH_COMPONENT_SIDECAR = join(
 	".celox",
-	"testbench-components.manifest.json",
+	"testbench-components",
+	"veryl.manifest.json",
 );
 
 /** Load a TypeScript component module through Vite's own transform pipeline. */
@@ -53,7 +54,10 @@ export async function loadTestbenchComponentModule(
 	}
 }
 
-/** Write an aggregated, deterministic manifest sidecar under `.celox/`. */
+/**
+ * Write an aggregated, deterministic manifest where Veryl's existing
+ * `[[components]]` discovery can consume it as a committed manifest.
+ */
 export function writeTestbenchComponentSidecar(
 	projectRoot: string,
 	modulePath: string,

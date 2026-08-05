@@ -85,12 +85,27 @@ export default defineConfig({
 });
 ```
 
-The plugin loads the module through Vite, writes the extracted manifests to
-`.celox/testbench-components.manifest.json`, supplies them during type
-generation, and imports the original module in generated Vitest cases. Veryl
-can then declare `var model: $comp::store;`. This path is available to native
-Node/Vitest execution; browser Wasm simulation does not currently support
-synchronous JavaScript component callbacks.
+Register the generated manifest directory as a normal Veryl component source:
+
+```toml
+# Veryl.toml
+[[components]]
+path = ".celox/testbench-components"
+```
+
+The plugin loads the module through Vite and writes the extracted interfaces to
+`.celox/testbench-components/veryl.manifest.json`. Veryl's existing component
+discovery then makes the definitions visible to the compiler and language
+server, including method arguments and return types. No Rust or Wasm artifact
+is generated. The plugin also supplies the interfaces during TypeScript type
+generation and imports the original module in generated Vitest cases. Veryl can
+then declare `var model: $comp::store;`.
+
+Generate the manifest at least once before opening or reloading the Veryl
+project in an editor. If the language server does not notice a subsequent
+manifest update, reload its workspace. Runtime callbacks are available to
+native Node/Vitest execution; browser Wasm simulation does not currently
+support synchronous JavaScript component callbacks.
 
 ### tsconfig.json
 
@@ -118,8 +133,10 @@ my-project/
 ├── src/
 │   └── Counter.veryl          # Veryl source
 ├── .celox/
-│   └── src/
-│       └── Counter.d.veryl.ts # Generated type definition
+│   ├── src/
+│   │   └── Counter.d.veryl.ts # Generated type definition
+│   └── testbench-components/
+│       └── veryl.manifest.json    # Generated component interfaces
 └── vitest.config.ts
 ```
 

@@ -85,11 +85,25 @@ export default defineConfig({
 });
 ```
 
-プラグインはVite経由でmoduleを読み込み、抽出したmanifestを
-`.celox/testbench-components.manifest.json` に生成します。そのmanifestを型生成へ渡し、
-生成するVitest caseから元のmoduleをimportします。Veryl側では
-`var model: $comp::store;` と宣言できます。この経路はnative Node/Vitest向けです。
-ブラウザWasmシミュレーションは同期JavaScript callbackに未対応です。
+生成されるmanifest directoryを、通常のVeryl component sourceとして登録します：
+
+```toml
+# Veryl.toml
+[[components]]
+path = ".celox/testbench-components"
+```
+
+プラグインはVite経由でmoduleを読み込み、抽出したinterfaceを
+`.celox/testbench-components/veryl.manifest.json` に生成します。Verylの既存の
+component discoveryにより、methodの引数や戻り値も含めてcompilerとLSPから
+認識されます。Rust/Wasm artifactは生成しません。そのmanifestはTypeScript型生成にも
+渡され、生成するVitest caseから元のmoduleをimportします。Veryl側では
+`var model: $comp::store;` と宣言できます。
+
+エディタでVeryl projectを開くかreloadする前に、少なくとも1回manifestを生成して
+ください。以後のmanifest更新をLSPが検知しない場合はworkspaceをreloadします。
+runtime callbackはnative Node/Vitest向けです。ブラウザWasmシミュレーションは
+同期JavaScript callbackに未対応です。
 
 ### tsconfig.json
 
@@ -117,8 +131,10 @@ my-project/
 ├── src/
 │   └── Counter.veryl          # Veryl ソース
 ├── .celox/
-│   └── src/
-│       └── Counter.d.veryl.ts # 生成された型定義
+│   ├── src/
+│   │   └── Counter.d.veryl.ts # 生成された型定義
+│   └── testbench-components/
+│       └── veryl.manifest.json    # 生成されたcomponent interface
 └── vitest.config.ts
 ```
 
