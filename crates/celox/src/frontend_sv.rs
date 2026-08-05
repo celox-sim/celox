@@ -1227,6 +1227,16 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
                 expr_for_state_mode(else_expr, four_state)
             }
         }
+        sv::ir::Expr::Literal(literal) if !four_state && expr_is_unknown_literal(expr) => {
+            if unbased_fill_literal(literal).is_some() {
+                sv::ir::Expr::Literal("'0".to_string())
+            } else {
+                sv::ir::Expr::Unary {
+                    op: sv::ir::UnaryOp::ToTwoState,
+                    expr: Box::new(expr.clone()),
+                }
+            }
+        }
         sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => expr.clone(),
         sv::ir::Expr::Select { expr, msb, lsb } => sv::ir::Expr::Select {
             expr: Box::new(expr_for_state_mode(expr, four_state)),

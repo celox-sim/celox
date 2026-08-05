@@ -126,9 +126,16 @@ fn external_port_formal_names(decl: &InstDeclaration) -> Result<(bool, Vec<Strin
 }
 
 fn uses_named_external_port_associations(items: &[&str]) -> bool {
-    items
-        .iter()
-        .any(|item| find_top_level_connection_colon(item).is_some())
+    items.iter().any(|item| {
+        let Some(colon) = find_top_level_connection_colon(item) else {
+            return false;
+        };
+        let formal = item[..colon].trim();
+        !formal.is_empty()
+            && formal
+                .chars()
+                .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    })
 }
 
 fn last_outer_parenthesized(text: &str) -> Option<&str> {
@@ -3023,6 +3030,14 @@ mod tests {
     #[test]
     fn selected_positional_external_ports_are_not_treated_as_formal_names() {
         assert!(!uses_named_external_port_associations(&["a[7:0]", "y"]));
+    }
+
+    #[test]
+    fn positional_ternary_external_ports_are_not_treated_as_formal_names() {
+        assert!(!uses_named_external_port_associations(&[
+            "if sel ? a : b",
+            "y",
+        ]));
     }
 
     fn parse_top_module(code: &str) -> veryl_analyzer::ir::Module {

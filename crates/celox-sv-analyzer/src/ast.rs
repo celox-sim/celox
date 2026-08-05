@@ -148,7 +148,6 @@ impl Module {
     ) -> Result<Self, AnalyzerError> {
         let node = node.into();
         let name = module_name_from_node(node.clone(), syntax_tree)?;
-        reject_silently_ignored_constructs(node.clone(), syntax_tree)?;
         let mut parameters = parameters_from_module_node(node.clone(), syntax_tree)?;
         let mut parameter_names = HashSet::new();
         if let Some(parameter) = parameters
@@ -163,6 +162,8 @@ impl Module {
         if name == override_module_name {
             apply_parameter_overrides(&mut parameters, parameter_overrides)?;
         }
+        let const_env = const_env_from_parameters(&parameters);
+        reject_silently_ignored_constructs(node.clone(), syntax_tree, &const_env)?;
         let ports = ports_from_module_node(node.clone(), syntax_tree)?;
         let mut port_names = HashSet::new();
         if let Some(port) = ports.iter().find(|port| !port_names.insert(port.name())) {
@@ -177,7 +178,6 @@ impl Module {
         {
             return Err(AnalyzerError::Unsupported("ref port direction".to_string()));
         }
-        let const_env = const_env_from_parameters(&parameters);
         let signals = signals_from_module_node(node.clone(), syntax_tree, &const_env)?;
         if let Some(parameter) = parameters.iter().find(|parameter| {
             ports.iter().any(|port| port.name() == parameter.name())
@@ -394,7 +394,9 @@ fn reject_unsupported_multidimensional_packed_bounds(
 fn reject_silently_ignored_constructs(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
 ) -> Result<(), AnalyzerError> {
+    let inactive_nodes = inactive_conditional_generate_nodes(node.clone(), syntax_tree, const_env);
     let has_leaking_conditional_generate_local =
         conditional_generate_has_leaking_local(node.clone(), syntax_tree);
     reject_duplicate_conditional_generate_locals(node.clone(), syntax_tree)?;
@@ -408,6 +410,9 @@ fn reject_silently_ignored_constructs(
         ));
     }
     for child in node {
+        if inactive_nodes.iter().any(|inactive| inactive == &child) {
+            continue;
+        }
         match child {
             RefNode::AnsiPortDeclarationVariable(port)
                 if RefNode::AnsiPortDeclarationVariable(port)
@@ -628,6 +633,16 @@ fn reject_silently_ignored_constructs(
             RefNode::Cast(_) | RefNode::ConstantCast(_) => {
                 return Err(AnalyzerError::Unsupported("cast expression".to_string()));
             }
+            RefNode::ConstantFunctionCall(call)
+                if matches!(
+                    &call.nodes.0.nodes.0,
+                    sv_parser::SubroutineCall::TfCall(call) if call.nodes.2.is_some()
+                ) =>
+            {
+                return Err(AnalyzerError::Unsupported(
+                    "user constant function call".to_string(),
+                ));
+            }
             RefNode::NamedPortConnectionAsterisk(_) => {
                 return Err(AnalyzerError::Unsupported(
                     "wildcard port connection".to_string(),
@@ -775,6 +790,40 @@ fn reject_silently_ignored_constructs(
         }
     }
     Ok(())
+}
+
+fn inactive_conditional_generate_nodes<'a>(
+    node: RefNode<'a>,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+) -> Vec<RefNode<'a>> {
+    let mut inactive = Vec::new();
+    for child in node {
+        let RefNode::ConditionalGenerateConstruct(sv_parser::ConditionalGenerateConstruct::If(
+            generate,
+        )) = child
+        else {
+            continue;
+        };
+        let Some(condition) = const_expr_from_ref_node(
+            RefNode::ConstantExpression(&generate.nodes.1.nodes.1),
+            syntax_tree,
+        ) else {
+            continue;
+        };
+        let Some(condition) = eval_ast_const_expr(&condition, const_env) else {
+            continue;
+        };
+        let inactive_block = if condition != 0 {
+            generate.nodes.3.as_ref().map(|(_, block)| block)
+        } else {
+            Some(&generate.nodes.2)
+        };
+        if let Some(block) = inactive_block {
+            inactive.extend(RefNode::GenerateBlock(block));
+        }
+    }
+    inactive
 }
 
 fn blocking_assignment_has_non_plain_lvalue(assignment: &sv_parser::BlockingAssignment) -> bool {
@@ -3145,13 +3194,12 @@ fn functions_from_module_node(
 ) -> Result<HashMap<String, Function>, AnalyzerError> {
     let mut functions = HashMap::new();
     let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
-    for item in module_non_port_items(node) {
-        let Some(declaration) = package_or_generate_declaration_from_non_port_item(item) else {
+    let inactive_nodes = inactive_conditional_generate_nodes(node.clone(), syntax_tree, const_env);
+    for child in node {
+        if inactive_nodes.iter().any(|inactive| inactive == &child) {
             continue;
-        };
-        let sv_parser::PackageOrGenerateItemDeclaration::FunctionDeclaration(declaration) =
-            declaration
-        else {
+        }
+        let RefNode::FunctionDeclaration(declaration) = child else {
             continue;
         };
         validate_function_return_type(declaration, syntax_tree, const_env, &type_aliases)?;
@@ -7403,6 +7451,12 @@ fn const_expr_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opti
             }
             sv_parser::ConstantPrimary::ConstantFunctionCall(call) => {
                 const_expr_from_function_subroutine_call(&call.nodes.0, syntax_tree).or_else(|| {
+                    let sv_parser::SubroutineCall::TfCall(tf_call) = &call.nodes.0.nodes.0 else {
+                        return None;
+                    };
+                    if tf_call.nodes.2.is_some() {
+                        return None;
+                    }
                     let identifier = unwrap_node!(
                         RefNode::ConstantFunctionCall(call),
                         SimpleIdentifier,

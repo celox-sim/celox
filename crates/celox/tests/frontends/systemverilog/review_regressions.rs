@@ -3410,3 +3410,68 @@ fn rejects_duplicate_named_external_port_associations() {
         "{error}"
     );
 }
+
+#[test]
+fn skips_validation_in_disabled_generate_branches() {
+    let source = r#"
+        module Top #(parameter USE_INITIAL = 0) (output logic y);
+            if (USE_INITIAL) begin : disabled
+                initial y = 1'b0;
+            end else begin : enabled
+                assign y = 1'b1;
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("disabled_generate.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn honors_functions_from_selected_generate_branches() {
+    let source = r#"
+        module Top(output logic y);
+            if (1) begin : selected
+                function automatic logic value();
+                    return 1'b1;
+                endfunction
+                assign y = value();
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("generate_function.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn collapses_nested_unknown_literals_in_two_state_mode() {
+    let source = r#"
+        module Top(output logic [1:0] y);
+            assign y = {1'bx, 1'b0};
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("nested_unknown_literal.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0u8.into());
+}
+
+#[test]
+fn rejects_user_constant_function_calls() {
+    let source = r#"
+        module Top(input logic F, output logic y);
+            parameter P = F(0);
+            assign y = P;
+        endmodule
+    "#;
+    let error = cranelift_build_error(source);
+    assert!(error.contains("user constant function call"), "{error}");
+}
