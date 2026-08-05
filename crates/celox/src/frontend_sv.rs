@@ -755,7 +755,7 @@ fn specialize_module(
     key: &LoweredSvModuleKey,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let overrides = evaluated_parameter_overrides(&key.parameter_overrides)?;
-    let ir = sv::analyze_source_module_with_parameter_overrides(
+    let ir = sv::analyze_source_module_with_parameter_expr_overrides(
         &module.source_code,
         &module.source_path,
         &module.name,
@@ -886,30 +886,6 @@ fn lower_module_with_overrides(
         variables.insert(id, variable);
     }
 
-    let mut arena = SLTNodeArena::new();
-    let mut comb_blocks = Vec::new();
-    for process in module.comb_processes() {
-        if let Some(condition) = process.condition() {
-            let condition =
-                sv::typecheck::eval_const_expr_with_types(condition, &constants, &parameter_types)
-                    .ok_or_else(|| {
-                        sv::AnalyzerError::Unsupported(
-                            "unknown conditional-generate condition".to_string(),
-                        )
-                    })?;
-            if condition == 0 {
-                continue;
-            }
-        }
-        comb_blocks.extend(lower_comb_process(
-            process,
-            &variables,
-            &name_to_id,
-            &constants,
-            &parameter_types,
-            &mut arena,
-        )?);
-    }
     let (eval_only_ff_blocks, apply_ff_blocks, eval_apply_ff_blocks, reset_clock_map) =
         lower_ff_processes(
             module,
@@ -964,13 +940,13 @@ fn lower_module_with_overrides(
             apply_ff_blocks,
             eval_apply_ff_blocks,
             glue_blocks: HashMap::default(),
-            comb_blocks,
+            comb_blocks: Vec::new(),
             comb_observers: Vec::<CombObserver<VarId>>::new(),
             runtime_errors: HashMap::<i64, RuntimeErrorInfo<VarId>>::default(),
             runtime_event_sites: Vec::new(),
             initial_memory_values,
             comb_boundaries: HashMap::default(),
-            arena,
+            arena: SLTNodeArena::new(),
             store: SymbolicStore::default(),
             reset_clock_map,
         },
@@ -1024,20 +1000,20 @@ fn mark_ff_event_domains(
 
 fn evaluated_parameter_overrides(
     parameter_overrides: &[LoweredSvParameterOverride],
-) -> Result<std::collections::HashMap<String, i128>, sv::AnalyzerError> {
+) -> Result<std::collections::HashMap<String, sv::ir::ConstExpr>, sv::AnalyzerError> {
     let constants = std::collections::HashMap::new();
     let mut evaluated = std::collections::HashMap::new();
     for parameter in parameter_overrides {
         let Some(value) = parameter.value.as_ref() else {
             continue;
         };
-        let value = sv::typecheck::eval_const_expr(value, &constants).ok_or_else(|| {
+        sv::typecheck::eval_const_expr(value, &constants).ok_or_else(|| {
             sv::AnalyzerError::Unsupported(format!(
                 "non-integer module parameter override `{}`",
                 parameter.name
             ))
         })?;
-        evaluated.insert(parameter.name.clone(), value);
+        evaluated.insert(parameter.name.clone(), value.clone());
     }
     Ok(evaluated)
 }
@@ -1051,19 +1027,47 @@ fn lower_parameter_overrides(
         .parameter_overrides()
         .iter()
         .map(|parameter| {
-            let value = parameter
-                .value()
-                .and_then(|value| {
-                    sv::typecheck::eval_const_expr_with_types(value, constants, parameter_types)
-                })
-                .map(const_expr_from_i128)
-                .or_else(|| parameter.value().cloned());
+            let value = parameter.value().cloned().map(|value| {
+                if const_expr_references_identifier(&value) {
+                    sv::typecheck::eval_const_expr_with_types(&value, constants, parameter_types)
+                        .map(const_expr_from_i128)
+                        .unwrap_or(value)
+                } else {
+                    value
+                }
+            });
             LoweredSvParameterOverride {
                 name: parameter.name().to_string(),
                 value,
             }
         })
         .collect()
+}
+
+fn const_expr_references_identifier(expr: &sv::ir::ConstExpr) -> bool {
+    match expr {
+        sv::ir::ConstExpr::Ident(_) => true,
+        sv::ir::ConstExpr::Literal(_) => false,
+        sv::ir::ConstExpr::Select { expr, bit } => {
+            const_expr_references_identifier(expr) || const_expr_references_identifier(bit)
+        }
+        sv::ir::ConstExpr::Function { args, .. } => {
+            args.iter().any(const_expr_references_identifier)
+        }
+        sv::ir::ConstExpr::Unary { expr, .. } => const_expr_references_identifier(expr),
+        sv::ir::ConstExpr::Binary { left, right, .. } => {
+            const_expr_references_identifier(left) || const_expr_references_identifier(right)
+        }
+        sv::ir::ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            const_expr_references_identifier(condition)
+                || const_expr_references_identifier(then_expr)
+                || const_expr_references_identifier(else_expr)
+        }
+    }
 }
 
 fn const_expr_from_i128(value: i128) -> sv::ir::ConstExpr {
@@ -1130,6 +1134,24 @@ pub(crate) fn attach_instance_glue(
         )?;
         resolved_instances.push((instance, child_id, child));
     }
+    let (comb_blocks, arena) = lower_comb_processes(
+        &lowered.source,
+        &parent_variables,
+        &signal_names,
+        &lowered.constants,
+        &lowered.parameter_types,
+    )
+    .map_err(|error| {
+        ParserError::unsupported(
+            64,
+            LoweringPhase::SimulatorParser,
+            "systemverilog combinational process lowering",
+            error.to_string(),
+            None,
+        )
+    })?;
+    module.comb_blocks = comb_blocks;
+    module.arena = arena;
     for (instance, child_id, child) in resolved_instances {
         let glue = build_instance_glue(
             &parent_variables,
@@ -1151,6 +1173,40 @@ pub(crate) fn attach_instance_glue(
             });
     }
     Ok(())
+}
+
+fn lower_comb_processes(
+    module: &sv::ir::Module,
+    variables: &HashMap<VarId, SvVariable>,
+    name_to_id: &HashMap<String, VarId>,
+    constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Result<(Vec<LogicPath<VarId>>, SLTNodeArena<VarId>), sv::AnalyzerError> {
+    let mut arena = SLTNodeArena::new();
+    let mut comb_blocks = Vec::new();
+    for process in module.comb_processes() {
+        if let Some(condition) = process.condition() {
+            let condition =
+                sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)
+                    .ok_or_else(|| {
+                        sv::AnalyzerError::Unsupported(
+                            "unknown conditional-generate condition".to_string(),
+                        )
+                    })?;
+            if condition == 0 {
+                continue;
+            }
+        }
+        comb_blocks.extend(lower_comb_process(
+            process,
+            variables,
+            name_to_id,
+            constants,
+            parameter_types,
+            &mut arena,
+        )?);
+    }
+    Ok((comb_blocks, arena))
 }
 
 fn ensure_parent_output_signals(
@@ -1838,7 +1894,73 @@ fn lower_glue_parent_expr(
                 source_ids,
             ))
         }
-        sv::ir::Expr::Mux { .. } | sv::ir::Expr::Call { .. } => None,
+        sv::ir::Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            let arms_signed =
+                sv_glue_expr_is_signed(then_expr, variables, name_to_id, parameter_types)
+                    && sv_glue_expr_is_signed(else_expr, variables, name_to_id, parameter_types);
+            let arm_context =
+                sv_expr_natural_width(expr, variables, name_to_id, constants, parameter_types)
+                    .map(|natural_width| {
+                        context_width.map_or(natural_width, |width| width.max(natural_width))
+                    })
+                    .or(context_width);
+            let (condition, mut sources, mut source_ids) = lower_glue_parent_expr(
+                condition,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                arena,
+                None,
+                None,
+            )?;
+            let (mut then_expr, then_sources, then_source_ids) = lower_glue_parent_expr(
+                then_expr,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                arena,
+                arm_context,
+                Some(arms_signed),
+            )?;
+            let (mut else_expr, else_sources, else_source_ids) = lower_glue_parent_expr(
+                else_expr,
+                variables,
+                name_to_id,
+                constants,
+                parameter_types,
+                arena,
+                arm_context,
+                Some(arms_signed),
+            )?;
+            sources.extend(then_sources);
+            sources.extend(else_sources);
+            source_ids.extend(then_source_ids);
+            source_ids.extend(else_source_ids);
+            source_ids.sort();
+            source_ids.dedup();
+            let width =
+                celox_slt::get_width(then_expr, arena).max(celox_slt::get_width(else_expr, arena));
+            then_expr = coerce_node_width(arena, then_expr, Some(width), arms_signed).ok()?;
+            else_expr = coerce_node_width(arena, else_expr, Some(width), arms_signed).ok()?;
+            Some((
+                arena
+                    .alloc(SLTNode::Mux {
+                        cond: condition,
+                        then_expr,
+                        else_expr,
+                    })
+                    .ok()?,
+                sources,
+                source_ids,
+            ))
+        }
+        sv::ir::Expr::Call { .. } => None,
     }
 }
 

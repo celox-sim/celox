@@ -60,8 +60,8 @@ pub fn analyze_source_with_module_parameter_overrides(
     analyze::analyze_source(source)
 }
 
-/// Return the ANSI module names declared in a SystemVerilog source without
-/// performing semantic lowering of their bodies.
+/// Return the module names declared in a SystemVerilog source without
+/// performing semantic lowering of their bodies or port declarations.
 pub fn source_module_names(code: &str, path: &Path) -> Result<Vec<String>, AnalyzerError> {
     let syntax_tree = syntax::parse_source(code, path)?;
     ast::Source::module_names_from_syntax(&syntax_tree)
@@ -80,6 +80,27 @@ pub fn analyze_source_module_with_parameter_overrides(
         &syntax_tree,
         module_name,
         parameter_overrides,
+    )?;
+    analyze::analyze_source(source)
+}
+
+/// Analyze only one module from a source file while preserving the literal
+/// types of its parameter override expressions.
+pub fn analyze_source_module_with_parameter_expr_overrides(
+    code: &str,
+    path: &Path,
+    module_name: &str,
+    parameter_overrides: &std::collections::HashMap<String, ir::ConstExpr>,
+) -> Result<Ir, AnalyzerError> {
+    let syntax_tree = syntax::parse_source(code, path)?;
+    let parameter_overrides = parameter_overrides
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone().into()))
+        .collect();
+    let source = ast::Source::from_syntax_module_with_parameter_expr_overrides(
+        &syntax_tree,
+        module_name,
+        &parameter_overrides,
     )?;
     analyze::analyze_source(source)
 }

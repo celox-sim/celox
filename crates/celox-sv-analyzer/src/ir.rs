@@ -737,6 +737,41 @@ impl From<ast::ConstExpr> for ConstExpr {
     }
 }
 
+impl From<ConstExpr> for ast::ConstExpr {
+    fn from(expr: ConstExpr) -> Self {
+        match expr {
+            ConstExpr::Literal(value) => ast::ConstExpr::Literal(value),
+            ConstExpr::Ident(value) => ast::ConstExpr::Ident(value),
+            ConstExpr::Select { expr, bit } => ast::ConstExpr::Select {
+                expr: Box::new((*expr).into()),
+                bit: Box::new((*bit).into()),
+            },
+            ConstExpr::Function { name, args } => ast::ConstExpr::Function {
+                name,
+                args: args.into_iter().map(Into::into).collect(),
+            },
+            ConstExpr::Unary { op, expr } => ast::ConstExpr::Unary {
+                op: op.into(),
+                expr: Box::new((*expr).into()),
+            },
+            ConstExpr::Binary { left, op, right } => ast::ConstExpr::Binary {
+                left: Box::new((*left).into()),
+                op: op.into(),
+                right: Box::new((*right).into()),
+            },
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => ast::ConstExpr::Mux {
+                condition: Box::new((*condition).into()),
+                then_expr: Box::new((*then_expr).into()),
+                else_expr: Box::new((*else_expr).into()),
+            },
+        }
+    }
+}
+
 impl From<ast::Assignment> for Assignment {
     fn from(assignment: ast::Assignment) -> Self {
         Assignment::new(
@@ -886,6 +921,21 @@ impl From<ast::UnaryOp> for UnaryOp {
     }
 }
 
+impl From<UnaryOp> for ast::UnaryOp {
+    fn from(op: UnaryOp) -> Self {
+        match op {
+            UnaryOp::Plus => ast::UnaryOp::Plus,
+            UnaryOp::Minus => ast::UnaryOp::Minus,
+            UnaryOp::BitNot => ast::UnaryOp::BitNot,
+            UnaryOp::LogicNot => ast::UnaryOp::LogicNot,
+            UnaryOp::ToTwoState => ast::UnaryOp::ToTwoState,
+            UnaryOp::RedAnd => ast::UnaryOp::RedAnd,
+            UnaryOp::RedOr => ast::UnaryOp::RedOr,
+            UnaryOp::RedXor => ast::UnaryOp::RedXor,
+        }
+    }
+}
+
 impl From<ast::BinaryOp> for BinaryOp {
     fn from(op: ast::BinaryOp) -> Self {
         match op {
@@ -912,6 +962,36 @@ impl From<ast::BinaryOp> for BinaryOp {
             ast::BinaryOp::Le => BinaryOp::Le,
             ast::BinaryOp::Gt => BinaryOp::Gt,
             ast::BinaryOp::Ge => BinaryOp::Ge,
+        }
+    }
+}
+
+impl From<BinaryOp> for ast::BinaryOp {
+    fn from(op: BinaryOp) -> Self {
+        match op {
+            BinaryOp::Add => ast::BinaryOp::Add,
+            BinaryOp::Sub => ast::BinaryOp::Sub,
+            BinaryOp::Mul => ast::BinaryOp::Mul,
+            BinaryOp::Div => ast::BinaryOp::Div,
+            BinaryOp::Mod => ast::BinaryOp::Mod,
+            BinaryOp::Shl => ast::BinaryOp::Shl,
+            BinaryOp::Shr => ast::BinaryOp::Shr,
+            BinaryOp::Sar => ast::BinaryOp::Sar,
+            BinaryOp::BitAnd => ast::BinaryOp::BitAnd,
+            BinaryOp::BitOr => ast::BinaryOp::BitOr,
+            BinaryOp::BitXor => ast::BinaryOp::BitXor,
+            BinaryOp::LogicAnd => ast::BinaryOp::LogicAnd,
+            BinaryOp::LogicOr => ast::BinaryOp::LogicOr,
+            BinaryOp::Eq => ast::BinaryOp::Eq,
+            BinaryOp::Ne => ast::BinaryOp::Ne,
+            BinaryOp::EqCase => ast::BinaryOp::EqCase,
+            BinaryOp::NeCase => ast::BinaryOp::NeCase,
+            BinaryOp::EqWildcard => ast::BinaryOp::EqWildcard,
+            BinaryOp::NeWildcard => ast::BinaryOp::NeWildcard,
+            BinaryOp::Lt => ast::BinaryOp::Lt,
+            BinaryOp::Le => ast::BinaryOp::Le,
+            BinaryOp::Gt => ast::BinaryOp::Gt,
+            BinaryOp::Ge => ast::BinaryOp::Ge,
         }
     }
 }

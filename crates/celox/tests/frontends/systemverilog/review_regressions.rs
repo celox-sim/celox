@@ -1549,6 +1549,72 @@ fn discovers_implicit_output_nets_before_instance_glue() {
 }
 
 #[test]
+fn lowers_local_comb_logic_after_discovering_implicit_child_outputs() {
+    let source = r#"
+        module Source(output logic y); assign y = 1'b1; endmodule
+        module Top(output logic out);
+            Source source(.y(w));
+            assign out = w;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("implicit_read.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("out")), 1u8.into());
+}
+
+#[test]
+fn lowers_mux_expressions_in_child_input_connections() {
+    let source = r#"
+        module Child(input logic a, output logic y); assign y = a; endmodule
+        module Top(input logic sel, a, b, output logic y);
+            Child child(.a(sel ? a : b), .y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("glue_mux.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let sel = sim.signal("sel");
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set(a, 1u8);
+        io.set(b, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+    sim.modify(|io| io.set(sel, 0u8)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+}
+
+#[test]
+fn preserves_typed_parameter_override_literals_during_specialization() {
+    let source = r#"
+        module Child #(parameter P = 0) (output logic y); assign y = &P; endmodule
+        module Top(output logic y); Child #(.P(4'hf)) child(.y(y)); endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("typed_override.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn ignores_unreachable_non_ansi_modules() {
+    let source = r#"
+        module Top(output logic y); assign y = 1'b1; endmodule
+        module Legacy(y); output y; assign y = 1'b0; endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("unreachable_nonansi.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
 fn propagates_function_assignments_out_of_nested_blocks() {
     let source = r#"
         module Top(input logic a, output logic y);

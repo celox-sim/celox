@@ -25,6 +25,10 @@ impl Source {
         module_name: &str,
         parameter_overrides: &HashMap<String, i128>,
     ) -> Result<Self, AnalyzerError> {
+        let parameter_overrides = parameter_overrides
+            .iter()
+            .map(|(name, value)| (name.clone(), const_expr_from_i128(*value)))
+            .collect();
         let mut modules = Vec::new();
         for node in syntax_tree {
             match node {
@@ -33,7 +37,7 @@ impl Source {
                         module,
                         syntax_tree,
                         module_name,
-                        parameter_overrides,
+                        &parameter_overrides,
                     )?);
                 }
                 RefNode::ModuleDeclarationNonansi(_) => {
@@ -53,6 +57,22 @@ impl Source {
         module_name: &str,
         parameter_overrides: &HashMap<String, i128>,
     ) -> Result<Self, AnalyzerError> {
+        let parameter_overrides = parameter_overrides
+            .iter()
+            .map(|(name, value)| (name.clone(), const_expr_from_i128(*value)))
+            .collect();
+        Self::from_syntax_module_with_parameter_expr_overrides(
+            syntax_tree,
+            module_name,
+            &parameter_overrides,
+        )
+    }
+
+    pub fn from_syntax_module_with_parameter_expr_overrides(
+        syntax_tree: &SyntaxTree,
+        module_name: &str,
+        parameter_overrides: &HashMap<String, ConstExpr>,
+    ) -> Result<Self, AnalyzerError> {
         let mut modules = Vec::new();
         for node in syntax_tree {
             match node {
@@ -68,10 +88,13 @@ impl Source {
                         parameter_overrides,
                     )?);
                 }
-                RefNode::ModuleDeclarationNonansi(_) => {
-                    return Err(AnalyzerError::Unsupported(
-                        "non-ANSI module port declarations".to_string(),
-                    ));
+                RefNode::ModuleDeclarationNonansi(module) => {
+                    let node = RefNode::ModuleDeclarationNonansi(module);
+                    if module_name_from_node(node, syntax_tree)? == module_name {
+                        return Err(AnalyzerError::Unsupported(
+                            "non-ANSI module port declarations".to_string(),
+                        ));
+                    }
                 }
                 _ => {}
             }
@@ -89,11 +112,10 @@ impl Source {
                     RefNode::ModuleDeclarationAnsi(module),
                     syntax_tree,
                 )?),
-                RefNode::ModuleDeclarationNonansi(_) => {
-                    return Err(AnalyzerError::Unsupported(
-                        "non-ANSI module port declarations".to_string(),
-                    ));
-                }
+                RefNode::ModuleDeclarationNonansi(module) => names.push(module_name_from_node(
+                    RefNode::ModuleDeclarationNonansi(module),
+                    syntax_tree,
+                )?),
                 _ => {}
             }
         }
@@ -122,7 +144,7 @@ impl Module {
         node: impl Into<RefNode<'a>>,
         syntax_tree: &SyntaxTree,
         override_module_name: &str,
-        parameter_overrides: &HashMap<String, i128>,
+        parameter_overrides: &HashMap<String, ConstExpr>,
     ) -> Result<Self, AnalyzerError> {
         let node = node.into();
         let name = module_name_from_node(node.clone(), syntax_tree)?;
@@ -749,7 +771,7 @@ fn non_input_function_port(node: RefNode<'_>) -> bool {
 
 fn apply_parameter_overrides(
     parameters: &mut [Parameter],
-    overrides: &HashMap<String, i128>,
+    overrides: &HashMap<String, ConstExpr>,
 ) -> Result<(), AnalyzerError> {
     if let Some(name) = overrides
         .keys()
@@ -770,17 +792,21 @@ fn apply_parameter_overrides(
     }
     for parameter in parameters {
         if let Some(value) = overrides.get(parameter.name()) {
-            parameter.value = Some(if *value < 0 {
-                ConstExpr::Unary {
-                    op: UnaryOp::Minus,
-                    expr: Box::new(ConstExpr::Literal(value.unsigned_abs().to_string())),
-                }
-            } else {
-                ConstExpr::Literal(value.to_string())
-            });
+            parameter.value = Some(value.clone());
         }
     }
     Ok(())
+}
+
+fn const_expr_from_i128(value: i128) -> ConstExpr {
+    if value < 0 {
+        ConstExpr::Unary {
+            op: UnaryOp::Minus,
+            expr: Box::new(ConstExpr::Literal(value.unsigned_abs().to_string())),
+        }
+    } else {
+        ConstExpr::Literal(value.to_string())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
