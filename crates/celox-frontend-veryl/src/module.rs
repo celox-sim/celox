@@ -1779,6 +1779,7 @@ impl<'a> ModuleParser<'a> {
 
         let mut input_ports = Vec::new();
         let mut output_ports = Vec::new();
+        let mut output_targets = Vec::<(VarId, BitAccess)>::new();
         let mut glue_arena = SLTNodeArena::<GlueAddr>::new();
         let (uses_named_associations, formal_names) = external_port_formal_names(decl)?;
         if formal_names.len() != system_verilog.connects.len() {
@@ -1887,6 +1888,20 @@ impl<'a> ModuleParser<'a> {
                     ));
                 }
                 veryl_analyzer::ir::VarKind::Output => {
+                    if output_targets
+                        .iter()
+                        .any(|(id, access)| *id == parent_dst.id && access.overlaps(&parent_access))
+                    {
+                        return Err(ParserError::illegal_context(
+                            "external module output connections",
+                            format!(
+                                "multiple output ports drive overlapping target {}",
+                                parent_var.path
+                            ),
+                            Some(&parent_dst.token),
+                        ));
+                    }
+                    output_targets.push((parent_dst.id, parent_access));
                     let child_node = glue_arena.alloc(SLTNode::Input {
                         variable: GlueAddr::Child(*child_port_id),
                         signed: child_var.r#type.signed,

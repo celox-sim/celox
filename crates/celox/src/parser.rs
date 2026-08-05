@@ -573,19 +573,18 @@ pub fn parse_mixed(
     ),
     ParserError,
 > {
-    let external =
-        crate::frontend_sv::prepare_external_hierarchy(sv_sources).map_err(
-            |error| match error {
-                crate::frontend_sv::FrontendError::Lowering(error) => error,
-                crate::frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
-                    64,
-                    celox_frontend_veryl::LoweringPhase::SimulatorParser,
-                    "systemverilog analysis",
-                    error.to_string(),
-                    None,
-                ),
-            },
-        )?;
+    let external_roots = reachable_external_sv_roots(ir, top);
+    let external = crate::frontend_sv::prepare_external_hierarchy(sv_sources, &external_roots)
+        .map_err(|error| match error {
+            crate::frontend_sv::FrontendError::Lowering(error) => error,
+            crate::frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
+                64,
+                celox_frontend_veryl::LoweringPhase::SimulatorParser,
+                "systemverilog analysis",
+                error.to_string(),
+                None,
+            ),
+        })?;
     let symbolic = celox_frontend_veryl::parse_ir_with_external_hierarchy(
         ir,
         loop_provenance,
@@ -624,4 +623,43 @@ pub fn parse_mixed(
         testbench_random_seed,
     )?;
     Ok((program, dynamic_for_diagnostics))
+}
+
+#[cfg(feature = "systemverilog")]
+fn reachable_external_sv_roots(ir: &veryl_analyzer::ir::Ir, top: &StrId) -> HashSet<StrId> {
+    use veryl_analyzer::ir::{Component, Declaration};
+
+    let Some(root) = ir
+        .components
+        .iter()
+        .rev()
+        .find_map(|component| match component {
+            Component::Module(module) if module.name == *top => Some(module),
+            _ => None,
+        })
+    else {
+        return HashSet::default();
+    };
+
+    let mut roots = HashSet::default();
+    let mut visited = HashSet::default();
+    let mut queue = vec![root];
+    while let Some(module) = queue.pop() {
+        if !visited.insert(std::ptr::from_ref(module) as usize) {
+            continue;
+        }
+        for declaration in &module.declarations {
+            let Declaration::Inst(instance) = declaration else {
+                continue;
+            };
+            match instance.component.as_ref() {
+                Component::SystemVerilog(system_verilog) => {
+                    roots.insert(system_verilog.name);
+                }
+                Component::Module(child) => queue.push(child),
+                Component::Interface(_) => {}
+            }
+        }
+    }
+    roots
 }

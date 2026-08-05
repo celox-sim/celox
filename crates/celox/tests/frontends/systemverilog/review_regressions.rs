@@ -2516,6 +2516,74 @@ fn ignores_unreachable_invalid_systemverilog_hierarchy_in_mixed_designs() {
 }
 
 #[test]
+fn ignores_unreachable_unsupported_systemverilog_modules_in_mixed_designs() {
+    let veryl = r#"
+        module Top (y: output logic) {
+            inst good: $sv::Good (y);
+        }
+    "#;
+    let sv = r#"
+        module Good(output logic y); assign y = 1'b1; endmodule
+        module Unused(input logic a, b, output logic y); assign y = a ** b; endmodule
+    "#;
+    let mut sim = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("external.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn preserves_assignment_context_width_for_selected_shift_operands() {
+    let source = r#"
+        module Top(input logic a, output logic [15:0] y);
+            assign y = a[0] << 8;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("selected_shift_context.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0x100u16.into());
+}
+
+#[test]
+fn rejects_duplicate_external_systemverilog_output_targets() {
+    let veryl = r#"
+        module Top (y: output logic) {
+            inst child: $sv::TwoOut (y, y);
+        }
+    "#;
+    let sv = r#"
+        module TwoOut(output logic a, output logic b);
+            assign a = 1'b0;
+            assign b = 1'b1;
+        endmodule
+    "#;
+    let error = match Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("two_out.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    {
+        Ok(_) => panic!("duplicate external output targets unexpectedly compiled"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("multiple output ports drive overlapping target"),
+        "{error}"
+    );
+}
+
+#[test]
 fn rejects_invalid_systemverilog_hierarchy_when_mixed_design_reaches_it() {
     let veryl = r#"
         module Top (y: output logic) {

@@ -429,13 +429,19 @@ fn net_driver_ranges_overlap(left: Option<(i128, i128)>, right: Option<(i128, i1
     }
 }
 
-/// Lower every SystemVerilog module into an embeddable hierarchy. The module
-/// IDs in the returned graph are local and are remapped by the Veryl frontend.
+/// Lower the requested SystemVerilog roots and their reachable children into
+/// an embeddable hierarchy. The module IDs in the returned graph are local and
+/// are remapped by the Veryl frontend.
 pub fn prepare_external_hierarchy(
     sources: &[(&str, &Path)],
+    root_names: &HashSet<resource_table::StrId>,
 ) -> Result<ExternalHierarchy, FrontendError> {
     let analyzed = analyze_sources(sources)?;
-    let mut names = analyzed.keys().copied().collect::<Vec<_>>();
+    let mut names = root_names
+        .iter()
+        .copied()
+        .filter(|name| analyzed.contains_key(name))
+        .collect::<Vec<_>>();
     names.sort_by_key(|name| resource_table::get_str_value(*name).unwrap_or_default());
 
     let mut module_ids = HashMap::default();
@@ -2312,7 +2318,11 @@ fn lower_expr_with_context(
                 })
                 .ok()?;
             sources = select_sources(expr, sources, access)?;
-            Some((node, sources))
+            Some((
+                coerce_node_width(arena, node, context_width, context_signed.unwrap_or(false))
+                    .ok()?,
+                sources,
+            ))
         }
         sv::ir::Expr::Concat(parts) => {
             let mut nodes = Vec::new();
