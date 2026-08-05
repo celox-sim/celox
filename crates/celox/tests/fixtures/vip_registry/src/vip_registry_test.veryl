@@ -1,0 +1,45 @@
+alias package stream_pkg = $std::axi4_stream_pkg::<4, 2, 4, 5>;
+
+#[test(vip_registry_test)]
+module vip_registry_test {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst bus: $std::axi4_stream_if::<stream_pkg>;
+
+    inst src: $comp::vip::axi4_stream_source (
+        clk                 ,
+        rst                 ,
+        axi: bus.transmitter,
+    );
+    inst snk: $comp::vip::axi4_stream_sink (
+        clk              ,
+        rst              ,
+        axi: bus.receiver,
+    );
+    inst chk: $comp::vip::axi4_stream_checker #(
+        TIMEOUT: 20,
+    ) (
+        clk             ,
+        rst             ,
+        axi: bus.monitor,
+    );
+
+    initial {
+        rst.assert();
+        clk.next(4);
+
+        snk.expect(32'h1111_1111);
+        snk.expect(32'h2222_2222);
+        snk.expect(32'h3333_3333);
+        src.send(32'h1111_1111);
+        src.send(32'h2222_2222);
+        src.send_last(32'h3333_3333);
+        clk.next(10);
+
+        $assert(src.idle() == 1, "source drained");
+        $assert(snk.idle() == 1, "sink checks done");
+        $assert(snk.packets() == 1, "one packet completed");
+        $finish();
+    }
+}

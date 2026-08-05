@@ -1,0 +1,10 @@
+[project]
+name = "celox_vip_registry_test"
+version = "0.1.0"
+
+[build]
+# VIP 0.1.0 handles a high ResetPort value as asserted.
+reset_type = "async_high"
+
+[dependencies]
+vip = { github = "veryl-lang/vip", version = "0.1.0" }
