@@ -15,6 +15,7 @@ on:
       - "scripts/ci-changes.mjs"
       - "scripts/ci-changes.test.mjs"
       - "scripts/run-heliodor-bench.sh"
+      - "scripts/tests/convert-heliodor-bench.sh"
   schedule:
     - cron: "37 2 * * *"
   workflow_dispatch:
@@ -26,9 +27,10 @@ env:
   CARGO_INCREMENTAL: "0"
 
 # Pull requests neither write benchmark history nor need to wait behind unrelated
-# benchmark runs. Serialize pushes and nightly/manual publishers with bench.yml.
+# benchmark runs. Serialize master publishers with bench.yml, while develop uses
+# a separate group so its dispatch cannot replace a pending master nightly run.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || 'bench' }}
+  group: ${{ github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/develop' && 'heliodor-develop' || 'bench' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -53,6 +55,23 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: node scripts/ci-changes.mjs "$BASE_SHA" "$HEAD_SHA"
+
+  converter-test:
+    name: Test Heliodor result conversion
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Test benchmark conversion fixtures
+        shell: bash
+        run: bash scripts/tests/convert-heliodor-bench.sh
 
   heliodor:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -349,7 +368,9 @@ jobs:
 
   heliodor-head:
     name: Heliodor HEAD compatibility
-    if: github.event_name == 'schedule'
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop')
     permissions:
       contents: read
     runs-on: ubuntu-latest
