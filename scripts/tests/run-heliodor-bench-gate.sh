@@ -419,6 +419,8 @@ gate_verify_heliodor_checkout() {
 }
 
 build_celox_runner() {
+    assert_eq "$HELIODOR_CELOX_CARGO_FEATURES" "" \
+        "fixed gate Cargo features"
     assert_eq "$HELIODOR_CELOX_TARGET_DIR" \
         "$HELIODOR_RESULTS_DIR/celox-target" \
         "fresh invocation-owned gate Cargo target directory"
@@ -556,6 +558,7 @@ run_gate_fixture() {
     VERYL_BIN="$TMP/hostile-path-veryl"
     CELOX_OPT_LEVEL=O0
     CELOX_SIR_PASS_OVERRIDES='+hostile'
+    HELIODOR_CELOX_CARGO_FEATURES=hostile-feature
     MOCK_RUNNERS=""
     LAST_GATE_RESULTS_ROOT="$CELOX_ROOT/target/heliodor/results"
     if run_gate >"$TMP/$name.stdout" 2>"$TMP/$name.stderr"; then
