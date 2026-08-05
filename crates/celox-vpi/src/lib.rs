@@ -19,8 +19,16 @@ use std::{
 };
 
 use celox::{
-    BigUint, NativeProgramInstance, ReflectionScopeId, ReflectionSignalId, SignalDirection,
-    SimBackend,
+    BigUint, DomainKind, NativeProgramInstance, ReflectionScopeId, ReflectionSignalId,
+    SignalDirection, SimBackend,
+};
+
+mod callbacks;
+pub use callbacks::{
+    CB_AFTER_DELAY, CB_END_OF_SIMULATION, CB_NEXT_SIM_TIME, CB_READ_ONLY_SYNCH,
+    CB_READ_WRITE_SYNCH, CB_START_OF_SIMULATION, CB_VALUE_CHANGE, VpiCbData, VpiErrorInfo, VpiTime,
+    VpiVlogInfo, celox_vpi_current_time, vpi_chk_error, vpi_control, vpi_get_time,
+    vpi_get_vlog_info, vpi_handle_by_index, vpi_register_cb, vpi_remove_cb,
 };
 
 pub const VPI_BIN_STR_VAL: i32 = 1;
@@ -36,14 +44,18 @@ pub const VPI_Z: i32 = 2;
 pub const VPI_X: i32 = 3;
 
 pub const VPI_ITERATOR: i32 = 27;
+pub const VPI_CONSTANT: i32 = 7;
 pub const VPI_MODULE: i32 = 32;
 pub const VPI_NET: i32 = 36;
 pub const VPI_PORT: i32 = 44;
 pub const VPI_REG: i32 = 48;
+pub const VPI_LEFT_RANGE: i32 = 79;
 pub const VPI_PARENT: i32 = 81;
+pub const VPI_RIGHT_RANGE: i32 = 83;
 pub const VPI_SCOPE: i32 = 84;
 pub const VPI_INTERNAL_SCOPE: i32 = 92;
 pub const VPI_VARIABLES: i32 = 100;
+pub const VPI_INSTANCE: i32 = 745;
 
 pub const VPI_TYPE: i32 = 1;
 pub const VPI_NAME: i32 = 2;
@@ -54,6 +66,8 @@ pub const VPI_DEF_NAME: i32 = 9;
 pub const VPI_SCALAR: i32 = 17;
 pub const VPI_VECTOR: i32 = 18;
 pub const VPI_DIRECTION: i32 = 20;
+pub const VPI_TIME_UNIT: i32 = 11;
+pub const VPI_TIME_PRECISION: i32 = 12;
 
 pub const VPI_INPUT: i32 = 1;
 pub const VPI_OUTPUT: i32 = 2;
@@ -61,6 +75,10 @@ pub const VPI_INOUT: i32 = 3;
 pub const VPI_NO_DIRECTION: i32 = 5;
 
 pub const VPI_NO_DELAY: i32 = 1;
+pub const VPI_INERTIAL_DELAY: i32 = 2;
+pub const VPI_FORCE_FLAG: i32 = 5;
+pub const VPI_RELEASE_FLAG: i32 = 6;
+pub const VPI_FINISH: i32 = 67;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -96,6 +114,8 @@ enum ObjectRef {
 #[derive(Debug)]
 enum HandleKind {
     Object(ObjectRef),
+    Constant(i32),
+    Callback(u64),
     Iterator {
         objects: Vec<ObjectRef>,
         next: usize,
@@ -121,10 +141,18 @@ thread_local! {
 /// runtime which has already selected the attached image.
 pub fn install_runtime(instance: NativeProgramInstance) {
     RUNTIME.with_borrow_mut(|runtime| *runtime = Some(instance));
+    callbacks::reset();
 }
 
 pub fn clear_runtime() {
     RUNTIME.with_borrow_mut(|runtime| *runtime = None);
+    callbacks::reset();
+}
+
+/// Run VPI simulation regions until `vpiFinish` or until no future activity
+/// remains. Returns true when the test requested a normal finish.
+pub fn run_callbacks() -> bool {
+    callbacks::run()
 }
 
 #[unsafe(no_mangle)]
@@ -185,6 +213,26 @@ fn new_iterator_handle(objects: Vec<ObjectRef>) -> VpiHandle {
     }))
 }
 
+fn new_constant_handle(value: i32) -> VpiHandle {
+    Box::into_raw(Box::new(VpiHandleObject {
+        kind: HandleKind::Constant(value),
+        name: c_string(""),
+        full_name: c_string(""),
+        value_string: None,
+        value_vector: Vec::new(),
+    }))
+}
+
+fn new_callback_handle(id: u64) -> VpiHandle {
+    Box::into_raw(Box::new(VpiHandleObject {
+        kind: HandleKind::Callback(id),
+        name: c_string(""),
+        full_name: c_string(""),
+        value_string: None,
+        value_vector: Vec::new(),
+    }))
+}
+
 unsafe fn handle_mut<'a>(handle: VpiHandle) -> Option<&'a mut VpiHandleObject> {
     if handle.is_null() {
         None
@@ -199,7 +247,7 @@ unsafe fn object_ref(handle: VpiHandle) -> Option<ObjectRef> {
     // Safety: forwarded from the caller under the same VPI handle contract.
     match &unsafe { handle_mut(handle) }?.kind {
         HandleKind::Object(object) => Some(*object),
-        HandleKind::Iterator { .. } => None,
+        HandleKind::Constant(_) | HandleKind::Callback(_) | HandleKind::Iterator { .. } => None,
     }
 }
 
@@ -262,6 +310,26 @@ pub unsafe extern "C" fn vpi_handle_by_name(name: *const c_char, scope: VpiHandl
 ///
 /// `reference` must be a live handle returned by this library.
 pub unsafe extern "C" fn vpi_handle(kind: i32, reference: VpiHandle) -> VpiHandle {
+    if matches!(kind, VPI_LEFT_RANGE | VPI_RIGHT_RANGE) {
+        // Safety: reference follows the VPI handle contract.
+        let Some(ObjectRef::Signal(id)) = (unsafe { object_ref(reference) }) else {
+            return ptr::null_mut();
+        };
+        let width = with_runtime(|runtime| {
+            runtime
+                .reflection()
+                .signal(id)
+                .map(|signal| signal.signal.width)
+        })
+        .flatten();
+        return match (kind, width) {
+            (VPI_LEFT_RANGE, Some(width)) => {
+                new_constant_handle(i32::try_from(width.saturating_sub(1)).unwrap_or(i32::MAX))
+            }
+            (VPI_RIGHT_RANGE, Some(_)) => new_constant_handle(0),
+            _ => ptr::null_mut(),
+        };
+    }
     // Safety: reference follows the VPI handle contract.
     let Some(object) = (unsafe { object_ref(reference) }) else {
         return ptr::null_mut();
@@ -303,7 +371,7 @@ pub unsafe extern "C" fn vpi_iterate(kind: i32, reference: VpiHandle) -> VpiHand
     let objects = with_runtime(|runtime| {
         let reflection = runtime.reflection();
         match (kind, reference) {
-            (VPI_MODULE, None) => vec![ObjectRef::Scope(ReflectionScopeId(0))],
+            (VPI_MODULE | VPI_INSTANCE, None) => vec![ObjectRef::Scope(ReflectionScopeId(0))],
             (VPI_MODULE | VPI_INTERNAL_SCOPE, Some(ObjectRef::Scope(id))) => reflection
                 .scope(id)
                 .map(|scope| {
@@ -327,9 +395,8 @@ pub unsafe extern "C" fn vpi_iterate(kind: i32, reference: VpiHandle) -> VpiHand
                                 let signal = reflection.signal(*signal_id).unwrap();
                                 match kind {
                                     VPI_PORT => signal.direction != SignalDirection::Internal,
-                                    VPI_REG | VPI_VARIABLES => {
-                                        signal.direction == SignalDirection::Internal
-                                    }
+                                    VPI_REG => true,
+                                    VPI_VARIABLES => signal.direction == SignalDirection::Internal,
                                     VPI_NET => false,
                                     _ => false,
                                 }
@@ -351,8 +418,7 @@ pub unsafe extern "C" fn vpi_iterate(kind: i32, reference: VpiHandle) -> VpiHand
 ///
 /// # Safety
 ///
-/// `iterator` must be a live iterator handle returned by [`vpi_iterate`]. It
-/// must not be reused after this function returns null.
+/// `iterator` must be a live iterator handle returned by [`vpi_iterate`].
 pub unsafe extern "C" fn vpi_scan(iterator: VpiHandle) -> VpiHandle {
     // Safety: iterator follows the VPI handle contract.
     let Some(iterator_ref) = (unsafe { handle_mut(iterator) }) else {
@@ -362,9 +428,6 @@ pub unsafe extern "C" fn vpi_scan(iterator: VpiHandle) -> VpiHandle {
         return ptr::null_mut();
     };
     let Some(object) = objects.get(*next).copied() else {
-        // VPI iterators are consumed when scan reaches the end.
-        // Safety: this pointer came from `Box::into_raw` and is no longer used.
-        drop(unsafe { Box::from_raw(iterator) });
         return ptr::null_mut();
     };
     *next += 1;
@@ -374,20 +437,7 @@ pub unsafe extern "C" fn vpi_scan(iterator: VpiHandle) -> VpiHandle {
 fn object_type(object: ObjectRef) -> i32 {
     match object {
         ObjectRef::Scope(_) => VPI_MODULE,
-        ObjectRef::Signal(id) => with_runtime(|runtime| {
-            runtime
-                .reflection()
-                .signal(id)
-                .map(|signal| {
-                    if signal.direction == SignalDirection::Internal {
-                        VPI_REG
-                    } else {
-                        VPI_PORT
-                    }
-                })
-                .unwrap_or(0)
-        })
-        .unwrap_or(0),
+        ObjectRef::Signal(_) => VPI_REG,
     }
 }
 
@@ -398,6 +448,23 @@ fn object_type(object: ObjectRef) -> i32 {
 ///
 /// `reference` must be a live handle returned by this library.
 pub unsafe extern "C" fn vpi_get(property: i32, reference: VpiHandle) -> i32 {
+    if reference.is_null() {
+        return match property {
+            VPI_TIME_UNIT | VPI_TIME_PRECISION => -12,
+            _ => 0,
+        };
+    }
+    // Safety: reference follows the VPI handle contract.
+    let Some(handle) = (unsafe { handle_mut(reference) }) else {
+        return 0;
+    };
+    if matches!(handle.kind, HandleKind::Constant(_)) {
+        return if property == VPI_TYPE {
+            VPI_CONSTANT
+        } else {
+            0
+        };
+    }
     // Safety: reference follows the VPI handle contract.
     let Some(object) = (unsafe { object_ref(reference) }) else {
         return 0;
@@ -462,6 +529,16 @@ pub unsafe extern "C" fn vpi_get_str(property: i32, reference: VpiHandle) -> *mu
             handle.value_string = Some(c_string(&name));
             handle.value_string.as_ref().unwrap().as_ptr().cast_mut()
         }
+        VPI_TYPE => match handle.kind {
+            HandleKind::Object(object) => match object_type(object) {
+                VPI_MODULE => c"vpiModule".as_ptr().cast_mut(),
+                VPI_REG => c"vpiReg".as_ptr().cast_mut(),
+                _ => ptr::null_mut(),
+            },
+            HandleKind::Constant(_) => c"vpiConstant".as_ptr().cast_mut(),
+            HandleKind::Callback(_) => c"vpiCallback".as_ptr().cast_mut(),
+            HandleKind::Iterator { .. } => c"vpiIterator".as_ptr().cast_mut(),
+        },
         _ => ptr::null_mut(),
     }
 }
@@ -522,6 +599,14 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
     let Some(handle) = (unsafe { handle_mut(reference) }) else {
         return;
     };
+    if let HandleKind::Constant(integer) = handle.kind {
+        // Safety: checked non-null above; caller owns the `VpiValue` allocation.
+        let value = unsafe { &mut *value };
+        if value.format == VPI_INT_VAL {
+            value.value.integer = integer;
+        }
+        return;
+    }
     let HandleKind::Object(ObjectRef::Signal(id)) = handle.kind else {
         return;
     };
@@ -673,7 +758,10 @@ pub unsafe extern "C" fn vpi_put_value(
     _when: *const c_void,
     flags: i32,
 ) -> VpiHandle {
-    if flags != VPI_NO_DELAY {
+    if !matches!(
+        flags,
+        VPI_NO_DELAY | VPI_INERTIAL_DELAY | VPI_FORCE_FLAG | VPI_RELEASE_FLAG
+    ) {
         return ptr::null_mut();
     }
     // Safety: reference follows the VPI handle contract.
@@ -692,11 +780,33 @@ pub unsafe extern "C" fn vpi_put_value(
         return ptr::null_mut();
     };
     let succeeded = with_runtime_mut(|runtime| {
-        let Some(signal) = runtime.reflection().signal(id).map(|signal| signal.signal) else {
+        let Some(signal) = runtime.reflection().signal(id).cloned() else {
             return false;
         };
-        runtime.backend_mut().set_four_state(signal, bits, mask);
-        runtime.eval_comb().is_ok()
+        let old_is_high = runtime.backend().get(signal.signal).bit(0);
+        runtime
+            .backend_mut()
+            .set_four_state(signal.signal, bits, mask);
+        if runtime.eval_comb().is_err() {
+            return false;
+        }
+        let new_is_high = runtime.backend().get(signal.signal).bit(0);
+        let active_edge = match signal.domain_kind {
+            DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh => !old_is_high && new_is_high,
+            DomainKind::ClockNegedge | DomainKind::ResetAsyncLow => old_is_high && !new_is_high,
+            DomainKind::Other => false,
+        };
+        if active_edge
+            && let Some(event) = runtime.backend().resolve_event_opt(&signal.state_address)
+        {
+            if runtime.backend_mut().eval_apply_ff_at(event).is_err() {
+                return false;
+            }
+            if runtime.eval_comb().is_err() {
+                return false;
+            }
+        }
+        true
     })
     .unwrap_or(false);
     if succeeded {
@@ -716,6 +826,10 @@ pub unsafe extern "C" fn vpi_put_value(
 pub unsafe extern "C" fn vpi_free_object(reference: VpiHandle) -> i32 {
     if reference.is_null() {
         return 0;
+    }
+    // Safety: reference follows the VPI handle contract.
+    if let Some(HandleKind::Callback(id)) = (unsafe { handle_mut(reference) }).map(|h| &h.kind) {
+        return callbacks::remove(*id, reference);
     }
     // Safety: the handle came from `Box::into_raw` and ownership returns here.
     drop(unsafe { Box::from_raw(reference) });

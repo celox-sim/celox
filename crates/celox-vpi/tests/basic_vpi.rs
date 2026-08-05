@@ -1,4 +1,8 @@
-use std::{ffi::CStr, ptr};
+use std::{
+    ffi::CStr,
+    ptr,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use celox::{NativeProgramInstance, Simulator};
 use celox_vpi::*;
@@ -31,6 +35,73 @@ fn value_layout_matches_vpi_user_header() {
     assert_eq!(std::mem::size_of::<VpiValue>(), 16);
 }
 
+static CALLBACKS_SEEN: AtomicUsize = AtomicUsize::new(0);
+
+unsafe extern "C" fn record_callback(data: *mut VpiCbData) -> i32 {
+    // Safety: the callback runtime passes back the registration storage.
+    let reason = unsafe { (*data).reason };
+    match reason {
+        CB_START_OF_SIMULATION => {
+            CALLBACKS_SEEN.fetch_or(1, Ordering::SeqCst);
+        }
+        CB_AFTER_DELAY => {
+            assert_eq!(celox_vpi_current_time(), 5);
+            CALLBACKS_SEEN.fetch_or(2, Ordering::SeqCst);
+            vpi_control(VPI_FINISH);
+        }
+        CB_END_OF_SIMULATION => {
+            CALLBACKS_SEEN.fetch_or(4, Ordering::SeqCst);
+        }
+        _ => unreachable!(),
+    }
+    0
+}
+
+#[test]
+fn callback_runtime_advances_time_and_finishes_regions() {
+    let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
+    let runtime =
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap();
+    install_runtime(runtime);
+    CALLBACKS_SEEN.store(0, Ordering::SeqCst);
+
+    let mut start_time = VpiTime::default();
+    let mut delay_time = VpiTime {
+        type_: 2,
+        high: 0,
+        low: 5,
+        real: 0.0,
+    };
+    let mut end_time = VpiTime::default();
+    let start = VpiCbData {
+        reason: CB_START_OF_SIMULATION,
+        cb_rtn: Some(record_callback),
+        obj: ptr::null_mut(),
+        time: &mut start_time,
+        value: ptr::null_mut(),
+        index: 0,
+        user_data: ptr::null_mut(),
+    };
+    let delayed = VpiCbData {
+        reason: CB_AFTER_DELAY,
+        time: &mut delay_time,
+        ..start
+    };
+    let end = VpiCbData {
+        reason: CB_END_OF_SIMULATION,
+        time: &mut end_time,
+        ..start
+    };
+    unsafe {
+        assert!(!vpi_register_cb(&start).is_null());
+        assert!(!vpi_register_cb(&delayed).is_null());
+        assert!(!vpi_register_cb(&end).is_null());
+    }
+    assert!(run_callbacks());
+    assert_eq!(CALLBACKS_SEEN.load(Ordering::SeqCst), 7);
+    clear_runtime();
+}
+
 #[test]
 fn vpi_discovers_hierarchy_and_reads_and_writes_values() {
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
@@ -58,10 +129,11 @@ fn vpi_discovers_hierarchy_and_reads_and_writes_values() {
             c"Top.child[0]"
         );
         assert!(vpi_scan(modules).is_null());
+        assert_eq!(vpi_free_object(modules), 1);
 
         let a = vpi_handle_by_name(c"a".as_ptr(), top);
         let y = vpi_handle_by_name(c"y".as_ptr(), top);
-        assert_eq!(vpi_get(VPI_TYPE, a), VPI_PORT);
+        assert_eq!(vpi_get(VPI_TYPE, a), VPI_REG);
         assert_eq!(vpi_get(VPI_DIRECTION, a), VPI_INPUT);
         assert_eq!(vpi_get(VPI_SIZE, a), 8);
         let parent = vpi_handle(VPI_SCOPE, a);

@@ -717,6 +717,8 @@ name = "celox-vpi"
 version = "0.0.0"
 dependencies = [
  "celox",
+ "libloading",
+ "tempfile",
 ]
 
 [[package]]

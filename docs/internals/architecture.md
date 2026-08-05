@@ -131,12 +131,13 @@ state, and exposes reflection plus the native backend to foreign-interface
 adapters. Loading and executing this path does not require source text or a
 compiler artifact.
 
-The `celox-vpi` runtime layer exports the initial VPI C ABI directly on this
-instance. It supports module/scope/signal handles, hierarchy iteration, common
-integer and string properties, and immediate scalar, integer, vector, binary,
-and hexadecimal value access. Delayed writes and callback registration remain
-owned by the future simulation-region scheduler integration rather than being
-approximated inside the ABI layer.
+The `celox-vpi` runtime layer exports the VPI C ABI directly on this instance.
+It supports module/scope/signal handles, hierarchy iteration, common integer
+and string properties, scalar and vector value access, and the callback regions
+used by cocotb. The precompiled runtime loads cocotb's ordinary Icarus VPI
+adapter and drives timers, phase callbacks, value-change callbacks, and native
+clock/reset events without invoking the compiler. Delayed VPI writes and the
+full IEEE object model remain outside the initial compatibility subset.
 
 ### Cranelift
 
