@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785887918861,
+  "lastUpdate": 1785893107109,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -155811,6 +155811,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
             "value": 123700.257343,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+s@gmail.com",
+            "name": "tig",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "28c4a66c0a398bad838d27d27919390c3b7e7226",
+          "message": "Merge pull request #487 from celox-sim/fix/heliodor-latest-regressions\n\nfix: restore Heliodor boot compatibility",
+          "timestamp": "2026-08-05T00:34:04Z",
+          "tree_id": "38b78b06eca9ae3d3646926d9fce0f65b253ce56",
+          "url": "https://github.com/celox-sim/celox/commit/28c4a66c0a398bad838d27d27919390c3b7e7226"
+        },
+        "date": 1785893092232,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-jit/heliodor_linux_boot_execution",
+            "value": 195076.358949,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-total/heliodor_linux_boot_execution",
+            "value": 195116.67527,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl/heliodor_linux_boot_execution",
+            "value": 228455.979275,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-compile/heliodor_linux_boot_compilation",
+            "value": 142087.328538,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
+            "value": 67698.440617,
             "unit": "ms"
           }
         ]
