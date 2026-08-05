@@ -1,0 +1,7 @@
+#[test(OptionNormalizationTb)]
+module OptionNormalizationTb {
+    initial {
+        $assert(1 == 1, "project testbench passed");
+        $finish();
+    }
+}

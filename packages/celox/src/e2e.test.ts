@@ -22,7 +22,7 @@ import {
 } from "./napi-helpers.js";
 import { Simulation } from "./simulation.js";
 import { Simulator } from "./simulator.js";
-import { defineTbComponent, runTest } from "./testbench.js";
+import { defineTbComponent, runTest, runTestFromProject } from "./testbench.js";
 import {
 	FourState,
 	type FourStateSignalValue,
@@ -38,6 +38,7 @@ const FIXTURES_DIR = path.resolve(
 const ADDER_PROJECT = path.join(FIXTURES_DIR, "adder");
 const COUNTER_PROJECT = path.join(FIXTURES_DIR, "counter_project");
 const CELOX_TOML_PROJECT = path.join(FIXTURES_DIR, "celox_toml");
+const TESTBENCH_PROJECT = path.join(FIXTURES_DIR, "testbench_project");
 
 // ---------------------------------------------------------------------------
 // Test Veryl sources
@@ -2855,6 +2856,27 @@ describe("E2E: native testbench (runTest)", () => {
 		expect(a.file).toBeDefined();
 		expect(a.line).toBeGreaterThan(0);
 		expect(a.column).toBeGreaterThan(0);
+	});
+
+	test("normalizes public runTest options before calling NAPI", () => {
+		const options = {
+			deadStorePolicy: "preserveTopPorts",
+			craneliftOptLevel: "speedAndSize",
+			regallocAlgorithm: "singlePass",
+		} as const;
+		const sourceResult = runTest(
+			[{ content: TB_PASS_SOURCE, path: "test.veryl" }],
+			"CounterTbPass",
+			options,
+		);
+		const projectResult = runTestFromProject(
+			TESTBENCH_PROJECT,
+			"OptionNormalizationTb",
+			options,
+		);
+
+		expect(sourceResult.passed).toBe(true);
+		expect(projectResult.passed).toBe(true);
 	});
 
 	test("injects a synchronous TypeScript clocked component", () => {

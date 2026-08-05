@@ -526,13 +526,13 @@ impl ComponentRuntime {
                         } else {
                             veryl_component_sys::VRL_DIR_INPUT
                         };
-                        debug_assert_eq!(host.svc_port_index(port_name, direction), *port as i32);
+                        let resolved = host.svc_port_index(port_name, direction);
+                        debug_assert_eq!(resolved, *port as i32);
                     }
                     if let Some(port) = output {
-                        debug_assert_eq!(
-                            host.svc_port_index(port_name, veryl_component_sys::VRL_DIR_OUTPUT),
-                            *port as i32
-                        );
+                        let resolved =
+                            host.svc_port_index(port_name, veryl_component_sys::VRL_DIR_OUTPUT);
+                        debug_assert_eq!(resolved, *port as i32);
                     }
                 }
             }

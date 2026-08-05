@@ -1,13 +1,13 @@
 import {
+	buildNapiOpts,
 	loadNativeAddon,
 	type NapiInjectedCall,
 	type NapiInjectedComponent,
 	type NapiInjectedResult,
 	type NapiInjectedValue,
-	type NapiOptions,
 	type NapiTestResult,
 } from "./napi-helpers.js";
-import type { SourceFile } from "./types.js";
+import type { SimulatorOptions, SourceFile } from "./types.js";
 
 export type TbPort = {
 	direction: "input" | "output";
@@ -237,7 +237,7 @@ export interface InjectedTbComponent {
 	/** @internal */ readonly handler: NapiInjectedComponent["handler"];
 }
 
-export interface RunTestOptions extends NapiOptions {
+export interface RunTestOptions extends SimulatorOptions {
 	components?: Record<string, InjectedTbComponent>;
 }
 
@@ -254,7 +254,7 @@ export function runTest(
 	return loadNativeAddon().runTest(
 		sources.map(({ content, path }) => ({ content, path })),
 		top,
-		nativeOptions,
+		buildNapiOpts(nativeOptions),
 		injected,
 	);
 }
@@ -272,7 +272,7 @@ export function runTestFromProject(
 	return loadNativeAddon().runTestFromProject(
 		projectPath,
 		top,
-		nativeOptions,
+		buildNapiOpts(nativeOptions),
 		injected,
 	);
 }

@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
-import { createServer } from "vite";
+import { createServer, type Plugin, type ResolvedConfig } from "vite";
 import type { TestbenchComponentManifests } from "./types.js";
 
 export const TESTBENCH_COMPONENT_SIDECAR = join(
@@ -9,14 +9,41 @@ export const TESTBENCH_COMPONENT_SIDECAR = join(
 	"veryl.manifest.json",
 );
 
+function componentLoaderPlugins(config: ResolvedConfig): Plugin[] {
+	return config.plugins
+		.filter(
+			(plugin) =>
+				plugin.name !== "vite-plugin-celox" && !plugin.name.startsWith("vite:"),
+		)
+		.map((plugin) => ({
+			name: `celox-component-loader:${plugin.name}`,
+			enforce: plugin.enforce,
+			resolveId: plugin.resolveId,
+			load: plugin.load,
+			transform: plugin.transform,
+		}));
+}
+
 /** Load a TypeScript component module through Vite's own transform pipeline. */
 export async function loadTestbenchComponentModule(
 	modulePath: string,
 	projectRoot: string,
+	config: ResolvedConfig,
 ): Promise<TestbenchComponentManifests> {
 	const server = await createServer({
 		root: projectRoot,
 		configFile: false,
+		mode: config.mode,
+		define: config.define,
+		resolve: {
+			alias: config.resolve.alias,
+			conditions: config.resolve.conditions,
+			dedupe: config.resolve.dedupe,
+			extensions: config.resolve.extensions,
+			mainFields: config.resolve.mainFields,
+			preserveSymlinks: config.resolve.preserveSymlinks,
+		},
+		plugins: componentLoaderPlugins(config),
 		logLevel: "silent",
 		appType: "custom",
 		server: { middlewareMode: true },

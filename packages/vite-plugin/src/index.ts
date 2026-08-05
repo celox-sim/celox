@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
-import type { Plugin } from "vite";
+import type { Plugin, ResolvedConfig } from "vite";
 import { GenTsCache } from "./cache.js";
 import { cleanSidecars, generateSidecars } from "./sidecar.js";
 import {
@@ -35,12 +35,14 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 	let cache: GenTsCache;
 	let sidecarPaths: string[] = [];
 	let testbenchComponents: string | undefined;
+	let viteConfig: ResolvedConfig;
 
 	return {
 		name: "vite-plugin-celox",
 		enforce: "pre",
 
-		async configResolved(config) {
+		configResolved(config) {
+			viteConfig = config;
 			// Determine project root
 			if (options?.projectRoot) {
 				projectRoot = resolve(options.projectRoot);
@@ -48,7 +50,6 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				projectRoot = findVerylProjectRoot(config.root);
 			}
 
-			let componentManifests: TestbenchComponentManifests | undefined;
 			if (options?.testbenchComponents) {
 				const componentsModule = options.testbenchComponents;
 				testbenchComponents = isAbsolute(componentsModule)
@@ -59,9 +60,16 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 						`Could not find testbench components module: ${testbenchComponents}`,
 					);
 				}
+			}
+		},
+
+		async buildStart() {
+			let componentManifests: TestbenchComponentManifests | undefined;
+			if (testbenchComponents) {
 				componentManifests = await loadTestbenchComponentModule(
 					testbenchComponents,
 					projectRoot,
+					viteConfig,
 				);
 				writeTestbenchComponentSidecar(
 					projectRoot,
@@ -70,9 +78,6 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				);
 			}
 			cache = new GenTsCache(projectRoot, componentManifests);
-		},
-
-		buildStart() {
 			// Run generator and create type sidecars
 			const data = cache.get();
 			cleanSidecars(sidecarPaths);
@@ -177,6 +182,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				const manifests = await loadTestbenchComponentModule(
 					testbenchComponents,
 					projectRoot,
+					viteConfig,
 				);
 				writeTestbenchComponentSidecar(
 					projectRoot,
