@@ -39,7 +39,12 @@ async function openPlayground(page: Page) {
 		});
 	});
 
-	await page.goto("/");
+	const response = await page.goto("/");
+	expect(response?.headers()["cross-origin-opener-policy"]).toBe("same-origin");
+	expect(response?.headers()["cross-origin-embedder-policy"]).toBe(
+		"credentialless",
+	);
+	expect(await page.evaluate(() => window.crossOriginIsolated)).toBe(true);
 
 	await Promise.race([
 		page.waitForFunction(() => {
