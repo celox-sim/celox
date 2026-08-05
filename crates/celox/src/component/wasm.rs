@@ -8,9 +8,9 @@
 //! duration of each guest call; outside a call (probe instances, guest
 //! destructors) the imports see NULL and degrade to no-ops.
 
+use crate::HashMap;
 use crate::component::host::{HostContext, HostValue, METHOD_RET_WORDS};
 use crate::component::loader::{ComponentBackend, ComponentError};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use veryl_component_sys as sys;
@@ -102,7 +102,7 @@ pub struct WasmLibrary {
 
 pub fn get_wasm_library(path: &Path) -> Result<Arc<WasmLibrary>, ComponentError> {
     static LIBRARIES: LazyLock<Mutex<HashMap<PathBuf, Arc<WasmLibrary>>>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
+        LazyLock::new(|| Mutex::new(HashMap::default()));
 
     let mut libraries = LIBRARIES.lock().unwrap();
     if let Some(library) = libraries.get(path) {

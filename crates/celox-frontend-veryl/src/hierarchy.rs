@@ -1,4 +1,5 @@
 use celox_design::ModuleId;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use veryl_analyzer::ir::{Component, Declaration, Module, VarKind};
 use veryl_parser::resource_table::{self, StrId};
 
@@ -137,17 +138,58 @@ pub fn parse_ir_with_loop_provenance<'a>(
         inst_sequences.insert(module_id, inst_ids);
     }
 
-    // veryl-parser's resource table is process-global, so module parsing must
-    // remain serial even though modules are otherwise independent.
-    for (module_id, ir_module) in &module_ir {
-        let inst_ids = inst_sequences
-            .get(module_id)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let sim_module =
-            ModuleParser::parse_with_loop_provenance(ir_module, loop_provenance, config, inst_ids)?;
-        modules.insert(*module_id, sim_module);
-    }
+    // Analyzer/parser resources are thread-local. Copy the read-only parser
+    // tables into each worker before lowering otherwise independent modules.
+    // Hierarchy discovery above remains serial, so ModuleId and instance-ID
+    // assignment are identical to the single-threaded construction.
+    let resource_snapshot = resource_table::export_tables();
+    let tasks = module_ir
+        .iter()
+        .map(|(&module_id, &ir_module)| {
+            let inst_ids = inst_sequences
+                .get(&module_id)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            (module_id, ir_module, inst_ids)
+        })
+        .collect::<Vec<_>>();
+    let worker_count = tasks
+        .len()
+        .min(std::thread::available_parallelism().map_or(1, usize::from));
+    let next_task = AtomicUsize::new(0);
+    let parsed_modules = std::thread::scope(|scope| {
+        let handles = (0..worker_count)
+            .map(|_| {
+                scope.spawn(|| {
+                    resource_table::import_tables(&resource_snapshot);
+                    let mut parsed = Vec::new();
+                    loop {
+                        let task = next_task.fetch_add(1, Ordering::Relaxed);
+                        let Some(&(module_id, ir_module, inst_ids)) = tasks.get(task) else {
+                            break;
+                        };
+                        let module = ModuleParser::parse_with_loop_provenance(
+                            ir_module,
+                            loop_provenance,
+                            config,
+                            inst_ids,
+                        )?;
+                        parsed.push((module_id, module));
+                    }
+                    Ok::<_, ParserError>(parsed)
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut parsed_modules = Vec::with_capacity(tasks.len());
+        for handle in handles {
+            let parsed = handle
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+            parsed_modules.extend(parsed);
+        }
+        Ok::<_, ParserError>(parsed_modules)
+    })?;
+    modules.extend(parsed_modules);
 
     Ok(SymbolicRtl {
         modules,

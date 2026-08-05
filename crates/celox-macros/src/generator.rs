@@ -14,14 +14,14 @@ pub fn generate_project(ir: &Ir) -> proc_macro2::TokenStream {
         let module_name = format_ident!("{}", module_name_str);
 
         // Group ports by interface
-        let mut interface_map: std::collections::HashMap<
+        let mut interface_map: fxhash::FxHashMap<
             String,
             Vec<(
                 &VarPath,
                 veryl_analyzer::ir::VarId,
                 &veryl_analyzer::ir::Type,
             )>,
-        > = std::collections::HashMap::new();
+        > = fxhash::FxHashMap::default();
         let mut top_level_ports = Vec::new();
 
         for (var_path, var_id) in &module.ports {

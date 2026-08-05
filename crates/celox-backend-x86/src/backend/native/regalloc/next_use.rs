@@ -1,9 +1,10 @@
 //! Braun--Hack section 4.1: CFG-global next-use distances.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
 use crate::native::mir::{BlockId, MFunction, VReg};
+use crate::{HashMap, HashSet};
 
 use super::cfg::NormalizedCfg;
 
@@ -178,7 +179,7 @@ pub(super) fn analyze(
         .blocks
         .iter()
         .map(|block| {
-            let mut positions = HashMap::<VReg, Vec<usize>>::new();
+            let mut positions = HashMap::<VReg, Vec<usize>>::default();
             for (instruction, inst) in block.insts.iter().enumerate() {
                 for value in inst.uses() {
                     let value_positions = positions.entry(value).or_default();
@@ -193,14 +194,15 @@ pub(super) fn analyze(
     let phi_uses = phi_edge_uses(func, cfg)?;
     let region_topology = RegionTopology::build(cfg)?;
     let edge_loop_exits = &region_topology.edge_exits;
-    let mut entry: Vec<HashMap<VReg, NextUseDistance>> = vec![HashMap::new(); func.blocks.len()];
-    let mut exit: Vec<HashMap<VReg, NextUseDistance>> = vec![HashMap::new(); func.blocks.len()];
-    let mut anticipated_after_phis = vec![HashSet::<VReg>::new(); func.blocks.len()];
+    let mut entry: Vec<HashMap<VReg, NextUseDistance>> =
+        vec![HashMap::default(); func.blocks.len()];
+    let mut exit: Vec<HashMap<VReg, NextUseDistance>> = vec![HashMap::default(); func.blocks.len()];
+    let mut anticipated_after_phis = vec![HashSet::<VReg>::default(); func.blocks.len()];
     let mut queue = (0..func.blocks.len()).rev().collect::<VecDeque<_>>();
     let mut queued = vec![true; func.blocks.len()];
     while let Some(block) = queue.pop_front() {
         queued[block] = false;
-        let mut next_exit = HashMap::<VReg, NextUseDistance>::new();
+        let mut next_exit = HashMap::<VReg, NextUseDistance>::default();
         for (edge, &successor) in cfg.successors[block].iter().enumerate() {
             let edge_exits = edge_loop_exits[block][edge];
             for (&value, &distance) in &entry[successor] {
@@ -230,7 +232,7 @@ pub(super) fn analyze(
             }
         }
         let transfer = &transfers[block];
-        let mut next_entry = HashMap::new();
+        let mut next_entry = HashMap::default();
         for (&value, &distance) in &next_exit {
             if !transfer.definitions.contains(&value) {
                 let Some(distance) = distance.checked_prepend_instructions(transfer.length) else {
@@ -583,7 +585,7 @@ fn verify_use_positions_match_mir(
 ) -> Result<(), NextUseError> {
     for (block, mir_block) in func.blocks.iter().enumerate() {
         let actual = &analysis.use_positions[block];
-        let mut expected_count = HashMap::<VReg, usize>::new();
+        let mut expected_count = HashMap::<VReg, usize>::default();
         for (instruction, inst) in mir_block.insts.iter().enumerate() {
             let uses = inst.uses();
             for (operand, &value) in uses.iter().enumerate() {
@@ -654,7 +656,7 @@ fn verify_anticipated_equations(
             values.extend(phi_uses[block][0].iter().copied());
             values
         } else {
-            HashSet::new()
+            HashSet::default()
         };
         for (edge, &successor) in cfg.successors[block].iter().enumerate().skip(1) {
             expected_exit.retain(|value| {
@@ -664,8 +666,8 @@ fn verify_anticipated_equations(
             });
         }
 
-        let mut instruction_definitions = HashSet::<VReg>::new();
-        let mut after_phi_uses = HashSet::<VReg>::new();
+        let mut instruction_definitions = HashSet::<VReg>::default();
+        let mut after_phi_uses = HashSet::<VReg>::default();
         for inst in &mir_block.insts {
             for value in inst.uses() {
                 if !instruction_definitions.contains(&value) {
@@ -732,7 +734,7 @@ fn verify_dataflow_equations(
             ));
         }
 
-        let mut expected_exit = HashMap::<VReg, NextUseDistance>::new();
+        let mut expected_exit = HashMap::<VReg, NextUseDistance>::default();
         for (edge, &successor) in cfg.successors[block].iter().enumerate() {
             let loop_exits = edge_loop_exits[edge];
             for (&value, &successor_distance) in &analysis.entry[successor] {
@@ -772,7 +774,7 @@ fn verify_dataflow_equations(
             .iter()
             .map(|phi| phi.dst)
             .collect::<HashSet<_>>();
-        let mut local_uses = HashMap::<VReg, usize>::new();
+        let mut local_uses = HashMap::<VReg, usize>::default();
         for (instruction, inst) in mir_block.insts.iter().enumerate() {
             for value in inst.uses() {
                 if !definitions.contains(&value) {
@@ -784,7 +786,7 @@ fn verify_dataflow_equations(
             }
         }
 
-        let mut expected_entry = HashMap::<VReg, NextUseDistance>::new();
+        let mut expected_entry = HashMap::<VReg, NextUseDistance>::default();
         for (&value, &exit_distance) in &expected_exit {
             if definitions.contains(&value) {
                 continue;
@@ -829,7 +831,7 @@ fn verifier_phi_edge_uses(
         .collect::<Vec<_>>();
     for (successor, block) in func.blocks.iter().enumerate() {
         for phi in &block.phis {
-            let mut covered = HashSet::<usize>::new();
+            let mut covered = HashSet::<usize>::default();
             for &(predecessor_id, source) in &phi.sources {
                 let Some(&predecessor) = cfg.block_index.get(&predecessor_id) else {
                     return Err(NextUseError::new(
@@ -1167,7 +1169,7 @@ fn block_region_summaries(
                     "instruction-summary work exceeds addressable size",
                 )
             })?;
-        let mut used = HashSet::new();
+        let mut used = HashSet::default();
         for phi in &mir_block.phis {
             used.insert(phi.dst);
             used.extend(phi.sources.iter().map(|(_, source)| *source));
@@ -1702,9 +1704,9 @@ fn block_transfers(func: &MFunction) -> Vec<BlockTransfer> {
         .map(|block| {
             let phi_definitions = block.phis.iter().map(|phi| phi.dst).collect::<HashSet<_>>();
             let mut definitions = phi_definitions.clone();
-            let mut instruction_definitions = HashSet::<VReg>::new();
-            let mut local_uses = HashMap::<VReg, usize>::new();
-            let mut after_phi_uses = HashSet::<VReg>::new();
+            let mut instruction_definitions = HashSet::<VReg>::default();
+            let mut local_uses = HashMap::<VReg, usize>::default();
+            let mut after_phi_uses = HashSet::<VReg>::default();
             for (position, inst) in block.insts.iter().enumerate() {
                 for used in inst.uses() {
                     if !definitions.contains(&used) {
@@ -1749,7 +1751,7 @@ fn anticipated_on_all_successors(
             .len()
             .saturating_add(phi_edge_uses[*edge].len())
     }) else {
-        return HashSet::new();
+        return HashSet::default();
     };
     let seed_successor = successors[seed_edge];
     let mut result = anticipated_after_phis[seed_successor]
@@ -2010,14 +2012,14 @@ mod tests {
         successor.push(MInst::Return);
         func.blocks = vec![predecessor, successor];
         let cfg = NormalizedCfg {
-            block_index: HashMap::from([(BlockId(0), 0), (BlockId(1), 1)]),
+            block_index: [(BlockId(0), 0), (BlockId(1), 1)].into_iter().collect(),
             predecessors: vec![vec![], vec![0]],
             successors: vec![vec![1], vec![]],
             idom: vec![None, Some(0)],
             dominator_children: vec![vec![1], vec![]],
             dominance_frontier: vec![BTreeSet::new(); 2],
             loops: Vec::new(),
-            loop_for_header: HashMap::new(),
+            loop_for_header: HashMap::default(),
         };
 
         let error = analyze(&func, &cfg).unwrap_err();
@@ -2193,14 +2195,14 @@ mod tests {
         // neither is a natural-loop header.  Exiting the SCC must nevertheless
         // increment the lexicographic loop component.
         let cfg = NormalizedCfg {
-            block_index: HashMap::new(),
+            block_index: HashMap::default(),
             predecessors: vec![vec![], vec![0, 2], vec![0, 1], vec![1, 2]],
             successors: vec![vec![1, 2], vec![2, 3], vec![1, 3], vec![]],
             idom: vec![None, Some(0), Some(0), Some(0)],
             dominator_children: vec![vec![1, 2, 3], vec![], vec![], vec![]],
             dominance_frontier: vec![BTreeSet::new(); 4],
             loops: Vec::new(),
-            loop_for_header: HashMap::new(),
+            loop_for_header: HashMap::default(),
         };
         let topology = RegionTopology::build(&cfg).unwrap();
         assert_eq!(topology.edge_exits[1], vec![0, 1]);

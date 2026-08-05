@@ -1,6 +1,6 @@
 mod layout;
 
-use std::collections::HashMap;
+use fxhash::FxHashMap as HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, Mutex};
 
@@ -726,7 +726,7 @@ impl From<&celox::OptimizeOptions> for SirOptimizationCacheKey {
 
 #[cfg(not(target_arch = "wasm32"))]
 static JIT_CACHE: std::sync::LazyLock<Mutex<HashMap<CacheKey, Arc<CachedBuild>>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::default()));
 
 #[cfg(not(target_arch = "wasm32"))]
 /// Build a collision-free cache key from source content, top module, and options.
@@ -2077,7 +2077,7 @@ pub fn gen_ts(project_path: String) -> Result<String> {
     let source_file_refs: Vec<&str> = all_source_files.iter().map(|s| s.as_str()).collect();
 
     let mut all_modules = Vec::new();
-    let mut file_modules: HashMap<String, Vec<String>> = HashMap::new();
+    let mut file_modules: HashMap<String, Vec<String>> = HashMap::default();
     let mut post_pass_ir = Ir::default();
 
     for (i, (_path, parser)) in parsers.iter().enumerate() {
@@ -2224,7 +2224,7 @@ pub fn gen_ts_from_source(sources: Vec<NapiSourceFile>) -> Result<String> {
     let source_file_refs: Vec<&str> = all_source_files.iter().map(|s| s.as_str()).collect();
 
     let mut all_modules = Vec::new();
-    let mut file_modules: HashMap<String, Vec<String>> = HashMap::new();
+    let mut file_modules: HashMap<String, Vec<String>> = HashMap::default();
     let mut post_pass_ir = Ir::default();
 
     for (i, (_prj, _path, parser)) in parsers.iter().enumerate() {

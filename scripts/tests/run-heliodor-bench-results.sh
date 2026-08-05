@@ -63,6 +63,19 @@ assert_eq "$VERYL_TIMED_REPORTED_ELAPSED_NS" 15 "timed Veryl reported elapsed"
 assert_eq "$VERYL_TIMED_COMPILE_ELAPSED_NS" 6 "timed Veryl compile elapsed"
 assert_eq "$VERYL_TIMED_EXECUTE_ELAPSED_NS" 7 "timed Veryl execute elapsed"
 
+timed_veryl_compile_log="$TMP/timed-veryl-compile.log"
+write_log "$timed_veryl_compile_log" \
+    'VERYL_TEST_TIMING test=boot_compile compile_ns=9 execute_ns=0' \
+    'VERYL_TEST_RESULT test=boot_compile status=compile-only elapsed_ns=10'
+classify_timed_veryl_result "$timed_veryl_compile_log" boot_compile 0 1 \
+    || fail "timed Veryl compile-only result was rejected: $VERYL_TIMED_RESULT_DIAGNOSTIC"
+assert_eq "$VERYL_TIMED_SEMANTIC_STATUS" compile-only \
+    "timed Veryl compile-only semantic status"
+assert_eq "$VERYL_TIMED_COMPILE_ELAPSED_NS" 9 \
+    "timed Veryl compile-only compile elapsed"
+assert_eq "$VERYL_TIMED_EXECUTE_ELAPSED_NS" 0 \
+    "timed Veryl compile-only execute elapsed"
+
 wrong_timed_veryl_log="$TMP/wrong-timed-veryl.log"
 write_log "$wrong_timed_veryl_log" \
     'VERYL_TEST_TIMING test=other compile_ns=6 execute_ns=7' \
@@ -254,7 +267,7 @@ CELOX_RUNNER_BIN=/bin/true
 VERYL_TIMED_RUNNER_BIN=/bin/true
 RESOLVED_VERYL_BIN=/bin/true
 CELOX_SIR_PASS_OVERRIDES=""
-HELIODOR_CELOX_COMPILE_TIMEOUT_SEC=""
+HELIODOR_COMPILE_TIMEOUT_SEC=""
 FIXTURE_RESULT_LINE=""
 FIXTURE_EXIT_STATUS=0
 FIXTURE_AOT_CACHE_DIR=""
@@ -287,8 +300,9 @@ run_in_heliodor() {
 }
 
 ensure_results_schema "$integration_results/results.tsv"
-HELIODOR_CELOX_COMPILE_ONLY=0
+HELIODOR_COMPILE_ONLY=0
 CELOX_OPT_LEVEL=O2
+CELOX_SIR_PASS_OVERRIDES="-branchify_mux +gvn"
 FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_pass compile_ns=20 execute_ns=30 jit_execute_ns=25\nCELOX_TEST_RESULT test=integration_pass status=pass elapsed_ns=71'
 run_one celox integration_pass >/dev/null \
     || fail "run_one rejected a fixture full pass"
@@ -297,6 +311,11 @@ assert_eq "${FIXTURE_RUN_ARGS[$((fixture_arg_count - 2))]}" --opt-level \
     "Celox optimization flag"
 assert_eq "${FIXTURE_RUN_ARGS[$((fixture_arg_count - 1))]}" o2 \
     "normalized Celox optimization level"
+[[ " ${FIXTURE_RUN_ARGS[*]} " == *" --sir-pass=-branchify_mux "* ]] \
+    || fail "Celox disabled pass override was not kept as one argument"
+[[ " ${FIXTURE_RUN_ARGS[*]} " == *" --sir-pass=+gvn "* ]] \
+    || fail "Celox enabled pass override was not kept as one argument"
+CELOX_SIR_PASS_OVERRIDES=""
 assert_eq "$(awk -F '\t' 'NR == 2 { print $6 }' "$integration_results/results.tsv")" pass \
     "run_one pass semantic status"
 [[ "$(awk -F '\t' 'NR == 2 { print $4 }' "$integration_results/results.tsv")" =~ ^[0-9]+$ ]] \
@@ -308,7 +327,7 @@ assert_eq "$(awk -F '\t' 'NR == 2 { print $11 }' "$integration_results/results.t
 assert_eq "$(awk -F '\t' 'NR == 2 { print $12 }' "$integration_results/results.tsv")" 25 \
     "run_one pass JIT execute elapsed"
 
-HELIODOR_CELOX_COMPILE_ONLY=1
+HELIODOR_COMPILE_ONLY=1
 FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_compile compile_ns=70 execute_ns=0 jit_execute_ns=0\nCELOX_TEST_RESULT test=integration_compile status=compile-only elapsed_ns=72'
 run_one celox integration_compile >/dev/null \
     || fail "run_one rejected a fixture compile-only completion"
@@ -317,7 +336,7 @@ assert_eq "$(awk -F '\t' 'NR == 3 { print $6 }' "$integration_results/results.ts
 assert_eq "$(awk -F '\t' 'NR == 3 { print $4 }' "$integration_results/results.tsv")" NA \
     "run_one compile-only speed elapsed"
 
-HELIODOR_CELOX_COMPILE_ONLY=0
+HELIODOR_COMPILE_ONLY=0
 FIXTURE_EXIT_STATUS=1
 FIXTURE_RESULT_LINE=$'CELOX_TEST_TIMING test=integration_fail compile_ns=20 execute_ns=30 jit_execute_ns=25\nCELOX_TEST_RESULT test=integration_fail status=fail elapsed_ns=73'
 if run_one celox integration_fail >/dev/null 2>&1; then
@@ -357,6 +376,18 @@ assert_eq "$(awk -F '\t' 'NR == 6 { print $10 }' "$integration_results/results.t
 assert_eq "$(awk -F '\t' 'NR == 6 { print $11 }' "$integration_results/results.tsv")" 50 \
     "run_one timed Veryl execute elapsed"
 
+HELIODOR_COMPILE_ONLY=1
+FIXTURE_RESULT_LINE=$'VERYL_TEST_TIMING test=integration_veryl_compile compile_ns=60 execute_ns=0\nVERYL_TEST_RESULT test=integration_veryl_compile status=compile-only elapsed_ns=61'
+run_one veryl-cc-sync integration_veryl_compile >/dev/null \
+    || fail "run_one rejected a fixture timed Veryl compile-only result"
+[[ " ${FIXTURE_RUN_ARGS[*]} " == *" --compile-only "* ]] \
+    || fail "run_one did not request timed Veryl compile-only mode"
+assert_eq "$(awk -F '\t' 'NR == 7 { print $6 }' "$integration_results/results.tsv")" \
+    compile-only "run_one timed Veryl compile-only semantic status"
+assert_eq "$(awk -F '\t' 'NR == 7 { print $4 }' "$integration_results/results.tsv")" NA \
+    "run_one timed Veryl compile-only speed elapsed"
+HELIODOR_COMPILE_ONLY=0
+
 FIXTURE_AOT_CACHE_DIR=""
 FIXTURE_RESULT_LINE=$'[INFO ]    Succeeded test (integration_veryl_cli)\n[INFO ]    Completed tests : 1 passed, 0 failed'
 run_one veryl-cc integration_veryl_cli >/dev/null \
@@ -365,9 +396,9 @@ run_one veryl-cc integration_veryl_cli >/dev/null \
     || fail "run_one did not pass an absolute isolated cache to the Veryl CLI"
 [[ ! -e "$FIXTURE_AOT_CACHE_DIR" ]] \
     || fail "run_one did not remove the Veryl CLI AOT cache"
-assert_eq "$(awk -F '\t' 'NR == 7 { print $10 }' "$integration_results/results.tsv")" NA \
+assert_eq "$(awk -F '\t' 'NR == 8 { print $10 }' "$integration_results/results.tsv")" NA \
     "run_one Veryl CLI compile elapsed"
-assert_eq "$(awk -F '\t' 'NR == 7 { print $11 }' "$integration_results/results.tsv")" NA \
+assert_eq "$(awk -F '\t' 'NR == 8 { print $11 }' "$integration_results/results.tsv")" NA \
     "run_one Veryl CLI execute elapsed"
 
 echo "run-heliodor-bench result fixture tests: PASS"
