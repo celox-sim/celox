@@ -1,0 +1,48 @@
+name: Compile-time Benchmarks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_BENCH_DEBUG: "0"
+
+permissions: {}
+
+jobs:
+  codspeed:
+    name: CodSpeed
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-rust
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: codspeed-compilation
+
+      - name: Install cargo-codspeed
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed@5.0.1
+
+      - name: Build compile-time benchmarks
+        run: cargo codspeed build --locked -p celox --bench compilation
+
+      - name: Run compile-time benchmarks
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: simulation
+          run: cargo codspeed run -p celox

@@ -69,6 +69,7 @@ celox-backend-arm64   = { path = "../celox-backend-arm64", optional = true }
 [dev-dependencies]
 insta      = "1.46"
 criterion  = "0.8"
+codspeed-criterion-compat = "5.0.1"
 proptest   = "1.10"
 test-case  = "3"
 tempfile.workspace = true
@@ -82,6 +83,11 @@ harness = false
 [[bench]]
 name = "overhead"
 harness = false
+
+[[bench]]
+name = "compilation"
+harness = false
+bench = false
 
 [lints]
 workspace = true
