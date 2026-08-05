@@ -34,6 +34,8 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.release-token.outputs.token }}
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Create develop on first use
         id: develop
         env:
@@ -79,13 +81,38 @@ jobs:
             exit 0
           fi
 
-          # Conflict resolution can add commits to the disposable sync branch.
-          # Reset it to master only if it has not moved since this inspection.
+          # Build the disposable branch from the exact merge that CI and develop
+          # will consume. Cargo.lock can merge cleanly as text while still
+          # referring to master's released Veryl crates, so re-resolve the HEAD
+          # dependency graph before publishing a conflict-free merge.
+          git config user.name "celox-release-bot"
+          git config user.email "celox-release-bot@users.noreply.github.com"
+          git switch --force-create "$SYNC_BRANCH" origin/develop
+
+          set +e
+          git merge --no-commit --no-ff "$master_sha"
+          merge_status="$?"
+          set -e
+
+          if [ "$merge_status" -eq 0 ]; then
+            cargo update -p veryl-analyzer
+            cargo metadata --locked --format-version 1 --no-deps >/dev/null
+            git add Cargo.lock
+            git commit -m "chore(develop): sync master"
+            sync_sha="$(git rev-parse HEAD)"
+          else
+            # Keep non-dependency conflicts visible and actionable on the PR.
+            git merge --abort
+            git switch --force-create "$SYNC_BRANCH" "$master_sha"
+            sync_sha="$master_sha"
+          fi
+
+          # Do not replace a branch that moved after this run inspected it.
           sync_ref="refs/heads/$SYNC_BRANCH"
           remote_sync_sha="$(git ls-remote origin "$sync_ref" | cut -f1)"
           git push origin \
             --force-with-lease="$sync_ref:$remote_sync_sha" \
-            "$master_sha:$sync_ref"
+            "$sync_sha:$sync_ref"
 
           sync_pr="$(
             gh pr list \
