@@ -2,6 +2,48 @@
 
 use super::*;
 
+fn fingerprint(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) -> u64 {
+    fn hash_item(value: impl Hash) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    units.len().hash(&mut hasher);
+    for unit in units {
+        unit.entry_block_id.hash(&mut hasher);
+
+        unit.blocks.len().hash(&mut hasher);
+        let mut block_xor = 0u64;
+        let mut block_sum = 0u64;
+        for (&block_id, block) in &unit.blocks {
+            let item = hash_item((
+                block_id,
+                &block.params,
+                &block.instructions,
+                &block.terminator,
+            ));
+            block_xor ^= item;
+            block_sum = block_sum.wrapping_add(item);
+        }
+        block_xor.hash(&mut hasher);
+        block_sum.hash(&mut hasher);
+
+        unit.register_map.len().hash(&mut hasher);
+        let mut register_xor = 0u64;
+        let mut register_sum = 0u64;
+        for (&register, ty) in &unit.register_map {
+            let item = hash_item((register, ty));
+            register_xor ^= item;
+            register_sum = register_sum.wrapping_add(item);
+        }
+        register_xor.hash(&mut hasher);
+        register_sum.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 pub(super) fn optimize_unit_groups_cached(
     groups: &mut crate::HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
     passes: &ExecutionUnitPassManager,
@@ -31,34 +73,6 @@ pub(super) fn optimize_unit_groups_cached(
                     .sum(),
             })
             .collect()
-    }
-
-    fn fingerprint(units: &[ExecutionUnit<RegionedAbsoluteAddr>]) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        units.len().hash(&mut hasher);
-        for unit in units {
-            unit.entry_block_id.hash(&mut hasher);
-
-            let mut block_ids = unit.blocks.keys().copied().collect::<Vec<_>>();
-            block_ids.sort_unstable();
-            block_ids.len().hash(&mut hasher);
-            for block_id in block_ids {
-                let block = &unit.blocks[&block_id];
-                block_id.hash(&mut hasher);
-                block.params.hash(&mut hasher);
-                block.instructions.hash(&mut hasher);
-                block.terminator.hash(&mut hasher);
-            }
-
-            let mut registers = unit.register_map.iter().collect::<Vec<_>>();
-            registers.sort_unstable_by_key(|(register, _)| **register);
-            registers.len().hash(&mut hasher);
-            for (register, ty) in registers {
-                register.hash(&mut hasher);
-                ty.hash(&mut hasher);
-            }
-        }
-        hasher.finish()
     }
 
     struct EquivalenceClass {
@@ -131,5 +145,58 @@ pub(super) fn optimize_unit_groups_cached(
             groups.len(),
             start.elapsed()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fingerprint;
+    use crate::HashMap;
+    use crate::ir::{
+        BasicBlock, BlockId, ExecutionUnit, RegisterId, RegisterType, SIRInstruction,
+        SIRTerminator, SIRValue, UnaryOp,
+    };
+
+    fn unit(reverse: bool) -> ExecutionUnit<crate::ir::RegionedAbsoluteAddr> {
+        let entry = BasicBlock {
+            id: BlockId(0),
+            params: Vec::new(),
+            instructions: vec![SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8))],
+            terminator: SIRTerminator::Jump(BlockId(1), Vec::new()),
+        };
+        let exit = BasicBlock {
+            id: BlockId(1),
+            params: Vec::new(),
+            instructions: vec![SIRInstruction::Unary(
+                RegisterId(1),
+                UnaryOp::Ident,
+                RegisterId(0),
+            )],
+            terminator: SIRTerminator::Return,
+        };
+        let mut blocks = HashMap::default();
+        let mut register_map = HashMap::default();
+        let logic = RegisterType::Logic { width: 1 };
+        if reverse {
+            blocks.insert(BlockId(1), exit);
+            blocks.insert(BlockId(0), entry);
+            register_map.insert(RegisterId(1), logic.clone());
+            register_map.insert(RegisterId(0), logic);
+        } else {
+            blocks.insert(BlockId(0), entry);
+            blocks.insert(BlockId(1), exit);
+            register_map.insert(RegisterId(0), logic.clone());
+            register_map.insert(RegisterId(1), logic);
+        }
+        ExecutionUnit {
+            blocks,
+            entry_block_id: BlockId(0),
+            register_map,
+        }
+    }
+
+    #[test]
+    fn fingerprint_is_independent_of_hash_map_iteration_order() {
+        assert_eq!(fingerprint(&[unit(false)]), fingerprint(&[unit(true)]));
     }
 }

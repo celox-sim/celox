@@ -15,6 +15,7 @@ RTL 設計の性能を予測するものではありません。
 
 | グループ | 測定対象 |
 |---|---|
+| コンパイル時間 (CodSpeed) | フロントエンド、最適化、レイアウト、native/Cranelift コード生成の全工程 |
 | Counter | 順序状態の更新とクロックイベントのオーバーヘッド |
 | 標準ライブラリ | 組み合わせ回路、順序回路、構造化データパス |
 | TypeScript テストベンチ | N-API 呼び出し、型付き信号アクセス、スケジューラ |
@@ -38,6 +39,11 @@ Heliodor では固定入力の追加ワークロードを使います。測定�
 ## ローカル実行
 
 ```bash
+# CodSpeed によるコンパイル時間ベンチマーク
+cargo install cargo-codspeed --locked --version 5.0.1
+cargo codspeed build --locked -p celox --bench compilation
+cargo codspeed run -p celox
+
 # Rust ベンチマーク
 cargo bench -p celox
 
@@ -47,6 +53,10 @@ pnpm bench
 # Verilator 比較（Verilator と C++ ツールチェーンが必要）
 bash scripts/run-verilator-bench.sh
 ```
+
+CodSpeed ワークフローは pull request、merge queue、`master` で実行されます。pull
+request は決定的な CPU simulation を使って `master` の基準値と比較されます。
+ローカル実行ではベンチマーク suite が動作することだけを確認します。
 
 ローカル計測は、同じマシン上で 2 つのリビジョンを比較する場合に最も有効です。
 CI 履歴は、単発の小さな差より長期的な傾向の確認に向いています。

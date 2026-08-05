@@ -543,13 +543,17 @@ fn run_branchify_mux(
     // and apply the non-overlapping whole-unit plan atomically.  Running
     // here preserves every existing CFG/block-number decision and appends
     // only complete regions which the leaf transforms could not consume.
-    if enable_whole_function_rewrites
-        && let Ok(placement) = PlacementAnalysis::analyze(eu)
-        && let Some(plan) = find_atomic_priority_placement(eu, &placement)
+    let mut placement = enable_whole_function_rewrites
+        .then(|| PlacementAnalysis::analyze(eu).ok())
+        .flatten();
+    let mut placement_stale = false;
+    if let Some(placement) = &placement
+        && let Some(plan) = find_atomic_priority_placement(eu, placement)
     {
         let regions =
             apply_atomic_priority_placement(eu, plan, &mut next_block_id, &mut reg_counter);
         applied += regions;
+        placement_stale = regions != 0;
     }
     verify_stage(eu, "atomic priority placement");
     report_stage("atomic priority placement");
@@ -559,9 +563,11 @@ fn run_branchify_mux(
     // This catches pure/state-versioned DAGs which feed only one existing
     // control arm even when no Mux remains at the use site.  The complete
     // connected move is selected and preflighted before any block changes.
-    if enable_whole_function_rewrites
-        && let Ok(placement) = PlacementAnalysis::analyze(eu)
-        && let Some(plan) = find_existing_cfg_placement(eu, &placement)
+    if placement_stale {
+        placement = PlacementAnalysis::analyze(eu).ok();
+    }
+    if let Some(placement) = &placement
+        && let Some(plan) = find_existing_cfg_placement(eu, placement)
     {
         applied += apply_existing_cfg_placement(eu, plan);
     }
