@@ -1781,6 +1781,25 @@ fn preserves_typed_parameter_override_literals_during_specialization() {
 }
 
 #[test]
+fn preserves_parent_parameter_types_in_child_overrides() {
+    let source = r#"
+        module Child #(parameter P = 0) (output logic y);
+            assign y = (P == 4'hf);
+        endmodule
+        module Top #(
+            parameter logic signed [3:0] P = -1
+        ) (output logic y);
+            Child #(.P(P)) child(.y(y));
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("typed_parent_override.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
 fn ignores_unreachable_non_ansi_modules() {
     let source = r#"
         module Top(output logic y); assign y = 1'b1; endmodule
@@ -2171,6 +2190,14 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "always_ff event control",
+            r#"
+            module Top(input logic clk, sample, output logic q);
+                always_ff @(posedge clk or posedge sample) q <= clk;
+            endmodule
+        "#,
+        ),
+        (
             "always_ff inside loop-generate",
             r#"
             module Top(input logic clk, input logic [1:0] d, output logic [1:0] q);
@@ -2194,7 +2221,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "non-zero-based or ascending multidimensional packed range",
+            "non-zero-based multidimensional packed range",
             r#"
             module Top(input logic [2:1][7:0] a, output logic [7:0] y);
                 assign y = a[1];
@@ -3285,6 +3312,51 @@ fn preserves_multidimensional_packed_selects_in_child_port_actuals() {
     let a = sim.signal("a");
     sim.modify(|io| io.set(a, 0xabcdu16)).unwrap();
     assert_eq!(sim.get(sim.signal("y")), 0xabu8.into());
+}
+
+#[test]
+fn evaluates_packed_ranges_with_typed_parameters() {
+    let source = r#"
+        module Top #(
+            parameter logic [3:0] P = 0
+        ) (output logic [15:0] y);
+            logic [~P:0] value;
+            assign value = '1;
+            assign y = value;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("typed_parameter_range.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), u16::MAX.into());
+}
+
+#[test]
+fn preserves_ascending_inner_packed_dimension_widths() {
+    let source = r#"
+        module Top(
+            input logic [1:0][0:7] a,
+            output logic [7:0] y,
+            output logic first,
+            output logic last
+        );
+            assign y = a[1];
+            assign first = a[1][0];
+            assign last = a[1][7];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("ascending_inner_dimension.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 0x80cdu16)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0x80u8.into());
+    assert_eq!(sim.get(sim.signal("first")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("last")), 0u8.into());
 }
 
 #[test]

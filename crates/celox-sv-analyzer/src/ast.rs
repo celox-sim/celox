@@ -375,12 +375,16 @@ fn reject_unsupported_multidimensional_packed_bounds(
                 && ranges.iter().any(|range| {
                     let left = eval_ast_const_expr(range.left(), const_env);
                     let right = eval_ast_const_expr(range.right(), const_env);
-                    !matches!((left, right), (Some(left), Some(0)) if left >= 0)
+                    !matches!(
+                        (left, right),
+                        (Some(left), Some(right))
+                            if (right == 0 && left >= 0) || (left == 0 && right >= 0)
+                    )
                 })
         });
     if unsupported {
         Err(AnalyzerError::Unsupported(
-            "non-zero-based or ascending multidimensional packed range".to_string(),
+            "non-zero-based multidimensional packed range".to_string(),
         ))
     } else {
         Ok(())
@@ -2556,10 +2560,19 @@ fn infer_const_expr_type(
     }
 }
 
+#[derive(Clone)]
+struct PackedDimension {
+    left: ConstExpr,
+    right: ConstExpr,
+    width: ConstExpr,
+}
+
+type PackedDimensions = HashMap<String, Vec<PackedDimension>>;
+
 fn packed_dimensions_from_ports_and_signals(
     ports: &[Port],
     signals: &[Signal],
-) -> HashMap<String, Vec<ConstExpr>> {
+) -> PackedDimensions {
     let mut dimensions = HashMap::new();
     for port in ports {
         dimensions.insert(
@@ -2576,17 +2589,31 @@ fn packed_dimensions_from_ports_and_signals(
     dimensions
 }
 
-fn packed_dimension_widths(ranges: &[PackedRange]) -> Vec<ConstExpr> {
+fn packed_dimension_widths(ranges: &[PackedRange]) -> Vec<PackedDimension> {
     ranges
         .iter()
-        .map(|range| ConstExpr::Binary {
-            left: Box::new(ConstExpr::Binary {
-                left: Box::new(range.left().clone()),
-                op: BinaryOp::Sub,
-                right: Box::new(range.right().clone()),
-            }),
-            op: BinaryOp::Add,
-            right: Box::new(ConstExpr::Literal("1".to_string())),
+        .map(|range| {
+            let left = range.left().clone();
+            let right = range.right().clone();
+            let width = |high: ConstExpr, low: ConstExpr| ConstExpr::Binary {
+                left: Box::new(ConstExpr::Binary {
+                    left: Box::new(high),
+                    op: BinaryOp::Sub,
+                    right: Box::new(low),
+                }),
+                op: BinaryOp::Add,
+                right: Box::new(ConstExpr::Literal("1".to_string())),
+            };
+            let width = ConstExpr::Mux {
+                condition: Box::new(ConstExpr::Binary {
+                    left: Box::new(left.clone()),
+                    op: BinaryOp::Ge,
+                    right: Box::new(right.clone()),
+                }),
+                then_expr: Box::new(width(left.clone(), right.clone())),
+                else_expr: Box::new(width(right.clone(), left.clone())),
+            };
+            PackedDimension { left, right, width }
         })
         .collect()
 }
@@ -2701,7 +2728,7 @@ fn instances_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<Instance>, AnalyzerError> {
     let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
     let mut instances = Vec::new();
@@ -2724,7 +2751,7 @@ fn instances_from_non_port_module_item(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -2760,7 +2787,7 @@ fn instances_from_generate_item(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
@@ -2781,7 +2808,7 @@ fn instances_from_module_or_generate_item(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -2815,7 +2842,7 @@ fn instances_from_module_common_item(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -2840,7 +2867,7 @@ fn instances_from_conditional_generate(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     let sv_parser::ConditionalGenerateConstruct::If(generate) = generate else {
@@ -2889,7 +2916,7 @@ fn instances_from_generate_block(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     match block {
@@ -2939,7 +2966,7 @@ fn instances_from_module_instantiation(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     let module_name = identifier_text(
@@ -3041,7 +3068,7 @@ fn parameter_overrides_from_value_assignment(
 fn port_connections_from_hierarchical_instance(
     instance: &sv_parser::HierarchicalInstance,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<PortConnection>, AnalyzerError> {
     let Some(connections) = instance.nodes.1.nodes.1.as_ref() else {
         return Ok(Vec::new());
@@ -3114,7 +3141,7 @@ fn functions_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Result<HashMap<String, Function>, AnalyzerError> {
     let mut functions = HashMap::new();
     let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
@@ -3286,7 +3313,7 @@ fn validate_function_formal_types(
 fn validate_function_declaration_statements(
     declaration: &sv_parser::FunctionDeclaration,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Result<(), AnalyzerError> {
     let statements = match &declaration.nodes.2 {
         sv_parser::FunctionBodyDeclaration::WithPort(body) => &body.nodes.6,
@@ -3304,7 +3331,7 @@ fn validate_function_declaration_statements(
 fn validate_function_statement_or_null(
     statement: &sv_parser::StatementOrNull,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Result<(), AnalyzerError> {
     let sv_parser::StatementOrNull::Statement(statement) = statement else {
         return Ok(());
@@ -3315,7 +3342,7 @@ fn validate_function_statement_or_null(
 fn validate_function_statement(
     statement: &sv_parser::Statement,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Result<(), AnalyzerError> {
     match &statement.nodes.2 {
         sv_parser::StatementItem::JumpStatement(statement)
@@ -3435,7 +3462,7 @@ fn function_from_declaration(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<Function> {
     match &declaration.nodes.2 {
         sv_parser::FunctionBodyDeclaration::WithPort(body) => {
@@ -3856,7 +3883,7 @@ fn integer_atom_expr_type(node: RefNode<'_>) -> Option<ExprType> {
 fn function_body_expr(
     statements: &[sv_parser::FunctionStatementOrNull],
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     local_types: &HashMap<String, FunctionLocalType>,
     local_names: &HashSet<String>,
 ) -> Option<Expr> {
@@ -3889,7 +3916,7 @@ fn function_expr_from_statement_or_null(
     statement: &sv_parser::FunctionStatementOrNull,
     locals: &mut HashMap<String, Expr>,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
     let sv_parser::FunctionStatementOrNull::Statement(statement) = statement else {
@@ -3908,7 +3935,7 @@ fn function_expr_from_statement_or_null_stmt(
     statement: &sv_parser::StatementOrNull,
     locals: &mut HashMap<String, Expr>,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
     let sv_parser::StatementOrNull::Statement(statement) = statement else {
@@ -3927,7 +3954,7 @@ fn function_expr_from_statement(
     statement: &sv_parser::Statement,
     locals: &mut HashMap<String, Expr>,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
     match &statement.nodes.2 {
@@ -4024,7 +4051,7 @@ fn function_expr_from_conditional_statement(
     statement: &sv_parser::ConditionalStatement,
     locals: &mut HashMap<String, Expr>,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
     let mut branches = Vec::new();
@@ -4160,7 +4187,7 @@ fn function_expr_from_case_statement(
     statement: &sv_parser::CaseStatement,
     locals: &mut HashMap<String, Expr>,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     local_types: &HashMap<String, FunctionLocalType>,
 ) -> Option<Expr> {
     let sv_parser::CaseStatement::Normal(statement) = statement else {
@@ -4288,7 +4315,7 @@ fn comb_processes_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<CombProcess>, AnalyzerError> {
     let mut processes = Vec::new();
     for item in module_non_port_items(node) {
@@ -4309,7 +4336,7 @@ fn comb_processes_from_non_port_module_item(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -4345,7 +4372,7 @@ fn comb_processes_from_generate_item(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
@@ -4366,7 +4393,7 @@ fn comb_processes_from_module_or_generate_item(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item {
@@ -4387,7 +4414,7 @@ fn comb_processes_from_module_common_item(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -4452,7 +4479,7 @@ fn comb_processes_from_conditional_generate(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     let sv_parser::ConditionalGenerateConstruct::If(generate) = generate else {
@@ -4526,7 +4553,7 @@ fn comb_processes_from_loop_generate(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     if generate_block_has_data_declaration(&generate.nodes.2) {
@@ -4861,7 +4888,7 @@ fn comb_processes_from_generate_block(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     processes: &mut Vec<CombProcess>,
 ) -> Result<(), AnalyzerError> {
     match block {
@@ -5601,7 +5628,7 @@ fn substitute_const_expr_constants(
 fn assignments_from_continuous_assign(
     assign: &sv_parser::ContinuousAssign,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<Assignment>, AnalyzerError> {
     match assign {
         sv_parser::ContinuousAssign::Net(assign) => assign
@@ -5658,7 +5685,7 @@ fn comb_process_from_always_construct(
     always: &sv_parser::AlwaysConstruct,
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Result<Option<CombProcess>, AnalyzerError> {
     if !matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_)) {
         return Ok(None);
@@ -5700,7 +5727,7 @@ fn ff_processes_from_module_node(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<FfProcess>, AnalyzerError> {
     let mut processes = Vec::new();
     for item in module_non_port_items(node) {
@@ -5721,7 +5748,7 @@ fn ff_processes_from_non_port_module_item(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     processes: &mut Vec<FfProcess>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -5757,7 +5784,7 @@ fn ff_processes_from_generate_item(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     processes: &mut Vec<FfProcess>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
@@ -5778,7 +5805,7 @@ fn ff_processes_from_module_or_generate_item(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     processes: &mut Vec<FfProcess>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item {
@@ -5799,7 +5826,7 @@ fn ff_processes_from_module_common_item(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     processes: &mut Vec<FfProcess>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -5857,7 +5884,7 @@ fn ff_processes_from_generate_block(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     processes: &mut Vec<FfProcess>,
 ) -> Result<(), AnalyzerError> {
     match block {
@@ -5902,7 +5929,7 @@ fn ff_process_from_always_construct(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Result<Option<FfProcess>, AnalyzerError> {
     if !matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_)) {
         return Ok(None);
@@ -6008,7 +6035,7 @@ fn conditional_assignments_from_statement_or_null(
     condition: Option<Expr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     assignments: &mut Vec<ConditionalAssignment>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::StatementOrNull::Statement(stmt) = stmt {
@@ -6029,7 +6056,7 @@ fn conditional_assignments_from_statement(
     condition: Option<Expr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     assignments: &mut Vec<ConditionalAssignment>,
 ) -> Result<(), AnalyzerError> {
     match &stmt.nodes.2 {
@@ -6098,7 +6125,7 @@ fn conditional_assignments_from_conditional_statement(
     parent_condition: Option<Expr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     assignments: &mut Vec<ConditionalAssignment>,
 ) -> Result<(), AnalyzerError> {
     let if_condition =
@@ -6167,7 +6194,7 @@ fn conditional_assignments_from_case_statement(
     parent_condition: Option<Expr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
     assignments: &mut Vec<ConditionalAssignment>,
 ) -> Result<(), AnalyzerError> {
     let sv_parser::CaseStatement::Normal(stmt) = stmt else {
@@ -6252,7 +6279,7 @@ fn conditional_assignments_from_case_statement(
 fn expr_from_cond_predicate(
     predicate: &sv_parser::CondPredicate,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
     let first = predicate.nodes.0.contents().into_iter().next()?;
     let sv_parser::ExpressionOrCondPattern::Expression(expr) = first else {
@@ -6286,7 +6313,7 @@ fn combine_expr_condition_terms(parent: Option<Expr>, terms: Vec<Expr>) -> Optio
 fn assignments_from_statement(
     stmt: &sv_parser::Statement,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Vec<Assignment> {
     match &stmt.nodes.2 {
         sv_parser::StatementItem::BlockingAssignment(assignment) => match &assignment.0 {
@@ -6337,7 +6364,7 @@ fn assignments_from_statement(
 fn assignments_from_statement_or_null(
     stmt: &sv_parser::StatementOrNull,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Vec<Assignment> {
     match stmt {
         sv_parser::StatementOrNull::Statement(stmt) => {
@@ -6384,7 +6411,7 @@ fn expr_from_lvalue(lhs: &LValue) -> Expr {
 fn net_lvalue_from_node(
     node: &sv_parser::NetLvalue,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<LValue> {
     match node {
         sv_parser::NetLvalue::Identifier(identifier) => {
@@ -6401,7 +6428,7 @@ fn net_lvalue_from_node(
 fn variable_lvalue_from_node(
     node: &sv_parser::VariableLvalue,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<LValue> {
     match node {
         sv_parser::VariableLvalue::Identifier(identifier) => {
@@ -6419,7 +6446,7 @@ fn lvalue_from_select(
     name: String,
     select: &sv_parser::Select,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<LValue> {
     let bit_selects = select.nodes.1.nodes.0.as_slice();
     let indices = bit_selects
@@ -6461,7 +6488,7 @@ fn lvalue_from_constant_select(
     name: String,
     select: &sv_parser::ConstantSelect,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<LValue> {
     let bit_selects = select.nodes.1.nodes.0.as_slice();
     let indices = bit_selects
@@ -6511,7 +6538,7 @@ fn expr_from_expression(expr: &sv_parser::Expression, syntax_tree: &SyntaxTree) 
 fn expr_from_expression_with_types(
     expr: &sv_parser::Expression,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
     expr_from_expression_with_types_raw(expr, syntax_tree, packed_dimensions)
         .map(guard_zero_divisions)
@@ -6520,7 +6547,7 @@ fn expr_from_expression_with_types(
 fn expr_from_expression_with_types_raw(
     expr: &sv_parser::Expression,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
     match expr {
         sv_parser::Expression::Primary(primary) => {
@@ -6627,7 +6654,7 @@ fn expr_from_primary(primary: &sv_parser::Primary, syntax_tree: &SyntaxTree) -> 
 fn expr_from_primary_with_types(
     primary: &sv_parser::Primary,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
     match primary {
         sv_parser::Primary::PrimaryLiteral(_) => {
@@ -6692,7 +6719,7 @@ fn expr_from_primary_with_types(
 fn expr_from_mintypmax_ternary(
     expr: &sv_parser::MintypmaxExpressionTernary,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
     Some(Expr::Mux {
         condition: Box::new(expr_from_expression_with_types(
@@ -6716,7 +6743,7 @@ fn expr_from_mintypmax_ternary(
 fn expr_from_conditional_expression(
     expr: &sv_parser::ConditionalExpression,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
     Some(Expr::Mux {
         condition: Box::new(expr_from_cond_predicate(
@@ -6740,7 +6767,7 @@ fn expr_from_conditional_expression(
 fn expr_from_function_subroutine_call(
     call: &sv_parser::FunctionSubroutineCall,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
     let sv_parser::SubroutineCall::TfCall(call) = &call.nodes.0 else {
         return None;
@@ -6791,7 +6818,7 @@ fn expr_select_from_select(
     base: Expr,
     select: &sv_parser::Select,
     syntax_tree: &SyntaxTree,
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<Expr> {
     let bit_selects = select.nodes.1.nodes.0.as_slice();
     let indices = bit_selects
@@ -6845,7 +6872,7 @@ fn expr_select_from_select(
 fn flatten_packed_select(
     name: &str,
     indices: &[ConstExpr],
-    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
+    packed_dimensions: &PackedDimensions,
 ) -> Option<(ConstExpr, ConstExpr)> {
     let dimensions = packed_dimensions.get(name)?;
     if indices.is_empty() || indices.len() > dimensions.len() || dimensions.len() <= 1 {
@@ -6854,12 +6881,35 @@ fn flatten_packed_select(
 
     let mut offset = ConstExpr::Literal("0".to_string());
     for (idx, index) in indices.iter().enumerate() {
-        let stride = product_expr(&dimensions[idx + 1..]);
+        let stride = product_expr(
+            &dimensions[idx + 1..]
+                .iter()
+                .map(|dimension| dimension.width.clone())
+                .collect::<Vec<_>>(),
+        );
+        let dimension = &dimensions[idx];
+        let index = ConstExpr::Mux {
+            condition: Box::new(ConstExpr::Binary {
+                left: Box::new(dimension.left.clone()),
+                op: BinaryOp::Ge,
+                right: Box::new(dimension.right.clone()),
+            }),
+            then_expr: Box::new(ConstExpr::Binary {
+                left: Box::new(index.clone()),
+                op: BinaryOp::Sub,
+                right: Box::new(dimension.right.clone()),
+            }),
+            else_expr: Box::new(ConstExpr::Binary {
+                left: Box::new(dimension.right.clone()),
+                op: BinaryOp::Sub,
+                right: Box::new(index.clone()),
+            }),
+        };
         let term = if is_one(&stride) {
-            index.clone()
+            index
         } else {
             ConstExpr::Binary {
-                left: Box::new(index.clone()),
+                left: Box::new(index),
                 op: BinaryOp::Mul,
                 right: Box::new(stride),
             }
@@ -6867,7 +6917,12 @@ fn flatten_packed_select(
         offset = add_expr(offset, term);
     }
 
-    let remaining_width = product_expr(&dimensions[indices.len()..]);
+    let remaining_width = product_expr(
+        &dimensions[indices.len()..]
+            .iter()
+            .map(|dimension| dimension.width.clone())
+            .collect::<Vec<_>>(),
+    );
     if is_one(&remaining_width) {
         return Some((offset.clone(), offset));
     }

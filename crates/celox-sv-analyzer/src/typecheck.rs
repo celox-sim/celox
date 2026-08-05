@@ -148,7 +148,7 @@ pub fn eval_const_expr_with_types<S: BuildHasher>(
     eval_const_expr(&expr, constants)
 }
 
-fn substitute_typed_constants<S: BuildHasher>(
+pub fn substitute_typed_constants<S: BuildHasher>(
     expr: ConstExpr,
     constants: &HashMap<String, i128>,
     types: &HashMap<String, (usize, bool), S>,

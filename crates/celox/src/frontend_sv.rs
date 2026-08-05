@@ -822,7 +822,7 @@ fn lower_module_with_overrides(
             )));
         }
         let id = next_var_id(&mut next_id);
-        let type_info = signal_type_from_sv(port.r#type(), &constants)?;
+        let type_info = signal_type_from_sv(port.r#type(), &constants, &parameter_types)?;
         let path = VarPath::new(resource_table::insert_str(port.name()));
         let kind = signal_kind_from_port_direction(port.direction());
         let variable = SvVariable {
@@ -866,7 +866,7 @@ fn lower_module_with_overrides(
             )));
         }
         let id = next_var_id(&mut next_id);
-        let type_info = signal_type_from_sv(signal.r#type(), &constants)?;
+        let type_info = signal_type_from_sv(signal.r#type(), &constants, &parameter_types)?;
         let path = VarPath::new(resource_table::insert_str(signal.name()));
         let variable = SvVariable {
             id,
@@ -1043,6 +1043,8 @@ fn lower_parameter_overrides(
         .iter()
         .map(|parameter| {
             let value = parameter.value().cloned().map(|value| {
+                let value =
+                    sv::typecheck::substitute_typed_constants(value, constants, parameter_types);
                 if const_expr_references_identifier(&value) {
                     sv::typecheck::eval_const_expr_with_types(&value, constants, parameter_types)
                         .map(const_expr_from_i128)
@@ -2131,11 +2133,26 @@ struct SvSignalType {
 fn signal_type_from_sv(
     typ: &sv::ir::Type,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Result<SvSignalType, sv::AnalyzerError> {
     let width = if typ.packed_ranges().is_empty() {
         1
     } else {
-        sv::typecheck::resolve_packed_width_with_env(typ.packed_ranges(), constants)
+        typ.packed_ranges()
+            .iter()
+            .try_fold(1usize, |acc, range| {
+                let left = sv::typecheck::eval_const_expr_with_types(
+                    range.left(),
+                    constants,
+                    parameter_types,
+                )?;
+                let right = sv::typecheck::eval_const_expr_with_types(
+                    range.right(),
+                    constants,
+                    parameter_types,
+                )?;
+                acc.checked_mul(left.abs_diff(right) as usize + 1)
+            })
             .or_else(|| typ.resolved_width())
             .ok_or_else(|| {
                 sv::AnalyzerError::Unsupported("unresolved explicit packed width".to_string())
@@ -2148,10 +2165,17 @@ fn signal_type_from_sv(
         .packed_ranges()
         .iter()
         .filter_map(|range| {
-            Some((
-                sv::typecheck::eval_const_expr(range.left(), constants)?,
-                sv::typecheck::eval_const_expr(range.right(), constants)?,
-            ))
+            let left = sv::typecheck::eval_const_expr_with_types(
+                range.left(),
+                constants,
+                parameter_types,
+            )?;
+            let right = sv::typecheck::eval_const_expr_with_types(
+                range.right(),
+                constants,
+                parameter_types,
+            )?;
+            Some((left, right))
         })
         .collect();
     let type_kind = match typ.kind() {
@@ -3124,11 +3148,38 @@ fn clock_event_from_ff_process(process: &sv::ir::FfProcess) -> Option<&sv::ir::F
             assignment
                 .condition()
                 .is_some_and(|condition| expr_references_ident(condition, event.signal()))
-                || expr_references_ident(assignment.assignment().rhs(), event.signal())
+                || expr_uses_ident_as_condition(assignment.assignment().rhs(), event.signal())
         })
     });
     let clock = candidates.next()?;
     candidates.next().is_none().then_some(clock)
+}
+
+fn expr_uses_ident_as_condition(expr: &sv::ir::Expr, name: &str) -> bool {
+    match expr {
+        sv::ir::Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_references_ident(condition, name)
+                || expr_uses_ident_as_condition(then_expr, name)
+                || expr_uses_ident_as_condition(else_expr, name)
+        }
+        sv::ir::Expr::Select { expr, .. }
+        | sv::ir::Expr::Resize { expr, .. }
+        | sv::ir::Expr::Unary { expr, .. } => expr_uses_ident_as_condition(expr, name),
+        sv::ir::Expr::Concat(parts) | sv::ir::Expr::RepeatConcat { parts, .. } => parts
+            .iter()
+            .any(|part| expr_uses_ident_as_condition(part, name)),
+        sv::ir::Expr::Binary { left, right, .. } => {
+            expr_uses_ident_as_condition(left, name) || expr_uses_ident_as_condition(right, name)
+        }
+        sv::ir::Expr::Call { args, .. } => args
+            .iter()
+            .any(|arg| expr_uses_ident_as_condition(arg, name)),
+        sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => false,
+    }
 }
 
 fn trigger_set_from_ff_process(
