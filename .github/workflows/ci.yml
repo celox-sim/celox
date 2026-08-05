@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, integration/veryl-head]
+    branches: [master, develop]
   pull_request:
   merge_group:
 
@@ -21,7 +21,7 @@ jobs:
     name: Detect changes
     runs-on: ubuntu-latest
     env:
-      RELEASE_PLEASE_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login == 'celox-release-please[bot]' && github.head_ref == 'release-please--branches--master--components--celox' }}
+      STABLE_LANE: ${{ (github.event_name == 'push' && github.ref_name == 'master') || (github.event_name == 'pull_request' && github.base_ref == 'master') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/master') }}
     outputs:
       docs: ${{ steps.classify.outputs.docs }}
       javascript: ${{ steps.classify.outputs.javascript }}
@@ -41,8 +41,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
         run: node scripts/ci-changes.mjs "$BASE_SHA" "$HEAD_SHA"
 
-      - name: Validate release version
-        if: env.RELEASE_PLEASE_PR == 'true'
+      - name: Reject development dependencies from the stable lane
+        if: env.STABLE_LANE == 'true'
         run: node scripts/check-release-version.mjs
 
   docs:
@@ -71,6 +71,8 @@ jobs:
     needs: changes
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.scripts == 'true')
     runs-on: ubuntu-latest
+    env:
+      VERYL_LANE: ${{ ((github.event_name == 'push' && github.ref_name == 'develop') || (github.event_name == 'pull_request' && github.base_ref == 'develop') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/develop')) && 'head' || 'stable' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -86,9 +88,14 @@ jobs:
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
         run: cargo fmt --all -- --check
 
-      - name: Verify vendored Veryl metadata
+      - name: Verify Veryl dependency lane
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
-        run: node scripts/veryl-vendor.mjs check
+        shell: bash
+        run: |
+          node scripts/check-veryl-lane.mjs "$VERYL_LANE"
+          if [ "$VERYL_LANE" = stable ]; then
+            node scripts/veryl-vendor.mjs check
+          fi
 
       - name: cargo clippy
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   defaultFeatures,
   disableGitoxideDefault,
+  promoteReleasedVerylDependencies,
   requestedVerylVersion,
   verifyLockfile,
   verifyVendor,
@@ -58,6 +59,25 @@ test("rejects Veryl crates that are not in lockstep", () => {
     () => requestedVerylVersion(rootManifest().replace('veryl-std = "0.20.2"', 'veryl-std = "0.20.3"')),
     /not in lockstep/,
   );
+});
+
+test("promotes only released Veryl declarations onto the develop manifest", () => {
+  const developManifest = rootManifest("0.20.2")
+    .replace('[workspace.dependencies]\n', '[workspace.dependencies]\nlocal-overlay = "develop"\n')
+    .replace(
+      'veryl-parser = { version = "0.20.2", default-features = false }',
+      'veryl-parser = { git = "https://github.com/veryl-lang/veryl.git", rev = "0123456789abcdef0123456789abcdef01234567", default-features = false }',
+    );
+  const releaseManifest = rootManifest("0.20.3").replace(
+    '[patch.crates-io]',
+    'release-only = "unchanged-by-promotion"\n\n[patch.crates-io]',
+  );
+
+  const promoted = promoteReleasedVerylDependencies(developManifest, releaseManifest);
+
+  assert.equal(requestedVerylVersion(promoted), "0.20.3");
+  assert.match(promoted, /^local-overlay = "develop"$/m);
+  assert.doesNotMatch(promoted, /release-only/);
 });
 
 test("removes gitoxide from the vendored default features", () => {

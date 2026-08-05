@@ -5,18 +5,31 @@ on:
     types: [napi-release]
   workflow_dispatch:
     inputs:
-      tag:
-        description: Existing v-prefixed release tag to publish or retry
+      channel:
+        description: Package channel to publish
         required: true
+        default: stable
+        type: choice
+        options:
+          - stable
+          - nightly-stable
+          - nightly-head
+      tag:
+        description: Existing v-prefixed release tag (required for stable)
+        required: false
         type: string
 
 concurrency:
-  group: napi-publish-${{ github.event.client_payload.tag || inputs.tag }}
+  group: napi-publish-${{ inputs.channel || github.event.client_payload.tag }}
   cancel-in-progress: false
 
 env:
   CARGO_INCREMENTAL: "0"
   RELEASE_TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+  NIGHTLY: ${{ startsWith(inputs.channel, 'nightly-') }}
+  NIGHTLY_CHANNEL: ${{ inputs.channel == 'nightly-stable' && 'stable' || inputs.channel == 'nightly-head' && 'head' || '' }}
+  BUILD_REF: ${{ startsWith(inputs.channel, 'nightly-') && github.sha || (github.event.client_payload.tag || inputs.tag) }}
+  NPM_TAG: ${{ inputs.channel == 'nightly-stable' && 'nightly-stable' || inputs.channel == 'nightly-head' && 'nightly-head' || 'latest' }}
 
 permissions:
   contents: read
@@ -25,14 +38,55 @@ jobs:
   validate-release:
     name: Validate release version
     runs-on: ubuntu-latest
+    outputs:
+      build_sha: ${{ steps.revision.outputs.sha }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ env.BUILD_REF }}
+          fetch-depth: 0
 
-      - name: Check release tag
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Resolve immutable build revision
+        id: revision
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Check nightly source branch
+        if: env.NIGHTLY == 'true'
         shell: bash
         run: |
+          case "$NIGHTLY_CHANNEL" in
+            stable) expected_ref="refs/heads/master" ;;
+            head) expected_ref="refs/heads/develop" ;;
+            *) echo "Unknown nightly channel $NIGHTLY_CHANNEL." >&2; exit 1 ;;
+          esac
+          if [ "$GITHUB_REF" != "$expected_ref" ]; then
+            echo "$NPM_TAG must be dispatched from $expected_ref, got $GITHUB_REF." >&2
+            exit 1
+          fi
+
+      - if: env.NIGHTLY == 'true'
+        uses: ./.github/actions/set-nightly-version
+        with:
+          enabled: ${{ env.NIGHTLY }}
+          channel: ${{ env.NIGHTLY_CHANNEL }}
+
+      - name: Check nightly Veryl compatibility lane
+        if: env.NIGHTLY == 'true'
+        run: node scripts/check-veryl-lane.mjs "$NIGHTLY_CHANNEL"
+
+      - name: Check release tag
+        if: env.NIGHTLY != 'true'
+        shell: bash
+        run: |
+          if [ -z "$RELEASE_TAG" ]; then
+            echo "A stable publication requires a v-prefixed release tag." >&2
+            exit 1
+          fi
           expected_tag="v$(tr -d '\r\n' < VERSION)"
           if [ "$RELEASE_TAG" != "$expected_tag" ]; then
             echo "Release tag $RELEASE_TAG does not match VERSION ($expected_tag)." >&2
@@ -40,6 +94,7 @@ jobs:
           fi
 
       - name: Check published GitHub release
+        if: env.NIGHTLY != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -56,6 +111,7 @@ jobs:
           fi
 
       - name: Check synchronized versions and stable dependencies
+        if: env.NIGHTLY != 'true'
         run: node scripts/check-release-version.mjs
 
   build:
@@ -87,12 +143,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ needs.validate-release.outputs.build_sha }}
           submodules: recursive
 
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+
+      - if: env.NIGHTLY == 'true'
+        uses: ./.github/actions/set-nightly-version
+        with:
+          enabled: ${{ env.NIGHTLY }}
+          channel: ${{ env.NIGHTLY_CHANNEL }}
 
       - uses: pnpm/action-setup@v6
 
@@ -142,7 +204,7 @@ jobs:
           if-no-files-found: error
 
   test:
-    needs: build
+    needs: [validate-release, build]
     strategy:
       fail-fast: false
       matrix:
@@ -158,12 +220,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ needs.validate-release.outputs.build_sha }}
           submodules: recursive
 
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+
+      - if: env.NIGHTLY == 'true'
+        uses: ./.github/actions/set-nightly-version
+        with:
+          enabled: ${{ env.NIGHTLY }}
+          channel: ${{ env.NIGHTLY_CHANNEL }}
 
       - uses: pnpm/action-setup@v6
 
@@ -183,7 +251,7 @@ jobs:
         run: pnpm --filter="!@celox-sim/celox-napi" --filter="!@celox-sim/playground" -r test
 
   publish:
-    needs: test
+    needs: [validate-release, test]
     runs-on: ubuntu-latest
     name: Publish
     permissions:
@@ -192,13 +260,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ needs.validate-release.outputs.build_sha }}
           submodules: recursive
 
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+
+      - if: env.NIGHTLY == 'true'
+        uses: ./.github/actions/set-nightly-version
+        with:
+          enabled: ${{ env.NIGHTLY }}
+          channel: ${{ env.NIGHTLY_CHANNEL }}
 
       - uses: pnpm/action-setup@v6
 
@@ -265,7 +339,7 @@ jobs:
               if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
                 echo "$package_name@$package_version is already published; skipping."
               else
-                npm publish "$dir" --provenance --access public
+                npm publish "$dir" --provenance --access public --tag "$NPM_TAG"
               fi
             fi
           done
@@ -279,11 +353,11 @@ jobs:
           if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
             echo "$package_name@$package_version is already published; skipping."
           else
-            npm publish --provenance --access public
+            npm publish --provenance --access public --tag "$NPM_TAG"
           fi
 
   publish-js:
-    needs: publish
+    needs: [validate-release, publish]
     runs-on: ubuntu-latest
     name: Publish JS Packages
     permissions:
@@ -292,13 +366,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ needs.validate-release.outputs.build_sha }}
           submodules: recursive
 
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+
+      - if: env.NIGHTLY == 'true'
+        uses: ./.github/actions/set-nightly-version
+        with:
+          enabled: ${{ env.NIGHTLY }}
+          channel: ${{ env.NIGHTLY_CHANNEL }}
 
       - uses: pnpm/action-setup@v6
 
@@ -317,7 +397,7 @@ jobs:
           if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
             echo "$package_name@$package_version is already published; skipping."
           else
-            pnpm publish --provenance --access public --no-git-checks
+            pnpm publish --provenance --access public --no-git-checks --tag "$NPM_TAG"
           fi
 
       - name: Publish @celox-sim/vite-plugin
@@ -329,5 +409,5 @@ jobs:
           if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
             echo "$package_name@$package_version is already published; skipping."
           else
-            pnpm publish --provenance --access public --no-git-checks
+            pnpm publish --provenance --access public --no-git-checks --tag "$NPM_TAG"
           fi

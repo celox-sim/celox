@@ -1,0 +1,21 @@
+name: Set nightly package version
+description: Derive one deterministic prerelease version from the checked-out commit
+
+inputs:
+  enabled:
+    description: Whether to rewrite package versions for a nightly build
+    required: true
+  channel:
+    description: Nightly compatibility channel (stable or head)
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - if: inputs.enabled == 'true'
+      shell: bash
+      run: |
+        revision="$(git rev-parse HEAD)"
+        commit_epoch="$(git show -s --format=%ct HEAD)"
+        timestamp="$(node -e 'const date = new Date(Number(process.argv[1]) * 1000); process.stdout.write(date.toISOString().replace(/[-:T]/g, "").slice(0, 14));' "$commit_epoch")"
+        node scripts/set-nightly-version.mjs "${{ inputs.channel }}" "$timestamp" "$revision"
