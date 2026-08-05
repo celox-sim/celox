@@ -9,9 +9,10 @@ use std::time::{Duration, Instant};
 
 use bit_set::BitSet;
 use num_bigint::BigUint;
+use serde::{Deserialize, Serialize};
 
 use crate::ir::{AbsoluteAddr, LaidOutProgram, SignalArrayLayout, SignalRef};
-use crate::{CodegenError, HashMap, SimulatorError, SimulatorOptions};
+use crate::{CodegenError, HashMap, HashSet, SimulatorError, SimulatorOptions};
 
 use super::super::RuntimeEventBuffer;
 use super::super::traits::SimulatorErrorCode;
@@ -102,7 +103,7 @@ pub struct SharedNativeCode {
     /// Simulation-state bytes plus the largest native spill/scratch arena
     /// required by any compiled function.
     native_memory_size: usize,
-    options: SimulatorOptions,
+    options: NativeRuntimeOptions,
     /// (offset, byte_size) pairs for 4-state variables that need X initialization.
     four_state_inits: Vec<(usize, usize)>,
 }
@@ -114,11 +115,23 @@ unsafe impl Sync for SharedNativeCode {}
 impl SharedNativeCode {
     /// Attach a compiler-produced image to the precompiled host runtime.
     pub fn from_image(program_image: NativeProgramImage) -> Result<Self, SimulatorError> {
+        program_image.validate().map_err(|message| {
+            codegen_message(format!("invalid native program image: {message}"))
+        })?;
+        let symbols = program_image
+            .symbols
+            .iter()
+            .map(|symbol| jit_mem::JitSymbol {
+                offset: symbol.offset,
+                size: symbol.size,
+                name: symbol.name.clone(),
+            })
+            .collect::<Vec<_>>();
         let jit_image = jit_mem::JitCode::new_named_with_symbols_profiled(
             program_image.code_image(),
             "celox_native_image",
-            &program_image.symbols,
-            program_image.options.x86_options.diagnostics.perf_map,
+            &symbols,
+            program_image.options.perf_map,
         )
         .map_err(|source| codegen_err(CodegenError::NativeMemory { source }))?;
         let materialize = |event: NativeEventImageRef| -> Result<NativeEventRef, SimulatorError> {
@@ -156,7 +169,7 @@ impl SharedNativeCode {
             id_to_event,
             layout: program_image.layout.clone(),
             native_memory_size: program_image.native_memory_size,
-            options: program_image.options.clone(),
+            options: program_image.options,
             four_state_inits: program_image.four_state_inits.clone(),
             program_image,
         })
@@ -187,7 +200,7 @@ impl SharedNativeCode {
 }
 
 /// One callable function in a packed native code image.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeCodeEntry {
     /// Stable diagnostic name for the emitted function.
     pub name: String,
@@ -197,7 +210,7 @@ pub struct NativeCodeEntry {
     pub size: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct NativeEventImageRef {
     func_offset: usize,
     comb_apply_offset: usize,
@@ -205,13 +218,27 @@ struct NativeEventImageRef {
     id: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct NativeCodeSymbol {
+    offset: usize,
+    size: usize,
+    name: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct NativeRuntimeOptions {
+    four_state: bool,
+    native_tick_loop: bool,
+    perf_map: bool,
+}
+
 /// Pointer-free native compiler artifact which can be attached to the
 /// precompiled Celox runtime.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NativeProgramImage {
-    code: Arc<[u8]>,
+    code: Vec<u8>,
     code_entries: Vec<NativeCodeEntry>,
-    symbols: Vec<jit_mem::JitSymbol>,
+    symbols: Vec<NativeCodeSymbol>,
     comb_offset: usize,
     event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
     eval_only_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
@@ -220,7 +247,7 @@ pub struct NativeProgramImage {
     id_to_event: Vec<NativeEventImageRef>,
     layout: MemoryLayout,
     native_memory_size: usize,
-    options: SimulatorOptions,
+    options: NativeRuntimeOptions,
     four_state_inits: Vec<(usize, usize)>,
 }
 
@@ -238,6 +265,82 @@ impl NativeProgramImage {
     /// Final state layout consumed by every generated entry.
     pub fn layout(&self) -> &MemoryLayout {
         &self.layout
+    }
+
+    pub(super) fn validate(&self) -> Result<(), String> {
+        if self.code.is_empty() {
+            return Err("code image is empty".into());
+        }
+        let mut entry_offsets = HashSet::default();
+        let mut previous_end = 0usize;
+        for entry in &self.code_entries {
+            if !entry.offset.is_multiple_of(NATIVE_CODE_ENTRY_ALIGNMENT) {
+                return Err(format!("entry `{}` is not aligned", entry.name));
+            }
+            if entry.size == 0 {
+                return Err(format!("entry `{}` is empty", entry.name));
+            }
+            let end = entry
+                .offset
+                .checked_add(entry.size)
+                .ok_or_else(|| format!("entry `{}` range overflows", entry.name))?;
+            if entry.offset < previous_end || end > self.code.len() {
+                return Err(format!("entry `{}` is outside the code image", entry.name));
+            }
+            if !entry_offsets.insert(entry.offset) {
+                return Err(format!("entry `{}` duplicates an offset", entry.name));
+            }
+            previous_end = end;
+        }
+        if !entry_offsets.contains(&self.comb_offset) {
+            return Err("eval_comb offset does not name an image entry".into());
+        }
+        for symbol in &self.symbols {
+            let end = symbol
+                .offset
+                .checked_add(symbol.size)
+                .ok_or_else(|| format!("symbol `{}` range overflows", symbol.name))?;
+            if symbol.size == 0 || end > self.code.len() {
+                return Err(format!(
+                    "symbol `{}` is outside the code image",
+                    symbol.name
+                ));
+            }
+        }
+        for event in self
+            .event_map
+            .values()
+            .chain(self.eval_only_event_map.values())
+            .chain(self.apply_event_map.values())
+            .chain(self.id_to_event.iter())
+        {
+            if !entry_offsets.contains(&event.func_offset)
+                || !entry_offsets.contains(&event.comb_apply_offset)
+            {
+                return Err(format!(
+                    "event {} references a missing image entry",
+                    event.id
+                ));
+            }
+        }
+        let semantic_size = self
+            .layout
+            .merged_total_size
+            .checked_add(self.layout.triggered_bits_total_size)
+            .ok_or_else(|| "semantic memory size overflows".to_string())?;
+        if self.native_memory_size < semantic_size {
+            return Err("native memory is smaller than the semantic state".into());
+        }
+        for &(offset, size) in &self.four_state_inits {
+            let end = size
+                .checked_mul(2)
+                .and_then(|size| offset.checked_add(size))
+                .ok_or_else(|| "four-state initialization range overflows".to_string())?;
+            if end > self.native_memory_size {
+                return Err("four-state initialization exceeds native memory".into());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -498,7 +601,7 @@ const NATIVE_CODE_ENTRY_ALIGNMENT: usize = 16;
 fn append_native_code(
     image: &mut Vec<u8>,
     entries: &mut Vec<NativeCodeEntry>,
-    image_symbols: &mut Vec<jit_mem::JitSymbol>,
+    image_symbols: &mut Vec<NativeCodeSymbol>,
     name: String,
     compiled: &CompiledNativeFunction,
 ) -> Result<usize, SimulatorError> {
@@ -514,7 +617,7 @@ fn append_native_code(
     image.extend_from_slice(&compiled.code);
 
     if compiled.symbols.is_empty() {
-        image_symbols.push(jit_mem::JitSymbol {
+        image_symbols.push(NativeCodeSymbol {
             offset,
             size: compiled.code.len(),
             name: name.clone(),
@@ -531,7 +634,7 @@ fn append_native_code(
                     symbol.name
                 )));
             }
-            image_symbols.push(jit_mem::JitSymbol {
+            image_symbols.push(NativeCodeSymbol {
                 offset: offset + symbol.offset,
                 size: symbol.size,
                 name: format!("{name}.{}", symbol.name),
@@ -1048,7 +1151,7 @@ fn compile_program(
 
     Ok((
         NativeProgramImage {
-            code: Arc::from(packed_image),
+            code: packed_image,
             code_entries,
             symbols: image_symbols,
             comb_offset,
@@ -1059,7 +1162,11 @@ fn compile_program(
             id_to_event,
             layout: layout.clone(),
             native_memory_size,
-            options: options.clone(),
+            options: NativeRuntimeOptions {
+                four_state: options.four_state,
+                native_tick_loop: options.x86_options.native_tick_loop,
+                perf_map: options.x86_options.diagnostics.perf_map,
+            },
             four_state_inits,
         },
         codegen_trace,
@@ -1347,7 +1454,7 @@ impl super::super::SimBackend for NativeBackend {
         event: NativeEventRef,
         count: u64,
     ) -> (u64, Result<(), SimulatorErrorCode>) {
-        if self.compiled.options.x86_options.native_tick_loop {
+        if self.compiled.options.native_tick_loop {
             self.call_func_many_timed(event.comb_apply_func, count)
         } else if count == 0 {
             (0, Ok(()))

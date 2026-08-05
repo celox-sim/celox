@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use celox::native_backend::NativeImageContainerError;
 use celox::{NativeBackend, SharedNativeCode, SimBackend, Simulator};
 
 const ADDER: &str = r#"
@@ -101,6 +102,109 @@ fn precompiled_runtime_reattaches_pointer_free_program_image() {
     backend.eval_apply_ff_at(clock).unwrap();
     backend.eval_comb().unwrap();
     assert_eq!(backend.get_as::<u8>(output), 77);
+}
+
+#[test]
+fn native_program_image_round_trips_through_appended_runtime() {
+    const RUNTIME_PREFIX: &[u8] = b"\x7fELFprecompiled-celox-runtime";
+
+    let sim = Simulator::builder(FF, "Top").build().unwrap();
+    let encoded = sim
+        .shared_code()
+        .program_image()
+        .append_to_runtime(RUNTIME_PREFIX)
+        .unwrap();
+    assert_eq!(&encoded[..RUNTIME_PREFIX.len()], RUNTIME_PREFIX);
+
+    let appended = celox::NativeProgramImage::discover_appended(&encoded)
+        .unwrap()
+        .unwrap();
+    assert_eq!(appended.runtime_len, RUNTIME_PREFIX.len());
+    assert_eq!(appended.image.code_image(), sim.shared_code().code_image());
+    assert_eq!(
+        appended.image.code_entries(),
+        sim.shared_code().code_entries()
+    );
+
+    let reloaded = Arc::new(SharedNativeCode::from_image(appended.image).unwrap());
+    let mut backend = NativeBackend::from_shared(reloaded);
+    let clock = backend.id_to_event_slice()[0];
+    let reset = sim.signal("i_rst");
+    let data = sim.signal("d");
+    let output = sim.signal("q");
+    backend.set(reset, 1u8);
+    backend.set(data, 91u8);
+    backend.eval_comb().unwrap();
+    backend.eval_apply_ff_at(clock).unwrap();
+    backend.eval_comb().unwrap();
+    assert_eq!(backend.get_as::<u8>(output), 91);
+}
+
+#[test]
+fn native_program_image_rejects_corrupt_appended_payload() {
+    let sim = Simulator::builder(ADDER, "Top").build().unwrap();
+    let mut encoded = sim
+        .shared_code()
+        .program_image()
+        .append_to_runtime(b"runtime")
+        .unwrap();
+    encoded["runtime".len()] ^= 0x80;
+
+    assert!(matches!(
+        celox::NativeProgramImage::discover_appended(&encoded),
+        Err(NativeImageContainerError::ChecksumMismatch)
+    ));
+    assert!(
+        celox::NativeProgramImage::discover_appended(b"ordinary runtime")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn native_program_image_writes_an_executable_runtime_file() {
+    let sim = Simulator::builder(ADDER, "Top").build().unwrap();
+    let shared = sim.shared_code();
+    let image = shared.program_image();
+    let directory = tempfile::tempdir().unwrap();
+    let runtime_path = directory.path().join("celox-runtime");
+    let output_path = directory.path().join("compiled-design");
+    std::fs::write(&runtime_path, b"precompiled runtime").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&runtime_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&runtime_path, permissions).unwrap();
+    }
+
+    image
+        .write_attached_runtime(&runtime_path, &output_path)
+        .unwrap();
+    // Replacing an existing attached image must strip the old trailer rather
+    // than nesting containers indefinitely.
+    image
+        .write_attached_runtime(&output_path, &output_path)
+        .unwrap();
+
+    let output = std::fs::read(&output_path).unwrap();
+    let appended = celox::NativeProgramImage::discover_appended(&output)
+        .unwrap()
+        .unwrap();
+    assert_eq!(appended.runtime_len, b"precompiled runtime".len());
+    assert_eq!(&output[..appended.runtime_len], b"precompiled runtime");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(
+            std::fs::metadata(&output_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
+    }
 }
 
 /// Two backends from the same SharedNativeCode produce correct, independent results.

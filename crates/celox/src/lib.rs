@@ -102,7 +102,8 @@ mod host_api {
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub use crate::backend::native::{
-        NativeBackend, NativeCodeEntry, NativeProgramImage, SharedNativeCode,
+        AppendedNativeImage, NativeBackend, NativeCodeEntry, NativeImageArchitecture,
+        NativeImageContainerError, NativeProgramImage, SharedNativeCode,
     };
     #[cfg(any(
         target_arch = "x86_64",

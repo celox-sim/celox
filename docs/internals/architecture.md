@@ -109,9 +109,14 @@ and literal data remain inside their originating function blob.
 The precompiled host runtime attaches the image by copying it once into
 executable memory and resolving the recorded offsets into process-local function
 pointers. The same artifact can therefore be copied to another address and
-reattached without recompiling the design. The in-memory artifact is the boundary
-for a future on-disk executable or appended-image container; it is not yet a
-stable serialized file format.
+reattached without recompiling the design.
+
+`NativeProgramImage` can also be serialized after a precompiled runtime
+executable. A fixed-size EOF trailer records the container version, target ISA,
+payload length, and checksum, so startup can find the design without parsing ELF
+or another platform executable format. Replacing an attached design preserves
+the runtime prefix and its file permissions. Container versions are validated
+strictly; compatibility between different versions is not implicit.
 
 ### Cranelift
 

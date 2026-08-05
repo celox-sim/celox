@@ -11,6 +11,7 @@ edition.workspace     = true
 [dependencies]
 celox-design = { path = "../celox-design" }
 fxhash       = { workspace = true }
+serde        = { workspace = true }
 
 [lints]
 workspace = true

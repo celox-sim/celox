@@ -440,6 +440,7 @@ dependencies = [
  "miette",
  "num-bigint",
  "num-traits",
+ "postcard",
  "proptest",
  "rand 0.10.2",
  "rand_pcg",
@@ -687,6 +688,7 @@ version = "0.0.0"
 dependencies = [
  "celox-design",
  "fxhash",
+ "serde",
 ]
 
 [[package]]
