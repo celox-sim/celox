@@ -59,6 +59,86 @@ fn bench_native_tb_std_counter() -> String {
 // ── Basic ──────────────────────────────────────────────────────────────
 
 #[test]
+fn test_native_testbench_ff_condition_reads_pre_edge_value_after_write() {
+    let code = r#"
+        module Dut (
+            clk     : input  clock,
+            present : input  logic,
+            d       : input  logic<8>,
+            captured: output logic<8>,
+        ) {
+            var in_flight: logic;
+            always_ff (clk) {
+                in_flight = present;
+                if in_flight {
+                    captured = d;
+                }
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var present: logic;
+            var d: logic<8>;
+            var captured: logic<8>;
+            inst dut: Dut (clk, present, d, captured);
+
+            initial {
+                present = 1'b1;
+                d = 8'hA5;
+                clk.next(1);
+                $assert(captured == 8'h00);
+
+                present = 1'b0;
+                d = 8'h3C;
+                clk.next(1);
+                $assert(captured == 8'h3C);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_native_testbench_overlapping_ff_writes_preserve_last_write() {
+    let code = r#"
+        module Dut (
+            clk  : input  clock,
+            state: output logic<128>,
+        ) {
+            always_ff (clk) {
+                state = 128'h11111111111111111111111111111111;
+                state[15:8] = 8'hAA;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var state: logic<128>;
+            inst dut: Dut (clk, state);
+
+            initial {
+                clk.next(1);
+                $assert(state[23:0] == 24'h11AA11);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
 fn test_native_testbench_uses_metadata_project_name() {
     let code = r#"
         #[test(t)]
@@ -912,6 +992,60 @@ fn test_reset_dynamic_duration_from_variable() {
                 duration = 5;
                 rst.assert(duration);
                 $assert(ticks == 32'd5, "ticks=%d", ticks);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_reset_zero_duration_clamps_to_one_cycle() {
+    let code = format!(
+        r#"
+        {CLOCK_TICK_COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var ticks: logic<32>;
+            var duration: logic<32>;
+            inst dut: ClockTickCounter (clk, rst, ticks);
+
+            initial {{
+                duration = 0;
+                rst.assert(duration);
+                $assert(ticks == 32'd1, "ticks=%d", ticks);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_reset_legacy_clock_argument_clamps_to_one_cycle() {
+    let code = format!(
+        r#"
+        {CLOCK_TICK_COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var ticks: logic<32>;
+            inst dut: ClockTickCounter (clk, rst, ticks);
+
+            initial {{
+                rst.assert(clk);
+                $assert(ticks == 32'd1, "ticks=%d", ticks);
                 $finish();
             }}
         }}

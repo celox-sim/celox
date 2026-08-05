@@ -2538,15 +2538,6 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    pub(super) fn is_range_fully_defined(&self, var_id: VarId, access: BitAccess) -> bool {
-        if let Some(bits) = self.defined_ranges.get(&var_id) {
-            // Whether all bits in the specified range [lsb, msb] are set in BitSet
-            (access.lsb..=access.msb).all(|i| bits.contains(i))
-        } else {
-            false
-        }
-    }
-
     pub(super) fn op_load<A>(
         &mut self,
         var_id: VarId,
@@ -2634,9 +2625,11 @@ impl<'a> FfParser<'a> {
         // For source tracking, use the conservative range from eval_var_select
         // (covers all bits that might be read by a dynamic index).
         let access = eval_var_select(self.module, var_id, index, select)?;
-        let is_internal = self.local_working_vars.contains(&var_id)
-            || self.is_range_fully_defined(var_id, access)
-            || self.dynamic_defined_vars.contains(&var_id);
+        // Module state read in an always_ff block is always the pre-edge
+        // value, even when an earlier statement in the same block assigned
+        // that variable.  `defined_ranges` only describes pending writes; it
+        // must not hide the old-state read from the shared-clock scheduler.
+        let is_internal = self.local_working_vars.contains(&var_id);
         if !is_internal {
             sources.push(VarAtomBase::new(
                 convert(var_id, STABLE_REGION),
@@ -2669,6 +2662,7 @@ impl<'a> FfParser<'a> {
         };
         // Use get_access_width for actual element width (correct for dynamic array indices).
         let target_width = get_access_width(self.module, dst.id, &dst.index, &dst.select)?;
+        let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
         let target_type = &self.module.variables[&dst.id].r#type;
         let src_reg = if target_type.is_2state()
             && matches!(ir_builder.register(&src_reg), RegisterType::Logic { .. })
@@ -2728,6 +2722,23 @@ impl<'a> FfParser<'a> {
         } else {
             domain.region()
         };
+        let direct_write = if is_static {
+            self.direct_static_write_ranges
+                .get(&dst.id)
+                .is_some_and(|ranges| {
+                    ranges
+                        .iter()
+                        .any(|range| range.lsb <= access.lsb && range.msb >= access.msb)
+                })
+        } else {
+            self.direct_dynamic_write_vars.contains(&dst.id)
+        };
+        let store_region =
+            if direct_write && matches!(store_region, WORKING_REGION | SPARSE_WORKING_REGION) {
+                STABLE_REGION
+            } else {
+                store_region
+            };
         ir_builder.emit(SIRInstruction::Store(
             convert(dst.id, store_region),
             offset,
@@ -2738,7 +2749,6 @@ impl<'a> FfParser<'a> {
         ));
 
         // Use conservative range from eval_var_select for tracking (covers all possible bits).
-        let access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
         if is_static {
             let bits = self.defined_ranges.entry(dst.id).or_default();
             for i in access.lsb..=access.msb {
@@ -4494,6 +4504,150 @@ mod tests {
     };
     use veryl_metadata::Metadata;
     use veryl_parser::Parser;
+
+    #[test]
+    fn module_state_read_after_write_is_tracked_as_an_old_state_source() {
+        symbol_table::clear();
+        attribute_table::clear();
+        let code = r#"
+module Top (
+    clk    : input clock,
+    present: input logic,
+    d      : input logic<8>,
+) {
+    var in_flight: logic;
+    var captured: logic<8>;
+    always_ff (clk) {
+        in_flight = present;
+        if in_flight {
+            captured = d;
+        }
+    }
+}
+"#;
+        let metadata = Metadata::create_default("prj").unwrap();
+        let parsed = Parser::parse(code, &"").unwrap();
+        let analyzer = Analyzer::new(&metadata);
+        let mut context = Context::default();
+        let mut ir = Ir::default();
+        assert!(analyzer.analyze_pass1("prj", &parsed.veryl).is_empty());
+        assert!(Analyzer::analyze_post_pass1().is_empty());
+        assert!(
+            analyzer
+                .analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir))
+                .is_empty()
+        );
+        assert!(Analyzer::analyze_post_pass2(&ir).is_empty());
+
+        let module = ir
+            .components
+            .into_iter()
+            .find_map(|component| match component {
+                Component::Module(module) => Some(module),
+                _ => None,
+            })
+            .unwrap();
+        let declarations = module
+            .declarations
+            .iter()
+            .filter_map(|declaration| match declaration {
+                Declaration::Ff(declaration) => Some(declaration.as_ref()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let in_flight = module
+            .variables
+            .iter()
+            .find_map(|(&id, variable)| (variable.path.to_string() == "in_flight").then_some(id))
+            .unwrap();
+
+        let mut parser = FfParser::new(&module, BuildConfig::default());
+        let mut builder = SIRBuilder::new();
+        let result = parser.parse_ff_group(&declarations, &mut builder).unwrap();
+
+        assert!(result.sources.iter().any(|source| {
+            source.id.var_id == in_flight
+                && source.id.region == celox_design::STABLE_REGION
+                && source.access == BitAccess::new(0, 0)
+        }));
+    }
+
+    #[test]
+    fn direct_ff_stores_are_selected_per_bit_range() {
+        symbol_table::clear();
+        attribute_table::clear();
+        let code = r#"
+module Top (
+    clk: input clock,
+    lo : input logic<8>,
+    hi : input logic<8>,
+) {
+    var state: logic<16>;
+    always_ff (clk) {
+        state[7:0] = lo;
+        state[15:8] = hi;
+    }
+}
+"#;
+        let metadata = Metadata::create_default("prj").unwrap();
+        let parsed = Parser::parse(code, &"").unwrap();
+        let analyzer = Analyzer::new(&metadata);
+        let mut context = Context::default();
+        let mut ir = Ir::default();
+        assert!(analyzer.analyze_pass1("prj", &parsed.veryl).is_empty());
+        assert!(Analyzer::analyze_post_pass1().is_empty());
+        assert!(
+            analyzer
+                .analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir))
+                .is_empty()
+        );
+        assert!(Analyzer::analyze_post_pass2(&ir).is_empty());
+
+        let module = ir
+            .components
+            .into_iter()
+            .find_map(|component| match component {
+                Component::Module(module) => Some(module),
+                _ => None,
+            })
+            .unwrap();
+        let declarations = module
+            .declarations
+            .iter()
+            .filter_map(|declaration| match declaration {
+                Declaration::Ff(declaration) => Some(declaration.as_ref()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let state = module
+            .variables
+            .iter()
+            .find_map(|(&id, variable)| (variable.path.to_string() == "state").then_some(id))
+            .unwrap();
+        let direct_ranges = [(state, vec![BitAccess::new(8, 15)])].into_iter().collect();
+
+        let mut parser = FfParser::new(&module, BuildConfig::default())
+            .with_direct_write_ranges(direct_ranges, HashSet::default());
+        let mut builder = SIRBuilder::new();
+        parser.parse_ff_group(&declarations, &mut builder).unwrap();
+        let execution_unit = builder.flush_eu().unwrap();
+        let stores = execution_unit
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(address, SIROffset::Static(offset), width, ..)
+                    if address.var_id == state =>
+                {
+                    Some((address.region, *offset, *width))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(stores.contains(&(WORKING_REGION, 0, 8)));
+        assert!(stores.contains(&(STABLE_REGION, 8, 8)));
+    }
 
     #[test]
     fn conditional_expression_effects_are_not_definitely_defined_after_merge() {

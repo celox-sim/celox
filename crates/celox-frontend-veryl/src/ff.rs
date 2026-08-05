@@ -298,6 +298,8 @@ pub struct FfParser<'a> {
     dynamic_defined_vars: HashSet<VarId>,
     dynamic_write_vars: HashSet<VarId>,
     sparse_write_vars: HashSet<VarId>,
+    direct_static_write_ranges: HashMap<VarId, Vec<celox_design::BitAccess>>,
+    direct_dynamic_write_vars: HashSet<VarId>,
     local_working_vars: HashSet<VarId>,
     local_let_values: HashMap<VarId, RegisterId>,
     loop_exit_blocks: Vec<BlockId>,
@@ -338,6 +340,8 @@ impl<'a> FfParser<'a> {
             dynamic_defined_vars: HashSet::default(),
             dynamic_write_vars: HashSet::default(),
             sparse_write_vars: HashSet::default(),
+            direct_static_write_ranges: HashMap::default(),
+            direct_dynamic_write_vars: HashSet::default(),
             local_working_vars,
             local_let_values: HashMap::default(),
             loop_exit_blocks: Vec::new(),
@@ -360,6 +364,16 @@ impl<'a> FfParser<'a> {
     ) -> Self {
         self.runtime_error_code_map = Some(runtime_error_code_map);
         self.runtime_event_site_base = runtime_event_site_base;
+        self
+    }
+
+    pub fn with_direct_write_ranges(
+        mut self,
+        static_ranges: HashMap<VarId, Vec<celox_design::BitAccess>>,
+        dynamic_vars: HashSet<VarId>,
+    ) -> Self {
+        self.direct_static_write_ranges = static_ranges;
+        self.direct_dynamic_write_vars = dynamic_vars;
         self
     }
 

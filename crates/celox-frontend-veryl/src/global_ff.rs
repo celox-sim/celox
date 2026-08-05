@@ -48,32 +48,30 @@ impl<'a> SharedClockLowering<'a> {
         }
     }
 
-    fn direct_var(
+    fn direct_write(
+        direct_writes: &[VarAtomBase<RegionedAbsoluteAddr>],
+        write: &VarAtomBase<RegionedAbsoluteAddr>,
+    ) -> bool {
+        direct_writes.contains(write)
+    }
+
+    fn direct_dynamic_var(
         summary: &FfAccessSummary<RegionedAbsoluteAddr>,
-        action_direct: bool,
+        direct_writes: &[VarAtomBase<RegionedAbsoluteAddr>],
         address: AbsoluteAddr,
     ) -> bool {
-        action_direct
-            && summary.writes.iter().any(|write| {
-                write.id.absolute_addr() == address
-                    && !summary
-                        .reads
-                        .iter()
-                        .any(|read| read.id == write.id && read.access.overlaps(&write.access))
-            })
-            && !summary.writes.iter().any(|write| {
-                write.id.absolute_addr() == address
-                    && summary
-                        .reads
-                        .iter()
-                        .any(|read| read.id == write.id && read.access.overlaps(&write.access))
-            })
+        let mut writes = summary
+            .writes
+            .iter()
+            .filter(|write| write.id.absolute_addr() == address)
+            .peekable();
+        writes.peek().is_some() && writes.all(|write| Self::direct_write(direct_writes, write))
     }
 
     fn emit_region_copies(
         builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
         summaries: &[FfAccessSummary<RegionedAbsoluteAddr>],
-        direct: &[bool],
+        direct_writes: &[Vec<VarAtomBase<RegionedAbsoluteAddr>>],
         src_region: u32,
         dst_region: u32,
     ) {
@@ -81,19 +79,20 @@ impl<'a> SharedClockLowering<'a> {
             .iter()
             .enumerate()
             .flat_map(|(index, summary)| {
-                let action_direct = direct.get(index).copied().unwrap_or(false);
+                let direct_writes = direct_writes.get(index).map_or(&[][..], Vec::as_slice);
                 summary.dynamic_writes.iter().filter(move |address| {
-                    !Self::direct_var(summary, action_direct, address.absolute_addr())
+                    !Self::direct_dynamic_var(summary, direct_writes, address.absolute_addr())
                 })
             })
             .map(RegionedAbsoluteAddr::absolute_addr)
             .collect::<HashSet<_>>();
         let mut ranges = BTreeMap::<AbsoluteAddr, Vec<BitAccess>>::new();
         for target in summaries.iter().enumerate().flat_map(|(index, summary)| {
-            let action_direct = direct.get(index).copied().unwrap_or(false);
-            summary.writes.iter().filter(move |target| {
-                !Self::direct_var(summary, action_direct, target.id.absolute_addr())
-            })
+            let direct_writes = direct_writes.get(index).map_or(&[][..], Vec::as_slice);
+            summary
+                .writes
+                .iter()
+                .filter(move |target| !Self::direct_write(direct_writes, target))
         }) {
             let addr = target.id.absolute_addr();
             if !dynamic.contains(&addr) {
@@ -127,25 +126,26 @@ impl<'a> SharedClockLowering<'a> {
     fn emit_sparse_commits(
         builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
         summaries: &[FfAccessSummary<RegionedAbsoluteAddr>],
-        direct: &[bool],
+        direct_writes: &[Vec<VarAtomBase<RegionedAbsoluteAddr>>],
     ) {
         let dynamic = summaries
             .iter()
             .enumerate()
             .flat_map(|(index, summary)| {
-                let action_direct = direct.get(index).copied().unwrap_or(false);
+                let direct_writes = direct_writes.get(index).map_or(&[][..], Vec::as_slice);
                 summary.dynamic_writes.iter().filter(move |address| {
-                    !Self::direct_var(summary, action_direct, address.absolute_addr())
+                    !Self::direct_dynamic_var(summary, direct_writes, address.absolute_addr())
                 })
             })
             .map(RegionedAbsoluteAddr::absolute_addr)
             .collect::<HashSet<_>>();
         let mut widths = BTreeMap::<AbsoluteAddr, usize>::new();
         for target in summaries.iter().enumerate().flat_map(|(index, summary)| {
-            let action_direct = direct.get(index).copied().unwrap_or(false);
-            summary.writes.iter().filter(move |target| {
-                !Self::direct_var(summary, action_direct, target.id.absolute_addr())
-            })
+            let direct_writes = direct_writes.get(index).map_or(&[][..], Vec::as_slice);
+            summary
+                .writes
+                .iter()
+                .filter(move |target| !Self::direct_write(direct_writes, target))
         }) {
             let addr = target.id.absolute_addr();
             if dynamic.contains(&addr) {
@@ -177,14 +177,14 @@ impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_
     fn begin(
         &mut self,
         builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
-        direct: &[bool],
+        direct_writes: &[Vec<VarAtomBase<RegionedAbsoluteAddr>>],
     ) -> Result<(), ParserError> {
-        // Only actions whose old-state anti-dependencies form a cycle need a
-        // private snapshot. Direct actions run after every old-state reader.
+        // Only ranges whose old-state anti-dependencies could not be ordered
+        // need a private snapshot.
         Self::emit_region_copies(
             builder,
             &self.summaries,
-            direct,
+            direct_writes,
             STABLE_REGION,
             WORKING_REGION,
         );
@@ -194,7 +194,7 @@ impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_
     fn lower(
         &mut self,
         index: usize,
-        direct: bool,
+        direct_writes: &[VarAtomBase<RegionedAbsoluteAddr>],
         builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
     ) -> Result<(), ParserError> {
         let recipe = self.recipes.get(index).ok_or_else(|| {
@@ -210,40 +210,41 @@ impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_
             .iter()
             .map(|address| address.var_id)
             .collect();
+        let direct_static_ranges = recipe
+            .summary
+            .writes
+            .iter()
+            .filter(|write| Self::direct_write(direct_writes, write))
+            .fold(
+                HashMap::<VarId, Vec<BitAccess>>::default(),
+                |mut ranges, write| {
+                    ranges
+                        .entry(write.id.var_id)
+                        .or_default()
+                        .push(write.access);
+                    ranges
+                },
+            );
+        let direct_dynamic_vars = recipe
+            .summary
+            .dynamic_writes
+            .iter()
+            .filter_map(|address| {
+                Self::direct_dynamic_var(&recipe.summary, direct_writes, address.absolute_addr())
+                    .then_some(address.var_id)
+            })
+            .collect::<HashSet<_>>();
         let mut parser = ff::FfParser::new(recipe.module, self.config)
             .with_relocated_runtime_ids(
                 recipe.runtime.error_codes.clone(),
                 recipe.runtime.event_site_base,
             )
-            .with_sparse_write_vars(sparse_write_vars);
-        let direct_vars = recipe
-            .summary
-            .writes
-            .iter()
-            .filter_map(|write| {
-                let address = write.id.absolute_addr();
-                let reads_old_value = recipe.summary.writes.iter().any(|candidate| {
-                    candidate.id.absolute_addr() == address
-                        && recipe.summary.reads.iter().any(|read| {
-                            read.id == candidate.id && read.access.overlaps(&candidate.access)
-                        })
-                });
-                (direct && !reads_old_value).then_some(write.id.var_id)
-            })
-            .collect::<HashSet<_>>();
-        let target_region = |var_id, region| {
-            if direct_vars.contains(&var_id)
-                && matches!(region, WORKING_REGION | SPARSE_WORKING_REGION)
-            {
-                STABLE_REGION
-            } else {
-                region
-            }
-        };
+            .with_sparse_write_vars(sparse_write_vars)
+            .with_direct_write_ranges(direct_static_ranges, direct_dynamic_vars);
         parser.parse_ff_group_into(
             &recipe.declarations,
             &|var_id, region| RegionedAbsoluteAddr {
-                region: target_region(var_id, region),
+                region,
                 instance_id: recipe.instance_id,
                 var_id,
             },
@@ -255,18 +256,18 @@ impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_
     fn finish(
         &mut self,
         builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
-        direct: &[bool],
+        direct_writes: &[Vec<VarAtomBase<RegionedAbsoluteAddr>>],
     ) -> Result<(), ParserError> {
-        // Cyclic actions retain the common snapshot and publish together.
-        // Direct actions have already published at their proven placement.
+        // Staged ranges publish together. Proven direct ranges have already
+        // published at their scheduled placement.
         Self::emit_region_copies(
             builder,
             &self.summaries,
-            direct,
+            direct_writes,
             WORKING_REGION,
             STABLE_REGION,
         );
-        Self::emit_sparse_commits(builder, &self.summaries, direct);
+        Self::emit_sparse_commits(builder, &self.summaries, direct_writes);
         Ok(())
     }
 }
@@ -335,8 +336,11 @@ pub fn build_ff_clock_recipes<'a>(
                 dynamic_writes: summary
                     .dynamic_writes
                     .iter()
-                    .copied()
-                    .map(relocate_addr)
+                    .map(|address| RegionedAbsoluteAddr {
+                        region: STABLE_REGION,
+                        instance_id,
+                        var_id: address.var_id,
+                    })
                     .collect(),
             };
             let recipe = FfClockRecipe {
