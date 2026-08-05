@@ -8,3 +8,8 @@ disallowed-methods = [
     { path = "std::env::vars", reason = "read CELOX diagnostics through DiagnosticsOptions::from_env at the application boundary" },
     { path = "std::env::vars_os", reason = "read CELOX diagnostics through DiagnosticsOptions::from_env at the application boundary" },
 ]
+
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "compiler data is trusted; use fxhash::FxHashMap (or the crate HashMap alias) to avoid RandomState overhead" },
+    { path = "std::collections::HashSet", reason = "compiler data is trusted; use fxhash::FxHashSet (or the crate HashSet alias) to avoid RandomState overhead" },
+]

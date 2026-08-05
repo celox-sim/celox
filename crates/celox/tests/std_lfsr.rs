@@ -1,5 +1,5 @@
 use celox::Simulator;
-use std::collections::HashSet;
+use fxhash::FxHashSet as HashSet;
 
 #[path = "test_utils/mod.rs"]
 #[macro_use]

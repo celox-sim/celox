@@ -5,7 +5,9 @@
 //! only in [`SpillDesc`] side-tables so the register allocator can make
 //! cost-aware spill decisions without knowing about bit layouts.
 
-use std::{collections::HashMap, fmt};
+use std::fmt;
+
+use crate::HashMap;
 
 use crate::RegionedAbsoluteAddr;
 

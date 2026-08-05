@@ -163,8 +163,8 @@ fn optimize_bit_extracts(
 
     // For each replacement, decrement use counts for the operands we're removing
     // and only mark instructions as dead if their result has no remaining uses.
-    let mut dead_set = std::collections::HashSet::new();
-    let mut replaced_set = std::collections::HashSet::new();
+    let mut dead_set = crate::HashSet::default();
+    let mut replaced_set = crate::HashSet::default();
 
     for repl in &replacements {
         replaced_set.insert(repl.and_idx);

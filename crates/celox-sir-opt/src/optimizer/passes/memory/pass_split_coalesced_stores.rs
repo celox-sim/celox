@@ -6,9 +6,9 @@
 
 use super::pass_manager::ExecutionUnitPass;
 use super::sir_analysis::{UseSite, collect_uses};
+use crate::HashMap;
 use crate::PassOptions;
 use crate::ir::*;
-use std::collections::HashMap;
 
 pub(in crate::optimizer) struct SplitCoalescedStoresPass {
     pub max_store_width: usize,
@@ -36,7 +36,7 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, max_stor
         };
 
         // Phase 1: Build def position map — O(n)
-        let mut def_pos: HashMap<RegisterId, usize> = HashMap::new();
+        let mut def_pos: HashMap<RegisterId, usize> = HashMap::default();
         for (i, inst) in block.instructions.iter().enumerate() {
             if let Some(d) = inst_def(inst) {
                 def_pos.insert(d, i);
@@ -181,7 +181,7 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, max_stor
         let block = eu.blocks.get_mut(&bid).unwrap();
 
         // Collect indices to skip (original Store + Concat)
-        let mut skip: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut skip: crate::HashSet<usize> = crate::HashSet::default();
         for plan in &plans {
             skip.insert(plan.store_idx);
             if plan.remove_concat {
@@ -191,7 +191,7 @@ fn split_coalesced_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, max_stor
 
         // Collect insertions by position: after index i, insert these instructions
         let mut insert_map: HashMap<usize, Vec<SIRInstruction<RegionedAbsoluteAddr>>> =
-            HashMap::new();
+            HashMap::default();
         for plan in plans {
             for (after_idx, insts) in plan.insertions {
                 insert_map.entry(after_idx).or_default().extend(insts);

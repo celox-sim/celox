@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::{HashMap, HashSet};
 
 use celox_testbench::{
     CompiledExpr, ComponentLibrary, ComponentParameterValue, ExecutableComponentBinding,
@@ -188,7 +188,7 @@ fn validate_manifest(
     manifest: &veryl_metadata::ComponentManifest,
 ) -> Result<(), String> {
     let has_ports = !(manifest.ports.is_empty() && manifest.groups.is_empty());
-    let mut bound = std::collections::HashSet::new();
+    let mut bound = HashSet::default();
     for connection in &descriptor.connections {
         if !has_ports {
             break;
@@ -329,7 +329,7 @@ impl ComponentRuntime {
         self.active_reset_event = None;
         let mut initialized = Vec::with_capacity(descriptors.len());
         let mut initial_writes = Vec::new();
-        let mut driven_outputs = HashMap::<SignalRef, Vec<ComponentOutputDriver>>::new();
+        let mut driven_outputs = HashMap::<SignalRef, Vec<ComponentOutputDriver>>::default();
         let libraries: HashMap<_, _> = libraries
             .iter()
             .map(|library| (library.export.as_str(), library))

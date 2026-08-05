@@ -1,7 +1,8 @@
 //! Machine constraints expressed as SSA Perm boundaries.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
+use crate::HashMap;
 use crate::native::mir::{BlockId, MBlock, MFunction, MInst, PhiNode, SpillDesc, VReg};
 
 use super::analysis::AnalysisResult;
@@ -149,7 +150,7 @@ impl PermBoundary {
                 return None;
             }
         }
-        let mut result = HashMap::with_capacity(self.rows.len());
+        let mut result = HashMap::with_capacity_and_hasher(self.rows.len(), Default::default());
         for (row, facts) in self.rows.iter().enumerate() {
             let color = assigned[row]?;
             result.insert(facts.destination, ALLOCATABLE_REGS[color]);
@@ -243,7 +244,7 @@ impl PermModel {
             };
             let live_after =
                 live_after_first_instruction(block, &analysis.exit_distances[block_index]);
-            let mut fixed = HashMap::<VReg, PhysReg>::new();
+            let mut fixed = HashMap::<VReg, PhysReg>::default();
             for (value, constraint) in instruction.uses().into_iter().zip(use_constraints(
                 instruction,
                 func.target_features.variable_shift_encoding(),
@@ -483,7 +484,7 @@ impl PermModel {
 
 fn live_after_first_instruction(
     block: &MBlock,
-    exit: &crate::HashMap<VReg, u32>,
+    exit: &celox_backend_common::regalloc::NextUseDistances<VReg>,
 ) -> BTreeSet<VReg> {
     let mut live = exit.keys().copied().collect::<BTreeSet<_>>();
     for instruction in block.insts.iter().skip(1).rev() {
@@ -549,7 +550,8 @@ fn constraint_boundary_liveness(
                 constraint_boundaries(block, func.target_features.variable_shift_encoding())
                     .into_iter()
                     .collect::<BTreeSet<_>>();
-            let mut points = HashMap::with_capacity(boundaries.len());
+            let mut points =
+                HashMap::with_capacity_and_hasher(boundaries.len(), Default::default());
             let mut live = analysis.exit_distances[block_index]
                 .keys()
                 .copied()
@@ -609,7 +611,7 @@ fn split_constraint_blocks(
         ));
     };
     let mut rewritten = Vec::<(MBlock, bool)>::new();
-    let mut final_block = HashMap::<BlockId, BlockId>::new();
+    let mut final_block = HashMap::<BlockId, BlockId>::default();
     let mut boundary_blocks = Vec::new();
 
     for (block_index, block) in original.into_iter().enumerate() {
@@ -754,8 +756,8 @@ fn insert_permutation_merge_phis(
         })
         .collect::<Vec<_>>();
 
-    let mut definition_blocks = HashMap::<VReg, BTreeSet<usize>>::new();
-    let mut existing_phi_blocks = HashMap::<VReg, BTreeSet<usize>>::new();
+    let mut definition_blocks = HashMap::<VReg, BTreeSet<usize>>::default();
+    let mut existing_phi_blocks = HashMap::<VReg, BTreeSet<usize>>::default();
     for (block, mir_block) in func.blocks.iter().enumerate() {
         for phi in &mir_block.phis {
             let logical = logical_for_vreg[phi.dst.0 as usize];
@@ -821,7 +823,7 @@ fn rename_permutation_representatives(
         Enter(usize),
         Exit(Vec<VReg>),
     }
-    let mut stacks = HashMap::<VReg, Vec<VReg>>::new();
+    let mut stacks = HashMap::<VReg, Vec<VReg>>::default();
     let mut work = vec![Event::Enter(0)];
     while let Some(event) = work.pop() {
         match event {
