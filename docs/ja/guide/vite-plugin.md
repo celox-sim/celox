@@ -192,4 +192,4 @@ import { Top } from "../src/Top.veryl?dse=preserveAllPorts";
 | オプション | 型 | デフォルト | 説明 |
 |---|---|---|---|
 | `projectRoot` | `string` | *（自動検出）* | `Veryl.toml` を含むディレクトリへのパス |
-| `testbenchComponents` | `string` | *（なし）* | 生成されるnative Vitestテストへ注入するコンポーネントmodule |
+| `testbenchComponents` | `string` | *（なし）* | TypeScript製TB component registryをdefault exportするmoduleへの絶対パス、またはVeryl project rootからの相対パス。manifest生成とnative Vitestテストへのcallback注入に使用します。 |

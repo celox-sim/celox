@@ -197,4 +197,4 @@ The policy is embedded in the `ModuleDefinition` as `defaultOptions.deadStorePol
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `projectRoot` | `string` | *(auto-detected)* | Path to the directory containing `Veryl.toml` |
-| `testbenchComponents` | `string` | *(none)* | Component module injected into generated native Vitest testbenches |
+| `testbenchComponents` | `string` | *(none)* | Absolute path, or path relative to the Veryl project root, to a module that default-exports a TypeScript TB component registry. Used to generate manifests and inject callbacks into native Vitest tests. |

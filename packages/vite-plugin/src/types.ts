@@ -34,8 +34,10 @@ export interface CeloxPluginOptions {
 	/** Explicit path to the Veryl project root (directory containing Veryl.toml). */
 	projectRoot?: string;
 	/**
-	 * TypeScript component module used by generated native Vitest cases.
-	 * Its default export must map `$comp` names to `defineTbComponent` results.
+	 * Path to a TypeScript TB component registry module, absolute or relative
+	 * to the Veryl project root. Its default export must map `$comp` names to
+	 * `defineTbComponent` results. The plugin uses it for manifest generation
+	 * and callback injection into generated native Vitest cases.
 	 */
 	testbenchComponents?: string;
 }
