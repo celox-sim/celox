@@ -37,6 +37,32 @@ function startsWithAny(path, prefixes) {
   return prefixes.some((prefix) => path.startsWith(prefix));
 }
 
+export function affectsHeliodorArm64(files) {
+  // Keep PR scheduling deliberately narrow. Generic Rust and manifest changes
+  // still exercise x86-64/Cranelift in PRs, while master and manual runs always
+  // retain the ARM64 Linux boot coverage.
+  return files
+    .map((path) => path.replace(/^\.\//, ""))
+    .some(
+      (path) =>
+        path === ".github/workflows/heliodor-bench.yml" ||
+        startsWithAny(path, [
+          ".github/actions/setup-rust/",
+          "crates/celox-backend-arm64/",
+          "crates/celox-backend-common/",
+          "crates/celox/src/backend/native/",
+          "scripts/ci-changes.",
+        ]) ||
+        [
+          "crates/celox/src/backend.rs",
+          "crates/celox-bench/src/bin/celox-heliodor.rs",
+          "scripts/run-heliodor-bench.sh",
+          "scripts/setup-arm64-backend-dev.sh",
+          "scripts/tests/run-heliodor-bench-gate.sh",
+        ].includes(path),
+    );
+}
+
 export function classifyFiles(files, { releasePlease = false } = {}) {
   const affected = {
     docs: false,
@@ -168,11 +194,14 @@ if (
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
   const files = changedFiles(process.argv[2] ?? "", process.argv[3] ?? "");
-  writeOutputs(
+  const affected =
     files === null
-      ? ALL_AFFECTED
-      : classifyFiles(files, {
-          releasePlease: process.env.RELEASE_PLEASE_PR === "true",
-        }),
-  );
+      ? { ...ALL_AFFECTED, heliodor_arm64: true }
+      : {
+          ...classifyFiles(files, {
+            releasePlease: process.env.RELEASE_PLEASE_PR === "true",
+          }),
+          heliodor_arm64: affectsHeliodorArm64(files),
+        };
+  writeOutputs(affected);
 }

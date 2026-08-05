@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyFiles } from "./ci-changes.mjs";
+import {
+  affectsHeliodorArm64,
+  classifyFiles,
+} from "./ci-changes.mjs";
 
 const none = {
   docs: false,
@@ -103,4 +106,34 @@ test("repository script changes only run script tests", () => {
 
 test("unknown paths fail open", () => {
   assert.deepEqual(classifyFiles(["new-source-area/input.xyz"]), all);
+});
+
+test("ARM64 Heliodor changes include backend and harness integration", () => {
+  for (const path of [
+    "crates/celox-backend-arm64/src/lib.rs",
+    "crates/celox-backend-common/src/lib.rs",
+    "crates/celox/src/backend/native/backend.rs",
+    "crates/celox/src/backend.rs",
+    "crates/celox-bench/src/bin/celox-heliodor.rs",
+    "scripts/run-heliodor-bench.sh",
+    ".github/actions/setup-rust/action.yml",
+    ".github/workflows/heliodor-bench.yml",
+    "scripts/ci-changes.mjs",
+  ]) {
+    assert.equal(affectsHeliodorArm64([path]), true, path);
+  }
+});
+
+test("generic Rust changes do not schedule ARM64 Heliodor on pull requests", () => {
+  assert.equal(
+    affectsHeliodorArm64([
+      "Cargo.lock",
+      "Cargo.toml",
+      "crates/celox/Cargo.toml",
+      "crates/celox/src/simulator.rs",
+      "crates/celox-backend-x86/src/lib.rs",
+      ".github/workflows/codspeed.yml",
+    ]),
+    false,
+  );
 });
