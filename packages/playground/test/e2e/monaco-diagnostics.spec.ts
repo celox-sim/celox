@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 type PlaygroundTestMarker = {
 	code?: string | number;
@@ -27,12 +27,40 @@ describe("bigint literals", () => {
 });
 `;
 
-test("playground does not report TS2737 for bigint literals", async ({ page }) => {
+async function openPlayground(page: Page) {
+	const browserErrors: string[] = [];
+	const pageError = new Promise<never>((_, reject) => {
+		page.on("pageerror", (error) => {
+			browserErrors.push(error.message);
+			reject(new Error(`Playground browser error: ${error.message}`));
+		});
+	});
+
 	await page.goto("/");
 
-	await page.waitForFunction(
-		() => typeof window.__CELOX_PLAYGROUND_TEST_API__ !== "undefined",
+	await Promise.race([
+		page.waitForFunction(() => {
+			const api = window.__CELOX_PLAYGROUND_TEST_API__;
+			return api && api.getStatusText() !== "Loading WASM…";
+		}),
+		pageError,
+	]);
+	const status = await page.evaluate(() =>
+		window.__CELOX_PLAYGROUND_TEST_API__?.getStatusText(),
 	);
+	expect(status).toBe("Ready");
+
+	return browserErrors;
+}
+
+test("playground reaches Ready without browser errors", async ({ page }) => {
+	const browserErrors = await openPlayground(page);
+	await expect(page.locator("#editor .monaco-editor")).toBeVisible();
+	expect(browserErrors).toEqual([]);
+});
+
+test("playground does not report TS2737 for bigint literals", async ({ page }) => {
+	const browserErrors = await openPlayground(page);
 
 	await page.evaluate((source) => {
 		const api = window.__CELOX_PLAYGROUND_TEST_API__;
@@ -62,4 +90,5 @@ test("playground does not report TS2737 for bigint literals", async ({ page }) =
 			{ timeout: 60_000 },
 		)
 		.toBe(true);
+	expect(browserErrors).toEqual([]);
 });

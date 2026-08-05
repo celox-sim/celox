@@ -21,6 +21,7 @@ crates/celox-napi/index.d.ts
 crates/celox-napi/*.wasm
 crates/celox-napi/celox.wasi.cjs
 crates/celox-napi/celox.wasi-browser.js
+crates/celox-napi/celox.wasi.d.cts
 crates/celox-napi/wasi-worker.mjs
 crates/celox-napi/wasi-worker-browser.mjs
 
