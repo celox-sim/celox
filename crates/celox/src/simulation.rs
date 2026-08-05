@@ -56,7 +56,7 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         event: B::Event,
         _timestamp: u64,
     ) -> Result<(), RuntimeErrorCode> {
-        self.components.stage_inputs(event.id(), &self.backend);
+        self.components.stage_inputs(event.id(), &mut self.backend);
         Ok(())
     }
 

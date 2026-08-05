@@ -930,6 +930,7 @@ fn run_testbench_limited<B: SimBackend>(
     tick_limit: Option<u64>,
 ) -> LimitedTestbenchResult {
     let test_name = root_testbench_name(sim);
+    let use_4state = sim.backend.layout().four_state;
     let initial_writes = match sim.components.initialize(
         testbench.components(),
         testbench.component_bindings(),
@@ -937,8 +938,8 @@ fn run_testbench_limited<B: SimBackend>(
         testbench.component_file_base(),
         execution_random_seed(testbench.configured_random_seed()),
         &test_name,
-        sim.backend_ref().layout().four_state,
-        &sim.backend,
+        use_4state,
+        &mut sim.backend,
     ) {
         Ok(writes) => writes,
         Err(message) => {
@@ -1057,6 +1058,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
     testbench: &CompiledTestbench<B>,
 ) -> TestResultDetailed {
     let test_name = root_testbench_name(sim);
+    let use_4state = sim.backend.layout().four_state;
     let initial_writes = match sim.components.initialize(
         testbench.components(),
         testbench.component_bindings(),
@@ -1064,8 +1066,8 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         testbench.component_file_base(),
         execution_random_seed(testbench.configured_random_seed()),
         &test_name,
-        sim.backend_ref().layout().four_state,
-        &sim.backend,
+        use_4state,
+        &mut sim.backend,
     ) {
         Ok(writes) => writes,
         Err(_) => {
@@ -1625,7 +1627,7 @@ fn exec_one_detailed<B: SimBackend>(
                 method,
                 &host_args,
                 ctx.current_time,
-                &sim.backend,
+                &mut sim.backend,
             ) {
                 Ok(value) => value,
                 Err(message) => return ExecResult::Fail(message),

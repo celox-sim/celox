@@ -16,6 +16,7 @@ use celox_testbench::{
     TestbenchComponent,
 };
 use veryl_analyzer::ir::ExternalParamValue;
+use veryl_analyzer::ir::TypeKind;
 use veryl_analyzer::ir::{Declaration, Module, VarId, VarPath};
 use veryl_analyzer::symbol::Affiliation;
 use veryl_analyzer::value::Value;
@@ -90,6 +91,23 @@ fn component_input_target(
     }
 }
 
+fn component_event_target(
+    expression: &veryl_analyzer::ir::Expression,
+) -> Option<VerylComponentEventBinding> {
+    use veryl_analyzer::ir::{Expression, Factor};
+
+    let Expression::Term(term) = expression else {
+        return None;
+    };
+    match term.as_ref() {
+        Factor::Variable(id, _, _, _) => Some(VerylComponentEventBinding::Root(*id)),
+        Factor::HierVariable(reference) => {
+            Some(VerylComponentEventBinding::Hierarchical(reference.clone()))
+        }
+        _ => None,
+    }
+}
+
 fn collect_testbench_components(
     module: &Module,
     parent_instance: InstanceId,
@@ -145,34 +163,16 @@ fn collect_testbench_components(
                 } else {
                     None
                 };
-                let event = if connection.is_clock || connection.is_reset {
+                let sync_reset = connection.is_reset
+                    && matches!(
+                        connection.expr.comptime().r#type.kind,
+                        TypeKind::ResetSyncHigh | TypeKind::ResetSyncLow
+                    );
+                let event = if (connection.is_clock || connection.is_reset) && !sync_reset {
                     output
                         .as_ref()
                         .map(|output| VerylComponentEventBinding::Root(output.id))
-                        .or_else(|| match &input_target {
-                            Some(VerylComponentInputBinding::Root { id, .. }) => {
-                                Some(VerylComponentEventBinding::Root(*id))
-                            }
-                            Some(VerylComponentInputBinding::Hierarchical(reference)) => {
-                                Some(VerylComponentEventBinding::Hierarchical(reference.clone()))
-                            }
-                            None => None,
-                        })
-                        .or_else(|| {
-                            let veryl_analyzer::ir::Expression::Term(term) = &connection.expr
-                            else {
-                                return None;
-                            };
-                            match term.as_ref() {
-                                veryl_analyzer::ir::Factor::Variable(id, _, _, _) => {
-                                    Some(VerylComponentEventBinding::Root(*id))
-                                }
-                                veryl_analyzer::ir::Factor::HierVariable(reference) => Some(
-                                    VerylComponentEventBinding::Hierarchical(reference.clone()),
-                                ),
-                                _ => None,
-                            }
-                        })
+                        .or_else(|| component_event_target(&connection.expr))
                 } else {
                     None
                 };

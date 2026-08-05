@@ -1586,6 +1586,35 @@ fn falling_source_edge_preserves_opposite_derived_clock_events() {
 }
 
 #[test]
+fn direct_inverted_component_clock_requires_a_named_derived_clock() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var d: logic<8>;
+            var q: logic<8>;
+            inst component: $comp::celox_clocked #(STEP: 0) (
+                clk: ~clk,
+                d,
+                q,
+            );
+            initial { clk.next(); $finish(); }
+        }
+    "#;
+
+    let error = Simulator::builder(code, "t")
+        .with_metadata(metadata)
+        .build()
+        .expect_err("a direct inverted expression is not a clock-typed connection");
+    assert!(
+        matches!(error.kind(), SimulatorErrorKind::Analyzer(_)),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn clocked_inst_component_accepts_zero_time_methods() {
     register_component();
     let (_dir, metadata) = component_metadata();
@@ -1805,6 +1834,52 @@ fn synchronous_reset_without_runtime_reset_event_still_binds() {
     ));
     assert_eq!(
         celox::testbench::run_compiled_testbench(&mut simulator, &testbench),
+        TestResult::Pass
+    );
+}
+
+#[test]
+fn component_synchronous_reset_is_staged_without_a_reset_event() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"
+        #[test(sync_dut)]
+        module SyncDut (
+            clk: input clock,
+            rst: input reset_sync_low,
+            dut_q: output logic,
+            component_q: output logic<8>,
+        ) {
+            always_ff (clk, rst) {
+                if_reset { dut_q = 0; } else { dut_q = 1; }
+            }
+            inst component: $comp::celox_reset (clk, rst, q: component_q);
+        }
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var dut_q: logic;
+            var component_q: logic<8>;
+            inst dut: SyncDut (clk, rst, dut_q, component_q);
+            initial {
+                rst.assert();
+                $assert(dut_q == 0, "synchronous RTL reset was applied");
+                $assert(
+                    component_q == 103,
+                    "component observed sync reset through three clock hooks: %d",
+                    component_q,
+                );
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
         TestResult::Pass
     );
 }

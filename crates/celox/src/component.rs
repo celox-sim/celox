@@ -89,8 +89,8 @@ impl ComponentWrite {
             backend.set_four_state(self.target.signal, self.value, self.mask_xz);
             return;
         };
-        let (values, _) = backend.memory_as_ptr();
-        let offset = selection.offset.eval_u64(values.cast_mut()) as usize;
+        let (values, _) = backend.memory_as_mut_ptr();
+        let offset = selection.offset.eval_u64(values) as usize;
         let width = selection
             .width
             .min(self.target.signal.width.saturating_sub(offset));
@@ -285,17 +285,17 @@ fn take_output_writes(component: &mut LiveComponent) -> Vec<ComponentWrite> {
     writes
 }
 
-fn stage_component_inputs<B: SimBackend>(component: &mut LiveComponent, backend: &B) {
-    let (values, _) = backend.memory_as_ptr();
+fn stage_component_inputs<B: SimBackend>(component: &mut LiveComponent, backend: &mut B) {
+    let (values, _) = backend.memory_as_mut_ptr();
     for input in &component.inputs {
-        let value = input.expr.eval_value(values.cast_mut()).to_biguint();
+        let value = input.expr.eval_value(values).to_biguint();
         let mask_xz = input
             .mask_source
             .as_ref()
             .map(|source| {
                 let (_, mut mask) = backend.get_four_state(source.signal);
                 if let Some(selection) = &source.selection {
-                    let offset = selection.offset.eval_u64(values.cast_mut()) as usize;
+                    let offset = selection.offset.eval_u64(values) as usize;
                     mask >>= offset;
                     mask &= width_mask(selection.width);
                 }
@@ -322,7 +322,7 @@ impl ComponentRuntime {
         seed_base: u64,
         test_name: &str,
         use_4state: bool,
-        simulator_backend: &B,
+        simulator_backend: &mut B,
     ) -> Result<Vec<ComponentWrite>, String> {
         self.components.clear();
         self.last_trace_values.clear();
@@ -436,23 +436,24 @@ impl ComponentRuntime {
                         width: connection.width as usize,
                     });
                     if connection.is_clock || connection.is_reset {
-                        let event = binding.event.ok_or_else(|| {
-                            format!(
-                                "component `{}` {} port `{}` has no runtime event source",
-                                descriptor.instance,
-                                if connection.is_clock {
-                                    "clock"
-                                } else {
-                                    "reset"
-                                },
-                                connection.port
-                            )
-                        })?;
-                        events.push(LiveEvent {
-                            event_id: event.id(),
-                            port,
-                            reset: connection.is_reset,
-                        });
+                        match binding.event {
+                            Some(event) => events.push(LiveEvent {
+                                event_id: event.id(),
+                                port,
+                                reset: connection.is_reset,
+                            }),
+                            None if connection.is_clock => {
+                                return Err(format!(
+                                    "component `{}` clock port `{}` has no runtime event source; connect it to a named clock signal",
+                                    descriptor.instance, connection.port
+                                ));
+                            }
+                            None => {
+                                // Synchronous resets are ordinary staged inputs. They
+                                // intentionally have no standalone runtime event and are
+                                // observed by the component on its clock hook.
+                            }
+                        }
                     }
                     Some(port)
                 } else {
@@ -646,7 +647,7 @@ impl ComponentRuntime {
             .any(|component| !component.events.is_empty())
     }
 
-    pub(crate) fn stage_inputs<B: SimBackend>(&mut self, event_id: usize, backend: &B) {
+    pub(crate) fn stage_inputs<B: SimBackend>(&mut self, event_id: usize, backend: &mut B) {
         for component in &mut self.components {
             if !component
                 .events
@@ -742,7 +743,7 @@ impl ComponentRuntime {
         method: &str,
         args: &[HostValue],
         time: u64,
-        backend: &B,
+        backend: &mut B,
     ) -> Result<(HostValue, Vec<ComponentWrite>), String> {
         let Some(component) = self
             .components

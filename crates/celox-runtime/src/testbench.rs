@@ -31,10 +31,6 @@ fn bind_component<B: SimBackend, S: std::hash::BuildHasher>(
             .connections
             .into_iter()
             .map(|connection| {
-                let output_address = connection
-                    .output
-                    .as_ref()
-                    .map(|output| output.signal.address);
                 let output = match connection.output {
                     Some(output) => Some(bind_target(backend, output)?),
                     None => None,
@@ -59,7 +55,7 @@ fn bind_component<B: SimBackend, S: std::hash::BuildHasher>(
                             .map(|msb| BitAccess::new(0, msb)),
                     };
                     rtl_writes.iter().any(|write| {
-                        Some(write.id) == output_address
+                        backend.resolve_signal(&write.id) == output.signal
                             && target_access.is_none_or(|target| target.overlaps(&write.access))
                     })
                 });
@@ -75,10 +71,9 @@ fn bind_component<B: SimBackend, S: std::hash::BuildHasher>(
                     },
                     output,
                     output_rtl_driven,
-                    event: match connection.event {
-                        Some(event) => Some(backend.resolve_event_opt(&event)?),
-                        None => None,
-                    },
+                    event: connection
+                        .event
+                        .and_then(|event| backend.resolve_event_opt(&event)),
                 })
             })
             .collect::<Option<Vec<_>>>()?,
