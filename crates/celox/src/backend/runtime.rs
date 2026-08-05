@@ -18,6 +18,7 @@ pub type SimFunc = unsafe extern "C" fn(*mut u8) -> u64;
 #[derive(Clone, Copy)]
 pub struct EventRef {
     pub func: SimFunc,
+    pub comb_apply_func: SimFunc,
     pub addr: AbsoluteAddr,
     pub id: usize,
 }
@@ -26,6 +27,7 @@ impl std::fmt::Debug for EventRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EventRef")
             .field("func", &(self.func as usize))
+            .field("comb_apply_func", &(self.comb_apply_func as usize))
             .field("addr", &self.addr)
             .field("id", &self.id)
             .finish()
@@ -440,6 +442,7 @@ impl JitBackend {
                     *clock,
                     EventRef {
                         func,
+                        comb_apply_func: func,
                         addr: *clock,
                         id,
                     },
@@ -470,6 +473,28 @@ impl JitBackend {
         // Release borrows captured by compile_ffs so engine is available again.
         // (Using `let _` instead of `drop()` to avoid clippy::drop_non_drop.)
         let _ = compile_ffs;
+
+        // Deferred testbench ticks require the scheduler's combined comb/FF
+        // program. Calling independently compiled comb and FF functions can
+        // observe a different pre-edge snapshot around reset and NBA regions.
+        for (clock, ff_units) in &sir.sir.eval_apply_ffs {
+            let mut combined_units;
+            let units = if let Some(fused) = sir.sir.eval_comb_apply_ffs.get(clock) {
+                fused.as_slice()
+            } else {
+                combined_units = sir.sir.eval_comb.clone();
+                combined_units.extend(ff_units.iter().cloned());
+                combined_units.as_slice()
+            };
+            let ptr = engine
+                .compile_units(units, None, None, None)
+                .map_err(SimulatorError::from)?;
+            let comb_apply_func: SimFunc = unsafe { std::mem::transmute(ptr) };
+            event_map
+                .get_mut(clock)
+                .expect("compiled clock event is present")
+                .comb_apply_func = comb_apply_func;
+        }
 
         // Insert clock_domains aliases so every event signal resolves
         for (alias, canonical) in &sir.design.events.aliases {
@@ -983,6 +1008,10 @@ impl super::SimBackend for JitBackend {
 
     fn eval_apply_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
         self.eval_apply_ff_at(event)
+    }
+
+    fn eval_comb_apply_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
+        self.run_sim_func(event.comb_apply_func)
     }
 
     fn eval_only_ff_at(&mut self, event: EventRef) -> Result<(), SimulatorErrorCode> {
