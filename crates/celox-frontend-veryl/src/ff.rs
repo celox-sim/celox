@@ -26,6 +26,7 @@ use veryl_analyzer::ir::{
 use veryl_analyzer::symbol::Affiliation;
 use veryl_analyzer::value::Value;
 use veryl_analyzer::value::byte_value_to_string;
+use veryl_parser::token_range::TokenRange;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LoopBoundStatus {
@@ -127,6 +128,103 @@ mod procedural_condition_tests {
                 "payload={payload:#x}, mask={mask:#x}",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod function_state_coercion_tests {
+    use super::FfParser;
+    use crate::BuildConfig;
+    use veryl_analyzer::{
+        Analyzer, Context, attribute_table,
+        ir::{Component, Expression, Factor, Ir, Op, Statement, ValueVariant},
+        symbol_table,
+    };
+    use veryl_metadata::Metadata;
+    use veryl_parser::Parser;
+
+    #[test]
+    fn unpacked_array_element_assignment_uses_element_type() {
+        symbol_table::clear();
+        attribute_table::clear();
+
+        let code = r#"
+            module Top (
+                clk: input clock,
+                q: output logic
+            ) {
+                function observed () -> logic {
+                    var values: logic<8>[2];
+                    values[1] = 8'd0;
+                    values[0] = 16'h0100;
+                    $display("upper=%0d", values[1]);
+                    return 1'b0;
+                }
+
+                always_ff (clk) {
+                    q = observed();
+                }
+            }
+        "#;
+        let metadata = Metadata::create_default("prj").unwrap();
+        let parsed = Parser::parse(code, &"").unwrap();
+        let analyzer = Analyzer::new(&metadata);
+        let mut context = Context::default();
+        let mut ir = Ir::default();
+        assert!(analyzer.analyze_pass1("prj", &parsed.veryl).is_empty());
+        assert!(Analyzer::analyze_post_pass1().is_empty());
+        assert!(
+            analyzer
+                .analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir))
+                .is_empty()
+        );
+        assert!(Analyzer::analyze_post_pass2(&ir).is_empty());
+
+        let module = ir
+            .components
+            .into_iter()
+            .find_map(|component| match component {
+                Component::Module(module) => Some(module),
+                _ => None,
+            })
+            .unwrap();
+        let function_body = module
+            .functions
+            .values()
+            .find_map(|function| function.get_function(&[]))
+            .unwrap();
+        let assignment = function_body
+            .statements
+            .iter()
+            .find_map(|statement| match statement {
+                Statement::Assign(assign)
+                    if assign.expr.comptime().r#type.total_width() == Some(16) =>
+                {
+                    Some(assign)
+                }
+                _ => None,
+            })
+            .unwrap();
+
+        let parser = FfParser::new(&module, BuildConfig::default());
+        let coerced = parser
+            .coerce_function_state_assignment(assignment.expr.clone(), &assignment.dst[0])
+            .unwrap();
+        let Expression::Binary(_, Op::As, target, comptime) = coerced else {
+            panic!("unpacked array element assignment must insert an explicit cast");
+        };
+        assert_eq!(comptime.r#type.total_width(), Some(8));
+        let Expression::Term(target) = target.as_ref() else {
+            panic!("assignment cast must have a term target");
+        };
+        let Factor::Value(target) = target.as_ref() else {
+            panic!("assignment cast must have a type target");
+        };
+        let ValueVariant::Type(target) = &target.value else {
+            panic!("assignment cast target must be a type");
+        };
+        assert_eq!(target.total_width(), Some(8));
+        assert!(target.array.is_empty());
     }
 }
 
@@ -305,9 +403,13 @@ pub struct FfParser<'a> {
     loop_exit_blocks: Vec<BlockId>,
     reset: Option<FfReset>,
     function_arg_stack: Vec<HashMap<VarId, Expression>>,
+    function_arg_value_stack: Vec<HashMap<VarId, RegisterId>>,
+    function_expression_value_stack: Vec<HashMap<TokenRange, RegisterId>>,
+    function_event_arg_state_stack: Vec<HashMap<TokenRange, HashMap<VarId, Expression>>>,
     // Maps an active array formal to its call-specific register snapshot and
     // the formal working region used for O(1) dynamic element loads.
     function_array_view_stack: Vec<HashMap<VarId, FunctionArrayView>>,
+    function_array_view_enabled_stack: Vec<bool>,
     runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
     runtime_event_sites: Vec<RuntimeEventSite>,
     next_runtime_error_code: i64,
@@ -347,7 +449,11 @@ impl<'a> FfParser<'a> {
             loop_exit_blocks: Vec::new(),
             reset: None,
             function_arg_stack: Vec::new(),
+            function_arg_value_stack: Vec::new(),
+            function_expression_value_stack: Vec::new(),
+            function_event_arg_state_stack: Vec::new(),
             function_array_view_stack: Vec::new(),
+            function_array_view_enabled_stack: Vec::new(),
             runtime_errors: HashMap::default(),
             runtime_event_sites: Vec::new(),
             next_runtime_error_code: 2000,
@@ -458,6 +564,34 @@ impl<'a> FfParser<'a> {
         id
     }
 
+    fn parse_runtime_event_expression<A>(
+        &mut self,
+        expr: &Expression,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        let state = self
+            .get_bound_function_event_arg_state(expr.token_range())
+            .cloned();
+        let has_state = state.is_some();
+        if let Some(state) = state {
+            self.function_arg_stack.push(state);
+            self.function_array_view_stack.push(HashMap::default());
+            self.function_array_view_enabled_stack.push(false);
+        }
+        let result =
+            self.parse_expression(expr, targets, domain, convert, sources, ir_builder, None);
+        if has_state {
+            self.function_array_view_enabled_stack.pop();
+            self.function_array_view_stack.pop();
+            self.function_arg_stack.pop();
+        }
+        result
+    }
+
     fn emit_runtime_event<A>(
         &mut self,
         site_id: u32,
@@ -479,8 +613,94 @@ impl<'a> FfParser<'a> {
         };
         let mut regs = Vec::new();
         for arg in value_args {
-            self.parse_expression(&arg.0, targets, domain, convert, sources, ir_builder, None)?;
+            self.parse_runtime_event_expression(
+                &arg.0, targets, domain, convert, sources, ir_builder,
+            )?;
             regs.push(self.stack.pop_back().unwrap());
+        }
+        ir_builder.emit(SIRInstruction::RuntimeEvent {
+            site_id,
+            args: regs,
+        });
+        Ok(())
+    }
+
+    fn prepare_effectful_runtime_event_args<A>(
+        &mut self,
+        args: &[SystemFunctionInput],
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<Vec<Option<RegisterId>>, ParserError> {
+        let value_args = if args
+            .first()
+            .and_then(|arg| Self::static_string_expr(&arg.0))
+            .is_some()
+        {
+            &args[1..]
+        } else {
+            args
+        };
+        let last_effectful_arg = value_args.iter().rposition(|arg| {
+            expression::expression_has_side_effect(&arg.0)
+                || self.expression_has_runtime_effect(&arg.0)
+        });
+        let Some(last_effectful_arg) = last_effectful_arg else {
+            return Ok(vec![None; value_args.len()]);
+        };
+
+        // Evaluate only through the last effectful argument. Earlier pure reads
+        // must be snapshotted before a later effect can change them, while pure
+        // trailing arguments can stay lazy in the assertion failure block.
+        value_args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                if index <= last_effectful_arg {
+                    self.parse_runtime_event_expression(
+                        &arg.0, targets, domain, convert, sources, ir_builder,
+                    )?;
+                    Ok(Some(self.stack.pop_back().unwrap()))
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect()
+    }
+
+    fn emit_runtime_event_with_prepared_args<A>(
+        &mut self,
+        site_id: u32,
+        args: &[SystemFunctionInput],
+        prepared: Vec<Option<RegisterId>>,
+        targets: &mut Vec<VarAtomBase<A>>,
+        domain: &Domain,
+        convert: &impl Fn(VarId, u32) -> A,
+        sources: &mut Vec<VarAtomBase<A>>,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> Result<(), ParserError> {
+        let value_args = if args
+            .first()
+            .and_then(|arg| Self::static_string_expr(&arg.0))
+            .is_some()
+        {
+            &args[1..]
+        } else {
+            args
+        };
+        debug_assert_eq!(value_args.len(), prepared.len());
+        let mut regs = Vec::with_capacity(value_args.len());
+        for (arg, prepared) in value_args.iter().zip(prepared) {
+            if let Some(reg) = prepared {
+                regs.push(reg);
+            } else {
+                self.parse_runtime_event_expression(
+                    &arg.0, targets, domain, convert, sources, ir_builder,
+                )?;
+                regs.push(self.stack.pop_back().unwrap());
+            }
         }
         ir_builder.emit(SIRInstruction::RuntimeEvent {
             site_id,
@@ -507,8 +727,8 @@ impl<'a> FfParser<'a> {
                 Ok(ControlFlow::Continue)
             }
             SystemFunctionKind::Assert { kind, cond, args } => {
-                self.parse_expression(
-                    &cond.0, targets, domain, convert, sources, ir_builder, None,
+                self.parse_runtime_event_expression(
+                    &cond.0, targets, domain, convert, sources, ir_builder,
                 )?;
                 let cond_reg = self.stack.pop_back().unwrap();
                 let cond_reg = self.lower_procedural_condition(cond_reg, ir_builder);
@@ -519,14 +739,28 @@ impl<'a> FfParser<'a> {
                     AssertKind::Continue => RuntimeEventKind::AssertContinue,
                 };
                 let site_id = self.register_runtime_event_site(event_kind, args);
+                // Assertion message arguments are observationally eager: any
+                // caller-visible effect must happen even when the assertion
+                // passes. Keep pure arguments in the failure block so the
+                // common passing path remains lazy.
+                let prepared_args = self.prepare_effectful_runtime_event_args(
+                    args, targets, domain, convert, sources, ir_builder,
+                )?;
                 ir_builder.seal_block(SIRTerminator::Branch {
                     cond: cond_reg,
                     true_block: (pass_bb, vec![]),
                     false_block: (fail_bb, vec![]),
                 });
                 ir_builder.switch_to_block(fail_bb);
-                self.emit_runtime_event(
-                    site_id, args, targets, domain, convert, sources, ir_builder,
+                self.emit_runtime_event_with_prepared_args(
+                    site_id,
+                    args,
+                    prepared_args,
+                    targets,
+                    domain,
+                    convert,
+                    sources,
+                    ir_builder,
                 )?;
                 match kind {
                     AssertKind::Fatal => {
