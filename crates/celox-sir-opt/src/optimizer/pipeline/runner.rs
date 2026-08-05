@@ -79,6 +79,14 @@ fn move_sparse_commits_to_event_tail(
     }
 }
 
+pub(super) fn canonicalize_required(program: &mut OptimizationContext<'_>) {
+    // Sparse next-state data must stay invisible until every evaluator for the
+    // event has sampled STABLE. Keep the commit in a final EU even at O0,
+    // where all optional SIR transforms are disabled.
+    move_sparse_commits_to_event_tail(&mut program.sir.eval_apply_ffs);
+    move_sparse_commits_to_event_tail(&mut program.sir.eval_comb_apply_ffs);
+}
+
 pub(super) fn optimize_with_options(
     program: &mut OptimizationContext,
     max_inflight_loads: usize,
@@ -130,11 +138,7 @@ pub(super) fn optimize_with_options(
     // Helper closure to check pass enablement.
     let on = |pass: SirPass| opt.is_enabled(pass);
 
-    // Sparse next-state data must stay invisible until every evaluator for the
-    // event has sampled STABLE.  Keep the commit in the same unified generated
-    // function, but place it in a final EU after all evaluator EUs.
-    move_sparse_commits_to_event_tail(&mut program.sir.eval_apply_ffs);
-    move_sparse_commits_to_event_tail(&mut program.sir.eval_comb_apply_ffs);
+    canonicalize_required(program);
 
     // 1. Unified Case (Fast Path): Full optimizations are safe.
     let phase_start = timing.then(crate::timing::now);

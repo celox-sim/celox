@@ -232,13 +232,11 @@ pub(crate) fn run_regalloc_with_label_and_trace(
     label: &str,
     trace: Option<&mut RegallocTrace>,
 ) -> Result<RegallocResult, RegallocError> {
-    run_regalloc_with_label_and_trace_and_diagnostics(
-        func,
-        label,
-        trace,
-        &crate::NativeDiagnostics::default(),
-        true,
-    )
+    let diagnostics = crate::NativeDiagnostics {
+        verify_regalloc: true,
+        ..crate::NativeDiagnostics::default()
+    };
+    run_regalloc_with_label_and_trace_and_diagnostics(func, label, trace, &diagnostics, true)
 }
 
 pub(crate) fn run_regalloc_with_label_and_trace_and_diagnostics(
