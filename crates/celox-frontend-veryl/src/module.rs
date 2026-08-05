@@ -111,6 +111,17 @@ fn external_port_formal_names(decl: &InstDeclaration) -> Result<(bool, Vec<Strin
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let mut unique_formals = HashSet::default();
+    if let Some(formal) = formal_names
+        .iter()
+        .find(|formal| !unique_formals.insert(formal.as_str()))
+    {
+        return Err(ParserError::illegal_context(
+            "external module port connections",
+            format!("duplicate named SystemVerilog port association `{formal}`"),
+            Some(&decl.token),
+        ));
+    }
     Ok((uses_named_associations, formal_names))
 }
 

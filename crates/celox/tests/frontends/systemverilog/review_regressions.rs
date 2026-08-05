@@ -3000,3 +3000,91 @@ fn rejects_duplicate_modules_across_source_files() {
         "{error}"
     );
 }
+
+#[test]
+fn substitutes_generate_localparams_in_child_port_actuals() {
+    let source = r#"
+        module Child(input logic a, output logic y); assign y = a; endmodule
+        module Top(output logic y);
+            if (1) begin : enabled
+                localparam P = 1'b1;
+                Child child(.a(P), .y(y));
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("generate_localparam_actual.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn preserves_multidimensional_packed_selects_in_child_port_actuals() {
+    let source = r#"
+        module Child(input logic [7:0] a, output logic [7:0] y); assign y = a; endmodule
+        module Top(input logic [1:0][7:0] a, output logic [7:0] y);
+            Child child(.a(a[1]), .y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("packed_actual.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 0xabcdu16)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xabu8.into());
+}
+
+#[test]
+fn rejects_unsupported_internal_data_types() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(output logic y);
+            real value;
+            assign y = 1'b0;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("unsupported internal data type"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_duplicate_named_external_port_associations() {
+    let veryl = r#"
+        module Top (
+            xa: input logic,
+            xb: input logic,
+            y: output logic,
+        ) {
+            inst child: $sv::NamedPorts (
+                a: xa,
+                a: xb,
+                y,
+            );
+        }
+    "#;
+    let sv = r#"
+        module NamedPorts(input logic a, input logic b, output logic y);
+            assign y = a & b;
+        endmodule
+    "#;
+    let error = match Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("duplicate_named.veryl"))],
+        vec![(sv, Path::new("named_ports.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    {
+        Ok(_) => panic!("duplicate named external port associations unexpectedly compiled"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("duplicate named SystemVerilog port association `a`"),
+        "{error}"
+    );
+}

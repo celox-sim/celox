@@ -190,7 +190,9 @@ impl Module {
                 parameter.name()
             )));
         }
-        let mut instances = instances_from_module_node(node.clone(), syntax_tree, &const_env)?;
+        let packed_dimensions = packed_dimensions_from_ports_and_signals(&ports, &signals);
+        let mut instances =
+            instances_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions)?;
         let mut instance_names = HashSet::new();
         if let Some(instance) = instances
             .iter()
@@ -209,7 +211,6 @@ impl Module {
         }
         reject_unsupported_multidimensional_packed_bounds(&ports, &signals, &const_env)?;
         let parameter_values = parameter_value_env(&parameters, &const_env);
-        let packed_dimensions = packed_dimensions_from_ports_and_signals(&ports, &signals);
         let mut expression_signedness = ports
             .iter()
             .map(|port| (port.name().to_string(), port.r#type().is_signed()))
@@ -2005,8 +2006,16 @@ fn signals_from_data_declaration(
                 syntax_tree,
                 type_aliases,
             )
-        })
-        .unwrap_or_else(Type::implicit);
+        });
+    let r#type = match (&variable.nodes.3, r#type) {
+        (_, Some(r#type)) => r#type,
+        (sv_parser::DataTypeOrImplicit::ImplicitDataType(_), None) => Type::implicit(),
+        (sv_parser::DataTypeOrImplicit::DataType(_), None) => {
+            return Err(AnalyzerError::Unsupported(
+                "unsupported internal data type".to_string(),
+            ));
+        }
+    };
     let r#type = type_with_fallback_ranges(
         r#type,
         RefNode::DataTypeOrImplicit(&variable.nodes.3),
@@ -2639,11 +2648,19 @@ fn instances_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Result<Vec<Instance>, AnalyzerError> {
     let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
     let mut instances = Vec::new();
     for item in module_non_port_items(node) {
-        instances_from_non_port_module_item(item, None, syntax_tree, const_env, &mut instances)?;
+        instances_from_non_port_module_item(
+            item,
+            None,
+            syntax_tree,
+            const_env,
+            packed_dimensions,
+            &mut instances,
+        )?;
     }
     instances.retain(|instance| !type_aliases.contains_key(instance.module_name()));
     Ok(instances)
@@ -2654,6 +2671,7 @@ fn instances_from_non_port_module_item(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -2664,6 +2682,7 @@ fn instances_from_non_port_module_item(
                     condition.clone(),
                     syntax_tree,
                     const_env,
+                    packed_dimensions,
                     instances,
                 )?;
             }
@@ -2674,6 +2693,7 @@ fn instances_from_non_port_module_item(
                 condition,
                 syntax_tree,
                 const_env,
+                packed_dimensions,
                 instances,
             )?;
         }
@@ -2687,10 +2707,18 @@ fn instances_from_generate_item(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
-        instances_from_module_or_generate_item(item, condition, syntax_tree, const_env, instances)?;
+        instances_from_module_or_generate_item(
+            item,
+            condition,
+            syntax_tree,
+            const_env,
+            packed_dimensions,
+            instances,
+        )?;
     }
     Ok(())
 }
@@ -2700,6 +2728,7 @@ fn instances_from_module_or_generate_item(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -2709,6 +2738,7 @@ fn instances_from_module_or_generate_item(
                 condition,
                 syntax_tree,
                 const_env,
+                packed_dimensions,
                 instances,
             )?;
         }
@@ -2718,6 +2748,7 @@ fn instances_from_module_or_generate_item(
                 condition,
                 syntax_tree,
                 const_env,
+                packed_dimensions,
                 instances,
             )?;
         }
@@ -2731,6 +2762,7 @@ fn instances_from_module_common_item(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     match item {
@@ -2740,6 +2772,7 @@ fn instances_from_module_common_item(
                 condition,
                 syntax_tree,
                 const_env,
+                packed_dimensions,
                 instances,
             )?;
         }
@@ -2754,6 +2787,7 @@ fn instances_from_conditional_generate(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     let sv_parser::ConditionalGenerateConstruct::If(generate) = generate else {
@@ -2774,6 +2808,7 @@ fn instances_from_conditional_generate(
         then_condition,
         syntax_tree,
         const_env,
+        packed_dimensions,
         instances,
     )?;
     if let Some((_, block)) = &generate.nodes.3 {
@@ -2784,7 +2819,14 @@ fn instances_from_conditional_generate(
                 expr: Box::new(generate_condition),
             },
         );
-        instances_from_generate_block(block, else_condition, syntax_tree, const_env, instances)?;
+        instances_from_generate_block(
+            block,
+            else_condition,
+            syntax_tree,
+            const_env,
+            packed_dimensions,
+            instances,
+        )?;
     }
     Ok(())
 }
@@ -2794,11 +2836,19 @@ fn instances_from_generate_block(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     match block {
         sv_parser::GenerateBlock::GenerateItem(item) => {
-            instances_from_generate_item(item, condition, syntax_tree, const_env, instances)?;
+            instances_from_generate_item(
+                item,
+                condition,
+                syntax_tree,
+                const_env,
+                packed_dimensions,
+                instances,
+            )?;
         }
         sv_parser::GenerateBlock::Multiple(block) => {
             let mut block_env = const_env.clone();
@@ -2811,6 +2861,7 @@ fn instances_from_generate_block(
                     condition.clone(),
                     syntax_tree,
                     &block_env,
+                    packed_dimensions,
                     instances,
                 )?;
             }
@@ -2835,6 +2886,7 @@ fn instances_from_module_instantiation(
     condition: Option<ConstExpr>,
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
+    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
     instances: &mut Vec<Instance>,
 ) -> Result<(), AnalyzerError> {
     let module_name = identifier_text(
@@ -2864,7 +2916,13 @@ fn instances_from_module_instantiation(
             syntax_tree,
         )
         .ok_or_else(|| AnalyzerError::Unsupported("unsupported instance identifier".to_string()))?;
-        let port_connections = port_connections_from_hierarchical_instance(instance, syntax_tree)?;
+        let mut port_connections =
+            port_connections_from_hierarchical_instance(instance, syntax_tree, packed_dimensions)?;
+        for connection in &mut port_connections {
+            connection.actual_expr = connection.actual_expr.take().map(|expr| {
+                substitute_expr_constants_with_parameter_literals(expr, const_env, &HashMap::new())
+            });
+        }
         let port_names = port_connections
             .iter()
             .map(|connection| connection.formal().to_string())
@@ -2926,6 +2984,7 @@ fn parameter_overrides_from_value_assignment(
 fn port_connections_from_hierarchical_instance(
     instance: &sv_parser::HierarchicalInstance,
     syntax_tree: &SyntaxTree,
+    packed_dimensions: &HashMap<String, Vec<ConstExpr>>,
 ) -> Result<Vec<PortConnection>, AnalyzerError> {
     let Some(connections) = instance.nodes.1.nodes.1.as_ref() else {
         return Ok(Vec::new());
@@ -2960,13 +3019,14 @@ fn port_connections_from_hierarchical_instance(
                     None => Some(Expr::Ident(formal.clone())),
                     Some(paren) => match paren.nodes.1.as_ref() {
                         None => None,
-                        Some(expr) => {
-                            Some(expr_from_expression(expr, syntax_tree).ok_or_else(|| {
+                        Some(expr) => Some(
+                            expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
+                                .ok_or_else(|| {
                                 AnalyzerError::Unsupported(
                                     "named port connection expression".to_string(),
                                 )
-                            })?)
-                        }
+                            })?,
+                        ),
                     },
                 };
                 let actual = actual_expr
