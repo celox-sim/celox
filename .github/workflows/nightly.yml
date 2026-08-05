@@ -1,0 +1,33 @@
+name: Queue Nightly Packages
+
+on:
+  schedule:
+    - cron: "43 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  queue:
+    name: Queue ${{ matrix.channel }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: nightly-stable
+            ref: master
+          - channel: nightly-head
+            ref: develop
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Dispatch the package build from its source branch
+        shell: bash
+        run: |
+          gh workflow run ci-napi.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "${{ matrix.ref }}" \
+            -f "channel=${{ matrix.channel }}"

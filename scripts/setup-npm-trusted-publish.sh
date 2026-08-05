@@ -5,7 +5,8 @@
 # Prerequisites:
 #   - npm login (you must be logged in to npm with publish rights to @celox-sim)
 #
-# After running this script:
+# After running this script, stable and both nightly channels use the same
+# trusted workflow identity:
 #   1. Go to https://www.npmjs.com/package/<name>/access for each package
 #   2. Add a trusted publisher:
 #        Provider:   GitHub Actions

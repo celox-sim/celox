@@ -27,10 +27,9 @@ jobs:
         id: release-token
         uses: actions/create-github-app-token@v3
         with:
-          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
-          permission-issues: write
           permission-pull-requests: write
           permission-workflows: write
 

@@ -31,8 +31,8 @@ for (const [path, candidate] of versions) {
 const cargoManifest = fs.readFileSync("Cargo.toml", "utf8");
 for (const line of cargoManifest.split("\n")) {
   if (/^veryl-[a-z-]+\s*=/.test(line) && /\bgit\s*=/.test(line)) {
-    throw new Error(`Stable releases cannot use a Veryl git dependency: ${line}`);
+    throw new Error(`The stable lane cannot use a Veryl git dependency: ${line}`);
   }
 }
 
-console.log(`Validated Celox release ${version}`);
+console.log(`Validated stable Celox version ${version}`);

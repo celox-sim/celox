@@ -5,27 +5,73 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - Cargo.toml
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open same-repository Renovate PR to refresh
+        required: true
+        type: number
 
 permissions:
   contents: write
+
+concurrency:
+  group: sync-veryl-vendor-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: false
 
 jobs:
   sync:
     name: Refresh veryl-metadata
     if: >-
-      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
       (github.event.pull_request.user.login == 'renovate' ||
       github.event.pull_request.user.login == 'renovate[bot]') &&
-      startsWith(github.event.pull_request.head.ref, 'renovate/')
+      startsWith(github.event.pull_request.head.ref, 'renovate/') &&
+      startsWith(github.event.pull_request.title, 'fix(veryl):'))
     runs-on: ubuntu-latest
     steps:
       - name: Create release app token
         id: release-token
         uses: actions/create-github-app-token@v3
         with:
-          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
+          permission-pull-requests: read
+
+      - name: Resolve and validate the Renovate pull request
+        id: pull-request
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+        shell: bash
+        run: |
+          metadata="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          author="$(jq -r '.user.login' <<<"$metadata")"
+          base_ref="$(jq -r '.base.ref' <<<"$metadata")"
+          head_ref="$(jq -r '.head.ref' <<<"$metadata")"
+          title="$(jq -r '.title' <<<"$metadata")"
+          changed_files="$(
+            gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
+              --jq '.[].filename'
+          )"
+          if [ "$(jq -r '.state' <<<"$metadata")" != open ] \
+            || [ "$(jq -r '.head.repo.full_name' <<<"$metadata")" != "$GITHUB_REPOSITORY" ] \
+            || { [ "$author" != renovate ] && [ "$author" != 'renovate[bot]' ]; } \
+            || [ "$base_ref" != master ] \
+            || [[ "$head_ref" != renovate/* ]] \
+            || [[ "$title" != "fix(veryl):"* ]] \
+            || ! grep -qx Cargo.toml <<<"$changed_files"; then
+            echo "PR $PR_NUMBER is not an open same-repository Renovate Cargo update for master." >&2
+            exit 1
+          fi
+
+          {
+            echo "base_sha=$(jq -r '.base.sha' <<<"$metadata")"
+            echo "head_sha=$(jq -r '.head.sha' <<<"$metadata")"
+            echo "head_ref=$head_ref"
+          } >> "$GITHUB_OUTPUT"
 
       # Only scripts from the trusted base revision run on the host. The PR
       # checkout is treated as data, and Cargo processes it in a disposable
@@ -33,20 +79,70 @@ jobs:
       - name: Check out trusted automation
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ steps.pull-request.outputs.base_sha }}
           path: automation
           persist-credentials: false
 
       - name: Check out Renovate branch
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ steps.pull-request.outputs.head_sha }}
           path: target
+          fetch-depth: 0
           token: ${{ steps.release-token.outputs.token }}
+
+      - name: Add the tested Veryl HEAD compatibility overlay
+        working-directory: target
+        shell: bash
+        run: |
+          git config user.name "celox-release-bot"
+          git config user.email "celox-release-bot@users.noreply.github.com"
+          git fetch --no-tags origin refs/heads/develop:refs/remotes/origin/develop
+
+          if git merge-base --is-ancestor origin/develop HEAD; then
+            echo "The release candidate already contains develop."
+            exit 0
+          fi
+
+          set +e
+          git merge --no-commit --no-ff origin/develop
+          merge_status="$?"
+          set -e
+
+          if [ "$merge_status" -eq 0 ]; then
+            exit 0
+          fi
+
+          mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+          unexpected=()
+          for path in "${conflicts[@]}"; do
+            case "$path" in
+              Cargo.toml|Cargo.lock|vendor/veryl-metadata/*)
+                # The Renovate side contains the released dependency. The
+                # vendored tree and lockfile are regenerated below.
+                git checkout --ours -- "$path"
+                git add -- "$path"
+                ;;
+              *)
+                unexpected+=("$path")
+                ;;
+            esac
+          done
+
+          if [ "${#unexpected[@]}" -ne 0 ]; then
+            printf 'develop conflicts with the Veryl release candidate in:\n' >&2
+            printf '  %s\n' "${unexpected[@]}" >&2
+            exit 1
+          fi
+
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo "Dependency conflict resolution left unresolved paths." >&2
+            exit 1
+          fi
 
       - name: Refresh vendored metadata and lockfile
         env:
-          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          HEAD_BRANCH: ${{ steps.pull-request.outputs.head_ref }}
         run: |
           version="$(node automation/scripts/veryl-vendor.mjs version target/Cargo.toml)"
           archive="$RUNNER_TEMP/veryl-metadata.crate"
@@ -78,13 +174,15 @@ jobs:
           node automation/scripts/veryl-vendor.mjs check target
 
           cd target
-          if git diff --quiet -- Cargo.lock vendor/veryl-metadata; then
-            echo "Vendored veryl-metadata is already synchronized."
+          git add Cargo.toml Cargo.lock vendor/veryl-metadata
+          if ! git rev-parse -q --verify MERGE_HEAD >/dev/null \
+            && git diff --quiet \
+            && git diff --cached --quiet; then
+            echo "Veryl release candidate is already synchronized."
             exit 0
           fi
 
           git config user.name "celox-release-bot"
           git config user.email "celox-release-bot@users.noreply.github.com"
-          git add Cargo.lock vendor/veryl-metadata
-          git commit -m "fix(veryl): sync vendored metadata $version"
+          git commit -m "fix(veryl): promote tested HEAD compatibility to $version"
           git push origin "HEAD:$HEAD_BRANCH"

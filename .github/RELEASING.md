@@ -41,32 +41,61 @@ release metadata, but tags are not deployment triggers.
 
 ## Veryl dependency lanes
 
-`master` is the release lane. It always uses released Veryl crates and is the
-only source of Celox releases. Renovate groups those crates into one
-`fix(veryl):` pull request. A trusted `pull_request_target` workflow downloads
-the matching `veryl-metadata` crate, reapplies the `git-command`-only default,
-refreshes `Cargo.lock` in an isolated container, and pushes the result back to
-the Renovate branch. The normal lint job rejects a stale or incorrectly featured
-vendor copy, so the initial Renovate commit cannot race ahead of synchronization.
-After a three-day release-age guard, required CI checks passing causes that pull
-request to merge automatically. Its `fix` title then creates a Celox patch in
-the next automated release train. The complete HEAD-to-Veryl-release-to-Celox-
-release path therefore needs no routine manual step; a compatibility failure
-simply stops at the required checks.
+`master` is both the normal Celox development trunk and the stable release lane.
+It always uses released Veryl crates and is the only source of stable Celox
+releases. Every pull request targeting `master` is checked for accidental Veryl
+git dependencies.
 
-`integration/veryl-head` is a generated, non-release branch. **Veryl HEAD
-Integration** recreates it from the latest `master` every day and whenever the
-stable dependency definition changes, pins all Veryl crates to one exact commit
-from upstream `master`, and lets the normal CI workflow test that commit. A
-failure on this branch is an early compatibility signal; do not merge or release
-this branch. The next successful run replaces it, so work on failures in a
-separate pull request or git worktree.
+`develop` is a non-release compatibility overlay: the latest `master` plus the
+changes needed by the last Veryl HEAD revision that passed CI. **Sync Develop**
+opens `master` to `develop` pull requests and enables auto-merge. Ordinary Celox
+features and fixes belong on `master`, never only on `develop`, so the overlay is
+disposable and can be rebuilt after a Veryl release.
+
+**Veryl HEAD Integration** creates `integration/veryl-head` from `develop`, pins
+all Veryl crates to one exact upstream `master` commit, and opens a pull request
+back to `develop`. Passing rolls auto-merge. A failing roll remains open and is
+not replaced by the next scheduled run, making the compatibility regression an
+actionable pull request that a maintainer can take over. The integration branch
+is temporary and must never target `master`.
+
+Renovate groups released Veryl crates into one `fix(veryl):` pull request against
+`master`. The trusted vendoring workflow merges the tested `develop` overlay into
+that release candidate, retains Renovate's released dependency declarations,
+downloads the matching `veryl-metadata` crate, reapplies the `git-command`-only
+default, and refreshes `Cargo.lock` in an isolated container. Required CI then
+tests the complete promotion. A source conflict or a HEAD-only change that is
+not compatible with the release leaves the existing Renovate pull request and
+its failed check for investigation. Every `develop` update redispatches the
+trusted synchronization for an open Veryl release candidate, so a compatibility
+fix cannot be missed merely because Renovate opened its pull request first. Once
+merged, the normal master-to-develop sync and next HEAD roll rebuild the overlay
+on the new stable base.
+
+## Nightly channels
+
+The NAPI publication workflow publishes two daily prerelease channels from
+immutable commits:
+
+| npm dist-tag | Source | Veryl compatibility |
+| --- | --- | --- |
+| `nightly-stable` | `master` | Latest released Veryl crates |
+| `nightly-head` | `develop` | Last Veryl HEAD roll accepted by CI |
+
+Nightly versions use the next patch plus the channel, source commit timestamp,
+and abbreviated source revision, for example
+`0.1.36-nightly.head.20260805123456.g0123456789ab`. Publishing the same commit is
+idempotent. **Queue Nightly Packages** dispatches the existing trusted publisher
+workflow from each source branch so npm provenance names the actual source
+commit. Manual dispatch can publish either nightly channel when run from its
+corresponding branch, or retry a stable tag. The packages remain one lockstep
+distribution in every channel.
 
 ## Repository configuration
 
 Release automation uses the `celox-release-please` GitHub App, installed for this
 repository with repository contents and pull request write access. Store its
-Client ID as the `RELEASE_APP_CLIENT_ID` Actions variable and its complete PEM
+numeric App ID as the `RELEASE_APP_ID` Actions variable and its complete PEM
 private key as the `RELEASE_APP_PRIVATE_KEY` Actions secret. Each job mints a
 short-lived, repository-scoped installation token; never store an installation
 token itself because it expires. The Veryl HEAD and vendored-metadata workflows
@@ -82,8 +111,9 @@ auto-merge.
 
 Configure merge commits to use the pull request title as the merge commit title.
 This preserves the Conventional Commit title consumed by Release Please. Protect
-`master` and require both **Conventional Commit title** and the normal CI checks;
-do not allow those checks to be bypassed by the weekly release automation. Enable
-repository auto-merge so the weekly workflow can queue a checked release pull
-request. Allow the automation token to force-update the disposable
-`integration/veryl-head` branch; never grant that exception on `master`.
+`master` and `develop` and require both **Conventional Commit title** and the
+normal CI checks; do not allow those checks to be bypassed by automation. Enable
+repository auto-merge so dependency rolls, lane synchronization, and weekly
+releases can queue checked pull requests. Allow the automation token to create
+`develop` on first use and force-update the disposable `integration/veryl-head`
+branch; never grant a force-push exception on `master` or `develop`.
