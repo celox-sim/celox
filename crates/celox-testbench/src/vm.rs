@@ -67,6 +67,23 @@ impl CompiledExpr {
         !self.eval(memory).is_zero()
     }
 
+    /// Returns the value when this expression does not read simulator memory.
+    pub fn constant_u64(&self) -> Option<u64> {
+        if self.bytecode.ops().iter().any(|op| {
+            matches!(
+                op,
+                TbOpcode::LoadU64 { .. }
+                    | TbOpcode::LoadWide { .. }
+                    | TbOpcode::LoadIndexed { .. }
+                    | TbOpcode::LoadBitSelect { .. }
+                    | TbOpcode::StoreU64 { .. }
+            )
+        }) {
+            return None;
+        }
+        Some(self.eval_u64(std::ptr::null_mut()))
+    }
+
     /// Core evaluation loop.  Uses `TestbenchValue` to handle both u64 and wide
     /// signals on a single stack.  The common case (all ≤64-bit operands)
     /// stays in the `TestbenchValue::U64` variant and never allocates.

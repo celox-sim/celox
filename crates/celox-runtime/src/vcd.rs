@@ -205,6 +205,13 @@ impl VcdWriter {
         val
     }
 
+    fn mask_to_width(mut value: BigUint, width: usize) -> BigUint {
+        if value.bits() > width as u64 {
+            value &= (BigUint::from(1u8) << width) - 1u8;
+        }
+        value
+    }
+
     /// Dump all changed signals at the given timestamp.
     ///
     /// `memory` is the raw JIT memory (stable region or full buffer).
@@ -249,7 +256,10 @@ impl VcdWriter {
                 }
                 VcdWriterSource::External { index } => {
                     let (value, mask) = &external[index];
-                    (value.clone(), mask.clone(), mask != &BigUint::default())
+                    let value = Self::mask_to_width(value.clone(), sig.width);
+                    let mask = Self::mask_to_width(mask.clone(), sig.width);
+                    let is_4state = mask != BigUint::default();
+                    (value, mask, is_4state)
                 }
             };
 
@@ -317,5 +327,39 @@ impl VcdWriter {
             }
             writeln!(writer, " {}", vcd_id)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_values_are_masked_to_their_declared_width() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("external-width.vcd");
+        let mut writer = VcdWriter::new(&path, &[]).unwrap();
+        writer
+            .add_external_signals(&[VcdExternalSignalDesc {
+                scope: "component".into(),
+                name: "state".into(),
+                width: 8,
+            }])
+            .unwrap();
+
+        writer
+            .dump_with_external(
+                0,
+                &[],
+                &[(BigUint::from(0x1ffu16), BigUint::from(0x100u16))],
+            )
+            .unwrap();
+        writer
+            .dump_with_external(1, &[], &[(BigUint::from(0xffu8), BigUint::default())])
+            .unwrap();
+
+        let dump = std::fs::read_to_string(path).unwrap();
+        assert!(!dump.contains("b111111111"), "{dump}");
+        assert_eq!(dump.matches("b11111111 !").count(), 1, "{dump}");
     }
 }

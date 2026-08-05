@@ -124,6 +124,35 @@ fn instance_seed(base: u64, test_name: &str, instance: &str) -> u64 {
     hash
 }
 
+#[derive(Clone, Copy)]
+struct ComponentOutputRange {
+    start: usize,
+    end: usize,
+}
+
+impl ComponentOutputRange {
+    fn from_target(target: &TestbenchTarget<SignalRef, CompiledExpr>) -> Option<Self> {
+        let (start, width) = match &target.selection {
+            Some(selection) => (
+                usize::try_from(selection.offset.constant_u64()?).ok()?,
+                selection.width,
+            ),
+            None => (0, target.signal.width),
+        };
+        let end = start.saturating_add(width).min(target.signal.width);
+        Some(Self { start, end })
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        self.start < other.end && other.start < self.end
+    }
+}
+
+struct ComponentOutputDriver {
+    instance: String,
+    range: Option<ComponentOutputRange>,
+}
+
 fn parameter_host_value(value: &ComponentParameterValue) -> HostValue {
     match value {
         ComponentParameterValue::Bits { words, width } => HostValue::Bits {
@@ -215,7 +244,7 @@ fn validate_manifest(
         }
     }
     for (name, _) in &descriptor.params {
-        if !manifest.params.is_empty() && manifest.param(name).is_none() {
+        if manifest.param(name).is_none() {
             return Err(format!(
                 "component `{}`: `{type_name}` declares no parameter named `{name}`",
                 descriptor.instance
@@ -293,7 +322,7 @@ impl ComponentRuntime {
         self.last_trace_values.clear();
         let mut initialized = Vec::with_capacity(descriptors.len());
         let mut initial_writes = Vec::new();
-        let mut driven_outputs = HashMap::<SignalRef, String>::new();
+        let mut driven_outputs = HashMap::<SignalRef, Vec<ComponentOutputDriver>>::new();
         let libraries: HashMap<_, _> = libraries
             .iter()
             .map(|library| (library.export.as_str(), library))
@@ -515,14 +544,22 @@ impl ComponentRuntime {
                         descriptor.instance, output.name
                     ));
                 }
-                if let Some(other) =
-                    driven_outputs.insert(output.target.signal, descriptor.instance.clone())
-                {
+                let range = ComponentOutputRange::from_target(&output.target);
+                let drivers = driven_outputs.entry(output.target.signal).or_default();
+                if let Some(other) = drivers.iter().find(|other| {
+                    range
+                        .zip(other.range)
+                        .is_none_or(|(range, other)| range.overlaps(other))
+                }) {
                     return Err(format!(
-                        "component `{}` output `{}` conflicts with component `{other}`",
-                        descriptor.instance, output.name
+                        "component `{}` output `{}` conflicts with component `{}`",
+                        descriptor.instance, output.name, other.instance
                     ));
                 }
+                drivers.push(ComponentOutputDriver {
+                    instance: descriptor.instance.clone(),
+                    range,
+                });
             }
             if kind == veryl_component_sys::VRL_KIND_CLOCKED
                 && !events.iter().any(|event| !event.reset)
@@ -799,4 +836,35 @@ pub(crate) fn host_bits(value: &HostValue) -> Option<(num_bigint::BigUint, u32)>
     };
     let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
     Some((num_bigint::BigUint::from_bytes_le(&bytes), *width))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_without_parameters_rejects_supplied_parameter() {
+        let manifest = veryl_metadata::ComponentManifest::parse(r#"{"kind":"method_only"}"#)
+            .expect("valid component manifest");
+        let descriptor = TestbenchComponent {
+            instance: "component".into(),
+            component: "paramless".into(),
+            params: vec![(
+                "UNKNOWN".into(),
+                ComponentParameterValue::Bits {
+                    words: vec![1],
+                    width: 1,
+                },
+            )],
+            connections: Vec::new(),
+            is_var_form: true,
+            source: None,
+        };
+
+        let error = validate_manifest(&descriptor, "paramless", &manifest).unwrap_err();
+        assert!(
+            error.contains("declares no parameter named `UNKNOWN`"),
+            "{error}"
+        );
+    }
 }

@@ -1320,6 +1320,47 @@ fn component_outputs_conflicting_with_each_other_fail() {
 }
 
 #[test]
+fn component_outputs_to_disjoint_static_slices_do_not_conflict() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var low: logic<4>;
+            var high: logic<4>;
+            var q: logic<8>;
+            inst low_component: $comp::celox_clocked #(STEP: 0) (
+                clk,
+                d: low,
+                q: q[3:0],
+            );
+            inst high_component: $comp::celox_clocked #(STEP: 0) (
+                clk,
+                d: high,
+                q: q[7:4],
+            );
+            initial {
+                $assert(q == 8'h33, "disjoint on_init writes: %h", q);
+                low = 4'ha;
+                high = 4'hb;
+                clk.next();
+                $assert(q == 8'hba, "disjoint clock writes: %h", q);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
+}
+
+#[test]
 fn component_on_gated_clock_fires_only_with_the_gate() {
     register_component();
     let (_dir, metadata) = component_metadata();
