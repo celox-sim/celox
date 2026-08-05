@@ -1355,6 +1355,44 @@ fn test_ff_runtime_function_snapshots_input_before_callee_nonlocal_write(sim) {
     assert_eq!(sim.get(q), 7u8.into());
 }
 
+fn test_ff_runtime_function_snapshots_helper_input_before_callee_nonlocal_write(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            global_value: output logic<8>,
+            q: output logic<8>
+        ) {
+            function read_global () -> logic<8> {
+                return global_value;
+            }
+
+            function update_global (value: input logic<8>) -> logic<8> {
+                global_value = 8'd9;
+                if value == 8'd1 {
+                    return 8'd7;
+                } else {
+                    return 8'd8;
+                }
+            }
+
+            always_ff (clk) {
+                q = update_global(read_global());
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let global_value = sim.signal("global_value");
+    let q = sim.signal("q");
+
+    sim.modify(|io| io.set(global_value, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(global_value), 9u8.into());
+    assert_eq!(sim.get(q), 7u8.into());
+}
+
 fn test_ff_outputless_nested_nonlocal_write_updates_later_event_argument(sim) {
     @omit_veryl;
     @ignore_on(wasm);

@@ -3048,6 +3048,84 @@ impl<'a> FfParser<'a> {
         }
     }
 
+    fn expression_contains_function_call(expr: &Expression) -> bool {
+        let input_contains = |input: &veryl_analyzer::ir::SystemFunctionInput| {
+            Self::expression_contains_function_call(&input.0)
+        };
+        match expr {
+            Expression::Term(factor) => {
+                match factor.as_ref() {
+                    Factor::FunctionCall(_) => true,
+                    Factor::Variable(_, index, select, _) => {
+                        index.0.iter().any(Self::expression_contains_function_call)
+                            || select.0.iter().any(Self::expression_contains_function_call)
+                            || select.1.as_ref().is_some_and(|(_, expr)| {
+                                Self::expression_contains_function_call(expr)
+                            })
+                    }
+                    Factor::HierVariable(reference) => {
+                        reference
+                            .index
+                            .0
+                            .iter()
+                            .any(Self::expression_contains_function_call)
+                            || reference
+                                .select
+                                .0
+                                .iter()
+                                .any(Self::expression_contains_function_call)
+                            || reference.select.1.as_ref().is_some_and(|(_, expr)| {
+                                Self::expression_contains_function_call(expr)
+                            })
+                    }
+                    Factor::SystemFunctionCall(call) => match &call.kind {
+                        SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
+                            args.iter().any(input_contains)
+                        }
+                        SystemFunctionKind::Assert { cond, args, .. } => {
+                            input_contains(cond) || args.iter().any(input_contains)
+                        }
+                        SystemFunctionKind::Bits(_) | SystemFunctionKind::Size(_) => false,
+                        SystemFunctionKind::Clog2(input)
+                        | SystemFunctionKind::Onehot(input)
+                        | SystemFunctionKind::Signed(input)
+                        | SystemFunctionKind::Unsigned(input) => input_contains(input),
+                        SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
+                    },
+                    Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                }
+            }
+            Expression::Binary(lhs, _, rhs, _) => {
+                Self::expression_contains_function_call(lhs)
+                    || Self::expression_contains_function_call(rhs)
+            }
+            Expression::Unary(_, inner, _) => Self::expression_contains_function_call(inner),
+            Expression::Ternary(cond, then_expr, else_expr, _) => {
+                Self::expression_contains_function_call(cond)
+                    || Self::expression_contains_function_call(then_expr)
+                    || Self::expression_contains_function_call(else_expr)
+            }
+            Expression::Concatenation(items, _) => items.iter().any(|(expr, repeat)| {
+                Self::expression_contains_function_call(expr)
+                    || repeat
+                        .as_ref()
+                        .is_some_and(Self::expression_contains_function_call)
+            }),
+            Expression::ArrayLiteral(items, _) => items.iter().any(|item| match item {
+                ArrayLiteralItem::Value(expr, repeat) => {
+                    Self::expression_contains_function_call(expr)
+                        || repeat
+                            .as_ref()
+                            .is_some_and(|repeat| Self::expression_contains_function_call(repeat))
+                }
+                ArrayLiteralItem::Defaul(expr) => Self::expression_contains_function_call(expr),
+            }),
+            Expression::StructConstructor(_, fields, _) => fields
+                .iter()
+                .any(|(_, expr)| Self::expression_contains_function_call(expr)),
+        }
+    }
+
     fn collect_expression_read_variables(
         &self,
         expr: &Expression,
@@ -3455,7 +3533,10 @@ impl<'a> FfParser<'a> {
             return Ok(());
         }
 
-        if !force_materialization && !self.expression_needs_eager_evaluation(expr) {
+        if !force_materialization
+            && !self.expression_needs_eager_evaluation(expr)
+            && !Self::expression_contains_function_call(expr)
+        {
             return Ok(());
         }
 
@@ -3569,6 +3650,7 @@ impl<'a> FfParser<'a> {
                 && !has_effectful_output_destination
                 && !Self::expression_references_any(actual, &output_ids)
                 && !callee_writes_dependency
+                && !Self::expression_contains_function_call(actual)
             {
                 continue;
             }
