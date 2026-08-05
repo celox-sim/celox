@@ -106,6 +106,39 @@ fn test_native_testbench_ff_condition_reads_pre_edge_value_after_write() {
 }
 
 #[test]
+fn test_native_testbench_overlapping_ff_writes_preserve_last_write() {
+    let code = r#"
+        module Dut (
+            clk  : input  clock,
+            state: output logic<128>,
+        ) {
+            always_ff (clk) {
+                state = 128'h11111111111111111111111111111111;
+                state[15:8] = 8'hAA;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var state: logic<128>;
+            inst dut: Dut (clk, state);
+
+            initial {
+                clk.next(1);
+                $assert(state[23:0] == 24'h11AA11);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
 fn test_native_testbench_uses_metadata_project_name() {
     let code = r#"
         #[test(t)]

@@ -2982,10 +2982,10 @@ fn direct_ff_write_ranges<Addr: Copy + Eq + Hash>(
         .iter()
         .enumerate()
         .map(|(writer, summary)| {
-            summary
+            let mut direct = summary
                 .writes
                 .iter()
-                .filter(|write| {
+                .map(|write| {
                     // Direct publication is only a throughput optimization.
                     // Dynamic destinations and static bitfields requiring a
                     // physical read-modify-write stay staged.
@@ -3034,6 +3034,36 @@ fn direct_ff_write_ranges<Addr: Copy + Eq + Hash>(
                         .all(|&reader| retained.contains(&(ff_node_base + reader, writer_node)));
                     comb_readers_proven && ff_readers_proven
                 })
+                .collect::<Vec<_>>();
+
+            // Direct Stores publish immediately, while staged Stores publish
+            // together in finish(). Mixing those destinations inside one
+            // overlapping write component can reverse procedural last-write-
+            // wins order. Propagate staging through the component while
+            // leaving disjoint ranges eligible for direct publication.
+            let mut staged = direct
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &direct)| (!direct).then_some(index))
+                .collect::<Vec<_>>();
+            while let Some(staged_index) = staged.pop() {
+                let staged_write = summary.writes[staged_index];
+                for (candidate, candidate_write) in summary.writes.iter().enumerate() {
+                    if direct[candidate]
+                        && staged_write.id == candidate_write.id
+                        && staged_write.access.overlaps(&candidate_write.access)
+                    {
+                        direct[candidate] = false;
+                        staged.push(candidate);
+                    }
+                }
+            }
+
+            summary
+                .writes
+                .iter()
+                .zip(direct)
+                .filter_map(|(write, direct)| direct.then_some(write))
                 .copied()
                 .collect()
         })
@@ -4335,6 +4365,36 @@ mod tests {
             direct[0],
             vec![VarAtomBase::new(21, 0, 0), VarAtomBase::new(24, 8, 15)]
         );
+    }
+
+    #[test]
+    fn ff_direct_write_stages_complete_overlapping_components() {
+        let summary = FfAccessSummary {
+            reads: Vec::new(),
+            writes: vec![
+                VarAtomBase::new(20, 4, 19),
+                VarAtomBase::new(20, 16, 31),
+                VarAtomBase::new(20, 24, 31),
+                VarAtomBase::new(20, 40, 47),
+            ],
+            dynamic_writes: HashSet::default(),
+        };
+        let plan = plan_ff_comb_schedule(&[], std::slice::from_ref(&summary)).unwrap();
+        let var_widths = [(20, 64)].into_iter().collect();
+
+        let direct = direct_ff_write_ranges(
+            &[],
+            &[summary],
+            &plan,
+            &HashSet::default(),
+            0,
+            &var_widths,
+            &HashMap::default(),
+        );
+
+        // The unaligned first write is staged. Staging propagates through the
+        // two transitively overlapping native ranges, but not the disjoint byte.
+        assert_eq!(direct[0], vec![VarAtomBase::new(20, 40, 47)]);
     }
 
     #[test]
