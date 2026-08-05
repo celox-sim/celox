@@ -121,6 +121,9 @@ pub struct RuntimeSchema<A> {
     /// Persistent state read directly by host-side testbench execution. These
     /// are optimization roots even when no SIR instruction loads them.
     pub testbench_read_roots: HashSet<A>,
+    /// Bit ranges written by RTL execution units. External component outputs
+    /// may not overlap these ranges because that would create multiple drivers.
+    pub rtl_writes: HashSet<VarAtomBase<A>>,
 }
 
 impl<A> Default for RuntimeSchema<A> {
@@ -130,6 +133,7 @@ impl<A> Default for RuntimeSchema<A> {
             runtime_event_sites: Vec::new(),
             comb_observers: Vec::new(),
             testbench_read_roots: HashSet::default(),
+            rtl_writes: HashSet::default(),
         }
     }
 }

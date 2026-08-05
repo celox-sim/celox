@@ -1,7 +1,7 @@
 import fs from "node:fs";
 
 const verylRepository = "https://github.com/veryl-lang/veryl.git";
-const dependencyNames = [
+export const verylDependencyNames = [
   "veryl-analyzer",
   "veryl-emitter",
   "veryl-metadata",
@@ -21,7 +21,7 @@ export function useVerylHead(manifest, revision) {
   const patches = patchStart === -1 ? "" : manifest.slice(patchStart);
   let updated = dependencies;
 
-  for (const name of dependencyNames) {
+  for (const name of verylDependencyNames) {
     const pattern = new RegExp(`^${name}\\s*=.*$`, "m");
     const matches = updated.match(pattern);
     if (matches === null) {

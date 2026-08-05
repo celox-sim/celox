@@ -12,7 +12,7 @@ pub use error::SimulatorErrorCode;
 pub use event_buffer::RuntimeEventBuffer;
 pub use simulation::{EventInfo, SimulationExecutor, SimulationState};
 pub use testbench::bind_testbench_program;
-pub use vcd::{VcdSignalDesc, VcdWriter};
+pub use vcd::{VcdExternalSignalDesc, VcdSignalDesc, VcdWriter};
 
 pub type AbsoluteAddr = celox_design::StateAddr;
 pub type MemoryLayout = celox_state_layout::MemoryLayout<AbsoluteAddr>;

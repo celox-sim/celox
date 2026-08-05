@@ -708,17 +708,17 @@ const editorOpts: monaco.editor.IStandaloneEditorConstructionOptions = {
 };
 
 // Configure TS compiler options for testbench files
-monaco.languages.typescript.typescriptDefaults.setEagerModelSync(true);
-const monacoTestbenchCompilerOptions = buildMonacoTestbenchCompilerOptions(
-	monaco.languages.typescript,
-);
-monaco.languages.typescript.typescriptDefaults.setCompilerOptions(
+const monacoTypeScript = monaco.typescript;
+monacoTypeScript.typescriptDefaults.setEagerModelSync(true);
+const monacoTestbenchCompilerOptions =
+	buildMonacoTestbenchCompilerOptions(monacoTypeScript);
+monacoTypeScript.typescriptDefaults.setCompilerOptions(
 	monacoTestbenchCompilerOptions,
 );
-monaco.languages.typescript.javascriptDefaults.setCompilerOptions(
+monacoTypeScript.javascriptDefaults.setCompilerOptions(
 	monacoTestbenchCompilerOptions,
 );
-monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
+monacoTypeScript.typescriptDefaults.setDiagnosticsOptions({
 	diagnosticsOptions: {
 		noSemanticValidation: false,
 		noSyntaxValidation: false,
@@ -1012,7 +1012,7 @@ function promptNewFile() {
 
 // ── vitest type declarations for Monaco ─────────────────
 
-monaco.languages.typescript.typescriptDefaults.addExtraLib(
+monacoTypeScript.typescriptDefaults.addExtraLib(
 	`
 declare module "vitest" {
   export function describe(name: string, fn: () => void): void;
@@ -1073,19 +1073,19 @@ const celoxDtsFiles: Record<string, string> = {
 	"wasm-bridge": celoxWasmBridgeDts,
 	"napi-bridge": celoxNapiBridgeDts,
 };
-monaco.languages.typescript.typescriptDefaults.addExtraLib(
+monacoTypeScript.typescriptDefaults.addExtraLib(
 	fixDtsImports(celoxIndexDts),
 	"file:///node_modules/@celox-sim/celox/index.d.ts",
 );
 for (const [name, content] of Object.entries(celoxDtsFiles)) {
 	const fixed = fixDtsImports(content);
 	// Register as both the sub-module path and the node_modules-style path
-	monaco.languages.typescript.typescriptDefaults.addExtraLib(
+	monacoTypeScript.typescriptDefaults.addExtraLib(
 		fixed,
 		`file:///node_modules/@celox-sim/celox/dist/${name}.d.ts`,
 	);
 	// Also register as a bare module specifier for "from '@celox-sim/celox/xxx'" resolution
-	monaco.languages.typescript.typescriptDefaults.addExtraLib(
+	monacoTypeScript.typescriptDefaults.addExtraLib(
 		fixed,
 		`file:///node_modules/@celox-sim/celox/${name}.d.ts`,
 	);
@@ -1143,7 +1143,7 @@ declare module "../src/${moduleName}.veryl" {
 ${virtualModuleDts}
 }
 `;
-	currentExtraLib = monaco.languages.typescript.typescriptDefaults.addExtraLib(
+	currentExtraLib = monacoTypeScript.typescriptDefaults.addExtraLib(
 		dts,
 		"file:///celox-sim.d.ts",
 	);
@@ -1152,11 +1152,11 @@ ${virtualModuleDts}
 	const verylModuleDts = virtualModuleDts;
 	// Register under multiple paths to ensure resolution works
 	// test/foo.test.ts imports "../src/Adder.veryl" → resolves to file:///src/Adder.veryl
-	monaco.languages.typescript.typescriptDefaults.addExtraLib(
+	monacoTypeScript.typescriptDefaults.addExtraLib(
 		verylModuleDts,
 		`file:///src/${moduleName}.veryl`,
 	);
-	monaco.languages.typescript.typescriptDefaults.addExtraLib(
+	monacoTypeScript.typescriptDefaults.addExtraLib(
 		verylModuleDts,
 		`file:///src/${moduleName}.d.veryl.ts`,
 	);
@@ -1940,7 +1940,7 @@ async function run() {
 		const tests: TestEntry[] = [];
 
 		statusEl.textContent = "Running…";
-		const tsWorker = await monaco.languages.typescript.getTypeScriptWorker();
+		const tsWorker = await monacoTypeScript.getTypeScriptWorker();
 		const testModels = getTestModels();
 		if (testModels.length === 0) throw new Error("No test files found");
 
@@ -2143,8 +2143,7 @@ function installPlaygroundTestApi() {
 		async getTypeScriptDiagnostics(path: string) {
 			const file = getFile(path);
 			if (!file) throw new Error(`File not found: ${path}`);
-			const workerFactory =
-				await monaco.languages.typescript.getTypeScriptWorker();
+			const workerFactory = await monacoTypeScript.getTypeScriptWorker();
 			const worker = await workerFactory(file.model.uri);
 			const uri = file.model.uri.toString();
 			const [semantic, syntactic, suggestion] = await Promise.all([

@@ -12,6 +12,8 @@ on:
       - "crates/**"
       - "!crates/celox-napi/package.json"
       - "scripts/convert-heliodor-bench.mjs"
+      - "scripts/ci-changes.mjs"
+      - "scripts/ci-changes.test.mjs"
       - "scripts/run-heliodor-bench.sh"
   schedule:
     - cron: "37 2 * * *"
@@ -30,10 +32,32 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'schedule' }}
 
 jobs:
+  # PRs use this gate to avoid spending a dedicated ARM runner on unrelated
+  # Rust changes. Detection failures fail open in arm64-linux-boot below.
+  arm64-changes:
+    name: Detect ARM64 changes
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      heliodor_arm64: ${{ steps.classify.outputs.heliodor_arm64 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed files
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci-changes.mjs "$BASE_SHA" "$HEAD_SHA"
+
   heliodor:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -91,6 +115,29 @@ jobs:
           fi
           echo "result_file=$result_file" >> "$GITHUB_OUTPUT"
 
+          runner_file="$(dirname "$result_file")/celox-target/release/celox-heliodor"
+          if [ ! -x "$runner_file" ]; then
+            echo "The Heliodor gate did not produce an executable Celox runner" >&2
+            exit 1
+          fi
+          echo "runner_file=$(realpath -e "$runner_file")" >> "$GITHUB_OUTPUT"
+
+      - name: Boot Linux with the Cranelift backend on the same host
+        if: steps.gate.outputs.status == '0'
+        shell: bash
+        env:
+          HELIODOR_DIR: ${{ github.workspace }}/target/heliodor/source
+          HELIODOR_RESULTS_DIR: ${{ github.workspace }}/target/heliodor/results/cranelift-x86_64
+          HELIODOR_TOOLS_DIR: ${{ github.workspace }}/target/heliodor/tools
+          HELIODOR_RUNNERS: celox-cranelift
+          HELIODOR_TESTS: test_soc_linux_boot
+          HELIODOR_TIMEOUT_SEC: "1200"
+          HELIODOR_CELOX_CARGO_PROFILE: release
+          HELIODOR_BUILD_CELOX_RUNNER: "0"
+          CELOX_RUNNER_BIN: ${{ steps.gate.outputs.runner_file }}
+          CELOX_OPT_LEVEL: O2
+        run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-cranelift-output.txt
+
       - name: Capture benchmark host final state
         if: always()
         shell: bash
@@ -113,21 +160,6 @@ jobs:
         run: |
           node scripts/convert-heliodor-bench.mjs "${{ steps.gate.outputs.result_file }}" heliodor-converted.json
           node scripts/convert-heliodor-bench.mjs "${{ steps.gate.outputs.result_file }}" heliodor-jit.json --jit-only
-
-      - name: Store Heliodor benchmark history
-        if: github.event_name != 'pull_request'
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          name: Heliodor Benchmarks
-          tool: customSmallerIsBetter
-          output-file-path: heliodor-converted.json
-          gh-pages-branch: gh-pages
-          benchmark-data-dir-path: dev/bench
-          auto-push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
-          alert-threshold: "110%"
-          fail-on-alert: false
-          comment-on-alert: false
-          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Compare generated-JIT benchmark
         if: github.event_name == 'pull_request'
@@ -152,68 +184,41 @@ jobs:
           path: |
             heliodor-host.txt
             heliodor-output.txt
+            heliodor-cranelift-output.txt
             heliodor-converted.json
             heliodor-jit.json
             target/heliodor/results/gate_*/results.tsv
             target/heliodor/results/gate_*/*.log
             target/heliodor/results/gate_*/*.before
             target/heliodor/results/gate_*/*.after
+            target/heliodor/results/cranelift-x86_64/results.tsv
+            target/heliodor/results/cranelift-x86_64/*.log
 
       - name: Enforce fixed gate result
         if: always() && steps.gate.outputs.status != '0'
         run: exit 1
 
-  cranelift-linux-boot:
-    name: Cranelift Linux boot
-    if: github.event_name != 'schedule'
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      HELIODOR_DIR: ${{ github.workspace }}/target/heliodor-cranelift/source
-      HELIODOR_RESULTS_DIR: ${{ github.workspace }}/target/heliodor-cranelift/results
-      HELIODOR_TOOLS_DIR: ${{ github.workspace }}/target/heliodor-cranelift/tools
-      HELIODOR_RUNNERS: celox-cranelift
-      HELIODOR_TESTS: test_soc_linux_boot
-      HELIODOR_TIMEOUT_SEC: "1200"
-      CELOX_OPT_LEVEL: O2
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          submodules: recursive
-
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Boot Linux with the Cranelift backend
-        shell: bash
-        run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-cranelift-output.txt
-
-      - name: Upload Cranelift Linux boot results
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: heliodor-cranelift-linux-boot
-          path: |
-            heliodor-cranelift-output.txt
-            target/heliodor-cranelift/results/results.tsv
-            target/heliodor-cranelift/results/*.log
-
   arm64-linux-boot:
     name: ARM64 Linux boot
-    if: github.event_name != 'schedule'
+    needs: arm64-changes
+    if: >-
+      !cancelled() &&
+      github.event_name != 'schedule' &&
+      (github.event_name != 'pull_request' ||
+      needs.arm64-changes.result != 'success' ||
+      needs.arm64-changes.outputs.heliodor_arm64 == 'true')
     permissions:
       contents: read
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       HELIODOR_DIR: ${{ github.workspace }}/target/heliodor-arm64/source
       HELIODOR_RESULTS_DIR: ${{ github.workspace }}/target/heliodor-arm64/results
       HELIODOR_TOOLS_DIR: ${{ github.workspace }}/target/heliodor-arm64/tools
-      HELIODOR_RUNNERS: celox
+      HELIODOR_RUNNERS: veryl-cc-sync celox celox-cranelift
       HELIODOR_TESTS: test_soc_linux_boot
       HELIODOR_TIMEOUT_SEC: "1200"
+      HELIODOR_CELOX_CARGO_PROFILE: release
       HELIODOR_CELOX_CARGO_FEATURES: experimental-arm64-backend
       CELOX_OPT_LEVEL: O2
     steps:
@@ -224,7 +229,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
 
-      - name: Boot Linux with the ARM64 backend
+      - name: Boot Linux with Veryl-CC, native, and Cranelift on ARM64
         shell: bash
         run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-arm64-output.txt
 
@@ -237,6 +242,59 @@ jobs:
             heliodor-arm64-output.txt
             target/heliodor-arm64/results/results.tsv
             target/heliodor-arm64/results/*.log
+
+  publish-linux-boot:
+    name: Publish Linux boot benchmarks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: [heliodor, arm64-linux-boot]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: heliodor-benchmark
+          path: artifacts/x86_64
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: heliodor-arm64-linux-boot
+          path: artifacts/native-aarch64
+
+      - name: Convert backend and CPU architecture results
+        shell: bash
+        run: |
+          native_results="$(find artifacts/x86_64 -path '*/gate_*/results.tsv' -type f -print -quit)"
+          cranelift_results="$(find artifacts/x86_64 -path '*/cranelift-x86_64/results.tsv' -type f -print -quit)"
+          arm64_results="$(find artifacts/native-aarch64 -name results.tsv -type f -print -quit)"
+          if [[ -z "$native_results" || -z "$cranelift_results" || -z "$arm64_results" ]]; then
+            echo "Could not find every Linux boot results.tsv artifact" >&2
+            exit 1
+          fi
+          node scripts/convert-heliodor-bench.mjs \
+            "$native_results" heliodor-published.json \
+            --cranelift-results "$cranelift_results" \
+            --arm64-results "$arm64_results"
+
+      - name: Store Heliodor benchmark history
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Heliodor Benchmarks
+          tool: customSmallerIsBetter
+          output-file-path: heliodor-published.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
+          auto-push: true
+          alert-threshold: "110%"
+          fail-on-alert: false
+          comment-on-alert: false
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
   heliodor-head:
     name: Heliodor HEAD compatibility

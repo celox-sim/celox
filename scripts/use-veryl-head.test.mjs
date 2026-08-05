@@ -41,6 +41,12 @@ test("pins every Veryl workspace dependency to one HEAD revision", () => {
   );
 });
 
+test("is idempotent when the manifest already pins the requested revision", () => {
+  const pinned = useVerylHead(manifest, revision);
+
+  assert.equal(useVerylHead(pinned, revision), pinned);
+});
+
 test("rejects an ambiguous revision", () => {
   assert.throws(() => useVerylHead(manifest, "master"), /full lowercase git revision/);
 });

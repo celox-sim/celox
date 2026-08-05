@@ -1,7 +1,7 @@
 import type * as monaco from "monaco-editor";
 
 type TypeScriptDefaultsApi = Pick<
-	typeof monaco.languages.typescript,
+	typeof monaco.typescript,
 	"ScriptTarget" | "ModuleKind" | "ModuleResolutionKind"
 >;
 
@@ -25,7 +25,7 @@ export const MONACO_TESTBENCH_LIBS = [
 
 export function buildMonacoTestbenchCompilerOptions(
 	ts: TypeScriptDefaultsApi,
-): monaco.languages.typescript.CompilerOptions {
+): monaco.typescript.CompilerOptions {
 	return {
 		target: pickEnumValue(ts.ScriptTarget, ["ES2022", "ES2021", "ES2020"]),
 		module: pickEnumValue(ts.ModuleKind, ["ES2022", "ES2020", "ESNext"]),

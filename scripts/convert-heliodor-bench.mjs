@@ -3,18 +3,39 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 
-const [inputPath, outputPath, mode] = process.argv.slice(2);
+const [inputPath, outputPath, ...options] = process.argv.slice(2);
 if (!inputPath || !outputPath) {
   console.error(
-    "Usage: node convert-heliodor-bench.mjs <results.tsv> <output.json> [--jit-only]",
+    "Usage: node convert-heliodor-bench.mjs <results.tsv> <output.json> [--jit-only | --cranelift-results <results.tsv> --arm64-results <results.tsv>]",
   );
   process.exit(1);
 }
-if (mode && mode !== "--jit-only") {
-  throw new Error(`unknown conversion mode: ${mode}`);
+
+let jitOnly = false;
+let craneliftResultsPath;
+let arm64ResultsPath;
+for (let index = 0; index < options.length; index += 1) {
+  switch (options[index]) {
+    case "--jit-only":
+      jitOnly = true;
+      break;
+    case "--cranelift-results":
+      craneliftResultsPath = options[++index];
+      break;
+    case "--arm64-results":
+      arm64ResultsPath = options[++index];
+      break;
+    default:
+      throw new Error(`unknown conversion option: ${options[index]}`);
+  }
+}
+if (jitOnly && (craneliftResultsPath || arm64ResultsPath)) {
+  throw new Error("--jit-only cannot be combined with platform results");
+}
+if (Boolean(craneliftResultsPath) !== Boolean(arm64ResultsPath)) {
+  throw new Error("Cranelift and ARM64 results must be provided together");
 }
 
-const lines = readFileSync(inputPath, "utf8").trim().split("\n");
 const expectedHeader = [
   "runner",
   "test",
@@ -29,23 +50,36 @@ const expectedHeader = [
   "execute_elapsed_ns",
   "jit_execute_elapsed_ns",
 ];
-const header = lines.shift()?.split("\t") ?? [];
-if (header.join("\t") !== expectedHeader.join("\t")) {
-  throw new Error(`unsupported Heliodor result schema: ${header.join("\t")}`);
+
+function readResults(path) {
+  const lines = readFileSync(path, "utf8").trim().split("\n");
+  const header = lines.shift()?.split("\t") ?? [];
+  if (header.join("\t") !== expectedHeader.join("\t")) {
+    throw new Error(
+      `unsupported Heliodor result schema in ${path}: ${header.join("\t")}`,
+    );
+  }
+  return lines.filter(Boolean).map((line) => {
+    const fields = line.split("\t");
+    if (fields.length !== expectedHeader.length) {
+      throw new Error(
+        `expected 12 fields in ${path}, found ${fields.length}: ${line}`,
+      );
+    }
+    return Object.fromEntries(
+      expectedHeader.map((name, index) => [name, fields[index]]),
+    );
+  });
 }
 
-const rows = lines.filter(Boolean).map((line) => {
-  const fields = line.split("\t");
-  if (fields.length !== expectedHeader.length) {
-    throw new Error(`expected 12 fields, found ${fields.length}: ${line}`);
-  }
-  return Object.fromEntries(expectedHeader.map((name, index) => [name, fields[index]]));
-});
+const rows = readResults(inputPath);
 
-function requirePassedRunner(name) {
-  const matches = rows.filter((row) => row.runner === name);
+function requirePassedRunner(resultRows, name, sourcePath) {
+  const matches = resultRows.filter((row) => row.runner === name);
   if (matches.length !== 1) {
-    throw new Error(`expected exactly one ${name} row, found ${matches.length}`);
+    throw new Error(
+      `expected exactly one ${name} row in ${sourcePath}, found ${matches.length}`,
+    );
   }
   const row = matches[0];
   if (row.semantic_status !== "pass" || row.exit_status !== "0") {
@@ -70,8 +104,8 @@ function milliseconds(name, nanoseconds) {
   };
 }
 
-const celox = requirePassedRunner("celox");
-const veryl = requirePassedRunner("veryl-cc-sync");
+const celox = requirePassedRunner(rows, "celox", inputPath);
+const veryl = requirePassedRunner(rows, "veryl-cc-sync", inputPath);
 if (celox.test !== veryl.test) {
   throw new Error(`runner tests differ: Celox=${celox.test}, Veryl=${veryl.test}`);
 }
@@ -99,7 +133,54 @@ const results = [
   ),
 ];
 
-const selectedResults = mode === "--jit-only" ? results.slice(0, 1) : results;
+if (craneliftResultsPath && arm64ResultsPath) {
+  const cranelift = requirePassedRunner(
+    readResults(craneliftResultsPath),
+    "celox-cranelift",
+    craneliftResultsPath,
+  );
+  const arm64Rows = readResults(arm64ResultsPath);
+  const arm64 = requirePassedRunner(arm64Rows, "celox", arm64ResultsPath);
+  const craneliftArm64 = requirePassedRunner(
+    arm64Rows,
+    "celox-cranelift",
+    arm64ResultsPath,
+  );
+  const verylArm64 = requirePassedRunner(
+    arm64Rows,
+    "veryl-cc-sync",
+    arm64ResultsPath,
+  );
+  for (const row of [cranelift, arm64, craneliftArm64, verylArm64]) {
+    if (row.test !== celox.test) {
+      throw new Error(
+        `runner tests differ: native-x86_64=${celox.test}, ${row.runner}=${row.test}`,
+      );
+    }
+  }
+
+  for (const [platform, row] of [
+    ["native-x86_64", celox],
+    ["cranelift-x86_64", cranelift],
+    ["veryl-cc-x86_64", veryl],
+    ["native-aarch64", arm64],
+    ["cranelift-aarch64", craneliftArm64],
+    ["veryl-cc-aarch64", verylArm64],
+  ]) {
+    results.push(
+      milliseconds(
+        `heliodor-${platform}/heliodor_linux_boot_compilation`,
+        ns(row, "compile_elapsed_ns"),
+      ),
+      milliseconds(
+        `heliodor-${platform}/heliodor_linux_boot_execution`,
+        ns(row, "execute_elapsed_ns"),
+      ),
+    );
+  }
+}
+
+const selectedResults = jitOnly ? results.slice(0, 1) : results;
 
 writeFileSync(outputPath, JSON.stringify(selectedResults, null, 2));
 console.log(`Converted ${selectedResults.length} Heliodor metrics → ${outputPath}`);

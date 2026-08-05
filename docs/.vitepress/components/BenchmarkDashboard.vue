@@ -62,6 +62,10 @@ interface Series {
     | "heliodor-celox-compile"
     | "heliodor-veryl"
     | "heliodor-veryl-compile"
+    | "heliodor-native-x86_64"
+    | "heliodor-cranelift-x86_64"
+    | "heliodor-native-aarch64"
+    | "heliodor-cranelift-aarch64"
     | "unknown";
   points: SeriesPoint[];
 }
@@ -219,6 +223,10 @@ const RUNTIME_COLORS: Record<string, string> = {
   "heliodor-celox-compile": "#06b6d4",
   "heliodor-veryl": "#f97316",
   "heliodor-veryl-compile": "#eab308",
+  "heliodor-native-x86_64": "#2563eb",
+  "heliodor-cranelift-x86_64": "#a855f7",
+  "heliodor-native-aarch64": "#16a34a",
+  "heliodor-cranelift-aarch64": "#f97316",
 };
 
 const RUNTIME_LABELS: Record<string, string> = {
@@ -233,6 +241,10 @@ const RUNTIME_LABELS: Record<string, string> = {
   "heliodor-celox-compile": "Celox compile",
   "heliodor-veryl": "Veryl-CC execution",
   "heliodor-veryl-compile": "Veryl-CC compile",
+  "heliodor-native-x86_64": "Native x86-64",
+  "heliodor-cranelift-x86_64": "Cranelift x86-64",
+  "heliodor-native-aarch64": "Native AArch64",
+  "heliodor-cranelift-aarch64": "Cranelift AArch64",
 };
 
 // --- State ---
@@ -246,7 +258,7 @@ const activeTab = ref("counter");
 
 function stripPrefix(name: string): string {
   return name.replace(
-    /^(rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-veryl|heliodor-veryl-compile)\//,
+    /^(rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-cranelift-x86_64|heliodor-native-aarch64|heliodor-cranelift-aarch64)\//,
     "",
   );
 }
@@ -278,6 +290,10 @@ function runtime(name: string): Series["runtime"] {
   if (name.startsWith("heliodor-celox-compile/")) return "heliodor-celox-compile";
   if (name.startsWith("heliodor-veryl-compile/")) return "heliodor-veryl-compile";
   if (name.startsWith("heliodor-veryl/")) return "heliodor-veryl";
+  if (name.startsWith("heliodor-native-x86_64/")) return "heliodor-native-x86_64";
+  if (name.startsWith("heliodor-cranelift-x86_64/")) return "heliodor-cranelift-x86_64";
+  if (name.startsWith("heliodor-native-aarch64/")) return "heliodor-native-aarch64";
+  if (name.startsWith("heliodor-cranelift-aarch64/")) return "heliodor-cranelift-aarch64";
   if (name.startsWith("rust-dse/")) return "rust-dse";
   if (name.startsWith("rust/") && stripPrefix(name).startsWith("native_tb_")) return "native-tb";
   if (name.startsWith("rust/")) return "rust";

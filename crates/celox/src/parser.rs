@@ -308,6 +308,8 @@ pub fn parse(
     diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
     testbench_random_seed: Option<u64>,
+    component_libraries: Vec<celox_testbench::ComponentLibrary>,
+    component_file_base: Option<std::path::PathBuf>,
 ) -> Result<
     (
         crate::ir::OptimizedSir,
@@ -395,7 +397,9 @@ pub fn parse(
     apply_fused_optimization_hints(&mut scheduled.scheduled, scheduled.fused_optimization_hints)?;
     scheduled.scheduled.inject_triggers();
     let scheduled = scheduled.scheduled;
-    let (sir, mut runtime, testbench_source) = RuntimeProgram::from_scheduled(scheduled);
+    let (sir, mut runtime, mut testbench_source) = RuntimeProgram::from_scheduled(scheduled);
+    testbench_source.component_libraries = component_libraries;
+    testbench_source.component_file_base = component_file_base;
     crate::testbench_compile::project_observability(&mut runtime, &testbench_source)?;
     runtime.testbench = crate::testbench_compile::compile_semantic_testbench(
         &runtime,
