@@ -707,7 +707,6 @@ assign y = a >: b;
     // Signed ordering must use the declared sign bit when the top storage
     // chunk is only partially occupied.
     fn test_wide_signed_compare_non_chunk_aligned(sim) {
-        @omit_veryl;
         @setup { let code = r#"
 module Top (
 a65: input signed logic<65>,

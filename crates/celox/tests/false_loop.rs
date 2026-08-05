@@ -281,7 +281,7 @@ fn test_large_scc_dynamic_loop_convergence(sim) {
 fn test_read_then_overwrite_convergence(sim) {
     // This exercises Celox's fixed-point scheduling. The Veryl simulator
     // adapter evaluates these continuous assignments in source order.
-    @omit_veryl;
+    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             i: input logic,
@@ -372,7 +372,6 @@ fn test_cross_bit_dependency_false_loop() {
     assert!(result.is_ok());
 }
 #[test]
-#[ignore = "Veryl 0.20.1 post-pass2 reports this conservative hierarchical comb loop before celox false-loop analysis"]
 fn test_hierarchical_conditional_false_loop() {
     let code = r#"
         module Pass (i: input logic, o: output logic) {

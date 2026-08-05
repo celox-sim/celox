@@ -11,7 +11,6 @@ all_backends! {
 // assign passes the analyzer (no UnassignVariable), and true_loop
 // declaration allows the SIR scheduler to accept the cycle.
 fn test_converging_true_loop_with_assign(sim) {
-    @ignore_on(veryl); // Upstream Veryl simulator currently asserts on duplicate ProtoStatements in this true-loop shape.
     @setup { let code = r#"
         module Top (i: input logic<2>, o: output logic<2>) {
             var v: logic<2>;
@@ -38,6 +37,7 @@ fn test_converging_true_loop_with_assign(sim) {
 // Non-converging true loop: oscillation detected at runtime.
 // Uses cross-bit assign to bypass the analyzer's UnassignVariable check.
 fn test_true_loop_oscillation_detected(sim) {
+    // The Veryl adapter cannot apply Celox's explicit true-loop guard config.
     @omit_veryl;
     @setup {
     // v[0] = ~v[1] & a, v[1] = v[0]
@@ -69,6 +69,7 @@ fn test_true_loop_oscillation_detected(sim) {
 }
 
 fn test_runtime_true_loop_reports_only_failing_scc(sim) {
+    // The Veryl adapter cannot apply Celox's explicit true-loop guard config.
     @omit_veryl;
     @setup {
     let code = r#"

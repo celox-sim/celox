@@ -7,7 +7,6 @@ mod test_utils;
 all_backends! {
 
     fn test_subbyte_arithmetic_padding_does_not_corrupt_concat(sim) {
-        @omit_veryl;
         @setup { let code = r#"
 module Top (
     bound: input  logic<4>,
@@ -236,7 +235,6 @@ module Top (
     }
 
     fn test_partial_sparse_chunks_do_not_overlap_adjacent_variables(sim) {
-        @omit_veryl;
         @setup { let code = r#"
 module Top (
     clk  : input  clock,
@@ -319,7 +317,6 @@ module Top (
     }
 
     fn test_wide_dynamic_ff_checkpoint_round_trip(sim) {
-        @omit_veryl;
         @setup { let code = r#"
 module Top (
     clk    : input  clock,
@@ -388,7 +385,6 @@ module Top (
     }
 
     fn test_unaligned_309_bit_dynamic_ff_round_trip(sim) {
-        @omit_veryl;
         @ignore_on(wasm);
         @setup { let code = r#"
 module Top (
@@ -488,7 +484,6 @@ module Top (
     }
 
     fn test_packed_rat_checkpoint_round_trip(sim) {
-        @omit_veryl;
         @setup { let code = r#"
 module Top (
     clk    : input  clock,
@@ -556,7 +551,6 @@ module Top (
     }
 
     fn test_dynamic_ff_array_partial_squash_preserves_head_and_branch(sim) {
-        @omit_veryl;
         @setup { let code = r#"
 module Top (
     clk        : input  clock,
@@ -635,7 +629,6 @@ module Top (
     }
 
     fn test_line_write_loop_updates_large_sparse_ff_array(sim) {
-        @omit_veryl;
         @setup { let code = r#"
 module Top (
     clk  : input  clock,

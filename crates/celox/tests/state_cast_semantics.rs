@@ -158,7 +158,6 @@ module Top (
     }
 
     fn signed_four_state_function_formal_preserves_unknown_bits(sim) {
-        @omit_veryl;
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -198,7 +197,8 @@ module Top (
     }
 
     fn implicit_assignment_to_bit_clears_unknowns_without_mutating_source(sim) {
-        @omit_veryl;
+        // Veryl 0.20.3 retains the X/Z mask when assigning logic to bit.
+        @ignore_on(veryl);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,

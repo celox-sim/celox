@@ -38,7 +38,6 @@ const MULTI_STATE_LOOP: &str = r#"
 all_backends! {
 
 fn recovered_unrolled_store_forward_selects_older_entry(sim) {
-    @omit_veryl;
     @setup { let code = r#"
         module StoreShadow (
             store_idx : input  logic<5>,
@@ -154,7 +153,6 @@ fn recovered_unrolled_store_forward_selects_older_entry(sim) {
 }
 
 fn recovered_unrolled_multi_state_priority(sim) {
-    @omit_veryl;
     @setup { let code = MULTI_STATE_LOOP; }
     @build SimulatorBuilder::new(code, "Top");
 
@@ -183,7 +181,6 @@ fn recovered_unrolled_multi_state_priority(sim) {
 }
 
 fn recovered_unrolled_guard_uses_procedural_four_state_truth(sim) {
-    @omit_veryl;
     @setup { let code = r#"
         module Top (
             cond : input  logic<8>,

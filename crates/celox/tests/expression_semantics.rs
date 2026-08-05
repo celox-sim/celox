@@ -484,7 +484,8 @@ module Top (
     }
 
     fn system_function_results_obey_ternary_width_contexts(sim) {
-        // Veryl 0.20.2 leaves these calls unresolved in its simulator IR.
+        // Veryl 0.20.3 leaves these calls unresolved in its simulator IR, so
+        // the reference simulation cannot be constructed.
         @omit_veryl;
         @build Simulator::builder(r#"
 module Top (

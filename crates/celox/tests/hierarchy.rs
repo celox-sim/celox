@@ -85,7 +85,6 @@ o_data: top_out
     fn test_instance_input_function_output_writeback(sim) {
         // veryl-simulator currently evaluates the connection value but does
         // not write the function output actual back to the parent variable.
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Child (
 i: input logic,
@@ -642,9 +641,6 @@ assign o = i;
     }
 
     fn test_instance_input_port_assignment_width_context(sim) {
-        // veryl-simulator 0.20.1 currently zero-extends the signed input-port
-        // case; the language assignment semantics require sign extension.
-        @omit_veryl;
         @setup { let code = r#"
 module Child (
 widen_u: input  logic<16>,
@@ -720,7 +716,6 @@ o_fill
     }
 
     fn test_dynamic_output_port_rmw_preserves_unselected_bits(sim) {
-        @omit_veryl;
         @setup { let code = r#"
 module Child (
 a: input logic<2>,
@@ -775,7 +770,6 @@ assign out = mem;
     }
 
     fn test_dynamic_output_port_converts_four_state_child_to_two_state_parent(sim) {
-        @omit_veryl;
         @setup { let code = r#"
 module Child (y: output logic) {
 assign y = 1'bx;
@@ -797,7 +791,6 @@ assign out = mem;
     }
 
     fn test_dynamic_minus_colon_output_port_rmw(sim) {
-        @omit_veryl;
         @setup { let code = r#"
 module Child (a: input logic<2>, y: output logic<2>) {
 assign y = a;
@@ -825,7 +818,6 @@ assign out = mem;
     }
 
     fn test_dynamic_step_output_port_rmw(sim) {
-        @omit_veryl;
         @setup { let code = r#"
 module Child (a: input logic<2>, y: output logic<2>) {
 assign y = a;
@@ -1249,7 +1241,6 @@ assign out1 = d1;
     }
 
     fn test_hierarchical_overlapping_partial_write_dynamic_index_runtime(sim) {
-        @omit_veryl;
         @ignore_on(native, cranelift, wasm);
         @setup { let code = r#"
 module ChildFb (
@@ -1354,7 +1345,6 @@ assign out_v1 = v[1];
     }
 
     fn test_hierarchical_concat_then_overlap_dynamic_index_runtime(sim) {
-        @omit_veryl;
         @ignore_on(native, cranelift, wasm);
         @setup { let code = r#"
 module ChildFb (
@@ -1437,7 +1427,6 @@ assign out_v1 = v[1];
     }
 
     fn test_child_signal_access(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Sub (
 i_data: input  logic<8>,
