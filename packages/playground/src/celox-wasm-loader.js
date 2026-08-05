@@ -1,7 +1,7 @@
 import {
   createOnMessage as __wasmCreateOnMessageForFsProxy,
   getDefaultContext as __emnapiGetDefaultContext,
-  instantiateNapiModuleSync as __emnapiInstantiateNapiModuleSync,
+  instantiateNapiModule as __emnapiInstantiateNapiModule,
   WASI as __WASI,
 } from '@napi-rs/wasm-runtime'
 import { memfs } from '@napi-rs/wasm-runtime/fs'
@@ -29,13 +29,11 @@ const __sharedMemory = new WebAssembly.Memory({
   shared: typeof SharedArrayBuffer !== 'undefined',
 })
 
-const __wasmFile = await fetch(__wasmUrl).then((res) => res.arrayBuffer())
-
 const {
   instance: __napiInstance,
   module: __wasiModule,
   napiModule: __napiModule,
-} = __emnapiInstantiateNapiModuleSync(__wasmFile, {
+} = await __emnapiInstantiateNapiModule(__wasmUrl, {
   context: __emnapiContext,
   asyncWorkPoolSize: typeof SharedArrayBuffer !== 'undefined' ? 4 : 0,
   wasi: __wasi,

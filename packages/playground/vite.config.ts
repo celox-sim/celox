@@ -1,4 +1,9 @@
-import { defineConfig, type Plugin } from "vite";
+import {
+  defineConfig,
+  type Plugin,
+  type PreviewServer,
+  type ViteDevServer,
+} from "vite";
 import monacoEditorPlugin from "vite-plugin-monaco-editor";
 
 const monacoPlugin = (monacoEditorPlugin as any).default || monacoEditorPlugin;
@@ -6,15 +11,18 @@ const monacoPlugin = (monacoEditorPlugin as any).default || monacoEditorPlugin;
 // Vite's server.headers only applies to the main HTML.
 // We need COOP/COEP on ALL responses for SharedArrayBuffer to work.
 function crossOriginIsolation(): Plugin {
+  const configureHeaders = (server: PreviewServer | ViteDevServer) => {
+    server.middlewares.use((_, res, next) => {
+      res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+      res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
+      next();
+    });
+  };
+
   return {
     name: "cross-origin-isolation",
-    configureServer(server) {
-      server.middlewares.use((_, res, next) => {
-        res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
-        res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
-        next();
-      });
-    },
+    configureServer: configureHeaders,
+    configurePreviewServer: configureHeaders,
   };
 }
 
