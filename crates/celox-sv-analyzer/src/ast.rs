@@ -3070,6 +3070,7 @@ fn functions_from_module_node(
         else {
             continue;
         };
+        validate_function_formal_types(declaration, syntax_tree, const_env, &type_aliases)?;
         validate_function_declaration_statements(declaration, syntax_tree, packed_dimensions)?;
         if let Some(function) = function_from_declaration(
             declaration,
@@ -3098,6 +3099,47 @@ fn functions_from_module_node(
         }
     }
     Ok(functions)
+}
+
+fn validate_function_formal_types(
+    declaration: &sv_parser::FunctionDeclaration,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Result<(), AnalyzerError> {
+    let unsupported = |node: &sv_parser::DataTypeOrImplicit| {
+        matches!(node, sv_parser::DataTypeOrImplicit::DataType(_))
+            && value_type_from_data_type_or_implicit(node, syntax_tree, const_env, type_aliases)
+                .is_none()
+    };
+    let invalid = match &declaration.nodes.2 {
+        sv_parser::FunctionBodyDeclaration::WithPort(body) => {
+            body.nodes.3.nodes.1.as_ref().is_some_and(|ports| {
+                ports
+                    .nodes
+                    .0
+                    .contents()
+                    .iter()
+                    // A type-only item can be the parser's representation of
+                    // the shorthand `input logic a, b`; only validate entries
+                    // that actually carry a formal identifier here.
+                    .any(|port| port.nodes.4.is_some() && unsupported(&port.nodes.3))
+            })
+        }
+        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => body.nodes.4.iter().any(|item| {
+            let sv_parser::TfItemDeclaration::TfPortDeclaration(port) = item else {
+                return false;
+            };
+            unsupported(&port.nodes.3)
+        }),
+    };
+    if invalid {
+        Err(AnalyzerError::Unsupported(
+            "unsupported function formal data type".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_function_declaration_statements(
@@ -6399,7 +6441,7 @@ fn guard_zero_divisions(expr: Expr) -> Expr {
                         op: BinaryOp::EqCase,
                         right: Box::new(Expr::Literal("0".to_string())),
                     }),
-                    then_expr: Box::new(Expr::Literal("'x".to_string())),
+                    then_expr: Box::new(Expr::Literal(crate::DIV_ZERO_UNKNOWN_LITERAL.to_string())),
                     else_expr: Box::new(operation),
                 }
             } else {

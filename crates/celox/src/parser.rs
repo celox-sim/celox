@@ -589,17 +589,18 @@ pub fn parse_mixed(
     ParserError,
 > {
     let external_roots = reachable_external_sv_roots(ir, top);
-    let external = crate::frontend_sv::prepare_external_hierarchy(sv_sources, &external_roots)
-        .map_err(|error| match error {
-            crate::frontend_sv::FrontendError::Lowering(error) => error,
-            crate::frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
-                64,
-                celox_frontend_veryl::LoweringPhase::SimulatorParser,
-                "systemverilog analysis",
-                error.to_string(),
-                None,
-            ),
-        })?;
+    let external =
+        crate::frontend_sv::prepare_external_hierarchy(sv_sources, &external_roots, four_state)
+            .map_err(|error| match error {
+                crate::frontend_sv::FrontendError::Lowering(error) => error,
+                crate::frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
+                    64,
+                    celox_frontend_veryl::LoweringPhase::SimulatorParser,
+                    "systemverilog analysis",
+                    error.to_string(),
+                    None,
+                ),
+            })?;
     let symbolic = celox_frontend_veryl::parse_ir_with_external_hierarchy(
         ir,
         loop_provenance,

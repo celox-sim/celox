@@ -17,6 +17,10 @@ pub mod typecheck;
 
 pub use ir::Ir;
 
+/// Internal marker used to defer division-by-zero state handling until the
+/// simulator's two-state/four-state mode is known.
+pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
+
 /// Errors reported by the SystemVerilog analyzer.
 #[derive(Debug, Error)]
 pub enum AnalyzerError {

@@ -449,6 +449,7 @@ fn net_driver_ranges_overlap(left: Option<(i128, i128)>, right: Option<(i128, i1
 pub fn prepare_external_hierarchy(
     sources: &[(&str, &Path)],
     root_names: &HashSet<resource_table::StrId>,
+    four_state: bool,
 ) -> Result<ExternalHierarchy, FrontendError> {
     let analyzed = analyze_sources(sources)?;
     let mut names = root_names
@@ -476,7 +477,7 @@ pub fn prepare_external_hierarchy(
         let base = analyzed
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name))?;
-        let lowered = specialize_module(base, &key)?;
+        let lowered = specialize_module(base, &key, four_state)?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name) {
@@ -503,7 +504,7 @@ pub fn prepare_external_hierarchy(
             let base = analyzed
                 .get(&key.name)
                 .ok_or_else(|| unsupported_sv_instance(key.name))?;
-            Ok((module_id, specialize_module(base, key)?))
+            Ok((module_id, specialize_module(base, key, four_state)?))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
     validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
@@ -529,6 +530,7 @@ pub fn prepare_external_hierarchy(
             key,
             &module_ids,
             &lowered_modules,
+            four_state,
         )?;
         modules.insert(
             module_id,
@@ -613,7 +615,7 @@ pub fn schedule_sources(
         let base = analyzed
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name))?;
-        let lowered = specialize_module(base, &key)?;
+        let lowered = specialize_module(base, &key, four_state)?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name) {
@@ -640,7 +642,7 @@ pub fn schedule_sources(
             let base = analyzed
                 .get(&key.name)
                 .ok_or_else(|| unsupported_sv_instance(key.name))?;
-            let lowered = specialize_module(base, key).map_err(FrontendError::from)?;
+            let lowered = specialize_module(base, key, four_state).map_err(FrontendError::from)?;
             Ok((module_id, lowered))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
@@ -667,7 +669,14 @@ pub fn schedule_sources(
     for (key, &module_id) in &module_ids {
         let lowered = &lowered_modules[&module_id];
         let mut sim_module = lowered.sim_module.clone();
-        attach_instance_glue(&mut sim_module, lowered, key, &module_ids, &lowered_modules)?;
+        attach_instance_glue(
+            &mut sim_module,
+            lowered,
+            key,
+            &module_ids,
+            &lowered_modules,
+            four_state,
+        )?;
         module_names.insert(module_id, key.name);
         modules.insert(module_id, sim_module);
     }
@@ -753,6 +762,7 @@ fn validate_sv_module_graph(
 fn specialize_module(
     module: &AnalyzedSvModule,
     key: &LoweredSvModuleKey,
+    four_state: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let overrides = evaluated_parameter_overrides(&key.parameter_overrides)?;
     let ir = sv::analyze_source_module_with_parameter_expr_overrides(
@@ -766,16 +776,20 @@ fn specialize_module(
         .iter()
         .find(|candidate| candidate.name() == module.name)
         .ok_or_else(|| sv::AnalyzerError::Unsupported(format!("module `{}`", module.name)))?;
-    lower_module(specialized)
+    lower_module(specialized, four_state)
 }
 
-fn lower_module(module: &sv::ir::Module) -> Result<LoweredSvModule, sv::AnalyzerError> {
-    lower_module_with_overrides(module, &[])
+fn lower_module(
+    module: &sv::ir::Module,
+    four_state: bool,
+) -> Result<LoweredSvModule, sv::AnalyzerError> {
+    lower_module_with_overrides(module, &[], four_state)
 }
 
 fn lower_module_with_overrides(
     module: &sv::ir::Module,
     parameter_overrides: &[LoweredSvParameterOverride],
+    four_state: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let token = TokenRange::default();
     let name = resource_table::insert_str(module.name());
@@ -893,6 +907,7 @@ fn lower_module_with_overrides(
             &name_to_id,
             &constants,
             &parameter_types,
+            four_state,
         )?;
     mark_ff_event_domains(module, &mut variables, &name_to_id);
 
@@ -1101,6 +1116,7 @@ pub(crate) fn attach_instance_glue(
     current_key: &LoweredSvModuleKey,
     module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
     lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
+    four_state: bool,
 ) -> Result<(), ParserError> {
     let mut signal_names = lowered.signal_names.clone();
     let mut parent_variables = lowered.variables.clone();
@@ -1142,6 +1158,7 @@ pub(crate) fn attach_instance_glue(
         &signal_names,
         &lowered.constants,
         &lowered.parameter_types,
+        four_state,
     )
     .map_err(|error| {
         ParserError::unsupported(
@@ -1162,6 +1179,7 @@ pub(crate) fn attach_instance_glue(
             &lowered.parameter_types,
             child,
             &instance.port_connections,
+            four_state,
         )?;
         module
             .glue_blocks
@@ -1177,12 +1195,99 @@ pub(crate) fn attach_instance_glue(
     Ok(())
 }
 
+fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
+    match expr {
+        sv::ir::Expr::Mux {
+            then_expr,
+            else_expr,
+            ..
+        } if matches!(
+            &**then_expr,
+            sv::ir::Expr::Literal(literal)
+                if literal == sv::DIV_ZERO_UNKNOWN_LITERAL
+        ) =>
+        {
+            if four_state {
+                let sv::ir::Expr::Mux {
+                    condition,
+                    else_expr,
+                    ..
+                } = expr
+                else {
+                    unreachable!()
+                };
+                sv::ir::Expr::Mux {
+                    condition: Box::new(expr_for_state_mode(condition, four_state)),
+                    then_expr: Box::new(sv::ir::Expr::Literal("'x".to_string())),
+                    else_expr: Box::new(expr_for_state_mode(else_expr, four_state)),
+                }
+            } else {
+                expr_for_state_mode(else_expr, four_state)
+            }
+        }
+        sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => expr.clone(),
+        sv::ir::Expr::Select { expr, msb, lsb } => sv::ir::Expr::Select {
+            expr: Box::new(expr_for_state_mode(expr, four_state)),
+            msb: msb.clone(),
+            lsb: lsb.clone(),
+        },
+        sv::ir::Expr::Concat(parts) => sv::ir::Expr::Concat(
+            parts
+                .iter()
+                .map(|part| expr_for_state_mode(part, four_state))
+                .collect(),
+        ),
+        sv::ir::Expr::RepeatConcat { count, parts } => sv::ir::Expr::RepeatConcat {
+            count: count.clone(),
+            parts: parts
+                .iter()
+                .map(|part| expr_for_state_mode(part, four_state))
+                .collect(),
+        },
+        sv::ir::Expr::Resize {
+            expr,
+            width,
+            signed,
+        } => sv::ir::Expr::Resize {
+            expr: Box::new(expr_for_state_mode(expr, four_state)),
+            width: *width,
+            signed: *signed,
+        },
+        sv::ir::Expr::Unary { op, expr } => sv::ir::Expr::Unary {
+            op: *op,
+            expr: Box::new(expr_for_state_mode(expr, four_state)),
+        },
+        sv::ir::Expr::Binary { left, op, right } => sv::ir::Expr::Binary {
+            left: Box::new(expr_for_state_mode(left, four_state)),
+            op: *op,
+            right: Box::new(expr_for_state_mode(right, four_state)),
+        },
+        sv::ir::Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => sv::ir::Expr::Mux {
+            condition: Box::new(expr_for_state_mode(condition, four_state)),
+            then_expr: Box::new(expr_for_state_mode(then_expr, four_state)),
+            else_expr: Box::new(expr_for_state_mode(else_expr, four_state)),
+        },
+        sv::ir::Expr::Call { name, args } => sv::ir::Expr::Call {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| expr_for_state_mode(arg, four_state))
+                .collect(),
+        },
+    }
+}
+
 fn lower_comb_processes(
     module: &sv::ir::Module,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
+    four_state: bool,
 ) -> Result<(Vec<LogicPath<VarId>>, SLTNodeArena<VarId>), sv::AnalyzerError> {
     let mut arena = SLTNodeArena::new();
     let mut comb_blocks = Vec::new();
@@ -1206,6 +1311,7 @@ fn lower_comb_processes(
             constants,
             parameter_types,
             &mut arena,
+            four_state,
         )?);
     }
     Ok((comb_blocks, arena))
@@ -1311,6 +1417,7 @@ fn build_instance_glue(
     parent_parameter_types: &HashMap<String, (usize, bool)>,
     child: &LoweredSvModule,
     connections: &[LoweredSvPortConnection],
+    four_state: bool,
 ) -> Result<SvGlue, ParserError> {
     let mut input_ports = Vec::new();
     let mut output_ports = Vec::new();
@@ -1346,9 +1453,10 @@ fn build_instance_glue(
                 let (mut expr, sources, source_ids) = if let Some(actual_expr) =
                     connection.and_then(|item| item.actual_expr.as_ref())
                 {
+                    let actual_expr = expr_for_state_mode(actual_expr, four_state);
                     let actual = connection.map_or("", |item| item.actual.as_str());
                     let (expr, sources, source_ids) = lower_glue_parent_expr(
-                        actual_expr,
+                        &actual_expr,
                         parent_variables,
                         parent_signal_names,
                         parent_constants,
@@ -1356,7 +1464,7 @@ fn build_instance_glue(
                         &mut arena,
                         Some(width),
                         Some(sv_glue_expr_is_signed(
-                            actual_expr,
+                            &actual_expr,
                             parent_variables,
                             parent_signal_names,
                             parent_parameter_types,
@@ -1376,7 +1484,7 @@ fn build_instance_glue(
                         expr,
                         Some(width),
                         sv_glue_expr_is_signed(
-                            actual_expr,
+                            &actual_expr,
                             parent_variables,
                             parent_signal_names,
                             parent_parameter_types,
@@ -2053,6 +2161,7 @@ fn lower_comb_process(
     constants: &std::collections::HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     arena: &mut SLTNodeArena<VarId>,
+    four_state: bool,
 ) -> Result<Vec<LogicPath<VarId>>, sv::AnalyzerError> {
     let assignments = process.assignments();
     if process.kind() == sv::ir::CombProcessKind::AlwaysComb {
@@ -2096,6 +2205,7 @@ fn lower_comb_process(
             constants,
             parameter_types,
             arena,
+            four_state,
         )?;
         merge_overlapping_comb_path(&mut paths, path, arena)?;
     }
@@ -2257,6 +2367,7 @@ fn lower_assignment(
     constants: &std::collections::HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     arena: &mut SLTNodeArena<VarId>,
+    four_state: bool,
 ) -> Result<LogicPath<VarId>, sv::AnalyzerError> {
     let target = lower_lvalue_target(assignment.lhs_value(), variables, name_to_id, constants)
         .ok_or_else(|| {
@@ -2274,7 +2385,8 @@ fn lower_assignment(
                 assignment.lhs()
             ))
         })?;
-    let (expr, sources) = if let sv::ir::Expr::Literal(literal) = assignment.rhs()
+    let rhs = expr_for_state_mode(assignment.rhs(), four_state);
+    let (expr, sources) = if let sv::ir::Expr::Literal(literal) = &rhs
         && let Some(fill) = unbased_fill_literal(literal)
     {
         (
@@ -2285,7 +2397,7 @@ fn lower_assignment(
         )
     } else {
         lower_expr_with_context(
-            assignment.rhs(),
+            &rhs,
             variables,
             name_to_id,
             constants,
@@ -2293,7 +2405,7 @@ fn lower_assignment(
             arena,
             Some(target_width),
             Some(sv_expr_is_signed_with_parameters(
-                assignment.rhs(),
+                &rhs,
                 variables,
                 name_to_id,
                 parameter_types,
@@ -2310,7 +2422,7 @@ fn lower_assignment(
         arena,
         expr,
         Some(target_width),
-        sv_expr_is_signed_with_parameters(assignment.rhs(), variables, name_to_id, parameter_types),
+        sv_expr_is_signed_with_parameters(&rhs, variables, name_to_id, parameter_types),
     )
     .map_err(|error| {
         sv::AnalyzerError::Unsupported(format!(
@@ -2884,6 +2996,7 @@ fn lower_ff_processes(
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
+    four_state: bool,
 ) -> Result<SvFfBlocks, sv::AnalyzerError> {
     let mut eval_only_ff_blocks = HashMap::default();
     let mut apply_ff_blocks = HashMap::default();
@@ -2898,10 +3011,7 @@ fn lower_ff_processes(
         let clock_id = *name_to_id
             .get(clock.signal())
             .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
-        if reset_edges
-            .get(&clock_id)
-            .is_some_and(|edge| *edge != clock.edge())
-        {
+        if reset_edges.contains_key(&clock_id) {
             return Err(sv::AnalyzerError::Unsupported(
                 "mixed clock/reset-edge polarities for one signal".to_string(),
             ));
@@ -2922,10 +3032,7 @@ fn lower_ff_processes(
             let reset_id = *name_to_id.get(reset.signal()).ok_or_else(|| {
                 sv::AnalyzerError::Unsupported("always_ff event control".to_string())
             })?;
-            if clock_edges
-                .get(&reset_id)
-                .is_some_and(|edge| *edge != reset.edge())
-            {
+            if clock_edges.contains_key(&reset_id) {
                 return Err(sv::AnalyzerError::Unsupported(
                     "mixed clock/reset-edge polarities for one signal".to_string(),
                 ));
@@ -2951,6 +3058,7 @@ fn lower_ff_processes(
             name_to_id,
             constants,
             parameter_types,
+            four_state,
         )
         .ok_or_else(|| {
             sv::AnalyzerError::Unsupported("always_ff assignment lowering".to_string())
@@ -3022,6 +3130,7 @@ fn lower_ff_process(
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
+    four_state: bool,
 ) -> Option<(
     ExecutionUnit<RegionedVarAddr>,
     ExecutionUnit<RegionedVarAddr>,
@@ -3038,6 +3147,7 @@ fn lower_ff_process(
         name_to_id,
         constants,
         parameter_types,
+        four_state,
     )?;
     let eval_only = seal_builder(eval_builder);
 
@@ -3055,6 +3165,7 @@ fn lower_ff_process(
         name_to_id,
         constants,
         parameter_types,
+        four_state,
     )?;
     emit_ff_commits(&mut eval_apply_builder, &targets);
     let eval_apply = seal_builder(eval_apply_builder);
@@ -3140,6 +3251,7 @@ fn emit_ff_assignment_stores(
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
+    four_state: bool,
 ) -> Option<()> {
     let mut target_ids = Vec::new();
     for target in targets {
@@ -3174,21 +3286,21 @@ fn emit_ff_assignment_stores(
                 continue;
             }
             let target_width = target.access.msb - target.access.lsb + 1;
-            let rhs_expr = assignment.assignment().rhs();
-            let rhs = match rhs_expr {
+            let rhs_expr = expr_for_state_mode(assignment.assignment().rhs(), four_state);
+            let rhs = match &rhs_expr {
                 sv::ir::Expr::Literal(literal) => match unbased_fill_literal(literal) {
                     Some(fill) => lower_unbased_fill_literal(builder, fill, target_width)?,
                     None => {
                         let rhs = lower_expr_to_sir_with_context(
                             builder,
-                            rhs_expr,
+                            &rhs_expr,
                             variables,
                             name_to_id,
                             constants,
                             parameter_types,
                             Some(target_width),
                             Some(sv_expr_is_signed_with_parameters(
-                                rhs_expr,
+                                &rhs_expr,
                                 variables,
                                 name_to_id,
                                 parameter_types,
@@ -3199,7 +3311,7 @@ fn emit_ff_assignment_stores(
                             rhs,
                             target_width,
                             sv_expr_is_signed_with_parameters(
-                                rhs_expr,
+                                &rhs_expr,
                                 variables,
                                 name_to_id,
                                 parameter_types,
@@ -3210,14 +3322,14 @@ fn emit_ff_assignment_stores(
                 _ => {
                     let rhs = lower_expr_to_sir_with_context(
                         builder,
-                        rhs_expr,
+                        &rhs_expr,
                         variables,
                         name_to_id,
                         constants,
                         parameter_types,
                         Some(target_width),
                         Some(sv_expr_is_signed_with_parameters(
-                            rhs_expr,
+                            &rhs_expr,
                             variables,
                             name_to_id,
                             parameter_types,
@@ -3228,7 +3340,7 @@ fn emit_ff_assignment_stores(
                         rhs,
                         target_width,
                         sv_expr_is_signed_with_parameters(
-                            rhs_expr,
+                            &rhs_expr,
                             variables,
                             name_to_id,
                             parameter_types,
@@ -3845,7 +3957,13 @@ fn lower_expr_to_sir_with_context(
                 Some(*width),
                 Some(*signed),
             )?;
-            resize_sir_register(builder, inner, *width, *signed)
+            let resized = resize_sir_register(builder, inner, *width, *signed)?;
+            resize_sir_register(
+                builder,
+                resized,
+                context_width.unwrap_or(*width),
+                context_signed.unwrap_or(*signed),
+            )
         }
         sv::ir::Expr::Unary { op, expr } => {
             let one_bit_result = matches!(

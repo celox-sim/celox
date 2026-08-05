@@ -2659,6 +2659,28 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             endmodule
         "#,
         ),
+        (
+            "mixed clock/reset-edge polarities for one signal",
+            r#"
+            module Top(input logic sig, clk2, rst2, d, output logic q1, q2);
+                always_ff @(posedge sig or posedge rst2)
+                    if (rst2) q1 <= 1'b0; else q1 <= d;
+                always_ff @(posedge clk2 or posedge sig)
+                    if (sig) q2 <= 1'b0; else q2 <= d;
+            endmodule
+        "#,
+        ),
+        (
+            "unsupported function formal data type",
+            r#"
+            module Top(input logic [1:0] a, output logic [1:0] y);
+                function automatic logic [1:0] shift(input real value);
+                    return value << 1;
+                endfunction
+                assign y = shift(a);
+            endmodule
+        "#,
+        ),
     ];
 
     for (expected, source) in cases {
@@ -2816,6 +2838,43 @@ fn preserves_assignment_context_width_through_resized_function_results() {
     let a = sim.signal("a");
     sim.modify(|io| io.set(a, 1u8)).unwrap();
     assert_eq!(sim.get(sim.signal("y")), 0x100u16.into());
+}
+
+#[test]
+fn preserves_ff_context_width_through_resized_function_results() {
+    let source = r#"
+        module Top(input logic clk, input logic a, output logic [15:0] y);
+            function automatic logic [7:0] widen(input logic value);
+                return {7'b0, value};
+            endfunction
+            always_ff @(posedge clk) y <= widen(a) << 8;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("ff_function_resize_context.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0x100u16.into());
+}
+
+#[test]
+fn totalizes_division_by_zero_in_two_state_mode() {
+    let source = r#"
+        module Top(output logic [7:0] y);
+            assign y = 8'd5 / 8'd0;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("two_state_div_zero.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0u8.into());
 }
 
 #[test]
