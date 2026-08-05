@@ -2,7 +2,7 @@ use super::shared::{def_reg, replace_reg_in_terminator};
 use crate::ir::*;
 use crate::{HashMap, HashSet};
 use num_bigint::BigUint;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_SCALAR_COALESCED_STORE_BITS: usize = 64;
 
@@ -246,26 +246,32 @@ fn schedule_block_interleaved<A: Clone + PartialEq + Eq + std::hash::Hash>(
     // Scheduling loop with incremental ready set
     let mut out = Vec::with_capacity(n);
     let mut inflight_loads: HashSet<RegisterId> = HashSet::default();
-    let mut ready: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
+    let mut ready = (0..n).filter(|&i| indeg[i] == 0).collect::<BTreeSet<_>>();
+    let mut ready_stores = ready
+        .iter()
+        .copied()
+        .filter(|&i| matches!(window[i], SIRInstruction::Store(_, _, _, _, _, _)))
+        .collect::<BTreeSet<_>>();
+    let mut ready_loads = ready
+        .iter()
+        .copied()
+        .filter(|&i| matches!(window[i], SIRInstruction::Load(_, _, _, _)))
+        .collect::<BTreeSet<_>>();
 
     while !ready.is_empty() {
-        let pick = ready
-            .iter()
+        let pick = ready_stores
+            .first()
             .copied()
-            .find(|&i| matches!(window[i], SIRInstruction::Store(_, _, _, _, _, _)))
             .or_else(|| {
-                if inflight_loads.len() < max_inflight_loads {
-                    ready
-                        .iter()
-                        .copied()
-                        .find(|&i| matches!(window[i], SIRInstruction::Load(_, _, _, _)))
-                } else {
-                    None
-                }
+                (inflight_loads.len() < max_inflight_loads)
+                    .then(|| ready_loads.first().copied())
+                    .flatten()
             })
-            .unwrap_or(ready[0]);
+            .unwrap_or_else(|| *ready.first().expect("ready set must not be empty"));
 
-        ready.retain(|&x| x != pick);
+        ready.remove(&pick);
+        ready_stores.remove(&pick);
+        ready_loads.remove(&pick);
 
         let inst = window[pick].clone();
         if let SIRInstruction::Load(dst, _, _, _) = inst {
@@ -282,8 +288,16 @@ fn schedule_block_interleaved<A: Clone + PartialEq + Eq + std::hash::Hash>(
         for &s in &succs[pick] {
             indeg[s] -= 1;
             if indeg[s] == 0 {
-                let pos = ready.partition_point(|&x| x < s);
-                ready.insert(pos, s);
+                ready.insert(s);
+                match window[s] {
+                    SIRInstruction::Store(_, _, _, _, _, _) => {
+                        ready_stores.insert(s);
+                    }
+                    SIRInstruction::Load(_, _, _, _) => {
+                        ready_loads.insert(s);
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -1368,7 +1382,7 @@ mod tests {
         MAX_SCALAR_COALESCED_STORE_BITS, aggregate_static_offset,
         coalesce_static_loads as coalesce_static_loads_with_types,
         coalesce_static_stores as coalesce_static_stores_with_types, optimize_block,
-        subsume_static_loads as subsume_static_loads_with_types,
+        schedule_instructions, subsume_static_loads as subsume_static_loads_with_types,
     };
     use crate::HashMap;
     use crate::ir::{
@@ -1396,6 +1410,44 @@ mod tests {
             })
             .collect();
         subsume_static_loads_with_types(instructions, &register_map)
+    }
+
+    #[test]
+    fn rescheduling_preserves_store_and_bounded_load_priority() {
+        let mut instructions = vec![
+            SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
+            SIRInstruction::Load(RegisterId(1), 1u32, SIROffset::Static(0), 8),
+            SIRInstruction::Store(
+                2u32,
+                SIROffset::Static(0),
+                8,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Unary(RegisterId(2), crate::ir::UnaryOp::Ident, RegisterId(1)),
+            SIRInstruction::Load(RegisterId(3), 3u32, SIROffset::Static(0), 8),
+        ];
+
+        schedule_instructions(&mut instructions, 1);
+
+        assert!(matches!(
+            instructions[0],
+            SIRInstruction::Load(RegisterId(1), ..)
+        ));
+        assert!(matches!(
+            instructions[1],
+            SIRInstruction::Imm(RegisterId(0), ..)
+        ));
+        assert!(matches!(instructions[2], SIRInstruction::Store(2, ..)));
+        assert!(matches!(
+            instructions[3],
+            SIRInstruction::Unary(RegisterId(2), _, RegisterId(1))
+        ));
+        assert!(matches!(
+            instructions[4],
+            SIRInstruction::Load(RegisterId(3), ..)
+        ));
     }
 
     #[test]
