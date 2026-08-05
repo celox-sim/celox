@@ -334,8 +334,6 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
     element_widths: &HashMap<A, usize>,
 ) -> bool {
     let next_id = reg_counter;
-    let mut replaced_indices = std::collections::HashSet::new();
-    let mut insertions: HashMap<usize, Vec<SIRInstruction<A>>> = HashMap::default();
 
     type StoreGroupKey<A> = A;
     let mut groups: HashMap<StoreGroupKey<A>, Vec<usize>> = HashMap::default();
@@ -346,6 +344,31 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
             groups.entry(key).or_default().push(idx);
         }
     }
+    // A contiguous run made entirely of naturally aligned native-width
+    // stores is deliberately left unchanged below. Exclude those groups
+    // before building the load index and sorting detailed store metadata.
+    groups.retain(|_, indices| {
+        indices.len() >= 2
+            && indices.iter().any(|&index| {
+                matches!(
+                    &instructions[index],
+                    SIRInstruction::Store(
+                        _,
+                        SIROffset::Static(offset),
+                        width,
+                        _,
+                        _,
+                        _
+                    ) if *offset % 8 != 0 || !matches!(*width, 8 | 16 | 32 | 64)
+                )
+            })
+    });
+    if groups.is_empty() {
+        return false;
+    }
+
+    let mut replaced_indices = std::collections::HashSet::new();
+    let mut insertions: HashMap<usize, Vec<SIRInstruction<A>>> = HashMap::default();
 
     // Pre-index loads by address for efficient safety checks.
     // Each entry is (instruction_index, offset, width, is_dynamic).
@@ -1102,9 +1125,7 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
     let mut known_values: HashMap<(A, SIROffset), (RegisterId, usize)> = HashMap::default();
     let mut new_instructions = Vec::with_capacity(instructions.len());
 
-    for inst in instructions.drain(..) {
-        let mut inst = inst.clone();
-
+    for mut inst in instructions.drain(..) {
         match &mut inst {
             SIRInstruction::Binary(_, lhs, _, rhs) => {
                 if let Some(r) = replacement_map.get(lhs) {
@@ -1570,6 +1591,42 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(stores, vec![(0, 12, 24)]);
         verify(instructions, register_map);
+    }
+
+    #[test]
+    fn naturally_aligned_native_stores_skip_coalescing() {
+        let mut instructions = vec![
+            SIRInstruction::Store(
+                7u32,
+                SIROffset::Static(0),
+                32,
+                RegisterId(0),
+                vec![],
+                vec![],
+            ),
+            SIRInstruction::Store(
+                7u32,
+                SIROffset::Static(32),
+                32,
+                RegisterId(1),
+                vec![],
+                vec![],
+            ),
+        ];
+        let original = instructions.clone();
+        let mut register_map = [(RegisterId(0), logic(32)), (RegisterId(1), logic(32))]
+            .into_iter()
+            .collect();
+        let mut reg_counter = 1;
+
+        assert!(!coalesce_static_stores_with_types(
+            &mut instructions,
+            &mut register_map,
+            &mut reg_counter,
+            &HashMap::default(),
+        ));
+        assert_eq!(instructions, original);
+        assert_eq!(reg_counter, 1);
     }
 
     #[test]
