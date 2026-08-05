@@ -32,6 +32,26 @@ pub trait SimulationExecutor {
         event: <Self::Backend as SimBackend>::Event,
     ) -> Result<(), SimulatorErrorCode>;
 
+    /// Snapshot external-component inputs immediately before an event domain
+    /// evaluates its sequential logic.
+    fn stage_external_event(
+        &mut self,
+        _event: <Self::Backend as SimBackend>::Event,
+        _timestamp: u64,
+    ) -> Result<(), SimulatorErrorCode> {
+        Ok(())
+    }
+
+    /// Fire external-component hooks after the event domain commits and
+    /// before the following combinational settle.
+    fn fire_external_event(
+        &mut self,
+        _event: <Self::Backend as SimBackend>::Event,
+        _timestamp: u64,
+    ) -> Result<(), SimulatorErrorCode> {
+        Ok(())
+    }
+
     /// Called after the state for a simulation timestamp has stabilized.
     fn finish_timed_step(&mut self, _timestamp: u64) {}
 }
@@ -76,6 +96,44 @@ pub struct SimulationState<B: SimBackend> {
 }
 
 impl<B: SimBackend> SimulationState<B> {
+    /// Rebase edge detection after state was advanced outside this scheduler.
+    pub fn synchronize_event_values(&mut self, backend: &B) {
+        self.last_clock_values.make_empty();
+        for (signal, id, _) in &self.topo_signals {
+            if *id == usize::MAX {
+                continue;
+            }
+            let value: u8 = backend.get_as(*signal);
+            if value != 0 {
+                self.last_clock_values.insert(*id);
+            }
+        }
+    }
+
+    fn replace_triggers_with_stable_edges(&self, backend: &mut B) {
+        backend.clear_triggered_bits();
+        for (signal, id, _) in &self.topo_signals {
+            if *id == usize::MAX {
+                continue;
+            }
+            let was_nonzero = self.last_clock_values.contains(*id);
+            let value: u8 = backend.get_as(*signal);
+            let is_nonzero = value != 0;
+            let triggered = match self.domain_kinds[*id] {
+                Some(DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh) => {
+                    !was_nonzero && is_nonzero
+                }
+                Some(DomainKind::ClockNegedge | DomainKind::ResetAsyncLow) => {
+                    was_nonzero && !is_nonzero
+                }
+                _ => was_nonzero != is_nonzero,
+            };
+            if triggered {
+                backend.mark_triggered_bit(*id);
+            }
+        }
+    }
+
     pub fn new(
         backend: &B,
         topo_signals: Vec<(SignalRef, usize, usize)>,
@@ -151,10 +209,13 @@ impl<B: SimBackend> SimulationState<B> {
 
         let mut triggered_domains = BitSet::with_capacity(num_events);
         let mut discovered_in_this_step = BitSet::with_capacity(num_events);
+        let mut scheduled_trigger_ids = BitSet::with_capacity(num_events);
+        let mut has_scheduled_event_signal = false;
         executor.backend_mut().clear_triggered_bits();
 
         for event in &events_to_process {
             if let Some(&id) = self.signal_to_id.get(&event.signal) {
+                has_scheduled_event_signal = true;
                 let was_nonzero = self.last_clock_values.contains(id);
                 let is_nonzero = event.next_val != 0;
                 let triggered = match self.domain_kinds[id] {
@@ -167,12 +228,28 @@ impl<B: SimBackend> SimulationState<B> {
                     _ => !was_nonzero && is_nonzero,
                 };
                 if triggered {
+                    scheduled_trigger_ids.insert(id);
                     executor.backend_mut().mark_triggered_bit(id);
                 }
             }
         }
 
         executor.eval_comb()?;
+        if has_scheduled_event_signal {
+            // Combinational settling before an active scheduled source domain
+            // commits may expose transient derived-clock edges. In that case,
+            // keep only the source event and rediscover stable edges after the
+            // commit. If the source edge is inactive, preserve derived edges
+            // while filtering out the scheduled signal's own transition.
+            if scheduled_trigger_ids.is_empty() {
+                self.replace_triggers_with_stable_edges(executor.backend_mut());
+            } else {
+                executor.backend_mut().clear_triggered_bits();
+                for id in scheduled_trigger_ids.iter() {
+                    executor.backend_mut().mark_triggered_bit(id);
+                }
+            }
+        }
 
         let mut comb_already_done = false;
         loop {
@@ -195,8 +272,13 @@ impl<B: SimBackend> SimulationState<B> {
                             discovered_in_this_step.insert(single_id);
                             triggered_domains.insert(info.canonical_id);
                             any_new_outer_loop_trigger = true;
+                            executor.stage_external_event(event, current_time)?;
                             executor.eval_apply_ff_at(event)?;
+                            executor.fire_external_event(event, current_time)?;
                             executor.eval_comb()?;
+                            if has_scheduled_event_signal {
+                                self.replace_triggers_with_stable_edges(executor.backend_mut());
+                            }
                             comb_already_done = true;
                             break;
                         }
@@ -218,8 +300,13 @@ impl<B: SimBackend> SimulationState<B> {
                     newly_triggered.push(info.canonical_id);
 
                     if let Some(event) = info.eval_only_event {
+                        executor.stage_external_event(
+                            info.eval_ff_event.unwrap_or(event),
+                            current_time,
+                        )?;
                         executor.eval_only_ff_at(event)?;
                     } else if let Some(event) = info.eval_ff_event {
+                        executor.stage_external_event(event, current_time)?;
                         executor.eval_apply_ff_at(event)?;
                     } else {
                         unreachable!(
@@ -242,11 +329,19 @@ impl<B: SimBackend> SimulationState<B> {
                     executor.apply_ff_at(event)?;
                 }
             }
+            for id in &newly_triggered {
+                if let Some(event) = self.event_info[*id].eval_ff_event {
+                    executor.fire_external_event(event, current_time)?;
+                }
+            }
 
             if comb_already_done {
                 comb_already_done = false;
             } else {
                 executor.eval_comb()?;
+                if has_scheduled_event_signal {
+                    self.replace_triggers_with_stable_edges(executor.backend_mut());
+                }
             }
         }
 

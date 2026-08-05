@@ -15,5 +15,8 @@ bit-set = { workspace = true }
 chrono = "0.4"
 num-bigint = { workspace = true }
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true

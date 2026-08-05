@@ -6,7 +6,7 @@ use crate::{ExprBytecode, ExprOpcode as TbOpcode, TestbenchOperator as Op};
 // ── Bytecode VM ────────────────────────────────────────────────────────
 
 /// A compiled expression: flat bytecode evaluated on a stack VM.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CompiledExpr {
     bytecode: ExprBytecode,
 }
@@ -65,6 +65,23 @@ impl CompiledExpr {
 
     pub fn eval_bool(&self, memory: *mut u8) -> bool {
         !self.eval(memory).is_zero()
+    }
+
+    /// Returns the value when this expression does not read simulator memory.
+    pub fn constant_u64(&self) -> Option<u64> {
+        if self.bytecode.ops().iter().any(|op| {
+            matches!(
+                op,
+                TbOpcode::LoadU64 { .. }
+                    | TbOpcode::LoadWide { .. }
+                    | TbOpcode::LoadIndexed { .. }
+                    | TbOpcode::LoadBitSelect { .. }
+                    | TbOpcode::StoreU64 { .. }
+            )
+        }) {
+            return None;
+        }
+        Some(self.eval_u64(std::ptr::null_mut()))
     }
 
     /// Core evaluation loop.  Uses `TestbenchValue` to handle both u64 and wide
