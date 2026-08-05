@@ -103,11 +103,10 @@ use the same mechanism so generated branch pushes start normal CI. Using the
 default `GITHUB_TOKEN` to create or update those branches would prevent their
 follow-up workflows from running.
 
-The App deliberately has no Issues permission, so Release Please does not add
-its normal status labels. The weekly workflow instead requires the exact
+The App has Issues write permission for Release Please's status labels. The
+weekly workflow still identifies the release pull request by the exact
 `release-please--branches--master--components--celox` branch from this repository
-and still honors a manually applied `release:hold` label before enabling
-auto-merge.
+and honors a manually applied `release:hold` label before enabling auto-merge.
 
 Configure merge commits to use the pull request title as the merge commit title.
 This preserves the Conventional Commit title consumed by Release Please. Protect
