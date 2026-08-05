@@ -2040,7 +2040,7 @@ fn lower_comb_process(
     if process.kind() == sv::ir::CombProcessKind::AlwaysComb {
         for (index, assignment) in assignments.iter().enumerate() {
             if assignments[index + 1..].iter().any(|later| {
-                later.lhs() != assignment.lhs()
+                later.lhs_value() != assignment.lhs_value()
                     && expr_references_ident(assignment.rhs(), later.lhs())
             }) {
                 return Err(sv::AnalyzerError::Unsupported(

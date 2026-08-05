@@ -28,6 +28,24 @@ fn rejects_cross_lhs_read_before_write_in_always_comb() {
 }
 
 #[test]
+fn rejects_same_vector_slice_read_before_write_in_always_comb() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic a, output logic [1:0] y);
+            always_comb begin
+                y[0] = y[1];
+                y[1] = a;
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("read-before-write dependency inside always_comb"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn rejects_inline_enum_ports_instead_of_scalarizing_them() {
     let error = cranelift_build_error(
         r#"
