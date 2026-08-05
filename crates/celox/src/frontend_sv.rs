@@ -1914,7 +1914,7 @@ fn lower_glue_parent_expr(
                 .flatten();
             let operand_context_signed = Some(operands_signed);
             let context_sized_comparison = comparison;
-            let left_fill = context_sized_comparison
+            let left_fill = (context_sized_comparison || shift)
                 .then(|| expr_unbased_fill_literal(left))
                 .flatten();
             let right_fill = (context_sized_comparison || shift)
@@ -1924,18 +1924,21 @@ fn lower_glue_parent_expr(
                 (mut left, mut sources, mut source_ids),
                 (mut right, right_sources, right_source_ids),
             ) = match (left_fill, right_fill) {
-                (Some(left_fill), Some(right_fill)) => (
+                (Some(left_fill), Some(right_fill)) => {
+                    let left_width = if shift { left_context.unwrap_or(1) } else { 1 };
                     (
-                        lower_unbased_fill_literal_slt(arena, left_fill, 1)?,
-                        HashSet::default(),
-                        Vec::new(),
-                    ),
-                    (
-                        lower_unbased_fill_literal_slt(arena, right_fill, 1)?,
-                        HashSet::default(),
-                        Vec::new(),
-                    ),
-                ),
+                        (
+                            lower_unbased_fill_literal_slt(arena, left_fill, left_width)?,
+                            HashSet::default(),
+                            Vec::new(),
+                        ),
+                        (
+                            lower_unbased_fill_literal_slt(arena, right_fill, 1)?,
+                            HashSet::default(),
+                            Vec::new(),
+                        ),
+                    )
+                }
                 (Some(fill), None) => {
                     let right = lower_glue_parent_expr(
                         right,
@@ -1947,7 +1950,11 @@ fn lower_glue_parent_expr(
                         right_context,
                         operand_context_signed,
                     )?;
-                    let width = celox_slt::get_width(right.0, arena);
+                    let width = if shift {
+                        left_context.unwrap_or(1)
+                    } else {
+                        celox_slt::get_width(right.0, arena)
+                    };
                     (
                         (
                             lower_unbased_fill_literal_slt(arena, fill, width)?,
@@ -2763,7 +2770,7 @@ fn lower_expr_with_context(
             let right_context = (context_determined && !shift)
                 .then_some(operation_context)
                 .flatten();
-            let left_fill = comparison
+            let left_fill = (comparison || shift)
                 .then(|| expr_unbased_fill_literal(left))
                 .flatten();
             let right_fill = (comparison || shift)
@@ -2771,16 +2778,19 @@ fn lower_expr_with_context(
                 .flatten();
             let ((mut left, mut sources), (mut right, right_sources)) =
                 match (left_fill, right_fill) {
-                    (Some(left_fill), Some(right_fill)) => (
+                    (Some(left_fill), Some(right_fill)) => {
+                        let left_width = if shift { left_context.unwrap_or(1) } else { 1 };
                         (
-                            lower_unbased_fill_literal_slt(arena, left_fill, 1)?,
-                            HashSet::default(),
-                        ),
-                        (
-                            lower_unbased_fill_literal_slt(arena, right_fill, 1)?,
-                            HashSet::default(),
-                        ),
-                    ),
+                            (
+                                lower_unbased_fill_literal_slt(arena, left_fill, left_width)?,
+                                HashSet::default(),
+                            ),
+                            (
+                                lower_unbased_fill_literal_slt(arena, right_fill, 1)?,
+                                HashSet::default(),
+                            ),
+                        )
+                    }
                     (Some(fill), None) => {
                         let right = lower_expr_with_context(
                             right,
@@ -2792,7 +2802,11 @@ fn lower_expr_with_context(
                             right_context,
                             Some(operands_signed),
                         )?;
-                        let width = celox_slt::get_width(right.0, arena);
+                        let width = if shift {
+                            left_context.unwrap_or(1)
+                        } else {
+                            celox_slt::get_width(right.0, arena)
+                        };
                         (
                             (
                                 lower_unbased_fill_literal_slt(arena, fill, width)?,

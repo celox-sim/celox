@@ -703,6 +703,27 @@ fn reject_silently_ignored_constructs(
                     "gate primitive instantiation".to_string(),
                 ));
             }
+            RefNode::DefparamAssignment(_) => {
+                return Err(AnalyzerError::Unsupported(
+                    "defparam assignment".to_string(),
+                ));
+            }
+            RefNode::PackedDimensionRange(range)
+                if const_expr_from_ref_node(
+                    RefNode::ConstantExpression(&range.nodes.0.nodes.1.nodes.0),
+                    syntax_tree,
+                )
+                .is_none()
+                    || const_expr_from_ref_node(
+                        RefNode::ConstantExpression(&range.nodes.0.nodes.1.nodes.2),
+                        syntax_tree,
+                    )
+                    .is_none() =>
+            {
+                return Err(AnalyzerError::Unsupported(
+                    "unsupported packed range".to_string(),
+                ));
+            }
             RefNode::PackageImportDeclaration(_) | RefNode::PackageScope(_) => {
                 return Err(AnalyzerError::Unsupported(
                     "package-dependent systemverilog module".to_string(),
@@ -2059,6 +2080,23 @@ fn parameters_from_ref_node(
     parameters: &mut Vec<Parameter>,
     is_local: bool,
 ) -> Result<(), AnalyzerError> {
+    if node.clone().into_iter().any(|child| {
+        matches!(
+            child,
+            RefNode::DataTypeOrImplicit(sv_parser::DataTypeOrImplicit::DataType(data_type))
+                if !matches!(
+                    &**data_type,
+                    sv_parser::DataType::Vector(_)
+                        | sv_parser::DataType::Atom(_)
+                        | sv_parser::DataType::Type(_)
+                        | sv_parser::DataType::ClassType(_)
+                )
+        )
+    }) {
+        return Err(AnalyzerError::Unsupported(
+            "unsupported parameter data type".to_string(),
+        ));
+    }
     let parameter_width = parameter_declared_width(node.clone(), syntax_tree, parameters);
     let parameter_signed = parameter_width.map(|_| {
         integer_atom_expr_type(node.clone())
@@ -2974,7 +3012,11 @@ fn parameter_overrides_from_value_assignment(
                     AnalyzerError::Unsupported("parameter override expression".to_string())
                 })?,
             ),
-            None => None,
+            None => {
+                return Err(AnalyzerError::Unsupported(format!(
+                    "empty parameter override `{name}`"
+                )));
+            }
         };
         overrides.push(ParameterOverride::new(name, value));
     }

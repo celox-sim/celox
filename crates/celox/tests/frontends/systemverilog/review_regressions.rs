@@ -2729,6 +2729,45 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             endmodule
         "#,
         ),
+        (
+            "defparam assignment",
+            r#"
+            module Child #(parameter W = 1) (output logic [W-1:0] y);
+                assign y = '0;
+            endmodule
+            module Top(output logic y);
+                Child child(.y(y));
+                defparam child.W = 8;
+            endmodule
+        "#,
+        ),
+        (
+            "unsupported parameter data type",
+            r#"
+            module Top #(parameter real P = 1) (output logic y);
+                assign y = P;
+            endmodule
+        "#,
+        ),
+        (
+            "empty parameter override `NO_SUCH`",
+            r#"
+            module Child #(parameter P = 1) (output logic y);
+                assign y = P;
+            endmodule
+            module Top(output logic y);
+                Child #(.NO_SUCH()) child(.y(y));
+            endmodule
+        "#,
+        ),
+        (
+            "unsupported packed range",
+            r#"
+            module Top(output logic [2 ** 3 - 1:0] y);
+                assign y = '1;
+            endmodule
+        "#,
+        ),
     ];
 
     for (expected, source) in cases {
@@ -2999,10 +3038,13 @@ fn sizes_unbased_shift_amounts_as_self_determined() {
         module Top(
             input logic clk,
             input logic [7:0] a,
+            input logic [2:0] sh,
             output logic [7:0] comb_y,
+            output logic [7:0] comb_left_fill_y,
             output logic [7:0] ff_y
         );
             assign comb_y = a << '1;
+            assign comb_left_fill_y = '1 << sh;
             always_ff @(posedge clk) ff_y <= a << '1;
         endmodule
     "#;
@@ -3012,8 +3054,14 @@ fn sizes_unbased_shift_amounts_as_self_determined() {
             .unwrap();
     let clk = sim.event("clk");
     let a = sim.signal("a");
-    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    let sh = sim.signal("sh");
+    sim.modify(|io| {
+        io.set(a, 1u8);
+        io.set(sh, 1u8);
+    })
+    .unwrap();
     assert_eq!(sim.get(sim.signal("comb_y")), 2u8.into());
+    assert_eq!(sim.get(sim.signal("comb_left_fill_y")), 0xfeu8.into());
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(sim.signal("ff_y")), 2u8.into());
 }
