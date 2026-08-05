@@ -318,6 +318,43 @@ fn merges_function_formals_updated_in_conditional_branches() {
 }
 
 #[test]
+fn merges_function_formals_updated_in_case_branches() {
+    let source = r#"
+        module Top(input logic sel, value, output logic y);
+            function automatic logic force_one(input logic s, v);
+                case (s)
+                    1'b1: v = 1'b1;
+                    default: ;
+                endcase
+                return v;
+            endfunction
+            assign y = force_one(sel, value);
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("function_formal_case.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let sel = sim.signal("sel");
+    let value = sim.signal("value");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(sel, 0u8);
+        io.set(value, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.modify(|io| io.set(value, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+    sim.modify(|io| {
+        io.set(sel, 1u8);
+        io.set(value, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
 fn rejects_dropped_unrepresentable_function_call_actuals() {
     let error = cranelift_build_error(
         r#"
@@ -2681,6 +2718,17 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             endmodule
         "#,
         ),
+        (
+            "unsupported function return data type",
+            r#"
+            module Top(output logic y);
+                function automatic real f();
+                    return 1'b1;
+                endfunction
+                assign y = f();
+            endmodule
+        "#,
+        ),
     ];
 
     for (expected, source) in cases {
@@ -2878,6 +2926,36 @@ fn totalizes_division_by_zero_in_two_state_mode() {
 }
 
 #[test]
+fn collapses_unknown_assignment_results_in_two_state_mode() {
+    let source = r#"
+        module Child(input logic value, output logic y);
+            assign y = value;
+        endmodule
+        module Top(
+            input logic clk,
+            output logic comb_y,
+            output logic ff_y,
+            output logic child_y
+        );
+            assign comb_y = 1'bx;
+            always_ff @(posedge clk) ff_y <= 1'bz;
+            Child child(.value(1'bx), .y(child_y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("two_state_unknown_assignment.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("comb_y")), 0u8.into());
+    assert_eq!(sim.get(sim.signal("child_y")), 0u8.into());
+    let clk = sim.event("clk");
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(sim.signal("ff_y")), 0u8.into());
+}
+
+#[test]
 fn preserves_ff_context_width_for_selected_shift_operands() {
     let source = r#"
         module Top(input logic clk, input logic a, output logic [15:0] y);
@@ -2913,6 +2991,31 @@ fn sizes_ff_left_fill_literals_from_the_shift_context() {
     sim.modify(|io| io.set(sh, 1u8)).unwrap();
     sim.tick(clk).unwrap();
     assert_eq!(sim.get(sim.signal("y")), 0xffff_ffff_ffff_fffeu64.into());
+}
+
+#[test]
+fn sizes_unbased_shift_amounts_as_self_determined() {
+    let source = r#"
+        module Top(
+            input logic clk,
+            input logic [7:0] a,
+            output logic [7:0] comb_y,
+            output logic [7:0] ff_y
+        );
+            assign comb_y = a << '1;
+            always_ff @(posedge clk) ff_y <= a << '1;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("unbased_shift_amount.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let clk = sim.event("clk");
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 1u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("comb_y")), 2u8.into());
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(sim.signal("ff_y")), 2u8.into());
 }
 
 #[test]

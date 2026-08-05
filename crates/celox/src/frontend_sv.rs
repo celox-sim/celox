@@ -1450,6 +1450,10 @@ fn build_instance_glue(
         let width = child_var.width;
         match child_var.kind {
             VarKind::Input => {
+                let collapse_unknown_literal = !four_state
+                    && connection
+                        .and_then(|item| item.actual_expr.as_ref())
+                        .is_some_and(expr_is_unknown_literal);
                 let (mut expr, sources, source_ids) = if let Some(actual_expr) =
                     connection.and_then(|item| item.actual_expr.as_ref())
                 {
@@ -1504,7 +1508,7 @@ fn build_instance_glue(
                         Vec::new(),
                     )
                 };
-                if !child_var.is_4state {
+                if !child_var.is_4state || collapse_unknown_literal {
                     expr = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
                 }
                 input_ports.push((
@@ -1892,6 +1896,10 @@ fn lower_glue_parent_expr(
                     | sv::ir::BinaryOp::Gt
                     | sv::ir::BinaryOp::Ge
             );
+            let shift = matches!(
+                op,
+                sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar
+            );
             let context_determined = !comparison
                 && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
             let operation_context = context_width.map(|context_width| {
@@ -1901,19 +1909,15 @@ fn lower_glue_parent_expr(
                 )
             });
             let left_context = context_determined.then_some(operation_context).flatten();
-            let right_context = (context_determined
-                && !matches!(
-                    op,
-                    sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar
-                ))
-            .then_some(operation_context)
-            .flatten();
+            let right_context = (context_determined && !shift)
+                .then_some(operation_context)
+                .flatten();
             let operand_context_signed = Some(operands_signed);
             let context_sized_comparison = comparison;
             let left_fill = context_sized_comparison
                 .then(|| expr_unbased_fill_literal(left))
                 .flatten();
-            let right_fill = context_sized_comparison
+            let right_fill = (context_sized_comparison || shift)
                 .then(|| expr_unbased_fill_literal(right))
                 .flatten();
             let (
@@ -1964,7 +1968,11 @@ fn lower_glue_parent_expr(
                         left_context,
                         operand_context_signed,
                     )?;
-                    let width = celox_slt::get_width(left.0, arena);
+                    let width = if shift {
+                        1
+                    } else {
+                        celox_slt::get_width(left.0, arena)
+                    };
                     (
                         left,
                         (
@@ -2434,7 +2442,7 @@ fn lower_assignment(
         .var()
         .and_then(|target| variables.get(&target.id))
         .is_some_and(|variable| !variable.is_4state);
-    if target_is_two_state {
+    if target_is_two_state || (!four_state && expr_is_unknown_literal(&rhs)) {
         expr = arena
             .alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))
             .map_err(|error| {
@@ -2739,6 +2747,10 @@ fn lower_expr_with_context(
                     | sv::ir::BinaryOp::Gt
                     | sv::ir::BinaryOp::Ge
             );
+            let shift = matches!(
+                op,
+                sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar
+            );
             let context_determined = !comparison
                 && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
             let operation_context = context_width.map(|context_width| {
@@ -2748,17 +2760,13 @@ fn lower_expr_with_context(
                 )
             });
             let left_context = context_determined.then_some(operation_context).flatten();
-            let right_context = (context_determined
-                && !matches!(
-                    op,
-                    sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar
-                ))
-            .then_some(operation_context)
-            .flatten();
+            let right_context = (context_determined && !shift)
+                .then_some(operation_context)
+                .flatten();
             let left_fill = comparison
                 .then(|| expr_unbased_fill_literal(left))
                 .flatten();
-            let right_fill = comparison
+            let right_fill = (comparison || shift)
                 .then(|| expr_unbased_fill_literal(right))
                 .flatten();
             let ((mut left, mut sources), (mut right, right_sources)) =
@@ -2804,7 +2812,11 @@ fn lower_expr_with_context(
                             left_context,
                             Some(operands_signed),
                         )?;
-                        let width = celox_slt::get_width(left.0, arena);
+                        let width = if shift {
+                            1
+                        } else {
+                            celox_slt::get_width(left.0, arena)
+                        };
                         (
                             left,
                             (
@@ -3348,7 +3360,9 @@ fn emit_ff_assignment_stores(
                     )?
                 }
             };
-            let rhs = if variables.get(&target.id)?.is_4state {
+            let rhs = if variables.get(&target.id)?.is_4state
+                && (four_state || !expr_is_unknown_literal(&rhs_expr))
+            {
                 rhs
             } else {
                 let two_state = builder.alloc_bit(target_width, false);
@@ -3670,6 +3684,14 @@ fn expr_unbased_fill_literal(expr: &sv::ir::Expr) -> Option<char> {
         sv::ir::Expr::Literal(literal) => unbased_fill_literal(literal),
         _ => None,
     }
+}
+
+fn expr_is_unknown_literal(expr: &sv::ir::Expr) -> bool {
+    let sv::ir::Expr::Literal(literal) = expr else {
+        return false;
+    };
+    sv::typecheck::parse_integral_literal(literal)
+        .is_some_and(|literal| literal.mask != BigUint::default())
 }
 
 fn unbased_fill_value(fill: char, width: usize) -> Option<(BigUint, BigUint)> {
@@ -4023,6 +4045,10 @@ fn lower_expr_to_sir_with_context(
                     | sv::ir::BinaryOp::Gt
                     | sv::ir::BinaryOp::Ge
             );
+            let shift = matches!(
+                op,
+                sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar
+            );
             let context_determined = !comparison
                 && !matches!(op, sv::ir::BinaryOp::LogicAnd | sv::ir::BinaryOp::LogicOr);
             let operation_context = context_width.map(|context_width| {
@@ -4032,13 +4058,9 @@ fn lower_expr_to_sir_with_context(
                 )
             });
             let left_context = context_determined.then_some(operation_context).flatten();
-            let right_context = (context_determined
-                && !matches!(
-                    op,
-                    sv::ir::BinaryOp::Shl | sv::ir::BinaryOp::Shr | sv::ir::BinaryOp::Sar
-                ))
-            .then_some(operation_context)
-            .flatten();
+            let right_context = (context_determined && !shift)
+                .then_some(operation_context)
+                .flatten();
             let right_fill = match &**right {
                 sv::ir::Expr::Literal(literal) => unbased_fill_literal(literal),
                 _ => None,
@@ -4058,7 +4080,11 @@ fn lower_expr_to_sir_with_context(
                     left_context,
                     Some(operands_signed),
                 )?;
-                let width = builder.register(&left).width();
+                let width = if shift {
+                    1
+                } else {
+                    builder.register(&left).width()
+                };
                 (left, lower_unbased_fill_literal(builder, fill, width)?)
             } else if let Some(fill) = left_fill {
                 let right = lower_expr_to_sir_with_context(

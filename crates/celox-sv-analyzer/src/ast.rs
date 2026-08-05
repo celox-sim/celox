@@ -3070,6 +3070,7 @@ fn functions_from_module_node(
         else {
             continue;
         };
+        validate_function_return_type(declaration, syntax_tree, const_env, &type_aliases)?;
         validate_function_formal_types(declaration, syntax_tree, const_env, &type_aliases)?;
         validate_function_declaration_statements(declaration, syntax_tree, packed_dimensions)?;
         if let Some(function) = function_from_declaration(
@@ -3099,6 +3100,34 @@ fn functions_from_module_node(
         }
     }
     Ok(functions)
+}
+
+fn validate_function_return_type(
+    declaration: &sv_parser::FunctionDeclaration,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Result<(), AnalyzerError> {
+    let node = match &declaration.nodes.2 {
+        sv_parser::FunctionBodyDeclaration::WithPort(body) => &body.nodes.0,
+        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => &body.nodes.0,
+    };
+    let unsupported = match node {
+        sv_parser::FunctionDataTypeOrImplicit::DataTypeOrVoid(data_type) => {
+            let sv_parser::DataTypeOrVoid::DataType(data_type) = &**data_type else {
+                return Ok(());
+            };
+            value_type_from_data_type(data_type, syntax_tree, const_env, type_aliases).is_none()
+        }
+        sv_parser::FunctionDataTypeOrImplicit::ImplicitDataType(_) => false,
+    };
+    if unsupported {
+        Err(AnalyzerError::Unsupported(
+            "unsupported function return data type".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_function_formal_types(
@@ -4096,10 +4125,25 @@ fn function_expr_from_case_statement(
 
     if branches.iter().all(|(_, expr, _)| expr.is_none()) && default_branch.0.is_none() {
         let mut merged = locals.clone();
-        for name in locals.keys() {
-            let mut value = default_branch.1.get(name)?.clone();
+        let mut names = locals.keys().cloned().collect::<HashSet<_>>();
+        names.extend(default_branch.1.keys().cloned());
+        names.extend(
+            branches
+                .iter()
+                .flat_map(|(_, _, branch_locals)| branch_locals.keys().cloned()),
+        );
+        for name in names {
+            let mut value = default_branch
+                .1
+                .get(&name)
+                .or_else(|| locals.get(&name))
+                .cloned()
+                .unwrap_or_else(|| Expr::Ident(name.clone()));
             for (condition, _, branch_locals) in branches.iter().rev() {
-                let branch_value = branch_locals.get(name)?.clone();
+                let branch_value = branch_locals
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| value.clone());
                 if branch_value != value {
                     value = Expr::Mux {
                         condition: Box::new(condition.clone()),
@@ -4108,7 +4152,7 @@ fn function_expr_from_case_statement(
                     };
                 }
             }
-            merged.insert(name.clone(), value);
+            merged.insert(name, value);
         }
         *locals = merged;
         return None;
