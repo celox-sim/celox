@@ -1792,7 +1792,22 @@ fn signals_from_net_declaration(
     let (r#type, assignments, is_net) = match net {
         sv_parser::NetDeclaration::NetType(net) => {
             let r#type = type_from_ref_node(RefNode::DataTypeOrImplicit(&net.nodes.3), syntax_tree)
-                .unwrap_or_else(Type::implicit);
+                .or_else(|| {
+                    type_alias_from_ref_node(
+                        RefNode::DataTypeOrImplicit(&net.nodes.3),
+                        syntax_tree,
+                        type_aliases,
+                    )
+                });
+            let r#type = match (&net.nodes.3, r#type) {
+                (_, Some(r#type)) => r#type,
+                (sv_parser::DataTypeOrImplicit::ImplicitDataType(_), None) => Type::implicit(),
+                (sv_parser::DataTypeOrImplicit::DataType(_), None) => {
+                    return Err(AnalyzerError::Unsupported(
+                        "unsupported net data type".to_string(),
+                    ));
+                }
+            };
             let r#type = type_with_fallback_ranges(
                 r#type,
                 RefNode::DataTypeOrImplicit(&net.nodes.3),
@@ -3114,6 +3129,7 @@ fn functions_from_module_node(
         };
         validate_function_return_type(declaration, syntax_tree, const_env, &type_aliases)?;
         validate_function_formal_types(declaration, syntax_tree, const_env, &type_aliases)?;
+        validate_function_local_names(declaration, syntax_tree, const_env, &type_aliases)?;
         validate_function_declaration_statements(declaration, syntax_tree, packed_dimensions)?;
         if let Some(function) = function_from_declaration(
             declaration,
@@ -3142,6 +3158,60 @@ fn functions_from_module_node(
         }
     }
     Ok(functions)
+}
+
+fn validate_function_local_names(
+    declaration: &sv_parser::FunctionDeclaration,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
+) -> Result<(), AnalyzerError> {
+    let (params, local_types) = match &declaration.nodes.2 {
+        sv_parser::FunctionBodyDeclaration::WithPort(body) => {
+            let params = body
+                .nodes
+                .3
+                .nodes
+                .1
+                .as_ref()
+                .map(|ports| tf_params(ports, syntax_tree, const_env, type_aliases))
+                .unwrap_or_default();
+            let local_types = function_local_types_from_block_items(
+                &body.nodes.5,
+                syntax_tree,
+                const_env,
+                type_aliases,
+            )
+            .unwrap_or_default();
+            (params, local_types)
+        }
+        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => {
+            let params = tf_item_params(&body.nodes.4, syntax_tree, const_env, type_aliases);
+            let block_items = body.nodes.4.iter().filter_map(|item| match item {
+                sv_parser::TfItemDeclaration::BlockItemDeclaration(item) => Some(&**item),
+                sv_parser::TfItemDeclaration::TfPortDeclaration(_) => None,
+            });
+            let local_types = function_local_types_from_block_item_iter(
+                block_items,
+                syntax_tree,
+                const_env,
+                type_aliases,
+            )
+            .unwrap_or_default();
+            (params, local_types)
+        }
+    };
+    if let Some(param) = params
+        .iter()
+        .find(|param| local_types.contains_key(&param.name))
+    {
+        Err(AnalyzerError::Unsupported(format!(
+            "function local shadows formal `{}`",
+            param.name
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_function_return_type(

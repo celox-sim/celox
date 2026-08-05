@@ -2768,6 +2768,28 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             endmodule
         "#,
         ),
+        (
+            "unsupported net data type",
+            r#"
+            module Top(output logic y);
+                wire enum { A, B, C } value;
+                assign value = C;
+                assign y = value;
+            endmodule
+        "#,
+        ),
+        (
+            "function local shadows formal `a`",
+            r#"
+            module Top(input logic a, output logic y);
+                function automatic logic f(input logic a);
+                    logic a;
+                    return a;
+                endfunction
+                assign y = f(a);
+            endmodule
+        "#,
+        ),
     ];
 
     for (expected, source) in cases {
