@@ -2,6 +2,7 @@ use super::shared::{def_reg, replace_reg_in_terminator};
 use crate::ir::*;
 use crate::{HashMap, HashSet};
 use num_bigint::BigUint;
+use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_SCALAR_COALESCED_STORE_BITS: usize = 64;
 
@@ -245,26 +246,32 @@ fn schedule_block_interleaved<A: Clone + PartialEq + Eq + std::hash::Hash>(
     // Scheduling loop with incremental ready set
     let mut out = Vec::with_capacity(n);
     let mut inflight_loads: HashSet<RegisterId> = HashSet::default();
-    let mut ready: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
+    let mut ready = (0..n).filter(|&i| indeg[i] == 0).collect::<BTreeSet<_>>();
+    let mut ready_stores = ready
+        .iter()
+        .copied()
+        .filter(|&i| matches!(window[i], SIRInstruction::Store(_, _, _, _, _, _)))
+        .collect::<BTreeSet<_>>();
+    let mut ready_loads = ready
+        .iter()
+        .copied()
+        .filter(|&i| matches!(window[i], SIRInstruction::Load(_, _, _, _)))
+        .collect::<BTreeSet<_>>();
 
     while !ready.is_empty() {
-        let pick = ready
-            .iter()
+        let pick = ready_stores
+            .first()
             .copied()
-            .find(|&i| matches!(window[i], SIRInstruction::Store(_, _, _, _, _, _)))
             .or_else(|| {
-                if inflight_loads.len() < max_inflight_loads {
-                    ready
-                        .iter()
-                        .copied()
-                        .find(|&i| matches!(window[i], SIRInstruction::Load(_, _, _, _)))
-                } else {
-                    None
-                }
+                (inflight_loads.len() < max_inflight_loads)
+                    .then(|| ready_loads.first().copied())
+                    .flatten()
             })
-            .unwrap_or(ready[0]);
+            .unwrap_or_else(|| *ready.first().expect("ready set must not be empty"));
 
-        ready.retain(|&x| x != pick);
+        ready.remove(&pick);
+        ready_stores.remove(&pick);
+        ready_loads.remove(&pick);
 
         let inst = window[pick].clone();
         if let SIRInstruction::Load(dst, _, _, _) = inst {
@@ -281,8 +288,16 @@ fn schedule_block_interleaved<A: Clone + PartialEq + Eq + std::hash::Hash>(
         for &s in &succs[pick] {
             indeg[s] -= 1;
             if indeg[s] == 0 {
-                let pos = ready.partition_point(|&x| x < s);
-                ready.insert(pos, s);
+                ready.insert(s);
+                match window[s] {
+                    SIRInstruction::Store(_, _, _, _, _, _) => {
+                        ready_stores.insert(s);
+                    }
+                    SIRInstruction::Load(_, _, _, _) => {
+                        ready_loads.insert(s);
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -600,7 +615,7 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
     true
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AvailableStaticLoad {
     dst: RegisterId,
     load_offset: usize,
@@ -609,37 +624,77 @@ struct AvailableStaticLoad {
     valid_end: usize,
 }
 
-/// Remove a statically written range from the still-current portions of prior
-/// loads. A write can split one loaded range into two valid fragments: the
-/// register still contains the old value on both non-overlapping sides.
-fn subtract_static_write(
-    loads: &mut Vec<AvailableStaticLoad>,
-    write_start: usize,
-    write_end: usize,
-) {
-    if write_start >= write_end {
-        return;
+#[derive(Default)]
+struct AvailableStaticLoads {
+    by_valid_start: BTreeMap<usize, Vec<AvailableStaticLoad>>,
+    max_valid_width: usize,
+}
+
+impl AvailableStaticLoads {
+    fn insert(&mut self, load: AvailableStaticLoad) {
+        self.max_valid_width = self
+            .max_valid_width
+            .max(load.valid_end.saturating_sub(load.valid_start));
+        self.by_valid_start
+            .entry(load.valid_start)
+            .or_default()
+            .push(load);
     }
-    let mut retained = Vec::with_capacity(loads.len().saturating_add(1));
-    for load in loads.drain(..) {
-        if write_start >= load.valid_end || load.valid_start >= write_end {
-            retained.push(load);
-            continue;
+
+    fn containing(&self, start: usize, end: usize) -> impl Iterator<Item = &AvailableStaticLoad> {
+        let earliest_start = start.saturating_sub(self.max_valid_width);
+        self.by_valid_start
+            .range(earliest_start..=start)
+            .flat_map(|(_, loads)| loads)
+            .filter(move |load| load.valid_start <= start && end <= load.valid_end)
+    }
+
+    /// Remove a statically written range from the still-current portions of
+    /// prior loads. A write can split one loaded range into two valid
+    /// fragments: the register still contains the old value on both
+    /// non-overlapping sides.
+    fn subtract_write(&mut self, write_start: usize, write_end: usize) {
+        if write_start >= write_end {
+            return;
         }
-        if load.valid_start < write_start {
-            retained.push(AvailableStaticLoad {
-                valid_end: write_start,
-                ..load
-            });
-        }
-        if write_end < load.valid_end {
-            retained.push(AvailableStaticLoad {
-                valid_start: write_end,
-                ..load
-            });
+
+        let earliest_start = write_start.saturating_sub(self.max_valid_width.saturating_sub(1));
+        let affected_starts = self
+            .by_valid_start
+            .range(earliest_start..write_end)
+            .filter(|(_, loads)| {
+                loads
+                    .iter()
+                    .any(|load| write_start < load.valid_end && load.valid_start < write_end)
+            })
+            .map(|(&start, _)| start)
+            .collect::<Vec<_>>();
+
+        for start in affected_starts {
+            let loads = self
+                .by_valid_start
+                .remove(&start)
+                .expect("affected load bucket must exist");
+            for load in loads {
+                if write_start >= load.valid_end || load.valid_start >= write_end {
+                    self.insert(load);
+                    continue;
+                }
+                if load.valid_start < write_start {
+                    self.insert(AvailableStaticLoad {
+                        valid_end: write_start,
+                        ..load
+                    });
+                }
+                if write_end < load.valid_end {
+                    self.insert(AvailableStaticLoad {
+                        valid_start: write_end,
+                        ..load
+                    });
+                }
+            }
         }
     }
-    *loads = retained;
 }
 
 /// Replace a later static Load with a Slice of a prior wider static Load when
@@ -650,7 +705,7 @@ fn subsume_static_loads<A: Clone + Eq + std::hash::Hash>(
     instructions: &mut [SIRInstruction<A>],
     register_map: &HashMap<RegisterId, RegisterType>,
 ) -> bool {
-    let mut available: HashMap<A, Vec<AvailableStaticLoad>> = HashMap::default();
+    let mut available: HashMap<A, AvailableStaticLoads> = HashMap::default();
     let mut changed = false;
 
     for inst in instructions {
@@ -667,12 +722,9 @@ fn subsume_static_loads<A: Clone + Eq + std::hash::Hash>(
                 }
 
                 let exact_is_available = available.get(addr).is_some_and(|loads| {
-                    loads.iter().any(|load| {
-                        load.load_offset == offset
-                            && load.load_width == width
-                            && load.valid_start <= offset
-                            && end <= load.valid_end
-                    })
+                    loads
+                        .containing(offset, end)
+                        .any(|load| load.load_offset == offset && load.load_width == width)
                 });
                 if exact_is_available {
                     // Preserve the existing exact-load elimination path, which
@@ -682,11 +734,9 @@ fn subsume_static_loads<A: Clone + Eq + std::hash::Hash>(
 
                 let source = available.get(addr).and_then(|loads| {
                     loads
-                        .iter()
+                        .containing(offset, end)
                         .filter(|load| {
                             load.load_width > width
-                                && load.valid_start <= offset
-                                && end <= load.valid_end
                                 && match (register_map.get(&load.dst), register_map.get(&dst)) {
                                     (
                                         Some(RegisterType::Logic {
@@ -736,7 +786,7 @@ fn subsume_static_loads<A: Clone + Eq + std::hash::Hash>(
                 available
                     .entry(addr.clone())
                     .or_default()
-                    .push(AvailableStaticLoad {
+                    .insert(AvailableStaticLoad {
                         dst,
                         load_offset: offset,
                         load_width: width,
@@ -768,7 +818,7 @@ fn subsume_static_loads<A: Clone + Eq + std::hash::Hash>(
                     continue;
                 };
                 if let Some(loads) = available.get_mut(addr) {
-                    subtract_static_write(loads, *offset, write_end);
+                    loads.subtract_write(*offset, write_end);
                 }
             }
             SIRInstruction::Commit(_, dst, SIROffset::Static(offset), width, triggers) => {
@@ -781,7 +831,7 @@ fn subsume_static_loads<A: Clone + Eq + std::hash::Hash>(
                     continue;
                 };
                 if let Some(loads) = available.get_mut(dst) {
-                    subtract_static_write(loads, *offset, write_end);
+                    loads.subtract_write(*offset, write_end);
                 }
             }
             SIRInstruction::RuntimeEvent { .. }
@@ -932,7 +982,12 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
     let mut replacements: HashMap<usize, Vec<SIRInstruction<A>>> = HashMap::default();
 
     for seg in segments {
-        if seg.loads.len() < 2 {
+        if seg.loads.len() < 2
+            || seg
+                .loads
+                .iter()
+                .all(|load| load.offset % 8 == 0 && matches!(load.width, 8 | 16 | 32 | 64))
+        {
             continue;
         }
 
@@ -1117,12 +1172,64 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
     *instructions = out;
 }
 
+#[derive(Default)]
+struct KnownAddressValues {
+    static_values: BTreeMap<usize, (RegisterId, usize)>,
+    other_values: HashMap<SIROffset, (RegisterId, usize)>,
+    max_static_width: usize,
+}
+
+impl KnownAddressValues {
+    fn get(&self, offset: &SIROffset) -> Option<(RegisterId, usize)> {
+        match offset {
+            SIROffset::Static(start) => self.static_values.get(start).copied(),
+            _ => self.other_values.get(offset).copied(),
+        }
+    }
+
+    fn insert(&mut self, offset: SIROffset, value: (RegisterId, usize)) {
+        match offset {
+            SIROffset::Static(start) => {
+                self.max_static_width = self.max_static_width.max(value.1);
+                self.static_values.insert(start, value);
+            }
+            offset => {
+                self.other_values.insert(offset, value);
+            }
+        }
+    }
+
+    fn invalidate_store(&mut self, offset: &SIROffset, width: usize) {
+        let SIROffset::Static(store_start) = offset else {
+            self.static_values.clear();
+            self.other_values.clear();
+            self.max_static_width = 0;
+            return;
+        };
+
+        self.other_values.clear();
+        let store_end = *store_start + width;
+        let earliest_overlap = store_start.saturating_sub(self.max_static_width.saturating_sub(1));
+        let invalidated = self
+            .static_values
+            .range(earliest_overlap..store_end)
+            .filter_map(|(&load_start, &(_, load_width))| {
+                let load_end = load_start + load_width;
+                (*store_start < load_end && load_start < store_end).then_some(load_start)
+            })
+            .collect::<Vec<_>>();
+        for start in invalidated {
+            self.static_values.remove(&start);
+        }
+    }
+}
+
 fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::hash::Hash>(
     instructions: &mut Vec<SIRInstruction<A>>,
     replacement_map: &mut HashMap<RegisterId, RegisterId>,
     register_map: &HashMap<RegisterId, RegisterType>,
 ) {
-    let mut known_values: HashMap<(A, SIROffset), (RegisterId, usize)> = HashMap::default();
+    let mut known_values: HashMap<A, KnownAddressValues> = HashMap::default();
     let mut new_instructions = Vec::with_capacity(instructions.len());
 
     for mut inst in instructions.drain(..) {
@@ -1203,93 +1310,49 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
 
         match &inst {
             SIRInstruction::Load(dst, addr, offset, width) => {
-                let key = (addr.clone(), offset.clone());
-                if let Some((existing_reg, existing_width)) = known_values.get(&key)
-                    && *existing_width == *width
+                if let Some((existing_reg, existing_width)) =
+                    known_values.get(addr).and_then(|values| values.get(offset))
+                    && existing_width == *width
                     && register_map
-                        .get(existing_reg)
+                        .get(&existing_reg)
                         .zip(register_map.get(dst))
                         .is_some_and(|(existing, destination)| existing == destination)
                 {
-                    replacement_map.insert(*dst, *existing_reg);
+                    replacement_map.insert(*dst, existing_reg);
                     continue;
                 }
 
-                known_values.insert(key, (*dst, *width));
+                known_values
+                    .entry(addr.clone())
+                    .or_default()
+                    .insert(offset.clone(), (*dst, *width));
                 new_instructions.push(inst);
             }
             SIRInstruction::Store(addr, offset, width, src, _, _) => {
-                let keys_to_remove: Vec<_> = known_values
-                    .keys()
-                    .filter(|(a, _)| *a == *addr)
-                    .cloned()
-                    .collect();
-
-                if let SIROffset::Static(store_off) = offset {
-                    let store_range = *store_off..(*store_off + *width);
-
-                    for key in keys_to_remove {
-                        let (_, key_offset) = &key;
-                        if let SIROffset::Static(load_off) = key_offset {
-                            let load_width = known_values[&key].1;
-                            let load_range = *load_off..(*load_off + load_width);
-
-                            if store_range.start < load_range.end
-                                && load_range.start < store_range.end
-                            {
-                                known_values.remove(&key);
-                            }
-                        } else {
-                            known_values.remove(&key);
-                        }
-                    }
-
-                    let key = (addr.clone(), offset.clone());
-                    known_values.insert(key, (*src, *width));
-                } else {
-                    for key in keys_to_remove {
-                        known_values.remove(&key);
-                    }
+                let values = known_values.entry(addr.clone()).or_default();
+                values.invalidate_store(offset, *width);
+                if matches!(offset, SIROffset::Static(_)) {
+                    values.insert(offset.clone(), (*src, *width));
                 }
 
                 new_instructions.push(inst);
             }
             SIRInstruction::Commit(src_addr, dst_addr, offset, width, triggers) => {
-                let keys_to_remove: Vec<_> = known_values
-                    .keys()
-                    .filter(|(a, _)| *a == *dst_addr)
-                    .cloned()
-                    .collect();
+                known_values
+                    .entry(dst_addr.clone())
+                    .or_default()
+                    .invalidate_store(offset, *width);
 
-                if let SIROffset::Static(commit_off) = offset {
-                    let commit_range = *commit_off..(*commit_off + *width);
-
-                    for key in keys_to_remove {
-                        let (_, key_offset) = &key;
-                        if let SIROffset::Static(load_off) = key_offset {
-                            let load_width = known_values[&key].1;
-                            let load_range = *load_off..(*load_off + load_width);
-                            if commit_range.start < load_range.end
-                                && load_range.start < commit_range.end
-                            {
-                                known_values.remove(&key);
-                            }
-                        } else {
-                            known_values.remove(&key);
-                        }
-                    }
-                } else {
-                    for key in keys_to_remove {
-                        known_values.remove(&key);
-                    }
-                }
-
-                let src_key = (src_addr.clone(), offset.clone());
-                if let Some((src_reg, src_width)) = known_values.get(&src_key).copied()
+                if let Some((src_reg, src_width)) = known_values
+                    .get(src_addr)
+                    .and_then(|values| values.get(offset))
                     && src_width == *width
                     && register_map.get(&src_reg) == Some(&RegisterType::Logic { width: *width })
                 {
-                    known_values.insert((dst_addr.clone(), offset.clone()), (src_reg, *width));
+                    known_values
+                        .entry(dst_addr.clone())
+                        .or_default()
+                        .insert(offset.clone(), (src_reg, *width));
                     new_instructions.push(SIRInstruction::Store(
                         dst_addr.clone(),
                         offset.clone(),
@@ -1315,10 +1378,11 @@ fn eliminate_redundant_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std:
 #[cfg(test)]
 mod tests {
     use super::{
+        AvailableStaticLoad, AvailableStaticLoads, KnownAddressValues,
         MAX_SCALAR_COALESCED_STORE_BITS, aggregate_static_offset,
         coalesce_static_loads as coalesce_static_loads_with_types,
         coalesce_static_stores as coalesce_static_stores_with_types, optimize_block,
-        subsume_static_loads as subsume_static_loads_with_types,
+        schedule_instructions, subsume_static_loads as subsume_static_loads_with_types,
     };
     use crate::HashMap;
     use crate::ir::{
@@ -1346,6 +1410,181 @@ mod tests {
             })
             .collect();
         subsume_static_loads_with_types(instructions, &register_map)
+    }
+
+    #[test]
+    fn rescheduling_preserves_store_and_bounded_load_priority() {
+        let mut instructions = vec![
+            SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
+            SIRInstruction::Load(RegisterId(1), 1u32, SIROffset::Static(0), 8),
+            SIRInstruction::Store(
+                2u32,
+                SIROffset::Static(0),
+                8,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            ),
+            SIRInstruction::Unary(RegisterId(2), crate::ir::UnaryOp::Ident, RegisterId(1)),
+            SIRInstruction::Load(RegisterId(3), 3u32, SIROffset::Static(0), 8),
+        ];
+
+        schedule_instructions(&mut instructions, 1);
+
+        assert!(matches!(
+            instructions[0],
+            SIRInstruction::Load(RegisterId(1), ..)
+        ));
+        assert!(matches!(
+            instructions[1],
+            SIRInstruction::Imm(RegisterId(0), ..)
+        ));
+        assert!(matches!(instructions[2], SIRInstruction::Store(2, ..)));
+        assert!(matches!(
+            instructions[3],
+            SIRInstruction::Unary(RegisterId(2), _, RegisterId(1))
+        ));
+        assert!(matches!(
+            instructions[4],
+            SIRInstruction::Load(RegisterId(3), ..)
+        ));
+    }
+
+    #[test]
+    fn known_values_invalidate_only_overlapping_static_ranges() {
+        let mut values = KnownAddressValues::default();
+        values.insert(SIROffset::Static(0), (RegisterId(0), 128));
+        values.insert(SIROffset::Static(160), (RegisterId(1), 32));
+        values.insert(SIROffset::Dynamic(RegisterId(9)), (RegisterId(2), 32));
+
+        values.invalidate_store(&SIROffset::Static(96), 32);
+
+        assert_eq!(values.get(&SIROffset::Static(0)), None);
+        assert_eq!(
+            values.get(&SIROffset::Static(160)),
+            Some((RegisterId(1), 32))
+        );
+        assert_eq!(values.get(&SIROffset::Dynamic(RegisterId(9))), None);
+    }
+
+    #[test]
+    fn dynamic_store_invalidates_every_known_range() {
+        let mut values = KnownAddressValues::default();
+        values.insert(SIROffset::Static(0), (RegisterId(0), 32));
+        values.insert(
+            SIROffset::PackedElements {
+                bit_offset: 32,
+                element_width: 8,
+            },
+            (RegisterId(1), 32),
+        );
+
+        values.invalidate_store(&SIROffset::Dynamic(RegisterId(9)), 32);
+
+        assert_eq!(values.get(&SIROffset::Static(0)), None);
+        assert_eq!(
+            values.get(&SIROffset::PackedElements {
+                bit_offset: 32,
+                element_width: 8,
+            }),
+            None
+        );
+        assert_eq!(values.max_static_width, 0);
+    }
+
+    #[test]
+    fn available_load_index_matches_naive_range_updates() {
+        let original = (0..12usize)
+            .map(|index| {
+                let start = index * 11 % 70;
+                let width = index * 13 % 31 + 1;
+                AvailableStaticLoad {
+                    dst: RegisterId(index),
+                    load_offset: start,
+                    load_width: width,
+                    valid_start: start,
+                    valid_end: start + width,
+                }
+            })
+            .collect::<Vec<_>>();
+        let sort = |loads: &mut Vec<AvailableStaticLoad>| {
+            loads.sort_by_key(|load| {
+                (
+                    load.dst,
+                    load.valid_start,
+                    load.valid_end,
+                    load.load_offset,
+                    load.load_width,
+                )
+            });
+        };
+
+        let mut untouched = AvailableStaticLoads::default();
+        for &load in &original {
+            untouched.insert(load);
+        }
+        for start in 0..96 {
+            for width in 0..24 {
+                let end = start + width;
+                let mut expected = original
+                    .iter()
+                    .filter(|load| load.valid_start <= start && end <= load.valid_end)
+                    .copied()
+                    .collect::<Vec<_>>();
+                let mut actual = untouched
+                    .containing(start, end)
+                    .copied()
+                    .collect::<Vec<_>>();
+                sort(&mut expected);
+                sort(&mut actual);
+                assert_eq!(actual, expected, "containing range {start}..{end}");
+            }
+        }
+
+        for write_start in 0..96 {
+            for write_width in 0..24 {
+                let write_end = write_start + write_width;
+                let mut expected = Vec::new();
+                for &load in &original {
+                    if write_start >= write_end
+                        || write_start >= load.valid_end
+                        || load.valid_start >= write_end
+                    {
+                        expected.push(load);
+                        continue;
+                    }
+                    if load.valid_start < write_start {
+                        expected.push(AvailableStaticLoad {
+                            valid_end: write_start,
+                            ..load
+                        });
+                    }
+                    if write_end < load.valid_end {
+                        expected.push(AvailableStaticLoad {
+                            valid_start: write_end,
+                            ..load
+                        });
+                    }
+                }
+
+                let mut indexed = AvailableStaticLoads::default();
+                for &load in &original {
+                    indexed.insert(load);
+                }
+                indexed.subtract_write(write_start, write_end);
+                let mut actual = indexed
+                    .by_valid_start
+                    .into_values()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                sort(&mut expected);
+                sort(&mut actual);
+                assert_eq!(
+                    actual, expected,
+                    "subtracting write range {write_start}..{write_end}"
+                );
+            }
+        }
     }
 
     fn verify(
@@ -1547,6 +1786,30 @@ mod tests {
                 .all(|instruction| !matches!(instruction, SIRInstruction::Binary(..)))
         );
         verify(instructions, register_map);
+    }
+
+    #[test]
+    fn naturally_aligned_native_loads_skip_coalescing() {
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 7u32, SIROffset::Static(0), 32),
+            SIRInstruction::Load(RegisterId(1), 7u32, SIROffset::Static(32), 32),
+        ];
+        let original = instructions.clone();
+        let mut register_map = [(RegisterId(0), logic(32)), (RegisterId(1), logic(32))]
+            .into_iter()
+            .collect();
+        let mut reg_counter = 1;
+
+        coalesce_static_loads_with_types(
+            &mut instructions,
+            &mut register_map,
+            &mut reg_counter,
+            false,
+            &HashMap::default(),
+        );
+
+        assert_eq!(instructions, original);
+        assert_eq!(reg_counter, 1);
     }
 
     #[test]
