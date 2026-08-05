@@ -20,6 +20,7 @@ permissions: {}
 jobs:
   codspeed:
     name: CodSpeed
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     permissions:
       contents: read

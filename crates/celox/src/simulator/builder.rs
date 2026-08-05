@@ -828,6 +828,11 @@ mod host {
             self.top
         }
 
+        /// Returns whether four-state simulation is enabled for this builder.
+        pub fn four_state_enabled(&self) -> bool {
+            self.options.four_state
+        }
+
         /// Supply project metadata (clock/reset settings, etc.) instead of defaults.
         pub fn with_metadata(mut self, metadata: Metadata) -> Self {
             self.metadata = Some(metadata);

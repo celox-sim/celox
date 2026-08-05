@@ -55,9 +55,11 @@ pnpm bench
 bash scripts/run-verilator-bench.sh
 ```
 
-The CodSpeed workflow runs on pull requests, merge queues, and `master`. Pull
-requests are compared with the `master` baseline using deterministic CPU
-simulation, while the local command only checks that the benchmark suite runs.
+The CodSpeed workflow runs benchmarks on pull requests and `master`. Merge queue
+events preserve the workflow check without running CodSpeed because CodSpeed does
+not support the `merge_group` event. Pull requests are compared with the `master`
+baseline using deterministic CPU simulation, while the local command only checks
+that the benchmark suite runs.
 
 Local measurements are most useful for comparing two revisions on the same
 machine. CI history is better for long-term trends than for small one-off deltas.
