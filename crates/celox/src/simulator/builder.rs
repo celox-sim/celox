@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use veryl_analyzer::ir::{Comptime, Expression, VarPath};
@@ -10,8 +9,8 @@ use veryl_parser::resource_table;
 
 use crate::parser::BuildConfig;
 use crate::{
-    CompilationWarning, FrontendDiagnostic, ParserError, SimulatorError, SimulatorErrorKind,
-    ir::OptimizedSir, parser,
+    CompilationWarning, FrontendDiagnostic, HashMap, ParserError, SimulatorError,
+    SimulatorErrorKind, ir::OptimizedSir, parser,
 };
 
 fn component_library_path(
