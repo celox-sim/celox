@@ -48,6 +48,50 @@ export default defineConfig({
 });
 ```
 
+### TypeScript Testbench Components
+
+Native Vitest testbenches can use synchronous components created with
+`defineTbComponent` without building a Rust or Wasm component library:
+
+```ts
+// test/tb-components.ts
+import { defineTbComponent } from "@celox-sim/celox";
+
+const store = defineTbComponent<{ value: bigint }>({
+  kind: "method_only",
+  create: () => ({ value: 0n }),
+  methods: {
+    set: {
+      args: [{ name: "value", type: "value" }],
+      call: ({ state }, [value]) => { state.value = value as bigint; },
+    },
+    get: {
+      returns: { width: 8 },
+      call: ({ state }) => ({ returnValue: state.value }),
+    },
+  },
+});
+
+export default { store };
+```
+
+Point the Vite plugin at the component module:
+
+```ts
+export default defineConfig({
+  plugins: [celox({
+    testbenchComponents: "./test/tb-components.ts",
+  })],
+});
+```
+
+The plugin loads the module through Vite, writes the extracted manifests to
+`.celox/testbench-components.manifest.json`, supplies them during type
+generation, and imports the original module in generated Vitest cases. Veryl
+can then declare `var model: $comp::store;`. This path is available to native
+Node/Vitest execution; browser Wasm simulation does not currently support
+synchronous JavaScript component callbacks.
+
 ### tsconfig.json
 
 To enable TypeScript support for `.veryl` imports, add the following to `tsconfig.json`:
@@ -108,3 +152,4 @@ The policy is embedded in the `ModuleDefinition` as `defaultOptions.deadStorePol
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `projectRoot` | `string` | *(auto-detected)* | Path to the directory containing `Veryl.toml` |
+| `testbenchComponents` | `string` | *(none)* | Component module injected into generated native Vitest testbenches |

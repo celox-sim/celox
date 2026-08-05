@@ -37,6 +37,25 @@ export {
 export { Simulation } from "./simulation.js";
 // Simulator (event-based)
 export { Simulator } from "./simulator.js";
+export type {
+	InjectedTbComponent,
+	RunTestOptions,
+	TbComponentContext,
+	TbComponentDefinition,
+	TbComponentEffects,
+	TbFourStateValue,
+	TbMethodArgument,
+	TbMethodDefinition,
+	TbMethodResult,
+	TbOutputValue,
+	TbParameter,
+	TbPort,
+} from "./testbench.js";
+export {
+	defineTbComponent,
+	runTest,
+	runTestFromProject,
+} from "./testbench.js";
 // Core types
 /** @internal */
 export type {

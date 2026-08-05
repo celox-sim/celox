@@ -25,8 +25,17 @@ export interface GenTsPortInfo {
 	readonly is4state: boolean;
 }
 
-/** Plugin options. */
+export type TestbenchComponentManifests = Record<
+	string,
+	{ readonly manifest: string }
+>;
+
 export interface CeloxPluginOptions {
 	/** Explicit path to the Veryl project root (directory containing Veryl.toml). */
 	projectRoot?: string;
+	/**
+	 * TypeScript component module used by generated native Vitest cases.
+	 * Its default export must map `$comp` names to `defineTbComponent` results.
+	 */
+	testbenchComponents?: string;
 }

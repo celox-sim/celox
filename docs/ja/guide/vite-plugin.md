@@ -48,6 +48,49 @@ export default defineConfig({
 });
 ```
 
+### TypeScript テストベンチコンポーネント
+
+native Vitest テストベンチでは、`defineTbComponent` で作った同期コンポーネントを
+Rust/Wasm コンポーネントライブラリのビルドなしで利用できます：
+
+```ts
+// test/tb-components.ts
+import { defineTbComponent } from "@celox-sim/celox";
+
+const store = defineTbComponent<{ value: bigint }>({
+  kind: "method_only",
+  create: () => ({ value: 0n }),
+  methods: {
+    set: {
+      args: [{ name: "value", type: "value" }],
+      call: ({ state }, [value]) => { state.value = value as bigint; },
+    },
+    get: {
+      returns: { width: 8 },
+      call: ({ state }) => ({ returnValue: state.value }),
+    },
+  },
+});
+
+export default { store };
+```
+
+Vite 設定でコンポーネントmoduleを指定します：
+
+```ts
+export default defineConfig({
+  plugins: [celox({
+    testbenchComponents: "./test/tb-components.ts",
+  })],
+});
+```
+
+プラグインはVite経由でmoduleを読み込み、抽出したmanifestを
+`.celox/testbench-components.manifest.json` に生成します。そのmanifestを型生成へ渡し、
+生成するVitest caseから元のmoduleをimportします。Veryl側では
+`var model: $comp::store;` と宣言できます。この経路はnative Node/Vitest向けです。
+ブラウザWasmシミュレーションは同期JavaScript callbackに未対応です。
+
 ### tsconfig.json
 
 `.veryl` インポートの TypeScript サポートを有効にするには、`tsconfig.json` に以下を追加します：
@@ -108,3 +151,4 @@ import { Top } from "../src/Top.veryl?dse=preserveAllPorts";
 | オプション | 型 | デフォルト | 説明 |
 |---|---|---|---|
 | `projectRoot` | `string` | *（自動検出）* | `Veryl.toml` を含むディレクトリへのパス |
+| `testbenchComponents` | `string` | *（なし）* | 生成されるnative Vitestテストへ注入するコンポーネントmodule |

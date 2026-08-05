@@ -2,7 +2,11 @@ mod backend;
 #[cfg(feature = "host-runtime")]
 mod component;
 #[cfg(feature = "host-runtime")]
-pub use component::{register_static_component, register_static_component_manifest};
+pub use component::{
+    InjectedCall, InjectedComponentHandler, InjectedComponents, InjectedHook, InjectedNamedValue,
+    InjectedPort, InjectedResult, InjectedValue, register_static_component,
+    register_static_component_manifest,
+};
 mod debug;
 mod diagnostics;
 mod ir;

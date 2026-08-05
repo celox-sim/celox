@@ -1,0 +1,10 @@
+#[test(InjectedTestbench)]
+module InjectedTestbench {
+    var store: $comp::vite_store;
+
+    initial {
+        store.set(8'h2a);
+        $assert(store.get() == 8'h2a, "Vite-injected TypeScript component");
+        $finish();
+    }
+}
