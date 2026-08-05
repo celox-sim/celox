@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785921320967,
+  "lastUpdate": 1785922921741,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -155909,6 +155909,55 @@ window.BENCHMARK_DATA = {
           {
             "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
             "value": 63081.780208,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "tignear+s@gmail.com",
+            "name": "tig",
+            "username": "tignear"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "65c3fd0069e1a361322e5997214071fcbfceb360",
+          "message": "Merge pull request #488 from celox-sim/ci/cranelift-linux-boot\n\nfix(cranelift): boot Linux correctly",
+          "timestamp": "2026-08-05T08:54:57Z",
+          "tree_id": "9b7373f6088fa41d6b21141311bc527202988ef7",
+          "url": "https://github.com/celox-sim/celox/commit/65c3fd0069e1a361322e5997214071fcbfceb360"
+        },
+        "date": 1785922905694,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-jit/heliodor_linux_boot_execution",
+            "value": 191025.79246,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-total/heliodor_linux_boot_execution",
+            "value": 191066.332526,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl/heliodor_linux_boot_execution",
+            "value": 227625.298583,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-compile/heliodor_linux_boot_compilation",
+            "value": 139797.688464,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
+            "value": 66897.071839,
             "unit": "ms"
           }
         ]
