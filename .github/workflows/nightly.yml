@@ -10,6 +10,18 @@ permissions:
   contents: read
 
 jobs:
+  # heliodor-bench.yml schedules the stable master lane directly. Dispatch the
+  # develop ref here as well so the same nightly coverage exercises Veryl HEAD.
+  queue-heliodor-develop:
+    name: Queue develop Heliodor benchmarks
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Dispatch the Veryl HEAD compatibility lane
+        shell: bash
+        run: gh workflow run heliodor-bench.yml --repo "$GITHUB_REPOSITORY" --ref develop
+
   queue:
     name: Queue ${{ matrix.channel }}
     runs-on: ubuntu-latest

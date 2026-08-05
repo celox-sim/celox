@@ -15,6 +15,7 @@ on:
       - "scripts/ci-changes.mjs"
       - "scripts/ci-changes.test.mjs"
       - "scripts/run-heliodor-bench.sh"
+      - "scripts/tests/convert-heliodor-bench.sh"
   schedule:
     - cron: "37 2 * * *"
   workflow_dispatch:
@@ -26,10 +27,11 @@ env:
   CARGO_INCREMENTAL: "0"
 
 # Pull requests neither write benchmark history nor need to wait behind unrelated
-# benchmark runs. Keep only the master/manual publisher serialized with bench.yml.
+# benchmark runs. Serialize master publishers with bench.yml, while develop uses
+# a separate group so its dispatch cannot replace a pending master nightly run.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || github.event_name == 'schedule' && 'heliodor-head' || 'bench' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'schedule' }}
+  group: ${{ github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/develop' && 'heliodor-develop' || 'bench' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # PRs use this gate to avoid spending a dedicated ARM runner on unrelated
@@ -54,8 +56,25 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: node scripts/ci-changes.mjs "$BASE_SHA" "$HEAD_SHA"
 
+  converter-test:
+    name: Test Heliodor result conversion
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Test benchmark conversion fixtures
+        shell: bash
+        run: bash scripts/tests/convert-heliodor-bench.sh
+
   heliodor:
-    if: github.event_name != 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -203,8 +222,8 @@ jobs:
     needs: arm64-changes
     if: >-
       !cancelled() &&
-      github.event_name != 'schedule' &&
-      (github.event_name != 'pull_request' ||
+      (github.event_name == 'push' || github.event_name == 'pull_request') &&
+      (github.event_name == 'push' ||
       needs.arm64-changes.result != 'success' ||
       needs.arm64-changes.outputs.heliodor_arm64 == 'true')
     permissions:
@@ -215,7 +234,7 @@ jobs:
       HELIODOR_DIR: ${{ github.workspace }}/target/heliodor-arm64/source
       HELIODOR_RESULTS_DIR: ${{ github.workspace }}/target/heliodor-arm64/results
       HELIODOR_TOOLS_DIR: ${{ github.workspace }}/target/heliodor-arm64/tools
-      HELIODOR_RUNNERS: veryl-cc-sync celox celox-cranelift
+      HELIODOR_RUNNERS: celox
       HELIODOR_TESTS: test_soc_linux_boot
       HELIODOR_TIMEOUT_SEC: "1200"
       HELIODOR_CELOX_CARGO_PROFILE: release
@@ -229,7 +248,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
 
-      - name: Boot Linux with Veryl-CC, native, and Cranelift on ARM64
+      - name: Boot Linux with the native backend on ARM64
         shell: bash
         run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-arm64-output.txt
 
@@ -243,10 +262,61 @@ jobs:
             target/heliodor-arm64/results/results.tsv
             target/heliodor-arm64/results/*.log
 
+  arm64-linux-boot-full:
+    name: Nightly ARM64 Linux boot
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      HELIODOR_DIR: ${{ github.workspace }}/target/heliodor-arm64/source
+      HELIODOR_RESULTS_DIR: ${{ github.workspace }}/target/heliodor-arm64/results
+      HELIODOR_TOOLS_DIR: ${{ github.workspace }}/target/heliodor-arm64/tools
+      HELIODOR_TESTS: test_soc_linux_boot
+      HELIODOR_CELOX_CARGO_PROFILE: release
+      HELIODOR_CELOX_CARGO_FEATURES: experimental-arm64-backend
+      CELOX_OPT_LEVEL: O2
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Boot Linux with Veryl-CC and the native backend on ARM64
+        shell: bash
+        env:
+          HELIODOR_RUNNERS: veryl-cc-sync celox
+          HELIODOR_TIMEOUT_SEC: "1200"
+        run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-arm64-output.txt
+
+      - name: Boot Linux with the Cranelift backend on ARM64
+        shell: bash
+        env:
+          HELIODOR_RUNNERS: celox-cranelift
+          HELIODOR_TIMEOUT_SEC: "1800"
+          HELIODOR_BUILD_CELOX_RUNNER: "0"
+        run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-arm64-cranelift-output.txt
+
+      - name: Upload nightly ARM64 Linux boot results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: heliodor-arm64-linux-boot-full
+          path: |
+            heliodor-arm64-output.txt
+            heliodor-arm64-cranelift-output.txt
+            target/heliodor-arm64/results/results.tsv
+            target/heliodor-arm64/results/*.log
+
   publish-linux-boot:
     name: Publish Linux boot benchmarks
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [heliodor, arm64-linux-boot]
+    if: >-
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      github.ref == 'refs/heads/master'
+    needs: [heliodor, arm64-linux-boot-full]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -264,7 +334,7 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: heliodor-arm64-linux-boot
+          name: heliodor-arm64-linux-boot-full
           path: artifacts/native-aarch64
 
       - name: Convert backend and CPU architecture results
@@ -298,7 +368,9 @@ jobs:
 
   heliodor-head:
     name: Heliodor HEAD compatibility
-    if: github.event_name == 'schedule'
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/develop')
     permissions:
       contents: read
     runs-on: ubuntu-latest
