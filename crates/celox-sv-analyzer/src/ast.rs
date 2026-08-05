@@ -179,6 +179,17 @@ impl Module {
         }
         let const_env = const_env_from_parameters(&parameters);
         let signals = signals_from_module_node(node.clone(), syntax_tree, &const_env)?;
+        if let Some(parameter) = parameters.iter().find(|parameter| {
+            ports.iter().any(|port| port.name() == parameter.name())
+                || signals
+                    .iter()
+                    .any(|signal| signal.name() == parameter.name())
+        }) {
+            return Err(AnalyzerError::Unsupported(format!(
+                "parameter name collides with port or signal `{}`",
+                parameter.name()
+            )));
+        }
         let mut instances = instances_from_module_node(node.clone(), syntax_tree, &const_env)?;
         let mut instance_names = HashSet::new();
         if let Some(instance) = instances
@@ -3606,14 +3617,15 @@ fn function_body_expr(
     local_types: &HashMap<String, FunctionLocalType>,
     local_names: &HashSet<String>,
 ) -> Option<Expr> {
-    let mut locals = local_names
+    let mut locals = local_types
         .iter()
-        .filter_map(|name| {
-            let r#type = local_types.get(name).copied()?;
-            Some((
-                name.clone(),
-                coerce_function_local_assignment(Expr::Literal("'x".to_string()), r#type),
-            ))
+        .map(|(name, r#type)| {
+            let initial = if local_names.contains(name) {
+                coerce_function_local_assignment(Expr::Literal("'x".to_string()), *r#type)
+            } else {
+                Expr::Ident(name.clone())
+            };
+            (name.clone(), initial)
         })
         .collect::<HashMap<_, _>>();
     for statement in statements {

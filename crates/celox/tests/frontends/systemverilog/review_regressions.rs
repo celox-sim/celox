@@ -230,6 +230,29 @@ fn rejects_single_branch_generate_locals_instead_of_leaking_them() {
 }
 
 #[test]
+fn rejects_parameters_that_collide_with_ports_or_signals() {
+    for source in [
+        r#"
+            module Top #(parameter A = 1) (input logic A, output logic y);
+                assign y = A;
+            endmodule
+        "#,
+        r#"
+            module Top #(parameter A = 1) (output logic y);
+                logic A;
+                assign y = A;
+            endmodule
+        "#,
+    ] {
+        let error = cranelift_build_error(source);
+        assert!(
+            error.contains("parameter name collides with port or signal `A`"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
 fn rejects_generate_local_typedefs_instead_of_leaking_them() {
     let error = cranelift_build_error(
         r#"
@@ -264,6 +287,34 @@ fn rejects_duplicate_function_argument_names() {
         error.contains("duplicate function argument `a`"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn merges_function_formals_updated_in_conditional_branches() {
+    let source = r#"
+        module Top(input logic sel, value, output logic y);
+            function automatic logic force_one(input logic s, input logic v);
+                if (s) v = 1'b1;
+                return v;
+            endfunction
+            assign y = force_one(sel, value);
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("function_formal.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let sel = sim.signal("sel");
+    let value = sim.signal("value");
+    let y = sim.signal("y");
+    sim.modify(|io| {
+        io.set(sel, 0u8);
+        io.set(value, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.modify(|io| io.set(sel, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
 }
 
 #[test]

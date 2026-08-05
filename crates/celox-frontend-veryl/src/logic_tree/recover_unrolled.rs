@@ -3163,7 +3163,12 @@ fn specialize_binary_constant(
         BinaryOp::LtS | BinaryOp::LeS | BinaryOp::GtS | BinaryOp::GeS
     ) || matches!(
         op,
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard
+        BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::EqCase
+            | BinaryOp::NeCase
+            | BinaryOp::EqWildcard
+            | BinaryOp::NeWildcard
     ) && lhs.signed
         && rhs.signed;
     let extend_comparison = |operand: &SpecializedConstant| {
@@ -5080,11 +5085,15 @@ mod tests {
         let signed_eq =
             specialize_binary_constant(BinaryOp::Eq, &signed_narrow, &signed_wide, 1, false)
                 .unwrap();
+        let signed_eq_case =
+            specialize_binary_constant(BinaryOp::EqCase, &signed_narrow, &signed_wide, 1, false)
+                .unwrap();
         let unsigned_eq =
             specialize_binary_constant(BinaryOp::Eq, &unsigned_narrow, &signed_wide, 1, false)
                 .unwrap();
 
         assert_eq!(signed_eq.value, BigUint::from(1u8));
+        assert_eq!(signed_eq_case.value, BigUint::from(1u8));
         assert_eq!(unsigned_eq.value, BigUint::from(0u8));
     }
 
