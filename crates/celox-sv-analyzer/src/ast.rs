@@ -179,7 +179,7 @@ impl Module {
         }
         let const_env = const_env_from_parameters(&parameters);
         let signals = signals_from_module_node(node.clone(), syntax_tree, &const_env)?;
-        let instances = instances_from_module_node(node.clone(), syntax_tree, &const_env)?;
+        let mut instances = instances_from_module_node(node.clone(), syntax_tree, &const_env)?;
         let mut instance_names = HashSet::new();
         if let Some(instance) = instances
             .iter()
@@ -215,6 +215,13 @@ impl Module {
         );
         let functions =
             functions_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions)?;
+        for instance in &mut instances {
+            for connection in &mut instance.port_connections {
+                connection.actual_expr = connection.actual_expr.take().map(|expr| {
+                    expand_expr_calls(expr, &functions, &expression_signedness, 0, true)
+                });
+            }
+        }
         let comb_processes = comb_processes_from_module_node(
             node.clone(),
             syntax_tree,
@@ -372,12 +379,8 @@ fn reject_silently_ignored_constructs(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
 ) -> Result<(), AnalyzerError> {
-    let mut module_scope_value_names = module_scope_signal_names(node.clone(), syntax_tree);
-    module_scope_value_names.extend(
-        parameters_from_module_node(node.clone(), syntax_tree)?
-            .into_iter()
-            .map(|parameter| parameter.name),
-    );
+    let has_leaking_conditional_generate_local =
+        conditional_generate_has_leaking_local(node.clone(), syntax_tree);
     reject_duplicate_conditional_generate_locals(node.clone(), syntax_tree)?;
     if node
         .clone()
@@ -585,11 +588,7 @@ fn reject_silently_ignored_constructs(
                     .3
                     .as_ref()
                     .is_some_and(|(_, block)| generate_block_has_data_declaration(block)))
-                || conditional_generate_local_collides(
-                    generate,
-                    syntax_tree,
-                    &module_scope_value_names,
-                ) =>
+                || has_leaking_conditional_generate_local =>
             {
                 return Err(AnalyzerError::Unsupported(
                     "local data declaration inside conditional-generate".to_string(),
@@ -4327,24 +4326,6 @@ fn has_local_constants(const_env: &HashMap<String, i128>) -> bool {
     })
 }
 
-fn module_scope_signal_names(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Vec<String> {
-    let aliases = HashMap::new();
-    module_non_port_items(node)
-        .into_iter()
-        .filter_map(package_or_generate_declaration_from_non_port_item)
-        .flat_map(|declaration| match declaration {
-            sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data) => {
-                signals_from_data_declaration(data, syntax_tree, &aliases).unwrap_or_default()
-            }
-            sv_parser::PackageOrGenerateItemDeclaration::NetDeclaration(net) => {
-                signals_from_net_declaration(net, syntax_tree, &aliases).unwrap_or_default()
-            }
-            _ => Vec::new(),
-        })
-        .map(|signal| signal.name)
-        .collect()
-}
-
 fn reject_duplicate_conditional_generate_locals(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
@@ -4386,6 +4367,54 @@ fn reject_duplicate_conditional_generate_locals(
         }
     }
     Ok(())
+}
+
+fn conditional_generate_has_leaking_local(module: RefNode<'_>, syntax_tree: &SyntaxTree) -> bool {
+    let module_identifiers = module
+        .clone()
+        .into_iter()
+        .filter_map(identifier_locate)
+        .collect::<Vec<_>>();
+    module.into_iter().any(|node| {
+        let RefNode::ConditionalGenerateConstruct(sv_parser::ConditionalGenerateConstruct::If(
+            generate,
+        )) = node
+        else {
+            return false;
+        };
+        std::iter::once(&generate.nodes.2)
+            .chain(
+                generate
+                    .nodes
+                    .3
+                    .as_ref()
+                    .into_iter()
+                    .map(|(_, block)| block),
+            )
+            .any(|block| {
+                let block_identifiers = RefNode::GenerateBlock(block)
+                    .into_iter()
+                    .filter_map(identifier_locate)
+                    .collect::<Vec<_>>();
+                let Some(block_start) = block_identifiers.iter().map(|locate| locate.offset).min()
+                else {
+                    return false;
+                };
+                let block_end = block_identifiers
+                    .iter()
+                    .map(|locate| locate.offset + locate.len)
+                    .max()
+                    .unwrap_or(block_start);
+                generate_block_direct_data_declaration_names(block, syntax_tree)
+                    .into_iter()
+                    .any(|name| {
+                        module_identifiers.iter().any(|locate| {
+                            (locate.offset < block_start || locate.offset >= block_end)
+                                && syntax_tree.get_str(locate) == Some(name.as_str())
+                        })
+                    })
+            })
+    })
 }
 
 fn generate_block_direct_data_declaration_names(
@@ -4470,42 +4499,6 @@ fn package_declaration_from_generate_item(
         return None;
     };
     Some(declaration)
-}
-
-fn conditional_generate_local_collides(
-    generate: &sv_parser::IfGenerateConstruct,
-    syntax_tree: &SyntaxTree,
-    module_scope_signal_names: &[String],
-) -> bool {
-    generate_block_data_declaration_names(&generate.nodes.2, syntax_tree)
-        .into_iter()
-        .chain(
-            generate
-                .nodes
-                .3
-                .as_ref()
-                .into_iter()
-                .flat_map(|(_, block)| generate_block_data_declaration_names(block, syntax_tree)),
-        )
-        .any(|name| module_scope_signal_names.contains(&name))
-}
-
-fn generate_block_data_declaration_names(
-    block: &sv_parser::GenerateBlock,
-    syntax_tree: &SyntaxTree,
-) -> Vec<String> {
-    let aliases = HashMap::new();
-    RefNode::GenerateBlock(block)
-        .into_iter()
-        .filter_map(|node| match node {
-            RefNode::DataDeclaration(data) => Some(data),
-            _ => None,
-        })
-        .flat_map(|data| {
-            signals_from_data_declaration(data, syntax_tree, &aliases).unwrap_or_default()
-        })
-        .map(|signal| signal.name)
-        .collect()
 }
 
 fn generate_item_has_data_declaration(item: &sv_parser::GenerateItem) -> bool {

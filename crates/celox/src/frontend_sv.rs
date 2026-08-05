@@ -1128,7 +1128,9 @@ pub(crate) fn attach_instance_glue(
             &mut parent_variables,
             &mut signal_names,
             &mut implicit_output_signals,
+            &lowered.source,
             &lowered.constants,
+            &lowered.parameter_types,
             child,
             &instance.port_connections,
         )?;
@@ -1214,7 +1216,9 @@ fn ensure_parent_output_signals(
     parent_variables: &mut HashMap<VarId, SvVariable>,
     parent_signal_names: &mut HashMap<String, VarId>,
     implicit_output_signals: &mut HashSet<String>,
+    parent_source: &sv::ir::Module,
     parent_constants: &std::collections::HashMap<String, i128>,
+    parent_parameter_types: &HashMap<String, (usize, bool)>,
     child: &LoweredSvModule,
     connections: &[LoweredSvPortConnection],
 ) -> Result<(), ParserError> {
@@ -1251,6 +1255,20 @@ fn ensure_parent_output_signals(
             return Err(ParserError::illegal_context(
                 "systemverilog output port connection",
                 format!("cannot drive parameter `{actual}`"),
+                None,
+            ));
+        }
+        if !local_driver_ranges(
+            parent_source,
+            actual,
+            parent_constants,
+            parent_parameter_types,
+        )
+        .is_empty()
+        {
+            return Err(ParserError::illegal_context(
+                "systemverilog output port connection",
+                format!("multiple net drivers for `{actual}`"),
                 None,
             ));
         }

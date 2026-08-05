@@ -211,6 +211,25 @@ fn rejects_generate_locals_that_shadow_parameters() {
 }
 
 #[test]
+fn rejects_single_branch_generate_locals_instead_of_leaking_them() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(output logic y);
+            if (1) begin : g
+                logic tmp;
+                assign tmp = 1'b1;
+            end
+            assign y = tmp;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("local data declaration inside conditional-generate"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn rejects_generate_local_typedefs_instead_of_leaking_them() {
     let error = cranelift_build_error(
         r#"
@@ -1608,6 +1627,42 @@ fn lowers_mux_expressions_in_child_input_connections() {
 }
 
 #[test]
+fn expands_function_calls_in_child_input_connections() {
+    let source = r#"
+        module Child(input logic a, output logic y); assign y = a; endmodule
+        module Top(input logic x, output logic y);
+            function automatic logic invert(input logic value);
+                return ~value;
+            endfunction
+            Child child(.a(invert(x)), .y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("glue_call.sv"))], "Top")
+        .build_cranelift()
+        .unwrap();
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(x, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    sim.modify(|io| io.set(x, 0u8)).unwrap();
+    assert_eq!(sim.get(y), 1u8.into());
+}
+
+#[test]
+fn rejects_local_drivers_of_implicit_child_output_nets() {
+    let source = r#"
+        module Source(output logic y); assign y = 1'b1; endmodule
+        module Top(input logic a, output logic out);
+            Source source(.y(w));
+            assign w = a;
+            assign out = w;
+        endmodule
+    "#;
+    let error = cranelift_build_error(source);
+    assert!(error.contains("multiple net drivers for `w`"), "{error}");
+}
+
+#[test]
 fn preserves_typed_parameter_override_literals_during_specialization() {
     let source = r#"
         module Child #(parameter P = 0) (output logic y); assign y = &P; endmodule
@@ -2821,6 +2876,31 @@ fn rejects_duplicate_external_outputs_across_instances() {
     };
     assert!(
         error.contains("multiple output ports drive overlapping target"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rejects_external_outputs_that_overlap_veryl_local_drivers() {
+    let veryl = r#"
+        module Top (a: input logic, y: output logic) {
+            assign y = a;
+            inst child: $sv::Source (y);
+        }
+    "#;
+    let sv = "module Source(output logic y); assign y = 1'b1; endmodule";
+    let error = match Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("source.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    {
+        Ok(_) => panic!("external output and local driver unexpectedly compiled"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("external output overlaps local driver"),
         "{error}"
     );
 }

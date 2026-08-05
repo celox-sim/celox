@@ -2374,6 +2374,33 @@ impl<'a> ModuleParser<'a> {
             eval_apply_ff_blocks.insert(trigger_set.clone(), eval_apply_eu);
         }
 
+        for (external_id, external_access) in &self.external_output_targets {
+            let overlaps_comb = self.comb_blocks.iter().any(|path| {
+                path.target.var().is_some_and(|target| {
+                    target.id == *external_id && target.access.overlaps(external_access)
+                })
+            });
+            let overlaps_ff = ff_access_summaries.values().any(|summary| {
+                summary.writes.iter().any(|target| {
+                    target.id.var_id == *external_id && target.access.overlaps(external_access)
+                }) || summary
+                    .dynamic_writes
+                    .iter()
+                    .any(|target| target.var_id == *external_id)
+            });
+            if overlaps_comb || overlaps_ff {
+                let variable = &self.module.variables[external_id];
+                return Err(ParserError::illegal_context(
+                    "external module output connections",
+                    format!(
+                        "external output overlaps local driver for {}",
+                        variable.path
+                    ),
+                    None,
+                ));
+            }
+        }
+
         // Keep both boundary sources:
         // - BitSlicer: assignment destination-based split points
         // - parse_comb: expression/read-driven split points
