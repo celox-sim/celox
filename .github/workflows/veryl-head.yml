@@ -73,9 +73,16 @@ jobs:
             exit 1
           fi
           node scripts/use-veryl-head.mjs "$veryl_revision"
-          # Updating one changed Veryl root resolves the complete shared git
-          # dependency graph without also refreshing unrelated unlocked crates.
-          cargo update -p veryl-analyzer
+          if git diff --quiet -- Cargo.toml; then
+            # A merged roll updates Cargo.lock and retriggers this workflow. Do
+            # not resolve the unchanged graph again: broad transitive version
+            # ranges can make cargo update alternate between valid lockfiles.
+            echo "develop already pins Veryl HEAD $veryl_revision."
+          else
+            # Updating one changed Veryl root resolves the complete shared git
+            # dependency graph without also refreshing unrelated unlocked crates.
+            cargo update -p veryl-analyzer
+          fi
           echo "VERYL_REVISION=$veryl_revision" >> "$GITHUB_ENV"
 
       - name: Create the rolling integration branch
