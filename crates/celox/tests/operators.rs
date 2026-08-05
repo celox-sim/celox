@@ -443,9 +443,6 @@ module Top (
     }
 
     fn test_unsigned_type_cast_does_not_inherit_source_signedness(sim) {
-        // Veryl 0.20.2's runtime lowerer zero-extends this widening cast,
-        // contrary to its analyzer, emitter, and SystemVerilog cast rules.
-        @omit_veryl;
         @setup { let code = r#"
 module Top (
     sel:       input  logic,

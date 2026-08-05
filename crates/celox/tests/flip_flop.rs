@@ -44,7 +44,6 @@ fn test_ff_nonblocking(sim) {
 }
 
 fn test_ff_static_and_dynamic_writes_share_sparse_state(sim) {
-    @omit_veryl;
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1322,7 +1321,6 @@ fn test_ff_runtime_function_snapshots_nonlocal_read_before_later_write(sim) {
 }
 
 fn test_ff_runtime_function_snapshots_input_before_callee_nonlocal_write(sim) {
-    @omit_veryl;
     @ignore_on(wasm);
     @setup { let code = r#"
         module Top (
@@ -1356,7 +1354,6 @@ fn test_ff_runtime_function_snapshots_input_before_callee_nonlocal_write(sim) {
 }
 
 fn test_ff_runtime_function_snapshots_helper_input_before_callee_nonlocal_write(sim) {
-    @omit_veryl;
     @ignore_on(wasm);
     @setup { let code = r#"
         module Top (
@@ -1435,7 +1432,6 @@ fn test_ff_outputless_nested_nonlocal_write_updates_later_event_argument(sim) {
 }
 
 fn test_ff_statement_function_direct_nonlocal_assignment_is_observable(sim) {
-    @omit_veryl;
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1462,7 +1458,6 @@ fn test_ff_statement_function_direct_nonlocal_assignment_is_observable(sim) {
 }
 
 fn test_ff_skipped_conditional_nonlocal_write_preserves_prior_ff_assignment(sim) {
-    @omit_veryl;
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1496,7 +1491,6 @@ fn test_ff_skipped_conditional_nonlocal_write_preserves_prior_ff_assignment(sim)
 }
 
 fn test_ff_nonlocal_write_precedes_aliased_formal_output_copyout(sim) {
-    @omit_veryl;
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1523,7 +1517,6 @@ fn test_ff_nonlocal_write_precedes_aliased_formal_output_copyout(sim) {
 }
 
 fn test_ff_outputless_wrapper_nested_copyout_to_nonlocal_is_observable(sim) {
-    @omit_veryl;
     @setup { let code = r#"
         module Top (clk: input clock, global_value: output logic<8>) {
             function set (written: output logic<8>) {
@@ -1548,7 +1541,6 @@ fn test_ff_outputless_wrapper_nested_copyout_to_nonlocal_is_observable(sim) {
 }
 
 fn test_ff_outputless_wrapper_expression_copyout_to_nonlocal_is_observable(sim) {
-    @omit_veryl;
     @setup { let code = r#"
         module Top (clk: input clock, global_value: output logic<8>) {
             function set (
@@ -1578,7 +1570,6 @@ fn test_ff_outputless_wrapper_expression_copyout_to_nonlocal_is_observable(sim) 
 }
 
 fn test_ff_outputless_wrapper_indexed_copyout_to_nonlocal_is_observable(sim) {
-    @omit_veryl;
     @setup { let code = r#"
         module Top (clk: input clock, global_value: output logic<8>) {
             function set (
@@ -1608,7 +1599,8 @@ fn test_ff_outputless_wrapper_indexed_copyout_to_nonlocal_is_observable(sim) {
 }
 
 fn test_ff_outputless_wrapper_dynamic_indexed_copyout_to_nonlocal_is_observable(sim) {
-    @omit_veryl;
+    // Veryl 0.20.3 copies the output to the wrong dynamically selected bit.
+    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1644,7 +1636,6 @@ fn test_ff_outputless_wrapper_dynamic_indexed_copyout_to_nonlocal_is_observable(
 }
 
 fn test_ff_outputless_wrapper_direct_dynamic_nonlocal_assignment_is_observable(sim) {
-    @omit_veryl;
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1733,7 +1724,6 @@ fn test_ff_pure_helper_nonlocal_read_is_snapshotted_before_runtime_write(sim) {
 }
 
 fn test_ff_dynamic_nonlocal_store_follows_pending_whole_write(sim) {
-    @omit_veryl;
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1824,8 +1814,8 @@ fn test_ff_guarded_system_task_merges_definition_state(sim) {
 }
 
 fn test_ff_nonlocal_source_ternary_preserves_unknown_merge(sim) {
-    @omit_veryl;
-    @ignore_on(wasm);
+    // Veryl 0.20.3 selects one arm instead of merging an X/Z condition.
+    @ignore_on(wasm, veryl);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -1977,7 +1967,8 @@ fn test_ff_retained_dynamic_copyout_does_not_repeat_nonlocal_body_write(sim) {
 }
 
 fn test_ff_function_output_index_uses_final_nonlocal_state(sim) {
-    @omit_veryl;
+    // Veryl 0.20.3 resolves the output actual with the pre-call index.
+    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2177,8 +2168,8 @@ fn test_ff_short_circuit_nested_output_updates_only_when_rhs_runs(sim) {
 }
 
 fn test_ff_short_circuit_runtime_write_preserves_later_state_source(sim) {
-    @omit_veryl;
-    @ignore_on(wasm);
+    // Veryl 0.20.3 exposes the same-edge write to a later FF read.
+    @ignore_on(wasm, veryl);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -2450,8 +2441,8 @@ fn test_ff_bits_and_size_do_not_evaluate_output_writing_operand(sim) {
 }
 
 fn test_ff_bits_and_size_operands_do_not_alias_earlier_array_argument(sim) {
-    @omit_veryl;
-    @ignore_on(wasm);
+    // Veryl 0.20.3 evaluates the $bits/$size operand and applies its effects.
+    @ignore_on(wasm, veryl);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -3518,7 +3509,6 @@ fn test_ff_effectful_function_inputs_follow_declaration_order(sim) {
 }
 
 fn test_ff_pure_input_is_snapshotted_before_later_effectful_input(sim) {
-    @omit_veryl;
     @setup { let code = r#"
         module Top (clk: input clock, effect: output logic<8>, q: output logic<8>) {
             function update (
@@ -3683,7 +3673,6 @@ fn test_ff_unpacked_input_before_runtime_effect_stays_symbolically_bound(sim) {
 }
 
 fn test_ff_effectful_array_item_output_is_not_a_read_alias(sim) {
-    @omit_veryl;
     @ignore_on(wasm);
     @setup { let code = r#"
         module Top (
@@ -4911,7 +4900,6 @@ fn test_ff_runtime_for_forward_overshoot_exits_without_wraparound(sim) {
 }
 
 fn test_ff_runtime_for_unsigned_slice_bound_zero_extends_signed_source(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -5230,7 +5218,6 @@ fn test_ff_struct_constructor_expression(sim) {
 }
 
 fn test_ff_struct_constructor_expression_literal_order(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -5297,7 +5284,6 @@ fn test_ff_struct_constructor_signed_member_extension(sim) {
 }
 
 fn test_ff_array_literal_expression_order(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -5624,7 +5610,6 @@ fn test_ff_function_call_nested_output_statement_in_function_body(sim) {
 }
 
 fn test_ff_function_call_indexed_nonvariable_argument_expression(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (clk: input clock, in_a: input logic<4>, out_q: output logic) {
             function f (x: input logic<4>) -> logic {
@@ -5650,7 +5635,6 @@ fn test_ff_function_call_indexed_nonvariable_argument_expression(sim) {
 }
 
 fn test_ff_function_call_chained_range_access_on_argument(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (clk: input clock, in_a: input logic<8>, out_q: output logic<4>) {
             function f (x: input logic<8>) -> logic<4> {
@@ -5672,7 +5656,6 @@ fn test_ff_function_call_chained_range_access_on_argument(sim) {
 }
 
 fn test_ff_function_call_step_access_on_nonvariable_argument(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (clk: input clock, in_a: input logic<8>, out_q: output logic<4>) {
             function f (x: input logic<8>) -> logic<4> {
@@ -5694,7 +5677,6 @@ fn test_ff_function_call_step_access_on_nonvariable_argument(sim) {
 }
 
 fn test_ff_function_call_nonvariable_argument_uses_formal_width_before_slice(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (clk: input clock, out_q: output logic) {
             function f (x: input logic<4>) -> logic {
@@ -5714,7 +5696,6 @@ fn test_ff_function_call_nonvariable_argument_uses_formal_width_before_slice(sim
 }
 
 fn test_ff_function_call_nonvariable_argument_preserves_self_sized_overflow_before_coercion(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (clk: input clock, out_q: output logic) {
             function f (x: input logic<4>) -> logic {
@@ -5766,7 +5747,6 @@ fn test_ff_function_call_part_select_of_signed_formal_is_unsigned(sim) {
 }
 
 fn test_ff_function_call_sign_extends_narrow_signed_actual_before_slice(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -5789,7 +5769,6 @@ fn test_ff_function_call_sign_extends_narrow_signed_actual_before_slice(sim) {
 }
 
 fn test_ff_function_call_preserves_unsigned_actual_when_widening_to_signed_formal(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -5812,7 +5791,6 @@ fn test_ff_function_call_preserves_unsigned_actual_when_widening_to_signed_forma
 }
 
 fn test_ff_function_call_preserves_unsigned_formal_signedness_for_nonvariable_actual(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -5838,7 +5816,6 @@ fn test_ff_function_call_preserves_unsigned_formal_signedness_for_nonvariable_ac
 }
 
 fn test_ff_function_call_nonvariable_argument_uses_formal_shape_for_indexing(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -5902,7 +5879,6 @@ fn test_ff_function_call_array_literal_element_uses_formal_context_width(sim) {
 }
 
 fn test_ff_function_call_array_literal_supports_dynamic_multidim_indexing(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -5949,7 +5925,6 @@ fn test_ff_function_call_array_literal_supports_dynamic_multidim_indexing(sim) {
 }
 
 fn test_ff_function_call_array_literal_view_dominates_conditional_access(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -5981,7 +5956,6 @@ fn test_ff_function_call_array_literal_view_dominates_conditional_access(sim) {
 }
 
 fn test_ff_function_call_array_literal_effect_is_eager_in_ternary_arm(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6036,7 +6010,6 @@ fn test_ff_function_call_array_literal_effect_is_eager_in_ternary_arm(sim) {
 }
 
 fn test_ff_function_call_array_literal_effect_is_eager_in_short_circuit_rhs(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6113,7 +6086,6 @@ fn test_ff_function_call_array_literal_effect_is_eager_in_short_circuit_rhs(sim)
 }
 
 fn test_ff_function_call_array_literal_view_preserves_expression_order(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6154,7 +6126,6 @@ fn test_ff_function_call_array_literal_view_preserves_expression_order(sim) {
 }
 
 fn test_ff_function_call_array_literal_snapshots_scalar_before_later_write(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6193,7 +6164,6 @@ fn test_ff_function_call_array_literal_snapshots_scalar_before_later_write(sim) 
 }
 
 fn test_ff_function_call_array_literal_snapshots_scalar_before_callee_write(sim) {
-    @omit_veryl;
     @ignore_on(wasm);
     @setup { let code = r#"
         module Top (
@@ -6276,7 +6246,6 @@ fn test_ff_case_range_skips_effectful_upper_bound_when_lower_is_false(sim) {
 }
 
 fn test_ff_function_call_array_literal_branch_view_is_reused_after_merge(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6322,7 +6291,6 @@ fn test_ff_function_call_array_literal_branch_view_is_reused_after_merge(sim) {
 }
 
 fn test_ff_function_call_effectful_array_items_are_eager_before_conditional_access(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6381,7 +6349,6 @@ fn test_ff_function_call_effectful_array_items_are_eager_before_conditional_acce
 }
 
 fn test_ff_function_call_carries_branch_local_static_array_item_cache(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6428,7 +6395,6 @@ fn test_ff_function_call_carries_branch_local_static_array_item_cache(sim) {
 }
 
 fn test_ff_function_call_tracks_nested_static_array_read_through_branch(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6478,7 +6444,6 @@ fn test_ff_function_call_tracks_nested_static_array_read_through_branch(sim) {
 }
 
 fn test_ff_function_call_tracks_array_view_hidden_in_bound_literal(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6530,7 +6495,6 @@ fn test_ff_function_call_tracks_array_view_hidden_in_bound_literal(sim) {
 }
 
 fn test_ff_function_call_merges_nested_array_state_at_cache_completion(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6586,7 +6550,6 @@ fn test_ff_function_call_merges_nested_array_state_at_cache_completion(sim) {
 }
 
 fn test_ff_function_call_merges_nested_array_state_at_static_cache_completion(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6640,7 +6603,6 @@ fn test_ff_function_call_merges_nested_array_state_at_static_cache_completion(si
 }
 
 fn test_ff_function_call_merges_directly_forwarded_array_cache(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6697,7 +6659,6 @@ fn test_ff_function_call_merges_directly_forwarded_array_cache(sim) {
 }
 
 fn test_ff_function_call_tracks_array_reads_in_output_indices(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6754,7 +6715,6 @@ fn test_ff_function_call_tracks_array_reads_in_output_indices(sim) {
 }
 
 fn test_ff_function_call_tracks_nested_array_reads_in_output_indices(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6863,7 +6823,6 @@ fn test_ff_function_call_restores_initialized_forwarded_alias_view(sim) {
 }
 
 fn test_ff_function_call_merges_outer_array_view_across_nested_short_circuit(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -6922,7 +6881,6 @@ fn test_ff_function_call_merges_outer_array_view_across_nested_short_circuit(sim
 }
 
 fn test_ff_function_call_forwards_array_literal_view_to_nested_call(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -7196,7 +7154,6 @@ fn test_ff_function_call_snapshots_pure_array_items_before_later_effect(sim) {
 }
 
 fn test_ff_function_call_converts_array_literal_view_for_wider_nested_formal(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -7229,7 +7186,6 @@ fn test_ff_function_call_converts_array_literal_view_for_wider_nested_formal(sim
 }
 
 fn test_ff_function_call_converts_forwarded_static_array_element(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -7255,7 +7211,6 @@ fn test_ff_function_call_converts_forwarded_static_array_element(sim) {
 }
 
 fn test_ff_function_call_array_literal_element_uses_element_width(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -7278,7 +7233,6 @@ fn test_ff_function_call_array_literal_element_uses_element_width(sim) {
 }
 
 fn test_ff_function_array_element_assignment_preserves_signedness(sim) {
-    @omit_veryl;
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -7303,7 +7257,6 @@ fn test_ff_function_array_element_assignment_preserves_signedness(sim) {
 }
 
 fn test_ff_function_call_array_literal_default_fill_matches_formal_shape(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -7349,7 +7302,6 @@ fn test_ff_function_call_multidim_array_literal_default_fill_matches_formal_shap
 }
 
 fn test_ff_function_call_multidim_array_literal_indexing_preserves_element_order(sim) {
-    @ignore_on(veryl); // https://github.com/veryl-lang/veryl/pull/3131
     @setup { let code = r#"
         module Top (
             clk: input clock,
@@ -7428,7 +7380,6 @@ fn test_ff_function_call_dynamic_multidim_indexing_accepts_array_valued_items(si
 }
 
 fn test_ff_function_call_bit_select_on_nonvariable_one_bit_formal(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             clk: input clock,

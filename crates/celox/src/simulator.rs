@@ -69,6 +69,8 @@ mod host {
         pub(crate) vcd_writer: Option<crate::VcdWriter>,
         pub(crate) dirty: bool,
         pub(crate) warnings: Vec<CompilationWarning>,
+        pub(crate) components: crate::component::ComponentRuntime,
+        pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
         runtime_event_read_seq: Arc<AtomicU64>,
         runtime_event_drain_active: Arc<AtomicBool>,
         comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
@@ -503,6 +505,8 @@ mod host {
                 vcd_writer: None,
                 dirty: false,
                 warnings,
+                components: Default::default(),
+                component_simulation: None,
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
                 runtime_event_drain_active: Arc::new(AtomicBool::new(false)),
                 comb_observer_snapshots: Vec::new(),
@@ -791,10 +795,13 @@ mod host {
                 self.eval_comb_checked().unwrap();
                 self.dirty = false;
             }
+            let component_traces = self.components.trace_values();
             if let Some(ref mut writer) = self.vcd_writer {
                 let (ptr, size) = self.backend.memory_as_ptr();
                 let memory = unsafe { std::slice::from_raw_parts(ptr, size) };
-                writer.dump(timestamp, memory).unwrap();
+                writer
+                    .dump_with_external(timestamp, memory, &component_traces)
+                    .unwrap();
             }
         }
 

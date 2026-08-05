@@ -23,11 +23,27 @@ pub struct VcdSignalDesc {
     pub is_4state: bool,
 }
 
+/// Describes a signal whose value is supplied by an external runtime rather
+/// than stored in Celox's flat simulation memory.
+#[derive(Clone, Debug)]
+pub struct VcdExternalSignalDesc {
+    pub scope: String,
+    pub name: String,
+    pub width: usize,
+}
+
+#[derive(Clone, Copy)]
+enum VcdWriterSource {
+    Memory { offset: usize, is_4state: bool },
+    External { index: usize },
+}
+
 struct VcdWriterSignal {
     vcd_id: String,
-    offset: usize,
+    scope: String,
+    name: String,
     width: usize,
-    is_4state: bool,
+    source: VcdWriterSource,
 }
 
 pub struct VcdWriter {
@@ -35,70 +51,27 @@ pub struct VcdWriter {
     signals: Vec<VcdWriterSignal>,
     last_values: Vec<Option<(BigUint, BigUint)>>,
     timestamp: u64,
+    header_written: bool,
+    external_count: usize,
 }
 
 impl VcdWriter {
     pub fn new<P: AsRef<Path>>(path: P, descs: &[VcdSignalDesc]) -> std::io::Result<Self> {
         let file = File::create(path)?;
-        let mut writer = BufWriter::new(file);
-
-        // VCD Header
-        writeln!(writer, "$date")?;
-        writeln!(
-            writer,
-            "  {}",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-        )?;
-        writeln!(writer, "$end")?;
-        writeln!(writer, "$version")?;
-        writeln!(writer, "  celox")?;
-        writeln!(writer, "$end")?;
-        writeln!(writer, "$timescale 1ns $end")?;
-
-        // Group signals by scope, preserving insertion order.
-        let mut scope_order: Vec<&str> = Vec::new();
-        let mut scope_groups: Vec<Vec<&VcdSignalDesc>> = Vec::new();
-        let mut scope_idx: std::collections::HashMap<&str, usize> =
-            std::collections::HashMap::new();
-
-        for desc in descs {
-            match scope_idx.get(desc.scope.as_str()) {
-                Some(&idx) => scope_groups[idx].push(desc),
-                None => {
-                    scope_idx.insert(&desc.scope, scope_order.len());
-                    scope_order.push(&desc.scope);
-                    scope_groups.push(vec![desc]);
-                }
-            }
-        }
-
-        // Write hierarchy and assign VCD IDs
-        let mut signals = Vec::with_capacity(descs.len());
-        let mut next_id_num = 0usize;
-
-        for (i, scope_name) in scope_order.iter().enumerate() {
-            writeln!(writer, "$scope module {} $end", scope_name)?;
-            for desc in &scope_groups[i] {
-                let vcd_id = Self::generate_vcd_id(next_id_num);
-                next_id_num += 1;
-                writeln!(
-                    writer,
-                    "$var wire {} {} {} $end",
-                    desc.width, vcd_id, desc.name
-                )?;
-                signals.push(VcdWriterSignal {
-                    vcd_id,
+        let writer = BufWriter::new(file);
+        let signals = descs
+            .iter()
+            .map(|desc| VcdWriterSignal {
+                vcd_id: String::new(),
+                scope: desc.scope.clone(),
+                name: desc.name.clone(),
+                width: desc.width,
+                source: VcdWriterSource::Memory {
                     offset: desc.offset,
-                    width: desc.width,
                     is_4state: desc.is_4state,
-                });
-            }
-            writeln!(writer, "$upscope $end")?;
-        }
-
-        writeln!(writer, "$enddefinitions $end")?;
-        writeln!(writer, "$dumpvars")?;
-        writeln!(writer, "$end")?;
+                },
+            })
+            .collect::<Vec<_>>();
 
         let last_values = vec![None; signals.len()];
 
@@ -107,7 +80,102 @@ impl VcdWriter {
             signals,
             last_values,
             timestamp: 0,
+            header_written: false,
+            external_count: 0,
         })
+    }
+
+    /// Adds externally supplied signals before the first dump. VCD headers
+    /// cannot be extended after value changes have started.
+    pub fn add_external_signals(&mut self, descs: &[VcdExternalSignalDesc]) -> std::io::Result<()> {
+        if descs.is_empty() {
+            return Ok(());
+        }
+        if self.external_count != 0 {
+            let existing = self
+                .signals
+                .iter()
+                .filter(|signal| matches!(signal.source, VcdWriterSource::External { .. }))
+                .zip(descs)
+                .all(|(signal, desc)| {
+                    signal.scope == desc.scope
+                        && signal.name == desc.name
+                        && signal.width == desc.width
+                });
+            if existing && self.external_count == descs.len() {
+                return Ok(());
+            }
+        }
+        if self.header_written {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cannot add external VCD signals after the first dump",
+            ));
+        }
+        for desc in descs {
+            let index = self.external_count;
+            self.external_count += 1;
+            self.signals.push(VcdWriterSignal {
+                vcd_id: String::new(),
+                scope: desc.scope.clone(),
+                name: desc.name.clone(),
+                width: desc.width,
+                source: VcdWriterSource::External { index },
+            });
+            self.last_values.push(None);
+        }
+        Ok(())
+    }
+
+    fn write_header(&mut self) -> std::io::Result<()> {
+        if self.header_written {
+            return Ok(());
+        }
+        writeln!(self.writer, "$date")?;
+        writeln!(
+            self.writer,
+            "  {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        )?;
+        writeln!(self.writer, "$end")?;
+        writeln!(self.writer, "$version")?;
+        writeln!(self.writer, "  celox")?;
+        writeln!(self.writer, "$end")?;
+        writeln!(self.writer, "$timescale 1ns $end")?;
+
+        let mut scope_order = Vec::<String>::new();
+        let mut scope_groups = Vec::<Vec<usize>>::new();
+        let mut scope_idx = std::collections::HashMap::<String, usize>::new();
+        for (signal_index, signal) in self.signals.iter().enumerate() {
+            if let Some(index) = scope_idx.get(&signal.scope).copied() {
+                scope_groups[index].push(signal_index);
+            } else {
+                let index = scope_order.len();
+                scope_idx.insert(signal.scope.clone(), index);
+                scope_order.push(signal.scope.clone());
+                scope_groups.push(vec![signal_index]);
+            }
+        }
+        let mut next_id = 0;
+        for (scope, group) in scope_order.iter().zip(scope_groups) {
+            writeln!(self.writer, "$scope module {} $end", scope)?;
+            for signal_index in group {
+                let signal = &mut self.signals[signal_index];
+                signal.vcd_id = Self::generate_vcd_id(next_id);
+                next_id += 1;
+                writeln!(
+                    self.writer,
+                    "$var wire {} {} {} $end",
+                    signal.width, signal.vcd_id, signal.name
+                )?;
+            }
+            writeln!(self.writer, "$upscope $end")?;
+        }
+        writeln!(self.writer, "$enddefinitions $end")?;
+        writeln!(self.writer, "$dumpvars")?;
+        writeln!(self.writer, "$end")?;
+        self.header_written = true;
+        Ok(())
     }
 
     fn generate_vcd_id(num: usize) -> String {
@@ -137,22 +205,62 @@ impl VcdWriter {
         val
     }
 
+    fn mask_to_width(mut value: BigUint, width: usize) -> BigUint {
+        if value.bits() > width as u64 {
+            value &= (BigUint::from(1u8) << width) - 1u8;
+        }
+        value
+    }
+
     /// Dump all changed signals at the given timestamp.
     ///
     /// `memory` is the raw JIT memory (stable region or full buffer).
     pub fn dump(&mut self, timestamp: u64, memory: &[u8]) -> std::io::Result<()> {
+        self.dump_with_external(timestamp, memory, &[])
+    }
+
+    /// Dump memory-backed signals and external values in registration order.
+    pub fn dump_with_external(
+        &mut self,
+        timestamp: u64,
+        memory: &[u8],
+        external: &[(BigUint, BigUint)],
+    ) -> std::io::Result<()> {
+        if external.len() != self.external_count {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "expected {} external VCD values, got {}",
+                    self.external_count,
+                    external.len()
+                ),
+            ));
+        }
+        self.write_header()?;
         if timestamp > self.timestamp || timestamp == 0 {
             writeln!(self.writer, "#{}", timestamp)?;
             self.timestamp = timestamp;
         }
 
         for (i, sig) in self.signals.iter().enumerate() {
-            let byte_size = get_byte_size(sig.width);
-            let current_val = Self::read_value(memory, sig.offset, sig.width);
-            let current_mask = if sig.is_4state {
-                Self::read_value(memory, sig.offset + byte_size, sig.width)
-            } else {
-                BigUint::from(0u32)
+            let (current_val, current_mask, is_4state) = match sig.source {
+                VcdWriterSource::Memory { offset, is_4state } => {
+                    let byte_size = get_byte_size(sig.width);
+                    let value = Self::read_value(memory, offset, sig.width);
+                    let mask = if is_4state {
+                        Self::read_value(memory, offset + byte_size, sig.width)
+                    } else {
+                        BigUint::from(0u32)
+                    };
+                    (value, mask, is_4state)
+                }
+                VcdWriterSource::External { index } => {
+                    let (value, mask) = &external[index];
+                    let value = Self::mask_to_width(value.clone(), sig.width);
+                    let mask = Self::mask_to_width(mask.clone(), sig.width);
+                    let is_4state = mask != BigUint::default();
+                    (value, mask, is_4state)
+                }
             };
 
             let prev = &self.last_values[i];
@@ -162,7 +270,7 @@ impl VcdWriter {
             };
 
             if changed {
-                if sig.is_4state && current_mask != BigUint::from(0u32) {
+                if is_4state && current_mask != BigUint::from(0u32) {
                     Self::write_four_state_value(
                         &mut self.writer,
                         sig.width,
@@ -219,5 +327,39 @@ impl VcdWriter {
             }
             writeln!(writer, " {}", vcd_id)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_values_are_masked_to_their_declared_width() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("external-width.vcd");
+        let mut writer = VcdWriter::new(&path, &[]).unwrap();
+        writer
+            .add_external_signals(&[VcdExternalSignalDesc {
+                scope: "component".into(),
+                name: "state".into(),
+                width: 8,
+            }])
+            .unwrap();
+
+        writer
+            .dump_with_external(
+                0,
+                &[],
+                &[(BigUint::from(0x1ffu16), BigUint::from(0x100u16))],
+            )
+            .unwrap();
+        writer
+            .dump_with_external(1, &[], &[(BigUint::from(0xffu8), BigUint::default())])
+            .unwrap();
+
+        let dump = std::fs::read_to_string(path).unwrap();
+        assert!(!dump.contains("b111111111"), "{dump}");
+        assert_eq!(dump.matches("b11111111 !").count(), 1, "{dump}");
     }
 }

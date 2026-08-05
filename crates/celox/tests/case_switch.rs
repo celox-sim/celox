@@ -230,7 +230,6 @@ o2 = 8'h00;
     }
 
     fn test_case_in_comb_function_return(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     sel: input logic<2>,
@@ -267,7 +266,6 @@ module Top (
     }
 
     fn test_case_in_comb_function_output_argument(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     sel: input logic<2>,
@@ -305,7 +303,6 @@ module Top (
     }
 
     fn test_case_break_inside_comb_function_for(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     d: input logic<4>,

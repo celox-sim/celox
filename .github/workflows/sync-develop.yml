@@ -15,6 +15,8 @@ jobs:
   sync:
     name: Merge master into develop
     runs-on: ubuntu-latest
+    env:
+      SYNC_BRANCH: integration/master-to-develop
     steps:
       - name: Create release app token
         id: release-token
@@ -32,6 +34,8 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.release-token.outputs.token }}
 
+      - uses: ./.github/actions/setup-rust
+
       - name: Create develop on first use
         id: develop
         env:
@@ -43,7 +47,7 @@ jobs:
             exit 0
           fi
 
-          git push origin "${GITHUB_SHA}:refs/heads/develop"
+          git push origin "HEAD:refs/heads/develop"
           echo "created=true" >> "$GITHUB_OUTPUT"
 
       - name: Open or update the master synchronization pull request
@@ -53,17 +57,69 @@ jobs:
         shell: bash
         run: |
           git fetch --no-tags origin refs/heads/develop:refs/remotes/origin/develop
-          if git merge-base --is-ancestor "$GITHUB_SHA" origin/develop; then
-            echo "develop already contains master $GITHUB_SHA."
+          master_sha="$(git rev-parse HEAD)"
+
+          # Do not use master itself as a pull request head. A queued develop
+          # synchronization would then hold the branch that master's own merge
+          # queue needs to advance. Remove any PR created by the old workflow
+          # before switching to the dedicated synchronization branch.
+          legacy_pr="$(
+            gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --state open \
+              --base develop \
+              --head master \
+              --json number,isCrossRepository \
+              --jq '[.[] | select(.isCrossRepository == false)][0].number // empty'
+          )"
+          if [ -n "$legacy_pr" ]; then
+            gh pr close "$legacy_pr" --repo "$GITHUB_REPOSITORY"
+          fi
+
+          if git merge-base --is-ancestor "$master_sha" origin/develop; then
+            echo "develop already contains master $master_sha."
             exit 0
           fi
+
+          # Build the disposable branch from the exact merge that CI and develop
+          # will consume. Cargo.lock can merge cleanly as text while still
+          # referring to master's released Veryl crates, so re-resolve the HEAD
+          # dependency graph before publishing a conflict-free merge.
+          git config user.name "celox-release-bot"
+          git config user.email "celox-release-bot@users.noreply.github.com"
+          git switch --force-create "$SYNC_BRANCH" origin/develop
+
+          set +e
+          git merge --no-commit --no-ff "$master_sha"
+          merge_status="$?"
+          set -e
+
+          if [ "$merge_status" -eq 0 ]; then
+            cargo update -p veryl-analyzer
+            cargo metadata --locked --format-version 1 --no-deps >/dev/null
+            git add Cargo.lock
+            git commit -m "chore(develop): sync master"
+            sync_sha="$(git rev-parse HEAD)"
+          else
+            # Keep non-dependency conflicts visible and actionable on the PR.
+            git merge --abort
+            git switch --force-create "$SYNC_BRANCH" "$master_sha"
+            sync_sha="$master_sha"
+          fi
+
+          # Do not replace a branch that moved after this run inspected it.
+          sync_ref="refs/heads/$SYNC_BRANCH"
+          remote_sync_sha="$(git ls-remote origin "$sync_ref" | cut -f1)"
+          git push origin \
+            --force-with-lease="$sync_ref:$remote_sync_sha" \
+            "$sync_sha:$sync_ref"
 
           sync_pr="$(
             gh pr list \
               --repo "$GITHUB_REPOSITORY" \
               --state open \
               --base develop \
-              --head master \
+              --head "$SYNC_BRANCH" \
               --json number,isCrossRepository \
               --jq '[.[] | select(.isCrossRepository == false)][0].number // empty'
           )"
@@ -73,9 +129,9 @@ jobs:
               gh pr create \
                 --repo "$GITHUB_REPOSITORY" \
                 --base develop \
-                --head master \
+                --head "$SYNC_BRANCH" \
                 --title "chore(develop): sync master" \
-                --body $'Bring stable-trunk changes into the Veryl HEAD compatibility lane.\n\nThis PR is managed automatically. A conflict is actionable and must be resolved without replacing the Veryl HEAD dependency on `develop`.'
+                --body $'Bring stable-trunk changes into the Veryl HEAD compatibility lane.\n\nThis PR is managed automatically through a dedicated synchronization branch so the develop merge queue never holds `master` itself as a pull request head. A conflict is actionable and must be resolved without replacing the Veryl HEAD dependency on `develop`.'
             )"
           fi
 

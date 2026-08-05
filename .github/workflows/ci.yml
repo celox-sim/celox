@@ -72,7 +72,7 @@ jobs:
     if: always() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.scripts == 'true')
     runs-on: ubuntu-latest
     env:
-      VERYL_LANE: ${{ ((github.event_name == 'push' && github.ref_name == 'develop') || (github.event_name == 'pull_request' && github.base_ref == 'develop') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/develop')) && 'head' || 'stable' }}
+      VERYL_LANE: ${{ ((github.event_name == 'push' && github.ref_name == 'develop') || (github.event_name == 'pull_request' && github.base_ref == 'develop') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/develop')) && 'detect' || 'stable' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -92,8 +92,14 @@ jobs:
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
         shell: bash
         run: |
-          node scripts/check-veryl-lane.mjs "$VERYL_LANE"
-          if [ "$VERYL_LANE" = stable ]; then
+          if [ "$VERYL_LANE" = detect ]; then
+            detected_lane="$(node scripts/check-veryl-lane.mjs detect)"
+            echo "Detected Veryl $detected_lane lane on develop."
+          else
+            node scripts/check-veryl-lane.mjs "$VERYL_LANE"
+            detected_lane="$VERYL_LANE"
+          fi
+          if [ "$detected_lane" = stable ]; then
             node scripts/veryl-vendor.mjs check
           fi
 

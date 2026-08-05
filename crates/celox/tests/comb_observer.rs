@@ -2544,7 +2544,6 @@ module Top (
 }
 
 fn test_named_function_inputs_evaluate_in_source_order(sim) {
-    @omit_veryl;
     @build Simulator::builder(r#"
 module Top (
     value: input logic<8>,
@@ -2586,7 +2585,6 @@ module Top (
 }
 
 fn test_named_function_outputs_apply_in_source_order(sim) {
-    @omit_veryl;
     @build Simulator::builder(r#"
 module Top (
     tmp: output logic<8>,
@@ -4488,8 +4486,8 @@ module Top (sel: input logic, a: input logic<8>, out: output logic<8>) {
 }
 
 fn test_comb_function_loop_bounds_apply_output_effects_left_to_right(sim) {
-    @omit_veryl;
-    @ignore_on(wasm);
+    // Veryl 0.20.3 executes the design but drops the function output effects.
+    @ignore_on(wasm, veryl);
     @build Simulator::builder(r#"
 module Top (value: input logic<4>, out: output logic<8>) {
     function start_bound (x: input logic<4>, seen: output logic<8>) -> logic<4> {
@@ -4518,8 +4516,8 @@ module Top (value: input logic<4>, out: output logic<8>) {
 }
 
 fn test_comb_function_loop_skips_conditions_after_break(sim) {
-    @omit_veryl;
-    @ignore_on(wasm);
+    // Veryl 0.20.3 executes the design but drops the function output effects.
+    @ignore_on(wasm, veryl);
     @build Simulator::builder(r#"
 module Top (
     stop: input logic,

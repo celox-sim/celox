@@ -194,7 +194,6 @@ module Top (
     }
 
     fn test_direct_comb_signed_system_function_sign_extends_to_context(sim) {
-        @ignore_on(veryl);
         @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -263,7 +262,6 @@ module Top (
     }
 
     fn test_comb_function_body_signed_unsigned_system_functions(sim) {
-        @ignore_on(veryl);
         @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -395,7 +393,6 @@ module Top (
     }
 
     fn test_direct_ff_size_type_system_function(sim) {
-        @ignore_on(veryl);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -546,7 +543,6 @@ module Top (
     }
 
     fn test_direct_ff_signed_system_function_sign_extends_to_context(sim) {
-        @ignore_on(veryl);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,

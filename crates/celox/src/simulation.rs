@@ -51,6 +51,34 @@ impl<B: SimBackend> SimulationExecutor for Simulator<B> {
         self.apply_ff_at_checked(event)
     }
 
+    fn stage_external_event(
+        &mut self,
+        event: B::Event,
+        _timestamp: u64,
+    ) -> Result<(), RuntimeErrorCode> {
+        self.components.stage_inputs(event.id(), &mut self.backend);
+        Ok(())
+    }
+
+    fn fire_external_event(
+        &mut self,
+        event: B::Event,
+        timestamp: u64,
+    ) -> Result<(), RuntimeErrorCode> {
+        let writes = self
+            .components
+            .fire(event.id(), timestamp)
+            .map_err(|message| RuntimeErrorCode::Runtime {
+                message,
+                signals: Vec::new(),
+            })?;
+        for write in writes {
+            write.apply(&mut self.backend);
+            self.dirty = true;
+        }
+        Ok(())
+    }
+
     fn finish_timed_step(&mut self, timestamp: u64) {
         self.dirty = false;
         self.dump(timestamp);
@@ -74,81 +102,83 @@ impl Simulation {
 
 // ── Generic methods available for any backend ───────────────────────
 
-impl<B: SimBackend> Simulation<B> {
-    pub(crate) fn new(simulator: Simulator<B>) -> Self {
-        let num_events = simulator.backend.num_events();
-        let topo_signals: Vec<(SignalRef, usize, usize)> = simulator
+pub(crate) fn simulation_state<B: SimBackend>(simulator: &Simulator<B>) -> SimulationState<B> {
+    let num_events = simulator.backend.num_events();
+    let topo_signals: Vec<(SignalRef, usize, usize)> = simulator
+        .program
+        .design
+        .events
+        .ordered_events
+        .iter()
+        .map(|addr| {
+            let signal = simulator.backend.resolve_signal(addr);
+            let id = simulator
+                .backend
+                .resolve_event_opt(addr)
+                .map(|ev| ev.id())
+                .unwrap_or(usize::MAX);
+            let canonical = simulator.program.design.events.canonical(*addr);
+            let canonical_id = simulator
+                .backend
+                .resolve_event_opt(&canonical)
+                .map(|ev| ev.id())
+                .unwrap_or(usize::MAX);
+            (signal, id, canonical_id)
+        })
+        .collect();
+
+    let mut domain_kinds = vec![None; num_events];
+    for (_, id, _) in topo_signals.iter().copied() {
+        if id != usize::MAX {
+            let addr = simulator.backend.id_to_addr_slice()[id];
+            if let Some(info) = simulator.program.get_variable_info(&addr) {
+                domain_kinds[id] = Some(info.kind);
+            }
+        }
+    }
+
+    let mut event_info = vec![
+        EventInfo {
+            canonical_id: usize::MAX,
+            is_cascaded: false,
+            eval_ff_event: None,
+            eval_only_event: None,
+            apply_event: None,
+        };
+        num_events
+    ];
+    for (id, info) in event_info.iter_mut().enumerate() {
+        let addr = simulator.backend.id_to_addr_slice()[id];
+        let canonical = simulator.program.design.events.canonical(addr);
+
+        let is_cascaded = simulator
             .program
             .design
             .events
-            .ordered_events
-            .iter()
-            .map(|addr| {
-                let signal = simulator.backend.resolve_signal(addr);
-                let id = simulator
-                    .backend
-                    .resolve_event_opt(addr)
-                    .map(|ev| ev.id())
-                    .unwrap_or(usize::MAX);
-                let canonical = simulator.program.design.events.canonical(*addr);
-                let canonical_id = simulator
-                    .backend
-                    .resolve_event_opt(&canonical)
-                    .map(|ev| ev.id())
-                    .unwrap_or(usize::MAX);
-                (signal, id, canonical_id)
-            })
-            .collect();
+            .cascaded_events
+            .contains(&canonical);
 
-        let mut domain_kinds = vec![None; num_events];
-        for (_, id, _) in topo_signals.iter().copied() {
-            if id != usize::MAX {
-                let addr = simulator.backend.id_to_addr_slice()[id];
-                if let Some(info) = simulator.program.get_variable_info(&addr) {
-                    domain_kinds[id] = Some(info.kind);
-                }
-            }
-        }
+        let eval_ff_event = simulator.backend.resolve_event_opt(&canonical);
+        let eval_only_event = simulator.backend.resolve_eval_only_event(&canonical);
+        let apply_event = simulator.backend.resolve_apply_event(&canonical);
 
-        let mut event_info = vec![
-            EventInfo {
-                canonical_id: usize::MAX,
-                is_cascaded: false,
-                eval_ff_event: None,
-                eval_only_event: None,
-                apply_event: None,
+        if let Some(canonical_ev) = eval_ff_event {
+            *info = EventInfo {
+                canonical_id: canonical_ev.id(),
+                is_cascaded,
+                eval_ff_event,
+                eval_only_event,
+                apply_event,
             };
-            num_events
-        ];
-        for (id, info) in event_info.iter_mut().enumerate() {
-            let addr = simulator.backend.id_to_addr_slice()[id];
-            let canonical = simulator.program.design.events.canonical(addr);
-
-            let is_cascaded = simulator
-                .program
-                .design
-                .events
-                .cascaded_events
-                .contains(&canonical);
-
-            let eval_ff_event = simulator.backend.resolve_event_opt(&canonical);
-            let eval_only_event = simulator.backend.resolve_eval_only_event(&canonical);
-            let apply_event = simulator.backend.resolve_apply_event(&canonical);
-
-            if let Some(canonical_ev) = eval_ff_event {
-                *info = EventInfo {
-                    canonical_id: canonical_ev.id(),
-                    is_cascaded,
-                    eval_ff_event,
-                    eval_only_event,
-                    apply_event,
-                };
-            }
         }
+    }
 
-        let state =
-            SimulationState::new(&simulator.backend, topo_signals, domain_kinds, event_info);
+    SimulationState::new(&simulator.backend, topo_signals, domain_kinds, event_info)
+}
 
+impl<B: SimBackend> Simulation<B> {
+    pub(crate) fn new(simulator: Simulator<B>) -> Self {
+        let state = simulation_state(&simulator);
         Self { simulator, state }
     }
 
