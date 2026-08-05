@@ -185,7 +185,7 @@ jobs:
       HELIODOR_DIR: ${{ github.workspace }}/target/heliodor-arm64/source
       HELIODOR_RESULTS_DIR: ${{ github.workspace }}/target/heliodor-arm64/results
       HELIODOR_TOOLS_DIR: ${{ github.workspace }}/target/heliodor-arm64/tools
-      HELIODOR_RUNNERS: celox celox-cranelift
+      HELIODOR_RUNNERS: veryl-cc-sync celox celox-cranelift
       HELIODOR_TESTS: test_soc_linux_boot
       HELIODOR_TIMEOUT_SEC: "1200"
       HELIODOR_CELOX_CARGO_PROFILE: release
@@ -199,7 +199,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
 
-      - name: Boot Linux with the native and Cranelift ARM64 backends
+      - name: Boot Linux with Veryl-CC, native, and Cranelift on ARM64
         shell: bash
         run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-arm64-output.txt
 
