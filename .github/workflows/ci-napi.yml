@@ -69,7 +69,8 @@ jobs:
             exit 1
           fi
 
-      - uses: ./.github/actions/set-nightly-version
+      - if: env.NIGHTLY == 'true'
+        uses: ./.github/actions/set-nightly-version
         with:
           enabled: ${{ env.NIGHTLY }}
           channel: ${{ env.NIGHTLY_CHANNEL }}
@@ -149,7 +150,8 @@ jobs:
         with:
           node-version: 24
 
-      - uses: ./.github/actions/set-nightly-version
+      - if: env.NIGHTLY == 'true'
+        uses: ./.github/actions/set-nightly-version
         with:
           enabled: ${{ env.NIGHTLY }}
           channel: ${{ env.NIGHTLY_CHANNEL }}
@@ -225,7 +227,8 @@ jobs:
         with:
           node-version: 24
 
-      - uses: ./.github/actions/set-nightly-version
+      - if: env.NIGHTLY == 'true'
+        uses: ./.github/actions/set-nightly-version
         with:
           enabled: ${{ env.NIGHTLY }}
           channel: ${{ env.NIGHTLY_CHANNEL }}
@@ -265,7 +268,8 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
-      - uses: ./.github/actions/set-nightly-version
+      - if: env.NIGHTLY == 'true'
+        uses: ./.github/actions/set-nightly-version
         with:
           enabled: ${{ env.NIGHTLY }}
           channel: ${{ env.NIGHTLY_CHANNEL }}
@@ -370,7 +374,8 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
-      - uses: ./.github/actions/set-nightly-version
+      - if: env.NIGHTLY == 'true'
+        uses: ./.github/actions/set-nightly-version
         with:
           enabled: ${{ env.NIGHTLY }}
           channel: ${{ env.NIGHTLY_CHANNEL }}

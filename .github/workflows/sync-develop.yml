@@ -24,6 +24,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
+          permission-workflows: write
 
       - uses: actions/checkout@v7
         with:
@@ -63,8 +64,8 @@ jobs:
               --state open \
               --base develop \
               --head master \
-              --json number \
-              --jq '.[0].number // empty'
+              --json number,isCrossRepository \
+              --jq '[.[] | select(.isCrossRepository == false)][0].number // empty'
           )"
 
           if [ -z "$sync_pr" ]; then
