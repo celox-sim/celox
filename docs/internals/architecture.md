@@ -131,6 +131,13 @@ state, and exposes reflection plus the native backend to foreign-interface
 adapters. Loading and executing this path does not require source text or a
 compiler artifact.
 
+The `celox-vpi` runtime layer exports the initial VPI C ABI directly on this
+instance. It supports module/scope/signal handles, hierarchy iteration, common
+integer and string properties, and immediate scalar, integer, vector, binary,
+and hexadecimal value access. Delayed writes and callback registration remain
+owned by the future simulation-region scheduler integration rather than being
+approximated inside the ABI layer.
+
 ### Cranelift
 
 The Cranelift backend translates SIR to Cranelift IR and uses Cranelift's JIT. It

@@ -1,0 +1,21 @@
+[package]
+name                  = "celox-vpi"
+version.workspace     = true
+publish               = false
+authors.workspace     = true
+repository.workspace  = true
+license.workspace     = true
+description.workspace = true
+edition.workspace     = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+celox = { path = "../celox" }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+celox = { path = "../celox", features = ["experimental-arm64-backend"] }
+
+[lints]
+workspace = true
