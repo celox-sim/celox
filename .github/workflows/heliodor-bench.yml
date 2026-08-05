@@ -162,6 +162,7 @@ jobs:
       HELIODOR_RUNNERS: celox-cranelift
       HELIODOR_TESTS: test_soc_linux_boot
       HELIODOR_TIMEOUT_SEC: "1200"
+      HELIODOR_CELOX_CARGO_PROFILE: release
       CELOX_OPT_LEVEL: O2
     steps:
       - uses: actions/checkout@v7
@@ -199,6 +200,7 @@ jobs:
       HELIODOR_RUNNERS: celox celox-cranelift
       HELIODOR_TESTS: test_soc_linux_boot
       HELIODOR_TIMEOUT_SEC: "1200"
+      HELIODOR_CELOX_CARGO_PROFILE: release
       HELIODOR_CELOX_CARGO_FEATURES: experimental-arm64-backend
       CELOX_OPT_LEVEL: O2
     steps:
