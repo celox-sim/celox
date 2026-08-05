@@ -79,7 +79,13 @@ jobs:
             exit 0
           fi
 
-          git push origin "$master_sha:refs/heads/$SYNC_BRANCH"
+          # Conflict resolution can add commits to the disposable sync branch.
+          # Reset it to master only if it has not moved since this inspection.
+          sync_ref="refs/heads/$SYNC_BRANCH"
+          remote_sync_sha="$(git ls-remote origin "$sync_ref" | cut -f1)"
+          git push origin \
+            --force-with-lease="$sync_ref:$remote_sync_sha" \
+            "$master_sha:$sync_ref"
 
           sync_pr="$(
             gh pr list \
