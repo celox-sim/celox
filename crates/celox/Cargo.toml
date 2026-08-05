@@ -83,6 +83,7 @@ harness = false
 [[bench]]
 name = "compilation"
 harness = false
+bench = false
 
 [lints]
 workspace = true
