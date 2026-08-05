@@ -1,8 +1,11 @@
-#![cfg(target_arch = "x86_64")]
+#![cfg(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+))]
 
 use std::sync::Arc;
 
-use celox::{NativeBackend, SimBackend, Simulator};
+use celox::{NativeBackend, SharedNativeCode, SimBackend, Simulator};
 
 const ADDER: &str = r#"
     module Top (
@@ -30,6 +33,75 @@ const FF: &str = r#"
         }
     }
 "#;
+
+#[cfg(target_arch = "x86_64")]
+type CopiedNativeFunc = unsafe extern "sysv64" fn(*mut u8) -> i64;
+#[cfg(target_arch = "aarch64")]
+type CopiedNativeFunc = unsafe extern "C" fn(*mut u8) -> i64;
+
+#[test]
+fn shared_code_packs_every_function_into_one_image() {
+    let sim = Simulator::builder(FF, "Top").build().unwrap();
+    let shared = sim.shared_code();
+    let entries = shared.code_entries();
+    let image = shared.code_image();
+
+    assert!(entries.len() > 1, "FF design should emit multiple entries");
+    assert_eq!(entries[0].name, "eval_comb");
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.offset % 16, 0, "unaligned entry {entry:?}");
+        assert!(entry.size > 0, "empty entry {entry:?}");
+        assert!(entry.offset + entry.size <= image.len());
+        if let Some(next) = entries.get(index + 1) {
+            assert!(entry.offset + entry.size <= next.offset);
+        }
+    }
+}
+
+#[test]
+fn copied_native_image_executes_from_recorded_entry_offset() {
+    let sim = Simulator::builder(ADDER, "Top").build().unwrap();
+    let shared = sim.shared_code();
+    let eval_comb = shared
+        .code_entries()
+        .iter()
+        .find(|entry| entry.name == "eval_comb")
+        .unwrap();
+    let copied = celox::native_backend::jit_mem::JitCode::new(shared.code_image()).unwrap();
+    let entry_ptr = copied.entry_ptr(eval_comb.offset).unwrap();
+    // Safety: the entry metadata and image were produced together, and this
+    // test preserves the complete image while resolving the copied base.
+    let eval_comb = unsafe { std::mem::transmute::<*const u8, CopiedNativeFunc>(entry_ptr) };
+
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let sum = sim.signal("sum");
+    let mut backend = NativeBackend::from_shared(shared);
+    backend.set(a, 19u8);
+    backend.set(b, 23u8);
+    let (state, _) = backend.memory_as_mut_ptr();
+    assert_eq!(unsafe { eval_comb(state) }, 0);
+    assert_eq!(backend.get_as::<u8>(sum), 42);
+}
+
+#[test]
+fn precompiled_runtime_reattaches_pointer_free_program_image() {
+    let sim = Simulator::builder(FF, "Top").build().unwrap();
+    let image = sim.shared_code().program_image().clone();
+    let reloaded = Arc::new(SharedNativeCode::from_image(image).unwrap());
+    let mut backend = NativeBackend::from_shared(reloaded);
+    let clock = backend.id_to_event_slice()[0];
+    let reset = sim.signal("i_rst");
+    let data = sim.signal("d");
+    let output = sim.signal("q");
+
+    backend.set(reset, 1u8);
+    backend.set(data, 77u8);
+    backend.eval_comb().unwrap();
+    backend.eval_apply_ff_at(clock).unwrap();
+    backend.eval_comb().unwrap();
+    assert_eq!(backend.get_as::<u8>(output), 77);
+}
 
 /// Two backends from the same SharedNativeCode produce correct, independent results.
 #[test]

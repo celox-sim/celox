@@ -98,6 +98,21 @@ The backend is experimental and disabled by default. Enable the
 `experimental-arm64-backend` feature on the `celox` crate to select it as the
 default backend on AArch64; without the feature, AArch64 uses Cranelift.
 
+### Native program images
+
+The x86-64 and AArch64 compilers first produce a pointer-free
+`NativeProgramImage`. Every generated evaluation function is copied intact into
+one 16-byte-aligned code image; callable entries and event bindings are retained
+as offsets from the image base. Internal branches, jump tables, constant tables,
+and literal data remain inside their originating function blob.
+
+The precompiled host runtime attaches the image by copying it once into
+executable memory and resolving the recorded offsets into process-local function
+pointers. The same artifact can therefore be copied to another address and
+reattached without recompiling the design. The in-memory artifact is the boundary
+for a future on-disk executable or appended-image container; it is not yet a
+stable serialized file format.
+
 ### Cranelift
 
 The Cranelift backend translates SIR to Cranelift IR and uses Cranelift's JIT. It
