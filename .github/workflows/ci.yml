@@ -402,9 +402,6 @@ jobs:
       - name: Build packages
         run: pnpm run build
 
-      - name: Build Playground
-        run: pnpm --filter @celox-sim/playground build
-
       - name: Install Chromium
         run: pnpm --filter @celox-sim/playground exec playwright install --with-deps chromium
 
