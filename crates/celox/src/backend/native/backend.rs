@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use bit_set::BitSet;
+use celox_runtime::DesignReflection;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 
@@ -245,6 +246,7 @@ pub struct NativeProgramImage {
     apply_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
     id_to_addr: Vec<AbsoluteAddr>,
     id_to_event: Vec<NativeEventImageRef>,
+    reflection: DesignReflection,
     layout: MemoryLayout,
     native_memory_size: usize,
     options: NativeRuntimeOptions,
@@ -267,7 +269,15 @@ impl NativeProgramImage {
         &self.layout
     }
 
+    /// Source-independent instance hierarchy and signal metadata.
+    pub fn reflection(&self) -> &DesignReflection {
+        &self.reflection
+    }
+
     pub(super) fn validate(&self) -> Result<(), String> {
+        self.reflection
+            .validate()
+            .map_err(|error| format!("invalid design reflection: {error}"))?;
         if self.code.is_empty() {
             return Err("code image is empty".into());
         }
@@ -1160,6 +1170,7 @@ fn compile_program(
             apply_event_map,
             id_to_addr,
             id_to_event,
+            reflection: sir.runtime().build_design_reflection(layout),
             layout: layout.clone(),
             native_memory_size,
             options: NativeRuntimeOptions {

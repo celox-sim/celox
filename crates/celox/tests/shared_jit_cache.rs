@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use celox::native_backend::NativeImageContainerError;
-use celox::{NativeBackend, SharedNativeCode, SimBackend, Simulator};
+use celox::{NativeBackend, SharedNativeCode, SignalDirection, SimBackend, Simulator};
 
 const ADDER: &str = r#"
     module Top (
@@ -32,6 +32,29 @@ const FF: &str = r#"
                 q = d;
             }
         }
+    }
+"#;
+
+const HIERARCHICAL: &str = r#"
+    module Child (
+        i: input signed logic<8>,
+        o: output logic<8>,
+    ) {
+        var state: logic<8>;
+        always_comb {
+            state = i;
+            o = state;
+        }
+    }
+
+    module Top (
+        a: input signed logic<8>,
+        y: output logic<8>,
+    ) {
+        inst u_child: Child (
+            i: a,
+            o: y,
+        );
     }
 "#;
 
@@ -125,6 +148,10 @@ fn native_program_image_round_trips_through_appended_runtime() {
         appended.image.code_entries(),
         sim.shared_code().code_entries()
     );
+    assert_eq!(
+        appended.image.reflection(),
+        sim.shared_code().program_image().reflection()
+    );
 
     let reloaded = Arc::new(SharedNativeCode::from_image(appended.image).unwrap());
     let mut backend = NativeBackend::from_shared(reloaded);
@@ -138,6 +165,44 @@ fn native_program_image_round_trips_through_appended_runtime() {
     backend.eval_apply_ff_at(clock).unwrap();
     backend.eval_comb().unwrap();
     assert_eq!(backend.get_as::<u8>(output), 91);
+}
+
+#[test]
+fn native_program_image_carries_source_independent_design_reflection() {
+    let sim = Simulator::builder(HIERARCHICAL, "Top").build().unwrap();
+    let compiled = sim.shared_code();
+    let image = compiled.program_image();
+    let reflection = image.reflection();
+
+    let (_, root) = reflection.scope_by_name("Top").unwrap();
+    assert_eq!(root.name, "Top");
+    assert_eq!(root.module_name, "Top");
+    assert!(root.parent.is_none());
+    let (_, child) = reflection.scope_by_name("Top.u_child[0]").unwrap();
+    assert_eq!(child.name, "u_child[0]");
+    assert_eq!(child.module_name, "Child");
+    assert_eq!(
+        child.parent.unwrap(),
+        reflection.scope_by_name("Top").unwrap().0
+    );
+
+    let (_, input) = reflection.signal_by_name("Top.a").unwrap();
+    assert_eq!(input.direction, SignalDirection::Input);
+    assert!(input.signed);
+    assert_eq!(input.signal.width, 8);
+    let (_, child_input) = reflection.signal_by_name("Top.u_child[0].i").unwrap();
+    assert_eq!(child_input.direction, SignalDirection::Input);
+    assert!(child_input.signed);
+    let (_, child_state) = reflection.signal_by_name("Top.u_child[0].state").unwrap();
+    assert_eq!(child_state.direction, SignalDirection::Internal);
+
+    let input = input.signal;
+    let output = reflection.signal_by_name("Top.y").unwrap().1.signal;
+    let shared = Arc::new(SharedNativeCode::from_image(image.clone()).unwrap());
+    let mut backend = NativeBackend::from_shared(shared);
+    backend.set(input, 0xa5u8);
+    backend.eval_comb().unwrap();
+    assert_eq!(backend.get_as::<u8>(output), 0xa5);
 }
 
 #[test]

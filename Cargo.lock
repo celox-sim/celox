@@ -634,6 +634,7 @@ dependencies = [
  "celox-testbench",
  "chrono",
  "num-bigint",
+ "serde",
  "tempfile",
 ]
 

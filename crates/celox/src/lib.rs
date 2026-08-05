@@ -22,6 +22,10 @@ pub use backend::{
 };
 pub use celox_design::{ElaboratedDesign, EventTopology, RuntimeSchema};
 pub use celox_frontend_veryl::{FrontendDiagnostic, LoweringPhase, ParserError};
+pub use celox_runtime::{
+    DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,
+    SignalDirection,
+};
 pub use celox_slt::scheduler::SchedulerError;
 pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
 pub use diagnostics::RuntimeDiagnostics;

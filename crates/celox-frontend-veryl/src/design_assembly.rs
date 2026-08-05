@@ -1128,6 +1128,7 @@ fn module_variables(
                     id: *id,
                     path: varibale.path.clone(),
                     var_kind: varibale.kind,
+                    signed: varibale.r#type.signed,
                     packed_dims,
                     metadata: VariableMetadata {
                         width: resolve_total_width(module, varibale)?,

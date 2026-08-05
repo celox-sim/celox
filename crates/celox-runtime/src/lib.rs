@@ -3,6 +3,7 @@
 pub mod backend;
 mod error;
 mod event_buffer;
+mod reflection;
 pub mod scheduler;
 mod simulation;
 mod testbench;
@@ -10,6 +11,10 @@ mod vcd;
 
 pub use error::SimulatorErrorCode;
 pub use event_buffer::RuntimeEventBuffer;
+pub use reflection::{
+    DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,
+    SignalDirection,
+};
 pub use simulation::{EventInfo, SimulationExecutor, SimulationState};
 pub use testbench::bind_testbench_program;
 pub use vcd::{VcdExternalSignalDesc, VcdSignalDesc, VcdWriter};
@@ -17,7 +22,9 @@ pub use vcd::{VcdExternalSignalDesc, VcdSignalDesc, VcdWriter};
 pub type AbsoluteAddr = celox_design::StateAddr;
 pub type MemoryLayout = celox_state_layout::MemoryLayout<AbsoluteAddr>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct SignalArrayLayout {
     pub element_width: usize,
     pub element_count: usize,
@@ -25,7 +32,9 @@ pub struct SignalArrayLayout {
     pub plane_size: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct SignalRef {
     pub offset: usize,
     pub width: usize,

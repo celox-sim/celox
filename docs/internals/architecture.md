@@ -111,6 +111,12 @@ executable memory and resolving the recorded offsets into process-local function
 pointers. The same artifact can therefore be copied to another address and
 reattached without recompiling the design.
 
+The image also carries a source-independent reflection table. It records the
+elaborated instance tree and name-sorted signals, including their directions,
+signedness, packed and unpacked dimensions, four-state representation, and
+runtime state offsets. A precompiled runtime can therefore implement foreign
+interfaces such as VPI without retaining the Veryl analyzer or compiler IR.
+
 `NativeProgramImage` can also be serialized after a precompiled runtime
 executable. A fixed-size EOF trailer records the container version, target ISA,
 payload length, and checksum, so startup can find the design without parsing ELF
