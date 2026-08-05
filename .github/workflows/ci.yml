@@ -176,6 +176,16 @@ jobs:
       - name: Build NAPI WASM compatibility target
         run: pnpm --filter @celox-sim/celox-napi exec napi build --platform --target wasm32-wasip1-threads --manifest-path ../../Cargo.toml -p celox-napi
 
+      - name: Upload NAPI WASM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: napi-wasm32-wasi
+          path: |
+            crates/celox-napi/celox.wasi-browser.js
+            crates/celox-napi/celox.wasm32-wasi.wasm
+            crates/celox-napi/wasi-worker-browser.mjs
+          if-no-files-found: error
+
   arm64-backend:
     name: ARM64 Backend Test
     needs: changes
@@ -362,3 +372,38 @@ jobs:
 
       - name: Run tests
         run: pnpm --filter="!@celox-sim/celox-napi" --filter="!@celox-sim/playground" -r test
+
+  playground-browser:
+    name: Playground Browser Test
+    needs: [changes, rust]
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Download NAPI WASM artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: napi-wasm32-wasi
+          path: crates/celox-napi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages
+        run: pnpm run build
+
+      - name: Install Chromium
+        run: pnpm --filter @celox-sim/playground exec playwright install --with-deps chromium
+
+      - name: Run Playground browser tests
+        run: pnpm --filter @celox-sim/playground test:e2e
