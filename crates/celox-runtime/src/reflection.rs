@@ -1,6 +1,6 @@
 //! Source-independent hierarchy and signal metadata retained by native images.
 
-use celox_design::{PortTypeKind, StateAddr};
+use celox_design::{DomainKind, PortTypeKind, StateAddr};
 use serde::{Deserialize, Serialize};
 
 use crate::SignalRef;
@@ -37,6 +37,7 @@ pub struct ReflectionSignal {
     pub state_address: StateAddr,
     pub signal: SignalRef,
     pub direction: SignalDirection,
+    pub domain_kind: DomainKind,
     pub signed: bool,
     pub packed_dims: Vec<usize>,
     pub unpacked_dims: Vec<usize>,

@@ -124,6 +124,13 @@ or another platform executable format. Replacing an attached design preserves
 the runtime prefix and its file permissions. Container versions are validated
 strictly; compatibility between different versions is not implicit.
 
+`NativeProgramInstance` is the runtime-only entry point for the resulting
+artifact. It discovers an image in arbitrary runtime bytes or at the end of the
+current executable, maps the code into executable memory, allocates independent
+state, and exposes reflection plus the native backend to foreign-interface
+adapters. Loading and executing this path does not require source text or a
+compiler artifact.
+
 ### Cranelift
 
 The Cranelift backend translates SIR to Cranelift IR and uses Cranelift's JIT. It

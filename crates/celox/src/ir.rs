@@ -500,6 +500,7 @@ impl RuntimeProgram {
                         array_layout,
                     },
                     direction,
+                    domain_kind: info.kind,
                     signed: info.signed,
                     packed_dims: info.packed_dims.clone(),
                     unpacked_dims: info.array_dims.clone(),

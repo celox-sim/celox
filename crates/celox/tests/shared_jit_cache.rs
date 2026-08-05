@@ -6,7 +6,10 @@
 use std::sync::Arc;
 
 use celox::native_backend::NativeImageContainerError;
-use celox::{NativeBackend, SharedNativeCode, SignalDirection, SimBackend, Simulator};
+use celox::{
+    NativeBackend, NativeProgramInstance, NativeProgramLoadError, SharedNativeCode,
+    SignalDirection, SimBackend, Simulator,
+};
 
 const ADDER: &str = r#"
     module Top (
@@ -203,6 +206,31 @@ fn native_program_image_carries_source_independent_design_reflection() {
     backend.set(input, 0xa5u8);
     backend.eval_comb().unwrap();
     assert_eq!(backend.get_as::<u8>(output), 0xa5);
+}
+
+#[test]
+fn precompiled_runtime_instance_loads_and_runs_attached_bytes_without_source() {
+    let sim = Simulator::builder(ADDER, "Top").build().unwrap();
+    let attached = sim
+        .shared_code()
+        .program_image()
+        .append_to_runtime(b"precompiled runtime")
+        .unwrap();
+    drop(sim);
+
+    let mut runtime = NativeProgramInstance::from_attached_bytes(&attached).unwrap();
+    let a = runtime.signal_ref("Top.a").unwrap();
+    let b = runtime.signal_ref("Top.b").unwrap();
+    let sum = runtime.signal_ref("Top.sum").unwrap();
+    runtime.backend_mut().set(a, 100u8);
+    runtime.backend_mut().set(b, 27u8);
+    runtime.eval_comb().unwrap();
+    assert_eq!(runtime.backend().get_as::<u8>(sum), 127);
+
+    assert!(matches!(
+        NativeProgramInstance::from_attached_bytes(b"plain runtime"),
+        Err(NativeProgramLoadError::MissingImage)
+    ));
 }
 
 #[test]
