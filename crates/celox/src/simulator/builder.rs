@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use veryl_analyzer::ir::{Comptime, Expression, VarPath};
 use veryl_analyzer::value::Value;
@@ -144,7 +145,29 @@ fn analyze(
     symbol_table::clear();
     attribute_table::clear();
 
-    let metadata = metadata.unwrap_or_else(|| Metadata::create_default("prj").unwrap());
+    let mut metadata = metadata.unwrap_or_else(|| Metadata::create_default("prj").unwrap());
+    // Pass 1 uses this name as the source namespace. Preserve the namespaces
+    // assigned by Veryl for dependency and standard-library sources instead
+    // of registering every supplied source under the root project.
+    let source_projects: HashMap<PathBuf, String> = if metadata.metadata_path.as_os_str().is_empty()
+    {
+        HashMap::default()
+    } else {
+        match metadata.paths::<&Path>(&[], false, true) {
+            Ok(paths) => paths.into_iter().map(|path| (path.src, path.prj)).collect(),
+            Err(error) => {
+                return (
+                    Err(ParserError::illegal_context(
+                        "Veryl project source discovery",
+                        error.to_string(),
+                        None,
+                    )),
+                    Vec::new(),
+                    Vec::new(),
+                );
+            }
+        }
+    };
     // Preserve an explicitly configured seed, but defer generating an
     // implicit seed until testbench execution. This keeps compilation
     // deterministic and avoids host-only time APIs in the browser compiler.
@@ -158,7 +181,8 @@ fn analyze(
     let mut errors = vec![];
     for (code, path) in sources {
         let parsed = Parser::parse(code, path).unwrap();
-        errors.append(&mut analyzer.analyze_pass1(&project_name, &parsed.veryl));
+        let source_project = source_projects.get(*path).unwrap_or(&project_name);
+        errors.append(&mut analyzer.analyze_pass1(source_project, &parsed.veryl));
         parsers.push(parsed);
     }
     let loop_sources =
