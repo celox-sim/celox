@@ -12,6 +12,7 @@ use celox_slt::{
     scheduler::{self, SchedulerError},
 };
 use veryl_analyzer::ir::{Declaration, Module, VarId, VarPath};
+use veryl_analyzer::symbol::Affiliation;
 use veryl_metadata::{ClockType, ResetType};
 use veryl_parser::resource_table::{self, StrId};
 
@@ -20,7 +21,7 @@ use crate::{
     FusedSirOptimizationHints, GlueAddr, HashMap, HashSet, InstancePath, ParserError,
     RegionedAbsoluteAddr, RegionedVarAddr, RelocationModule, ScheduledRtl, ScheduledRtlOutput,
     SharedClockLowering, SimModule, SourceLocation, SymbolicRtl, VariableInfo, VerylFrontendLookup,
-    VerylTestbenchSource, build_ff_clock_recipes, flattening, resolve_total_width,
+    VerylTestbenchSource, bitaccess, build_ff_clock_recipes, flattening, resolve_total_width,
 };
 
 fn flatten_with_trace(
@@ -852,21 +853,32 @@ fn module_variables(
         let mut variables = HashMap::default();
         let mut paths: HashMap<VarPath, Option<VarId>> = HashMap::default();
         for (id, varibale) in &module.variables {
-            match paths.entry(varibale.path.clone()) {
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(Some(*id));
-                }
-                std::collections::hash_map::Entry::Occupied(mut e) => {
-                    // Duplicate VarPath — mark as ambiguous
-                    e.insert(None);
+            // Only module-scope variables are externally addressable. Locals
+            // may share the same VarPath, but must not make a legal
+            // hierarchical or public lookup appear ambiguous.
+            if varibale.affiliation == Affiliation::Module {
+                match paths.entry(varibale.path.clone()) {
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(Some(*id));
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        // Duplicate visible VarPath — mark as ambiguous.
+                        e.insert(None);
+                    }
                 }
             }
+            let (dimensions, _, _) = bitaccess::get_dimensions_and_strides(module, *id)?;
+            let packed_dims = dimensions
+                .into_iter()
+                .skip(varibale.r#type.array.iter().count())
+                .collect();
             variables.insert(
                 *id,
                 VariableInfo {
                     id: *id,
                     path: varibale.path.clone(),
                     var_kind: varibale.kind,
+                    packed_dims,
                     metadata: VariableMetadata {
                         width: resolve_total_width(module, varibale)?,
                         is_4state: is_4state_type(&varibale.r#type.kind),

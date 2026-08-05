@@ -181,17 +181,30 @@ impl SIRTranslator {
             };
 
             for i in 0..arg_num_chunks {
-                let chunk_val_v = get_chunk_as_i64(state.builder, &arg_chunks_v, i);
-                let chunk_val_m = if self.options.four_state {
+                let arg_chunk_bits = arg_width.saturating_sub(i * 64).min(64);
+                let raw_chunk_v = get_chunk_as_i64(state.builder, &arg_chunks_v, i);
+                let raw_chunk_m = if self.options.four_state {
                     get_chunk_as_i64(state.builder, &arg_chunks_m, i)
                 } else {
                     state.builder.ins().iconst(types::I64, 0)
+                };
+                // Cranelift represents sub-byte HDL values with an i8.  Mask the
+                // physical padding before concatenation so it cannot become part
+                // of an adjacent field.
+                let (chunk_val_v, chunk_val_m) = if arg_chunk_bits < 64 {
+                    let mask_value = (1u64 << arg_chunk_bits) - 1;
+                    let mask = state.builder.ins().iconst(types::I64, mask_value as i64);
+                    (
+                        state.builder.ins().band(raw_chunk_v, mask),
+                        state.builder.ins().band(raw_chunk_m, mask),
+                    )
+                } else {
+                    (raw_chunk_v, raw_chunk_m)
                 };
 
                 let abs_bit_offset = current_bit_offset + i * 64;
                 let dst_chunk_idx = abs_bit_offset / 64;
                 let bit_shift = abs_bit_offset % 64;
-                let arg_chunk_bits = arg_width.saturating_sub(i * 64).min(64);
 
                 // 1. Write to dst_chunks[dst_chunk_idx]
                 if dst_chunk_idx < num_chunks {
@@ -650,8 +663,8 @@ impl SIRTranslator {
                     }
                 };
 
-                let final_res_v = cast_type(state.builder, res_v, dst_ty);
-                let final_res_m = cast_type(state.builder, res_m, dst_ty);
+                let final_res_v = promote_to_physical(state, res_v, d_width, false, dst_ty);
+                let final_res_m = promote_to_physical(state, res_m, d_width, false, dst_ty);
                 // Normalize: operations produce X (v=1,m=1), never Z (v=0,m=1)
                 let normalized_v = state.builder.ins().bor(final_res_v, final_res_m);
                 state.regs.insert(
@@ -662,7 +675,7 @@ impl SIRTranslator {
                     },
                 );
             } else {
-                let final_res = cast_type(state.builder, res_v, dst_ty);
+                let final_res = promote_to_physical(state, res_v, d_width, false, dst_ty);
                 state
                     .regs
                     .insert(*dst, TransValue::TwoState(vec![final_res]));
@@ -1372,16 +1385,8 @@ impl SIRTranslator {
                     }
                 };
 
-                let final_res_v = if common_ty.bits() > dst_ty.bits() {
-                    state.builder.ins().ireduce(dst_ty, res_v)
-                } else {
-                    res_v
-                };
-                let final_res_m = if common_ty.bits() > dst_ty.bits() {
-                    state.builder.ins().ireduce(dst_ty, res_m)
-                } else {
-                    res_m
-                };
+                let final_res_v = promote_to_physical(state, res_v, d_width, false, dst_ty);
+                let final_res_m = promote_to_physical(state, res_m, d_width, false, dst_ty);
                 // Identity/casts preserve X versus Z. Other unary operations
                 // produce X for an unknown input bit.
                 let normalized_v = match op {
@@ -1405,11 +1410,7 @@ impl SIRTranslator {
                     },
                 );
             } else {
-                let final_res = if common_ty.bits() > dst_ty.bits() {
-                    state.builder.ins().ireduce(dst_ty, res_v)
-                } else {
-                    res_v
-                };
+                let final_res = promote_to_physical(state, res_v, d_width, false, dst_ty);
                 state
                     .regs
                     .insert(*dst, TransValue::TwoState(vec![final_res]));

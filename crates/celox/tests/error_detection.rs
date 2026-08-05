@@ -646,21 +646,80 @@ fn test_testbench_helper_hierarchical_read_returns_error_without_panicking() {
             )),
             "expected Veryl InvisibleIndentifier for helper's hierarchical read, got {errors:?}"
         ),
-        Err(SimulatorErrorKind::SIRParser(ParserError::Unsupported {
-            issue,
-            phase: LoweringPhase::SimulatorParser,
-            feature,
-            ..
-        })) => {
-            assert_eq!(*issue, 467);
+        Err(SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. })) => {
             assert_eq!(*feature, "hierarchical variable reference");
         }
         Err(kind) => panic!(
-            "expected InvisibleIndentifier or Unsupported(SimulatorParser) for helper's hierarchical read, got {kind:?}"
+            "expected InvisibleIndentifier or IllegalContext for helper's hierarchical read, got {kind:?}"
         ),
         Ok(_) => panic!(
-            "expected InvisibleIndentifier or Unsupported(SimulatorParser) for helper's hierarchical read, got Ok"
+            "expected InvisibleIndentifier or IllegalContext for helper's hierarchical read, got Ok"
         ),
+    }
+}
+
+#[test]
+fn test_selected_testbench_destination_out_of_range_is_rejected() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var word: logic<8>;
+
+            initial {
+                word[6 +: 4] = 4'hf;
+                $finish();
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "t")
+        .build()
+        .expect_err("out-of-range selected destination must be rejected");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
+            assert_eq!(*feature, "testbench selected destination");
+        }
+        other => panic!("expected selected destination geometry error, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_expression_testbench_function_selected_destination_is_rejected() {
+    let code = r#"
+        module Driver (source: output logic<8>) {
+            assign source = 8'h05;
+        }
+
+        #[test(t)]
+        module t {
+            var source: logic<8>;
+            inst dut: Driver (source);
+
+            function update(x: input logic<8>) -> logic<8> {
+                var tmp: logic<8>;
+                tmp = 8'ha0;
+                tmp[3:0] = x;
+                return tmp;
+            }
+
+            initial {
+                $assert(update(source) == 8'ha5);
+                $finish();
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "t")
+        .build()
+        .expect_err("selected destination in an expression helper must be rejected");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::IllegalContext { feature, .. }) => {
+            assert_eq!(
+                *feature,
+                "selected destination in expression testbench function"
+            );
+        }
+        other => panic!("expected expression helper selected destination error, got {other:?}"),
     }
 }
 
@@ -1105,6 +1164,277 @@ fn test_ff_function_argument_array_literal_multiple_default_is_rejected_by_analy
             "expected analyzer MultipleDefault for array literal, got: {errors:?}"
         ),
         other => panic!("expected analyzer MultipleDefault for array literal, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_ff_function_call_rejects_unpacked_input_aliased_by_later_effect() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            var samples: logic<8>[2];
+
+            function pick (
+                values: input logic<8>[2],
+                ignored: input logic<8>
+            ) -> logic<8> {
+                return values[0];
+            }
+
+            function update (value: output logic<8>) -> logic<8> {
+                value = 8'h00;
+                return 8'h00;
+            }
+
+            always_ff (clk) {
+                out_q = pick(samples, update(samples[0]));
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("an unpacked input must not observe a later aliased output effect lazily");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 43);
+            assert_eq!(*feature, "unpacked function argument aliases later effect");
+        }
+        other => panic!("expected unpacked input aliasing error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_ff_function_call_rejects_unpacked_input_aliased_by_later_callee_write() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            var samples: logic<8>[2];
+
+            function pick (
+                values: input logic<8>[2],
+                ignored: input logic<8>
+            ) -> logic<8> {
+                return values[0];
+            }
+
+            function update () -> logic<8> {
+                samples[0] = 8'h00;
+                return 8'h00;
+            }
+
+            always_ff (clk) {
+                out_q = pick(samples, update());
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("an unpacked input must not observe a later callee write lazily");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 43);
+            assert_eq!(*feature, "unpacked function argument aliases later effect");
+        }
+        other => panic!("expected unpacked input aliasing error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_ff_function_call_rejects_selected_unpacked_input_before_callee_index_write() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            rows: input logic<8>[2, 2],
+            out_q: output logic<8>
+        ) {
+            var index: logic;
+
+            function pick (values: input logic<8>[2]) -> logic<8> {
+                index = 1'b1;
+                return values[0];
+            }
+
+            always_ff (clk) {
+                out_q = pick(rows[index]);
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("a selected unpacked input must not observe a callee index write lazily");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 43);
+            assert_eq!(*feature, "unpacked function argument aliases later effect");
+        }
+        other => panic!("expected unpacked input aliasing error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_ff_function_call_rejects_unpacked_literal_aliased_by_output_index_effect() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            out_q: output logic<8>
+        ) {
+            var changing: logic<8>;
+            var sink: logic<8>[2];
+
+            function pick (
+                values: input logic<8>[2],
+                result: output logic<8>
+            ) -> logic<8> {
+                result = 8'h00;
+                return values[0];
+            }
+
+            function update (value: output logic<8>) -> logic {
+                value = 8'h00;
+                return 1'b0;
+            }
+
+            always_ff (clk) {
+                out_q = pick('{changing, default: 8'h00}, sink[update(changing)]);
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("an unpacked literal must not observe an output-index effect lazily");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 43);
+            assert_eq!(*feature, "unpacked function argument aliases later effect");
+        }
+        other => panic!("expected unpacked input aliasing error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_ff_function_runtime_effect_in_for_bound_is_detected() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            count: input logic<3>
+        ) {
+            function observed (x: input logic<3>) -> logic<3> {
+                $display("bound=%0d", x);
+                return x;
+            }
+
+            function consume (n: input logic<3>) {
+                for i in observed(n)..n {}
+            }
+
+            always_ff (clk) {
+                consume(count);
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("runtime effect in a function-local for bound must not be discarded");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 66);
+            assert_eq!(
+                *feature,
+                "control flow around runtime effect in function body"
+            );
+        }
+        other => panic!("expected effectful for-bound error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_ff_function_runtime_effect_in_assignment_destination_is_detected() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            index: input logic<3>
+        ) {
+            function observed (x: input logic<3>) -> logic<3> {
+                $display("index=%0d", x);
+                return x;
+            }
+
+            function consume (i: input logic<3>) {
+                var tmp: logic<8>;
+                tmp = 8'd0;
+                tmp[observed(i)] = 1'b1;
+            }
+
+            always_ff (clk) {
+                consume(index);
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("runtime effect in an assignment destination must not be discarded");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 66);
+            assert_eq!(
+                *feature,
+                "effectful assignment destination in function body"
+            );
+        }
+        other => panic!("expected effectful assignment-destination error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_ff_function_runtime_effect_in_statement_call_output_destination_is_detected() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            index: input logic<3>
+        ) {
+            function observed (x: input logic<3>) -> logic<3> {
+                $display("index=%0d", x);
+                return x;
+            }
+
+            function set (value: output logic) {
+                value = 1'b1;
+            }
+
+            function consume (i: input logic<3>) {
+                var tmp: logic<8>;
+                tmp = 8'd0;
+                set(tmp[observed(i)]);
+            }
+
+            always_ff (clk) {
+                consume(index);
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("runtime effect in a call output destination must not be discarded");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 66);
+            assert_eq!(
+                *feature,
+                "effectful function call output destination in function body"
+            );
+        }
+        other => panic!("expected effectful call-output-destination error, got: {other:?}"),
     }
 }
 

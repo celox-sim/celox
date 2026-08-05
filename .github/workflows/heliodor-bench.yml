@@ -13,6 +13,8 @@ on:
       - "!crates/celox-napi/package.json"
       - "scripts/convert-heliodor-bench.mjs"
       - "scripts/run-heliodor-bench.sh"
+  schedule:
+    - cron: "37 2 * * *"
   workflow_dispatch:
 
 permissions:
@@ -21,14 +23,15 @@ permissions:
 env:
   CARGO_INCREMENTAL: "0"
 
-# This shares the gh-pages benchmark data with bench.yml. Serialize both
-# workflows so their independent benchmark-action pushes cannot race.
+# Pull requests neither write benchmark history nor need to wait behind unrelated
+# benchmark runs. Keep only the master/manual publisher serialized with bench.yml.
 concurrency:
-  group: bench
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('heliodor-pr-{0}', github.event.pull_request.number) || github.event_name == 'schedule' && 'heliodor-head' || 'bench' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'schedule' }}
 
 jobs:
   heliodor:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -159,3 +162,93 @@ jobs:
       - name: Enforce fixed gate result
         if: always() && steps.gate.outputs.status != '0'
         run: exit 1
+
+  cranelift-linux-boot:
+    name: Cranelift Linux boot
+    if: github.event_name != 'schedule'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HELIODOR_DIR: ${{ github.workspace }}/target/heliodor-cranelift/source
+      HELIODOR_RESULTS_DIR: ${{ github.workspace }}/target/heliodor-cranelift/results
+      HELIODOR_TOOLS_DIR: ${{ github.workspace }}/target/heliodor-cranelift/tools
+      HELIODOR_RUNNERS: celox-cranelift
+      HELIODOR_TESTS: test_soc_linux_boot
+      HELIODOR_TIMEOUT_SEC: "1200"
+      CELOX_OPT_LEVEL: O2
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Boot Linux with the Cranelift backend
+        shell: bash
+        run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-cranelift-output.txt
+
+      - name: Upload Cranelift Linux boot results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: heliodor-cranelift-linux-boot
+          path: |
+            heliodor-cranelift-output.txt
+            target/heliodor-cranelift/results/results.tsv
+            target/heliodor-cranelift/results/*.log
+
+  heliodor-head:
+    name: Heliodor HEAD compatibility
+    if: github.event_name == 'schedule'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HELIODOR_DIR: target/heliodor-head/source
+      HELIODOR_RESULTS_DIR: target/heliodor-head/results
+      HELIODOR_TOOLS_DIR: target/heliodor-head/tools
+      HELIODOR_RUNNERS: celox
+      HELIODOR_TESTS: test_soc_linux_boot
+      HELIODOR_TIMEOUT_SEC: "420"
+      CELOX_OPT_LEVEL: O2
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Resolve Heliodor HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          heliodor_revision="$(git ls-remote https://github.com/dalance/heliodor.git HEAD | cut -f1)"
+          if [[ ! "$heliodor_revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Could not resolve dalance/heliodor HEAD" >&2
+            exit 1
+          fi
+          echo "HELIODOR_REF=$heliodor_revision" >> "$GITHUB_ENV"
+          echo "$heliodor_revision" > heliodor-head-ref.txt
+          echo "Testing Heliodor HEAD at $heliodor_revision"
+          echo "### Heliodor HEAD compatibility" >> "$GITHUB_STEP_SUMMARY"
+          echo "Upstream revision: \`$heliodor_revision\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run Heliodor HEAD compatibility gate
+        shell: bash
+        run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-head-output.txt
+
+      - name: Upload Heliodor HEAD results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: heliodor-head-compatibility
+          path: |
+            heliodor-head-ref.txt
+            heliodor-head-output.txt
+            target/heliodor-head/results/results.tsv
+            target/heliodor-head/results/*.log

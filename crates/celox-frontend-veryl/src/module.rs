@@ -715,11 +715,12 @@ fn collect_parent_output_address_sources(
                 }
                 Ok(())
             }
-            Factor::HierVariable(reference) => Err(ParserError::unsupported(
-                467,
-                LoweringPhase::SimulatorParser,
+            Factor::HierVariable(reference) => Err(ParserError::illegal_context(
                 "hierarchical variable reference",
-                format!("{}", reference.var_path),
+                format!(
+                    "`{}` is only valid in a native testbench block",
+                    reference.var_path
+                ),
                 Some(&reference.comptime.token),
             )),
             Factor::SystemFunctionCall(call) => {

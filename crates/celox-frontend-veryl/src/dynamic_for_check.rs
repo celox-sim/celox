@@ -90,6 +90,7 @@ enum StateChange {
 #[derive(Default)]
 struct Effects {
     reads: Vec<Access>,
+    hierarchical_reads: Vec<veryl_analyzer::ir::HierVarRef>,
     writes: Vec<Access>,
     state_changes: Vec<StateChange>,
     observable: bool,
@@ -105,6 +106,8 @@ impl Effects {
 
     fn append(&mut self, mut other: Effects) {
         self.reads.append(&mut other.reads);
+        self.hierarchical_reads
+            .append(&mut other.hierarchical_reads);
         self.writes.append(&mut other.writes);
         self.state_changes.append(&mut other.state_changes);
         self.observable |= other.observable;
@@ -254,6 +257,24 @@ fn check_elaborated_for(
     let mut active_functions = HashSet::default();
     let body_effects =
         collect_statement_effects(&statement.body, module, &mut active_functions, false);
+    let mut unknown = bound_effects
+        .unknown
+        .clone()
+        .or(body_effects.unknown.clone());
+    let immediate_writes =
+        collect_immediate_state_writes(&body_effects.writes, scheduled, &mut unknown);
+    if hierarchical_reads_conflict(
+        &bound_effects.hierarchical_reads,
+        &immediate_writes,
+        scheduled,
+        &mut unknown,
+    ) {
+        diagnostics.push(FrontendDiagnostic::mutable_for_bound(
+            &statement.token,
+            "the loop body may immediately modify state read by the continuation bound",
+        ));
+        return;
+    }
     if body_effects.state_changes.is_empty() {
         return;
     }
@@ -272,7 +293,6 @@ fn check_elaborated_for(
         return;
     }
 
-    let mut unknown = bound_effects.unknown.or(body_effects.unknown);
     let writes =
         collect_state_change_writes(&body_effects.state_changes, scheduled, hints, &mut unknown);
     let mut conflict = false;
@@ -296,6 +316,14 @@ fn check_elaborated_for(
             break;
         }
     }
+    if hierarchical_reads_conflict(
+        &bound_effects.hierarchical_reads,
+        &writes,
+        scheduled,
+        &mut unknown,
+    ) {
+        conflict = true;
+    }
 
     if conflict {
         diagnostics.push(FrontendDiagnostic::time_advancing_for_bound(
@@ -315,6 +343,70 @@ struct StateWrite {
     address: StateAddr,
     /// `None` denotes a dynamic or otherwise non-static range of this object.
     bits: Option<BitAccess>,
+}
+
+fn collect_immediate_state_writes(
+    accesses: &[Access],
+    scheduled: &ScheduledRtl,
+    unknown: &mut Option<String>,
+) -> Vec<StateWrite> {
+    let mut writes = Vec::new();
+    for access in accesses.iter().filter(|access| !access.deferred) {
+        let Some((address, _)) = scheduled.frontend_lookup.root_variable(access.id) else {
+            unknown.get_or_insert_with(|| {
+                format!(
+                    "body variable `{}` could not be projected after elaboration",
+                    access.id
+                )
+            });
+            continue;
+        };
+        add_state_write(
+            &mut writes,
+            StateWrite {
+                address,
+                bits: Some(access.bits),
+            },
+        );
+    }
+    propagate_comb_writes(&scheduled.sir.eval_comb, &mut writes);
+    writes
+}
+
+fn hierarchical_reads_conflict(
+    references: &[veryl_analyzer::ir::HierVarRef],
+    writes: &[StateWrite],
+    scheduled: &ScheduledRtl,
+    unknown: &mut Option<String>,
+) -> bool {
+    for reference in references {
+        let (address, info) = match crate::testbench::resolve_hierarchical_reference(
+            &scheduled.frontend_lookup,
+            reference,
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                unknown.get_or_insert_with(|| error.to_string());
+                continue;
+            }
+        };
+        let read_bits = match crate::testbench::hierarchical_reference_bits(info, reference) {
+            Ok(bits) => bits,
+            Err(error) => {
+                unknown.get_or_insert_with(|| error.to_string());
+                continue;
+            }
+        };
+        if writes.iter().any(|write| {
+            write.address == address
+                && write
+                    .bits
+                    .is_none_or(|write_bits| write_bits.overlaps(&read_bits))
+        }) {
+            return true;
+        }
+    }
+    false
 }
 
 fn collect_state_change_writes(
@@ -1031,7 +1123,7 @@ fn check_for(
     }
 
     let unknown = bound_effects.unknown.or_else(|| {
-        (!bound_effects.reads.is_empty())
+        (!bound_effects.reads.is_empty() || !bound_effects.hierarchical_reads.is_empty())
             .then_some(body_effects.unknown)
             .flatten()
     });
@@ -1259,8 +1351,15 @@ fn collect_expression_effects(
             Factor::Unknown(_) => {
                 effects.mark_unknown("bound expression contains an unknown value")
             }
-            Factor::HierVariable(_) => {
-                effects.mark_unknown("bound expression contains an unsupported hierarchical read")
+            Factor::HierVariable(reference) => {
+                collect_index_select_effects(
+                    &reference.index,
+                    &reference.select,
+                    module,
+                    active_functions,
+                    &mut effects,
+                );
+                effects.hierarchical_reads.push((**reference).clone());
             }
             Factor::Value(_) | Factor::Anonymous(_) => {}
         },
@@ -1627,6 +1726,55 @@ mod tests {
             ports: HashMap::default(),
             port_types: HashMap::default(),
             variables: [(bound_id, variable)].into_iter().collect(),
+            functions: HashMap::default(),
+            declarations: vec![Declaration::new_comb(vec![statement])],
+            suppress_unassigned: false,
+            per_decl_refs: HashMap::default(),
+            assign_tokens: HashMap::default(),
+            ff_table: FfTable::default(),
+        };
+        let ir = Ir {
+            components: vec![Component::Module(module)],
+        };
+
+        let diagnostics = check_dynamic_for_bounds(&ir);
+        assert!(matches!(
+            diagnostics.as_slice(),
+            [FrontendDiagnostic::UnknownForBoundEffect { .. }]
+        ));
+    }
+
+    #[test]
+    fn unknown_body_effect_ir_is_reported_for_a_hierarchical_bound() {
+        let token = TokenRange::default();
+        let bound = Expression::Term(Box::new(Factor::HierVariable(Box::new(
+            veryl_analyzer::ir::HierVarRef {
+                inst_path: vec![StrId::default()],
+                var_path: VarPath(vec![StrId::default()]),
+                index: VarIndex::default(),
+                select: VarSelect::default(),
+                comptime: Comptime::default(),
+            },
+        ))));
+        let statement = Statement::For(Box::new(ForStatement {
+            var_id: VarId::default(),
+            var_name: StrId::default(),
+            var_type: Type::default(),
+            range: ForRange::Forward {
+                start: ForBound::Const(0),
+                end: ForBound::Expression(Box::new(bound)),
+                inclusive: false,
+                step: 1,
+            },
+            body: vec![Statement::Unsupported(token)],
+            token,
+        }));
+        let module = Module {
+            name: StrId::default(),
+            token,
+            ports: HashMap::default(),
+            port_types: HashMap::default(),
+            variables: HashMap::default(),
             functions: HashMap::default(),
             declarations: vec![Declaration::new_comb(vec![statement])],
             suppress_unassigned: false,

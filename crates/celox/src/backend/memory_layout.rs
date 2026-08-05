@@ -134,6 +134,16 @@ pub(crate) fn collect_strided_array_layouts(
 ) -> HashMap<AbsoluteAddr, UnpackedArrayLayout> {
     let mut candidates = declared_strided_array_layouts(program);
 
+    // Testbench bytecode addresses state through packed logical bit offsets.
+    // Keep every directly observed array packed so dynamic indices do not
+    // accidentally address element padding in an element-strided layout.
+    candidates.retain(|address, _| {
+        !program
+            .runtime_schema
+            .testbench_read_roots
+            .contains(address)
+    });
+
     let mut inspect = |inst: &SIRInstruction<crate::ir::RegionedAbsoluteAddr>,
                        exact_zeros: &crate::HashSet<RegisterId>| {
         let mut check = |addr: &crate::ir::RegionedAbsoluteAddr,

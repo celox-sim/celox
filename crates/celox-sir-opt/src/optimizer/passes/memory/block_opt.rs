@@ -914,6 +914,13 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
         }
 
         let element_width = element_widths.get(&seg.addr).copied();
+        let scalar_observed_end = element_width.is_none().then(|| {
+            seg.loads
+                .iter()
+                .filter_map(|load| load.offset.checked_add(load.width))
+                .max()
+                .unwrap_or(0)
+        });
         let mut by_word: HashMap<(usize, usize), Vec<LoadInfo>> = HashMap::default();
         for ld in seg.loads {
             if ld.width == 0 || ld.width > 64 {
@@ -954,6 +961,14 @@ fn coalesce_static_loads<A: Clone + std::fmt::Debug + PartialEq + Ord + std::has
         for ((mut word_base, mut word_width), mut loads) in by_word {
             if loads.len() < 2 {
                 continue;
+            }
+            // A scalar has no entry in `element_widths`.  The 64-bit bucket is
+            // only a grouping aid; it is not evidence that the backing object
+            // is 64 bits wide. Keep the combined load within the extent proven
+            // readable by any original load from this scalar. This preserves a
+            // native word load when a covering wide load already proves it safe.
+            if let Some(observed_end) = scalar_observed_end {
+                word_width = observed_end.saturating_sub(word_base).min(word_width);
             }
             if word_width == 0 {
                 word_base = loads.iter().map(|load| load.offset).min().unwrap();
@@ -1402,6 +1417,41 @@ mod tests {
         assert!(instructions.iter().all(|instruction| !matches!(
             instruction,
             SIRInstruction::Load(RegisterId(1) | RegisterId(2), _, _, _)
+        )));
+        verify(instructions, register_map);
+    }
+
+    #[test]
+    fn scalar_partial_load_coalescing_stays_within_the_accessed_span() {
+        let mut instructions = vec![
+            SIRInstruction::Load(RegisterId(0), 7u32, SIROffset::Static(0), 16),
+            SIRInstruction::Load(RegisterId(1), 7, SIROffset::Static(16), 2),
+            SIRInstruction::Load(RegisterId(2), 7, SIROffset::Static(18), 14),
+        ];
+        let mut register_map = [
+            (RegisterId(0), logic(16)),
+            (RegisterId(1), logic(2)),
+            (RegisterId(2), logic(14)),
+        ]
+        .into_iter()
+        .collect();
+        let mut reg_counter = 2;
+
+        coalesce_static_loads_with_types(
+            &mut instructions,
+            &mut register_map,
+            &mut reg_counter,
+            false,
+            &HashMap::default(),
+        );
+
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            SIRInstruction::Load(_, 7, SIROffset::Static(0), 32)
+        )));
+        assert!(instructions.iter().all(|instruction| !matches!(
+            instruction,
+            SIRInstruction::Load(_, 7, SIROffset::Static(0), 64)
         )));
         verify(instructions, register_map);
     }

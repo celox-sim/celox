@@ -314,6 +314,7 @@ impl ExecutionUnitPass for CircularPriorityPass {
                 cfg.block_ids[natural_loop.header],
                 &loop_blocks,
                 &definitions,
+                &use_blocks,
             ) {
                 bit_map_plans.push(plan);
             }
@@ -413,6 +414,7 @@ pub(in crate::optimizer) fn recover_native_fixed_bit_map_loops(
         return 0;
     };
     let definitions = collect_definitions(eu);
+    let use_blocks = collect_use_blocks(eu);
     let mut planned_headers = HashSet::default();
     let mut plans = Vec::new();
     for natural_loop in &cfg.loops {
@@ -425,7 +427,9 @@ pub(in crate::optimizer) fn recover_native_fixed_bit_map_loops(
             .iter()
             .map(|&block| cfg.block_ids[block])
             .collect::<HashSet<_>>();
-        if let Some(plan) = recognize_bit_map_loop(eu, &cfg, header, &loop_blocks, &definitions) {
+        if let Some(plan) =
+            recognize_bit_map_loop(eu, &cfg, header, &loop_blocks, &definitions, &use_blocks)
+        {
             plans.push(plan);
         }
     }
@@ -1363,11 +1367,25 @@ fn recognize_bit_map_loop(
     eu: &ExecutionUnit<RegionedAbsoluteAddr>,
     cfg: &SirCfg,
     header: BlockId,
-    _loop_blocks: &HashSet<BlockId>,
+    loop_blocks: &HashSet<BlockId>,
     definitions: &HashMap<RegisterId, Definition>,
+    use_blocks: &HashMap<RegisterId, HashSet<BlockId>>,
 ) -> Option<BitMapLoopPlan> {
     let block = &eu.blocks[&header];
     if block.params.len() != 3 {
+        return None;
+    }
+    if block
+        .params
+        .iter()
+        .copied()
+        .chain(block.instructions.iter().filter_map(def_reg))
+        .any(|value| {
+            use_blocks
+                .get(&value)
+                .is_some_and(|users| users.iter().any(|user| !loop_blocks.contains(user)))
+        })
+    {
         return None;
     }
     if block.instructions.iter().any(|instruction| {
@@ -1442,6 +1460,14 @@ fn recognize_bit_map_loop(
         return None;
     }
     let exit_result_position = exit_arguments.iter().position(|&value| value == update)?;
+    if exit_arguments.iter().enumerate().any(|(position, value)| {
+        position != exit_result_position
+            && definitions
+                .get(value)
+                .is_some_and(|definition| definition.block() == header)
+    }) {
+        return None;
+    }
     let dependencies = collect_bit_dependencies(
         eu,
         cfg,
@@ -5193,5 +5219,33 @@ mod tests {
             assert_eq!(after, before, "input={input:#06x}");
             assert_eq!(after, vec![0xa55a_0000 | input]);
         }
+    }
+
+    #[test]
+    fn rejects_fixed_bit_insert_loop_with_escaping_definition() {
+        let mut unit = bit_map_loop_fixture();
+        let escaped = match unit.blocks[&BlockId(1)].instructions[0] {
+            SIRInstruction::Load(destination, ..) => destination,
+            ref instruction => panic!("expected loop load, got {instruction:?}"),
+        };
+        unit.blocks
+            .get_mut(&BlockId(2))
+            .unwrap()
+            .instructions
+            .push(SIRInstruction::Store(
+                address(4),
+                SIROffset::Static(0),
+                1,
+                escaped,
+                Vec::new(),
+                Vec::new(),
+            ));
+        unit.verify_result().unwrap();
+        let original = unit.to_string();
+
+        test_pass().run(&mut unit, &PassOptions::default());
+
+        unit.verify_result().unwrap();
+        assert_eq!(unit.to_string(), original);
     }
 }

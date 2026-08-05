@@ -314,7 +314,7 @@ fn finalize_scheduled_rtl(
     apply_fused_optimization_hints(&mut scheduled.scheduled, scheduled.fused_optimization_hints)?;
     scheduled.scheduled.inject_triggers();
     let (sir, mut runtime, testbench_source) = RuntimeProgram::from_scheduled(scheduled.scheduled);
-    crate::testbench_compile::project_observability(&mut runtime, &testbench_source);
+    crate::testbench_compile::project_observability(&mut runtime, &testbench_source)?;
     runtime.testbench = crate::testbench_compile::compile_semantic_testbench(
         &runtime,
         &testbench_source,

@@ -1,5 +1,5 @@
 use celox::{
-    DeadStorePolicy, ParserError, ResetType, Simulator, SimulatorErrorKind, TestResult,
+    DeadStorePolicy, ResetType, Simulator, SimulatorErrorKind, TestResult,
     testbench::{compile_initial_testbench, run_compiled_testbench},
 };
 use veryl_analyzer::{AnalyzerError, analyzer_error::InvalidForRangeKind};
@@ -57,6 +57,86 @@ fn bench_native_tb_std_counter() -> String {
 }
 
 // ── Basic ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_native_testbench_ff_condition_reads_pre_edge_value_after_write() {
+    let code = r#"
+        module Dut (
+            clk     : input  clock,
+            present : input  logic,
+            d       : input  logic<8>,
+            captured: output logic<8>,
+        ) {
+            var in_flight: logic;
+            always_ff (clk) {
+                in_flight = present;
+                if in_flight {
+                    captured = d;
+                }
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var present: logic;
+            var d: logic<8>;
+            var captured: logic<8>;
+            inst dut: Dut (clk, present, d, captured);
+
+            initial {
+                present = 1'b1;
+                d = 8'hA5;
+                clk.next(1);
+                $assert(captured == 8'h00);
+
+                present = 1'b0;
+                d = 8'h3C;
+                clk.next(1);
+                $assert(captured == 8'h3C);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_native_testbench_overlapping_ff_writes_preserve_last_write() {
+    let code = r#"
+        module Dut (
+            clk  : input  clock,
+            state: output logic<128>,
+        ) {
+            always_ff (clk) {
+                state = 128'h11111111111111111111111111111111;
+                state[15:8] = 8'hAA;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var state: logic<128>;
+            inst dut: Dut (clk, state);
+
+            initial {
+                clk.next(1);
+                $assert(state[23:0] == 24'h11AA11);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
 
 #[test]
 fn test_native_testbench_uses_metadata_project_name() {
@@ -259,39 +339,176 @@ fn test_unset_testbench_seed_is_fresh_per_execution() {
 }
 
 #[test]
-fn test_selected_testbench_destinations_are_rejected() {
-    for code in [
-        r#"
+fn test_selected_testbench_destinations_update_only_selected_targets() {
+    let random_handle = veryl_parser::resource_table::insert_str("r");
+    veryl_simulator::random_table::seed_handle(random_handle, 42);
+    let random_value = veryl_simulator::random_table::get(random_handle, 8, false).payload_u64();
+
+    let cases = [
+        format!(
+            r#"
             #[test(t)]
-            module t {
+            module t {{
                 var values: logic<8>[4];
                 var index: logic<2>;
                 var r: $tb::random::<u8>;
-                initial {
+                initial {{
+                    values[0] = 8'h11;
+                    values[1] = 8'h22;
+                    values[2] = 8'h33;
+                    values[3] = 8'h44;
                     index = 1;
+                    r.seed(42);
                     values[index] = r.get();
+                    $assert(values[0] == 8'h11);
+                    $assert(values[1] == 8'd{random_value});
+                    $assert(values[2] == 8'h33);
+                    $assert(values[3] == 8'h44);
                     $finish();
-                }
-            }
-        "#,
+                }}
+            }}
+        "#
+        ),
         r#"
             #[test(t)]
             module t {
                 var word: logic<8>;
                 initial {
-                    word[3] = 1;
+                    word = 8'hAA;
+                    word[3] = 1'b0;
+                    $assert(word == 8'hA2);
+                    word[6:3] = 4'b0011;
+                    $assert(word == 8'h9A);
                     $finish();
                 }
             }
-        "#,
-    ] {
-        let error = Simulator::builder(code, "t").build().unwrap_err();
-        let SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, .. }) = error.kind()
-        else {
-            panic!("expected selected destination diagnostic, got {error:?}");
-        };
-        assert_eq!(*issue, 478);
+        "#
+        .to_string(),
+        format!(
+            r#"
+            module Driver (
+                idx: output logic<2>,
+            ) {{
+                always_comb {{
+                    idx = 2;
+                }}
+            }}
+
+            #[test(t)]
+            module t {{
+                inst dut: Driver (idx);
+                var idx: logic<2>;
+                var values: logic<8>[4];
+                var r: $tb::random::<u8>;
+
+                initial {{
+                    values[0] = 8'h11;
+                    values[1] = 8'h22;
+                    values[2] = 8'h33;
+                    values[3] = 8'h44;
+                    r.seed(42);
+                    values[dut.idx] = r.get();
+                    $assert(values[0] == 8'h11);
+                    $assert(values[1] == 8'h22);
+                    $assert(values[2] == 8'd{random_value});
+                    $assert(values[3] == 8'h44);
+                    $finish();
+                }}
+            }}
+        "#
+        ),
+    ];
+    for code in cases {
+        assert_eq!(
+            Simulator::builder(&code, "t").run_test().unwrap(),
+            TestResult::Pass
+        );
+        assert_eq!(
+            Simulator::builder(&code, "t").run_test_cranelift().unwrap(),
+            TestResult::Pass
+        );
     }
+}
+
+#[test]
+fn test_packed_prefix_and_low_bound_testbench_destinations() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            const W: u32 = 4;
+            var word: logic<8>;
+            var matrix: logic<4, 4>;
+            initial {
+                word = 8'hA0;
+                word[W - 1:0] = 4'hF;
+                $assert(word == 8'hAF);
+
+                word = 8'hA0;
+                word[0 +: W] = 4'h5;
+                $assert(word == 8'hA5);
+
+                matrix = 16'h0000;
+                matrix[2][1] = 1'b1;
+                $assert(matrix == 16'h0200);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass
+    );
+    assert_eq!(
+        Simulator::builder(code, "t").run_test_cranelift().unwrap(),
+        TestResult::Pass
+    );
+}
+
+#[test]
+fn test_selected_testbench_destinations_keep_dynamic_reads_and_old_value_live() {
+    let random_handle = veryl_parser::resource_table::insert_str("r");
+    veryl_simulator::random_table::seed_handle(random_handle, 42);
+    let random_value = veryl_simulator::random_table::get(random_handle, 8, false).payload_u64();
+    let code = format!(
+        r#"
+        module Driver (
+            index: output logic<2>,
+        ) {{
+            always_comb {{
+                index = 2;
+            }}
+        }}
+
+        #[test(t)]
+        module t {{
+            var values: logic<8>[4];
+            var index: logic<2>;
+            var word: logic<8>;
+            var r: $tb::random::<u8>;
+            inst dut: Driver(index);
+
+            initial {{
+                values = '{{default: 8'h00}};
+                word = 8'hA0;
+                r.seed(42);
+                values[index] = r.get();
+                word[3] = 1'b1;
+                $assert(values[2] == 8'd{random_value});
+                $assert(word == 8'hA8);
+                $finish();
+            }}
+        }}
+        "#,
+    );
+
+    assert_eq!(
+        Simulator::builder(&code, "t")
+            .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
 }
 
 #[test]
@@ -359,6 +576,264 @@ fn test_testbench_direct_reads_are_dead_store_roots() {
 
             initial {
                 $assert(hidden == 8'd7);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_hierarchical_testbench_read_resolves_nested_instance_index_and_select() {
+    let code = r#"
+        module Core () {
+            var words: logic<16>[2];
+
+            always_comb {
+                words[0] = 16'h1234;
+                words[1] = 16'habcd;
+            }
+        }
+
+        module Dut () {
+            inst u_core: Core ();
+        }
+
+        #[test(t)]
+        module t {
+            inst dut: Dut ();
+            var index: u32;
+
+            initial {
+                index = 1;
+                $assert(dut.u_core.words[index][11:4] == 8'hbc);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_hierarchical_dynamic_reads_preserve_wide_values() {
+    let code = r#"
+        module Dut () {
+            var words: logic<128>[2];
+
+            always_comb {
+                words[0] = 128'h0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+                words[1] = 128'hffff_eeee_dddd_cccc_bbbb_aaaa_9999_8888;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst dut: Dut ();
+            var index: u32;
+            var bit_index: u32;
+
+            initial {
+                index = 1;
+                bit_index = 68;
+                $assert(dut.words[index] == 128'hffff_eeee_dddd_cccc_bbbb_aaaa_9999_8888, "wide indexed read");
+                $assert(dut.words[0][bit_index +: 8] == 8'hde, "wide dynamic select");
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[cfg(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+))]
+#[test]
+fn test_hierarchical_dynamic_array_read_uses_native_layout() {
+    let code = r#"
+        module Dut (
+            clk: input clock,
+            narrow: output logic<3>[2],
+        ) {
+            always_ff {
+                narrow[0] = 3'h1;
+                narrow[1] = 3'h5;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var narrow: logic<3>[2];
+            inst dut: Dut (clk, narrow);
+            var index: u32;
+
+            initial {
+                clk.next();
+                index = 1;
+                $assert(dut.narrow[index] == 3'h5);
+                $finish();
+            }
+        }
+    "#;
+
+    let mut sim = Simulator::builder(code, "t")
+        .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+        .build_native()
+        .unwrap();
+    assert!(
+        sim.program()
+            .runtime_schema
+            .testbench_read_roots
+            .iter()
+            .all(|address| !sim.layout().unpacked_arrays.contains_key(address))
+    );
+    let testbench = compile_initial_testbench(&sim).unwrap();
+    assert_eq!(
+        run_compiled_testbench(&mut sim, &testbench),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_hierarchical_assert_message_argument_preserves_selected_width() {
+    let code = r#"
+        module Dut () {
+            var word: logic<8>;
+
+            always_comb {
+                word = 8'hab;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst dut: Dut ();
+
+            initial {
+                $assert_continue(1'b0, "got %h", dut.word[3:0]);
+                $finish();
+            }
+        }
+    "#;
+
+    let detailed = Simulator::builder(code, "t")
+        .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+        .run_test_detailed()
+        .unwrap();
+    assert!(!detailed.passed);
+    assert_eq!(detailed.assertions.len(), 1);
+    assert_eq!(detailed.assertions[0].message.as_deref(), Some("got b"));
+}
+
+#[test]
+fn test_hierarchical_read_ignores_same_named_function_local() {
+    let code = r#"
+        module Dut () {
+            var q: logic<8>;
+
+            function shadow() -> logic<8> {
+                var q: logic<8>;
+                q = 8'h11;
+                return q;
+            }
+
+            always_comb {
+                q = 8'h42;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst dut: Dut ();
+
+            initial {
+                $assert(dut.q == 8'h42);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .dead_store_policy(DeadStorePolicy::PreserveListedSignals)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_hierarchical_select_widths_and_multidimensional_dynamic_indices() {
+    let code = r#"
+        module Dut () {
+            var word: logic<8>;
+            var mem: logic<8>[2, 2];
+            var narrow: logic<3>[2, 2];
+            var wide: logic<128>[2];
+            var pix: logic<4, 4>;
+
+            always_comb {
+                word = 8'hab;
+                mem[0][0] = 8'h11;
+                mem[0][1] = 8'h12;
+                mem[1][0] = 8'h21;
+                mem[1][1] = 8'h22;
+                narrow[0][0] = 3'h1;
+                narrow[0][1] = 3'h2;
+                narrow[1][0] = 3'h3;
+                narrow[1][1] = 3'h5;
+                wide[0] = 0;
+                wide[1] = 128'h0000_0000_0000_0002_0000_0000_0000_0000;
+                pix = 16'h0200;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst dut: Dut ();
+            var i: u32;
+            var j: u32;
+            var anchor: u32;
+            var step_index: u32;
+
+            initial {
+                i = 1;
+                j = 1;
+                anchor = 7;
+                step_index = 1;
+                $assert(dut.word[3 -: 4] == 4'hb, "minus-colon select");
+                $assert(dut.word[anchor -: 4] == 4'ha, "dynamic minus-colon select");
+                $assert(dut.word[step_index step 4] == 4'ha, "dynamic step select");
+                $assert({dut.word[7:4], dut.word[3:0]} == 8'hab, "selected concat widths");
+                $assert(dut.mem[i][1] == 8'h22, "dynamic outer index");
+                $assert(dut.mem[i][j] == 8'h22, "multiple dynamic indices");
+                $assert(dut.narrow[i][j] == 3'h5, "non-byte-aligned dynamic indices");
+                $assert(dut.narrow[1][0][j] == 1'b1, "sub-byte static index and dynamic select");
+                $assert(dut.wide[i][64:1] == 64'd0, "wide selected value is masked");
+                $assert(dut.pix[2][1] == 1'b1, "multi-dimensional packed index");
+                $assert(dut.pix[2][0] == 1'b0, "all packed indices are consumed");
                 $finish();
             }
         }
@@ -517,6 +992,60 @@ fn test_reset_dynamic_duration_from_variable() {
                 duration = 5;
                 rst.assert(duration);
                 $assert(ticks == 32'd5, "ticks=%d", ticks);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_reset_zero_duration_clamps_to_one_cycle() {
+    let code = format!(
+        r#"
+        {CLOCK_TICK_COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var ticks: logic<32>;
+            var duration: logic<32>;
+            inst dut: ClockTickCounter (clk, rst, ticks);
+
+            initial {{
+                duration = 0;
+                rst.assert(duration);
+                $assert(ticks == 32'd1, "ticks=%d", ticks);
+                $finish();
+            }}
+        }}
+    "#
+    );
+    assert_eq!(
+        Simulator::builder(&code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_reset_legacy_clock_argument_clamps_to_one_cycle() {
+    let code = format!(
+        r#"
+        {CLOCK_TICK_COUNTER}
+        #[test(t)]
+        module t {{
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var ticks: logic<32>;
+            inst dut: ClockTickCounter (clk, rst, ticks);
+
+            initial {{
+                rst.assert(clk);
+                $assert(ticks == 32'd1, "ticks=%d", ticks);
                 $finish();
             }}
         }}

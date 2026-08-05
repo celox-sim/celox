@@ -24,14 +24,14 @@ Execution Unit 0:
     r9: logic<1>
     r10: logic<1>
     r11: logic<2>
-    r12: logic<64>
+    r12: logic<2>
     r13: logic<64>
     r14: logic<64>
     r17: logic<2>
   b0:
     r0 = Load(addr=sel (region=0), offset=0, bits=1)
     r1 = Load(addr=v (region=0), offset=0, bits=1)
-    r12 = Load(addr=i (region=0), offset=0, bits=64)
+    r12 = Load(addr=i (region=0), offset=0, bits=2)
     r13 = SIRValue(0x1)
     r14 = r12 Shr r13
     r2 = r14 And r13

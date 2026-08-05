@@ -375,6 +375,25 @@ fn static_commit_offset_width_boundary_table_preserves_neighbors() {
 }
 
 #[test]
+fn cranelift_static_64_bit_commit_crosses_word_boundary() {
+    let offset = 1;
+    let width = 64;
+    let total_width = case_total_width(offset, width);
+    let code = ff_commit_source(offset, width, total_width);
+    let base = patterned_value(0x0123_4567_89ab_cdef, total_width);
+    let val = BigUint::from(0xffff_ffff_ffff_fad8u64);
+    let expected = expected_replace(total_width, offset, width, &base, &val);
+
+    let mut cranelift = SimulatorBuilder::new(&code, "Top")
+        .optimize(true)
+        .build_cranelift()
+        .unwrap();
+    tick_ff_case(&mut cranelift, width, &base, &val);
+
+    assert_eq!(cranelift.get(cranelift.signal("o")), expected);
+}
+
+#[test]
 fn post_optimized_sir_keeps_boundary_store_and_commit_corpus() {
     let wide_unaligned = ff_commit_source(1, 99, case_total_width(1, 99));
     assert_optimized_sir_has_static_store(&wide_unaligned, "Top", 1, 99);
