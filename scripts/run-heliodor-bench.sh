@@ -15,6 +15,7 @@ HELIODOR_RUNNERS="${HELIODOR_RUNNERS:-veryl-cc-sync celox}"
 CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O2}"
 CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
 HELIODOR_CELOX_CARGO_PROFILE="${HELIODOR_CELOX_CARGO_PROFILE:-heliodor-dev}"
+HELIODOR_CELOX_CARGO_FEATURES="${HELIODOR_CELOX_CARGO_FEATURES:-}"
 CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/$HELIODOR_CELOX_CARGO_PROFILE/celox-heliodor}"
 VERYL_TIMED_RUNNER_BIN="${VERYL_TIMED_RUNNER_BIN:-$CELOX_ROOT/target/$HELIODOR_CELOX_CARGO_PROFILE/veryl-heliodor}"
 HELIODOR_BUILD_CELOX_RUNNER="${HELIODOR_BUILD_CELOX_RUNNER:-1}"
@@ -81,6 +82,8 @@ Environment:
                        prebuilt synchronous Veryl-CC timing runner path
   HELIODOR_CELOX_CARGO_PROFILE
                        Cargo profile for the Celox runner (default: heliodor-dev)
+  HELIODOR_CELOX_CARGO_FEATURES
+                       optional Cargo features for the Celox runner
   HELIODOR_BUILD_CELOX_RUNNER
                        build CELOX_RUNNER_BIN before Celox runs (default: 1)
   HELIODOR_CELOX_TARGET_DIR
@@ -986,6 +989,7 @@ any_veryl_runner_enabled() {
 
 build_celox_runner() {
     local log="$HELIODOR_RESULTS_DIR/celox_runner_build.log"
+    local -a feature_args=()
     local -a target_dir_args=()
     if [[ "$HELIODOR_BUILD_CELOX_RUNNER" != 1 ]]; then
         if [[ ! -x "$CELOX_RUNNER_BIN" ]]; then
@@ -999,10 +1003,13 @@ build_celox_runner() {
     if [[ -n "$HELIODOR_CELOX_TARGET_DIR" ]]; then
         target_dir_args=(--target-dir "$HELIODOR_CELOX_TARGET_DIR")
     fi
+    if [[ -n "$HELIODOR_CELOX_CARGO_FEATURES" ]]; then
+        feature_args=(--features "$HELIODOR_CELOX_CARGO_FEATURES")
+    fi
     if ! env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET \
         cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox-bench \
         --bin celox-heliodor --profile "$HELIODOR_CELOX_CARGO_PROFILE" --locked \
-        "${target_dir_args[@]}" >"$log" 2>&1; then
+        "${feature_args[@]}" "${target_dir_args[@]}" >"$log" 2>&1; then
         tail -n 80 "$log" >&2 || true
         return 1
     fi
@@ -1684,6 +1691,7 @@ run_gate() {
     CELOX_OPT_LEVEL=O2
     CELOX_SIR_PASS_OVERRIDES=""
     HELIODOR_CELOX_CARGO_PROFILE=release
+    HELIODOR_CELOX_CARGO_FEATURES=""
     HELIODOR_CELOX_TARGET_DIR=""
     CELOX_RUNNER_BIN=""
     VERYL_TIMED_RUNNER_BIN=""
