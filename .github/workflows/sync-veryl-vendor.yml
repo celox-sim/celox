@@ -39,6 +39,7 @@ jobs:
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: read
+          permission-workflows: write
 
       - name: Resolve and validate the Renovate pull request
         id: pull-request
@@ -117,7 +118,28 @@ jobs:
           unexpected=()
           for path in "${conflicts[@]}"; do
             case "$path" in
-              Cargo.toml|Cargo.lock|vendor/veryl-metadata/*)
+              Cargo.toml)
+                # Keep develop's complete manifest, then restore only the
+                # released Veryl declarations from the Renovate side. Verify
+                # first that Renovate did not change anything else in it.
+                manifest_merge="$(mktemp -d "$RUNNER_TEMP/veryl-manifest-merge.XXXXXX")"
+                git show :1:Cargo.toml > "$manifest_merge/base.toml"
+                git show :2:Cargo.toml > "$manifest_merge/release.toml"
+                node ../automation/scripts/veryl-vendor.mjs promote \
+                  "$manifest_merge/release.toml" \
+                  "$manifest_merge/base.toml"
+                if ! cmp -s "$manifest_merge/base.toml" "$manifest_merge/release.toml"; then
+                  echo "Renovate changed Cargo.toml outside the Veryl dependency declarations." >&2
+                  exit 1
+                fi
+
+                git checkout --theirs -- Cargo.toml
+                node ../automation/scripts/veryl-vendor.mjs promote \
+                  "$manifest_merge/release.toml" \
+                  Cargo.toml
+                git add -- Cargo.toml
+                ;;
+              Cargo.lock|vendor/veryl-metadata/*)
                 # The Renovate side contains the released dependency. The
                 # vendored tree and lockfile are regenerated below.
                 git checkout --ours -- "$path"

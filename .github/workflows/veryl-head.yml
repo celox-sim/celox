@@ -53,8 +53,8 @@ jobs:
               --state open \
               --base develop \
               --head integration/veryl-head \
-              --json number,url \
-              --jq '.[0].url // empty'
+              --json isCrossRepository,url \
+              --jq '[.[] | select(.isCrossRepository == false)][0].url // empty'
           )"
           if [ -n "$roll_pr" ]; then
             echo "Keeping the existing Veryl roll for investigation: $roll_pr"
