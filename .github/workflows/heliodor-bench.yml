@@ -200,6 +200,44 @@ jobs:
             target/heliodor-cranelift/results/results.tsv
             target/heliodor-cranelift/results/*.log
 
+  arm64-linux-boot:
+    name: ARM64 Linux boot
+    if: github.event_name != 'schedule'
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    env:
+      HELIODOR_DIR: ${{ github.workspace }}/target/heliodor-arm64/source
+      HELIODOR_RESULTS_DIR: ${{ github.workspace }}/target/heliodor-arm64/results
+      HELIODOR_TOOLS_DIR: ${{ github.workspace }}/target/heliodor-arm64/tools
+      HELIODOR_RUNNERS: celox
+      HELIODOR_TESTS: test_soc_linux_boot
+      HELIODOR_TIMEOUT_SEC: "1200"
+      HELIODOR_CELOX_CARGO_FEATURES: experimental-arm64-backend
+      CELOX_OPT_LEVEL: O2
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Boot Linux with the ARM64 backend
+        shell: bash
+        run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-arm64-output.txt
+
+      - name: Upload ARM64 Linux boot results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: heliodor-arm64-linux-boot
+          path: |
+            heliodor-arm64-output.txt
+            target/heliodor-arm64/results/results.tsv
+            target/heliodor-arm64/results/*.log
+
   heliodor-head:
     name: Heliodor HEAD compatibility
     if: github.event_name == 'schedule'
