@@ -52,6 +52,30 @@ export function requestedVerylVersion(rootManifest) {
   return version;
 }
 
+export function promoteReleasedVerylDependencies(developManifest, releaseManifest) {
+  requestedVerylVersion(releaseManifest);
+  const releasedDependencies = section(releaseManifest, "workspace.dependencies");
+  let promotedDependencies = section(developManifest, "workspace.dependencies");
+
+  for (const crate of VERYL_CRATES) {
+    const escaped = crate.replaceAll("-", "\\-");
+    const pattern = new RegExp(`^${escaped}\\s*=.*$`, "m");
+    const released = releasedDependencies.match(pattern);
+    if (!released) {
+      throw new Error(`missing released ${crate} dependency declaration`);
+    }
+    if (!pattern.test(promotedDependencies)) {
+      throw new Error(`missing develop ${crate} dependency declaration`);
+    }
+    promotedDependencies = promotedDependencies.replace(pattern, released[0]);
+  }
+
+  return developManifest.replace(
+    section(developManifest, "workspace.dependencies"),
+    promotedDependencies,
+  );
+}
+
 export function vendorPackageVersion(vendorManifest) {
   const packageSection = section(vendorManifest, "package");
   const match = packageSection.match(/^version\s*=\s*"([^"]+)"/m);
@@ -112,7 +136,7 @@ export function verifyLockfile(rootManifest, lockfile) {
 }
 
 function run(argv) {
-  const [command = "check", argument] = argv;
+  const [command = "check", argument, destination] = argv;
   if (command === "version") {
     const manifest = fs.readFileSync(argument ?? "Cargo.toml", "utf8");
     process.stdout.write(`${requestedVerylVersion(manifest)}\n`);
@@ -123,6 +147,20 @@ function run(argv) {
     const manifestPath = argument ?? "vendor/veryl-metadata/Cargo.toml";
     const manifest = fs.readFileSync(manifestPath, "utf8");
     fs.writeFileSync(manifestPath, disableGitoxideDefault(manifest));
+    return;
+  }
+
+  if (command === "promote") {
+    if (!argument) {
+      throw new Error("promote requires a released Cargo.toml path");
+    }
+    const manifestPath = destination ?? "Cargo.toml";
+    const developManifest = fs.readFileSync(manifestPath, "utf8");
+    const releaseManifest = fs.readFileSync(argument, "utf8");
+    fs.writeFileSync(
+      manifestPath,
+      promoteReleasedVerylDependencies(developManifest, releaseManifest),
+    );
     return;
   }
 

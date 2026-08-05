@@ -2,11 +2,10 @@ name: Veryl HEAD Integration
 
 on:
   push:
-    branches: [master]
+    branches: [develop]
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
-      - "vendor/veryl-metadata/**"
       - "scripts/use-veryl-head.mjs"
       - ".github/workflows/veryl-head.yml"
   schedule:
@@ -18,30 +17,54 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   update:
-    name: Update integration/veryl-head
+    name: Propose the next Veryl HEAD
     runs-on: ubuntu-latest
     steps:
       - name: Create release app token
         id: release-token
         uses: actions/create-github-app-token@v3
         with:
-          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
+          permission-pull-requests: write
 
       - uses: actions/checkout@v7
         with:
-          ref: master
+          ref: develop
           fetch-depth: 0
           token: ${{ steps.release-token.outputs.token }}
 
       - uses: ./.github/actions/setup-rust
 
+      - name: Keep an actionable failed roll intact
+        id: existing
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+        shell: bash
+        run: |
+          roll_pr="$(
+            gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --state open \
+              --base develop \
+              --head integration/veryl-head \
+              --json isCrossRepository,url \
+              --jq '[.[] | select(.isCrossRepository == false)][0].url // empty'
+          )"
+          if [ -n "$roll_pr" ]; then
+            echo "Keeping the existing Veryl roll for investigation: $roll_pr"
+            echo "open=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "open=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Pin Veryl dependencies to upstream HEAD
+        if: steps.existing.outputs.open != 'true'
         shell: bash
         run: |
           veryl_revision="$(git ls-remote https://github.com/veryl-lang/veryl.git refs/heads/master | cut -f1)"
@@ -55,12 +78,41 @@ jobs:
           cargo update -p veryl-analyzer
           echo "VERYL_REVISION=$veryl_revision" >> "$GITHUB_ENV"
 
-      - name: Update generated integration branch
+      - name: Create the rolling integration branch
+        if: steps.existing.outputs.open != 'true'
+        id: roll
         shell: bash
         run: |
+          if git diff --quiet -- Cargo.toml Cargo.lock; then
+            echo "develop already uses Veryl HEAD $VERYL_REVISION."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           git config user.name "celox-release-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -C integration/veryl-head
           git add Cargo.toml Cargo.lock
-          git commit -m "ci(veryl): test Veryl HEAD ${VERYL_REVISION:0:12}"
-          git push --force-with-lease origin HEAD:integration/veryl-head
+          git commit -m "fix(veryl): roll HEAD to ${VERYL_REVISION:0:12}"
+          git push --force origin HEAD:integration/veryl-head
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open the Veryl roll pull request
+        if: steps.roll.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+        shell: bash
+        run: |
+          roll_pr="$(
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base develop \
+              --head integration/veryl-head \
+              --title "fix(veryl): roll HEAD to ${VERYL_REVISION:0:12}" \
+              --body $'Roll all Veryl crates to one exact upstream `master` revision.\n\nCI success merges this automatically into the non-release `develop` lane. CI failure deliberately leaves this PR open so it can be taken over and fixed. Do not retarget this PR to `master`.'
+          )"
+
+          gh pr merge "$roll_pr" \
+            --repo "$GITHUB_REPOSITORY" \
+            --auto \
+            --merge
