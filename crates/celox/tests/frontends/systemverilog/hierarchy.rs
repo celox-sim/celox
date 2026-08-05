@@ -442,7 +442,7 @@ fn rejects_veryl_generated_sv_that_uses_unlowered_constructs() {
         (
             "Fifo.sv",
             include_str!("../../../../../benches/verilator/Fifo.sv"),
-            "unpacked array dimension",
+            "cast expression",
         ),
         (
             "LinearSec.sv",

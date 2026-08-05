@@ -563,10 +563,11 @@ mod host {
                         let (current_value, current_mask) = self.backend.get_four_state(signal);
                         let value = (current_value & &preserve_mask) | (value & written_mask);
                         let mask = (current_mask & &preserve_mask) | (mask & written_mask);
-                        if signal.is_4state {
+                        if self.backend.layout().four_state && signal.is_4state {
                             self.backend.set_four_state(signal, value, mask);
                         } else {
-                            self.backend.set_wide(signal, value);
+                            let known_mask = &width_mask ^ (&mask & &width_mask);
+                            self.backend.set_wide(signal, value & known_mask);
                         }
                     }
                     InitialMemoryData::Writes(runs) => {

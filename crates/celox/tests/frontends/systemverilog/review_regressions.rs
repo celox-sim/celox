@@ -125,6 +125,160 @@ fn rejects_overlapping_always_ff_variable_drivers() {
 }
 
 #[test]
+fn rejects_child_outputs_that_multiply_drive_a_variable() {
+    let error = cranelift_build_error(
+        r#"
+        module Source(output logic y); assign y = 1'b1; endmodule
+        module Top(output wire out);
+            logic w;
+            Source a(.y(w));
+            Source b(.y(w));
+            assign out = w;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("multiple variable drivers for `w`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_writes_to_input_ports() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic a, b, output wire y);
+            always_comb a = b;
+            assign y = a;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("write to input port `a`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_generate_locals_that_shadow_parameters() {
+    let error = cranelift_build_error(
+        r#"
+        module Top #(parameter P = 0) (output wire y);
+            if (1) begin : g
+                logic P;
+                assign P = 1'b1;
+                assign y = P;
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("local data declaration inside conditional-generate"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_generate_local_typedefs_instead_of_leaking_them() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(output wire y);
+            if (0) begin : g
+                typedef logic [7:0] T;
+            end
+            T value;
+            assign y = value[0];
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("type declaration inside conditional-generate"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_duplicate_function_argument_names() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(output wire y);
+            function logic f(input logic a, input logic a);
+                return a;
+            endfunction
+            assign y = f(1'b0, 1'b1);
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("duplicate function argument `a`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn preserves_selected_parameter_constants_in_hierarchy_glue() {
+    let source = r#"
+        module Child(input logic a, output logic y); assign y = a; endmodule
+        module Top(output logic y);
+            parameter logic [3:0] P = 4'h5;
+            Child child(.a(P[0]), .y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("selected_parameter_glue.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn lowers_only_the_reachable_parameter_specialization() {
+    let source = r#"
+        module Child #(parameter ENABLE = 1) (
+            input logic a,
+            input logic b,
+            output logic y
+        );
+            if (ENABLE) assign y = a ** b;
+            else assign y = 1'b0;
+        endmodule
+        module Top(output logic y);
+            Child #(.ENABLE(0)) child(.a(1'b0), .b(1'b0), .y(y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("reachable_specialization.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0u8.into());
+}
+
+#[test]
+fn initializes_four_state_variables_to_unknown() {
+    let source = r#"
+        module Top(output wire logic_is_x, output wire bit_is_zero);
+            logic four_state;
+            bit two_state;
+            assign logic_is_x = (four_state === 1'bx);
+            assign bit_is_zero = (two_state === 1'b0);
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("variable_initial_state.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("logic_is_x")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("bit_is_zero")), 1u8.into());
+}
+
+#[test]
 fn evaluates_sized_arithmetic_and_logical_right_shift_parameters() {
     let source = r#"
         module Top(output logic wraps, output logic logical_shift);

@@ -48,6 +48,58 @@ impl Source {
         Ok(Self { modules })
     }
 
+    pub fn from_syntax_module_with_parameter_overrides(
+        syntax_tree: &SyntaxTree,
+        module_name: &str,
+        parameter_overrides: &HashMap<String, i128>,
+    ) -> Result<Self, AnalyzerError> {
+        let mut modules = Vec::new();
+        for node in syntax_tree {
+            match node {
+                RefNode::ModuleDeclarationAnsi(module) => {
+                    let node = RefNode::ModuleDeclarationAnsi(module);
+                    if module_name_from_node(node.clone(), syntax_tree)? != module_name {
+                        continue;
+                    }
+                    modules.push(Module::from_module_node_with_parameter_overrides(
+                        node,
+                        syntax_tree,
+                        module_name,
+                        parameter_overrides,
+                    )?);
+                }
+                RefNode::ModuleDeclarationNonansi(_) => {
+                    return Err(AnalyzerError::Unsupported(
+                        "non-ANSI module port declarations".to_string(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(Self { modules })
+    }
+
+    pub fn module_names_from_syntax(
+        syntax_tree: &SyntaxTree,
+    ) -> Result<Vec<String>, AnalyzerError> {
+        let mut names = Vec::new();
+        for node in syntax_tree {
+            match node {
+                RefNode::ModuleDeclarationAnsi(module) => names.push(module_name_from_node(
+                    RefNode::ModuleDeclarationAnsi(module),
+                    syntax_tree,
+                )?),
+                RefNode::ModuleDeclarationNonansi(_) => {
+                    return Err(AnalyzerError::Unsupported(
+                        "non-ANSI module port declarations".to_string(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(names)
+    }
+
     pub fn modules(&self) -> &[Module] {
         &self.modules
     }
@@ -73,17 +125,7 @@ impl Module {
         parameter_overrides: &HashMap<String, i128>,
     ) -> Result<Self, AnalyzerError> {
         let node = node.into();
-        let id = unwrap_node!(node.clone(), ModuleIdentifier)
-            .ok_or_else(|| AnalyzerError::Unsupported("module without identifier".to_string()))?;
-        let locate = identifier_locate(id).ok_or_else(|| {
-            AnalyzerError::Unsupported("unsupported module identifier".to_string())
-        })?;
-        let name = syntax_tree
-            .get_str(&locate)
-            .ok_or_else(|| {
-                AnalyzerError::Unsupported("invalid module identifier span".to_string())
-            })?
-            .to_string();
+        let name = module_name_from_node(node.clone(), syntax_tree)?;
         reject_silently_ignored_constructs(node.clone(), syntax_tree)?;
         let mut parameters = parameters_from_module_node(node.clone(), syntax_tree)?;
         let mut parameter_names = HashSet::new();
@@ -263,6 +305,20 @@ impl Module {
     }
 }
 
+fn module_name_from_node(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+) -> Result<String, AnalyzerError> {
+    let id = unwrap_node!(node, ModuleIdentifier)
+        .ok_or_else(|| AnalyzerError::Unsupported("module without identifier".to_string()))?;
+    let locate = identifier_locate(id)
+        .ok_or_else(|| AnalyzerError::Unsupported("unsupported module identifier".to_string()))?;
+    syntax_tree
+        .get_str(&locate)
+        .map(str::to_string)
+        .ok_or_else(|| AnalyzerError::Unsupported("invalid module identifier span".to_string()))
+}
+
 fn reject_unsupported_multidimensional_packed_bounds(
     ports: &[Port],
     signals: &[Signal],
@@ -294,7 +350,12 @@ fn reject_silently_ignored_constructs(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
 ) -> Result<(), AnalyzerError> {
-    let module_scope_signal_names = module_scope_signal_names(node.clone(), syntax_tree);
+    let mut module_scope_value_names = module_scope_signal_names(node.clone(), syntax_tree);
+    module_scope_value_names.extend(
+        parameters_from_module_node(node.clone(), syntax_tree)?
+            .into_iter()
+            .map(|parameter| parameter.name),
+    );
     reject_duplicate_conditional_generate_locals(node.clone(), syntax_tree)?;
     if node
         .clone()
@@ -483,6 +544,17 @@ fn reject_silently_ignored_constructs(
                     "case-generate construct".to_string(),
                 ));
             }
+            RefNode::ConditionalGenerateConstruct(
+                sv_parser::ConditionalGenerateConstruct::If(generate),
+            ) if generate_block_has_type_declaration(&generate.nodes.2)
+                || generate.nodes.3.as_ref().is_some_and(|(_, block)| {
+                    generate_block_has_type_declaration(block)
+                }) =>
+            {
+                return Err(AnalyzerError::Unsupported(
+                    "type declaration inside conditional-generate".to_string(),
+                ));
+            }
             RefNode::ConditionalGenerateConstruct(sv_parser::ConditionalGenerateConstruct::If(
                 generate,
             )) if (generate_block_has_data_declaration(&generate.nodes.2)
@@ -494,7 +566,7 @@ fn reject_silently_ignored_constructs(
                 || conditional_generate_local_collides(
                     generate,
                     syntax_tree,
-                    &module_scope_signal_names,
+                    &module_scope_value_names,
                 ) =>
             {
                 return Err(AnalyzerError::Unsupported(
@@ -2911,6 +2983,17 @@ fn functions_from_module_node(
             packed_dimensions,
         ) {
             let name = function.name.clone();
+            let mut parameter_names = HashSet::new();
+            if let Some(parameter) = function
+                .params
+                .iter()
+                .find(|parameter| !parameter_names.insert(parameter.name.as_str()))
+            {
+                return Err(AnalyzerError::Unsupported(format!(
+                    "duplicate function argument `{}`",
+                    parameter.name
+                )));
+            }
             if functions.insert(name.clone(), function).is_some() {
                 return Err(AnalyzerError::Unsupported(format!(
                     "duplicate function declaration `{name}`"
@@ -4074,6 +4157,24 @@ fn comb_processes_from_conditional_generate(
             "conditional-generate condition lowering".to_string(),
         ));
     };
+    if let Some(value) = eval_ast_const_expr(&generate_condition, const_env) {
+        let block = if value != 0 {
+            Some(&generate.nodes.2)
+        } else {
+            generate.nodes.3.as_ref().map(|(_, block)| block)
+        };
+        if let Some(block) = block {
+            comb_processes_from_generate_block(
+                block,
+                condition,
+                syntax_tree,
+                const_env,
+                packed_dimensions,
+                processes,
+            )?;
+        }
+        return Ok(());
+    }
     if has_local_constants(const_env)
         && eval_ast_const_expr(&generate_condition, const_env).is_none()
     {
@@ -4182,6 +4283,16 @@ fn generate_block_has_data_declaration(block: &sv_parser::GenerateBlock) -> bool
             block.nodes.3.iter().any(generate_item_has_data_declaration)
         }
     }
+}
+
+fn generate_block_has_type_declaration(block: &sv_parser::GenerateBlock) -> bool {
+    RefNode::GenerateBlock(block).into_iter().any(|node| {
+        matches!(
+            node,
+            RefNode::DataDeclaration(sv_parser::DataDeclaration::TypeDeclaration(_))
+                | RefNode::TypeAssignment(_)
+        )
+    })
 }
 
 fn has_local_constants(const_env: &HashMap<String, i128>) -> bool {

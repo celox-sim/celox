@@ -91,8 +91,6 @@ impl SvVariable {
 #[derive(Clone)]
 pub(crate) struct LoweredSvModule {
     source: sv::ir::Module,
-    source_code: String,
-    source_path: PathBuf,
     pub sim_module: SimModule,
     variables: HashMap<VarId, SvVariable>,
     pub port_order: Vec<VarId>,
@@ -100,6 +98,13 @@ pub(crate) struct LoweredSvModule {
     constants: std::collections::HashMap<String, i128>,
     parameter_types: HashMap<String, (usize, bool)>,
     pub instances: Vec<LoweredSvInstance>,
+}
+
+#[derive(Clone)]
+struct AnalyzedSvModule {
+    name: String,
+    source_code: String,
+    source_path: PathBuf,
 }
 
 #[derive(Clone)]
@@ -147,20 +152,24 @@ impl LoweredSvModuleKey {
     }
 }
 
-pub(crate) fn analyze_sources(
+fn analyze_sources(
     sources: &[(&str, &Path)],
-) -> Result<HashMap<resource_table::StrId, LoweredSvModule>, sv::AnalyzerError> {
+) -> Result<HashMap<resource_table::StrId, AnalyzedSvModule>, sv::AnalyzerError> {
     let mut modules = HashMap::default();
     for (code, path) in sources {
-        let ir = sv::analyze_source(code, path)?;
-        for module in ir.modules() {
-            let name = resource_table::insert_str(module.name());
+        for module_name in sv::source_module_names(code, path)? {
+            let name = resource_table::insert_str(&module_name);
             if modules.contains_key(&name) {
-                return Err(sv::AnalyzerError::DuplicateModule {
-                    name: module.name().to_string(),
-                });
+                return Err(sv::AnalyzerError::DuplicateModule { name: module_name });
             }
-            modules.insert(name, lower_module(module, code, path)?);
+            modules.insert(
+                name,
+                AnalyzedSvModule {
+                    name: module_name,
+                    source_code: (*code).to_string(),
+                    source_path: (*path).to_path_buf(),
+                },
+            );
         }
     }
     Ok(modules)
@@ -186,33 +195,87 @@ fn validate_specialized_instance_net_drivers(
                     .map(|port| (port.name(), false)),
             );
         for (signal_name, require_driver) in net_names {
-            let child_driver_count = module
-                .instances
-                .iter()
-                .filter_map(|instance| {
-                    let key = LoweredSvModuleKey::instance_key(instance);
-                    let child_id = module_ids.get(&key)?;
-                    Some((instance, modules.get(child_id)?))
-                })
-                .flat_map(|(instance, child)| {
-                    instance.port_connections.iter().filter(move |connection| {
-                        matches!(
-                            connection.actual_expr.as_ref(),
-                            Some(sv::ir::Expr::Ident(name)) if name == signal_name
-                        ) && child.source.ports().iter().any(|port| {
-                            port.name() == connection.formal
-                                && matches!(
-                                    port.direction(),
-                                    sv::ir::PortDirection::Output | sv::ir::PortDirection::Inout
-                                )
-                        })
-                    })
-                })
-                .count();
+            let child_driver_count =
+                child_output_driver_count(module, signal_name, module_ids, modules);
             validate_net_driver_ranges(module, signal_name, child_driver_count, require_driver)?;
+        }
+
+        let variable_names = module
+            .source
+            .signals()
+            .iter()
+            .filter(|signal| !signal.is_net())
+            .map(|signal| signal.name())
+            .chain(
+                module
+                    .source
+                    .ports()
+                    .iter()
+                    .filter(|port| !port.is_net())
+                    .map(|port| port.name()),
+            );
+        for signal_name in variable_names {
+            let child_driver_count =
+                child_output_driver_count(module, signal_name, module_ids, modules);
+            let local_drivers = local_driver_ranges(
+                &module.source,
+                signal_name,
+                &module.constants,
+                &module.parameter_types,
+            );
+            if child_driver_count > 1 || child_driver_count == 1 && !local_drivers.is_empty() {
+                return Err(sv::AnalyzerError::Unsupported(format!(
+                    "multiple variable drivers for `{signal_name}`"
+                )));
+            }
         }
     }
     Ok(())
+}
+
+fn child_output_driver_count(
+    module: &LoweredSvModule,
+    signal_name: &str,
+    module_ids: &HashMap<LoweredSvModuleKey, ModuleId>,
+    modules: &HashMap<ModuleId, LoweredSvModule>,
+) -> usize {
+    module
+        .instances
+        .iter()
+        .filter_map(|instance| {
+            let key = LoweredSvModuleKey::instance_key(instance);
+            let child_id = module_ids.get(&key)?;
+            Some((instance, modules.get(child_id)?))
+        })
+        .flat_map(|(instance, child)| {
+            instance.port_connections.iter().filter(move |connection| {
+                connection
+                    .actual_expr
+                    .as_ref()
+                    .is_some_and(|expr| output_connection_targets_signal(expr, signal_name))
+                    && child.source.ports().iter().any(|port| {
+                        port.name() == connection.formal
+                            && matches!(
+                                port.direction(),
+                                sv::ir::PortDirection::Output | sv::ir::PortDirection::Inout
+                            )
+                    })
+            })
+        })
+        .count()
+}
+
+fn output_connection_targets_signal(expr: &sv::ir::Expr, signal_name: &str) -> bool {
+    match expr {
+        sv::ir::Expr::Ident(name) => name == signal_name,
+        sv::ir::Expr::Select { expr, .. } | sv::ir::Expr::Resize { expr, .. } => {
+            output_connection_targets_signal(expr, signal_name)
+        }
+        sv::ir::Expr::Concat(parts) => parts
+            .iter()
+            .any(|part| output_connection_targets_signal(part, signal_name)),
+        _ => false,
+    }
 }
 
 fn validate_net_driver_ranges(
@@ -253,6 +316,19 @@ fn validate_variable_driver_ranges(
     constants: &std::collections::HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Result<(), sv::AnalyzerError> {
+    for port in module
+        .ports()
+        .iter()
+        .filter(|port| port.direction() == sv::ir::PortDirection::Input)
+    {
+        if !local_driver_ranges(module, port.name(), constants, parameter_types).is_empty() {
+            return Err(sv::AnalyzerError::Unsupported(format!(
+                "write to input port `{}`",
+                port.name()
+            )));
+        }
+    }
+
     let variable_names = module
         .signals()
         .iter()
@@ -654,41 +730,32 @@ fn validate_sv_module_graph(
     Ok(())
 }
 
-pub(crate) fn specialize_module(
-    module: &LoweredSvModule,
+fn specialize_module(
+    module: &AnalyzedSvModule,
     key: &LoweredSvModuleKey,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
-    if key.parameter_overrides.is_empty() {
-        return Ok(module.clone());
-    }
     let overrides = evaluated_parameter_overrides(&key.parameter_overrides)?;
-    let ir = sv::analyze_source_with_module_parameter_overrides(
+    let ir = sv::analyze_source_module_with_parameter_overrides(
         &module.source_code,
         &module.source_path,
-        module.source.name(),
+        &module.name,
         &overrides,
     )?;
     let specialized = ir
         .modules()
         .iter()
-        .find(|candidate| candidate.name() == module.source.name())
-        .unwrap_or(&module.source);
-    lower_module_with_overrides(specialized, &[], &module.source_code, &module.source_path)
+        .find(|candidate| candidate.name() == module.name)
+        .ok_or_else(|| sv::AnalyzerError::Unsupported(format!("module `{}`", module.name)))?;
+    lower_module(specialized)
 }
 
-fn lower_module(
-    module: &sv::ir::Module,
-    source_code: &str,
-    source_path: &Path,
-) -> Result<LoweredSvModule, sv::AnalyzerError> {
-    lower_module_with_overrides(module, &[], source_code, source_path)
+fn lower_module(module: &sv::ir::Module) -> Result<LoweredSvModule, sv::AnalyzerError> {
+    lower_module_with_overrides(module, &[])
 }
 
 fn lower_module_with_overrides(
     module: &sv::ir::Module,
     parameter_overrides: &[LoweredSvParameterOverride],
-    source_code: &str,
-    source_path: &Path,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let token = TokenRange::default();
     let name = resource_table::insert_str(module.name());
@@ -738,12 +805,17 @@ fn lower_module_with_overrides(
         };
         name_to_id.insert(port.name().to_string(), id);
         port_order.push(id);
-        if port.is_net() {
+        if port.is_net() || type_info.is_4state {
             let written_mask = (BigUint::from(1u8) << type_info.width) - BigUint::from(1u8);
+            let value = if port.is_net() {
+                BigUint::default()
+            } else {
+                written_mask.clone()
+            };
             initial_memory_values.push(InitialStateValue {
                 address: id,
                 data: InitialStateData::Packed {
-                    value: BigUint::default(),
+                    value,
                     mask: written_mask.clone(),
                     written_mask,
                 },
@@ -775,12 +847,17 @@ fn lower_module_with_overrides(
             token,
         };
         name_to_id.insert(signal.name().to_string(), id);
-        if signal.is_net() {
+        if signal.is_net() || type_info.is_4state {
             let written_mask = (BigUint::from(1u8) << type_info.width) - BigUint::from(1u8);
+            let value = if signal.is_net() {
+                BigUint::default()
+            } else {
+                written_mask.clone()
+            };
             initial_memory_values.push(InitialStateValue {
                 address: id,
                 data: InitialStateData::Packed {
-                    value: BigUint::default(),
+                    value,
                     mask: written_mask.clone(),
                     written_mask,
                 },
@@ -859,8 +936,6 @@ fn lower_module_with_overrides(
 
     Ok(LoweredSvModule {
         source: module.clone(),
-        source_code: source_code.to_string(),
-        source_path: source_path.to_path_buf(),
         sim_module: SimModule {
             name,
             variables: shared_variables,
@@ -2613,14 +2688,14 @@ fn packed_expr_select_offsets(
     name_to_id: &HashMap<String, VarId>,
 ) -> Option<(usize, usize)> {
     if let sv::ir::Expr::Ident(name) = expr {
-        let variable = name_to_id.get(name).and_then(|id| variables.get(id))?;
-        Some((
-            packed_index_offset(variable, msb)?,
-            packed_index_offset(variable, lsb)?,
-        ))
-    } else {
-        Some((usize::try_from(msb).ok()?, usize::try_from(lsb).ok()?))
+        if let Some(variable) = name_to_id.get(name).and_then(|id| variables.get(id)) {
+            return Some((
+                packed_index_offset(variable, msb)?,
+                packed_index_offset(variable, lsb)?,
+            ));
+        }
     }
+    Some((usize::try_from(msb).ok()?, usize::try_from(lsb).ok()?))
 }
 
 type SvFfBlocks = (
