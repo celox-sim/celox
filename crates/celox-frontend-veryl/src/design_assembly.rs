@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use celox_design::{
-    DomainKind, ElaboratedDesign, EventTopology, InitialStateValue, InstanceId, ModuleId,
-    PortTypeKind, RegionedStateAddr, RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventKind,
-    RuntimeEventSite, RuntimeSchema, STABLE_REGION, StateAddr, StateObjectId, VarAtomBase,
-    VariableMetadata,
+    BitAccess, DomainKind, ElaboratedDesign, EventTopology, InitialStateValue, InstanceId,
+    ModuleId, PortTypeKind, RegionedStateAddr, RuntimeCombObserver, RuntimeErrorInfo,
+    RuntimeEventKind, RuntimeEventSite, RuntimeSchema, STABLE_REGION, StateAddr, StateObjectId,
+    VarAtomBase, VariableMetadata,
 };
 use celox_sir::{BasicBlock, ExecutionUnit, SIRInstruction, SIRTerminator, SirProgram};
 use celox_slt::{
@@ -28,8 +28,8 @@ use crate::{
     RegionedAbsoluteAddr, RegionedVarAddr, RelocationModule, ScheduledRtl, ScheduledRtlOutput,
     SharedClockLowering, SimModule, SourceLocation, SymbolicRtl, VariableInfo,
     VerylComponentBinding, VerylComponentConnectionBinding, VerylComponentEventBinding,
-    VerylFrontendLookup, VerylTestbenchSource, bitaccess, build_ff_clock_recipes, flattening,
-    resolve_total_width,
+    VerylComponentInputBinding, VerylFrontendLookup, VerylTestbenchSource, bitaccess,
+    build_ff_clock_recipes, flattening, resolve_total_width,
 };
 
 fn string_of(id: StrId) -> String {
@@ -65,6 +65,28 @@ fn component_parameter(value: &ExternalParamValue) -> ComponentParameterValue {
                 width: value.width() as u32,
             }
         }
+    }
+}
+
+fn component_input_target(
+    expression: &veryl_analyzer::ir::Expression,
+) -> Option<VerylComponentInputBinding> {
+    use veryl_analyzer::ir::{Expression, Factor, Op};
+
+    match expression {
+        Expression::Term(term) => match term.as_ref() {
+            Factor::Variable(id, index, select, _) => Some(VerylComponentInputBinding::Root {
+                id: *id,
+                index: index.clone(),
+                select: select.clone(),
+            }),
+            Factor::HierVariable(reference) => {
+                Some(VerylComponentInputBinding::Hierarchical(reference.clone()))
+            }
+            _ => None,
+        },
+        Expression::Unary(Op::BitNot, inner, _) => component_input_target(inner),
+        _ => None,
     }
 }
 
@@ -118,27 +140,8 @@ fn collect_testbench_components(
             .iter()
             .map(|connection| {
                 let output = connection.output.clone();
-                let input_signal = if connection.input {
-                    match &connection.expr {
-                        veryl_analyzer::ir::Expression::Term(term) => match term.as_ref() {
-                            veryl_analyzer::ir::Factor::Variable(id, index, select, _)
-                                if index.0.is_empty()
-                                    && select.0.is_empty()
-                                    && select.1.is_none() =>
-                            {
-                                Some(VerylComponentEventBinding::Root(*id))
-                            }
-                            veryl_analyzer::ir::Factor::HierVariable(reference)
-                                if reference.index.0.is_empty()
-                                    && reference.select.0.is_empty()
-                                    && reference.select.1.is_none() =>
-                            {
-                                Some(VerylComponentEventBinding::Hierarchical(reference.clone()))
-                            }
-                            _ => None,
-                        },
-                        _ => None,
-                    }
+                let input_target = if connection.input {
+                    component_input_target(&connection.expr)
                 } else {
                     None
                 };
@@ -146,7 +149,15 @@ fn collect_testbench_components(
                     output
                         .as_ref()
                         .map(|output| VerylComponentEventBinding::Root(output.id))
-                        .or_else(|| input_signal.clone())
+                        .or_else(|| match &input_target {
+                            Some(VerylComponentInputBinding::Root { id, .. }) => {
+                                Some(VerylComponentEventBinding::Root(*id))
+                            }
+                            Some(VerylComponentInputBinding::Hierarchical(reference)) => {
+                                Some(VerylComponentEventBinding::Hierarchical(reference.clone()))
+                            }
+                            None => None,
+                        })
                         .or_else(|| {
                             let veryl_analyzer::ir::Expression::Term(term) = &connection.expr
                             else {
@@ -168,7 +179,7 @@ fn collect_testbench_components(
                 VerylComponentConnectionBinding {
                     port: string_of(connection.port),
                     input: connection.input.then(|| connection.expr.clone()),
-                    input_signal,
+                    input_target,
                     output,
                     event,
                 }
@@ -933,7 +944,7 @@ pub fn schedule_symbolic_rtl(
     };
 
     let sir = source_sir.into_map_addr(project, project_regioned);
-    let state_objects = state_objects
+    let state_objects: HashMap<StateAddr, VariableMetadata> = state_objects
         .into_iter()
         .map(|(address, metadata)| (project(address), metadata))
         .collect();
@@ -1001,7 +1012,7 @@ pub fn schedule_symbolic_rtl(
         })
         .collect();
 
-    let mut rtl_write_roots = HashSet::default();
+    let mut rtl_writes = HashSet::default();
     for unit in sir
         .eval_comb
         .iter()
@@ -1012,11 +1023,32 @@ pub fn schedule_symbolic_rtl(
     {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {
-                match instruction {
-                    SIRInstruction::Store(address, ..) | SIRInstruction::Commit(_, address, ..) => {
-                        rtl_write_roots.insert(address.absolute_addr());
+                let (address, offset, width) = match instruction {
+                    SIRInstruction::Store(address, offset, width, ..)
+                    | SIRInstruction::Commit(_, address, offset, width, _) => {
+                        (address.absolute_addr(), offset, *width)
                     }
-                    _ => {}
+                    _ => continue,
+                };
+                let access = offset
+                    .constant_bit_offset()
+                    .and_then(|lsb| {
+                        width
+                            .checked_sub(1)
+                            .and_then(|tail| lsb.checked_add(tail))
+                            .map(|msb| BitAccess::new(lsb, msb))
+                    })
+                    .or_else(|| {
+                        state_objects
+                            .get(&address)
+                            .and_then(|object| object.width.checked_sub(1))
+                            .map(|msb| BitAccess::new(0, msb))
+                    });
+                if let Some(access) = access {
+                    rtl_writes.insert(VarAtomBase {
+                        id: address,
+                        access,
+                    });
                 }
             }
         }
@@ -1044,7 +1076,7 @@ pub fn schedule_symbolic_rtl(
             runtime_event_sites,
             comb_observers,
             testbench_read_roots: Default::default(),
-            rtl_write_roots,
+            rtl_writes,
         },
         testbench_source,
     };

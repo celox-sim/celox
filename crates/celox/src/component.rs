@@ -35,7 +35,7 @@ pub fn register_static_component_manifest(name: &str, json: &str) {
 struct LiveInput {
     port: u32,
     expr: CompiledExpr,
-    signal: Option<SignalRef>,
+    mask_source: Option<TestbenchTarget<SignalRef, CompiledExpr>>,
     width: usize,
 }
 
@@ -66,6 +66,7 @@ struct LiveComponent {
 pub(crate) struct ComponentRuntime {
     components: Vec<LiveComponent>,
     last_trace_values: Vec<(num_bigint::BigUint, num_bigint::BigUint)>,
+    active_reset_event: Option<usize>,
 }
 
 pub(crate) struct ComponentWrite {
@@ -171,7 +172,7 @@ fn component_manifest(
         let Some(json) = loader::library_manifest(&library.path) else {
             return Ok(None);
         };
-        return Ok(veryl_metadata::parse_library_manifest(&json).remove(type_name));
+        return loader::parse_library_manifest_json(&json, type_name);
     }
     loader::static_manifest(type_name)
         .map(|json| {
@@ -287,15 +288,20 @@ fn take_output_writes(component: &mut LiveComponent) -> Vec<ComponentWrite> {
 fn stage_component_inputs<B: SimBackend>(component: &mut LiveComponent, backend: &B) {
     let (values, _) = backend.memory_as_ptr();
     for input in &component.inputs {
-        let (value, mask_xz) = input
-            .signal
-            .map(|signal| backend.get_four_state(signal))
-            .unwrap_or_else(|| {
-                (
-                    input.expr.eval_value(values.cast_mut()).to_biguint(),
-                    num_bigint::BigUint::default(),
-                )
-            });
+        let value = input.expr.eval_value(values.cast_mut()).to_biguint();
+        let mask_xz = input
+            .mask_source
+            .as_ref()
+            .map(|source| {
+                let (_, mut mask) = backend.get_four_state(source.signal);
+                if let Some(selection) = &source.selection {
+                    let offset = selection.offset.eval_u64(values.cast_mut()) as usize;
+                    mask >>= offset;
+                    mask &= width_mask(selection.width);
+                }
+                mask
+            })
+            .unwrap_or_default();
         let mut words: Vec<_> = value.iter_u64_digits().collect();
         let mut mask_words: Vec<_> = mask_xz.iter_u64_digits().collect();
         words.resize(input.width.div_ceil(64).max(1), 0);
@@ -320,6 +326,7 @@ impl ComponentRuntime {
     ) -> Result<Vec<ComponentWrite>, String> {
         self.components.clear();
         self.last_trace_values.clear();
+        self.active_reset_event = None;
         let mut initialized = Vec::with_capacity(descriptors.len());
         let mut initial_writes = Vec::new();
         let mut driven_outputs = HashMap::<SignalRef, Vec<ComponentOutputDriver>>::new();
@@ -425,7 +432,7 @@ impl ComponentRuntime {
                     inputs.push(LiveInput {
                         port,
                         expr: expr.clone(),
-                        signal: binding.input_signal,
+                        mask_source: binding.input_target.clone(),
                         width: connection.width as usize,
                     });
                     if connection.is_clock || connection.is_reset {
@@ -633,15 +640,6 @@ impl ComponentRuntime {
             .collect()
     }
 
-    pub(crate) fn listens_to(&self, event_id: usize) -> bool {
-        self.components.iter().any(|component| {
-            component
-                .events
-                .iter()
-                .any(|event| event.event_id == event_id)
-        })
-    }
-
     pub(crate) fn has_scheduled_components(&self) -> bool {
         self.components
             .iter()
@@ -666,37 +664,33 @@ impl ComponentRuntime {
         event_id: usize,
         time: u64,
     ) -> Result<Vec<ComponentWrite>, String> {
+        let active_reset_event = self.active_reset_event;
         self.fire_matching(time, |component| {
-            component
+            let triggered = component
                 .events
                 .iter()
-                .find(|event| event.event_id == event_id)
-                .map(|event| (event.port, event.reset))
-        })
-    }
-
-    pub(crate) fn fire_reset_cycle(
-        &mut self,
-        reset_event_id: Option<usize>,
-        clock_event_id: usize,
-        time: u64,
-    ) -> Result<Vec<ComponentWrite>, String> {
-        self.fire_matching(time, |component| {
-            reset_event_id
-                .and_then(|reset_event_id| {
+                .find(|event| event.event_id == event_id)?;
+            let reset = if triggered.reset {
+                None
+            } else {
+                active_reset_event.and_then(|reset_event_id| {
                     component
                         .events
                         .iter()
                         .find(|event| event.reset && event.event_id == reset_event_id)
                 })
-                .or_else(|| {
-                    component
-                        .events
-                        .iter()
-                        .find(|event| !event.reset && event.event_id == clock_event_id)
-                })
-                .map(|event| (event.port, event.reset))
+            };
+            let event = reset.unwrap_or(triggered);
+            Some((event.port, event.reset))
         })
+    }
+
+    pub(crate) fn begin_reset_cycles(&mut self, reset_event_id: Option<usize>) {
+        self.active_reset_event = reset_event_id;
+    }
+
+    pub(crate) fn end_reset_cycles(&mut self) {
+        self.active_reset_event = None;
     }
 
     fn fire_matching(
@@ -780,9 +774,10 @@ impl ComponentRuntime {
             .any(|component| component.host.finish_requested())
     }
 
-    pub(crate) fn finish(&mut self) -> Result<(), String> {
+    pub(crate) fn finish(&mut self, time: u64) -> Result<(), String> {
         let mut failures = Vec::new();
         for component in &mut self.components {
+            component.host.time = time;
             let failures_before = component.host.failures().len();
             let rc = component.instance.on_finish(&mut component.host);
             drain_logs(component);

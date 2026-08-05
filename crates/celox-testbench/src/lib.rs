@@ -121,9 +121,10 @@ pub struct ComponentLibrary {
 pub struct ComponentConnectionBinding<Event, Signal, Expression> {
     pub port: String,
     pub input: Option<Expression>,
-    /// Direct source signal for a whole-variable input connection. Runtime
-    /// hosts use this alongside `input` to preserve the four-state mask.
-    pub input_signal: Option<Signal>,
+    /// Direct mask source for a variable/select input connection. Runtime
+    /// hosts evaluate `input` for the value and use this target to preserve
+    /// the corresponding four-state mask.
+    pub input_target: Option<TestbenchTarget<Signal, Expression>>,
     pub output: Option<TestbenchTarget<Signal, Expression>>,
     pub output_rtl_driven: bool,
     pub event: Option<Event>,

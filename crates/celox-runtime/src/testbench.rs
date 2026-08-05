@@ -1,4 +1,4 @@
-use celox_design::StateAddr as AbsoluteAddr;
+use celox_design::{BitAccess, StateAddr as AbsoluteAddr, VarAtomBase};
 use celox_testbench::{
     AssertMessage as GenericAssertMessage, ClockCount as GenericClockCount, CompiledExpr,
     ExecutableArgument, ExecutableAssertMessage, ExecutableClockCount, ExecutableLoopBound,
@@ -23,7 +23,7 @@ fn bind_expr<B: SimBackend>(
 fn bind_component<B: SimBackend, S: std::hash::BuildHasher>(
     backend: &B,
     component: SemanticComponentBinding<AbsoluteAddr>,
-    rtl_write_roots: &std::collections::HashSet<AbsoluteAddr, S>,
+    rtl_writes: &std::collections::HashSet<VarAtomBase<AbsoluteAddr>, S>,
 ) -> Option<celox_testbench::ExecutableComponentBinding<B::Event, SignalRef>> {
     Some(celox_testbench::ComponentBinding {
         instance: component.instance,
@@ -31,23 +31,49 @@ fn bind_component<B: SimBackend, S: std::hash::BuildHasher>(
             .connections
             .into_iter()
             .map(|connection| {
-                let output_rtl_driven = connection
+                let output_address = connection
                     .output
                     .as_ref()
-                    .is_some_and(|output| rtl_write_roots.contains(&output.signal.address));
+                    .map(|output| output.signal.address);
+                let output = match connection.output {
+                    Some(output) => Some(bind_target(backend, output)?),
+                    None => None,
+                };
+                let output_rtl_driven = output.as_ref().is_some_and(|output| {
+                    let target_access = match &output.selection {
+                        Some(selection) => selection
+                            .offset
+                            .constant_u64()
+                            .and_then(|offset| usize::try_from(offset).ok())
+                            .and_then(|lsb| {
+                                output
+                                    .width
+                                    .checked_sub(1)
+                                    .and_then(|tail| lsb.checked_add(tail))
+                                    .map(|msb| BitAccess::new(lsb, msb))
+                            }),
+                        None => output
+                            .signal
+                            .width
+                            .checked_sub(1)
+                            .map(|msb| BitAccess::new(0, msb)),
+                    };
+                    rtl_writes.iter().any(|write| {
+                        Some(write.id) == output_address
+                            && target_access.is_none_or(|target| target.overlaps(&write.access))
+                    })
+                });
                 Some(celox_testbench::ComponentConnectionBinding {
                     port: connection.port,
                     input: match connection.input {
                         Some(input) => Some(bind_expr(backend, input)?),
                         None => None,
                     },
-                    input_signal: connection
-                        .input_signal
-                        .map(|input| backend.resolve_signal(&input.address)),
-                    output: match connection.output {
-                        Some(output) => Some(bind_target(backend, output)?),
+                    input_target: match connection.input_target {
+                        Some(input) => Some(bind_target(backend, input)?),
                         None => None,
                     },
+                    output,
                     output_rtl_driven,
                     event: match connection.event {
                         Some(event) => Some(backend.resolve_event_opt(&event)?),
@@ -320,7 +346,7 @@ fn bind_statement<B: SimBackend>(
 pub fn bind_testbench_program<B: SimBackend, S: std::hash::BuildHasher>(
     backend: &B,
     program: TestbenchProgram<AbsoluteAddr>,
-    rtl_write_roots: &std::collections::HashSet<AbsoluteAddr, S>,
+    rtl_writes: &std::collections::HashSet<VarAtomBase<AbsoluteAddr>, S>,
 ) -> Option<ExecutableTestbench<B::Event, SignalRef>> {
     let random_seed = program.configured_random_seed();
     let components = program.components().to_vec();
@@ -330,7 +356,7 @@ pub fn bind_testbench_program<B: SimBackend, S: std::hash::BuildHasher>(
         .component_bindings()
         .to_vec()
         .into_iter()
-        .map(|component| bind_component(backend, component, rtl_write_roots))
+        .map(|component| bind_component(backend, component, rtl_writes))
         .collect::<Option<Vec<_>>>()?;
     let statements = program
         .into_statements()

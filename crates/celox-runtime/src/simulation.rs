@@ -300,7 +300,10 @@ impl<B: SimBackend> SimulationState<B> {
                     newly_triggered.push(info.canonical_id);
 
                     if let Some(event) = info.eval_only_event {
-                        executor.stage_external_event(event, current_time)?;
+                        executor.stage_external_event(
+                            info.eval_ff_event.unwrap_or(event),
+                            current_time,
+                        )?;
                         executor.eval_only_ff_at(event)?;
                     } else if let Some(event) = info.eval_ff_event {
                         executor.stage_external_event(event, current_time)?;

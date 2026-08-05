@@ -327,3 +327,19 @@ fn lookup_in_library(
 ) -> Result<&'static sys::VrlComponentVTable, ComponentError> {
     Err(ComponentError::Unsupported)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_library_manifest_json;
+
+    #[test]
+    fn strict_library_manifest_parser_rejects_malformed_documents() {
+        assert!(parse_library_manifest_json("not json", "component").is_err());
+        assert!(parse_library_manifest_json(r#"{"kind":"method_only"}"#, "component").is_err());
+        assert!(
+            parse_library_manifest_json(r#"{"types":{}}"#, "component")
+                .unwrap()
+                .is_none()
+        );
+    }
+}

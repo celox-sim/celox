@@ -245,9 +245,19 @@ pub struct VerylComponentBinding {
 pub struct VerylComponentConnectionBinding {
     pub port: String,
     pub input: Option<Expression>,
-    pub input_signal: Option<VerylComponentEventBinding>,
+    pub input_target: Option<VerylComponentInputBinding>,
     pub output: Option<veryl_analyzer::ir::AssignDestination>,
     pub event: Option<VerylComponentEventBinding>,
+}
+
+#[derive(Clone)]
+pub enum VerylComponentInputBinding {
+    Root {
+        id: VarId,
+        index: veryl_analyzer::ir::VarIndex,
+        select: veryl_analyzer::ir::VarSelect,
+    },
+    Hierarchical(Box<veryl_analyzer::ir::HierVarRef>),
 }
 
 #[derive(Clone)]

@@ -2,7 +2,7 @@
 
 use std::ffi::c_void;
 use std::sync::Once;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use celox::{FrontendDiagnostic, Simulator, SimulatorErrorKind, TestResult};
 use veryl_component_sys as sys;
@@ -337,6 +337,22 @@ unsafe extern "C" fn clock_call_method(
                 1
             }
         }
+        "check_input_mask" if args.len() == 2 => {
+            let mut value = 0;
+            let mut mask_xz = 0;
+            unsafe { (api.read_input)(ctx, state.input, &mut value, &mut mask_xz) };
+            if Some(value) == argument(0) && Some(mask_xz) == argument(1) {
+                0
+            } else {
+                unsafe {
+                    (api.fail)(
+                        ctx,
+                        sys::VrlStr::from_str("component method observed wrong input mask"),
+                    )
+                };
+                1
+            }
+        }
         "drive" if args.len() == 1 => {
             let value = argument(0).unwrap_or_default();
             unsafe { (api.write_output)(ctx, state.output, &value, std::ptr::null()) };
@@ -643,6 +659,26 @@ static INIT_FINISH_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable 
 };
 
 static CLEANUP_DROPS: AtomicUsize = AtomicUsize::new(0);
+static FINISH_TIME: AtomicU64 = AtomicU64::new(u64::MAX);
+
+unsafe extern "C" fn record_finish_time(state: *mut c_void, ctx: *mut sys::VrlCtx) -> i32 {
+    let state = unsafe { &*state.cast::<MethodState>() };
+    let time = unsafe { ((*state.api).sim_time)(ctx) };
+    FINISH_TIME.store(time, Ordering::Relaxed);
+    0
+}
+
+static FINISH_TIME_COMPONENT: sys::VrlComponentVTable = sys::VrlComponentVTable {
+    abi_version: sys::VRL_COMPONENT_ABI_VERSION,
+    kind: sys::VRL_KIND_METHOD_ONLY,
+    create,
+    destroy,
+    on_init: hook,
+    on_reset: hook,
+    on_clock: hook,
+    call_method,
+    on_finish: record_finish_time,
+};
 
 unsafe extern "C" fn destroy_cleanup(state: *mut c_void) {
     if !state.is_null() {
@@ -697,6 +733,7 @@ fn register_component() {
         celox::register_static_component("celox_finisher", &FINISH_COMPONENT);
         celox::register_static_component("celox_init_finisher", &INIT_FINISH_COMPONENT);
         celox::register_static_component("celox_cleanup", &CLEANUP_COMPONENT);
+        celox::register_static_component("celox_finish_time", &FINISH_TIME_COMPONENT);
         celox::register_static_component("celox_create_failure", &FAILING_COMPONENT);
     });
 }
@@ -792,6 +829,9 @@ fn component_metadata() -> (tempfile::TempDir, veryl_metadata::Metadata) {
                     }]
                 },
                 "celox_cleanup": {
+                    "kind": "method_only"
+                },
+                "celox_finish_time": {
                     "kind": "method_only"
                 },
                 "celox_create_failure": {
@@ -1158,7 +1198,7 @@ fn run_component_four_state_roundtrip<B: celox::SimBackend>(mut simulator: Simul
             .iter()
             .find(|connection| connection.port == "d")
             .unwrap()
-            .input_signal
+            .input_target
             .is_some()
     );
     assert_eq!(
@@ -2509,4 +2549,244 @@ fn component_return_supports_indexed_destinations() {
             .unwrap(),
         TestResult::Pass
     );
+}
+
+#[test]
+fn component_output_disjoint_from_rtl_selected_driver_is_allowed() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var d: logic<4>;
+            var q: logic<8>;
+            always_ff (clk) { q[7:4] += 1; }
+            inst component: $comp::celox_clocked #(STEP: 0) (
+                clk,
+                d,
+                q: q[3:0],
+            );
+            initial {
+                d = 4'ha;
+                clk.next();
+                $assert(q[7:4] == 1, "RTL owns the high slice: %h", q);
+                $assert(q[3:0] == 4'ha, "component owns the low slice: %h", q);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
+}
+
+#[test]
+fn component_method_connected_outputs_are_dynamic_loop_writes() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var d: logic<8>;
+            var limit: logic<8>;
+            inst component: $comp::celox_clocked #(STEP: 0) (
+                clk,
+                d,
+                q: limit,
+            );
+            initial {
+                limit = 3;
+                for i in 0..limit {
+                    component.drive(i);
+                }
+                $finish();
+            }
+        }
+    "#;
+
+    let error = Simulator::builder(code, "t")
+        .with_metadata(metadata)
+        .build()
+        .expect_err("component method outputs must be treated as loop-body writes");
+    assert!(matches!(
+        error.kind(),
+        SimulatorErrorKind::Frontend(diagnostics)
+            if diagnostics.iter().any(|diagnostic| matches!(
+                diagnostic,
+                FrontendDiagnostic::MutableForBound { .. }
+            ))
+    ));
+}
+
+fn run_selected_four_state_input<B: celox::SimBackend>(mut simulator: Simulator<B>) {
+    let input = simulator.signal("d");
+    simulator.set_four_state(input, 0b1011_0000u8.into(), 0b0101_0000u8.into());
+    let testbench = celox::testbench::compile_initial_testbench(&simulator).unwrap();
+    assert_eq!(
+        celox::testbench::run_compiled_testbench(&mut simulator, &testbench),
+        TestResult::Pass
+    );
+}
+
+#[test]
+fn selected_component_inputs_preserve_four_state_masks_on_all_backends() {
+    register_component();
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var d: logic<8>;
+            var selected_q: logic<4>;
+            var inverted_q: logic<8>;
+            inst selected: $comp::celox_clocked #(STEP: 0) (
+                clk,
+                d: d[7:4],
+                q: selected_q,
+            );
+            inst inverted: $comp::celox_clocked #(STEP: 0) (
+                clk,
+                d: ~d,
+                q: inverted_q,
+            );
+            initial {
+                selected.check_input_mask(4'b1011, 4'b0101);
+                inverted.check_input_mask(8'h4f, 8'h50);
+                $finish();
+            }
+        }
+    "#;
+
+    let (_dir, metadata) = component_metadata();
+    run_selected_four_state_input(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .four_state(true)
+            .build()
+            .unwrap(),
+    );
+    let (_dir, metadata) = component_metadata();
+    run_selected_four_state_input(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .four_state(true)
+            .build_cranelift()
+            .unwrap(),
+    );
+    let (_dir, metadata) = component_metadata();
+    run_selected_four_state_input(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .four_state(true)
+            .build_wasm()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn split_derived_event_stages_component_inputs_with_canonical_event() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"
+        module Divider (
+            clk: input clock,
+            d: output logic<8>,
+        ) {
+            var toggle: logic;
+            always_ff (clk) {
+                toggle = ~toggle;
+                d += 1;
+            }
+            let div_clk: '_ clock = clk & toggle;
+        }
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var d: logic<8>;
+            var q: logic<8>;
+            inst dut: Divider (clk, d);
+            inst component: $comp::celox_clocked #(STEP: 0) (
+                clk: dut.div_clk,
+                d,
+                q,
+            );
+            initial {
+                clk.next();
+                $assert(q == 1, "derived component observed committed input: %d", q);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
+}
+
+#[test]
+fn reset_assert_routes_derived_component_clocks_through_scheduler() {
+    register_component();
+    let (_dir, metadata) = component_metadata();
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var en: logic;
+            let gated_clk: '_ clock = clk & en;
+            var q: logic<8>;
+            inst component: $comp::celox_reset (clk: gated_clk, rst, q);
+            initial {
+                en = 1;
+                rst.assert();
+                $assert(q == 3, "derived-clock component received every reset cycle: %d", q);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
+}
+
+#[test]
+fn component_finish_hook_observes_final_testbench_time() {
+    register_component();
+    FINISH_TIME.store(u64::MAX, Ordering::Relaxed);
+    let (_dir, metadata) = component_metadata();
+    let code = r#"
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var component: $comp::celox_finish_time;
+            initial {
+                clk.next(10);
+                $finish();
+            }
+        }
+    "#;
+
+    assert_eq!(
+        Simulator::builder(code, "t")
+            .with_metadata(metadata)
+            .run_test()
+            .unwrap(),
+        TestResult::Pass
+    );
+    assert_eq!(FINISH_TIME.load(Ordering::Relaxed), 10);
 }

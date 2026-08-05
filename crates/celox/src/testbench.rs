@@ -975,7 +975,7 @@ fn run_testbench_limited<B: SimBackend>(
     } else {
         exec_detailed(sim, testbench.statements(), &mut ctx)
     };
-    if let Err(message) = sim.components.finish()
+    if let Err(message) = sim.components.finish(ctx.current_time)
         && !matches!(result, ExecResult::Fail(_))
     {
         result = ExecResult::Fail(message);
@@ -1026,7 +1026,7 @@ pub fn compile_initial_testbench<B: SimBackend>(
     celox_runtime::bind_testbench_program(
         sim.backend_ref(),
         semantic,
-        &sim.program().runtime_schema.rtl_write_roots,
+        &sim.program().runtime_schema.rtl_writes,
     )
 }
 
@@ -1102,7 +1102,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
     } else {
         exec_detailed(sim, testbench.statements(), &mut ctx)
     };
-    let finish_ok = sim.components.finish().is_ok();
+    let finish_ok = sim.components.finish(ctx.current_time).is_ok();
     let passed = finish_ok
         && !matches!(result, ExecResult::Fail(_))
         && ctx.assertions.iter().all(|a| a.passed);
@@ -1408,10 +1408,7 @@ fn exec_one_detailed<B: SimBackend>(
                     if let Some(limit) = ctx.tick_limit {
                         batch = batch.min(limit.saturating_sub(ctx.current_time));
                     }
-                    let reset_event_id = reset_event.map(|event| event.id());
-                    let component_aware = reset_event_id
-                        .is_some_and(|event_id| sim.components.listens_to(event_id))
-                        || sim.components.listens_to(clock_event.id());
+                    let component_aware = sim.components.has_scheduled_components();
                     let (completed, result) = if component_aware {
                         (
                             1,
@@ -1680,26 +1677,11 @@ fn tick_component_reset<B: SimBackend>(
     clock_event: B::Event,
     time: u64,
 ) -> Result<(), String> {
-    if sim.dirty {
-        sim.eval_comb().map_err(|error| error.to_string())?;
-    }
-    if let Some(reset_event) = reset_event {
-        sim.components.stage_inputs(reset_event.id(), &sim.backend);
-    }
-    sim.components.stage_inputs(clock_event.id(), &sim.backend);
-    sim.eval_apply_ff_at_checked(clock_event)
-        .map_err(|error| error.to_string())?;
-    sim.dirty = true;
-    let writes = sim.components.fire_reset_cycle(
-        reset_event.map(|event| event.id()),
-        clock_event.id(),
-        time,
-    )?;
-    apply_component_writes(sim, writes);
-    if !sim.program.runtime_schema.comb_observers.is_empty() && sim.dirty {
-        sim.eval_comb().map_err(|error| error.to_string())?;
-    }
-    Ok(())
+    sim.components
+        .begin_reset_cycles(reset_event.map(|event| event.id()));
+    let result = tick_component_clock(sim, clock_event, time.saturating_sub(1));
+    sim.components.end_reset_cycles();
+    result
 }
 
 fn tick_component_clock<B: SimBackend>(
