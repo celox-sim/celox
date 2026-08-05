@@ -1,16 +1,23 @@
 # Vite Plugin
 
-The `@celox-sim/vite-plugin` package provides seamless integration between Veryl source files and the TypeScript/Vitest toolchain.
+The `@celox-sim/vite-plugin` package connects Veryl source files to Vite-based
+tools. In Vitest, it also acts as a test-runner adapter: importing a Veryl test
+file turns its `#[test]` modules into ordinary Vitest cases. The plugin is not
+limited to that role; regular Veryl modules are exposed as typed module
+definitions for handwritten TypeScript tests and other Vite applications.
 
 ## What It Does
 
-The plugin handles three things automatically:
+The plugin handles four things automatically:
 
 1. **Module resolution** -- Allows `import { Counter } from "../src/Counter.veryl"` to work in test files.
-2. **Type generation** -- Produces `.d.veryl.ts` sidecar files so TypeScript understands the shape of each module (ports, events, types).
-3. **Hot reload** -- When a `.veryl` file changes, the plugin invalidates its cache and regenerates types.
+2. **Vitest integration** -- Converts each imported `#[test]` module into a Vitest `test()` case, runs it with Celox, and reports Veryl assertions as Vitest failures.
+3. **Type generation** -- Produces `.d.veryl.ts` sidecar files so TypeScript understands the shape of each module (ports, events, types).
+4. **Hot reload** -- When a `.veryl` file changes, the plugin invalidates its cache and regenerates types.
 
-Under the hood, the plugin calls the `celox-ts-gen` type generator via the NAPI addon. You never need to run the generator manually.
+Under the hood, the plugin calls the `celox-ts-gen` type generator and native
+simulator through the NAPI addon. You do not need to generate types or create
+Vitest wrappers manually.
 
 ## Installation
 
@@ -33,6 +40,27 @@ export default defineConfig({
 ```
 
 The plugin automatically finds the nearest `Veryl.toml` by walking up from the Vite project root.
+
+### Using Vitest as the Veryl Test Runner
+
+Create a normal Vitest entry file that imports a Veryl file containing one or
+more `#[test]` modules:
+
+```ts
+// test/counter.test.ts
+import "./CounterTest.veryl";
+```
+
+When Vitest evaluates the import, the plugin registers one Vitest case for each
+Veryl test module. Celox executes the testbench with its native simulator;
+failed Veryl assertions, including their source locations, appear in the
+Vitest report. This lets Vitest provide discovery, filtering, watch mode,
+reporters, and CI integration without rewriting the testbench in TypeScript.
+
+Importing an ordinary, non-test Veryl module instead returns a typed
+`ModuleDefinition`. It can be driven from a handwritten TypeScript test through
+`Simulator` or `Simulation`, and the same import mechanism can be used by other
+Vite-based tools.
 
 ### Custom Project Root
 

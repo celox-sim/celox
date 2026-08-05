@@ -1,16 +1,22 @@
 # Vite プラグイン
 
-`@celox-sim/vite-plugin` パッケージは、Veryl ソースファイルと TypeScript/Vitest ツールチェーンのシームレスな統合を提供します。
+`@celox-sim/vite-plugin` パッケージは、VerylソースをViteベースのツールへ接続します。
+Vitestではテストランナーアダプターとしても動作し、Verylのテストファイルをimportすると、
+その `#[test]` モジュールが通常のVitestテストケースになります。この用途だけに限定されている
+わけではなく、通常のVerylモジュールは、手書きのTypeScriptテストやその他のVite
+アプリケーションで使える型付きモジュール定義として公開されます。
 
 ## 機能
 
-プラグインは 3 つのことを自動的に処理します：
+プラグインは 4 つのことを自動的に処理します：
 
 1. **モジュール解決** -- テストファイルで `import { Counter } from "../src/Counter.veryl"` が動作するようにします。
-2. **型生成** -- TypeScript が各モジュールの形状（ポート、イベント、型）を理解できるように `.d.veryl.ts` サイドカーファイルを生成します。
-3. **ホットリロード** -- `.veryl` ファイルが変更されると、プラグインはキャッシュを無効化して型を再生成します。
+2. **Vitest統合** -- importした各 `#[test]` モジュールをVitestの `test()` ケースに変換し、Celoxで実行してVerylのassertionをVitestのfailureとして報告します。
+3. **型生成** -- TypeScript が各モジュールの形状（ポート、イベント、型）を理解できるように `.d.veryl.ts` サイドカーファイルを生成します。
+4. **ホットリロード** -- `.veryl` ファイルが変更されると、プラグインはキャッシュを無効化して型を再生成します。
 
-内部的には、プラグインは NAPI アドオンを介して `celox-ts-gen` 型ジェネレータを呼び出します。ジェネレータを手動で実行する必要はありません。
+内部的には、プラグインはNAPIアドオンを介して `celox-ts-gen` 型ジェネレーターと
+ネイティブシミュレーターを呼び出します。型生成やVitest wrapperの作成を手動で行う必要はありません。
 
 ## インストール
 
@@ -33,6 +39,25 @@ export default defineConfig({
 ```
 
 プラグインは Vite プロジェクトルートから上方に探索して、最も近い `Veryl.toml` を自動的に見つけます。
+
+### VitestをVerylのテストランナーとして使う
+
+1つ以上の `#[test]` モジュールを含むVerylファイルをimportする、通常のVitest
+エントリーファイルを作成します：
+
+```ts
+// test/counter.test.ts
+import "./CounterTest.veryl";
+```
+
+Vitestがこのimportを評価すると、プラグインはVerylのテストモジュールごとにVitest
+ケースを1つ登録します。Celoxのネイティブシミュレーターがtestbenchを実行し、失敗した
+Verylのassertionはソース位置付きでVitestのレポートに現れます。testbenchをTypeScriptに
+書き直すことなく、Vitestのテスト検出、フィルター、watch mode、reporter、CI統合を利用できます。
+
+通常の非テストVerylモジュールをimportした場合は、型付きの `ModuleDefinition` が返ります。
+手書きのTypeScriptテストから `Simulator` または `Simulation` で操作でき、同じimport機構を
+その他のViteベースのツールからも利用できます。
 
 ### カスタムプロジェクトルート
 
