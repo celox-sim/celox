@@ -146,7 +146,12 @@ if (craneliftResultsPath && arm64ResultsPath) {
     "celox-cranelift",
     arm64ResultsPath,
   );
-  for (const row of [cranelift, arm64, craneliftArm64]) {
+  const verylArm64 = requirePassedRunner(
+    arm64Rows,
+    "veryl-cc-sync",
+    arm64ResultsPath,
+  );
+  for (const row of [cranelift, arm64, craneliftArm64, verylArm64]) {
     if (row.test !== celox.test) {
       throw new Error(
         `runner tests differ: native-x86_64=${celox.test}, ${row.runner}=${row.test}`,
@@ -157,8 +162,10 @@ if (craneliftResultsPath && arm64ResultsPath) {
   for (const [platform, row] of [
     ["native-x86_64", celox],
     ["cranelift-x86_64", cranelift],
+    ["veryl-cc-x86_64", veryl],
     ["native-aarch64", arm64],
     ["cranelift-aarch64", craneliftArm64],
+    ["veryl-cc-aarch64", verylArm64],
   ]) {
     results.push(
       milliseconds(
