@@ -6,15 +6,17 @@
 //! decision over the same CFG-sparse interval model as machine VRegs, not a
 //! lifetime approximation based on instruction layout or last reloads.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use crate::native::mir::{BlockId, MFunction, SpillKind, Uses, VReg};
+use crate::{HashMap, HashSet};
 
 use super::cfg::NormalizedCfg;
 use super::interval_union::{AllocationBundleId, DynamicIntervalMatrix, IntervalUnionError};
 use super::live_interval::{
-    LiveIntervalError, LiveIntervals, LiveSegment, LivenessProgram, analyze_program,
+    LiveIntervalError, LiveIntervals, LiveSegment, LivenessProgram,
+    analyze_program_with_verification,
 };
 use super::spill_plan::{LogicalValue, PlannedEdgeOp, PlannedOp, SpillHome, SpillPlan};
 
@@ -520,10 +522,10 @@ fn build_planned_stack_program_from_events(
 
     // Sparse pruned MemorySSA.  `definitions` and `live_in` contain only
     // relations which actually occur; no home-by-block matrix is built.
-    let mut definitions = HashSet::<(SpillHome, usize)>::new();
-    let mut upward_uses = HashSet::<(SpillHome, usize)>::new();
+    let mut definitions = HashSet::<(SpillHome, usize)>::default();
+    let mut upward_uses = HashSet::<(SpillHome, usize)>::default();
     for (block, block_events) in events.iter().enumerate() {
-        let mut locally_defined = HashSet::<SpillHome>::new();
+        let mut locally_defined = HashSet::<SpillHome>::default();
         for event in block_events {
             match event.kind {
                 PlannedStackEventKind::Store => {
@@ -549,7 +551,7 @@ fn build_planned_stack_program_from_events(
         }
     }
 
-    let mut phi_relations = HashSet::<(SpillHome, usize)>::new();
+    let mut phi_relations = HashSet::<(SpillHome, usize)>::default();
     let mut queued = definitions.clone();
     let mut phi_work = definitions.iter().copied().collect::<Vec<_>>();
     while let Some((home, block)) = phi_work.pop() {
@@ -601,7 +603,7 @@ fn build_planned_stack_program_from_events(
         Enter(usize),
         Exit(Vec<(SpillHome, Option<VReg>)>),
     }
-    let mut current = HashMap::<SpillHome, VReg>::new();
+    let mut current = HashMap::<SpillHome, VReg>::default();
     let mut actions = vec![RenameAction::Enter(0)];
     while let Some(action) = actions.pop() {
         let block = match action {
@@ -812,28 +814,46 @@ pub(super) fn color_spill_plan(
     func: &MFunction,
     cfg: &NormalizedCfg,
     plan: &SpillPlan,
+    timing: bool,
+    verify: bool,
 ) -> Result<PlannedStackColoring, StackColorError> {
+    let phase = timing.then(crate::timing::now);
     let (program, homes) = build_planned_stack_program(func, cfg, plan)?;
-    color_planned_stack_program(program, homes, cfg)
+    if let Some(start) = phase {
+        tracing::debug!(
+            "[regalloc-timing] stack_color build_program versions={} homes={} elapsed={:?}",
+            program.version_homes.len(),
+            homes.len(),
+            start.elapsed()
+        );
+    }
+    color_planned_stack_program(program, homes, cfg, timing, verify)
 }
 
 fn color_planned_stack_program(
     program: PlannedStackLivenessProgram,
     homes: BTreeSet<SpillHome>,
     cfg: &NormalizedCfg,
+    timing: bool,
+    verify: bool,
 ) -> Result<PlannedStackColoring, StackColorError> {
     if homes.is_empty() {
         return Ok(PlannedStackColoring {
-            offsets: HashMap::new(),
+            offsets: HashMap::default(),
             frame_size: 0,
             slot_count: 0,
         });
     }
-    let intervals = analyze_program(&program, cfg)
+    let phase = timing.then(crate::timing::now);
+    let intervals = analyze_program_with_verification(&program, cfg, verify)
         .map_err(|error| planned_live_error(error, &program.version_homes))?;
-    intervals
-        .verify_program(&program, cfg)
-        .map_err(|error| planned_live_error(error, &program.version_homes))?;
+    if let Some(start) = phase {
+        tracing::debug!(
+            "[regalloc-timing] stack_color analyze_intervals elapsed={:?}",
+            start.elapsed()
+        );
+    }
+    let phase = timing.then(crate::timing::now);
     let ranges = merge_home_segments(&intervals, &program.version_homes, &homes)?;
     let bundle_homes = homes.iter().copied().collect::<Vec<_>>();
     let mut bundle_ranges = Vec::with_capacity(bundle_homes.len());
@@ -863,10 +883,22 @@ fn color_planned_stack_program(
             .then_with(|| right.2.cmp(&left.2))
             .then_with(|| bundle_homes[left.0].cmp(&bundle_homes[right.0]))
     });
+    let order = order
+        .into_iter()
+        .map(|(bundle, _, _)| bundle)
+        .collect::<Vec<_>>();
+    if let Some(start) = phase {
+        tracing::debug!(
+            "[regalloc-timing] stack_color merge_ranges homes={} elapsed={:?}",
+            bundle_homes.len(),
+            start.elapsed()
+        );
+    }
 
+    let phase = timing.then(crate::timing::now);
     let mut matrix = DynamicIntervalMatrix::new(cfg)
         .map_err(|error| planned_union_error(error, &bundle_homes))?;
-    for (bundle, _, _) in order {
+    for &bundle in &order {
         let range = matrix
             .make_range(bundle_ranges[bundle].clone())
             .map_err(|error| planned_union_error(error, &bundle_homes))?;
@@ -877,53 +909,72 @@ fn color_planned_stack_program(
             .assign_validated(AllocationBundleId(bundle as u32), slot, range.validated())
             .map_err(|error| planned_union_error(error, &bundle_homes))?;
     }
-    matrix
-        .verify()
-        .map_err(|error| planned_union_error(error, &bundle_homes))?;
-
-    // Rebuild from the final immutable assignment, independently of the
-    // mutation order used by first-fit coloring.
-    let mut rebuilt = DynamicIntervalMatrix::new(cfg)
-        .map_err(|error| planned_union_error(error, &bundle_homes))?;
-    let mut rebuild_order = (0..bundle_homes.len())
-        .map(|bundle| {
-            matrix
-                .slot(AllocationBundleId(bundle as u32))
-                .map(|slot| (slot, bundle))
-                .ok_or_else(|| {
-                    StackColorError::new(
-                        "STACK_COLOR.PLANNED_ASSIGNMENT_COVERAGE",
-                        None,
-                        None,
-                        [bundle_homes[bundle]],
-                        "production stack home has no colored frame slot",
-                    )
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    rebuild_order.sort_unstable();
-    for (slot, bundle) in rebuild_order {
-        let range = rebuilt
-            .make_range(bundle_ranges[bundle].clone())
+    if let Some(start) = phase {
+        tracing::debug!(
+            "[regalloc-timing] stack_color assign slots={} elapsed={:?}",
+            matrix.slot_count(),
+            start.elapsed()
+        );
+    }
+    let phase = timing.then(crate::timing::now);
+    if verify {
+        matrix
+            .verify()
             .map_err(|error| planned_union_error(error, &bundle_homes))?;
+
+        // Rebuild from the final immutable assignment, independently of the
+        // mutation order used by first-fit coloring. This is a diagnostic
+        // proof of the already-computed assignment, not part of coloring.
+        let mut rebuilt = DynamicIntervalMatrix::new(cfg)
+            .map_err(|error| planned_union_error(error, &bundle_homes))?;
+        let mut rebuild_order = (0..bundle_homes.len())
+            .map(|bundle| {
+                matrix
+                    .slot(AllocationBundleId(bundle as u32))
+                    .map(|slot| (slot, bundle))
+                    .ok_or_else(|| {
+                        StackColorError::new(
+                            "STACK_COLOR.PLANNED_ASSIGNMENT_COVERAGE",
+                            None,
+                            None,
+                            [bundle_homes[bundle]],
+                            "production stack home has no colored frame slot",
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        rebuild_order.sort_unstable();
+        for (slot, bundle) in rebuild_order {
+            let range = rebuilt
+                .make_range(bundle_ranges[bundle].clone())
+                .map_err(|error| planned_union_error(error, &bundle_homes))?;
+            rebuilt
+                .assign_validated(AllocationBundleId(bundle as u32), slot, range.validated())
+                .map_err(|error| planned_union_error(error, &bundle_homes))?;
+        }
         rebuilt
-            .assign_validated(AllocationBundleId(bundle as u32), slot, range.validated())
+            .verify()
             .map_err(|error| planned_union_error(error, &bundle_homes))?;
+        if rebuilt != matrix {
+            return Err(StackColorError::new(
+                "STACK_COLOR.PLANNED_MATRIX_IDENTITY",
+                None,
+                None,
+                [],
+                "rebuilt production stack-slot matrix differs from completed coloring",
+            ));
+        }
     }
-    rebuilt
-        .verify()
-        .map_err(|error| planned_union_error(error, &bundle_homes))?;
-    if rebuilt != matrix {
-        return Err(StackColorError::new(
-            "STACK_COLOR.PLANNED_MATRIX_IDENTITY",
-            None,
-            None,
-            [],
-            "rebuilt production stack-slot matrix differs from completed coloring",
-        ));
+    if let Some(start) = phase {
+        tracing::debug!(
+            "[regalloc-timing] stack_color verify enabled={} elapsed={:?}",
+            verify,
+            start.elapsed()
+        );
     }
 
-    let mut offsets = HashMap::with_capacity(bundle_homes.len());
+    let phase = timing.then(crate::timing::now);
+    let mut offsets = HashMap::with_capacity_and_hasher(bundle_homes.len(), Default::default());
     for (bundle, &home) in bundle_homes.iter().enumerate() {
         let slot = matrix
             .slot(AllocationBundleId(bundle as u32))
@@ -963,6 +1014,12 @@ fn color_planned_stack_program(
                 "colored production stack frame exceeds u32",
             )
         })?;
+    if let Some(start) = phase {
+        tracing::debug!(
+            "[regalloc-timing] stack_color offsets elapsed={:?}",
+            start.elapsed()
+        );
+    }
     Ok(PlannedStackColoring {
         offsets,
         frame_size,
@@ -1015,7 +1072,7 @@ mod tests {
             }
         }
         let (program, homes) = build_planned_stack_program_from_events(func, cfg, events, homes)?;
-        color_planned_stack_program(program, homes, cfg)
+        color_planned_stack_program(program, homes, cfg, false, true)
     }
 
     fn diamond_function() -> MFunction {

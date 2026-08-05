@@ -6,6 +6,21 @@
 
 use celox::{MemoryLayout, MemoryLayoutMode, OptimizedSir, Simulator, SimulatorBuilder};
 
+#[test]
+fn native_compilation_can_be_initialized_later() {
+    let code = r#"
+        module Top (o: output logic<8>) {
+            assign o = 8'h5a;
+        }
+    "#;
+
+    let compilation = Simulator::builder(code, "Top").compile_native().unwrap();
+    assert!(compilation.warnings().is_empty());
+
+    let mut sim = compilation.initialize().unwrap();
+    assert_eq!(sim.get(sim.signal("o")), 0x5au64.into());
+}
+
 fn run_single_block_mir(insts: Vec<celox::native_backend::mir::MInst>, vreg_count: usize) -> u64 {
     use celox::native_backend::emit;
     use celox::native_backend::jit_mem;

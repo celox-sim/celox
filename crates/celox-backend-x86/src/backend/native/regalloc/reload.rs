@@ -6,7 +6,7 @@
 //! the shared access-based MemorySSA graph. A recipe is usable only where the
 //! same clobber graph reaches that exact physical load.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use celox_analysis::memory::{MemoryEffect, MemoryLocation, effects_may_alias};
@@ -15,6 +15,7 @@ use celox_analysis::memory_ssa::{
     MemoryClobber, MemoryPointMap,
 };
 
+use crate::HashMap;
 use crate::native::memory_effect::{self, MemoryObject, analysis_effects};
 use crate::native::mir::{BaseReg, BlockId, CmpKind, MFunction, MInst, OpSize, VReg};
 
@@ -1177,6 +1178,7 @@ struct ReloadMemorySsa {
     writes: BTreeMap<MemoryDefinition, Vec<MemoryEffect<MemoryObject>>>,
     block_ids: Vec<BlockId>,
     walker: ClobberWalker,
+    clobber_cache: HashMap<(StateLoad, MemoryAccessId), MemoryAccessId>,
 }
 
 impl ReloadMemorySsa {
@@ -1228,6 +1230,7 @@ impl ReloadMemorySsa {
         let graph = &self.graph;
         let writes = &self.writes;
         let block_ids = &self.block_ids;
+        let clobber_cache = &mut self.clobber_cache;
         let oracle = |definition: &MemoryDefinition, query: &MemoryEffect<MemoryObject>| {
             writes.get(definition).is_some_and(|effects| {
                 effects
@@ -1237,22 +1240,30 @@ impl ReloadMemorySsa {
             })
         };
         let mut clobber_query = self.walker.query(graph, &query, &oracle);
-        let mut clobber_access = |start| match clobber_query.clobber(start) {
-            Some(MemoryClobber::Access(access)) => Ok(access),
-            Some(MemoryClobber::Indeterminate) => Err(ReloadRecipeError::new(
-                "RELOAD_RECIPE.CLOBBER_CYCLE",
-                None,
-                None,
-                None,
-                "query-specific clobber graph is an unresolved closed cycle",
-            )),
-            None => Err(ReloadRecipeError::new(
-                "RELOAD_RECIPE.CLOBBER_ACCESS",
-                None,
-                None,
-                None,
-                "clobber query starts outside the MemorySSA graph",
-            )),
+        let mut clobber_access = |start| {
+            if let Some(&access) = clobber_cache.get(&(load, start)) {
+                return Ok(access);
+            }
+            match clobber_query.clobber(start) {
+                Some(MemoryClobber::Access(access)) => {
+                    clobber_cache.insert((load, start), access);
+                    Ok(access)
+                }
+                Some(MemoryClobber::Indeterminate) => Err(ReloadRecipeError::new(
+                    "RELOAD_RECIPE.CLOBBER_CYCLE",
+                    None,
+                    None,
+                    None,
+                    "query-specific clobber graph is an unresolved closed cycle",
+                )),
+                None => Err(ReloadRecipeError::new(
+                    "RELOAD_RECIPE.CLOBBER_ACCESS",
+                    None,
+                    None,
+                    None,
+                    "clobber query starts outside the MemorySSA graph",
+                )),
+            }
         };
         let root_access = clobber_access(start)?;
         let root = Self::stable_access(graph, block_ids, root_access)?;
@@ -1469,9 +1480,9 @@ fn analyze_unverified_with_queries(
         requested_points,
         collect_all_uses,
     )?;
-    let mut store_homes = HashMap::<(usize, usize), Vec<StoreHomeSpec>>::new();
-    let mut preserving_writes = HashMap::<(usize, usize), ValidatedStateFragment>::new();
-    let mut fragment_homes = HashMap::<(usize, usize), ValidatedStateFragment>::new();
+    let mut store_homes = HashMap::<(usize, usize), Vec<StoreHomeSpec>>::default();
+    let mut preserving_writes = HashMap::<(usize, usize), ValidatedStateFragment>::default();
+    let mut fragment_homes = HashMap::<(usize, usize), ValidatedStateFragment>::default();
     for (block, mir_block) in func.blocks.iter().enumerate() {
         for (instruction, inst) in mir_block.insts.iter().enumerate() {
             if let Some(insert) = validated_state_fragment(func, inst) {
@@ -2169,6 +2180,7 @@ fn build_reload_memory_ssa(
         writes,
         block_ids: func.blocks.iter().map(|block| block.id).collect(),
         walker: ClobberWalker::new(),
+        clobber_cache: HashMap::default(),
     })
 }
 

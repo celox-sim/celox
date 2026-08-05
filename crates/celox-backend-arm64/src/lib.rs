@@ -9,8 +9,9 @@ use celox_backend_common::regalloc::{
     Allocation, BlockAllocationFacts, FunctionAllocationFacts, InstructionAllocationFacts,
     LinearScanError, LiveRange, MachineRegister, allocate_linear_scan,
 };
-use std::collections::HashMap;
 use std::fmt;
+
+type HashMap<K, V> = fxhash::FxHashMap<K, V>;
 
 mod allocation;
 pub mod jit_mem;
@@ -286,7 +287,7 @@ fn live_ranges(
     facts: &FunctionAllocationFacts<VReg, Arm64Reg>,
 ) -> Result<Vec<LiveRange<VReg>>, CompileError> {
     let instructions = &facts.blocks[0].instructions;
-    let mut ranges = HashMap::<VReg, LiveRange<VReg>>::new();
+    let mut ranges = HashMap::<VReg, LiveRange<VReg>>::default();
     for (index, instruction) in instructions.iter().enumerate() {
         let index = u32::try_from(index)
             .map_err(|_| CompileError::InvalidMir("too many instructions".into()))?;

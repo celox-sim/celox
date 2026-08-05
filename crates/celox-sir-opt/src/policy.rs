@@ -273,7 +273,7 @@ impl Default for PassOptions {
 #[cfg(test)]
 mod tests {
     use super::{OptLevel, OptimizeOptions, SirPass};
-    use std::collections::HashSet;
+    use crate::HashSet;
 
     #[test]
     fn every_pass_name_round_trips_and_is_unique() {

@@ -165,46 +165,60 @@ pub(super) fn optimize_with_options(
     );
     let ff_passes = pipeline_builder.fused_ff(program);
     let comb_ff_passes = pipeline_builder.fused_comb_ff(program);
+    let comb_ff_late_passes = pipeline_builder.fused_comb_ff_late(program);
+    let ff_post_passes = pipeline_builder.fused_ff_post();
+    let comb_passes = pipeline_builder.combinational(program);
 
     let ff_eu_count: usize = program.sir.eval_apply_ffs.values().map(Vec::len).sum();
     let comb_ff_eu_count: usize = program.sir.eval_comb_apply_ffs.values().map(Vec::len).sum();
     let eu_count = ff_eu_count + comb_ff_eu_count;
-    optimize_unit_groups_cached(&mut program.sir.eval_apply_ffs, &ff_passes, &options);
-    optimize_unit_groups_cached(
-        &mut program.sir.eval_comb_apply_ffs,
-        &comb_ff_passes,
-        &options,
-    );
+    let comb_phase_start = timing.then(crate::timing::now);
+    let comb_eu_count = program.sir.eval_comb.len();
+    let sir = &mut *program.sir;
+    std::thread::scope(|scope| {
+        let comb_worker = scope.spawn(|| {
+            for (i, eu) in sir.eval_comb.iter_mut().enumerate() {
+                if timing {
+                    let inst_count: usize = eu.blocks.values().map(|b| b.instructions.len()).sum();
+                    let block_count = eu.blocks.len();
+                    tracing::debug!(
+                        "[phase] eval_comb eu[{i}]: blocks={block_count} insts={inst_count}"
+                    );
+                }
+                comb_passes.run(eu, &options);
+            }
+        });
 
-    // The late comb pipeline must start from the CFG produced by the complete
-    // initial pipeline. Keep it in the same exact-equivalence cache: clock
-    // and reset triggers commonly share the complete fused body.
-    let comb_ff_late_passes = pipeline_builder.fused_comb_ff_late(program);
-    optimize_unit_groups_cached(
-        &mut program.sir.eval_comb_apply_ffs,
-        &comb_ff_late_passes,
-        &options,
-    );
+        optimize_unit_groups_cached(&mut sir.eval_apply_ffs, &ff_passes, &options);
+        optimize_unit_groups_cached(&mut sir.eval_comb_apply_ffs, &comb_ff_passes, &options);
 
-    optimize_unified_commit_groups(
-        &mut program.sir.eval_apply_ffs,
-        on(SirPass::CommitSinking),
-        on(SirPass::InlineCommitForwarding),
-    );
-    optimize_unified_commit_groups(
-        &mut program.sir.eval_comb_apply_ffs,
-        on(SirPass::CommitSinking),
-        on(SirPass::InlineCommitForwarding),
-    );
-    let ff_post_passes = pipeline_builder.fused_ff_post();
-    optimize_unit_groups_cached(&mut program.sir.eval_apply_ffs, &ff_post_passes, &options);
-    optimize_unit_groups_cached(
-        &mut program.sir.eval_comb_apply_ffs,
-        &ff_post_passes,
-        &options,
-    );
+        // The late comb pipeline must start from the CFG produced by the complete
+        // initial pipeline. Keep it in the same exact-equivalence cache: clock
+        // and reset triggers commonly share the complete fused body.
+        optimize_unit_groups_cached(&mut sir.eval_comb_apply_ffs, &comb_ff_late_passes, &options);
+
+        optimize_unified_commit_groups(
+            &mut sir.eval_apply_ffs,
+            on(SirPass::CommitSinking),
+            on(SirPass::InlineCommitForwarding),
+        );
+        optimize_unified_commit_groups(
+            &mut sir.eval_comb_apply_ffs,
+            on(SirPass::CommitSinking),
+            on(SirPass::InlineCommitForwarding),
+        );
+        optimize_unit_groups_cached(&mut sir.eval_apply_ffs, &ff_post_passes, &options);
+        optimize_unit_groups_cached(&mut sir.eval_comb_apply_ffs, &ff_post_passes, &options);
+
+        comb_worker
+            .join()
+            .expect("combinational SIR optimization worker must not panic");
+    });
     if let Some(s) = phase_start {
         tracing::debug!("[phase] eval_apply_ffs ({eu_count} EUs): {:?}", s.elapsed());
+    }
+    if let Some(s) = comb_phase_start {
+        tracing::debug!("[phase] eval_comb ({comb_eu_count} EUs): {:?}", s.elapsed());
     }
 
     // 2. Logic-Only Cache (Split Path Phase 1):
@@ -230,23 +244,6 @@ pub(super) fn optimize_with_options(
     }
     if let Some(s) = phase_start {
         tracing::debug!("[phase] apply_ffs ({eu_count} EUs): {:?}", s.elapsed());
-    }
-
-    // 4. Combinational Blocks:
-    let phase_start = timing.then(crate::timing::now);
-    let comb_passes = pipeline_builder.combinational(program);
-
-    let eu_count = program.sir.eval_comb.len();
-    for (i, eu) in program.sir.eval_comb.iter_mut().enumerate() {
-        if timing {
-            let inst_count: usize = eu.blocks.values().map(|b| b.instructions.len()).sum();
-            let block_count = eu.blocks.len();
-            tracing::debug!("[phase] eval_comb eu[{i}]: blocks={block_count} insts={inst_count}");
-        }
-        comb_passes.run(eu, &options);
-    }
-    if let Some(s) = phase_start {
-        tracing::debug!("[phase] eval_comb ({eu_count} EUs): {:?}", s.elapsed());
     }
 
     super::late::optimize_late_comb(program, opt, &options, &unpacked_element_widths);

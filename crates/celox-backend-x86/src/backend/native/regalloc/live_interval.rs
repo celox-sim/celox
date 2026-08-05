@@ -7,12 +7,13 @@
 //! interfere merely because their blocks are adjacent in layout.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
 
 use crate::native::mir::{BlockId, MFunction, Uses, VReg};
+use crate::{HashMap, HashSet};
 
 use super::cfg::NormalizedCfg;
 
@@ -391,9 +392,18 @@ impl LivenessProgram for MFunction {
     }
 }
 
+#[cfg(test)]
 pub(super) fn analyze_program<P: LivenessProgram + ?Sized>(
     program: &P,
     cfg: &NormalizedCfg,
+) -> Result<LiveIntervals, LiveIntervalError> {
+    analyze_program_with_verification(program, cfg, true)
+}
+
+pub(super) fn analyze_program_with_verification<P: LivenessProgram + ?Sized>(
+    program: &P,
+    cfg: &NormalizedCfg,
+    verify: bool,
 ) -> Result<LiveIntervals, LiveIntervalError> {
     check_model_shape(program, cfg)?;
     let block_slots = assign_slots(program)?;
@@ -404,7 +414,9 @@ pub(super) fn analyze_program<P: LivenessProgram + ?Sized>(
         block_slots,
         intervals,
     };
-    result.verify_program(program, cfg)?;
+    if verify {
+        result.verify_program(program, cfg)?;
+    }
     Ok(result)
 }
 
@@ -605,7 +617,7 @@ fn collect_facts<P: LivenessProgram + ?Sized>(
         .map(|_| BlockFacts::default())
         .collect::<Vec<_>>();
     let mut phi_definitions = (0..program.block_count())
-        .map(|_| HashSet::new())
+        .map(|_| HashSet::default())
         .collect::<Vec<_>>();
 
     for block_index in 0..program.block_count() {
@@ -674,7 +686,7 @@ fn collect_facts<P: LivenessProgram + ?Sized>(
         }
     }
 
-    let mut edge_uses = HashMap::<(usize, usize), HashSet<VReg>>::new();
+    let mut edge_uses = HashMap::<(usize, usize), HashSet<VReg>>::default();
     for successor in 0..program.block_count() {
         let successor_id = program.block_id(successor);
         for phi_index in 0..program.phi_count(successor) {
@@ -748,13 +760,14 @@ fn solve_liveness(
     cfg: &NormalizedCfg,
     facts: &ModelFacts,
 ) -> (Vec<HashSet<VReg>>, Vec<HashSet<VReg>>) {
-    let mut live_in = (0..block_count).map(|_| HashSet::new()).collect::<Vec<_>>();
-    let mut live_out = live_in.clone();
+    let mut live_in = (0..block_count)
+        .map(|_| HashSet::default())
+        .collect::<Vec<_>>();
     let mut queue = (0..block_count).rev().collect::<VecDeque<_>>();
     let mut queued = vec![true; block_count];
     while let Some(block) = queue.pop_front() {
         queued[block] = false;
-        let mut next_out = HashSet::new();
+        let mut next_out = HashSet::default();
         for &successor in &cfg.successors[block] {
             next_out.extend(live_in[successor].iter().copied());
             if let Some(edge) = facts.edge_uses.get(&(block, successor)) {
@@ -768,9 +781,11 @@ fn solve_liveness(
                 .copied()
                 .filter(|value| !facts.blocks[block].definitions.contains(value)),
         );
-        if next_in != live_in[block] || next_out != live_out[block] {
+        // Only live-in is visible to predecessors. Keep the fixed point over
+        // that one relation and reconstruct live-out once after convergence;
+        // retaining and comparing both tables duplicates every live relation.
+        if next_in != live_in[block] {
             live_in[block] = next_in;
-            live_out[block] = next_out;
             for &predecessor in &cfg.predecessors[block] {
                 if !queued[predecessor] {
                     queued[predecessor] = true;
@@ -779,6 +794,18 @@ fn solve_liveness(
             }
         }
     }
+    let live_out = (0..block_count)
+        .map(|block| {
+            let mut values = HashSet::default();
+            for &successor in &cfg.successors[block] {
+                values.extend(live_in[successor].iter().copied());
+                if let Some(edge) = facts.edge_uses.get(&(block, successor)) {
+                    values.extend(edge.iter().copied());
+                }
+            }
+            values
+        })
+        .collect();
     (live_in, live_out)
 }
 
@@ -793,7 +820,7 @@ fn build_intervals<P: LivenessProgram + ?Sized>(
     let mut segments = vec![Vec::<LiveSegment>::new(); facts.definitions.len()];
     for block_index in 0..program.block_count() {
         let block_id = program.block_id(block_index);
-        let mut values = HashSet::new();
+        let mut values = HashSet::default();
         values.extend(live_in[block_index].iter().copied());
         values.extend(live_out[block_index].iter().copied());
         values.extend(facts.blocks[block_index].definitions.iter().copied());
@@ -934,7 +961,7 @@ impl LiveIntervals {
         let facts = collect_facts(program, cfg, &expected_slots)?;
         let dominators = DominatorIntervals::build(program, cfg)?;
         let mut cached_in = (0..program.block_count())
-            .map(|_| HashSet::new())
+            .map(|_| HashSet::default())
             .collect::<Vec<_>>();
         let mut cached_out = cached_in.clone();
 
@@ -1046,7 +1073,7 @@ impl LiveIntervals {
         }
 
         for block in 0..program.block_count() {
-            let mut expected_out = HashSet::new();
+            let mut expected_out = HashSet::default();
             for &successor in &cfg.successors[block] {
                 expected_out.extend(cached_in[successor].iter().copied());
                 if let Some(edge) = facts.edge_uses.get(&(block, successor)) {

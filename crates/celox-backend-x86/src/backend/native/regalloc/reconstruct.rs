@@ -1,7 +1,8 @@
 //! Materialize a SpillPlan and reconstruct strict SSA with dominance frontiers.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
+use crate::HashMap;
 use crate::native::memory_effect::{self, UnknownMemory};
 use crate::native::mir::{
     BaseReg, BlockId, MBlock, MFunction, MInst, OpSize, PhiNode, SpillDesc, SpillKind, VReg,
@@ -162,10 +163,21 @@ pub(super) fn reconstruct(
     plan: &SpillPlan,
     _next_use: &NextUseAnalysis,
     reload_recipes: &ReloadRecipeAnalysis,
+    timing: bool,
+    verify: bool,
 ) -> Result<ReconstructionResult, ReconstructError> {
     let recipe_homes = &plan.recipe_homes;
-    let stack_coloring =
-        super::stack_color::color_spill_plan(func, cfg, plan).map_err(stack_color_error)?;
+    let phase = timing.then(crate::timing::now);
+    let stack_coloring = super::stack_color::color_spill_plan(func, cfg, plan, timing, verify)
+        .map_err(stack_color_error)?;
+    if let Some(start) = phase {
+        tracing::debug!(
+            "[regalloc-timing] reconstruct stack_color homes={} slots={} elapsed={:?}",
+            stack_coloring.offsets.len(),
+            stack_coloring.slot_count,
+            start.elapsed()
+        );
+    }
     let stack_offsets = stack_coloring.offsets;
     let frame_size = stack_coloring.frame_size;
     verify_reload_homes(func, plan, &stack_offsets, recipe_homes)?;
@@ -173,9 +185,10 @@ pub(super) fn reconstruct(
     let mut logical_for_vreg = (0..original_vregs)
         .map(|index| plan.logical.of(VReg(index as u32)))
         .collect::<Vec<_>>();
-    let mut insertions = HashMap::<(usize, usize), Vec<MaterializedOp>>::new();
-    let mut reload_blocks = HashMap::<LogicalValue, BTreeSet<usize>>::new();
+    let mut insertions = HashMap::<(usize, usize), Vec<MaterializedOp>>::default();
+    let mut reload_blocks = HashMap::<LogicalValue, BTreeSet<usize>>::default();
     let mut edge_reload_bundles = Vec::<EdgeReloadBundle>::new();
+    let phase = timing.then(crate::timing::now);
     for spill in super::ssa_state_home::planned_spills(func, cfg, plan).map_err(|error| {
         ReconstructError::new(
             error.rule,
@@ -390,10 +403,20 @@ pub(super) fn reconstruct(
             edge_reload_bundles.push(bundle);
         }
     }
+    if let Some(start) = phase {
+        tracing::debug!(
+            "[regalloc-timing] reconstruct materialize_plan insertions={} reload_values={} edge_bundles={} elapsed={:?}",
+            insertions.len(),
+            reload_blocks.len(),
+            edge_reload_bundles.len(),
+            start.elapsed()
+        );
+    }
 
+    let phase = timing.then(crate::timing::now);
     let affected = reload_blocks.keys().copied().collect::<BTreeSet<_>>();
-    let mut definition_blocks = HashMap::<LogicalValue, BTreeSet<usize>>::new();
-    let mut existing_phi_blocks = HashMap::<LogicalValue, BTreeSet<usize>>::new();
+    let mut definition_blocks = HashMap::<LogicalValue, BTreeSet<usize>>::default();
+    let mut existing_phi_blocks = HashMap::<LogicalValue, BTreeSet<usize>>::default();
     for (block, mir_block) in func.blocks.iter().enumerate() {
         for phi in &mir_block.phis {
             let logical = reconstruct_logical(&logical_for_vreg, phi.dst, mir_block.id)?;
@@ -418,7 +441,7 @@ pub(super) fn reconstruct(
         definition_blocks.entry(logical).or_default().extend(blocks);
     }
 
-    let mut reconstruction_phis = HashMap::<(usize, LogicalValue), VReg>::new();
+    let mut reconstruction_phis = HashMap::<(usize, LogicalValue), VReg>::default();
     for logical in affected {
         let mut has_phi = existing_phi_blocks.remove(&logical).unwrap_or_default();
         let mut queue = definition_blocks
@@ -445,7 +468,15 @@ pub(super) fn reconstruct(
             }
         }
     }
+    if let Some(start) = phase {
+        tracing::debug!(
+            "[regalloc-timing] reconstruct place_phis phis={} elapsed={:?}",
+            reconstruction_phis.len(),
+            start.elapsed()
+        );
+    }
 
+    let phase = timing.then(crate::timing::now);
     let mut children = vec![Vec::new(); func.blocks.len()];
     for (block, &idom) in cfg.idom.iter().enumerate().skip(1) {
         let Some(idom) = idom else {
@@ -459,7 +490,7 @@ pub(super) fn reconstruct(
         };
         children[idom].push(block);
     }
-    let mut stacks = HashMap::<LogicalValue, Vec<VReg>>::new();
+    let mut stacks = HashMap::<LogicalValue, Vec<VReg>>::default();
     let mut recipe_reloads = Vec::<ExpectedMaterializedReload>::new();
     let mut pending_state_stores = Vec::<PendingStateStore>::new();
     let mut state_reloads = Vec::<MaterializedStateReload>::new();
@@ -479,6 +510,15 @@ pub(super) fn reconstruct(
         &mut pending_state_stores,
         &mut state_reloads,
     )?;
+    if let Some(start) = phase {
+        tracing::debug!(
+            "[regalloc-timing] reconstruct rename recipe_reloads={} state_reloads={} elapsed={:?}",
+            recipe_reloads.len(),
+            state_reloads.len(),
+            start.elapsed()
+        );
+    }
+    let phase = timing.then(crate::timing::now);
     let state_stores = resolve_state_store_ordinals(func, &pending_state_stores)?;
     let shared_reload_blocks = share_identical_edge_reload_bundles(
         func,
@@ -488,6 +528,14 @@ pub(super) fn reconstruct(
     )?;
     let removed = eliminate_dead_definitions(func, &mut recipe_reloads);
     state_reloads.retain(|reload| !removed.contains(&reload.reload));
+    if let Some(start) = phase {
+        tracing::debug!(
+            "[regalloc-timing] reconstruct finalize shared_blocks={} removed_defs={} elapsed={:?}",
+            shared_reload_blocks.len(),
+            removed.len(),
+            start.elapsed()
+        );
+    }
 
     Ok(ReconstructionResult {
         frame_size,
@@ -644,7 +692,7 @@ fn eliminate_dead_definitions(
     func: &mut MFunction,
     recipe_reloads: &mut Vec<ExpectedMaterializedReload>,
 ) -> BTreeSet<VReg> {
-    let mut definition_inputs = HashMap::<VReg, Vec<VReg>>::new();
+    let mut definition_inputs = HashMap::<VReg, Vec<VReg>>::default();
     let mut work = Vec::<VReg>::new();
     for block in &func.blocks {
         for phi in &block.phis {
@@ -698,7 +746,7 @@ fn resolve_state_store_ordinals(
     func: &MFunction,
     pending: &[PendingStateStore],
 ) -> Result<Vec<MaterializedStateStore>, ReconstructError> {
-    let mut by_location = HashMap::with_capacity(pending.len());
+    let mut by_location = HashMap::with_capacity_and_hasher(pending.len(), Default::default());
     for store in pending {
         if by_location
             .insert((store.block, store.instruction), store.home)
@@ -1299,7 +1347,7 @@ fn share_identical_edge_reload_bundles(
     recipe_reloads: &mut Vec<ExpectedMaterializedReload>,
     state_reloads: &mut Vec<MaterializedStateReload>,
 ) -> Result<Vec<MemoryPhiFactoring>, ReconstructError> {
-    let mut grouped = HashMap::<EdgeReloadGroupKey, Vec<usize>>::new();
+    let mut grouped = HashMap::<EdgeReloadGroupKey, Vec<usize>>::default();
     for (bundle, edge) in bundles.iter().enumerate() {
         grouped
             .entry(EdgeReloadGroupKey {
@@ -2477,7 +2525,9 @@ mod tests {
             dst: fresh,
             sources: Vec::new(),
         });
-        let reconstruction_phis = HashMap::from([((successor, LogicalValue(original.0)), fresh)]);
+        let reconstruction_phis = [((successor, LogicalValue(original.0)), fresh)]
+            .into_iter()
+            .collect();
         let mut children = vec![Vec::new(); func.blocks.len()];
         children[0].push(successor);
         let recipe_homes = BTreeSet::new();
@@ -2492,10 +2542,10 @@ mod tests {
             &plan,
             &children,
             &reconstruction_phis,
-            &HashMap::new(),
+            &HashMap::default(),
             &logical_for_vreg,
-            &mut HashMap::new(),
-            &mut HashMap::new(),
+            &mut HashMap::default(),
+            &mut HashMap::default(),
             &recipe_homes,
             &mut recipe_reloads,
             &mut pending_state_stores,
@@ -2754,7 +2804,7 @@ mod tests {
         plan.verify(&func, &cfg, registers).unwrap();
         plan.verify_recipe_homes(&func, &cfg, &recipes).unwrap();
         super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
-        let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes).unwrap();
+        let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes, false, true).unwrap();
         let rebuilt_cfg = (!result.shared_reload_blocks.is_empty())
             .then(|| super::super::cfg::normalize(&mut func).unwrap());
         let cfg = rebuilt_cfg.as_ref().unwrap_or(&cfg);
@@ -2841,7 +2891,7 @@ mod tests {
         plan.verify(&func, &cfg, 2).unwrap();
         plan.verify_recipe_homes(&func, &cfg, &recipes).unwrap();
         super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
-        let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes).unwrap();
+        let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes, false, true).unwrap();
         super::super::reload::verify_expected_materialized_reloads(
             &func,
             &cfg,
@@ -3117,7 +3167,7 @@ mod tests {
         plan.verify(&func, &cfg, 2).unwrap();
         plan.verify_recipe_homes(&func, &cfg, &recipes).unwrap();
         super::super::home_verify::verify(&func, &cfg, &plan).unwrap();
-        let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes).unwrap();
+        let result = reconstruct(&mut func, &cfg, &plan, &next_use, &recipes, false, true).unwrap();
         super::super::reload::verify_expected_materialized_reloads(
             &func,
             &cfg,

@@ -1,6 +1,14 @@
 mod builder;
 mod error;
 
+#[cfg(all(
+    feature = "host-runtime",
+    any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )
+))]
+pub use builder::NativeCompilation;
 pub use builder::compile_to_sir;
 #[cfg(feature = "host-runtime")]
 pub use builder::{DeadStorePolicy, SimulatorBuilder, SimulatorOptions};

@@ -1,6 +1,5 @@
 //! AArch64 emission for the transitional scalar MIR pipeline.
 
-use std::collections::HashMap;
 use std::fmt;
 
 use celox_backend_x86::native::mir::MFunction as LegacyFunction;
@@ -15,12 +14,12 @@ use celox_state_layout::{
 use dynasmrt::aarch64::Aarch64Relocation;
 use dynasmrt::{DynamicLabel, DynasmApi, DynasmError, DynasmLabelApi, VecAssembler, dynasm};
 
-use crate::Arm64Reg;
 use crate::allocation::{Assignment, CopyDestination, CopyOperation, CopySource, EdgeCopyPlan};
 use crate::mir::{
     BaseReg, BlockId, BranchPredicate, CmpKind, MFunction, MInst, OpSize, PackedLaneCompareRhs,
     SPARSE_COMMIT_DESCRIPTOR_WORDS, VReg,
 };
+use crate::{Arm64Reg, HashMap};
 
 const STATE_REG: u8 = 0;
 const SCRATCH0: u8 = 16;

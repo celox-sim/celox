@@ -1466,9 +1466,9 @@ mod tests {
 
     #[test]
     fn consecutive_empty_fallthrough_blocks_alias_the_next_instruction() {
+        use crate::HashMap;
         use crate::native::jit_mem::JitCode;
         use iced_x86::{Decoder, DecoderOptions, Mnemonic};
-        use std::collections::HashMap;
 
         let mut vregs = VRegAllocator::new();
         let condition = vregs.alloc();
@@ -1551,9 +1551,9 @@ mod tests {
 
     #[test]
     fn trailing_continuation_label_aliases_an_empty_fallthrough_chain() {
+        use crate::HashMap;
         use crate::native::jit_mem::JitCode;
         use iced_x86::{Decoder, DecoderOptions, Mnemonic};
-        use std::collections::HashMap;
 
         let mut vregs = VRegAllocator::new();
         let source = vregs.alloc();

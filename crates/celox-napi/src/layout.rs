@@ -4,9 +4,9 @@ use celox::{DefaultBackend, InstanceHierarchy, NamedSignal, get_byte_size};
 #[cfg(not(target_arch = "wasm32"))]
 type NamedEvent = celox::NamedEvent<DefaultBackend>;
 #[cfg(not(target_arch = "wasm32"))]
-use serde::Serialize;
+use fxhash::FxHashMap as HashMap;
 #[cfg(not(target_arch = "wasm32"))]
-use std::collections::HashMap;
+use serde::Serialize;
 
 /// Layout information for a single signal, serialized to JS.
 #[cfg(not(target_arch = "wasm32"))]
@@ -87,7 +87,7 @@ pub fn build_signal_layout(
     signals: &[NamedSignal],
     four_state_mode: bool,
 ) -> HashMap<String, SignalLayout> {
-    let mut map = HashMap::new();
+    let mut map = HashMap::default();
     for ns in signals {
         map.insert(
             ns.name.clone(),
@@ -100,12 +100,12 @@ pub fn build_signal_layout(
 /// Build a hierarchy node from an InstanceHierarchy.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn build_hierarchy_node(h: &InstanceHierarchy, four_state: bool) -> HierarchyNode {
-    let mut signals = HashMap::new();
+    let mut signals = HashMap::default();
     for ns in &h.signals {
         signals.insert(ns.name.clone(), build_signal_layout_entry(ns, four_state));
     }
 
-    let mut children = HashMap::new();
+    let mut children = HashMap::default();
     for (name, instances) in &h.children {
         let nodes: Vec<HierarchyNode> = instances
             .iter()
@@ -124,7 +124,7 @@ pub fn build_hierarchy_node(h: &InstanceHierarchy, four_state: bool) -> Hierarch
 /// Build a map of event name -> event ID from named events.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn build_event_map(events: &[NamedEvent]) -> HashMap<String, u32> {
-    let mut map = HashMap::new();
+    let mut map = HashMap::default();
     for ne in events {
         map.insert(ne.name.clone(), ne.id as u32);
     }

@@ -1,8 +1,9 @@
 //! Braun--Hack sections 4.2 and 4.3: W/S states and coupling plan.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
+use crate::HashMap;
 use crate::native::mir::{BlockId, MFunction, MInst, PackedStateHome, VReg};
 
 use super::assignment::clobbers;
@@ -271,7 +272,7 @@ impl EdgeTranslations {
         cfg: &NormalizedCfg,
         logical: &LogicalValues,
     ) -> Result<Self, SpillPlanError> {
-        let mut by_edge = HashMap::<(usize, usize), EdgeTranslation>::new();
+        let mut by_edge = HashMap::<(usize, usize), EdgeTranslation>::default();
         for (successor, block) in func.blocks.iter().enumerate() {
             for phi in &block.phis {
                 let destination = logical.checked_of(phi.dst, Some(block.id), None)?;
@@ -721,7 +722,7 @@ fn exit_reload_costs(
     edge_translations: &EdgeTranslations,
     block: usize,
 ) -> Result<HashMap<LogicalValue, u32>, SpillPlanError> {
-    let mut costs = HashMap::<LogicalValue, u32>::new();
+    let mut costs = HashMap::<LogicalValue, u32>::default();
     for &successor in &cfg.successors[block] {
         let mut demanded = BTreeSet::<LogicalValue>::new();
         for &value in next_use.entry[successor].keys() {
@@ -1382,7 +1383,7 @@ impl<'a> BlockTransitionPlanner<'a> {
         &mut self,
         point: TransitionPoint,
         inst: &MInst,
-        remaining: &mut RemainingBlockUses,
+        remaining: &mut RemainingBlockUses<'_>,
     ) -> Result<ScheduledStepDelta, SpillPlanError> {
         let resident_before = self.resident.clone();
         let deferred_before = self.deferred_recipe_reloads.clone();
@@ -1426,7 +1427,7 @@ impl<'a> BlockTransitionPlanner<'a> {
         &self,
         source: usize,
         inst: &MInst,
-        remaining: &RemainingBlockUses,
+        remaining: &RemainingBlockUses<'_>,
     ) -> Result<AllocationCandidateScore, SpillPlanError> {
         let block_id = self.func.blocks[self.block].id;
         let uses = inst
@@ -1750,7 +1751,7 @@ fn init_usual(
             .flat_map(|value| edge_translations.to_successors(predecessor, block, value))
             .collect();
     }
-    let mut frequency = HashMap::<LogicalValue, usize>::new();
+    let mut frequency = HashMap::<LogicalValue, usize>::default();
     for predecessor in &processed {
         for &value in &plan.w_exit[*predecessor] {
             for value in edge_translations.to_successors(*predecessor, block, value) {
@@ -1918,23 +1919,30 @@ impl FutureUses for LinearFutureUses<'_> {
     }
 }
 
-struct RemainingBlockUses {
+#[derive(Default)]
+struct RemainingUses {
+    points: Vec<(usize, usize)>,
+    next: usize,
+    count: usize,
+}
+
+struct RemainingBlockUses<'a> {
     block: BlockId,
     preferred_rank: Vec<usize>,
-    remaining: HashMap<LogicalValue, BTreeSet<(usize, usize)>>,
-    exit: HashMap<LogicalValue, NextUseDistance>,
-    exit_reload_costs: HashMap<LogicalValue, u32>,
+    remaining: HashMap<LogicalValue, RemainingUses>,
+    exit: &'a HashMap<VReg, NextUseDistance>,
+    exit_reload_costs: &'a HashMap<LogicalValue, u32>,
     emitted: Vec<bool>,
     emitted_count: usize,
 }
 
-impl RemainingBlockUses {
+impl<'a> RemainingBlockUses<'a> {
     fn build(
         func: &MFunction,
-        next_use: &NextUseAnalysis,
+        next_use: &'a NextUseAnalysis,
         logical: &LogicalValues,
         block: usize,
-        exit_reload_costs: &HashMap<LogicalValue, u32>,
+        exit_reload_costs: &'a HashMap<LogicalValue, u32>,
         preferred_order: Option<&[usize]>,
     ) -> Result<Self, SpillPlanError> {
         let instructions = func.blocks[block].insts.len();
@@ -1973,7 +1981,7 @@ impl RemainingBlockUses {
         } else {
             (0..instructions).collect::<Vec<_>>()
         };
-        let mut remaining = HashMap::<LogicalValue, BTreeSet<(usize, usize)>>::new();
+        let mut remaining = HashMap::<LogicalValue, RemainingUses>::default();
         for (source, inst) in func.blocks[block].insts.iter().enumerate() {
             let mut uses = inst.uses().to_vec();
             uses.sort_unstable();
@@ -1983,23 +1991,23 @@ impl RemainingBlockUses {
                 remaining
                     .entry(value)
                     .or_default()
-                    .insert((preferred_rank[source], source));
+                    .points
+                    .push((preferred_rank[source], source));
             }
         }
-        let exit = next_use.exit[block]
-            .iter()
-            .map(|(&value, &distance)| {
-                logical
-                    .checked_of(value, Some(func.blocks[block].id), Some(instructions))
-                    .map(|value| (value, distance))
-            })
-            .collect::<Result<HashMap<_, _>, _>>()?;
+        for uses in remaining.values_mut() {
+            uses.points.sort_unstable();
+            uses.count = uses.points.len();
+        }
+        for &value in next_use.exit[block].keys() {
+            logical.checked_of(value, Some(func.blocks[block].id), Some(instructions))?;
+        }
         Ok(Self {
             block: func.blocks[block].id,
             preferred_rank,
             remaining,
-            exit,
-            exit_reload_costs: exit_reload_costs.clone(),
+            exit: &next_use.exit[block],
+            exit_reload_costs,
             emitted: vec![false; instructions],
             emitted_count: 0,
         })
@@ -2027,7 +2035,7 @@ impl RemainingBlockUses {
         let mut changed = Vec::with_capacity(uses.len());
         for value in uses {
             let value = logical.checked_of(value, Some(self.block), Some(source))?;
-            let points = self.remaining.get_mut(&value).ok_or_else(|| {
+            let uses = self.remaining.get_mut(&value).ok_or_else(|| {
                 SpillPlanError::new(
                     "SPILL_PLAN.SCHEDULE_ORDER",
                     Some(self.block),
@@ -2036,7 +2044,8 @@ impl RemainingBlockUses {
                     "committed use has no remaining-use entry",
                 )
             })?;
-            if !points.remove(&(self.preferred_rank[source], source)) {
+            let point = (self.preferred_rank[source], source);
+            if uses.points.binary_search(&point).is_err() || uses.count == 0 {
                 return Err(SpillPlanError::new(
                     "SPILL_PLAN.SCHEDULE_ORDER",
                     Some(self.block),
@@ -2045,28 +2054,41 @@ impl RemainingBlockUses {
                     "committed use was absent from its remaining-use set",
                 ));
             }
+            uses.count -= 1;
+            while uses
+                .points
+                .get(uses.next)
+                .is_some_and(|&(_, instruction)| self.emitted[instruction])
+            {
+                uses.next += 1;
+            }
             changed.push(value);
         }
         Ok(changed)
     }
 
     fn remaining_uses(&self, value: LogicalValue) -> usize {
-        self.remaining.get(&value).map_or(0, BTreeSet::len)
+        self.remaining.get(&value).map_or(0, |uses| uses.count)
     }
 
     fn is_live_out(&self, value: LogicalValue) -> bool {
-        self.exit.contains_key(&value)
+        self.exit.contains_key(&VReg(value.0))
     }
 
     fn distance(&self, value: LogicalValue) -> NextUseDistance {
-        if let Some(&(rank, _)) = self.remaining.get(&value).and_then(BTreeSet::first) {
+        if let Some((rank, _)) = self
+            .remaining
+            .get(&value)
+            .and_then(|uses| uses.points.get(uses.next))
+            .copied()
+        {
             return NextUseDistance::Finite {
                 loop_exits: 0,
                 instructions: rank.saturating_sub(self.emitted_count),
             };
         }
         let remaining_instructions = self.emitted.len().saturating_sub(self.emitted_count);
-        match self.exit.get(&value).copied() {
+        match self.exit.get(&VReg(value.0)).copied() {
             Some(NextUseDistance::Finite {
                 loop_exits,
                 instructions,
@@ -2079,7 +2101,8 @@ impl RemainingBlockUses {
     }
 
     fn next_point(&self, value: LogicalValue) -> Option<PointUse> {
-        let &(_, instruction) = self.remaining.get(&value)?.first()?;
+        let uses = self.remaining.get(&value)?;
+        let &(_, instruction) = uses.points.get(uses.next)?;
         Some(PointUse {
             block: self.block,
             instruction,
@@ -2092,9 +2115,9 @@ impl RemainingBlockUses {
     }
 }
 
-struct DynamicFutureUses<'a>(&'a RemainingBlockUses);
+struct DynamicFutureUses<'view, 'data>(&'view RemainingBlockUses<'data>);
 
-impl FutureUses for DynamicFutureUses<'_> {
+impl FutureUses for DynamicFutureUses<'_, '_> {
     fn distance(&self, value: LogicalValue) -> NextUseDistance {
         self.0.distance(value)
     }
@@ -3050,7 +3073,7 @@ mod tests {
             &BTreeSet::new(),
             BTreeSet::new(),
             &constraints.instructions[0],
-            &HashMap::new(),
+            &HashMap::default(),
         )
         .unwrap();
 
@@ -3138,7 +3161,7 @@ mod tests {
             &BTreeSet::new(),
             BTreeSet::new(),
             &constraints.instructions[0],
-            &HashMap::new(),
+            &HashMap::default(),
         )
         .unwrap();
 
@@ -3214,7 +3237,7 @@ mod tests {
             &BTreeSet::new(),
             BTreeSet::new(),
             &constraints.instructions[0],
-            &HashMap::new(),
+            &HashMap::default(),
         )
         .unwrap();
 
