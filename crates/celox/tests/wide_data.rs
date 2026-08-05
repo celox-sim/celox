@@ -123,7 +123,6 @@ assign o_flat = {a, b, c, d};
     }
 
     fn test_wide_partial_write(sim) {
-        @ignore_on(veryl);
         @setup { use num_bigint::ToBigUint;
 let code = r#"
 module Top (
@@ -186,7 +185,6 @@ o = wide;
     }
 
     fn test_wide_rmw_preserve_neighboring_bits(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
 val: input logic<16>,

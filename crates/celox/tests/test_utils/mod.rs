@@ -21,7 +21,8 @@ pub mod veryl_std;
 ///         assert_eq!(sim.get(sim.signal("o")), 1u8.into());
 ///     }
 ///
-///     // Ignore specific backends (known limitations)
+///     // Ignore only when the backend constructs and runs the design but its
+///     // observable result differs from the expected behavior.
 ///     fn test_c(sim) {
 ///         @ignore_on(wasm);
 ///         @build Simulator::builder(r#"..."#, "Top");
@@ -35,8 +36,8 @@ pub mod veryl_std;
 ///         assert_eq!(sim.get(sim.signal("o")), 1u8.into());
 ///     }
 ///
-///     // Omit only the Veryl variant when the shared Rust test body does not
-///     // apply to the Veryl adapter API.
+///     // Omit only the Veryl variant when the reference simulation cannot be
+///     // constructed or the shared Rust test body does not apply to its API.
 ///     fn test_e(sim) {
 ///         @omit_veryl;
 ///         @build Simulator::builder(r#"..."#, "Top");
@@ -61,7 +62,7 @@ macro_rules! all_backends {
             $($setup)*
             let __builder = { $builder };
             let mut $sim = test_utils::veryl_sim::build_veryl_adapter(
-                __builder.sources(), __builder.top()
+                __builder.sources(), __builder.top(), __builder.four_state_enabled()
             );
             $($body)*
         }
@@ -353,37 +354,37 @@ macro_rules! all_backends {
     };
     (@resolve_ignore (native, cranelift, wasm) -> $($rest:tt)*) => {
         all_backends!(@impl_with_ignore
-            native_extra { #[ignore] } cranelift_extra { #[ignore] } wasm_extra { #[ignore] } veryl_mode { emit }
+            native_extra { #[ignore] } cranelift_extra { #[ignore] } wasm_extra { #[ignore] } veryl_extra { } veryl_mode { emit }
             $($rest)*
         );
     };
     (@resolve_ignore (native, wasm, cranelift) -> $($rest:tt)*) => {
         all_backends!(@impl_with_ignore
-            native_extra { #[ignore] } cranelift_extra { #[ignore] } wasm_extra { #[ignore] } veryl_mode { emit }
+            native_extra { #[ignore] } cranelift_extra { #[ignore] } wasm_extra { #[ignore] } veryl_extra { } veryl_mode { emit }
             $($rest)*
         );
     };
     (@resolve_ignore (cranelift, native, wasm) -> $($rest:tt)*) => {
         all_backends!(@impl_with_ignore
-            native_extra { #[ignore] } cranelift_extra { #[ignore] } wasm_extra { #[ignore] } veryl_mode { emit }
+            native_extra { #[ignore] } cranelift_extra { #[ignore] } wasm_extra { #[ignore] } veryl_extra { } veryl_mode { emit }
             $($rest)*
         );
     };
     (@resolve_ignore (cranelift, wasm, native) -> $($rest:tt)*) => {
         all_backends!(@impl_with_ignore
-            native_extra { #[ignore] } cranelift_extra { #[ignore] } wasm_extra { #[ignore] } veryl_mode { emit }
+            native_extra { #[ignore] } cranelift_extra { #[ignore] } wasm_extra { #[ignore] } veryl_extra { } veryl_mode { emit }
             $($rest)*
         );
     };
     (@resolve_ignore (wasm, native, cranelift) -> $($rest:tt)*) => {
         all_backends!(@impl_with_ignore
-            native_extra { #[ignore] } cranelift_extra { #[ignore] } wasm_extra { #[ignore] } veryl_mode { emit }
+            native_extra { #[ignore] } cranelift_extra { #[ignore] } wasm_extra { #[ignore] } veryl_extra { } veryl_mode { emit }
             $($rest)*
         );
     };
     (@resolve_ignore (wasm, cranelift, native) -> $($rest:tt)*) => {
         all_backends!(@impl_with_ignore
-            native_extra { #[ignore] } cranelift_extra { #[ignore] } wasm_extra { #[ignore] } veryl_mode { emit }
+            native_extra { #[ignore] } cranelift_extra { #[ignore] } wasm_extra { #[ignore] } veryl_extra { } veryl_mode { emit }
             $($rest)*
         );
     };

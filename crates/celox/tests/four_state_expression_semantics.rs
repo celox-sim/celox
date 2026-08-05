@@ -40,7 +40,8 @@ module Top (
     }
 
     fn indeterminate_ternary_executes_effectful_arms_in_order(sim) {
-        @omit_veryl;
+        // Veryl 0.20.3 retains the prior output effect after sel becomes known.
+        @ignore_on(veryl);
         @build Simulator::builder(r#"
 module Top (
     sel: input logic,
@@ -292,7 +293,6 @@ module Top (
     }
 
     fn logical_not_known_one_dominates_unknown_bits(sim) {
-        @omit_veryl;
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -373,7 +373,8 @@ module Top (
     }
 
     fn effectful_ternary_takes_known_true_branch_despite_unknown_bits(sim) {
-        @omit_veryl;
+        // Veryl 0.20.3 evaluates the false arm despite a known 1 in cond.
+        @ignore_on(veryl);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -706,7 +707,6 @@ module Top (
     }
 
     fn wide_ternary_condition_known_one_dominates_unknown_bits(sim) {
-        @omit_veryl;
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -758,7 +758,8 @@ module Top (
     }
 
     fn wide_ternary_unknown_condition_merges_every_arm_chunk(sim) {
-        @omit_veryl;
+        // Veryl 0.20.3 produces the wrong per-bit merge above 64 bits.
+        @ignore_on(veryl);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -810,7 +811,6 @@ module Top (
     }
 
     fn wide_unaligned_partial_store_and_slice_preserve_four_state_bits(sim) {
-        @omit_veryl;
         @build Simulator::builder(r#"
 module Top (
     seed: input logic<192>,

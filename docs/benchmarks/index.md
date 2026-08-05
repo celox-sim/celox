@@ -15,6 +15,7 @@ The complete benchmark matrix and raw history are available on the
 
 | Group | What it exercises |
 |---|---|
+| Compile time (CodSpeed) | End-to-end frontend, optimization, layout, and native/Cranelift code generation |
 | Counter | Sequential state updates and clock-event overhead |
 | Standard library | A mix of combinational, sequential, and structured datapaths |
 | TypeScript testbench | N-API calls, typed signal access, and scheduler overhead |
@@ -39,6 +40,11 @@ described in [Heliodor Linux Benchmark](./heliodor.md).
 ## Run locally
 
 ```bash
+# Compile-time benchmarks with CodSpeed
+cargo install cargo-codspeed --locked --version 5.0.1
+cargo codspeed build --locked -p celox --bench compilation
+cargo codspeed run -p celox
+
 # Rust benchmarks
 cargo bench -p celox
 
@@ -48,6 +54,12 @@ pnpm bench
 # Verilator comparison (requires Verilator and a C++ toolchain)
 bash scripts/run-verilator-bench.sh
 ```
+
+The CodSpeed workflow runs benchmarks on pull requests and `master`. Merge queue
+events preserve the workflow check without running CodSpeed because CodSpeed does
+not support the `merge_group` event. Pull requests are compared with the `master`
+baseline using deterministic CPU simulation, while the local command only checks
+that the benchmark suite runs.
 
 Local measurements are most useful for comparing two revisions on the same
 machine. CI history is better for long-term trends than for small one-off deltas.

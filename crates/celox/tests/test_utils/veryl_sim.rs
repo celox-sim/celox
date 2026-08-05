@@ -7,7 +7,7 @@ use celox::{AddrLookupError, RuntimeErrorCode};
 use num_bigint::BigUint;
 use std::path::Path;
 use veryl_analyzer::ir as air;
-use veryl_analyzer::value::Value;
+use veryl_analyzer::value::{Value, ValueBigUint, ValueU64};
 use veryl_analyzer::{Analyzer, Context, attribute_table, symbol_table};
 use veryl_metadata::Metadata;
 use veryl_parser::Parser;
@@ -46,8 +46,15 @@ impl VerylIOContext<'_> {
             .set(name, Value::new_biguint(val, width.max(1), false));
     }
 
-    pub fn set_four_state(&mut self, _signal: VerylSignalRef, _val: BigUint, _mask: BigUint) {
-        unimplemented!("four_state set not supported in veryl adapter");
+    pub fn set_four_state(&mut self, signal: VerylSignalRef, val: BigUint, mask: BigUint) {
+        let name = &self.names[signal.0];
+        let width = self
+            .sim
+            .get(name)
+            .or_else(|| self.sim.get_var(name))
+            .unwrap_or_else(|| panic!("signal '{name}' not found in veryl-simulator"))
+            .width();
+        self.sim.set(name, four_state_value(val, mask, width));
     }
 }
 
@@ -71,6 +78,29 @@ fn t_to_value<T: Copy>(val: T) -> Value {
 
 fn value_to_biguint(v: Value) -> BigUint {
     v.payload().into_owned()
+}
+
+fn four_state_value(payload: BigUint, mask: BigUint, width: usize) -> Value {
+    // Celox encodes X as (1, 1) and Z as (0, 1), while Veryl uses the
+    // opposite payload bit for masked values. Translate at the adapter boundary.
+    let payload = payload ^ &mask;
+    if width <= 64 {
+        let payload = payload.to_u64_digits().first().copied().unwrap_or(0);
+        let mask_xz = mask.to_u64_digits().first().copied().unwrap_or(0);
+        Value::U64(ValueU64 {
+            payload,
+            mask_xz,
+            width: width as u32,
+            signed: false,
+        })
+    } else {
+        Value::BigUint(ValueBigUint {
+            payload: Box::new(payload),
+            mask_xz: Box::new(mask),
+            width: width as u32,
+            signed: false,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -147,8 +177,15 @@ impl VerylSimAdapter {
         result
     }
 
-    pub fn get_four_state(&mut self, _signal: VerylSignalRef) -> (BigUint, BigUint) {
-        unimplemented!("four_state get not supported in veryl adapter");
+    pub fn get_four_state(&mut self, signal: VerylSignalRef) -> (BigUint, BigUint) {
+        let name = &self.names[signal.0];
+        let value = self
+            .sim
+            .get(name)
+            .or_else(|| self.sim.get_var(name))
+            .unwrap_or_else(|| panic!("signal '{name}' not found in veryl-simulator"));
+        let mask = value.mask_xz().into_owned();
+        (value.payload().into_owned() ^ &mask, mask)
     }
 
     pub fn tick(&mut self, event: VerylEventRef) -> Result<(), RuntimeErrorCode> {
@@ -207,7 +244,11 @@ impl VerylSimAdapter {
 // Builder
 // ---------------------------------------------------------------------------
 
-pub fn build_veryl_adapter(sources: &[(&str, &Path)], top: &str) -> VerylSimAdapter {
+pub fn build_veryl_adapter(
+    sources: &[(&str, &Path)],
+    top: &str,
+    use_4state: bool,
+) -> VerylSimAdapter {
     // Clear global tables (same as Celox does)
     symbol_table::clear();
     attribute_table::clear();
@@ -233,7 +274,7 @@ pub fn build_veryl_adapter(sources: &[(&str, &Path)], top: &str) -> VerylSimAdap
 
     let top_id = veryl_parser::resource_table::insert_str(top);
     let config = Config {
-        use_4state: false,
+        use_4state,
         use_jit: false,
         ..Default::default()
     };

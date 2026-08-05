@@ -528,7 +528,6 @@ fn test_runtime_if_without_break_in_synth_comb_loop(sim) {
 }
 
 fn test_runtime_bounds_stalled_step_with_break_exits_cleanly(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             start: input logic<32>,
@@ -627,7 +626,6 @@ fn test_runtime_bounds_signed_inclusive_range_preserves_negative_bounds(sim) {
 }
 
 fn test_runtime_bounds_truncate_loop_var_to_declared_width(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             count: input logic<32>,
@@ -654,7 +652,6 @@ fn test_runtime_bounds_truncate_loop_var_to_declared_width(sim) {
 }
 
 fn test_constant_bounds_preserve_wide_limit_above_loop_width(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             start: input logic<32>,
@@ -714,7 +711,6 @@ fn test_runtime_bounds_track_initial_seed_dependency(sim) {
 }
 
 fn test_runtime_bounds_preserve_pre_loop_bits_for_partial_updates(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             seed: input logic<2>,
@@ -744,7 +740,6 @@ fn test_runtime_bounds_preserve_pre_loop_bits_for_partial_updates(sim) {
 }
 
 fn test_runtime_bounds_reconstruct_wide_loop_carried_reads_from_partial_state(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             seed: input logic<2>,
@@ -774,7 +769,6 @@ fn test_runtime_bounds_reconstruct_wide_loop_carried_reads_from_partial_state(si
 }
 
 fn test_runtime_bounds_preserve_untouched_high_bits_for_dynamic_index_reads(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             seed: input logic<2>,
@@ -884,7 +878,6 @@ fn test_runtime_bounds_track_initial_seed_dependency_across_module_boundary(sim)
 }
 
 fn test_runtime_break_condition_dependency_across_module_boundary(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Child (
             sel: input logic,
@@ -961,7 +954,6 @@ fn test_runtime_bounds_stalled_step_reports_true_loop(sim) {
 }
 
 fn test_runtime_bounds_preserve_loop_carried_state_for_indexed_reads(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             count: input logic<32>,
@@ -988,7 +980,6 @@ fn test_runtime_bounds_preserve_loop_carried_state_for_indexed_reads(sim) {
 }
 
 fn test_runtime_bounds_forward_overshoot_exits_without_wraparound(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             start: input logic<32>,
@@ -1018,7 +1009,6 @@ fn test_runtime_bounds_forward_overshoot_exits_without_wraparound(sim) {
 }
 
 fn test_runtime_bounds_large_additive_step_exits_without_wraparound(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             start: input logic<32>,
@@ -1048,7 +1038,6 @@ fn test_runtime_bounds_large_additive_step_exits_without_wraparound(sim) {
 }
 
 fn test_runtime_bounds_inclusive_max_bound_runs_full_range(sim) {
-    @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
             count: input logic<8>,

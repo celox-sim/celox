@@ -52,7 +52,6 @@ fn pull_until_empty<B: celox::SimBackend>(
 
 all_backends! {
 fn bit_array_index_64_ff_roundtrips(sim) {
-    @omit_veryl;
     @ignore_on(wasm);
     @build Simulator::builder(r#"
 module BitArrayIndex64 (
@@ -99,7 +98,6 @@ module BitArrayIndex64 (
 }
 
 fn word_array_index_64_ff_roundtrips(sim) {
-    @omit_veryl;
     @ignore_on(wasm);
     @build Simulator::builder(r#"
 module WordArrayIndex64 (

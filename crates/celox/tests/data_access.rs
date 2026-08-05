@@ -111,7 +111,6 @@ b[1 step 8] = a;
     }
 
     fn test_dynamic_slice_bullying(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (idx: input logic<2>, data: input logic<16>, o: output logic<4>) {
 var mem: logic<16>;
@@ -134,7 +133,6 @@ assign o = mem[idx*4 +: 4];
     }
 
     fn test_dynamic_minus_colon_and_step_read_write(sim) {
-        @omit_veryl;
         @setup { let code = r#"
 module Top (
     minus_idx: input logic<4>,
@@ -284,7 +282,6 @@ assign o[j] = local_data[idx];
     }
 
     fn test_dynamic_index_with_bitslice(sim) {
-        @ignore_on(veryl);
         @setup { // Regression: arr[dynamic_idx][hi:lo] produced wrong values because
 // the bit-select anchor was incorrectly added to the dynamic offset.
 let code = r#"

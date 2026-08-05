@@ -149,7 +149,6 @@ o = tmp;
     }
 
     fn test_always_comb_read_before_write_uses_previous_value(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     a: input logic,
@@ -215,7 +214,6 @@ module Top (
     }
 
     fn test_comb_function_call_return_indexed_local_temp(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     d: input logic<8>,
@@ -247,7 +245,6 @@ module Top (
     }
 
     fn test_comb_function_call_partial_write_local_temp(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     d: input logic<8>,
@@ -277,7 +274,6 @@ module Top (
     }
 
     fn test_comb_function_call_local_and_return_width_coercion(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     sel: input logic,
@@ -316,7 +312,6 @@ module Top (
     }
 
     fn test_comb_function_call_constant_folded_if_return(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     q: output logic<8>,
@@ -374,7 +369,6 @@ module Top (
     }
 
     fn test_comb_function_call_break_inside_for(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     d: input logic<4>,
@@ -412,7 +406,6 @@ module Top (
     }
 
     fn test_comb_function_call_nested_helper(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     d: input logic<8>,
@@ -445,7 +438,6 @@ module Top (
     }
 
     fn test_comb_function_call_statement_with_output_argument(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     d: input logic<8>,
@@ -967,7 +959,6 @@ module Top (
     fn test_comb_loop_bound_output_call_writes_back_once(sim) {
         // Veryl simulator 0.20.2 accepts this program but drops the output
         // argument writeback from the runtime loop-bound expression.
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     d: input logic<8>,
@@ -1277,7 +1268,6 @@ module Top (
     }
 
     fn test_comb_function_call_statement_ignores_return_value(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     d: input logic<8>,
@@ -1306,7 +1296,6 @@ module Top (
     }
 
     fn test_comb_returning_output_function_reads_current_caller_store(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     d: input logic<8>,
@@ -1337,7 +1326,6 @@ module Top (
     }
 
     fn test_comb_returning_output_function_allows_nested_output_call(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     d: input logic<8>,
@@ -1445,7 +1433,6 @@ module Top (
     }
 
     fn test_comb_nested_function_call_statement_with_output_argument(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     d: input logic<8>,
@@ -1482,7 +1469,6 @@ module Top (
     }
 
     fn test_comb_function_call_output_reads_current_caller_store(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     d: input logic<8>,
@@ -1512,7 +1498,6 @@ module Top (
     }
 
     fn test_comb_function_call_statement_with_output_argument_in_loop(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     d: input logic<8>,
@@ -1543,7 +1528,6 @@ module Top (
     }
 
     fn test_comb_function_call_output_bit_select_preserves_unwritten_loop_bits(sim) {
-        @ignore_on(veryl);
         @setup { let code = r#"
 module Top (
     d: input logic<4>,

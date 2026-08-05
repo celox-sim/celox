@@ -6,7 +6,8 @@ mod test_utils;
 
 all_backends! {
     fn signed_divrem_i8(sim) {
-        @omit_veryl;
+        // Veryl 0.20.3 ignores the explicit unsigned cast in division.
+        @ignore_on(veryl);
         @build Simulator::builder(r#"
 module Top (
     a: input i8,
@@ -123,7 +124,6 @@ module Top (
     }
 
     fn signed_divrem_i64(sim) {
-        @omit_veryl;
         @build Simulator::builder(r#"
 module Top (
     a: input i64,
@@ -159,7 +159,8 @@ module Top (
     }
 
     fn signed_divrem_i128(sim) {
-        @omit_veryl;
+        // Veryl 0.20.3 produces an incorrect negative signed remainder.
+        @ignore_on(veryl);
         @build Simulator::builder(r#"
 module Top (
     a: input signed logic<128>,
@@ -220,7 +221,6 @@ module Top (
     }
 
     fn signed_divrem_always_ff(sim) {
-        @omit_veryl;
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -261,7 +261,6 @@ module Top (
     }
 
     fn signed_divrem_four_state_unknown(sim) {
-        @omit_veryl;
         @build Simulator::builder(r#"
 module Top (
     a: input signed logic<128>,
