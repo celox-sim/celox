@@ -3644,6 +3644,43 @@ fn test_ff_unpacked_input_before_runtime_effect_stays_symbolically_bound(sim) {
     );
 }
 
+fn test_ff_effectful_array_item_output_is_not_a_read_alias(sim) {
+    @omit_veryl;
+    @ignore_on(wasm);
+    @setup { let code = r#"
+        module Top (
+            clk: input clock,
+            effect: output logic<8>,
+            q: output logic<8>
+        ) {
+            function make (written: output logic<8>) -> logic<8> {
+                written = 8'h5a;
+                return 8'h11;
+            }
+
+            function pick (
+                values: input logic<8>[1],
+                written: output logic<8>
+            ) -> logic<8> {
+                written = 8'ha5;
+                return values[0];
+            }
+
+            always_ff (clk) {
+                q = pick('{make(effect)}, effect);
+            }
+        }
+    "#; }
+    @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let effect = sim.signal("effect");
+    let q = sim.signal("q");
+
+    sim.tick(clk).unwrap();
+    assert_eq!(sim.get(effect), 0xa5u8.into());
+    assert_eq!(sim.get(q), 0x11u8.into());
+}
+
 fn test_ff_symbolic_runtime_input_uses_declared_formal_type(sim) {
     @omit_veryl;
     @ignore_on(wasm);

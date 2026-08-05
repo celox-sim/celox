@@ -1224,6 +1224,39 @@ fn test_ff_function_call_rejects_unpacked_input_aliased_by_later_callee_write() 
 }
 
 #[test]
+fn test_ff_function_call_rejects_selected_unpacked_input_before_callee_index_write() {
+    let code = r#"
+        module Top (
+            clk: input clock,
+            rows: input logic<8>[2, 2],
+            out_q: output logic<8>
+        ) {
+            var index: logic;
+
+            function pick (values: input logic<8>[2]) -> logic<8> {
+                index = 1'b1;
+                return values[0];
+            }
+
+            always_ff (clk) {
+                out_q = pick(rows[index]);
+            }
+        }
+    "#;
+
+    let err = Simulator::builder(code, "Top")
+        .build()
+        .expect_err("a selected unpacked input must not observe a callee index write lazily");
+    match err.kind() {
+        SimulatorErrorKind::SIRParser(ParserError::Unsupported { issue, feature, .. }) => {
+            assert_eq!(*issue, 43);
+            assert_eq!(*feature, "unpacked function argument aliases later effect");
+        }
+        other => panic!("expected unpacked input aliasing error, got: {other:?}"),
+    }
+}
+
+#[test]
 fn test_ff_function_call_rejects_unpacked_literal_aliased_by_output_index_effect() {
     let code = r#"
         module Top (

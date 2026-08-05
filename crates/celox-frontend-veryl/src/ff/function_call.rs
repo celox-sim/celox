@@ -3048,7 +3048,7 @@ impl<'a> FfParser<'a> {
         }
     }
 
-    fn collect_expression_variables(
+    fn collect_expression_read_variables(
         &self,
         expr: &Expression,
         variables: &mut HashSet<VarId>,
@@ -3056,7 +3056,7 @@ impl<'a> FfParser<'a> {
     ) {
         let collect_input = |input: &veryl_analyzer::ir::SystemFunctionInput,
                              variables: &mut HashSet<VarId>| {
-            self.collect_expression_variables(&input.0, variables, arrays_only)
+            self.collect_expression_read_variables(&input.0, variables, arrays_only)
         };
         match expr {
             Expression::Term(factor) => match factor.as_ref() {
@@ -3071,39 +3071,41 @@ impl<'a> FfParser<'a> {
                         variables.insert(*id);
                     }
                     for expr in &index.0 {
-                        self.collect_expression_variables(expr, variables, arrays_only);
+                        self.collect_expression_read_variables(expr, variables, arrays_only);
                     }
                     for expr in &select.0 {
-                        self.collect_expression_variables(expr, variables, arrays_only);
+                        self.collect_expression_read_variables(expr, variables, arrays_only);
                     }
                     if let Some((_, expr)) = &select.1 {
-                        self.collect_expression_variables(expr, variables, arrays_only);
+                        self.collect_expression_read_variables(expr, variables, arrays_only);
                     }
                 }
                 Factor::HierVariable(reference) => {
                     for expr in &reference.index.0 {
-                        self.collect_expression_variables(expr, variables, arrays_only);
+                        self.collect_expression_read_variables(expr, variables, arrays_only);
                     }
                     for expr in &reference.select.0 {
-                        self.collect_expression_variables(expr, variables, arrays_only);
+                        self.collect_expression_read_variables(expr, variables, arrays_only);
                     }
                     if let Some((_, expr)) = &reference.select.1 {
-                        self.collect_expression_variables(expr, variables, arrays_only);
+                        self.collect_expression_read_variables(expr, variables, arrays_only);
                     }
                 }
                 Factor::FunctionCall(call) => {
                     for expr in call.inputs.values() {
-                        self.collect_expression_variables(expr, variables, arrays_only);
+                        self.collect_expression_read_variables(expr, variables, arrays_only);
                     }
                     for dst in call.outputs.values().flatten() {
-                        if !arrays_only
-                            || self
-                                .module
-                                .variables
-                                .get(&dst.id)
-                                .is_some_and(|variable| !variable.r#type.array.is_empty())
-                        {
-                            variables.insert(dst.id);
+                        // An output actual writes its base variable; only its
+                        // index/select expressions contribute read dependencies.
+                        for expr in &dst.index.0 {
+                            self.collect_expression_read_variables(expr, variables, arrays_only);
+                        }
+                        for expr in &dst.select.0 {
+                            self.collect_expression_read_variables(expr, variables, arrays_only);
+                        }
+                        if let Some((_, expr)) = &dst.select.1 {
+                            self.collect_expression_read_variables(expr, variables, arrays_only);
                         }
                     }
                 }
@@ -3129,22 +3131,22 @@ impl<'a> FfParser<'a> {
                 Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
             },
             Expression::Binary(lhs, _, rhs, _) => {
-                self.collect_expression_variables(lhs, variables, arrays_only);
-                self.collect_expression_variables(rhs, variables, arrays_only);
+                self.collect_expression_read_variables(lhs, variables, arrays_only);
+                self.collect_expression_read_variables(rhs, variables, arrays_only);
             }
             Expression::Unary(_, inner, _) => {
-                self.collect_expression_variables(inner, variables, arrays_only)
+                self.collect_expression_read_variables(inner, variables, arrays_only)
             }
             Expression::Ternary(cond, then_expr, else_expr, _) => {
-                self.collect_expression_variables(cond, variables, arrays_only);
-                self.collect_expression_variables(then_expr, variables, arrays_only);
-                self.collect_expression_variables(else_expr, variables, arrays_only);
+                self.collect_expression_read_variables(cond, variables, arrays_only);
+                self.collect_expression_read_variables(then_expr, variables, arrays_only);
+                self.collect_expression_read_variables(else_expr, variables, arrays_only);
             }
             Expression::Concatenation(items, _) => {
                 for (expr, repeat) in items {
-                    self.collect_expression_variables(expr, variables, arrays_only);
+                    self.collect_expression_read_variables(expr, variables, arrays_only);
                     if let Some(repeat) = repeat {
-                        self.collect_expression_variables(repeat, variables, arrays_only);
+                        self.collect_expression_read_variables(repeat, variables, arrays_only);
                     }
                 }
             }
@@ -3152,20 +3154,24 @@ impl<'a> FfParser<'a> {
                 for item in items {
                     match item {
                         ArrayLiteralItem::Value(expr, repeat) => {
-                            self.collect_expression_variables(expr, variables, arrays_only);
+                            self.collect_expression_read_variables(expr, variables, arrays_only);
                             if let Some(repeat) = repeat {
-                                self.collect_expression_variables(repeat, variables, arrays_only);
+                                self.collect_expression_read_variables(
+                                    repeat,
+                                    variables,
+                                    arrays_only,
+                                );
                             }
                         }
                         ArrayLiteralItem::Defaul(expr) => {
-                            self.collect_expression_variables(expr, variables, arrays_only);
+                            self.collect_expression_read_variables(expr, variables, arrays_only);
                         }
                     }
                 }
             }
             Expression::StructConstructor(_, fields, _) => {
                 for (_, expr) in fields {
-                    self.collect_expression_variables(expr, variables, arrays_only);
+                    self.collect_expression_read_variables(expr, variables, arrays_only);
                 }
             }
         }
@@ -3503,7 +3509,7 @@ impl<'a> FfParser<'a> {
             let must_snapshot_for_order = last_effectful_arg.is_some_and(|last| arg_index <= last);
             let formal = &self.module.variables[arg_id];
             let mut dependencies = HashSet::default();
-            self.collect_expression_variables(actual, &mut dependencies, false);
+            self.collect_expression_read_variables(actual, &mut dependencies, false);
             let callee_writes_dependency = self.statements_write_any(
                 &function_body.statements,
                 &dependencies,
@@ -3511,7 +3517,7 @@ impl<'a> FfParser<'a> {
             );
             if !formal.r#type.array.is_empty() {
                 let mut array_variables = HashSet::default();
-                self.collect_expression_variables(actual, &mut array_variables, true);
+                self.collect_expression_read_variables(actual, &mut array_variables, true);
                 let aliases_later_write = ordered_arg_paths
                     .iter()
                     .skip(arg_index + 1)
@@ -3528,7 +3534,13 @@ impl<'a> FfParser<'a> {
                     &array_variables,
                     &mut HashSet::default(),
                 );
-                if aliases_later_write || aliases_output_write || callee_writes_array {
+                let cannot_snapshot_before_callee_write =
+                    callee_writes_dependency && !matches!(actual, Expression::ArrayLiteral(_, _));
+                if aliases_later_write
+                    || aliases_output_write
+                    || callee_writes_array
+                    || cannot_snapshot_before_callee_write
+                {
                     return Err(ParserError::unsupported(
                         43,
                         LoweringPhase::FfLowering,
