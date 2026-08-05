@@ -71,6 +71,60 @@ fn rejects_internal_signals_that_shadow_ports() {
 }
 
 #[test]
+fn rejects_overlapping_combinational_variable_drivers() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic [1:0] a, b, output wire [2:0] y);
+            logic [2:0] value;
+            assign value[1:0] = a;
+            always_comb value[2:1] = b;
+            assign y = value;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("multiple variable drivers for `value`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_combinational_and_ff_variable_drivers() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic clk, a, b, output wire y);
+            logic q;
+            assign q = a;
+            always_ff @(posedge clk) q <= b;
+            assign y = q;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("multiple variable drivers for `q`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_overlapping_always_ff_variable_drivers() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic clk, a, b, output wire [1:0] y);
+            logic [1:0] q;
+            always_ff @(posedge clk) q[0] <= a;
+            always_ff @(posedge clk) q <= {a, b};
+            assign y = q;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("multiple variable drivers for `q`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn evaluates_sized_arithmetic_and_logical_right_shift_parameters() {
     let source = r#"
         module Top(output logic wraps, output logic logical_shift);

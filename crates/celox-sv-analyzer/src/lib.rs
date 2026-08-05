@@ -30,6 +30,8 @@ pub enum AnalyzerError {
     DuplicatePort { module: String, name: String },
     #[error("Duplicate parameter declaration in module `{module}`: {name}")]
     DuplicateParameter { module: String, name: String },
+    #[error("Duplicate instance declaration in module `{module}`: {name}")]
+    DuplicateInstance { module: String, name: String },
 }
 
 impl miette::Diagnostic for AnalyzerError {}
@@ -460,6 +462,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_repeated_ansi_port_names() {
+        let err = analyze_source(
+            r#"
+                module Top(output logic y, output logic y);
+                    assign y = 1'b1;
+                endmodule
+            "#,
+            Path::new("repeated_ansi_port.sv"),
+        )
+        .expect_err("repeated ANSI ports should be rejected");
+
+        assert!(matches!(
+            err,
+            AnalyzerError::DuplicatePort { module, name } if module == "Top" && name == "y"
+        ));
+    }
+
+    #[test]
     fn folds_constant_range_expressions() {
         let ir = analyze_source(
             r#"
@@ -550,6 +570,46 @@ mod tests {
         assert!(matches!(
             err,
             AnalyzerError::DuplicateParameter { module, name } if module == "Top" && name == "WIDTH"
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_module_scope_parameters() {
+        let err = analyze_source(
+            r#"
+                module Top(output logic y);
+                    parameter P = 0;
+                    parameter P = 1;
+                    assign y = P;
+                endmodule
+            "#,
+            Path::new("duplicate_module_parameter.sv"),
+        )
+        .expect_err("duplicate module-scope parameters should be rejected");
+
+        assert!(matches!(
+            err,
+            AnalyzerError::DuplicateParameter { module, name } if module == "Top" && name == "P"
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_instance_names() {
+        let err = analyze_source(
+            r#"
+                module Child(output logic y); assign y = 1'b1; endmodule
+                module Top(output logic a, output logic b);
+                    Child u(.y(a));
+                    Child u(.y(b));
+                endmodule
+            "#,
+            Path::new("duplicate_instance.sv"),
+        )
+        .expect_err("duplicate instances should be rejected");
+
+        assert!(matches!(
+            err,
+            AnalyzerError::DuplicateInstance { module, name } if module == "Top" && name == "u"
         ));
     }
 

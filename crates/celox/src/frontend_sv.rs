@@ -221,7 +221,12 @@ fn validate_net_driver_ranges(
     child_driver_count: usize,
     require_driver: bool,
 ) -> Result<(), sv::AnalyzerError> {
-    let local_drivers = local_net_driver_ranges(module, signal_name);
+    let local_drivers = local_driver_ranges(
+        &module.source,
+        signal_name,
+        &module.constants,
+        &module.parameter_types,
+    );
     let overlapping_local_drivers = local_drivers.iter().enumerate().any(|(index, left)| {
         local_drivers[index + 1..]
             .iter()
@@ -243,27 +248,58 @@ fn validate_net_driver_ranges(
     Ok(())
 }
 
-fn local_net_driver_ranges(
-    module: &LoweredSvModule,
+fn validate_variable_driver_ranges(
+    module: &sv::ir::Module,
+    constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Result<(), sv::AnalyzerError> {
+    let variable_names = module
+        .signals()
+        .iter()
+        .filter(|signal| !signal.is_net())
+        .map(|signal| signal.name())
+        .chain(
+            module
+                .ports()
+                .iter()
+                .filter(|port| !port.is_net())
+                .map(|port| port.name()),
+        );
+    for signal_name in variable_names {
+        let drivers = local_driver_ranges(module, signal_name, constants, parameter_types);
+        let has_overlap = drivers.iter().enumerate().any(|(index, left)| {
+            drivers[index + 1..]
+                .iter()
+                .any(|right| left.0 != right.0 && net_driver_ranges_overlap(left.1, right.1))
+        });
+        if has_overlap {
+            return Err(sv::AnalyzerError::Unsupported(format!(
+                "multiple variable drivers for `{signal_name}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn local_driver_ranges(
+    module: &sv::ir::Module,
     signal_name: &str,
+    constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Vec<(usize, Option<(i128, i128)>)> {
     let mut drivers = Vec::new();
     let mut driver_id = 0;
-    for process in module.source.comb_processes() {
+    for process in module.comb_processes() {
         let active = process.condition().is_none_or(|condition| {
-            sv::typecheck::eval_const_expr_with_types(
-                condition,
-                &module.constants,
-                &module.parameter_types,
-            )
-            .is_none_or(|value| value != 0)
+            sv::typecheck::eval_const_expr_with_types(condition, constants, parameter_types)
+                .is_none_or(|value| value != 0)
         });
         if active {
             for assignment in process.assignments() {
                 if assignment.lhs() == signal_name {
                     drivers.push((
                         driver_id,
-                        net_lvalue_range(assignment.lhs_value(), &module.constants),
+                        net_lvalue_range(assignment.lhs_value(), constants),
                     ));
                 }
                 if process.kind() == sv::ir::CombProcessKind::ContinuousAssign {
@@ -277,7 +313,7 @@ fn local_net_driver_ranges(
             driver_id += 1;
         }
     }
-    for process in module.source.ff_processes() {
+    for process in module.ff_processes() {
         drivers.extend(
             process
                 .assignments()
@@ -287,7 +323,7 @@ fn local_net_driver_ranges(
                 .map(|assignment| {
                     (
                         driver_id,
-                        net_lvalue_range(assignment.lhs_value(), &module.constants),
+                        net_lvalue_range(assignment.lhs_value(), constants),
                     )
                 }),
         );
@@ -675,8 +711,15 @@ fn lower_module_with_overrides(
         })
         .collect();
     let constants = module_constants_with_overrides(module, parameter_overrides);
+    validate_variable_driver_ranges(module, &constants, &parameter_types)?;
 
     for port in module.ports() {
+        if name_to_id.contains_key(port.name()) {
+            return Err(sv::AnalyzerError::Unsupported(format!(
+                "duplicate port name `{}`",
+                port.name()
+            )));
+        }
         let id = next_var_id(&mut next_id);
         let type_info = signal_type_from_sv(port.r#type(), &constants)?;
         let path = VarPath::new(resource_table::insert_str(port.name()));

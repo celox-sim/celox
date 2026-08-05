@@ -86,10 +86,27 @@ impl Module {
             .to_string();
         reject_silently_ignored_constructs(node.clone(), syntax_tree)?;
         let mut parameters = parameters_from_module_node(node.clone(), syntax_tree)?;
+        let mut parameter_names = HashSet::new();
+        if let Some(parameter) = parameters
+            .iter()
+            .find(|parameter| !parameter_names.insert(parameter.name()))
+        {
+            return Err(AnalyzerError::DuplicateParameter {
+                module: name,
+                name: parameter.name().to_string(),
+            });
+        }
         if name == override_module_name {
             apply_parameter_overrides(&mut parameters, parameter_overrides)?;
         }
         let ports = ports_from_module_node(node.clone(), syntax_tree)?;
+        let mut port_names = HashSet::new();
+        if let Some(port) = ports.iter().find(|port| !port_names.insert(port.name())) {
+            return Err(AnalyzerError::DuplicatePort {
+                module: name,
+                name: port.name().to_string(),
+            });
+        }
         if ports
             .iter()
             .any(|port| port.direction() == PortDirection::Ref)
@@ -99,6 +116,22 @@ impl Module {
         let const_env = const_env_from_parameters(&parameters);
         let signals = signals_from_module_node(node.clone(), syntax_tree, &const_env)?;
         let instances = instances_from_module_node(node.clone(), syntax_tree, &const_env)?;
+        let mut instance_names = HashSet::new();
+        if let Some(instance) = instances
+            .iter()
+            .filter(|instance| {
+                instance
+                    .condition()
+                    .and_then(|condition| eval_ast_const_expr(condition, &const_env))
+                    .is_none_or(|value| value != 0)
+            })
+            .find(|instance| !instance_names.insert(instance.name()))
+        {
+            return Err(AnalyzerError::DuplicateInstance {
+                module: name,
+                name: instance.name().to_string(),
+            });
+        }
         reject_unsupported_multidimensional_packed_bounds(&ports, &signals, &const_env)?;
         let parameter_values = parameter_value_env(&parameters, &const_env);
         let packed_dimensions = packed_dimensions_from_ports_and_signals(&ports, &signals);
