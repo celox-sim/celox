@@ -38,9 +38,8 @@ function startsWithAny(path, prefixes) {
 }
 
 export function affectsHeliodorArm64(files) {
-  // Keep PR scheduling deliberately narrow. Generic Rust and manifest changes
-  // still exercise x86-64/Cranelift in PRs, while master and manual runs always
-  // retain the ARM64 Linux boot coverage.
+  // Keep PR scheduling deliberately narrow. The PR job exercises only the
+  // native ARM64 runner; Veryl-CC and Cranelift run in the nightly workflow.
   return files
     .map((path) => path.replace(/^\.\//, ""))
     .some(
@@ -56,7 +55,6 @@ export function affectsHeliodorArm64(files) {
         [
           "crates/celox/src/backend.rs",
           "crates/celox-bench/src/bin/celox-heliodor.rs",
-          "crates/celox-bench/src/bin/veryl-heliodor.rs",
           "scripts/run-heliodor-bench.sh",
           "scripts/setup-arm64-backend-dev.sh",
           "scripts/tests/run-heliodor-bench-gate.sh",
