@@ -54,9 +54,11 @@ pnpm bench
 bash scripts/run-verilator-bench.sh
 ```
 
-CodSpeed ワークフローは pull request、merge queue、`master` で実行されます。pull
-request は決定的な CPU simulation を使って `master` の基準値と比較されます。
-ローカル実行ではベンチマーク suite が動作することだけを確認します。
+CodSpeed ワークフローは pull request と `master` でベンチマークを実行します。
+CodSpeed は `merge_group` event をサポートしていないため、merge queue では
+workflow check を維持しつつ CodSpeed を実行しません。pull request は決定的な CPU
+simulation を使って `master` の基準値と比較されます。ローカル実行では
+ベンチマーク suite が動作することだけを確認します。
 
 ローカル計測は、同じマシン上で 2 つのリビジョンを比較する場合に最も有効です。
 CI 履歴は、単発の小さな差より長期的な傾向の確認に向いています。
