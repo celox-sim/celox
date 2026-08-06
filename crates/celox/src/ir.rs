@@ -12,7 +12,13 @@ pub(crate) use celox_design::{
     InitialStateData, InitialStateWriteRun, RuntimeEventKind, RuntimeEventSite,
 };
 pub use celox_frontend_veryl::{InstancePath, VariableInfo, VerylFrontendLookup};
-#[cfg(feature = "host-runtime")]
+#[cfg(all(
+    feature = "host-runtime",
+    any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )
+))]
 use celox_runtime::{
     DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,
     SignalDirection,
@@ -325,7 +331,13 @@ fn rebuild_rtl_writes(program: &mut OptimizedSir) {
 }
 
 impl RuntimeProgram {
-    #[cfg(feature = "host-runtime")]
+    #[cfg(all(
+        feature = "host-runtime",
+        any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        )
+    ))]
     pub(crate) fn build_design_reflection(
         &self,
         layout: &crate::backend::MemoryLayout,
@@ -755,7 +767,13 @@ pub(crate) mod verify {
 pub use celox_slt::{GlueAddrBase, GlueBlockBase};
 
 pub use celox_frontend_veryl::SimModule;
-#[cfg(feature = "host-runtime")]
+#[cfg(all(
+    feature = "host-runtime",
+    any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )
+))]
 pub(crate) use celox_runtime::SignalArrayLayout;
 pub use celox_runtime::SignalRef;
 
