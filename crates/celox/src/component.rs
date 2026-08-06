@@ -7,12 +7,18 @@ use celox_testbench::{
 use veryl_metadata::component_manifest::{ConnectionFacts, ConnectionTarget, ConnectionViolation};
 
 mod host;
+mod injected;
 mod loader;
 #[cfg(not(target_family = "wasm"))]
 mod wasm;
 
 use host::{ExternalInstance, HostContext, HostValue, PortDir, PortRole};
 use loader::lookup_component_backend;
+
+pub use injected::{
+    InjectedCall, InjectedComponentHandler, InjectedComponents, InjectedHook, InjectedNamedValue,
+    InjectedPort, InjectedResult, InjectedValue,
+};
 
 use crate::{EventHandle, SignalRef, SimBackend};
 
@@ -67,6 +73,13 @@ pub(crate) struct ComponentRuntime {
     components: Vec<LiveComponent>,
     last_trace_values: Vec<(num_bigint::BigUint, num_bigint::BigUint)>,
     active_reset_event: Option<usize>,
+    injected: InjectedComponents,
+}
+
+impl ComponentRuntime {
+    pub(crate) fn set_injected(&mut self, injected: InjectedComponents) {
+        self.injected = injected;
+    }
 }
 
 pub(crate) struct ComponentWrite {
@@ -351,17 +364,33 @@ impl ComponentRuntime {
                     descriptor.instance
                 ));
             }
+            let injected = self.injected.get(&descriptor.component).cloned();
             let library = libraries.get(descriptor.component.as_str()).copied();
             let type_name = library
                 .map(|library| library.type_name.as_str())
                 .unwrap_or(descriptor.component.as_str());
-            let component_backend =
-                lookup_component_backend(library.map(|library| library.path.as_path()), type_name)
-                    .map_err(|error| format!("component `{}`: {error}", descriptor.instance))?;
-            if let Some(manifest) = component_manifest(library, type_name)? {
-                validate_manifest(descriptor, type_name, &manifest)?;
+            let component_backend = if injected.is_none() {
+                Some(
+                    lookup_component_backend(
+                        library.map(|library| library.path.as_path()),
+                        type_name,
+                    )
+                    .map_err(|error| format!("component `{}`: {error}", descriptor.instance))?,
+                )
+            } else {
+                None
+            };
+            let manifest = match &injected {
+                Some(definition) => Some(definition.manifest.clone()),
+                None => component_manifest(library, type_name)?,
+            };
+            if let Some(manifest) = &manifest {
+                validate_manifest(descriptor, type_name, manifest)?;
             }
-            let kind = component_backend.kind();
+            let kind = injected
+                .as_ref()
+                .map(|definition| definition.kind)
+                .unwrap_or_else(|| component_backend.as_ref().unwrap().kind());
             if descriptor.is_var_form && kind == veryl_component_sys::VRL_KIND_CLOCKED {
                 return Err(format!(
                     "component `{}`: clocked component `{type_name}` must use inst form",
@@ -487,8 +516,31 @@ impl ComponentRuntime {
                 ));
             }
 
-            let instance = ExternalInstance::create(component_backend, &mut host)
-                .map_err(|error| format!("component `{}`: {error}", descriptor.instance))?;
+            if injected.is_some() {
+                for (port_name, _, input, output, is_clock, is_reset) in &offered_ports {
+                    if let Some(port) = input {
+                        let direction = if *is_clock {
+                            veryl_component_sys::VRL_DIR_CLOCK
+                        } else if *is_reset {
+                            veryl_component_sys::VRL_DIR_RESET
+                        } else {
+                            veryl_component_sys::VRL_DIR_INPUT
+                        };
+                        let resolved = host.svc_port_index(port_name, direction);
+                        debug_assert_eq!(resolved, *port as i32);
+                    }
+                    if let Some(port) = output {
+                        let resolved =
+                            host.svc_port_index(port_name, veryl_component_sys::VRL_DIR_OUTPUT);
+                        debug_assert_eq!(resolved, *port as i32);
+                    }
+                }
+            }
+            let instance = match injected {
+                Some(definition) => ExternalInstance::create_injected(definition, &mut host),
+                None => ExternalInstance::create(component_backend.unwrap(), &mut host),
+            }
+            .map_err(|error| format!("component `{}`: {error}", descriptor.instance))?;
             for (port_name, group, input, output, is_clock, is_reset) in &offered_ports {
                 if group.is_none()
                     && !input.is_some_and(|port| host.port_touched(port))

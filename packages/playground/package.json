@@ -8,6 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:vite-components": "vitest run --config test/fixtures/injected-components/vitest.config.ts && node test/fixtures/injected-components/dependency-e2e.mjs",
+    "test:lsp-components": "pnpm run test:vite-components && node test/fixtures/injected-components/lsp-e2e.mjs",
     "test:e2e": "pnpm run build && playwright test",
     "test:watch": "vitest",
     "test:wasm": "NAPI_RS_FORCE_WASI=1 vitest run --config vitest.wasm.config.ts"
