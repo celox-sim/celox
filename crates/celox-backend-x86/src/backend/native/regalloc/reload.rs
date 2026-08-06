@@ -1164,9 +1164,9 @@ type MemoryProgramPoint = (usize, usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct MemoryDefinition {
-    point: MemoryProgramPoint,
     block: BlockId,
     ordinal: usize,
+    write_index: usize,
 }
 
 /// Reload-specific adapter around the shared access graph. MIR effects and
@@ -1175,7 +1175,7 @@ struct MemoryDefinition {
 struct ReloadMemorySsa {
     graph: MemoryAccessGraph<MemoryDefinition>,
     points: MemoryPointMap<MemoryProgramPoint>,
-    writes: BTreeMap<MemoryDefinition, Vec<MemoryEffect<MemoryObject>>>,
+    writes: Vec<Vec<MemoryEffect<MemoryObject>>>,
     block_ids: Vec<BlockId>,
     walker: ClobberWalker,
     clobber_cache: HashMap<(StateLoad, MemoryAccessId), MemoryAccessId>,
@@ -1232,7 +1232,7 @@ impl ReloadMemorySsa {
         let block_ids = &self.block_ids;
         let clobber_cache = &mut self.clobber_cache;
         let oracle = |definition: &MemoryDefinition, query: &MemoryEffect<MemoryObject>| {
-            writes.get(definition).is_some_and(|effects| {
+            writes.get(definition.write_index).is_some_and(|effects| {
                 effects
                     .iter()
                     .copied()
@@ -2105,7 +2105,7 @@ fn build_reload_memory_ssa(
         Vec::<MemoryAccessEvent<MemoryDefinition, MemoryProgramPoint>>::new();
         func.blocks.len()
     ];
-    let mut writes = BTreeMap::<MemoryDefinition, Vec<MemoryEffect<MemoryObject>>>::new();
+    let mut writes = Vec::<Vec<MemoryEffect<MemoryObject>>>::new();
     let sim_state = MemoryEffect::UnknownObject(MemoryObject::SimState);
 
     for (block, mir_block) in func.blocks.iter().enumerate() {
@@ -2141,19 +2141,11 @@ fn build_reload_memory_ssa(
                     )
                 })?;
                 let definition = MemoryDefinition {
-                    point: (block, instruction),
                     block: mir_block.id,
                     ordinal,
+                    write_index: writes.len(),
                 };
-                if writes.insert(definition, effects).is_some() {
-                    return Err(ReloadRecipeError::new(
-                        "RELOAD_RECIPE.WRITE_IDENTITY",
-                        Some(mir_block.id),
-                        Some(instruction),
-                        None,
-                        "one MIR write produced multiple MemoryDef identities",
-                    ));
-                }
+                writes.push(effects);
                 Some(definition)
             };
             events[block].push(MemoryAccessEvent {

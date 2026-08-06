@@ -1006,9 +1006,16 @@ fn merge_symbolic_stores(
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<SymbolicStore<VarId>, ParserError> {
     let mut merged_store = SymbolicStore::default();
+    merged_store.reserve(then_store.len());
     for id in then_store.keys() {
         let t_range_store = &then_store[id];
         let e_range_store = &else_store[id];
+
+        if t_range_store == e_range_store {
+            let inserted = merged_store.clone_entry_from(id, then_store);
+            debug_assert!(inserted);
+            continue;
+        }
 
         let mut merged_range_store = RangeStore {
             ranges: std::collections::BTreeMap::new(),
@@ -1033,13 +1040,10 @@ fn merge_symbolic_stores(
             let else_parts = e_range_store
                 .get_parts(access)
                 .map_err(|error| range_store_error("conditional merge", error, None))?;
-            let (t_expr, t_sources) =
-                combine_parts_with_default(*id, lsb, then_parts.clone(), arena)?;
-            let (e_expr, e_sources) =
-                combine_parts_with_default(*id, lsb, else_parts.clone(), arena)?;
-
             let t_modified = then_parts.iter().any(|(v, _)| v.is_some());
             let e_modified = else_parts.iter().any(|(v, _)| v.is_some());
+            let (t_expr, t_sources) = combine_parts_with_default(*id, lsb, then_parts, arena)?;
+            let (e_expr, e_sources) = combine_parts_with_default(*id, lsb, else_parts, arena)?;
 
             let result_val = if !t_modified && !e_modified {
                 None

@@ -14,6 +14,97 @@ use super::reload::{EdgeUse, PlanningRecipes, PointUse, ReloadRecipeAnalysis, Re
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct LogicalValue(pub u32);
 
+/// Sparse logical-value set with the same ascending iteration order as a
+/// `BTreeSet`, stored contiguously for the allocator's small W/S frontiers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct LogicalSet(Vec<LogicalValue>);
+
+impl LogicalSet {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub(super) fn contains(&self, value: &LogicalValue) -> bool {
+        self.0.binary_search(value).is_ok()
+    }
+
+    pub(super) fn insert(&mut self, value: LogicalValue) -> bool {
+        let Err(index) = self.0.binary_search(&value) else {
+            return false;
+        };
+        self.0.insert(index, value);
+        true
+    }
+
+    fn remove(&mut self, value: &LogicalValue) -> bool {
+        let Ok(index) = self.0.binary_search(value) else {
+            return false;
+        };
+        self.0.remove(index);
+        true
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn iter(&self) -> std::slice::Iter<'_, LogicalValue> {
+        self.0.iter()
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&LogicalValue) -> bool) {
+        self.0.retain(|value| keep(value));
+    }
+
+    fn difference<'a>(&'a self, other: &'a Self) -> impl Iterator<Item = &'a LogicalValue> + 'a {
+        self.0.iter().filter(|value| !other.contains(value))
+    }
+}
+
+impl FromIterator<LogicalValue> for LogicalSet {
+    fn from_iter<T: IntoIterator<Item = LogicalValue>>(iter: T) -> Self {
+        let mut values = iter.into_iter().collect::<Vec<_>>();
+        values.sort_unstable();
+        values.dedup();
+        Self(values)
+    }
+}
+
+impl Extend<LogicalValue> for LogicalSet {
+    fn extend<T: IntoIterator<Item = LogicalValue>>(&mut self, iter: T) {
+        for value in iter {
+            self.insert(value);
+        }
+    }
+}
+
+impl IntoIterator for LogicalSet {
+    type Item = LogicalValue;
+    type IntoIter = std::vec::IntoIter<LogicalValue>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a LogicalSet {
+    type Item = &'a LogicalValue;
+    type IntoIter = std::slice::Iter<'a, LogicalValue>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(super) struct SpillHome(pub u32);
 
@@ -112,18 +203,18 @@ pub(super) struct SpillPlan {
     /// Keys retain the pre-reconstruction insertion point; reconstruction
     /// independently proves the emitted load against final MIR.
     pub state_reload_recipes: BTreeMap<(BlockId, usize, LogicalValue), ResolvedRecipe>,
-    pub w_entry: Vec<BTreeSet<LogicalValue>>,
-    pub w_exit: Vec<BTreeSet<LogicalValue>>,
-    pub s_entry: Vec<BTreeSet<LogicalValue>>,
-    pub s_exit: Vec<BTreeSet<LogicalValue>>,
+    pub w_entry: Vec<LogicalSet>,
+    pub w_exit: Vec<LogicalSet>,
+    pub s_entry: Vec<LogicalSet>,
+    pub s_exit: Vec<LogicalSet>,
 }
 
 #[derive(Debug)]
 struct BlockTransition {
     point_ops: Vec<(ProgramPoint, PlannedOp)>,
     recipe_reloads: BTreeSet<(BlockId, usize, LogicalValue)>,
-    w_exit: BTreeSet<LogicalValue>,
-    s_exit: BTreeSet<LogicalValue>,
+    w_exit: LogicalSet,
+    s_exit: LogicalSet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,10 +524,10 @@ fn plan_internal(
         recipe_homes: BTreeSet::new(),
         state_homes: BTreeMap::new(),
         state_reload_recipes: BTreeMap::new(),
-        w_entry: vec![BTreeSet::new(); func.blocks.len()],
-        w_exit: vec![BTreeSet::new(); func.blocks.len()],
-        s_entry: vec![BTreeSet::new(); func.blocks.len()],
-        s_exit: vec![BTreeSet::new(); func.blocks.len()],
+        w_entry: vec![LogicalSet::new(); func.blocks.len()],
+        w_exit: vec![LogicalSet::new(); func.blocks.len()],
+        s_entry: vec![LogicalSet::new(); func.blocks.len()],
+        s_exit: vec![LogicalSet::new(); func.blocks.len()],
     };
     for block in 0..func.blocks.len() {
         let entry = if let Some(region) = next_use.region_at_entry(block) {
@@ -462,7 +553,7 @@ fn plan_internal(
                     .logical
                     .checked_of(value, Some(func.blocks[block].id), Some(0))
             })
-            .collect::<Result<BTreeSet<_>, _>>()?;
+            .collect::<Result<LogicalSet, _>>()?;
         let exit_reload_costs = constraints
             .map(|_| {
                 exit_reload_costs(
@@ -563,7 +654,7 @@ fn plan_internal(
             PlannedOp::SpillPhi { value, .. } => Some(*value),
             _ => None,
         })
-        .collect::<BTreeSet<_>>();
+        .collect::<LogicalSet>();
     for successor in 0..func.blocks.len() {
         for &predecessor in &cfg.predecessors[successor] {
             let mut resident_spills = Vec::new();
@@ -724,7 +815,7 @@ fn exit_reload_costs(
 ) -> Result<HashMap<LogicalValue, u32>, SpillPlanError> {
     let mut costs = HashMap::<LogicalValue, u32>::default();
     for &successor in &cfg.successors[block] {
-        let mut demanded = BTreeSet::<LogicalValue>::new();
+        let mut demanded = LogicalSet::new();
         for &value in next_use.entry[successor].keys() {
             let destination =
                 logical.checked_of(value, Some(func.blocks[successor].id), Some(0))?;
@@ -765,13 +856,13 @@ fn spilled_at_entry(
     plan: &SpillPlan,
     edge_translations: &EdgeTranslations,
     block: usize,
-    live_entry: &BTreeSet<LogicalValue>,
-    resident: &BTreeSet<LogicalValue>,
-) -> BTreeSet<LogicalValue> {
+    live_entry: &LogicalSet,
+    resident: &LogicalSet,
+) -> LogicalSet {
     let mut spilled = live_entry
         .difference(resident)
         .copied()
-        .collect::<BTreeSet<_>>();
+        .collect::<LogicalSet>();
     if !cfg.predecessors[block].is_empty() {
         spilled.extend(resident.iter().copied().filter(|value| {
             cfg.predecessors[block].iter().all(|predecessor| {
@@ -797,10 +888,10 @@ fn entry_residents_evicted_before_first_use(
     func: &MFunction,
     next_use: &NextUseAnalysis,
     block: usize,
-    resident: &BTreeSet<LogicalValue>,
+    resident: &LogicalSet,
     transition: &BlockTransition,
     order: Option<&[usize]>,
-) -> BTreeSet<LogicalValue> {
+) -> LogicalSet {
     let first_use = |value: LogicalValue| {
         order.map_or_else(
             || next_use.next_local_use(block, 0, VReg(value.0)),
@@ -848,8 +939,8 @@ fn plan_block_transition(
     homes: &SpillHomes,
     block: usize,
     registers: usize,
-    w_entry: &BTreeSet<LogicalValue>,
-    spilled: BTreeSet<LogicalValue>,
+    w_entry: &LogicalSet,
+    spilled: LogicalSet,
 ) -> Result<BlockTransition, SpillPlanError> {
     let mut planner = BlockTransitionPlanner::new(
         func,
@@ -1053,8 +1144,8 @@ fn plan_scheduled_block_transition(
     homes: &SpillHomes,
     block: usize,
     registers: usize,
-    w_entry: &BTreeSet<LogicalValue>,
-    spilled: BTreeSet<LogicalValue>,
+    w_entry: &LogicalSet,
+    spilled: LogicalSet,
     constraints: &[super::constraints::InstructionConstraints],
     exit_reload_costs: &HashMap<LogicalValue, u32>,
 ) -> Result<(BlockTransition, Vec<usize>), SpillPlanError> {
@@ -1254,8 +1345,8 @@ fn plan_explicit_block_order(
     homes: &SpillHomes,
     block: usize,
     registers: usize,
-    w_entry: &BTreeSet<LogicalValue>,
-    spilled: BTreeSet<LogicalValue>,
+    w_entry: &LogicalSet,
+    spilled: LogicalSet,
     exit_reload_costs: &HashMap<LogicalValue, u32>,
     order: &[usize],
 ) -> Result<BlockTransition, SpillPlanError> {
@@ -1303,8 +1394,8 @@ struct BlockTransitionPlanner<'a> {
     block: usize,
     registers: usize,
     transition: BlockTransition,
-    resident: BTreeSet<LogicalValue>,
-    spilled: BTreeSet<LogicalValue>,
+    resident: LogicalSet,
+    spilled: LogicalSet,
     deferred_recipe_reloads: BTreeMap<LogicalValue, PointUse>,
     last_definition: Option<LogicalValue>,
 }
@@ -1319,14 +1410,14 @@ impl<'a> BlockTransitionPlanner<'a> {
         homes: &'a SpillHomes,
         block: usize,
         registers: usize,
-        w_entry: &BTreeSet<LogicalValue>,
-        mut spilled: BTreeSet<LogicalValue>,
+        w_entry: &LogicalSet,
+        mut spilled: LogicalSet,
     ) -> Result<Self, SpillPlanError> {
         let mut transition = BlockTransition {
             point_ops: Vec::new(),
             recipe_reloads: BTreeSet::new(),
-            w_exit: BTreeSet::new(),
-            s_exit: BTreeSet::new(),
+            w_exit: LogicalSet::new(),
+            s_exit: LogicalSet::new(),
         };
         let resident = w_entry.clone();
         for phi in &func.blocks[block].phis {
@@ -1385,8 +1476,12 @@ impl<'a> BlockTransitionPlanner<'a> {
         inst: &MInst,
         remaining: &mut RemainingBlockUses<'_>,
     ) -> Result<ScheduledStepDelta, SpillPlanError> {
-        let resident_before = self.resident.clone();
-        let deferred_before = self.deferred_recipe_reloads.clone();
+        let resident_before = self.resident.iter().copied().collect::<Vec<_>>();
+        let deferred_before = self
+            .deferred_recipe_reloads
+            .iter()
+            .map(|(&value, &point)| (value, point))
+            .collect::<Vec<_>>();
         let last_definition_before = self.last_definition;
         let uses = {
             let before = DynamicFutureUses(remaining);
@@ -1397,24 +1492,61 @@ impl<'a> BlockTransitionPlanner<'a> {
             let after = DynamicFutureUses(remaining);
             self.finish_step(point, inst, &uses, &after)?;
         }
-        let resident = resident_before
-            .symmetric_difference(&self.resident)
+        let mut resident = resident_before
+            .iter()
             .copied()
-            .collect();
-        let deferred = deferred_before
-            .keys()
-            .chain(self.deferred_recipe_reloads.keys())
-            .copied()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .filter(|value| deferred_before.get(value) != self.deferred_recipe_reloads.get(value))
-            .collect();
-        let continuation = [last_definition_before, self.last_definition]
+            .filter(|value| !self.resident.contains(value))
+            .chain(
+                self.resident
+                    .iter()
+                    .copied()
+                    .filter(|value| resident_before.binary_search(value).is_err()),
+            )
+            .collect::<Vec<_>>();
+        resident.sort_unstable();
+
+        let mut deferred = Vec::new();
+        let (mut before_index, mut after) =
+            (0usize, self.deferred_recipe_reloads.iter().peekable());
+        while before_index < deferred_before.len() || after.peek().is_some() {
+            match (deferred_before.get(before_index), after.peek().copied()) {
+                (Some(&(before_value, before_point)), Some((&after_value, &after_point))) => {
+                    match before_value.cmp(&after_value) {
+                        Ordering::Less => {
+                            deferred.push(before_value);
+                            before_index += 1;
+                        }
+                        Ordering::Equal => {
+                            if before_point != after_point {
+                                deferred.push(before_value);
+                            }
+                            before_index += 1;
+                            after.next();
+                        }
+                        Ordering::Greater => {
+                            deferred.push(after_value);
+                            after.next();
+                        }
+                    }
+                }
+                (Some(&(before_value, _)), None) => {
+                    deferred.push(before_value);
+                    before_index += 1;
+                }
+                (None, Some((&after_value, _))) => {
+                    deferred.push(after_value);
+                    after.next();
+                }
+                (None, None) => break,
+            }
+        }
+
+        let mut continuation = [last_definition_before, self.last_definition]
             .into_iter()
             .flatten()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+            .collect::<Vec<_>>();
+        continuation.sort_unstable();
+        continuation.dedup();
         Ok(ScheduledStepDelta {
             resident,
             deferred,
@@ -1430,12 +1562,14 @@ impl<'a> BlockTransitionPlanner<'a> {
         remaining: &RemainingBlockUses<'_>,
     ) -> Result<AllocationCandidateScore, SpillPlanError> {
         let block_id = self.func.blocks[self.block].id;
-        let uses = inst
+        let mut uses = inst
             .uses()
             .iter()
             .copied()
             .map(|value| self.logical.checked_of(value, Some(block_id), Some(source)))
-            .collect::<Result<BTreeSet<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
+        uses.sort_unstable();
+        uses.dedup();
         let mut blocked_by_deferred_reload = false;
         let mut missing = 0usize;
         let mut resident_operands = 0usize;
@@ -1511,16 +1645,18 @@ impl<'a> BlockTransitionPlanner<'a> {
         point: TransitionPoint,
         inst: &MInst,
         future_uses: &impl FutureUses,
-    ) -> Result<BTreeSet<LogicalValue>, SpillPlanError> {
+    ) -> Result<Vec<LogicalValue>, SpillPlanError> {
         let block_id = self.func.blocks[self.block].id;
-        let uses = inst
+        let mut uses = inst
             .uses()
             .into_iter()
             .map(|value| {
                 self.logical
                     .checked_of(value, Some(block_id), Some(point.output))
             })
-            .collect::<Result<BTreeSet<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
+        uses.sort_unstable();
+        uses.dedup();
         for &value in &uses {
             if self.resident.insert(value) {
                 if let Some(expected) = self.deferred_recipe_reloads.remove(&value) {
@@ -1578,7 +1714,7 @@ impl<'a> BlockTransitionPlanner<'a> {
         &mut self,
         point: TransitionPoint,
         inst: &MInst,
-        uses: &BTreeSet<LogicalValue>,
+        uses: &[LogicalValue],
         future_uses: &impl FutureUses,
     ) -> Result<(), SpillPlanError> {
         let block_id = self.func.blocks[self.block].id;
@@ -1677,8 +1813,8 @@ fn limit_live_through_clobber(
     block: usize,
     point_instruction: usize,
     capacity: usize,
-    resident: &mut BTreeSet<LogicalValue>,
-    spilled: &mut BTreeSet<LogicalValue>,
+    resident: &mut LogicalSet,
+    spilled: &mut LogicalSet,
     deferred_recipe_reloads: &mut BTreeMap<LogicalValue, PointUse>,
     future_uses: &impl FutureUses,
 ) -> Result<(), SpillPlanError> {
@@ -1734,14 +1870,14 @@ fn init_usual(
     edge_translations: &EdgeTranslations,
     block: usize,
     registers: usize,
-) -> BTreeSet<LogicalValue> {
+) -> LogicalSet {
     let processed = cfg.predecessors[block]
         .iter()
         .copied()
         .filter(|predecessor| *predecessor < block)
         .collect::<Vec<_>>();
     if processed.is_empty() {
-        return BTreeSet::new();
+        return LogicalSet::new();
     }
     if processed.len() == 1 && cfg.predecessors[block].len() == 1 {
         let predecessor = processed[0];
@@ -1845,7 +1981,7 @@ fn init_loop_region(
     block: usize,
     region: usize,
     registers: usize,
-) -> Result<BTreeSet<LogicalValue>, SpillPlanError> {
+) -> Result<LogicalSet, SpillPlanError> {
     let mut alive = next_use.entry[block]
         .keys()
         .copied()
@@ -1853,7 +1989,7 @@ fn init_loop_region(
             plan.logical
                 .checked_of(value, Some(func.blocks[block].id), Some(0))
         })
-        .collect::<Result<BTreeSet<_>, _>>()?;
+        .collect::<Result<LogicalSet, _>>()?;
     for phi in &func.blocks[block].phis {
         alive.insert(
             plan.logical
@@ -2140,9 +2276,9 @@ fn limit(
     block: usize,
     point_instruction: usize,
     maximum: usize,
-    pinned: &BTreeSet<LogicalValue>,
-    resident: &mut BTreeSet<LogicalValue>,
-    spilled: &mut BTreeSet<LogicalValue>,
+    pinned: &[LogicalValue],
+    resident: &mut LogicalSet,
+    spilled: &mut LogicalSet,
     deferred_recipe_reloads: &mut BTreeMap<LogicalValue, PointUse>,
     future_uses: &impl FutureUses,
 ) -> Result<(), SpillPlanError> {
@@ -2199,7 +2335,7 @@ fn evict_value(
     block: usize,
     point_instruction: usize,
     value: LogicalValue,
-    spilled: &mut BTreeSet<LogicalValue>,
+    spilled: &mut LogicalSet,
     deferred_recipe_reloads: &mut BTreeMap<LogicalValue, PointUse>,
     future_uses: &impl FutureUses,
 ) -> Result<(), SpillPlanError> {
@@ -2265,7 +2401,7 @@ fn next_use_point_recipe(
 fn compare_eviction_candidates(
     func: &MFunction,
     planning_recipes: &PlanningRecipes,
-    spilled: &BTreeSet<LogicalValue>,
+    spilled: &LogicalSet,
     future_uses: &impl FutureUses,
     left: (LogicalValue, NextUseDistance),
     right: (LogicalValue, NextUseDistance),
@@ -2304,7 +2440,7 @@ fn compare_eviction_candidates(
 fn eviction_cost(
     func: &MFunction,
     planning_recipes: &PlanningRecipes,
-    spilled: &BTreeSet<LogicalValue>,
+    spilled: &LogicalSet,
     value: LogicalValue,
     future_uses: &impl FutureUses,
 ) -> u32 {
@@ -3070,8 +3206,8 @@ mod tests {
             &homes,
             0,
             4,
-            &BTreeSet::new(),
-            BTreeSet::new(),
+            &LogicalSet::new(),
+            LogicalSet::new(),
             &constraints.instructions[0],
             &HashMap::default(),
         )
@@ -3158,8 +3294,8 @@ mod tests {
             &homes,
             0,
             4,
-            &BTreeSet::new(),
-            BTreeSet::new(),
+            &LogicalSet::new(),
+            LogicalSet::new(),
             &constraints.instructions[0],
             &HashMap::default(),
         )
@@ -3234,8 +3370,8 @@ mod tests {
             &homes,
             0,
             4,
-            &BTreeSet::new(),
-            BTreeSet::new(),
+            &LogicalSet::new(),
+            LogicalSet::new(),
             &constraints.instructions[0],
             &HashMap::default(),
         )
@@ -3470,10 +3606,10 @@ mod tests {
             recipe_homes: BTreeSet::new(),
             state_homes: BTreeMap::new(),
             state_reload_recipes: BTreeMap::new(),
-            w_entry: vec![BTreeSet::new(); func.blocks.len()],
-            w_exit: vec![BTreeSet::new(); func.blocks.len()],
-            s_entry: vec![BTreeSet::new(); func.blocks.len()],
-            s_exit: vec![BTreeSet::new(); func.blocks.len()],
+            w_entry: vec![LogicalSet::new(); func.blocks.len()],
+            w_exit: vec![LogicalSet::new(); func.blocks.len()],
+            s_entry: vec![LogicalSet::new(); func.blocks.len()],
+            s_exit: vec![LogicalSet::new(); func.blocks.len()],
         };
         let predecessor = cfg.block_index[&BlockId(0)];
         let successor = cfg.block_index[&BlockId(1)];
@@ -3494,7 +3630,7 @@ mod tests {
             1,
         );
 
-        assert_eq!(inherited, BTreeSet::from([logical_value]));
+        assert_eq!(inherited, LogicalSet::from_iter([logical_value]));
     }
 
     #[test]
@@ -3568,10 +3704,10 @@ mod tests {
             recipe_homes: BTreeSet::new(),
             state_homes: BTreeMap::new(),
             state_reload_recipes: BTreeMap::new(),
-            w_entry: vec![BTreeSet::new(); func.blocks.len()],
-            w_exit: vec![BTreeSet::new(); func.blocks.len()],
-            s_entry: vec![BTreeSet::new(); func.blocks.len()],
-            s_exit: vec![BTreeSet::new(); func.blocks.len()],
+            w_entry: vec![LogicalSet::new(); func.blocks.len()],
+            w_exit: vec![LogicalSet::new(); func.blocks.len()],
+            s_entry: vec![LogicalSet::new(); func.blocks.len()],
+            s_exit: vec![LogicalSet::new(); func.blocks.len()],
         };
         let join = cfg.block_index[&BlockId(3)];
         let predecessors = &cfg.predecessors[join];
@@ -3594,7 +3730,10 @@ mod tests {
             1,
         );
 
-        assert_eq!(retained, BTreeSet::from([LogicalValue(guaranteed.0)]));
+        assert_eq!(
+            retained,
+            LogicalSet::from_iter([LogicalValue(guaranteed.0)])
+        );
     }
 
     #[test]
@@ -3660,10 +3799,10 @@ mod tests {
             recipe_homes: BTreeSet::new(),
             state_homes: BTreeMap::new(),
             state_reload_recipes: BTreeMap::new(),
-            w_entry: vec![BTreeSet::new(); func.blocks.len()],
-            w_exit: vec![BTreeSet::new(); func.blocks.len()],
-            s_entry: vec![BTreeSet::new(); func.blocks.len()],
-            s_exit: vec![BTreeSet::new(); func.blocks.len()],
+            w_entry: vec![LogicalSet::new(); func.blocks.len()],
+            w_exit: vec![LogicalSet::new(); func.blocks.len()],
+            s_entry: vec![LogicalSet::new(); func.blocks.len()],
+            s_exit: vec![LogicalSet::new(); func.blocks.len()],
         };
         let join = cfg.block_index[&BlockId(3)];
         let predecessors = &cfg.predecessors[join];
@@ -3682,7 +3821,10 @@ mod tests {
             1,
         );
 
-        assert_eq!(retained, BTreeSet::from([LogicalValue(repeated_use.0)]));
+        assert_eq!(
+            retained,
+            LogicalSet::from_iter([LogicalValue(repeated_use.0)])
+        );
         next_use.verify(&func, &cfg).unwrap();
     }
 
@@ -3834,7 +3976,7 @@ mod tests {
         let cfg = super::super::cfg::normalize(&mut func).unwrap();
         let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
         let planning_recipes = PlanningRecipes::stack_only(func.vregs.count());
-        let spilled = BTreeSet::new();
+        let spilled = LogicalSet::new();
         let future = LinearFutureUses {
             func: &func,
             next_use: &next_use,
@@ -4149,8 +4291,8 @@ mod tests {
             &homes,
             0,
             1,
-            &BTreeSet::new(),
-            BTreeSet::new(),
+            &LogicalSet::new(),
+            LogicalSet::new(),
         )
         .unwrap();
         for (source, inst) in func.blocks[0].insts.iter().enumerate() {
@@ -4656,7 +4798,10 @@ mod tests {
             LoopRegionKind::IrreducibleScc
         );
         for entry in [left, right] {
-            assert_eq!(plan.w_entry[entry], BTreeSet::from([LogicalValue(hot.0)]));
+            assert_eq!(
+                plan.w_entry[entry],
+                LogicalSet::from_iter([LogicalValue(hot.0)])
+            );
             assert!(!plan.w_entry[entry].contains(&LogicalValue(live_through.0)));
         }
     }

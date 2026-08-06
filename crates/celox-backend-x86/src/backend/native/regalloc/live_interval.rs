@@ -767,7 +767,18 @@ fn solve_liveness(
     let mut queued = vec![true; block_count];
     while let Some(block) = queue.pop_front() {
         queued[block] = false;
+        let next_out_capacity = cfg.successors[block]
+            .iter()
+            .map(|&successor| {
+                live_in[successor].len()
+                    + facts
+                        .edge_uses
+                        .get(&(block, successor))
+                        .map_or(0, HashSet::len)
+            })
+            .sum();
         let mut next_out = HashSet::default();
+        next_out.reserve(next_out_capacity);
         for &successor in &cfg.successors[block] {
             next_out.extend(live_in[successor].iter().copied());
             if let Some(edge) = facts.edge_uses.get(&(block, successor)) {
@@ -775,6 +786,7 @@ fn solve_liveness(
             }
         }
         let mut next_in = facts.blocks[block].upward_uses.clone();
+        next_in.reserve(next_out.len());
         next_in.extend(
             next_out
                 .iter()
@@ -796,7 +808,18 @@ fn solve_liveness(
     }
     let live_out = (0..block_count)
         .map(|block| {
+            let capacity = cfg.successors[block]
+                .iter()
+                .map(|&successor| {
+                    live_in[successor].len()
+                        + facts
+                            .edge_uses
+                            .get(&(block, successor))
+                            .map_or(0, HashSet::len)
+                })
+                .sum();
             let mut values = HashSet::default();
+            values.reserve(capacity);
             for &successor in &cfg.successors[block] {
                 values.extend(live_in[successor].iter().copied());
                 if let Some(edge) = facts.edge_uses.get(&(block, successor)) {
@@ -821,6 +844,13 @@ fn build_intervals<P: LivenessProgram + ?Sized>(
     for block_index in 0..program.block_count() {
         let block_id = program.block_id(block_index);
         let mut values = HashSet::default();
+        values.reserve(
+            live_in[block_index]
+                .len()
+                .saturating_add(live_out[block_index].len())
+                .saturating_add(facts.blocks[block_index].definitions.len())
+                .saturating_add(facts.blocks[block_index].last_use.len()),
+        );
         values.extend(live_in[block_index].iter().copied());
         values.extend(live_out[block_index].iter().copied());
         values.extend(facts.blocks[block_index].definitions.iter().copied());

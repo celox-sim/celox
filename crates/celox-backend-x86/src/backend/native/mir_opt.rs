@@ -2904,7 +2904,7 @@ fn global_gvn(func: &mut MFunction) {
         value_numbers: &mut [ValueNumber],
         value_leaders: &mut [VReg],
         leader_blocks: &mut [Option<usize>],
-        live_out: &[HashSet<VReg>],
+        live_out: &[Vec<VReg>],
         last_uses: &[HashMap<VReg, usize>],
         load_versions: &HashMap<(usize, usize), GvnLoadVersion>,
         value_table: &mut HashMap<GvnKey, ValueNumber>,
@@ -2971,7 +2971,7 @@ fn global_gvn(func: &mut MFunction) {
         value_numbers: &mut [ValueNumber],
         value_leaders: &mut [VReg],
         leader_blocks: &mut [Option<usize>],
-        live_out: &HashSet<VReg>,
+        live_out: &[VReg],
         last_uses: &HashMap<VReg, usize>,
         load_versions: &HashMap<(usize, usize), GvnLoadVersion>,
         value_table: &mut HashMap<GvnKey, ValueNumber>,
@@ -2996,7 +2996,7 @@ fn global_gvn(func: &mut MFunction) {
                     let leader = value_leaders[number as usize];
                     value_numbers[dst.0 as usize] = number;
                     let leader_block = leader_blocks[number as usize];
-                    let reuse_does_not_extend_live_range = live_out.contains(&leader)
+                    let reuse_does_not_extend_live_range = live_out.binary_search(&leader).is_ok()
                         || last_uses
                             .get(&leader)
                             .is_some_and(|last_use| *last_use >= inst_idx);
@@ -3062,7 +3062,7 @@ fn compute_gvn_liveness(
     func: &MFunction,
     block_id_to_idx: &HashMap<BlockId, usize>,
     succs: &[Vec<usize>],
-) -> (Vec<HashSet<VReg>>, Vec<HashSet<VReg>>) {
+) -> (Vec<Vec<VReg>>, Vec<Vec<VReg>>) {
     let block_count = func.blocks.len();
     let mut uses = vec![HashSet::default(); block_count];
     let mut defs = vec![HashSet::default(); block_count];
@@ -3081,31 +3081,75 @@ fn compute_gvn_liveness(
         }
     }
 
-    let mut live_in = vec![HashSet::default(); block_count];
+    let uses = uses
+        .into_iter()
+        .map(|set| {
+            let mut values = set.into_iter().collect::<Vec<_>>();
+            values.sort_unstable();
+            values
+        })
+        .collect::<Vec<_>>();
+
+    fn sorted_union(left: &[VReg], right: &[VReg]) -> Vec<VReg> {
+        let mut merged = Vec::with_capacity(left.len().saturating_add(right.len()));
+        let (mut left_index, mut right_index) = (0usize, 0usize);
+        while left_index < left.len() && right_index < right.len() {
+            match left[left_index].cmp(&right[right_index]) {
+                std::cmp::Ordering::Less => {
+                    merged.push(left[left_index]);
+                    left_index += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    merged.push(left[left_index]);
+                    left_index += 1;
+                    right_index += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    merged.push(right[right_index]);
+                    right_index += 1;
+                }
+            }
+        }
+        merged.extend_from_slice(&left[left_index..]);
+        merged.extend_from_slice(&right[right_index..]);
+        merged
+    }
+
+    fn merged_successor_live(
+        func: &MFunction,
+        succs: &[Vec<usize>],
+        live_in: &[Vec<VReg>],
+        block_index: usize,
+    ) -> Vec<VReg> {
+        let block_id = func.blocks[block_index].id;
+        let mut live_out = Vec::new();
+        for &successor in &succs[block_index] {
+            let mut edge_uses = func.blocks[successor]
+                .phis
+                .iter()
+                .filter_map(|phi| {
+                    phi.sources
+                        .iter()
+                        .find(|(predecessor, _)| *predecessor == block_id)
+                        .map(|(_, source)| *source)
+                })
+                .collect::<Vec<_>>();
+            edge_uses.sort_unstable();
+            edge_uses.dedup();
+            let successor_live = sorted_union(&live_in[successor], &edge_uses);
+            live_out = sorted_union(&live_out, &successor_live);
+        }
+        live_out
+    }
+
+    let mut live_in = vec![Vec::new(); block_count];
     let mut changed = true;
     while changed {
         changed = false;
         for block_index in (0..block_count).rev() {
-            let block_id = func.blocks[block_index].id;
-            let mut live_out = HashSet::default();
-            for &successor in &succs[block_index] {
-                live_out.extend(live_in[successor].iter().copied());
-                for phi in &func.blocks[successor].phis {
-                    if let Some((_, source)) = phi
-                        .sources
-                        .iter()
-                        .find(|(predecessor, _)| *predecessor == block_id)
-                    {
-                        live_out.insert(*source);
-                    }
-                }
-            }
-            let mut next = uses[block_index].clone();
-            next.extend(
-                live_out
-                    .into_iter()
-                    .filter(|value| !defs[block_index].contains(value)),
-            );
+            let mut live_out = merged_successor_live(func, succs, &live_in, block_index);
+            live_out.retain(|value| !defs[block_index].contains(value));
+            let next = sorted_union(&uses[block_index], &live_out);
             if next != live_in[block_index] {
                 live_in[block_index] = next;
                 changed = true;
@@ -3113,20 +3157,9 @@ fn compute_gvn_liveness(
         }
     }
 
-    let mut live_out = vec![HashSet::default(); block_count];
-    for (block_index, block) in func.blocks.iter().enumerate() {
-        for &successor in &succs[block_index] {
-            live_out[block_index].extend(live_in[successor].iter().copied());
-            for phi in &func.blocks[successor].phis {
-                if let Some((_, source)) = phi
-                    .sources
-                    .iter()
-                    .find(|(predecessor, _)| *predecessor == block.id)
-                {
-                    live_out[block_index].insert(*source);
-                }
-            }
-        }
+    let mut live_out = vec![Vec::new(); block_count];
+    for (block_index, values) in live_out.iter_mut().enumerate() {
+        *values = merged_successor_live(func, succs, &live_in, block_index);
     }
 
     debug_assert!(
