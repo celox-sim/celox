@@ -39,13 +39,13 @@ description = "Celox HDL Simulator"
 rust-version = "1.97.1"
 
 [workspace.dependencies]
-veryl-analyzer = { git = "https://github.com/veryl-lang/veryl.git", rev = "46772906ecd83a1a413664082d7df217794a1560" }
-veryl-emitter = { git = "https://github.com/veryl-lang/veryl.git", rev = "46772906ecd83a1a413664082d7df217794a1560" }
-veryl-metadata = { git = "https://github.com/veryl-lang/veryl.git", rev = "46772906ecd83a1a413664082d7df217794a1560" }
-veryl-parser = { git = "https://github.com/veryl-lang/veryl.git", rev = "46772906ecd83a1a413664082d7df217794a1560", default-features = false }
-veryl-path = { git = "https://github.com/veryl-lang/veryl.git", rev = "46772906ecd83a1a413664082d7df217794a1560" }
-veryl-simulator = { git = "https://github.com/veryl-lang/veryl.git", rev = "46772906ecd83a1a413664082d7df217794a1560" }
-veryl-std = { git = "https://github.com/veryl-lang/veryl.git", rev = "46772906ecd83a1a413664082d7df217794a1560" }
+veryl-analyzer = { git = "https://github.com/veryl-lang/veryl.git", rev = "a3d5f25139f910e936e4bc0e09a2453b0439694f" }
+veryl-emitter = { git = "https://github.com/veryl-lang/veryl.git", rev = "a3d5f25139f910e936e4bc0e09a2453b0439694f" }
+veryl-metadata = { git = "https://github.com/veryl-lang/veryl.git", rev = "a3d5f25139f910e936e4bc0e09a2453b0439694f" }
+veryl-parser = { git = "https://github.com/veryl-lang/veryl.git", rev = "a3d5f25139f910e936e4bc0e09a2453b0439694f", default-features = false }
+veryl-path = { git = "https://github.com/veryl-lang/veryl.git", rev = "a3d5f25139f910e936e4bc0e09a2453b0439694f" }
+veryl-simulator = { git = "https://github.com/veryl-lang/veryl.git", rev = "a3d5f25139f910e936e4bc0e09a2453b0439694f" }
+veryl-std = { git = "https://github.com/veryl-lang/veryl.git", rev = "a3d5f25139f910e936e4bc0e09a2453b0439694f" }
 
 bit-set         = "0.11"
 clap            = { version = "4.5.60", features = ["derive"] }
