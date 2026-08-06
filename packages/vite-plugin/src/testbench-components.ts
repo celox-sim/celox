@@ -3,6 +3,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import {
 	createServer,
 	type ModuleNode,
+	normalizePath,
 	type Plugin,
 	type ResolvedConfig,
 } from "vite";
@@ -19,18 +20,26 @@ export interface LoadedTestbenchComponents {
 	dependencies: Set<string>;
 }
 
+/** Normalize dependency keys the same way on Vite's watcher and module graph. */
+export function normalizeTestbenchComponentPath(file: string): string {
+	const normalized = normalizePath(resolve(file));
+	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
 function collectModuleFiles(
 	entry: string,
 	roots: Iterable<ModuleNode>,
 ): Set<string> {
-	const files = new Set([resolve(entry)]);
+	const files = new Set([normalizeTestbenchComponentPath(entry)]);
 	const pending = [...roots];
 	const seen = new Set<ModuleNode>();
 	while (pending.length > 0) {
 		const module = pending.pop()!;
 		if (seen.has(module)) continue;
 		seen.add(module);
-		if (module.file) files.add(resolve(module.file));
+		if (module.file) {
+			files.add(normalizeTestbenchComponentPath(module.file));
+		}
 		pending.push(...module.importedModules);
 	}
 	return files;
@@ -102,7 +111,8 @@ export async function loadTestbenchComponentModule(
 			JSON.parse(component.manifest);
 			manifests[name] = { manifest: component.manifest };
 		}
-		const roots = server.moduleGraph.getModulesByFile(modulePath) ?? [];
+		const roots =
+			server.moduleGraph.getModulesByFile(normalizePath(modulePath)) ?? [];
 		return {
 			manifests,
 			dependencies: collectModuleFiles(modulePath, roots),

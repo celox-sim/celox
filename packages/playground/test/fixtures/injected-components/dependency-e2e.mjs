@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { resolveConfig } from "vite";
-import { loadTestbenchComponentModule } from "../../../../vite-plugin/dist/testbench-components.js";
+import {
+	loadTestbenchComponentModule,
+	normalizeTestbenchComponentPath,
+} from "../../../../vite-plugin/dist/testbench-components.js";
 
 const root = import.meta.dirname;
 const registry = resolve(root, "tb-components.ts");
@@ -27,6 +30,6 @@ const config = await resolveConfig(
 
 const loaded = await loadTestbenchComponentModule(registry, root, config);
 assert.ok(
-	loaded.dependencies.has(helper),
+	loaded.dependencies.has(normalizeTestbenchComponentPath(helper)),
 	"aliased registry dependency is missing from the HMR dependency graph",
 );

@@ -5,6 +5,7 @@ import { GenTsCache } from "./cache.js";
 import { cleanSidecars, generateSidecars } from "./sidecar.js";
 import {
 	loadTestbenchComponentModule,
+	normalizeTestbenchComponentPath,
 	writeTestbenchComponentSidecar,
 } from "./testbench-components.js";
 import type {
@@ -181,7 +182,9 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		async handleHotUpdate({ file, server }) {
 			const componentChanged =
 				testbenchComponents !== undefined &&
-				testbenchComponentDependencies.has(resolve(file));
+				testbenchComponentDependencies.has(
+					normalizeTestbenchComponentPath(file),
+				);
 			if (!file.endsWith(".veryl") && !componentChanged) return;
 
 			if (componentChanged && testbenchComponents) {
