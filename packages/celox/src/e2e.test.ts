@@ -3003,4 +3003,35 @@ module InjectedMethodComponentTb {
 		expect(result.assertions.every((assertion) => assertion.passed)).toBe(true);
 		expect(finished).toBe(2);
 	});
+
+	test("preserves injected component failure messages", () => {
+		const source = `
+#[test(InjectedFailureTb)]
+module InjectedFailureTb {
+    var model: $comp::ts_failure;
+
+    initial {
+        model.fail();
+        $finish();
+    }
+}
+`;
+		const component = defineTbComponent({
+			kind: "method_only",
+			methods: {
+				fail: {
+					call: () => ({ failures: ["TypeScript component failed"] }),
+				},
+			},
+		});
+
+		const result = runTest(
+			[{ content: source, path: "injected_failure.veryl" }],
+			"InjectedFailureTb",
+			{ components: { ts_failure: component } },
+		);
+
+		expect(result.passed).toBe(false);
+		expect(result.error).toContain("TypeScript component failed");
+	});
 });

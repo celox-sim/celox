@@ -142,6 +142,7 @@ export interface NapiAssertionResult {
 export interface NapiTestResult {
 	passed: boolean;
 	assertions: NapiAssertionResult[];
+	error?: string;
 }
 
 export interface NapiInjectedValue {

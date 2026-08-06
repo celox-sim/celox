@@ -9,6 +9,7 @@ use celox::{
 
 struct Model {
     phases: Arc<Mutex<Vec<String>>>,
+    fired_clocks: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 impl InjectedComponentHandler for Model {
@@ -22,6 +23,10 @@ impl InjectedComponentHandler for Model {
             InjectedHook::Method { .. } => "method",
         };
         self.phases.lock().unwrap().push(phase.into());
+        self.fired_clocks
+            .lock()
+            .unwrap()
+            .push(call.fired_clock.clone());
         let output = match call.hook {
             InjectedHook::Init => Some(0),
             InjectedHook::Clock => {
@@ -75,6 +80,7 @@ fn injected_clocked_component_uses_component_scheduling() {
         }
     "#;
     let phases = Arc::new(Mutex::new(Vec::new()));
+    let fired_clocks = Arc::new(Mutex::new(Vec::new()));
     let mut components = InjectedComponents::new();
     components
         .insert(
@@ -89,6 +95,7 @@ fn injected_clocked_component_uses_component_scheduling() {
             }"#,
             Arc::new(Model {
                 phases: phases.clone(),
+                fired_clocks: fired_clocks.clone(),
             }),
         )
         .unwrap();
@@ -101,5 +108,9 @@ fn injected_clocked_component_uses_component_scheduling() {
     assert_eq!(
         *phases.lock().unwrap(),
         ["create", "init", "clock", "finish"]
+    );
+    assert_eq!(
+        *fired_clocks.lock().unwrap(),
+        [None, None, Some("clk".to_string()), None]
     );
 }

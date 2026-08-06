@@ -260,11 +260,14 @@ impl HostContext {
     }
 
     fn injected_call(&self, instance: &str, hook: InjectedHook) -> InjectedCall {
-        let fired_clock = self
-            .ports
-            .get(self.fired_clock as usize)
-            .filter(|port| port.role == PortRole::Clock)
-            .map(|port| port.name.clone());
+        let fired_clock = if matches!(&hook, InjectedHook::Clock) {
+            self.ports
+                .get(self.fired_clock as usize)
+                .filter(|port| port.role == PortRole::Clock)
+                .map(|port| port.name.clone())
+        } else {
+            None
+        };
         InjectedCall {
             instance: instance.to_string(),
             hook,

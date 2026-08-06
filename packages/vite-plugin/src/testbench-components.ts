@@ -1,6 +1,11 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
-import { createServer, type Plugin, type ResolvedConfig } from "vite";
+import { dirname, join, relative, resolve } from "node:path";
+import {
+	createServer,
+	type ModuleNode,
+	type Plugin,
+	type ResolvedConfig,
+} from "vite";
 import type { TestbenchComponentManifests } from "./types.js";
 
 export const TESTBENCH_COMPONENT_SIDECAR = join(
@@ -8,6 +13,28 @@ export const TESTBENCH_COMPONENT_SIDECAR = join(
 	"testbench-components",
 	"veryl.manifest.json",
 );
+
+export interface LoadedTestbenchComponents {
+	manifests: TestbenchComponentManifests;
+	dependencies: Set<string>;
+}
+
+function collectModuleFiles(
+	entry: string,
+	roots: Iterable<ModuleNode>,
+): Set<string> {
+	const files = new Set([resolve(entry)]);
+	const pending = [...roots];
+	const seen = new Set<ModuleNode>();
+	while (pending.length > 0) {
+		const module = pending.pop()!;
+		if (seen.has(module)) continue;
+		seen.add(module);
+		if (module.file) files.add(resolve(module.file));
+		pending.push(...module.importedModules);
+	}
+	return files;
+}
 
 function componentLoaderPlugins(config: ResolvedConfig): Plugin[] {
 	return config.plugins
@@ -29,7 +56,7 @@ export async function loadTestbenchComponentModule(
 	modulePath: string,
 	projectRoot: string,
 	config: ResolvedConfig,
-): Promise<TestbenchComponentManifests> {
+): Promise<LoadedTestbenchComponents> {
 	const server = await createServer({
 		root: projectRoot,
 		configFile: false,
@@ -75,7 +102,11 @@ export async function loadTestbenchComponentModule(
 			JSON.parse(component.manifest);
 			manifests[name] = { manifest: component.manifest };
 		}
-		return manifests;
+		const roots = server.moduleGraph.getModulesByFile(modulePath) ?? [];
+		return {
+			manifests,
+			dependencies: collectModuleFiles(modulePath, roots),
+		};
 	} finally {
 		await server.close();
 	}

@@ -1876,12 +1876,14 @@ pub struct NapiAssertionResult {
 pub struct NapiTestResult {
     pub passed: bool,
     pub assertions: Vec<NapiAssertionResult>,
+    pub error: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn convert_test_result(r: celox::TestResultDetailed) -> NapiTestResult {
     NapiTestResult {
         passed: r.passed,
+        error: r.error,
         assertions: r
             .assertions
             .into_iter()

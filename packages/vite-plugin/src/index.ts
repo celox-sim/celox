@@ -35,6 +35,7 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 	let cache: GenTsCache;
 	let sidecarPaths: string[] = [];
 	let testbenchComponents: string | undefined;
+	let testbenchComponentDependencies = new Set<string>();
 	let viteConfig: ResolvedConfig;
 
 	return {
@@ -66,11 +67,16 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 		async buildStart() {
 			let componentManifests: TestbenchComponentManifests | undefined;
 			if (testbenchComponents) {
-				componentManifests = await loadTestbenchComponentModule(
+				const loaded = await loadTestbenchComponentModule(
 					testbenchComponents,
 					projectRoot,
 					viteConfig,
 				);
+				componentManifests = loaded.manifests;
+				testbenchComponentDependencies = loaded.dependencies;
+				for (const dependency of testbenchComponentDependencies) {
+					this.addWatchFile(dependency);
+				}
 				writeTestbenchComponentSidecar(
 					projectRoot,
 					testbenchComponents,
@@ -172,24 +178,26 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 			return parts.join("\n\n") || "export {};";
 		},
 
-		async handleHotUpdate({ file }) {
+		async handleHotUpdate({ file, server }) {
 			const componentChanged =
 				testbenchComponents !== undefined &&
-				resolve(file) === resolve(testbenchComponents);
+				testbenchComponentDependencies.has(resolve(file));
 			if (!file.endsWith(".veryl") && !componentChanged) return;
 
 			if (componentChanged && testbenchComponents) {
-				const manifests = await loadTestbenchComponentModule(
+				const loaded = await loadTestbenchComponentModule(
 					testbenchComponents,
 					projectRoot,
 					viteConfig,
 				);
+				testbenchComponentDependencies = loaded.dependencies;
+				server.watcher.add([...testbenchComponentDependencies]);
 				writeTestbenchComponentSidecar(
 					projectRoot,
 					testbenchComponents,
-					manifests,
+					loaded.manifests,
 				);
-				cache.setTestbenchComponents(manifests);
+				cache.setTestbenchComponents(loaded.manifests);
 			}
 
 			// Invalidate cache so next load re-runs the generator
@@ -317,7 +325,9 @@ function generateTestCode(
 		);
 		lines.push(`    }`);
 		lines.push(`  }`);
-		lines.push(`  expect(__result.passed).toBe(true);`);
+		lines.push(
+			`  expect(__result.passed, __result.error ?? "testbench failed").toBe(true);`,
+		);
 		lines.push(`});`);
 		lines.push(``);
 	}
