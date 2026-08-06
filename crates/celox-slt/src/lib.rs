@@ -16,6 +16,7 @@ mod node_rules;
 mod path;
 pub mod range_store;
 pub mod scheduler;
+mod symbolic_store;
 mod symbolic_verify;
 
 #[doc(hidden)]
@@ -29,6 +30,7 @@ pub use node_facts::{SLTNodeFacts, SLTNodeFactsError};
 pub use path::{LogicPath, LogicPathId, LogicPathTarget};
 pub use range_store::{RangeStore, RangeStoreError};
 pub use scheduler::FfAccessSummary;
+pub use symbolic_store::SymbolicStore;
 pub use symbolic_verify::verify_symbolic_roots;
 
 /// Return the construction-time width cached when a node was interned.
@@ -42,8 +44,6 @@ pub fn get_width<A: std::hash::Hash + Eq + Clone>(node: NodeId, arena: &SLTNodeA
 ///
 /// `N` is the symbolic expression identity. It remains generic until the SLT
 /// arena itself moves into this crate.
-pub type SymbolicStore<A, N> = HashMap<A, RangeStore<Option<(N, HashSet<VarAtomBase<A>>)>>>;
-
 /// Bit boundaries discovered while constructing symbolic state.
 pub type BoundaryMap<A> = HashMap<A, BTreeSet<usize>>;
 

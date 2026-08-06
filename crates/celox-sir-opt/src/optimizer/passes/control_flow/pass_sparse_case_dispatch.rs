@@ -151,6 +151,12 @@ impl ExecutionUnitPass for SparseCaseDispatchPass {
         };
         let mut candidate_blocks: Option<HashSet<BlockId>> = None;
         loop {
+            // Applying a batch normally leaves no newly split block to
+            // inspect. Avoid rebuilding whole-EU use and definition indices
+            // merely to discover that the restricted candidate set is empty.
+            if candidate_blocks.as_ref().is_some_and(HashSet::is_empty) {
+                break;
+            }
             let plans =
                 find_sparse_case_plans(eu, &self.stable_alias_class, candidate_blocks.as_ref());
             if plans.is_empty() {
