@@ -142,6 +142,56 @@ export interface NapiAssertionResult {
 export interface NapiTestResult {
 	passed: boolean;
 	assertions: NapiAssertionResult[];
+	error?: string;
+}
+
+export interface NapiInjectedValue {
+	name?: string;
+	bits?: bigint;
+	maskXz?: bigint;
+	width?: number;
+	stringValue?: string;
+}
+
+export interface NapiInjectedPort {
+	name: string;
+	direction: string;
+	role?: string;
+	width: number;
+}
+
+export interface NapiInjectedCall {
+	instance: string;
+	phase: string;
+	method?: string;
+	inputs: NapiInjectedValue[];
+	params: NapiInjectedValue[];
+	ports: NapiInjectedPort[];
+	args: NapiInjectedValue[];
+	cycle: bigint;
+	time: bigint;
+	seed: bigint;
+	firedClock?: string;
+	fourState: boolean;
+}
+
+export interface NapiInjectedResult {
+	outputs?: NapiInjectedValue[];
+	returnValue?: NapiInjectedValue;
+	failures?: string[];
+	logs?: string[];
+	finish?: boolean;
+}
+
+export interface NapiInjectedComponent {
+	name: string;
+	manifest: string;
+	handler(call: NapiInjectedCall): NapiInjectedResult;
+}
+
+export interface NapiInjectedManifest {
+	name: string;
+	manifest: string;
 }
 
 export interface RawNapiAddon {
@@ -169,17 +219,19 @@ export interface RawNapiAddon {
 			options?: NapiOptions,
 		): RawNapiSimulationHandle;
 	};
-	genTs(projectPath: string): string;
+	genTs(projectPath: string, components?: NapiInjectedManifest[]): string;
 	clearJitCache(): void;
 	runTest(
 		sources: NapiSourceFile[],
 		top: string,
 		options?: NapiOptions,
+		components?: NapiInjectedComponent[],
 	): NapiTestResult;
 	runTestFromProject(
 		projectPath: string,
 		top: string,
 		options?: NapiOptions,
+		components?: NapiInjectedComponent[],
 	): NapiTestResult;
 }
 

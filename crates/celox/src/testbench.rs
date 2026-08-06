@@ -50,6 +50,7 @@ pub struct AssertionResult {
 pub struct TestResultDetailed {
     pub passed: bool,
     pub assertions: Vec<AssertionResult>,
+    pub error: Option<String>,
 }
 
 /// Opaque, precompiled native testbench program for a built simulator.
@@ -1070,21 +1071,21 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         &mut sim.backend,
     ) {
         Ok(writes) => writes,
-        Err(_) => {
+        Err(message) => {
             return TestResultDetailed {
                 passed: false,
                 assertions: Vec::new(),
+                error: Some(message),
             };
         }
     };
     if let Some(writer) = sim.vcd_writer.as_mut()
-        && writer
-            .add_external_signals(&sim.components.trace_descriptors())
-            .is_err()
+        && let Err(error) = writer.add_external_signals(&sim.components.trace_descriptors())
     {
         return TestResultDetailed {
             passed: false,
             assertions: Vec::new(),
+            error: Some(format!("component VCD registration failed: {error}")),
         };
     }
     apply_component_writes(sim, initial_writes);
@@ -1104,13 +1105,20 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
     } else {
         exec_detailed(sim, testbench.statements(), &mut ctx)
     };
-    let finish_ok = sim.components.finish(ctx.current_time).is_ok();
-    let passed = finish_ok
-        && !matches!(result, ExecResult::Fail(_))
-        && ctx.assertions.iter().all(|a| a.passed);
+    let mut error = match result {
+        ExecResult::Fail(message) => Some(message),
+        ExecResult::Continue | ExecResult::Break | ExecResult::Finished => None,
+    };
+    if let Err(message) = sim.components.finish(ctx.current_time)
+        && error.is_none()
+    {
+        error = Some(message);
+    }
+    let passed = error.is_none() && ctx.assertions.iter().all(|a| a.passed);
     TestResultDetailed {
         passed,
         assertions: ctx.assertions,
+        error,
     }
 }
 

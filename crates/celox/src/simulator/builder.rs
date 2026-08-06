@@ -134,6 +134,7 @@ fn analyze(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     preserve_element_storage_layout: bool,
 ) -> (
     Result<OptimizedSir, ParserError>,
@@ -172,6 +173,19 @@ fn analyze(
     let testbench_random_seed = metadata.test.seed;
     let (component_libraries, component_file_base) = component_runtime_config(&metadata);
     let analyzer = Analyzer::new(&metadata);
+    if !injected_manifests.is_empty() {
+        let names: Vec<_> = injected_manifests
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        veryl_analyzer::tb_component::insert_external_components(&names);
+        for (name, manifest) in injected_manifests {
+            veryl_analyzer::component_manifest_table::insert(
+                resource_table::insert_str(name),
+                manifest.clone(),
+            );
+        }
+    }
     let project_name = metadata.project.name.clone();
 
     // Per-file: parse + pass1
@@ -299,6 +313,7 @@ pub fn compile_to_sir(
         param_overrides,
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
+        &[],
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
     )
 }
@@ -324,6 +339,7 @@ fn compile_to_sir_with_layout_mode(
     param_overrides: &[(String, u64)],
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
+    injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics) = analyze(
@@ -340,6 +356,7 @@ fn compile_to_sir_with_layout_mode(
         param_overrides,
         optimize_options,
         diagnostics,
+        injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
@@ -435,6 +452,7 @@ mod host {
         warnings: Vec<CompilationWarning>,
         options: SimulatorOptions,
         vcd_path: Option<std::path::PathBuf>,
+        injected_components: crate::InjectedComponents,
     }
 
     #[cfg(any(
@@ -457,9 +475,11 @@ mod host {
                 warnings,
                 options,
                 vcd_path,
+                injected_components,
             } = self;
             let mut sim =
                 Simulator::with_backend_and_program(backend, program.into_runtime(), warnings);
+            sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
@@ -526,6 +546,7 @@ mod host {
         reset_type: Option<ResetType>,
         param_overrides: Vec<(String, u64)>,
         live_signals: Vec<(Vec<(String, usize)>, Vec<String>)>,
+        injected_components: crate::InjectedComponents,
         _marker: std::marker::PhantomData<Target>,
     }
 
@@ -567,6 +588,12 @@ mod host {
         /// Override a top-level module parameter value.
         pub fn param(mut self, name: &str, value: u64) -> Self {
             self.param_overrides.push((name.to_string(), value));
+            self
+        }
+
+        /// Make in-process component implementations available as `$comp::<name>`.
+        pub fn with_injected_components(mut self, components: crate::InjectedComponents) -> Self {
+            self.injected_components = components;
             self
         }
 
@@ -842,6 +869,7 @@ mod host {
                 reset_type: None,
                 param_overrides: Vec::new(),
                 live_signals: Vec::new(),
+                injected_components: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -859,6 +887,7 @@ mod host {
                 reset_type: None,
                 param_overrides: Vec::new(),
                 live_signals: Vec::new(),
+                injected_components: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -875,11 +904,13 @@ mod host {
                 Vec<CompilationWarning>,
                 SimulatorOptions,
                 Option<std::path::PathBuf>,
+                crate::InjectedComponents,
             ),
             SimulatorError,
         > {
             let phase_timing = self.options.diagnostics.phase_timing;
             let compile_start = phase_timing.then(crate::timing::now);
+            let injected_manifests = self.injected_components.manifests();
             let (program, warnings) = compile_to_sir_with_layout_mode(
                 &self.sources,
                 self.top,
@@ -894,6 +925,7 @@ mod host {
                 &self.param_overrides,
                 &self.options.optimize_options,
                 &self.options.diagnostics,
+                &injected_manifests,
                 layout_mode,
             )?;
             if let Some(start) = compile_start {
@@ -919,7 +951,13 @@ mod host {
                 }
             }
 
-            Ok((laid_out, warnings, self.options, self.vcd_path))
+            Ok((
+                laid_out,
+                warnings,
+                self.options,
+                self.vcd_path,
+                self.injected_components,
+            ))
         }
 
         /// Compiles the Veryl source and constructs the simulator.
@@ -946,7 +984,7 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let phase_start = phase_timing.then(crate::timing::now);
 
-            let (laid_out, warnings, options, vcd_path) = self
+            let (laid_out, warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
 
             if let Some(s) = phase_start {
@@ -975,6 +1013,7 @@ mod host {
 
             let mut sim =
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+            sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
@@ -995,9 +1034,10 @@ mod host {
         pub fn compile_native(self) -> Result<NativeCompilation, SimulatorError> {
             let phase_timing = self.options.diagnostics.phase_timing;
             let sir_start = phase_timing.then(crate::timing::now);
-            let (laid_out, warnings, options, vcd_path) = self.into_laid_out_program(
-                crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
-            )?;
+            let (laid_out, warnings, options, vcd_path, injected_components) = self
+                .into_laid_out_program(
+                    crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+                )?;
             if let Some(start) = sir_start {
                 tracing::debug!(
                     "[phase-timing] into_laid_out_program total: {:?}",
@@ -1015,6 +1055,7 @@ mod host {
                 warnings,
                 options,
                 vcd_path,
+                injected_components,
             })
         }
 
@@ -1033,11 +1074,12 @@ mod host {
         pub fn build_wasm(
             self,
         ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
-            let (laid_out, warnings, options, vcd_path) = self
+            let (laid_out, warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(crate::backend::memory_layout::MemoryLayoutMode::Packed)?;
             let backend = crate::backend::wasm_runtime::WasmBackend::new(&laid_out, &options)?;
             let mut sim =
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+            sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
@@ -1113,6 +1155,7 @@ mod host {
                 &self.param_overrides,
                 &self.options.optimize_options,
                 &self.options.diagnostics,
+                &self.injected_components.manifests(),
                 layout_mode,
             );
 
@@ -1152,6 +1195,8 @@ mod host {
 
                 let mut sim =
                     Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+                sim.components
+                    .set_injected(self.injected_components.clone());
                 sim.diagnostics = self.options.diagnostics.clone();
                 sim.apply_initial_values();
                 sim.modify(|_| {}).map_err(SimulatorError::from)?;
@@ -1200,6 +1245,7 @@ mod host {
                 reset_type: None,
                 param_overrides: Vec::new(),
                 live_signals: Vec::new(),
+                injected_components: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -1217,6 +1263,7 @@ mod host {
                 reset_type: None,
                 param_overrides: Vec::new(),
                 live_signals: Vec::new(),
+                injected_components: Default::default(),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -1248,6 +1295,7 @@ mod host {
                 &self.param_overrides,
                 &self.options.optimize_options,
                 &self.options.diagnostics,
+                &self.injected_components.manifests(),
                 layout_mode,
             )?;
             let mut laid_out =
@@ -1269,6 +1317,7 @@ mod host {
 
             let mut sim =
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
+            sim.components.set_injected(self.injected_components);
             sim.diagnostics = self.options.diagnostics.clone();
             if let Some(path) = self.vcd_path {
                 let descs = sim.build_vcd_descs(self.options.four_state);
