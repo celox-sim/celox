@@ -1,0 +1,11 @@
+[project]
+name = "vite_injected_components"
+version = "0.1.0"
+
+[build]
+clock_type = "posedge"
+reset_type = "async_low"
+sources = ["src"]
+
+[[components]]
+path = ".celox/testbench-components"

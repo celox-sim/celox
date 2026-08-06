@@ -1,0 +1,11 @@
+#[test(InjectedTestbench)]
+module InjectedTestbench {
+    var store: $comp::vite_store;
+
+    initial {
+        $assert(store.get() == 8'd40, "Vite alias resolved in component module");
+        store.set(8'h2a);
+        $assert(store.get() == 8'd44, "Vite plugin resolved in component module");
+        $finish();
+    }
+}
