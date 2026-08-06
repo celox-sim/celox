@@ -719,6 +719,7 @@ dependencies = [
  "celox",
  "libloading",
  "tempfile",
+ "veryl-metadata",
 ]
 
 [[package]]

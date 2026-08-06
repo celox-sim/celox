@@ -468,6 +468,10 @@ mod host {
         )
     }
 
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     pub(crate) fn runtime_event_write_seq_for_backend<B: SimBackend>(backend: &B) -> u64 {
         if let Some(buffer) = backend.runtime_event_buffer() {
             buffer.load_atomic_u64(0, std::sync::atomic::Ordering::Acquire)
@@ -481,6 +485,10 @@ mod host {
         }
     }
 
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
     pub(crate) fn collect_runtime_events_for_backend<B: SimBackend>(
         backend: &B,
         sites: &[RuntimeEventSite],

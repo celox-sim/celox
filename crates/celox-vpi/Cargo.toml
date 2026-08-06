@@ -27,6 +27,7 @@ celox = { path = "../celox", features = ["experimental-arm64-backend"] }
 
 [dependencies]
 libloading = "0.9"
+veryl-metadata.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -137,14 +137,65 @@ pub type VpiHandle = *mut VpiHandleObject;
 
 thread_local! {
     static RUNTIME: RefCell<Option<NativeProgramInstance>> = const { RefCell::new(None) };
-    static FORCED_VALUES: RefCell<HashMap<ReflectionSignalId, (BigUint, BigUint)>> = RefCell::new(HashMap::new());
+    static FORCED_VALUES: RefCell<HashMap<ReflectionSignalId, ForcedValue>> = RefCell::new(HashMap::new());
     static PENDING_WRITES: RefCell<PendingWrites> = RefCell::new(PendingWrites::default());
+}
+
+#[derive(Clone)]
+struct ForcedValue {
+    value: BigUint,
+    mask: BigUint,
+    deposited_value: BigUint,
+    deposited_mask: BigUint,
 }
 
 #[derive(Default)]
 struct PendingWrites {
-    old_levels: HashMap<ReflectionSignalId, bool>,
+    edge_batches: Vec<Vec<ReflectionSignalId>>,
     settle: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LogicLevel {
+    Zero,
+    One,
+    X,
+    Z,
+}
+
+fn logic_level(value: &BigUint, mask: &BigUint) -> LogicLevel {
+    match (value.bit(0), mask.bit(0)) {
+        (false, false) => LogicLevel::Zero,
+        (true, false) => LogicLevel::One,
+        (true, true) => LogicLevel::X,
+        (false, true) => LogicLevel::Z,
+    }
+}
+
+fn is_active_edge(kind: DomainKind, old: LogicLevel, new: LogicLevel) -> bool {
+    match kind {
+        DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh => {
+            matches!(old, LogicLevel::Zero) && !matches!(new, LogicLevel::Zero)
+                || matches!(old, LogicLevel::X | LogicLevel::Z) && matches!(new, LogicLevel::One)
+        }
+        DomainKind::ClockNegedge | DomainKind::ResetAsyncLow => {
+            matches!(old, LogicLevel::One) && !matches!(new, LogicLevel::One)
+                || matches!(old, LogicLevel::X | LogicLevel::Z) && matches!(new, LogicLevel::Zero)
+        }
+        DomainKind::Other => false,
+    }
+}
+
+fn queue_active_edge(pending: &mut PendingWrites, id: ReflectionSignalId) {
+    if let Some(batch) = pending
+        .edge_batches
+        .iter_mut()
+        .find(|batch| !batch.contains(&id))
+    {
+        batch.push(id);
+    } else {
+        pending.edge_batches.push(vec![id]);
+    }
 }
 
 /// Install an instance explicitly. This is primarily useful to an embedding
@@ -572,7 +623,7 @@ pub unsafe extern "C" fn vpi_get_str(property: i32, reference: VpiHandle) -> *mu
 }
 
 fn value_bits(id: ReflectionSignalId) -> Option<(BigUint, BigUint, usize)> {
-    if let Some((value, mask)) = FORCED_VALUES.with_borrow(|forced| forced.get(&id).cloned()) {
+    if let Some(forced) = FORCED_VALUES.with_borrow(|forced| forced.get(&id).cloned()) {
         let width = with_runtime(|runtime| {
             runtime
                 .reflection()
@@ -580,7 +631,7 @@ fn value_bits(id: ReflectionSignalId) -> Option<(BigUint, BigUint, usize)> {
                 .map(|signal| signal.signal.width)
         })
         .flatten()?;
-        return Some((value, mask, width));
+        return Some((forced.value, forced.mask, width));
     }
     with_runtime(|runtime| {
         let signal = runtime.reflection().signal(id)?;
@@ -595,7 +646,7 @@ fn format_binary(value: &BigUint, mask: &BigUint, width: usize) -> String {
         .rev()
         .map(|bit| {
             if mask.bit(bit as u64) {
-                'x'
+                if value.bit(bit as u64) { 'x' } else { 'z' }
             } else if value.bit(bit as u64) {
                 '1'
             } else {
@@ -611,7 +662,11 @@ fn format_hex(value: &BigUint, mask: &BigUint, width: usize) -> String {
         .map(|nibble| {
             let bit = nibble * 4;
             if (0..4).any(|offset| bit + offset < width && mask.bit((bit + offset) as u64)) {
-                'x'
+                let all_z = (0..4).all(|offset| {
+                    bit + offset >= width
+                        || mask.bit((bit + offset) as u64) && !value.bit((bit + offset) as u64)
+                });
+                if all_z { 'z' } else { 'x' }
             } else {
                 let digit = (0..4).fold(0u8, |digit, offset| {
                     digit | (u8::from(value.bit((bit + offset) as u64)) << offset)
@@ -659,7 +714,7 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
         }
         VPI_SCALAR_VAL => {
             value.value.scalar = if mask.bit(0) {
-                VPI_X
+                if bits.bit(0) { VPI_X } else { VPI_Z }
             } else if bits.bit(0) {
                 VPI_1
             } else {
@@ -693,7 +748,11 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
     }
 }
 
-unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint, BigUint)> {
+unsafe fn decode_value(
+    value: *const VpiValue,
+    width: usize,
+    signed: bool,
+) -> Option<(BigUint, BigUint)> {
     if value.is_null() {
         return None;
     }
@@ -702,17 +761,20 @@ unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint,
     match value.format {
         VPI_INT_VAL => {
             // Safety: reading the active union member selected by `format`.
-            Some((
-                BigUint::from(unsafe { value.value.integer } as u32),
-                0u8.into(),
-            ))
+            let integer = unsafe { value.value.integer };
+            let mut bits = BigUint::from(integer as u32);
+            if signed && integer < 0 && width > 32 {
+                bits |= ((BigUint::from(1u8) << (width - 32)) - BigUint::from(1u8)) << 32;
+            }
+            Some((bits, 0u8.into()))
         }
         VPI_SCALAR_VAL => {
             // Safety: reading the active union member selected by `format`.
             match unsafe { value.value.scalar } {
                 VPI_0 => Some((0u8.into(), 0u8.into())),
                 VPI_1 => Some((1u8.into(), 0u8.into())),
-                VPI_X | VPI_Z => Some((1u8.into(), 1u8.into())),
+                VPI_X => Some((1u8.into(), 1u8.into())),
+                VPI_Z => Some((0u8.into(), 1u8.into())),
                 _ => None,
             }
         }
@@ -767,9 +829,13 @@ unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint,
                     b'A'..=b'F' if radix_bits == 4 => {
                         bits |= BigUint::from(digit - b'A' + 10);
                     }
-                    b'x' | b'X' | b'z' | b'Z' => {
+                    b'x' | b'X' => {
                         let unknown = (1u8 << radix_bits) - 1;
                         bits |= BigUint::from(unknown);
+                        mask |= BigUint::from(unknown);
+                    }
+                    b'z' | b'Z' => {
+                        let unknown = (1u8 << radix_bits) - 1;
                         mask |= BigUint::from(unknown);
                     }
                     _ => return None,
@@ -816,46 +882,112 @@ pub unsafe extern "C" fn vpi_put_value(
         return ptr::null_mut();
     };
     if flags == VPI_RELEASE_FLAG {
-        FORCED_VALUES.with_borrow_mut(|forced| {
-            forced.remove(&id);
+        let released = FORCED_VALUES.with_borrow_mut(|forced| forced.remove(&id));
+        let succeeded = released.is_none_or(|released| {
+            with_runtime_mut(|runtime| {
+                let Some(signal) = runtime.reflection().signal(id).cloned() else {
+                    return false;
+                };
+                runtime.release_signal(id);
+                let (old_value, old_mask) = runtime.backend().get_four_state(signal.signal);
+                let old_level = logic_level(&old_value, &old_mask);
+                let new_level = logic_level(&released.deposited_value, &released.deposited_mask);
+                PENDING_WRITES.with_borrow_mut(|pending| {
+                    if is_active_edge(signal.domain_kind, old_level, new_level) {
+                        queue_active_edge(pending, id);
+                    }
+                    pending.settle = true;
+                });
+                runtime.backend_mut().set_four_state(
+                    signal.signal,
+                    released.deposited_value,
+                    released.deposited_mask,
+                );
+                true
+            })
+            .unwrap_or(false)
         });
-        PENDING_WRITES.with_borrow_mut(|pending| pending.settle = true);
-        return if callbacks::is_running() || flush_pending_writes() {
+        return if succeeded && (callbacks::is_running() || flush_pending_writes()) {
             reference
         } else {
             ptr::null_mut()
         };
     }
 
-    let width = with_runtime(|runtime| {
+    let signal_info = with_runtime(|runtime| {
         runtime
             .reflection()
             .signal(id)
-            .map(|signal| signal.signal.width)
+            .map(|signal| (signal.signal.width, signal.signed))
     })
     .flatten();
     // Safety: value follows the VPI value contract.
-    let Some((bits, mask)) = width.and_then(|width| unsafe { decode_value(value, width) }) else {
+    let Some((bits, mask)) =
+        signal_info.and_then(|(width, signed)| unsafe { decode_value(value, width, signed) })
+    else {
         return ptr::null_mut();
     };
     if flags == VPI_FORCE_FLAG {
+        let deposited = FORCED_VALUES
+            .with_borrow(|forced| {
+                forced.get(&id).map(|forced| {
+                    (
+                        forced.deposited_value.clone(),
+                        forced.deposited_mask.clone(),
+                    )
+                })
+            })
+            .or_else(|| {
+                with_runtime(|runtime| {
+                    let signal = runtime.reflection().signal(id)?;
+                    Some(runtime.backend().get_four_state(signal.signal))
+                })
+                .flatten()
+            });
+        let Some((deposited_value, deposited_mask)) = deposited else {
+            return ptr::null_mut();
+        };
         FORCED_VALUES.with_borrow_mut(|forced| {
-            forced.insert(id, (bits.clone(), mask.clone()));
+            forced.insert(
+                id,
+                ForcedValue {
+                    value: bits.clone(),
+                    mask: mask.clone(),
+                    deposited_value,
+                    deposited_mask,
+                },
+            );
         });
+    } else if FORCED_VALUES.with_borrow_mut(|forced| {
+        forced.get_mut(&id).is_some_and(|forced| {
+            forced.deposited_value = bits.clone();
+            forced.deposited_mask = mask.clone();
+            true
+        })
+    }) {
+        return reference;
     }
     let succeeded = with_runtime_mut(|runtime| {
         let Some(signal) = runtime.reflection().signal(id).cloned() else {
             return false;
         };
-        let old_is_high = runtime.backend().get(signal.signal).bit(0);
+        let (old_value, old_mask) = runtime.backend().get_four_state(signal.signal);
+        let old_level = logic_level(&old_value, &old_mask);
+        let new_level = logic_level(&bits, &mask);
         PENDING_WRITES.with_borrow_mut(|pending| {
-            pending.old_levels.entry(id).or_insert(old_is_high);
+            if is_active_edge(signal.domain_kind, old_level, new_level) {
+                queue_active_edge(pending, id);
+            }
             pending.settle = true;
         });
-        runtime
-            .backend_mut()
-            .set_four_state(signal.signal, bits, mask);
-        true
+        if flags == VPI_FORCE_FLAG {
+            runtime.force_signal(id, bits, mask)
+        } else {
+            runtime
+                .backend_mut()
+                .set_four_state(signal.signal, bits, mask);
+            true
+        }
     })
     .unwrap_or(false);
     let succeeded = succeeded && (callbacks::is_running() || flush_pending_writes());
@@ -871,25 +1003,24 @@ fn flush_pending_writes() -> bool {
     if !pending.settle {
         return true;
     }
-    let result = with_runtime_mut(|runtime| {
-        let mut active_edges = Vec::new();
-        for (id, old_is_high) in pending.old_levels {
-            let Some(signal) = runtime.reflection().signal(id).cloned() else {
-                continue;
-            };
-            let new_is_high = runtime.backend().get(signal.signal).bit(0);
-            let active = match signal.domain_kind {
-                DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh => {
-                    !old_is_high && new_is_high
-                }
-                DomainKind::ClockNegedge | DomainKind::ResetAsyncLow => old_is_high && !new_is_high,
-                DomainKind::Other => false,
-            };
-            if active {
-                active_edges.push(signal.state_address);
+    let result: Result<(), celox::RuntimeErrorCode> = with_runtime_mut(|runtime| {
+        if pending.edge_batches.is_empty() {
+            runtime.settle_active_edges(&[])?;
+        } else {
+            for batch in pending.edge_batches {
+                let active_edges = batch
+                    .into_iter()
+                    .filter_map(|id| {
+                        runtime
+                            .reflection()
+                            .signal(id)
+                            .map(|signal| signal.state_address)
+                    })
+                    .collect::<Vec<_>>();
+                runtime.settle_active_edges(&active_edges)?;
             }
         }
-        runtime.settle_active_edges(&active_edges)
+        Ok(())
     })
     .unwrap_or(Ok(()));
     if let Err(error) = result {

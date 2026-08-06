@@ -236,8 +236,17 @@ pub(super) fn run() -> bool {
         super::flush_pending_writes();
         progressed |= fire_all(CB_READ_WRITE_SYNCH);
         super::flush_pending_writes();
-        for id in changed_value_ids() {
-            progressed |= fire(id);
+        loop {
+            let changed = changed_value_ids();
+            if changed.is_empty() {
+                break;
+            }
+            for id in changed {
+                progressed |= fire(id);
+            }
+            if !super::flush_pending_writes() {
+                break;
+            }
         }
         progressed |= fire_all(CB_READ_ONLY_SYNCH);
 
@@ -391,9 +400,12 @@ pub unsafe extern "C" fn vpi_get_time(_object: VpiHandle, time: *mut VpiTime) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn vpi_control(operation: i32) {
+pub extern "C" fn vpi_control(operation: i32) -> i32 {
     if matches!(operation, VPI_STOP | VPI_FINISH) {
         STATE.with_borrow_mut(|state| state.finish = true);
+        1
+    } else {
+        0
     }
 }
 

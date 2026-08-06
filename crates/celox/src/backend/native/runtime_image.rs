@@ -1,6 +1,6 @@
 //! Runtime-only loading and instantiation of compiler-produced native images.
 
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use celox_design::StateAddr;
 use celox_runtime::backend::EventHandle;
@@ -37,6 +37,7 @@ pub struct NativeProgramInstance {
     runtime_event_read_seq: u64,
     comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
     comb_observer_initial_eval: bool,
+    forced_values: crate::HashMap<celox_runtime::ReflectionSignalId, (BigUint, BigUint)>,
 }
 
 impl NativeProgramInstance {
@@ -51,6 +52,7 @@ impl NativeProgramInstance {
             runtime_event_read_seq: 0,
             comb_observer_snapshots: Vec::new(),
             comb_observer_initial_eval: true,
+            forced_values: crate::HashMap::default(),
         };
         instance.comb_observer_snapshots = instance.snapshot_all_comb_observers();
         instance
@@ -105,7 +107,7 @@ impl NativeProgramInstance {
         active_edges: &[StateAddr],
     ) -> Result<(), celox_runtime::SimulatorErrorCode> {
         self.eval_comb_checked()?;
-        let mut seen = HashSet::new();
+        let mut seen = crate::HashSet::default();
         let mut events = Vec::new();
         for address in active_edges {
             let canonical = self
@@ -182,6 +184,28 @@ impl NativeProgramInstance {
         &mut self.backend
     }
 
+    /// Override one reflected signal at each combinational execution-unit
+    /// boundary until [`Self::release_signal`] is called.
+    pub fn force_signal(
+        &mut self,
+        id: celox_runtime::ReflectionSignalId,
+        value: BigUint,
+        mask: BigUint,
+    ) -> bool {
+        let Some(signal) = self.reflection().signal(id).cloned() else {
+            return false;
+        };
+        self.backend
+            .set_four_state(signal.signal, value.clone(), mask.clone());
+        self.forced_values.insert(id, (value, mask));
+        true
+    }
+
+    /// Restore normal design-driver control for a reflected signal.
+    pub fn release_signal(&mut self, id: celox_runtime::ReflectionSignalId) {
+        self.forced_values.remove(&id);
+    }
+
     fn runtime_schema(&self) -> &NativeRuntimeSchema {
         self.shared.program_image().runtime_schema()
     }
@@ -219,18 +243,12 @@ impl NativeProgramInstance {
 
     fn eval_comb_checked(&mut self) -> Result<(), celox_runtime::SimulatorErrorCode> {
         if self.runtime_schema().runtime_event_sites.is_empty() {
-            return self
-                .backend
-                .eval_comb()
-                .map_err(|error| self.decorate_runtime_error(error));
+            return self.eval_comb_backend();
         }
 
         let start_seq = crate::simulator::runtime_event_write_seq_for_backend(&self.backend);
         if self.runtime_schema().comb_observers.is_empty() {
-            let result = self
-                .backend
-                .eval_comb()
-                .map_err(|error| self.decorate_runtime_error(error));
+            let result = self.eval_comb_backend();
             self.check_fatal_events_since(start_seq)?;
             return result;
         }
@@ -257,10 +275,7 @@ impl NativeProgramInstance {
             }
         }
         self.backend.set_comb_capture_event_enabled(&active_sites);
-        let result = self
-            .backend
-            .eval_comb()
-            .map_err(|error| self.decorate_runtime_error(error));
+        let result = self.eval_comb_backend();
         let after = self.snapshot_all_comb_observers();
         self.backend.set_comb_capture_event_enabled(&vec![
             false;
@@ -272,6 +287,35 @@ impl NativeProgramInstance {
         self.comb_observer_initial_eval = false;
         self.check_fatal_events_since(start_seq)?;
         result
+    }
+
+    fn eval_comb_backend(&mut self) -> Result<(), celox_runtime::SimulatorErrorCode> {
+        if self.forced_values.is_empty() {
+            return self
+                .backend
+                .eval_comb()
+                .map_err(|error| self.decorate_runtime_error(error));
+        }
+        let overrides = self
+            .forced_values
+            .iter()
+            .filter_map(|(id, (value, mask))| {
+                self.reflection()
+                    .signal(*id)
+                    .map(|signal| (signal.signal, value.clone(), mask.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (signal, value, mask) in &overrides {
+            self.backend
+                .set_four_state(*signal, value.clone(), mask.clone());
+        }
+        self.backend
+            .eval_comb_units_with(|backend| {
+                for (signal, value, mask) in &overrides {
+                    backend.set_four_state(*signal, value.clone(), mask.clone());
+                }
+            })
+            .map_err(|error| self.decorate_runtime_error(error))
     }
 
     fn check_fatal_events_since(

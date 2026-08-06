@@ -1,6 +1,8 @@
 #![allow(clippy::disallowed_methods)] // Opt-in test configuration is environment-driven.
 
-use std::{env, path::Path, process::Command};
+use std::{env, fs, path::Path, process::Command};
+
+use celox::{DomainKind, NativeProgramInstance};
 
 fn python_output(python: &str, arguments: &[&str]) -> String {
     let output = Command::new(python).args(arguments).output().unwrap();
@@ -79,5 +81,71 @@ fn cocotb_drives_an_attached_native_flip_flop() {
         "cocotb reported a failure:\n{}\n{}",
         String::from_utf8_lossy(&checked.stdout),
         String::from_utf8_lossy(&checked.stderr)
+    );
+}
+
+#[test]
+fn compile_uses_the_source_projects_clock_and_reset_metadata() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source_dir = temporary.path().join("src");
+    fs::create_dir(&source_dir).unwrap();
+    fs::write(
+        temporary.path().join("Veryl.toml"),
+        r#"
+[project]
+name = "vpi_metadata"
+version = "0.1.0"
+
+[build]
+clock_type = "negedge"
+reset_type = "async_high"
+sources = ["src"]
+"#,
+    )
+    .unwrap();
+    let source = source_dir.join("top.veryl");
+    fs::write(
+        &source,
+        r#"
+module Top (
+    clk: input clock,
+    rst: input reset,
+    q: output logic,
+) {
+    always_ff (clk, rst) {
+        if_reset {
+            q = 0;
+        } else {
+            q = 1;
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let executable = temporary.path().join("metadata-sim");
+    let compile = Command::new(env!("CARGO_BIN_EXE_celox-vpi-compile"))
+        .arg(&source)
+        .args(["--top", "Top", "--runtime"])
+        .arg(env!("CARGO_BIN_EXE_celox-vpi-runtime"))
+        .arg("--output")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "native compilation failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let bytes = fs::read(executable).unwrap();
+    let runtime = NativeProgramInstance::from_attached_bytes(&bytes).unwrap();
+    assert_eq!(
+        runtime.signal("Top.clk").unwrap().domain_kind,
+        DomainKind::ClockNegedge
+    );
+    assert_eq!(
+        runtime.signal("Top.rst").unwrap().domain_kind,
+        DomainKind::ResetAsyncHigh
     );
 }

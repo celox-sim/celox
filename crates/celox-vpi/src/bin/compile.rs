@@ -3,6 +3,7 @@
 use std::{env, io::Write, path::PathBuf, process::ExitCode};
 
 use celox::Simulator;
+use veryl_metadata::Metadata;
 
 struct Arguments {
     source: PathBuf,
@@ -46,11 +47,39 @@ fn arguments() -> Result<Arguments, String> {
 
 fn run() -> Result<(), String> {
     let arguments = arguments()?;
-    let source = std::fs::read_to_string(&arguments.source)
-        .map_err(|error| format!("failed to read {}: {error}", arguments.source.display()))?;
-    let simulator = Simulator::builder(&source, &arguments.top)
-        .build()
-        .map_err(|error| format!("compilation failed: {error:?}"))?;
+    let simulator = if let Ok(metadata_path) = Metadata::search_from(&arguments.source) {
+        let mut metadata = Metadata::load(&metadata_path)
+            .map_err(|error| format!("failed to load {}: {error}", metadata_path.display()))?;
+        let paths = metadata
+            .paths::<&std::path::Path>(&[], false, false)
+            .map_err(|error| format!("failed to discover project sources: {error}"))?;
+        let sources = paths
+            .into_iter()
+            .filter(|path| !path.example)
+            .map(|path| {
+                let source = std::fs::read_to_string(&path.src)
+                    .map_err(|error| format!("failed to read {}: {error}", path.src.display()))?;
+                Ok((source, path.src))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let source_refs = sources
+            .iter()
+            .map(|(source, path)| (source.as_str(), path.as_path()))
+            .collect::<Vec<_>>();
+        Simulator::from_sources(source_refs, &arguments.top)
+            .with_metadata(metadata)
+            .four_state(true)
+            .opt_level(celox::OptLevel::O0)
+            .build()
+    } else {
+        let source = std::fs::read_to_string(&arguments.source)
+            .map_err(|error| format!("failed to read {}: {error}", arguments.source.display()))?;
+        Simulator::builder(&source, &arguments.top)
+            .four_state(true)
+            .opt_level(celox::OptLevel::O0)
+            .build()
+    }
+    .map_err(|error| format!("compilation failed: {error:?}"))?;
     simulator
         .shared_code()
         .program_image()
