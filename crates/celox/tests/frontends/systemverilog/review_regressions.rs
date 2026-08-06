@@ -2147,6 +2147,14 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "final construct",
+            r#"
+            module Top(input logic done);
+                final assert (done);
+            endmodule
+        "#,
+        ),
+        (
             "non-ANSI module port declarations",
             r#"
             module Top(y); output y; assign y = 1'b1; endmodule
@@ -2823,6 +2831,36 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                 endfunction
                 assign y = f(a);
             endmodule
+        "#,
+        ),
+        (
+            "static function-local state",
+            r#"
+            module Top(input logic set, value, output logic y);
+                function logic saved_value(input logic do_set, input logic new_value);
+                    logic saved;
+                    if (do_set) saved = new_value;
+                    return saved;
+                endfunction
+                assign y = saved_value(set, value);
+            endmodule
+        "#,
+        ),
+        (
+            "implicit net `missing` disabled",
+            r#"
+            `default_nettype none
+            module Child(output logic y); assign y = 1'b1; endmodule
+            module Top(output logic y);
+                Child child(.y(missing));
+                assign y = missing;
+            endmodule
+        "#,
+        ),
+        (
+            "pull or supply net type",
+            r#"
+            module Top(output tri1 y); endmodule
         "#,
         ),
     ];
@@ -3571,4 +3609,35 @@ fn evaluates_repeat_counts_with_typed_parameter_widths() {
     assert_eq!(sim.get(sim.signal("glue")), 0x7fffu16.into());
     sim.tick(sim.event("clk")).unwrap();
     assert_eq!(sim.get(sim.signal("ff_value")), 0x7fffu16.into());
+}
+
+#[test]
+fn evaluates_part_select_bounds_with_typed_parameter_widths() {
+    let source = r#"
+        module Child(input logic [15:0] value, output logic [15:0] y);
+            assign y = value;
+        endmodule
+        module Top(
+            input logic clk,
+            input logic [15:0] a,
+            output logic [15:0] comb, ff_value, glue
+        );
+            parameter logic [3:0] P = 0;
+            assign comb = a[~P:0];
+            always_ff @(posedge clk) ff_value <= a[~P:0];
+            Child child(.value(a[~P:0]), .y(glue));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("typed_part_select_bounds.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 0xabcdu16)).unwrap();
+    assert_eq!(sim.get(sim.signal("comb")), 0xabcdu16.into());
+    assert_eq!(sim.get(sim.signal("glue")), 0xabcdu16.into());
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(sim.signal("ff_value")), 0xabcdu16.into());
 }

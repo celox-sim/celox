@@ -91,6 +91,7 @@ impl SvVariable {
 #[derive(Clone)]
 pub(crate) struct LoweredSvModule {
     source: sv::ir::Module,
+    implicit_nets_allowed: bool,
     pub sim_module: SimModule,
     variables: HashMap<VarId, SvVariable>,
     pub port_order: Vec<VarId>,
@@ -105,6 +106,7 @@ struct AnalyzedSvModule {
     name: String,
     source_code: String,
     source_path: PathBuf,
+    implicit_nets_allowed: bool,
 }
 
 #[derive(Clone)]
@@ -157,6 +159,7 @@ fn analyze_sources(
 ) -> Result<HashMap<resource_table::StrId, AnalyzedSvModule>, sv::AnalyzerError> {
     let mut modules = HashMap::default();
     for (code, path) in sources {
+        let implicit_net_permissions = sv::source_module_implicit_net_permissions(code, path)?;
         for module_name in sv::source_module_names(code, path)? {
             let name = resource_table::insert_str(&module_name);
             if modules.contains_key(&name) {
@@ -165,6 +168,10 @@ fn analyze_sources(
             modules.insert(
                 name,
                 AnalyzedSvModule {
+                    implicit_nets_allowed: implicit_net_permissions
+                        .iter()
+                        .find_map(|(name, allowed)| (name == &module_name).then_some(*allowed))
+                        .unwrap_or(true),
                     name: module_name,
                     source_code: (*code).to_string(),
                     source_path: (*path).to_path_buf(),
@@ -389,7 +396,7 @@ fn local_driver_ranges(
                 if assignment.lhs() == signal_name {
                     drivers.push((
                         driver_id,
-                        net_lvalue_range(assignment.lhs_value(), constants),
+                        net_lvalue_range(assignment.lhs_value(), constants, parameter_types),
                     ));
                 }
                 if process.kind() == sv::ir::CombProcessKind::ContinuousAssign {
@@ -413,7 +420,7 @@ fn local_driver_ranges(
                 .map(|assignment| {
                     (
                         driver_id,
-                        net_lvalue_range(assignment.lhs_value(), constants),
+                        net_lvalue_range(assignment.lhs_value(), constants, parameter_types),
                     )
                 }),
         );
@@ -425,12 +432,13 @@ fn local_driver_ranges(
 fn net_lvalue_range(
     lvalue: &sv::ir::LValue,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<(i128, i128)> {
     let sv::ir::LValue::Select { msb, lsb, .. } = lvalue else {
         return None;
     };
-    let msb = sv::typecheck::eval_const_expr(msb, constants)?;
-    let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
+    let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
+    let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
     Some((msb.min(lsb), msb.max(lsb)))
 }
 
@@ -776,20 +784,22 @@ fn specialize_module(
         .iter()
         .find(|candidate| candidate.name() == module.name)
         .ok_or_else(|| sv::AnalyzerError::Unsupported(format!("module `{}`", module.name)))?;
-    lower_module(specialized, four_state)
+    lower_module(specialized, four_state, module.implicit_nets_allowed)
 }
 
 fn lower_module(
     module: &sv::ir::Module,
     four_state: bool,
+    implicit_nets_allowed: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
-    lower_module_with_overrides(module, &[], four_state)
+    lower_module_with_overrides(module, &[], four_state, implicit_nets_allowed)
 }
 
 fn lower_module_with_overrides(
     module: &sv::ir::Module,
     parameter_overrides: &[LoweredSvParameterOverride],
     four_state: bool,
+    implicit_nets_allowed: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let token = TokenRange::default();
     let name = resource_table::insert_str(module.name());
@@ -947,6 +957,7 @@ fn lower_module_with_overrides(
 
     Ok(LoweredSvModule {
         source: module.clone(),
+        implicit_nets_allowed,
         sim_module: SimModule {
             name,
             variables: shared_variables,
@@ -1146,6 +1157,7 @@ pub(crate) fn attach_instance_glue(
             &mut parent_variables,
             &mut signal_names,
             &mut implicit_output_signals,
+            lowered.implicit_nets_allowed,
             &lowered.source,
             &lowered.constants,
             &lowered.parameter_types,
@@ -1334,6 +1346,7 @@ fn ensure_parent_output_signals(
     parent_variables: &mut HashMap<VarId, SvVariable>,
     parent_signal_names: &mut HashMap<String, VarId>,
     implicit_output_signals: &mut HashSet<String>,
+    implicit_nets_allowed: bool,
     parent_source: &sv::ir::Module,
     parent_constants: &std::collections::HashMap<String, i128>,
     parent_parameter_types: &HashMap<String, (usize, bool)>,
@@ -1373,6 +1386,13 @@ fn ensure_parent_output_signals(
             return Err(ParserError::illegal_context(
                 "systemverilog output port connection",
                 format!("cannot drive parameter `{actual}`"),
+                None,
+            ));
+        }
+        if !implicit_nets_allowed {
+            return Err(ParserError::illegal_context(
+                "systemverilog output port connection",
+                format!("implicit net `{actual}` disabled by `default_nettype none"),
                 None,
             ));
         }
@@ -1695,8 +1715,10 @@ fn lower_glue_parent_expr(
                 None,
                 None,
             )?;
-            let msb_value = sv::typecheck::eval_const_expr(msb, constants)?;
-            let lsb_value = sv::typecheck::eval_const_expr(lsb, constants)?;
+            let msb_value =
+                sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
+            let lsb_value =
+                sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
             let (msb, lsb) =
                 packed_expr_select_offsets(expr, msb_value, lsb_value, variables, name_to_id)?;
             let access = BitAccess::new(msb.min(lsb), msb.max(lsb));
@@ -2439,13 +2461,19 @@ fn lower_assignment(
     arena: &mut SLTNodeArena<VarId>,
     four_state: bool,
 ) -> Result<LogicPath<VarId>, sv::AnalyzerError> {
-    let target = lower_lvalue_target(assignment.lhs_value(), variables, name_to_id, constants)
-        .ok_or_else(|| {
-            sv::AnalyzerError::Unsupported(format!(
-                "combinational assignment target `{}`",
-                assignment.lhs()
-            ))
-        })?;
+    let target = lower_lvalue_target(
+        assignment.lhs_value(),
+        variables,
+        name_to_id,
+        constants,
+        parameter_types,
+    )
+    .ok_or_else(|| {
+        sv::AnalyzerError::Unsupported(format!(
+            "combinational assignment target `{}`",
+            assignment.lhs()
+        ))
+    })?;
     let target_width = target
         .var()
         .map(|target| target.access.msb - target.access.lsb + 1)
@@ -2533,14 +2561,15 @@ fn lower_lvalue_target(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<LogicPathTarget<VarId>> {
     let target_id = *name_to_id.get(lvalue.name())?;
     let target_width = variables.get(&target_id)?.width;
     let (lsb, msb) = match lvalue {
         sv::ir::LValue::Ident(_) => (0, target_width.checked_sub(1)?),
         sv::ir::LValue::Select { msb, lsb, .. } => {
-            let msb = sv::typecheck::eval_const_expr(msb, constants)?;
-            let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
+            let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
+            let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
             let variable = variables.get(&target_id)?;
             let msb = packed_index_offset(variable, msb)?;
             let lsb = packed_index_offset(variable, lsb)?;
@@ -2632,8 +2661,10 @@ fn lower_expr_with_context(
                 parameter_types,
                 arena,
             )?;
-            let msb_value = sv::typecheck::eval_const_expr(msb, constants)?;
-            let lsb_value = sv::typecheck::eval_const_expr(lsb, constants)?;
+            let msb_value =
+                sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
+            let lsb_value =
+                sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
             let (msb, lsb) = if let sv::ir::Expr::Ident(name) = &**expr {
                 let variable = name_to_id.get(name).and_then(|id| variables.get(id))?;
                 (
@@ -3265,7 +3296,7 @@ fn lower_ff_process(
     ExecutionUnit<RegionedVarAddr>,
     ExecutionUnit<RegionedVarAddr>,
 )> {
-    let targets = ff_targets(process, variables, name_to_id, constants)?;
+    let targets = ff_targets(process, variables, name_to_id, constants, parameter_types)?;
     let mut eval_builder = SIRBuilder::new();
     emit_ff_seeds(&mut eval_builder, &targets);
     emit_ff_assignment_stores(
@@ -3320,6 +3351,7 @@ fn ff_targets(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<Vec<VarAtomBase<VarId>>> {
     let mut targets = Vec::new();
     for assignment in process.assignments() {
@@ -3328,6 +3360,7 @@ fn ff_targets(
             variables,
             name_to_id,
             constants,
+            parameter_types,
         )?;
         if !targets.contains(&target) {
             targets.push(target);
@@ -3410,6 +3443,7 @@ fn emit_ff_assignment_stores(
                 variables,
                 name_to_id,
                 constants,
+                parameter_types,
             )?;
             if target.id != target_id {
                 continue;
@@ -3606,14 +3640,15 @@ fn lvalue_atom(
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
     constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<VarAtomBase<VarId>> {
     let id = *name_to_id.get(lvalue.name())?;
     let width = variables.get(&id)?.width;
     match lvalue {
         sv::ir::LValue::Ident(_) => Some(VarAtomBase::new(id, 0, width.checked_sub(1)?)),
         sv::ir::LValue::Select { msb, lsb, .. } => {
-            let msb = sv::typecheck::eval_const_expr(msb, constants)?;
-            let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
+            let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
+            let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
             let variable = variables.get(&id)?;
             let msb = packed_index_offset(variable, msb)?;
             let lsb = packed_index_offset(variable, lsb)?;
@@ -3896,8 +3931,8 @@ fn sv_expr_natural_width(
                 .unwrap_or(sv::typecheck::parse_integral_literal(literal)?.width),
         ),
         sv::ir::Expr::Select { msb, lsb, .. } => {
-            let msb = sv::typecheck::eval_const_expr(msb, constants)?;
-            let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
+            let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
+            let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
             usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)
         }
         sv::ir::Expr::Resize { width, .. } => Some(*width),
@@ -4086,8 +4121,8 @@ fn lower_expr_to_sir_with_context(
                 None,
                 None,
             )?;
-            let msb = sv::typecheck::eval_const_expr(msb, constants)?;
-            let lsb = sv::typecheck::eval_const_expr(lsb, constants)?;
+            let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
+            let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
             let (msb, lsb) = packed_expr_select_offsets(expr, msb, lsb, variables, name_to_id)?;
             let high = msb.max(lsb);
             let low = msb.min(lsb);

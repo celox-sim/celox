@@ -71,6 +71,15 @@ pub fn source_module_names(code: &str, path: &Path) -> Result<Vec<String>, Analy
     ast::Source::module_names_from_syntax(&syntax_tree)
 }
 
+/// Return whether implicit nets are enabled when each module is declared.
+#[doc(hidden)]
+pub fn source_module_implicit_net_permissions(
+    code: &str,
+    path: &Path,
+) -> Result<Vec<(String, bool)>, AnalyzerError> {
+    syntax::source_module_implicit_net_permissions(code, path)
+}
+
 /// Analyze only one module from a source file, applying its parameter
 /// overrides before generate elaboration.
 pub fn analyze_source_module_with_parameter_overrides(
@@ -161,6 +170,27 @@ mod tests {
         assert_eq!(
             ir.modules()[0].ports()[1].r#type().resolved_width(),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn tracks_default_nettype_state_for_each_module() {
+        let source = r#"
+            `default_nettype none
+            module First(); endmodule
+            `default_nettype wire
+            module Second(); endmodule
+            `default_nettype none
+            `resetall
+            module Third(); endmodule
+        "#;
+        assert_eq!(
+            source_module_implicit_net_permissions(source, Path::new("nettype.sv")).unwrap(),
+            vec![
+                ("First".to_string(), false),
+                ("Second".to_string(), true),
+                ("Third".to_string(), true),
+            ]
         );
     }
 

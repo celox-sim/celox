@@ -583,6 +583,9 @@ fn reject_silently_ignored_constructs(
             RefNode::InitialConstruct(_) => {
                 return Err(AnalyzerError::Unsupported("initial construct".to_string()));
             }
+            RefNode::FinalConstruct(_) => {
+                return Err(AnalyzerError::Unsupported("final construct".to_string()));
+            }
             RefNode::ConcurrentAssertionItem(_) => {
                 return Err(AnalyzerError::Unsupported(
                     "concurrent assertion".to_string(),
@@ -668,6 +671,13 @@ fn reject_silently_ignored_constructs(
                 ));
             }
             RefNode::FunctionDeclaration(function)
+                if function_has_static_local_state(function) =>
+            {
+                return Err(AnalyzerError::Unsupported(
+                    "static function-local state".to_string(),
+                ));
+            }
+            RefNode::FunctionDeclaration(function)
                 if RefNode::FunctionDeclaration(function)
                     .into_iter()
                     .any(|node| {
@@ -730,6 +740,16 @@ fn reject_silently_ignored_constructs(
             RefNode::DefparamAssignment(_) => {
                 return Err(AnalyzerError::Unsupported(
                     "defparam assignment".to_string(),
+                ));
+            }
+            RefNode::NetType(
+                sv_parser::NetType::Supply0(_)
+                | sv_parser::NetType::Supply1(_)
+                | sv_parser::NetType::Tri0(_)
+                | sv_parser::NetType::Tri1(_),
+            ) => {
+                return Err(AnalyzerError::Unsupported(
+                    "pull or supply net type".to_string(),
                 ));
             }
             RefNode::PackedDimensionRange(range)
@@ -1050,6 +1070,35 @@ fn non_input_function_port(node: RefNode<'_>) -> bool {
             !matches!(&**direction, sv_parser::PortDirection::Input(_))
         }
         Some(sv_parser::TfPortDirection::ConstRef(_)) => true,
+    }
+}
+
+fn function_has_static_local_state(function: &sv_parser::FunctionDeclaration) -> bool {
+    let function_is_static = !matches!(function.nodes.1, Some(sv_parser::Lifetime::Automatic(_)));
+    let local_is_static = |item: &sv_parser::BlockItemDeclaration| {
+        let sv_parser::BlockItemDeclaration::Data(item) = item else {
+            return false;
+        };
+        let sv_parser::DataDeclaration::Variable(variable) = &item.nodes.1 else {
+            return false;
+        };
+        match &variable.nodes.2 {
+            Some(sv_parser::Lifetime::Automatic(_)) => false,
+            Some(sv_parser::Lifetime::Static(_)) => true,
+            None => function_is_static,
+        }
+    };
+    match &function.nodes.2 {
+        sv_parser::FunctionBodyDeclaration::WithPort(body) => {
+            body.nodes.5.iter().any(local_is_static)
+        }
+        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => body.nodes.4.iter().any(|item| {
+            matches!(
+                item,
+                sv_parser::TfItemDeclaration::BlockItemDeclaration(item)
+                    if local_is_static(item)
+            )
+        }),
     }
 }
 
