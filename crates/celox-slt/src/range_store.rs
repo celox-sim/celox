@@ -145,7 +145,13 @@ impl<T: Clone + PartialEq + Eq> RangeStore<T> {
     pub fn get_parts(&self, access: BitAccess) -> Result<Vec<(T, BitAccess)>, RangeStoreError> {
         self.validate_access(access)?;
         let mut parts = Vec::new();
-        for (&range_lsb, (expr, range_width, origin)) in self.ranges.range(..=access.msb) {
+        let first_lsb = self
+            .ranges
+            .range(..=access.lsb)
+            .next_back()
+            .map(|(&lsb, _)| lsb)
+            .ok_or_else(|| RangeStoreError::new("range store does not cover access LSB"))?;
+        for (&range_lsb, (expr, range_width, origin)) in self.ranges.range(first_lsb..=access.msb) {
             if *range_width == 0 {
                 return Err(RangeStoreError::new(format!(
                     "range at bit {range_lsb} has zero width"
@@ -202,6 +208,22 @@ mod tests {
                 (0, BitAccess::new(1, 1)),
                 (1, BitAccess::new(0, 3)),
                 (0, BitAccess::new(6, 6)),
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_from_the_range_containing_the_access_lsb() {
+        let mut store = RangeStore::new(0u8, 64);
+        for bit in 0..64 {
+            store.update(BitAccess::new(bit, bit), bit as u8).unwrap();
+        }
+        assert_eq!(
+            store.get_parts(BitAccess::new(60, 62)).unwrap(),
+            vec![
+                (60, BitAccess::new(0, 0)),
+                (61, BitAccess::new(0, 0)),
+                (62, BitAccess::new(0, 0)),
             ]
         );
     }
