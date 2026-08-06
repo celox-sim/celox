@@ -583,6 +583,11 @@ fn reject_silently_ignored_constructs(
             RefNode::InitialConstruct(_) => {
                 return Err(AnalyzerError::Unsupported("initial construct".to_string()));
             }
+            RefNode::ConcurrentAssertionItem(_) => {
+                return Err(AnalyzerError::Unsupported(
+                    "concurrent assertion".to_string(),
+                ));
+            }
             RefNode::ConditionalGenerateConstruct(
                 sv_parser::ConditionalGenerateConstruct::Case(_),
             ) => {
@@ -797,33 +802,227 @@ fn inactive_conditional_generate_nodes<'a>(
     syntax_tree: &SyntaxTree,
     const_env: &HashMap<String, i128>,
 ) -> Vec<RefNode<'a>> {
-    let mut inactive = Vec::new();
-    for child in node {
-        let RefNode::ConditionalGenerateConstruct(sv_parser::ConditionalGenerateConstruct::If(
-            generate,
-        )) = child
-        else {
-            continue;
-        };
-        let Some(condition) = const_expr_from_ref_node(
-            RefNode::ConstantExpression(&generate.nodes.1.nodes.1),
+    let mut selections = Vec::new();
+    for item in module_non_port_items(node) {
+        generate_selections_from_non_port_item(item, syntax_tree, const_env, &mut selections);
+    }
+    selections
+        .into_iter()
+        .filter(|(_, selected)| !selected)
+        .flat_map(|(block, _)| RefNode::GenerateBlock(block))
+        .collect()
+}
+
+fn record_generate_block_selection<'a>(
+    selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
+    block: &'a sv_parser::GenerateBlock,
+    selected: bool,
+) {
+    if let Some((_, previously_selected)) = selections
+        .iter_mut()
+        .find(|(candidate, _)| *candidate == block)
+    {
+        *previously_selected |= selected;
+    } else {
+        selections.push((block, selected));
+    }
+}
+
+fn generate_selections_from_non_port_item<'a>(
+    item: &'a sv_parser::NonPortModuleItem,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
+) {
+    match item {
+        sv_parser::NonPortModuleItem::GenerateRegion(region) => {
+            for item in &region.nodes.1 {
+                generate_selections_from_generate_item(item, syntax_tree, const_env, selections);
+            }
+        }
+        sv_parser::NonPortModuleItem::ModuleOrGenerateItem(item) => {
+            generate_selections_from_module_or_generate_item(
+                item,
+                syntax_tree,
+                const_env,
+                selections,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn generate_selections_from_generate_item<'a>(
+    item: &'a sv_parser::GenerateItem,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
+) {
+    if let sv_parser::GenerateItem::ModuleOrGenerateItem(item) = item {
+        generate_selections_from_module_or_generate_item(item, syntax_tree, const_env, selections);
+    }
+}
+
+fn generate_selections_from_module_or_generate_item<'a>(
+    item: &'a sv_parser::ModuleOrGenerateItem,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
+) {
+    let sv_parser::ModuleOrGenerateItem::ModuleItem(item) = item else {
+        return;
+    };
+    match &item.nodes.1 {
+        sv_parser::ModuleCommonItem::ConditionalGenerateConstruct(generate) => {
+            generate_selections_from_conditional_generate(
+                generate,
+                syntax_tree,
+                const_env,
+                selections,
+            );
+        }
+        sv_parser::ModuleCommonItem::LoopGenerateConstruct(generate) => {
+            generate_selections_from_loop_generate(generate, syntax_tree, const_env, selections);
+        }
+        _ => {}
+    }
+}
+
+fn generate_selections_from_conditional_generate<'a>(
+    generate: &'a sv_parser::ConditionalGenerateConstruct,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
+) {
+    let sv_parser::ConditionalGenerateConstruct::If(generate) = generate else {
+        return;
+    };
+    let condition = const_expr_from_ref_node(
+        RefNode::ConstantExpression(&generate.nodes.1.nodes.1),
+        syntax_tree,
+    )
+    .and_then(|condition| eval_ast_const_expr(&condition, const_env));
+    let then_selected = condition.map(|condition| condition != 0).unwrap_or(true);
+    record_generate_block_selection(selections, &generate.nodes.2, then_selected);
+    if then_selected {
+        generate_selections_from_generate_block(
+            &generate.nodes.2,
             syntax_tree,
-        ) else {
-            continue;
-        };
-        let Some(condition) = eval_ast_const_expr(&condition, const_env) else {
-            continue;
-        };
-        let inactive_block = if condition != 0 {
-            generate.nodes.3.as_ref().map(|(_, block)| block)
-        } else {
-            Some(&generate.nodes.2)
-        };
-        if let Some(block) = inactive_block {
-            inactive.extend(RefNode::GenerateBlock(block));
+            const_env,
+            selections,
+        );
+    }
+    if let Some((_, block)) = &generate.nodes.3 {
+        let else_selected = condition.map(|condition| condition == 0).unwrap_or(true);
+        record_generate_block_selection(selections, block, else_selected);
+        if else_selected {
+            generate_selections_from_generate_block(block, syntax_tree, const_env, selections);
         }
     }
-    inactive
+}
+
+fn generate_selections_from_loop_generate<'a>(
+    generate: &'a sv_parser::LoopGenerateConstruct,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
+) {
+    let Some(name) = identifier_text(
+        RefNode::GenvarIdentifier(&generate.nodes.1.nodes.1.0.nodes.1),
+        syntax_tree,
+    ) else {
+        record_generate_block_selection(selections, &generate.nodes.2, true);
+        generate_selections_from_generate_block(
+            &generate.nodes.2,
+            syntax_tree,
+            const_env,
+            selections,
+        );
+        return;
+    };
+    let Some(init) = const_expr_from_ref_node(
+        RefNode::ConstantExpression(&generate.nodes.1.nodes.1.0.nodes.3),
+        syntax_tree,
+    )
+    .and_then(|init| eval_ast_const_expr(&init, const_env)) else {
+        record_generate_block_selection(selections, &generate.nodes.2, true);
+        generate_selections_from_generate_block(
+            &generate.nodes.2,
+            syntax_tree,
+            const_env,
+            selections,
+        );
+        return;
+    };
+    let Some(condition) = const_expr_from_ref_node(
+        RefNode::ConstantExpression(&generate.nodes.1.nodes.1.2.nodes.0),
+        syntax_tree,
+    ) else {
+        record_generate_block_selection(selections, &generate.nodes.2, true);
+        generate_selections_from_generate_block(
+            &generate.nodes.2,
+            syntax_tree,
+            const_env,
+            selections,
+        );
+        return;
+    };
+
+    let mut value = init;
+    let mut selected = false;
+    for _ in 0..10_000 {
+        let mut loop_env = const_env.clone();
+        loop_env.insert(name.clone(), value);
+        let Some(condition_value) = eval_ast_const_expr(&condition, &loop_env) else {
+            record_generate_block_selection(selections, &generate.nodes.2, true);
+            generate_selections_from_generate_block(
+                &generate.nodes.2,
+                syntax_tree,
+                &loop_env,
+                selections,
+            );
+            return;
+        };
+        if condition_value == 0 {
+            break;
+        }
+        selected = true;
+        generate_selections_from_generate_block(
+            &generate.nodes.2,
+            syntax_tree,
+            &loop_env,
+            selections,
+        );
+        let Some(next) =
+            next_genvar_value(value, &generate.nodes.1.nodes.1.4, syntax_tree, &loop_env)
+        else {
+            break;
+        };
+        value = next;
+    }
+    record_generate_block_selection(selections, &generate.nodes.2, selected);
+}
+
+fn generate_selections_from_generate_block<'a>(
+    block: &'a sv_parser::GenerateBlock,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    selections: &mut Vec<(&'a sv_parser::GenerateBlock, bool)>,
+) {
+    match block {
+        sv_parser::GenerateBlock::GenerateItem(item) => {
+            generate_selections_from_generate_item(item, syntax_tree, const_env, selections);
+        }
+        sv_parser::GenerateBlock::Multiple(block) => {
+            let mut block_env = const_env.clone();
+            for item in &block.nodes.3 {
+                if add_localparams_from_generate_item(item, syntax_tree, &mut block_env) {
+                    continue;
+                }
+                generate_selections_from_generate_item(item, syntax_tree, &block_env, selections);
+            }
+        }
+    }
 }
 
 fn blocking_assignment_has_non_plain_lvalue(assignment: &sv_parser::BlockingAssignment) -> bool {

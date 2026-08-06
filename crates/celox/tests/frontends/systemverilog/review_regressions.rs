@@ -2139,6 +2139,14 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
+            "concurrent assertion",
+            r#"
+            module Top(input logic clk, valid);
+                assert property (@(posedge clk) valid);
+            endmodule
+        "#,
+        ),
+        (
             "non-ANSI module port declarations",
             r#"
             module Top(y); output y; assign y = 1'b1; endmodule
@@ -3474,4 +3482,93 @@ fn rejects_user_constant_function_calls() {
     "#;
     let error = cranelift_build_error(source);
     assert!(error.contains("user constant function call"), "{error}");
+}
+
+#[test]
+fn tracks_scoped_constants_when_skipping_inactive_generate_branches() {
+    let source = r#"
+        module Top(output logic localparam_y, genvar_y);
+            if (1) begin : outer
+                localparam ENABLE = 0;
+                if (ENABLE) initial localparam_y = 1'b0;
+                else assign localparam_y = 1'b1;
+            end
+            for (genvar i = 0; i < 1; i++) begin : loop_block
+                if (i == 1) initial genvar_y = 1'b0;
+                else assign genvar_y = 1'b1;
+            end
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("scoped_generate_constants.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("localparam_y")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("genvar_y")), 1u8.into());
+}
+
+#[test]
+fn propagates_comparison_width_into_nested_operands() {
+    let source = r#"
+        module Child(input logic value, output logic y);
+            assign y = value;
+        endmodule
+        module Top(
+            input logic clk,
+            input logic [3:0] a, b,
+            input logic [7:0] c,
+            output logic comb_eq, ff_eq, glue_eq
+        );
+            assign comb_eq = (a + b) == c;
+            always_ff @(posedge clk) ff_eq <= ((a + b) == c);
+            Child child(.value((a + b) == c), .y(glue_eq));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("comparison_operand_width.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    let c = sim.signal("c");
+    sim.modify(|io| {
+        io.set(a, 15u8);
+        io.set(b, 1u8);
+        io.set(c, 16u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("comb_eq")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("glue_eq")), 1u8.into());
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(sim.signal("ff_eq")), 1u8.into());
+}
+
+#[test]
+fn evaluates_repeat_counts_with_typed_parameter_widths() {
+    let source = r#"
+        module Child(input logic [14:0] value, output logic [14:0] y);
+            assign y = value;
+        endmodule
+        module Top(
+            input logic clk,
+            output logic [14:0] comb, ff_value, glue
+        );
+            parameter logic [3:0] P = 0;
+            assign comb = {(~P){1'b1}};
+            always_ff @(posedge clk) ff_value <= {(~P){1'b1}};
+            Child child(.value({(~P){1'b1}}), .y(glue));
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("typed_repeat_count.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("comb")), 0x7fffu16.into());
+    assert_eq!(sim.get(sim.signal("glue")), 0x7fffu16.into());
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(sim.signal("ff_value")), 0x7fffu16.into());
 }

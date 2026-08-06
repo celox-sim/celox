@@ -1754,7 +1754,8 @@ fn lower_glue_parent_expr(
             ))
         }
         sv::ir::Expr::RepeatConcat { count, parts } => {
-            let count = sv::typecheck::eval_const_expr(count, constants)?;
+            let count =
+                sv::typecheck::eval_const_expr_with_types(count, constants, parameter_types)?;
             let count = usize::try_from(count).ok()?;
             let mut nodes = Vec::new();
             let mut sources = HashSet::default();
@@ -1920,10 +1921,30 @@ fn lower_glue_parent_expr(
                         .unwrap_or(context_width),
                 )
             });
-            let left_context = context_determined.then_some(operation_context).flatten();
-            let right_context = (context_determined && !shift)
-                .then_some(operation_context)
+            let comparison_context = comparison
+                .then(|| {
+                    sv_comparison_operand_width(
+                        left,
+                        right,
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
+                    )
+                })
                 .flatten();
+            let left_context = if comparison {
+                comparison_context
+            } else {
+                context_determined.then_some(operation_context).flatten()
+            };
+            let right_context = if comparison {
+                comparison_context
+            } else {
+                (context_determined && !shift)
+                    .then_some(operation_context)
+                    .flatten()
+            };
             let operand_context_signed = Some(operands_signed);
             let context_sized_comparison = comparison;
             let left_fill = (context_sized_comparison || shift)
@@ -2660,7 +2681,8 @@ fn lower_expr_with_context(
             Some((arena.alloc(SLTNode::Concat(nodes)).ok()?, sources))
         }
         sv::ir::Expr::RepeatConcat { count, parts } => {
-            let count = sv::typecheck::eval_const_expr(count, constants)?;
+            let count =
+                sv::typecheck::eval_const_expr_with_types(count, constants, parameter_types)?;
             let count = usize::try_from(count).ok()?;
             let mut repeated = Vec::new();
             let mut sources = HashSet::default();
@@ -2800,10 +2822,30 @@ fn lower_expr_with_context(
                         .unwrap_or(context_width),
                 )
             });
-            let left_context = context_determined.then_some(operation_context).flatten();
-            let right_context = (context_determined && !shift)
-                .then_some(operation_context)
+            let comparison_context = comparison
+                .then(|| {
+                    sv_comparison_operand_width(
+                        left,
+                        right,
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
+                    )
+                })
                 .flatten();
+            let left_context = if comparison {
+                comparison_context
+            } else {
+                context_determined.then_some(operation_context).flatten()
+            };
+            let right_context = if comparison {
+                comparison_context
+            } else {
+                (context_determined && !shift)
+                    .then_some(operation_context)
+                    .flatten()
+            };
             let left_fill = (comparison || shift)
                 .then(|| expr_unbased_fill_literal(left))
                 .flatten();
@@ -3913,7 +3955,12 @@ fn sv_expr_natural_width(
             )?)
         }),
         sv::ir::Expr::RepeatConcat { count, parts } => {
-            let count = usize::try_from(sv::typecheck::eval_const_expr(count, constants)?).ok()?;
+            let count = usize::try_from(sv::typecheck::eval_const_expr_with_types(
+                count,
+                constants,
+                parameter_types,
+            )?)
+            .ok()?;
             let parts_width = parts.iter().try_fold(0usize, |width, part| {
                 width.checked_add(sv_expr_natural_width(
                     part,
@@ -3941,6 +3988,21 @@ fn sv_expr_natural_width(
         ),
         sv::ir::Expr::Call { .. } => None,
     }
+}
+
+fn sv_comparison_operand_width(
+    left: &sv::ir::Expr,
+    right: &sv::ir::Expr,
+    variables: &HashMap<VarId, SvVariable>,
+    name_to_id: &HashMap<String, VarId>,
+    constants: &std::collections::HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+) -> Option<usize> {
+    Some(
+        sv_expr_natural_width(left, variables, name_to_id, constants, parameter_types)?.max(
+            sv_expr_natural_width(right, variables, name_to_id, constants, parameter_types)?,
+        ),
+    )
 }
 
 fn lower_expr_to_sir_with_context(
@@ -4132,10 +4194,30 @@ fn lower_expr_to_sir_with_context(
                         .unwrap_or(context_width),
                 )
             });
-            let left_context = context_determined.then_some(operation_context).flatten();
-            let right_context = (context_determined && !shift)
-                .then_some(operation_context)
+            let comparison_context = comparison
+                .then(|| {
+                    sv_comparison_operand_width(
+                        left,
+                        right,
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
+                    )
+                })
                 .flatten();
+            let left_context = if comparison {
+                comparison_context
+            } else {
+                context_determined.then_some(operation_context).flatten()
+            };
+            let right_context = if comparison {
+                comparison_context
+            } else {
+                (context_determined && !shift)
+                    .then_some(operation_context)
+                    .flatten()
+            };
             let right_fill = match &**right {
                 sv::ir::Expr::Literal(literal) => unbased_fill_literal(literal),
                 _ => None,
@@ -4263,7 +4345,8 @@ fn lower_expr_to_sir_with_context(
             Some(reg)
         }
         sv::ir::Expr::RepeatConcat { count, parts } => {
-            let count = sv::typecheck::eval_const_expr(count, constants)?;
+            let count =
+                sv::typecheck::eval_const_expr_with_types(count, constants, parameter_types)?;
             let count = usize::try_from(count).ok()?;
             let mut regs = Vec::new();
             for _ in 0..count {
