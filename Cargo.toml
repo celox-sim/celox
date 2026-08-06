@@ -54,7 +54,7 @@ fxhash          = "0.2.1"
 itertools       = "0.15.0"
 libc            = "0.2"
 miette          = { version = "7.6" }
-num-bigint      = "0.5"
+num-bigint      = { version = "0.5", features = ["serde"] }
 num-traits      = "0.2.19"
 rand            = { version = "0.10", default-features = false }
 rand_pcg        = "0.10"

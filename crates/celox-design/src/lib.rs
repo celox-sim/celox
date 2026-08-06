@@ -53,14 +53,14 @@ pub struct TriggerSet<A> {
     pub resets: Vec<A>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum RuntimeEventKind {
     Display,
     AssertContinue,
     AssertFatal,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuntimeEventSite {
     pub kind: RuntimeEventKind,
     pub template: Option<String>,
@@ -74,7 +74,7 @@ pub struct RuntimeEventSite {
 /// Expression trees used to emit the event have already been lowered into
 /// SIR.  The runtime only retains the persistent-state ranges needed to detect
 /// whether the corresponding combinational process must be observed again.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuntimeCombObserver<A> {
     pub site_id: u32,
     pub activation_group: u32,
@@ -82,7 +82,7 @@ pub struct RuntimeCombObserver<A> {
     pub written_inputs: Vec<A>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitialStateWriteRun {
     pub bit_offset: usize,
     pub bit_width: usize,
@@ -90,7 +90,7 @@ pub struct InitialStateWriteRun {
     pub mask_bytes: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InitialStateData {
     Packed {
         value: BigUint,
@@ -100,13 +100,13 @@ pub enum InitialStateData {
     Writes(Vec<InitialStateWriteRun>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InitialStateValue<A> {
     pub address: A,
     pub data: InitialStateData,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeErrorInfo<A> {
     pub message: String,
     pub signals: Vec<A>,

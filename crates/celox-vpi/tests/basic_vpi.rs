@@ -1,7 +1,7 @@
 use std::{
     ffi::CStr,
     ptr,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicI32, AtomicUsize, Ordering},
 };
 
 use celox::{NativeProgramInstance, Simulator};
@@ -23,6 +23,39 @@ const DESIGN: &str = r#"
             i: a,
             o: y,
         );
+    }
+"#;
+
+const TWO_CLOCKS: &str = r#"
+    module Top (
+        clk_a: input  'a clock,
+        clk_b: input  'b clock,
+        rst_a: input  'a reset,
+        rst_b: input  'b reset,
+        qa:    output 'a logic<8>,
+        qb:    output 'b logic<8>,
+    ) {
+        var ra: 'a logic<8>;
+        var rb: 'b logic<8>;
+
+        unsafe (cdc) {
+            always_ff (clk_a, rst_a) {
+                if_reset {
+                    ra = 0;
+                } else {
+                    ra = rb + 1;
+                }
+            }
+            always_ff (clk_b, rst_b) {
+                if_reset {
+                    rb = 0;
+                } else {
+                    rb = ra + 1;
+                }
+            }
+        }
+        assign qa = ra;
+        assign qb = rb;
     }
 "#;
 
@@ -167,6 +200,235 @@ fn vpi_discovers_hierarchy_and_reads_and_writes_values() {
         assert_eq!(vpi_free_object(parent), 1);
         assert_eq!(vpi_free_object(child), 1);
         assert_eq!(vpi_free_object(top), 1);
+    }
+    clear_runtime();
+}
+
+#[test]
+fn string_separators_delay_flags_and_force_release_follow_vpi_semantics() {
+    let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+
+    unsafe {
+        let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        let y = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+        let separated = VpiValue {
+            format: VPI_BIN_STR_VAL,
+            value: VpiValueData {
+                str_: c"0010_1001".as_ptr().cast_mut(),
+            },
+        };
+        assert_eq!(vpi_put_value(a, &separated, ptr::null(), VPI_NO_DELAY), a);
+
+        let mut read = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        vpi_get_value(y, &mut read);
+        assert_eq!(read.value.integer, 42);
+
+        let rejected = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 10 },
+        };
+        let delayed = VpiTime {
+            type_: 2,
+            high: 0,
+            low: 1,
+            real: 0.0,
+        };
+        assert!(
+            vpi_put_value(
+                a,
+                &rejected,
+                (&raw const delayed).cast(),
+                VPI_INERTIAL_DELAY,
+            )
+            .is_null()
+        );
+        vpi_get_value(y, &mut read);
+        assert_eq!(read.value.integer, 42);
+
+        assert_eq!(
+            vpi_put_value(a, &rejected, ptr::null(), VPI_INERTIAL_DELAY),
+            a
+        );
+        vpi_get_value(y, &mut read);
+        assert_eq!(read.value.integer, 11);
+
+        let forced = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 99 },
+        };
+        assert_eq!(vpi_put_value(y, &forced, ptr::null(), VPI_FORCE_FLAG), y);
+        vpi_get_value(y, &mut read);
+        assert_eq!(read.value.integer, 99);
+
+        assert_eq!(vpi_put_value(a, &rejected, ptr::null(), VPI_NO_DELAY), a);
+        vpi_get_value(y, &mut read);
+        assert_eq!(
+            read.value.integer, 99,
+            "design writes must not override force"
+        );
+
+        assert_eq!(
+            vpi_put_value(y, ptr::null(), ptr::null(), VPI_RELEASE_FLAG),
+            y
+        );
+        vpi_get_value(y, &mut read);
+        assert_eq!(
+            read.value.integer, 11,
+            "release must restore driver control"
+        );
+        assert_eq!(vpi_free_object(a), 1);
+        assert_eq!(vpi_free_object(y), 1);
+    }
+    clear_runtime();
+}
+
+static CALLBACK_VALUE: AtomicI32 = AtomicI32::new(-1);
+
+unsafe extern "C" fn record_changed_value(data: *mut VpiCbData) -> i32 {
+    // Safety: callback storage and its requested value are live while firing.
+    let value = unsafe { (*(*data).value).value.integer };
+    CALLBACK_VALUE.store(value, Ordering::SeqCst);
+    0
+}
+
+#[test]
+fn value_change_callback_receives_the_requested_current_value() {
+    let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+    CALLBACK_VALUE.store(-1, Ordering::SeqCst);
+
+    unsafe {
+        let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        let y = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+        let mut callback_value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: -1 },
+        };
+        let callback = VpiCbData {
+            reason: CB_VALUE_CHANGE,
+            cb_rtn: Some(record_changed_value),
+            obj: y,
+            time: ptr::null_mut(),
+            value: &mut callback_value,
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        let callback_handle = vpi_register_cb(&callback);
+        assert!(!callback_handle.is_null());
+
+        let input = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 41 },
+        };
+        assert_eq!(vpi_put_value(a, &input, ptr::null(), VPI_NO_DELAY), a);
+        assert!(!run_callbacks());
+        assert_eq!(CALLBACK_VALUE.load(Ordering::SeqCst), 42);
+
+        assert_eq!(vpi_remove_cb(callback_handle), 1);
+        assert_eq!(vpi_free_object(a), 1);
+        assert_eq!(vpi_free_object(y), 1);
+    }
+    clear_runtime();
+}
+
+unsafe extern "C" fn drive_callback_object_high(data: *mut VpiCbData) -> i32 {
+    let high = VpiValue {
+        format: VPI_SCALAR_VAL,
+        value: VpiValueData { scalar: VPI_1 },
+    };
+    // Safety: the callback object is the live clock handle registered below.
+    unsafe {
+        assert_eq!(
+            vpi_put_value((*data).obj, &high, ptr::null(), VPI_NO_DELAY),
+            (*data).obj
+        );
+    }
+    0
+}
+
+unsafe fn put_int(handle: VpiHandle, integer: i32) {
+    let value = VpiValue {
+        format: VPI_INT_VAL,
+        value: VpiValueData { integer },
+    };
+    // Safety: forwarded from the caller's live handle.
+    assert_eq!(
+        unsafe { vpi_put_value(handle, &value, ptr::null(), VPI_NO_DELAY) },
+        handle
+    );
+}
+
+#[test]
+fn same_time_clock_callbacks_commit_domains_simultaneously() {
+    let simulator = Simulator::builder(TWO_CLOCKS, "Top").build().unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+
+    unsafe {
+        let clk_a = vpi_handle_by_name(c"Top.clk_a".as_ptr(), ptr::null_mut());
+        let clk_b = vpi_handle_by_name(c"Top.clk_b".as_ptr(), ptr::null_mut());
+        let rst_a = vpi_handle_by_name(c"Top.rst_a".as_ptr(), ptr::null_mut());
+        let rst_b = vpi_handle_by_name(c"Top.rst_b".as_ptr(), ptr::null_mut());
+        let qa = vpi_handle_by_name(c"Top.qa".as_ptr(), ptr::null_mut());
+        let qb = vpi_handle_by_name(c"Top.qb".as_ptr(), ptr::null_mut());
+
+        put_int(clk_a, 0);
+        put_int(clk_b, 0);
+        put_int(rst_a, 0);
+        put_int(rst_b, 0);
+        put_int(clk_a, 1);
+        put_int(clk_a, 0);
+        put_int(clk_b, 1);
+        put_int(clk_b, 0);
+        put_int(rst_a, 1);
+        put_int(rst_b, 1);
+
+        let mut time_a = VpiTime {
+            type_: 2,
+            high: 0,
+            low: 5,
+            real: 0.0,
+        };
+        let mut time_b = time_a;
+        let callback_a = VpiCbData {
+            reason: CB_AFTER_DELAY,
+            cb_rtn: Some(drive_callback_object_high),
+            obj: clk_a,
+            time: &mut time_a,
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        let callback_b = VpiCbData {
+            obj: clk_b,
+            time: &mut time_b,
+            ..callback_a
+        };
+        assert!(!vpi_register_cb(&callback_a).is_null());
+        assert!(!vpi_register_cb(&callback_b).is_null());
+        assert!(!run_callbacks());
+
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        vpi_get_value(qa, &mut value);
+        assert_eq!(value.value.integer, 1);
+        vpi_get_value(qb, &mut value);
+        assert_eq!(value.value.integer, 1);
+
+        for handle in [clk_a, clk_b, rst_a, rst_b, qa, qb] {
+            assert_eq!(vpi_free_object(handle), 1);
+        }
     }
     clear_runtime();
 }

@@ -1,11 +1,17 @@
 //! Runtime-only loading and instantiation of compiler-produced native images.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
+use celox_design::StateAddr;
+use celox_runtime::backend::EventHandle;
 use celox_runtime::{DesignReflection, ReflectionSignal, SignalRef};
+use num_bigint::BigUint;
 
-use crate::{NativeBackend, SharedNativeCode, SimBackend, SimulatorError};
+use crate::{
+    NativeBackend, RuntimeEvent, RuntimeFormatContext, SharedNativeCode, SimBackend, SimulatorError,
+};
 
+use super::backend::NativeRuntimeSchema;
 use super::{NativeImageContainerError, NativeProgramImage};
 
 /// Failure while discovering or attaching a compiler-produced native image.
@@ -17,6 +23,8 @@ pub enum NativeProgramLoadError {
     MissingImage,
     #[error("failed to attach native machine code: {0}")]
     Attach(#[source] SimulatorError),
+    #[error("failed to initialize native program state: {0}")]
+    Initialize(#[source] celox_runtime::SimulatorErrorCode),
 }
 
 /// One independently mutable instance of a precompiled native program.
@@ -26,6 +34,9 @@ pub enum NativeProgramLoadError {
 pub struct NativeProgramInstance {
     shared: Arc<SharedNativeCode>,
     backend: NativeBackend,
+    runtime_event_read_seq: u64,
+    comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
+    comb_observer_initial_eval: bool,
 }
 
 impl NativeProgramInstance {
@@ -34,7 +45,18 @@ impl NativeProgramInstance {
         let shared =
             Arc::new(SharedNativeCode::from_image(image).map_err(NativeProgramLoadError::Attach)?);
         let backend = NativeBackend::from_shared(Arc::clone(&shared));
-        Ok(Self { shared, backend })
+        let mut instance = Self {
+            shared,
+            backend,
+            runtime_event_read_seq: 0,
+            comb_observer_snapshots: Vec::new(),
+            comb_observer_initial_eval: true,
+        };
+        instance.comb_observer_snapshots = instance.snapshot_all_comb_observers();
+        instance
+            .eval_comb_checked()
+            .map_err(NativeProgramLoadError::Initialize)?;
+        Ok(instance)
     }
 
     /// Discover a program image appended to arbitrary runtime bytes.
@@ -70,7 +92,84 @@ impl NativeProgramInstance {
 
     /// Execute combinational logic after one or more foreign writes.
     pub fn eval_comb(&mut self) -> Result<(), celox_runtime::SimulatorErrorCode> {
-        self.backend.eval_comb()
+        self.eval_comb_checked()
+    }
+
+    /// Settle foreign writes and commit all active source domains together.
+    ///
+    /// Callers apply the raw signal values first and pass the addresses whose
+    /// configured edge became active. Multiple domains use split eval/apply
+    /// entries so no domain can observe another domain's same-time commit.
+    pub fn settle_active_edges(
+        &mut self,
+        active_edges: &[StateAddr],
+    ) -> Result<(), celox_runtime::SimulatorErrorCode> {
+        self.eval_comb_checked()?;
+        let mut seen = HashSet::new();
+        let mut events = Vec::new();
+        for address in active_edges {
+            let canonical = self
+                .shared
+                .program_image()
+                .event_topology()
+                .canonical(*address);
+            let Some(event) = self.backend.resolve_event_opt(&canonical) else {
+                continue;
+            };
+            if seen.insert(event.id()) {
+                events.push(event);
+            }
+        }
+
+        if events.len() == 1 {
+            self.backend
+                .eval_apply_ff_at(events[0])
+                .map_err(|error| self.decorate_runtime_error(error))?;
+        } else if !events.is_empty() {
+            let split = events
+                .iter()
+                .map(|event| {
+                    Some((
+                        self.backend.resolve_eval_only_event(&event.addr())?,
+                        self.backend.resolve_apply_event(&event.addr())?,
+                    ))
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(split) = split {
+                for (evaluate, _) in &split {
+                    self.backend
+                        .eval_only_ff_at(*evaluate)
+                        .map_err(|error| self.decorate_runtime_error(error))?;
+                }
+                for (_, apply) in &split {
+                    self.backend
+                        .apply_ff_at(*apply)
+                        .map_err(|error| self.decorate_runtime_error(error))?;
+                }
+            } else {
+                for event in events {
+                    self.backend
+                        .eval_apply_ff_at(event)
+                        .map_err(|error| self.decorate_runtime_error(error))?;
+                }
+            }
+        }
+        self.eval_comb_checked()
+    }
+
+    /// Drain source-independent `$display` and assertion records emitted by
+    /// generated code since the preceding call.
+    pub fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
+        crate::simulator::collect_runtime_events_for_backend(
+            &self.backend,
+            &self
+                .shared
+                .program_image()
+                .runtime_schema()
+                .runtime_event_sites,
+            &mut self.runtime_event_read_seq,
+            RuntimeFormatContext::default(),
+        )
     }
 
     /// Direct access used by foreign-interface adapters for value and event
@@ -82,4 +181,154 @@ impl NativeProgramInstance {
     pub fn backend_mut(&mut self) -> &mut NativeBackend {
         &mut self.backend
     }
+
+    fn runtime_schema(&self) -> &NativeRuntimeSchema {
+        self.shared.program_image().runtime_schema()
+    }
+
+    fn decorate_runtime_error(
+        &self,
+        error: celox_runtime::SimulatorErrorCode,
+    ) -> celox_runtime::SimulatorErrorCode {
+        let celox_runtime::SimulatorErrorCode::DetectedTrueLoopCode(code) = error else {
+            return error;
+        };
+        let Some(info) = self.runtime_schema().runtime_errors.get(&code) else {
+            return celox_runtime::SimulatorErrorCode::DetectedTrueLoop;
+        };
+        let signals = info
+            .signals
+            .iter()
+            .filter_map(|address| {
+                self.reflection()
+                    .signals()
+                    .iter()
+                    .find(|signal| signal.state_address == *address)
+                    .map(|signal| signal.full_name.clone())
+            })
+            .collect::<Vec<_>>();
+        if info.message == "Detected True Loop" {
+            celox_runtime::SimulatorErrorCode::DetectedTrueLoopAt { signals }
+        } else {
+            celox_runtime::SimulatorErrorCode::Runtime {
+                message: info.message.clone(),
+                signals,
+            }
+        }
+    }
+
+    fn eval_comb_checked(&mut self) -> Result<(), celox_runtime::SimulatorErrorCode> {
+        if self.runtime_schema().runtime_event_sites.is_empty() {
+            return self
+                .backend
+                .eval_comb()
+                .map_err(|error| self.decorate_runtime_error(error));
+        }
+
+        let start_seq = crate::simulator::runtime_event_write_seq_for_backend(&self.backend);
+        if self.runtime_schema().comb_observers.is_empty() {
+            let result = self
+                .backend
+                .eval_comb()
+                .map_err(|error| self.decorate_runtime_error(error));
+            self.check_fatal_events_since(start_seq)?;
+            return result;
+        }
+
+        let before = self.snapshot_all_comb_observers();
+        let active_before = before
+            .iter()
+            .zip(&self.comb_observer_snapshots)
+            .map(|(current, previous)| current != previous)
+            .collect::<Vec<_>>();
+        let mut active_sites = vec![false; self.runtime_schema().runtime_event_sites.len()];
+        for (observer, active) in self
+            .runtime_schema()
+            .comb_observers
+            .iter()
+            .zip(active_before)
+        {
+            if active || self.comb_observer_initial_eval {
+                for group_observer in &self.runtime_schema().comb_observers {
+                    if group_observer.activation_group == observer.activation_group {
+                        active_sites[group_observer.site_id as usize] = true;
+                    }
+                }
+            }
+        }
+        self.backend.set_comb_capture_event_enabled(&active_sites);
+        let result = self
+            .backend
+            .eval_comb()
+            .map_err(|error| self.decorate_runtime_error(error));
+        let after = self.snapshot_all_comb_observers();
+        self.backend.set_comb_capture_event_enabled(&vec![
+            false;
+            self.runtime_schema()
+                .runtime_event_sites
+                .len()
+        ]);
+        self.comb_observer_snapshots = after;
+        self.comb_observer_initial_eval = false;
+        self.check_fatal_events_since(start_seq)?;
+        result
+    }
+
+    fn check_fatal_events_since(
+        &self,
+        start_seq: u64,
+    ) -> Result<(), celox_runtime::SimulatorErrorCode> {
+        let mut read_seq = start_seq;
+        let events = crate::simulator::collect_runtime_events_for_backend(
+            &self.backend,
+            &self.runtime_schema().runtime_event_sites,
+            &mut read_seq,
+            RuntimeFormatContext::default(),
+        );
+        if let Some(message) = events.into_iter().find_map(|event| match event {
+            RuntimeEvent::AssertFatal { message } => Some(message),
+            RuntimeEvent::Display { .. }
+            | RuntimeEvent::AssertContinue { .. }
+            | RuntimeEvent::Missed { .. } => None,
+        }) {
+            return Err(celox_runtime::SimulatorErrorCode::Runtime {
+                message,
+                signals: Vec::new(),
+            });
+        }
+        Ok(())
+    }
+
+    fn snapshot_all_comb_observers(&self) -> Vec<Vec<(BigUint, BigUint)>> {
+        self.runtime_schema()
+            .comb_observers
+            .iter()
+            .map(|observer| {
+                observer
+                    .sensitivity
+                    .iter()
+                    .map(|atom| {
+                        let signal = self.backend.resolve_signal(&atom.id);
+                        let (value, mask) = if signal.is_4state {
+                            self.backend.get_four_state(signal)
+                        } else {
+                            (self.backend.get(signal), BigUint::default())
+                        };
+                        (
+                            slice_biguint(&value, atom.access.lsb, atom.access.msb),
+                            slice_biguint(&mask, atom.access.lsb, atom.access.msb),
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+}
+
+fn slice_biguint(value: &BigUint, least: usize, most: usize) -> BigUint {
+    if most < least {
+        return BigUint::default();
+    }
+    let width = most - least + 1;
+    (value >> least) & ((BigUint::from(1u8) << width) - BigUint::from(1u8))
 }

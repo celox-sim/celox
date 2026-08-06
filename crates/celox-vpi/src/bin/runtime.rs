@@ -36,7 +36,7 @@ fn run() -> Result<(), String> {
     // Safety: the symbol type and lifetime are established above.
     unsafe { bootstrap() };
 
-    if !celox_vpi::run_callbacks() {
+    if !celox_vpi::run_callbacks_result()? {
         return Err("simulation stopped with no scheduled cocotb activity".to_string());
     }
     celox_vpi::clear_runtime();

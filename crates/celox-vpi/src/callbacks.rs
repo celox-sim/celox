@@ -7,7 +7,7 @@ use std::{
 
 use super::{
     HandleKind, ObjectRef, VpiHandle, VpiValue, handle_mut, new_callback_handle, object_ref,
-    value_bits,
+    value_bits, vpi_get_value,
 };
 
 pub const CB_VALUE_CHANGE: i32 = 1;
@@ -79,6 +79,8 @@ struct CallbackState {
     firing: HashMap<u64, bool>,
     time: u64,
     finish: bool,
+    running: bool,
+    error: Option<String>,
 }
 
 struct VlogStorage {
@@ -92,7 +94,7 @@ thread_local! {
 }
 
 pub(super) fn reset() {
-    let old = STATE.with_borrow_mut(|state| std::mem::take(state));
+    let old = STATE.with_borrow_mut(std::mem::take);
     for registration in old.callbacks.into_values() {
         // Safety: reset owns every queued callback handle. It is only called
         // outside callback execution while replacing the runtime instance.
@@ -181,6 +183,12 @@ fn fire(id: u64) -> bool {
         }
     }
 
+    if registration.data.reason == CB_VALUE_CHANGE && !registration.data.value.is_null() {
+        // Safety: callback registration keeps both pointers live until the
+        // callback is removed, and vpi_get_value writes the requested format.
+        unsafe { vpi_get_value(registration.data.obj, registration.data.value) };
+    }
+
     if let Some(callback) = registration.data.cb_rtn {
         // Safety: the function and callback storage were supplied by the VPI
         // module and remain live until it removes or fires the registration.
@@ -212,6 +220,7 @@ fn fire_all(reason: i32) -> bool {
 }
 
 pub(super) fn run() -> bool {
+    STATE.with_borrow_mut(|state| state.running = true);
     fire_all(CB_START_OF_SIMULATION);
     let mut iterations = 0usize;
     loop {
@@ -224,7 +233,9 @@ pub(super) fn run() -> bool {
         for id in due_ids() {
             progressed |= fire(id);
         }
+        super::flush_pending_writes();
         progressed |= fire_all(CB_READ_WRITE_SYNCH);
+        super::flush_pending_writes();
         for id in changed_value_ids() {
             progressed |= fire(id);
         }
@@ -252,7 +263,27 @@ pub(super) fn run() -> bool {
     }
     let finished = STATE.with_borrow(|state| state.finish);
     fire_all(CB_END_OF_SIMULATION);
+    STATE.with_borrow_mut(|state| state.running = false);
     finished
+}
+
+pub(super) fn is_running() -> bool {
+    STATE.with_borrow(|state| state.running)
+}
+
+pub(super) fn fail(message: String) {
+    STATE.with_borrow_mut(|state| {
+        state.error.get_or_insert(message);
+        state.finish = true;
+    });
+}
+
+pub(super) fn has_error() -> bool {
+    STATE.with_borrow(|state| state.error.is_some())
+}
+
+pub(super) fn take_error() -> Option<String> {
+    STATE.with_borrow_mut(|state| state.error.take())
 }
 
 pub(super) fn remove(id: u64, handle: VpiHandle) -> i32 {

@@ -468,6 +468,48 @@ mod host {
         )
     }
 
+    pub(crate) fn runtime_event_write_seq_for_backend<B: SimBackend>(backend: &B) -> u64 {
+        if let Some(buffer) = backend.runtime_event_buffer() {
+            buffer.load_atomic_u64(0, std::sync::atomic::Ordering::Acquire)
+        } else {
+            let (pointer, size) = backend.runtime_event_buffer_as_ptr();
+            if size < std::mem::size_of::<u64>() {
+                return 0;
+            }
+            // Safety: the backend contract exposes `size` readable bytes.
+            unsafe { std::ptr::read_volatile(pointer.cast::<u64>()) }
+        }
+    }
+
+    pub(crate) fn collect_runtime_events_for_backend<B: SimBackend>(
+        backend: &B,
+        sites: &[RuntimeEventSite],
+        read_seq: &mut u64,
+        context: RuntimeFormatContext<'_>,
+    ) -> Vec<RuntimeEvent> {
+        let layout = backend.layout();
+        let raw = if let Some(buffer) = backend.runtime_event_buffer() {
+            collect_runtime_events(
+                layout,
+                sites,
+                read_seq,
+                buffer.byte_size(),
+                |offset| buffer.read_u64(offset),
+                |offset| buffer.load_atomic_u64(offset, std::sync::atomic::Ordering::Acquire),
+            )
+        } else {
+            let (pointer, size) = backend.runtime_event_buffer_as_ptr();
+            let read_u64 = |offset: usize| -> u64 {
+                // Safety: `collect_runtime_events` bounds every access by `size`.
+                unsafe { std::ptr::read_volatile(pointer.add(offset).cast::<u64>()) }
+            };
+            collect_runtime_events(layout, sites, read_seq, size, read_u64, read_u64)
+        };
+        raw.into_iter()
+            .filter_map(|event| render_raw_runtime_event(event, sites, context))
+            .collect()
+    }
+
     // ── Generic methods available for any backend ────────────────────────
     impl<B: SimBackend> Simulator<B> {
         fn decorate_runtime_error(&self, err: RuntimeErrorCode) -> RuntimeErrorCode {

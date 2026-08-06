@@ -8,7 +8,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use bit_set::BitSet;
+use celox_design::{
+    InitialStateData, InitialStateValue, InitialStateWriteRun, RuntimeCombObserver,
+    RuntimeErrorInfo, RuntimeEventSite,
+};
 use celox_runtime::DesignReflection;
+use celox_runtime::backend::SimBackend;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 
@@ -233,6 +238,24 @@ struct NativeRuntimeOptions {
     perf_map: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct NativeRuntimeSchema {
+    pub(crate) runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
+    pub(crate) runtime_event_sites: Vec<RuntimeEventSite>,
+    pub(crate) comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct NativeEventTopology {
+    aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
+}
+
+impl NativeEventTopology {
+    pub(crate) fn canonical(&self, address: AbsoluteAddr) -> AbsoluteAddr {
+        self.aliases.get(&address).copied().unwrap_or(address)
+    }
+}
+
 /// Pointer-free native compiler artifact which can be attached to the
 /// precompiled Celox runtime.
 #[derive(Clone, Serialize, Deserialize)]
@@ -247,6 +270,9 @@ pub struct NativeProgramImage {
     id_to_addr: Vec<AbsoluteAddr>,
     id_to_event: Vec<NativeEventImageRef>,
     reflection: DesignReflection,
+    initial_state: Vec<InitialStateValue<AbsoluteAddr>>,
+    runtime_schema: NativeRuntimeSchema,
+    event_topology: NativeEventTopology,
     layout: MemoryLayout,
     native_memory_size: usize,
     options: NativeRuntimeOptions,
@@ -272,6 +298,16 @@ impl NativeProgramImage {
     /// Source-independent instance hierarchy and signal metadata.
     pub fn reflection(&self) -> &DesignReflection {
         &self.reflection
+    }
+
+    /// Source-independent runtime diagnostics and combinational observers.
+    pub(crate) fn runtime_schema(&self) -> &NativeRuntimeSchema {
+        &self.runtime_schema
+    }
+
+    /// Canonical event-domain topology used by the runtime scheduler.
+    pub(crate) fn event_topology(&self) -> &NativeEventTopology {
+        &self.event_topology
     }
 
     pub(super) fn validate(&self) -> Result<(), String> {
@@ -1171,6 +1207,15 @@ fn compile_program(
             id_to_addr,
             id_to_event,
             reflection: sir.runtime().build_design_reflection(layout),
+            initial_state: sir.runtime().design.initial_state.clone(),
+            runtime_schema: NativeRuntimeSchema {
+                runtime_errors: sir.runtime().runtime_schema.runtime_errors.clone(),
+                runtime_event_sites: sir.runtime().runtime_schema.runtime_event_sites.clone(),
+                comb_observers: sir.runtime().runtime_schema.comb_observers.clone(),
+            },
+            event_topology: NativeEventTopology {
+                aliases: sir.runtime().design.events.aliases.clone(),
+            },
             layout: layout.clone(),
             native_memory_size,
             options: NativeRuntimeOptions {
@@ -1194,6 +1239,77 @@ pub struct NativeBackend {
     runtime_event_buffer: Arc<RuntimeEventBuffer>,
     comb_capture_enabled: Vec<u8>,
     execution_timing: Option<NativeExecutionTiming>,
+}
+
+fn write_bits_to_memory_from(
+    memory: &mut [u8],
+    destination_bit_offset: usize,
+    bit_width: usize,
+    source: &[u8],
+    source_bit_offset: usize,
+) {
+    for bit in 0..bit_width {
+        let source_bit = source_bit_offset + bit;
+        let value = (source[source_bit / 8] >> (source_bit % 8)) & 1;
+        let destination_bit = destination_bit_offset + bit;
+        let destination = &mut memory[destination_bit / 8];
+        let mask = 1u8 << (destination_bit % 8);
+        if value == 0 {
+            *destination &= !mask;
+        } else {
+            *destination |= mask;
+        }
+    }
+}
+
+fn write_bits_to_memory(
+    memory: &mut [u8],
+    destination_bit_offset: usize,
+    bit_width: usize,
+    source: &[u8],
+) {
+    write_bits_to_memory_from(memory, destination_bit_offset, bit_width, source, 0);
+}
+
+fn write_initial_run_to_plane(
+    memory: &mut [u8],
+    signal: SignalRef,
+    mask_plane: bool,
+    run: &InitialStateWriteRun,
+    source: &[u8],
+) {
+    let Some(array) = signal.array_layout else {
+        let plane_size = signal.width.div_ceil(8);
+        let destination_bit_offset =
+            (signal.offset + usize::from(mask_plane) * plane_size) * 8 + run.bit_offset;
+        write_bits_to_memory(memory, destination_bit_offset, run.bit_width, source);
+        return;
+    };
+
+    let plane_offset = signal.offset + usize::from(mask_plane) * array.plane_size;
+    let mut consumed = 0usize;
+    while consumed < run.bit_width {
+        let logical_offset = run.bit_offset + consumed;
+        let element = logical_offset / array.element_width;
+        let intra_element = logical_offset % array.element_width;
+        let part_width = (run.bit_width - consumed).min(array.element_width - intra_element);
+        let destination_bit_offset =
+            (plane_offset + element * array.element_stride) * 8 + intra_element;
+
+        if consumed.is_multiple_of(8)
+            && destination_bit_offset.is_multiple_of(8)
+            && part_width.is_multiple_of(8)
+        {
+            let source_byte = consumed / 8;
+            let destination_byte = destination_bit_offset / 8;
+            let byte_width = part_width / 8;
+            memory[destination_byte..destination_byte + byte_width]
+                .copy_from_slice(&source[source_byte..source_byte + byte_width]);
+        } else {
+            write_bits_to_memory_from(memory, destination_bit_offset, part_width, source, consumed);
+        }
+        consumed += part_width;
+    }
 }
 
 impl NativeBackend {
@@ -1259,7 +1375,85 @@ impl NativeBackend {
             execution_timing: None,
         };
         backend.install_event_buffers();
+        let compiled = Arc::clone(&backend.compiled);
+        backend.apply_initial_values(&compiled.program_image.initial_state);
         backend
+    }
+
+    fn apply_initial_values(&mut self, initial_state: &[InitialStateValue<AbsoluteAddr>]) {
+        for init in initial_state {
+            let signal = self.resolve_signal(&init.address);
+            match &init.data {
+                InitialStateData::Packed {
+                    value,
+                    mask,
+                    written_mask,
+                } => {
+                    let width_mask = if signal.width == 0 {
+                        BigUint::default()
+                    } else {
+                        (BigUint::from(1u8) << signal.width) - BigUint::from(1u8)
+                    };
+                    let preserve_mask = &width_mask ^ (written_mask & &width_mask);
+                    let (current_value, current_mask) = self.get_four_state(signal);
+                    let value = (current_value & &preserve_mask) | (value & written_mask);
+                    let mask = (current_mask & &preserve_mask) | (mask & written_mask);
+                    if signal.is_4state {
+                        self.set_four_state(signal, value, mask);
+                    } else {
+                        self.set_wide(signal, value);
+                    }
+                }
+                InitialStateData::Writes(runs) => self.apply_initial_memory_writes(signal, runs),
+            }
+        }
+    }
+
+    fn apply_initial_memory_writes(&mut self, signal: SignalRef, runs: &[InitialStateWriteRun]) {
+        let value_byte_size = signal.width.div_ceil(8);
+        let write_mask = self.compiled.options.four_state && signal.is_4state;
+        let mem = self.mem_bytes_mut();
+
+        for run in runs {
+            if run.bit_width == 0 {
+                continue;
+            }
+            if signal.array_layout.is_some() {
+                write_initial_run_to_plane(mem, signal, false, run, &run.value_bytes);
+                if write_mask {
+                    write_initial_run_to_plane(mem, signal, true, run, &run.mask_bytes);
+                }
+                continue;
+            }
+            if run.bit_offset.is_multiple_of(8) && run.bit_width.is_multiple_of(8) {
+                let byte_offset = run.bit_offset / 8;
+                let byte_width = run.bit_width / 8;
+                let value_offset = signal.offset + byte_offset;
+                mem[value_offset..value_offset + byte_width]
+                    .copy_from_slice(&run.value_bytes[..byte_width]);
+                if write_mask {
+                    let mask_offset = signal.offset + value_byte_size + byte_offset;
+                    mem[mask_offset..mask_offset + byte_width]
+                        .copy_from_slice(&run.mask_bytes[..byte_width]);
+                }
+                continue;
+            }
+
+            write_bits_to_memory(
+                mem,
+                signal.offset * 8 + run.bit_offset,
+                run.bit_width,
+                &run.value_bytes,
+            );
+            if write_mask {
+                write_bits_to_memory(
+                    mem,
+                    (signal.offset + value_byte_size) * 8 + run.bit_offset,
+                    run.bit_width,
+                    &run.mask_bytes,
+                );
+            }
+        }
     }
 
     /// Start a fresh opt-in measurement of generated native function calls.

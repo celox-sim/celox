@@ -14,13 +14,15 @@ compile_error!("celox-vpi currently supports only x86-64 and AArch64");
 
 use std::{
     cell::RefCell,
+    collections::HashMap,
     ffi::{CStr, CString, c_char, c_void},
+    io::Write,
     ptr,
 };
 
 use celox::{
     BigUint, DomainKind, NativeProgramInstance, ReflectionScopeId, ReflectionSignalId,
-    SignalDirection, SimBackend,
+    RuntimeEvent, SignalDirection, SimBackend,
 };
 
 mod callbacks;
@@ -135,24 +137,50 @@ pub type VpiHandle = *mut VpiHandleObject;
 
 thread_local! {
     static RUNTIME: RefCell<Option<NativeProgramInstance>> = const { RefCell::new(None) };
+    static FORCED_VALUES: RefCell<HashMap<ReflectionSignalId, (BigUint, BigUint)>> = RefCell::new(HashMap::new());
+    static PENDING_WRITES: RefCell<PendingWrites> = RefCell::new(PendingWrites::default());
+}
+
+#[derive(Default)]
+struct PendingWrites {
+    old_levels: HashMap<ReflectionSignalId, bool>,
+    settle: bool,
 }
 
 /// Install an instance explicitly. This is primarily useful to an embedding
 /// runtime which has already selected the attached image.
 pub fn install_runtime(instance: NativeProgramInstance) {
-    RUNTIME.with_borrow_mut(|runtime| *runtime = Some(instance));
     callbacks::reset();
+    FORCED_VALUES.with_borrow_mut(HashMap::clear);
+    PENDING_WRITES.with_borrow_mut(|pending| *pending = PendingWrites::default());
+    RUNTIME.with_borrow_mut(|runtime| *runtime = Some(instance));
 }
 
 pub fn clear_runtime() {
     RUNTIME.with_borrow_mut(|runtime| *runtime = None);
+    FORCED_VALUES.with_borrow_mut(HashMap::clear);
+    PENDING_WRITES.with_borrow_mut(|pending| *pending = PendingWrites::default());
     callbacks::reset();
 }
 
 /// Run VPI simulation regions until `vpiFinish` or until no future activity
 /// remains. Returns true when the test requested a normal finish.
 pub fn run_callbacks() -> bool {
-    callbacks::run()
+    run_callbacks_result().unwrap_or(false)
+}
+
+/// Run callbacks while preserving fatal DUT diagnostics for executable hosts.
+pub fn run_callbacks_result() -> Result<bool, String> {
+    process_runtime_events();
+    if let Some(error) = callbacks::take_error() {
+        return Err(error);
+    }
+    let finished = callbacks::run();
+    if let Some(error) = callbacks::take_error() {
+        Err(error)
+    } else {
+        Ok(finished)
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -544,6 +572,16 @@ pub unsafe extern "C" fn vpi_get_str(property: i32, reference: VpiHandle) -> *mu
 }
 
 fn value_bits(id: ReflectionSignalId) -> Option<(BigUint, BigUint, usize)> {
+    if let Some((value, mask)) = FORCED_VALUES.with_borrow(|forced| forced.get(&id).cloned()) {
+        let width = with_runtime(|runtime| {
+            runtime
+                .reflection()
+                .signal(id)
+                .map(|signal| signal.signal.width)
+        })
+        .flatten()?;
+        return Some((value, mask, width));
+    }
     with_runtime(|runtime| {
         let signal = runtime.reflection().signal(id)?;
         let (value, mask) = runtime.backend().get_four_state(signal.signal);
@@ -714,6 +752,9 @@ unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint,
             let mut bits = BigUint::from(0u8);
             let mut mask = BigUint::from(0u8);
             for digit in string.bytes() {
+                if digit == b'_' {
+                    continue;
+                }
                 bits <<= radix_bits;
                 mask <<= radix_bits;
                 match digit {
@@ -731,7 +772,6 @@ unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint,
                         bits |= BigUint::from(unknown);
                         mask |= BigUint::from(unknown);
                     }
-                    b'_' => {}
                     _ => return None,
                 }
             }
@@ -755,19 +795,38 @@ unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint,
 pub unsafe extern "C" fn vpi_put_value(
     reference: VpiHandle,
     value: *const VpiValue,
-    _when: *const c_void,
+    when: *const c_void,
     flags: i32,
 ) -> VpiHandle {
+    let inertial_is_immediate = flags == VPI_INERTIAL_DELAY
+        && (when.is_null() || {
+            // Safety: a non-null VPI delay pointer addresses `s_vpi_time`.
+            let delay = unsafe { &*when.cast::<VpiTime>() };
+            delay.type_ == 2 && delay.high == 0 && delay.low == 0
+        });
     if !matches!(
         flags,
         VPI_NO_DELAY | VPI_INERTIAL_DELAY | VPI_FORCE_FLAG | VPI_RELEASE_FLAG
-    ) {
+    ) || (flags == VPI_INERTIAL_DELAY && !inertial_is_immediate)
+    {
         return ptr::null_mut();
     }
     // Safety: reference follows the VPI handle contract.
     let Some(ObjectRef::Signal(id)) = (unsafe { object_ref(reference) }) else {
         return ptr::null_mut();
     };
+    if flags == VPI_RELEASE_FLAG {
+        FORCED_VALUES.with_borrow_mut(|forced| {
+            forced.remove(&id);
+        });
+        PENDING_WRITES.with_borrow_mut(|pending| pending.settle = true);
+        return if callbacks::is_running() || flush_pending_writes() {
+            reference
+        } else {
+            ptr::null_mut()
+        };
+    }
+
     let width = with_runtime(|runtime| {
         runtime
             .reflection()
@@ -779,40 +838,92 @@ pub unsafe extern "C" fn vpi_put_value(
     let Some((bits, mask)) = width.and_then(|width| unsafe { decode_value(value, width) }) else {
         return ptr::null_mut();
     };
+    if flags == VPI_FORCE_FLAG {
+        FORCED_VALUES.with_borrow_mut(|forced| {
+            forced.insert(id, (bits.clone(), mask.clone()));
+        });
+    }
     let succeeded = with_runtime_mut(|runtime| {
         let Some(signal) = runtime.reflection().signal(id).cloned() else {
             return false;
         };
         let old_is_high = runtime.backend().get(signal.signal).bit(0);
+        PENDING_WRITES.with_borrow_mut(|pending| {
+            pending.old_levels.entry(id).or_insert(old_is_high);
+            pending.settle = true;
+        });
         runtime
             .backend_mut()
             .set_four_state(signal.signal, bits, mask);
-        if runtime.eval_comb().is_err() {
-            return false;
-        }
-        let new_is_high = runtime.backend().get(signal.signal).bit(0);
-        let active_edge = match signal.domain_kind {
-            DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh => !old_is_high && new_is_high,
-            DomainKind::ClockNegedge | DomainKind::ResetAsyncLow => old_is_high && !new_is_high,
-            DomainKind::Other => false,
-        };
-        if active_edge
-            && let Some(event) = runtime.backend().resolve_event_opt(&signal.state_address)
-        {
-            if runtime.backend_mut().eval_apply_ff_at(event).is_err() {
-                return false;
-            }
-            if runtime.eval_comb().is_err() {
-                return false;
-            }
-        }
         true
     })
     .unwrap_or(false);
+    let succeeded = succeeded && (callbacks::is_running() || flush_pending_writes());
     if succeeded {
         reference
     } else {
         ptr::null_mut()
+    }
+}
+
+fn flush_pending_writes() -> bool {
+    let pending = PENDING_WRITES.with_borrow_mut(std::mem::take);
+    if !pending.settle {
+        return true;
+    }
+    let result = with_runtime_mut(|runtime| {
+        let mut active_edges = Vec::new();
+        for (id, old_is_high) in pending.old_levels {
+            let Some(signal) = runtime.reflection().signal(id).cloned() else {
+                continue;
+            };
+            let new_is_high = runtime.backend().get(signal.signal).bit(0);
+            let active = match signal.domain_kind {
+                DomainKind::ClockPosedge | DomainKind::ResetAsyncHigh => {
+                    !old_is_high && new_is_high
+                }
+                DomainKind::ClockNegedge | DomainKind::ResetAsyncLow => old_is_high && !new_is_high,
+                DomainKind::Other => false,
+            };
+            if active {
+                active_edges.push(signal.state_address);
+            }
+        }
+        runtime.settle_active_edges(&active_edges)
+    })
+    .unwrap_or(Ok(()));
+    if let Err(error) = result {
+        callbacks::fail(error.to_string());
+        return false;
+    }
+    process_runtime_events();
+    !callbacks::has_error()
+}
+
+fn process_runtime_events() {
+    let events = with_runtime_mut(NativeProgramInstance::drain_runtime_events).unwrap_or_default();
+    for event in events {
+        match event {
+            RuntimeEvent::Display { message } => {
+                let _ = writeln!(std::io::stdout().lock(), "{message}");
+            }
+            RuntimeEvent::AssertContinue { message } => {
+                let _ = writeln!(std::io::stderr().lock(), "assertion failed: {message}");
+            }
+            RuntimeEvent::AssertFatal { message } => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "fatal assertion failed: {message}"
+                );
+                callbacks::fail(message);
+            }
+            RuntimeEvent::Missed { count } => {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "celox-vpi: missed {count} runtime events"
+                );
+            }
+        }
     }
 }
 

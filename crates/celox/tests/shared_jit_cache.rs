@@ -234,6 +234,100 @@ fn precompiled_runtime_instance_loads_and_runs_attached_bytes_without_source() {
 }
 
 #[test]
+fn precompiled_runtime_restores_initial_state_and_settles_outputs() {
+    let directory = tempfile::tempdir().unwrap();
+    let memory_path = directory.path().join("initial.hex");
+    std::fs::write(&memory_path, "2a\n00\n").unwrap();
+    let source = format!(
+        r#"
+            module Top (out: output logic<8>) {{
+                var mem: logic<8>[2];
+                initial {{
+                    $readmemh("{}", mem);
+                }}
+                assign out = mem[0] + 8'd1;
+            }}
+        "#,
+        memory_path.display()
+    );
+    let sim = Simulator::builder(&source, "Top").build().unwrap();
+    let image = sim.shared_code().program_image().clone();
+    drop(sim);
+
+    let runtime = NativeProgramInstance::from_image(image).unwrap();
+    let output = runtime.signal_ref("Top.out").unwrap();
+    assert_eq!(runtime.backend().get_as::<u8>(output), 0x2b);
+}
+
+#[test]
+fn precompiled_runtime_preserves_comb_runtime_events() {
+    let sim = Simulator::builder(
+        r#"
+            module Top (a: input logic<8>, y: output logic<8>) {
+                always_comb {
+                    y = a + 8'd1;
+                    $display("y=%0d", y);
+                }
+            }
+        "#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let image = sim.shared_code().program_image().clone();
+    drop(sim);
+
+    let mut runtime = NativeProgramInstance::from_image(image).unwrap();
+    assert_eq!(
+        runtime.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "y=1".to_string(),
+        }]
+    );
+
+    let input = runtime.signal_ref("Top.a").unwrap();
+    runtime.backend_mut().set(input, 6u8);
+    runtime.settle_active_edges(&[]).unwrap();
+    assert_eq!(
+        runtime.drain_runtime_events(),
+        vec![celox::RuntimeEvent::Display {
+            message: "y=7".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn precompiled_runtime_reports_fatal_assertions() {
+    let sim = Simulator::builder(
+        r#"
+            module Top (a: input logic<8>) {
+                always_comb {
+                    $assert(a != 8'd1, "fatal a=%0d", a);
+                }
+            }
+        "#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let image = sim.shared_code().program_image().clone();
+    drop(sim);
+
+    let mut runtime = NativeProgramInstance::from_image(image).unwrap();
+    runtime.drain_runtime_events();
+    let input = runtime.signal_ref("Top.a").unwrap();
+    runtime.backend_mut().set(input, 1u8);
+    let error = runtime.settle_active_edges(&[]).unwrap_err();
+    assert!(error.to_string().contains("fatal a=1"));
+    assert_eq!(
+        runtime.drain_runtime_events(),
+        vec![celox::RuntimeEvent::AssertFatal {
+            message: "fatal a=1".to_string(),
+        }]
+    );
+}
+
+#[test]
 fn native_program_image_rejects_corrupt_appended_payload() {
     let sim = Simulator::builder(ADDER, "Top").build().unwrap();
     let mut encoded = sim
