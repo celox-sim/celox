@@ -63,7 +63,7 @@ pub fn veryl_test(input: TokenStream) -> TokenStream {
     };
 
     // Veryl CLI dependency logic
-    let mut table = std::collections::HashMap::new();
+    let mut table = fxhash::FxHashMap::default();
     for path in &paths {
         table.insert(path.src.clone(), path);
     }
@@ -79,7 +79,7 @@ pub fn veryl_test(input: TokenStream) -> TokenStream {
         .flatten()
         .collect();
 
-    let mut used_paths = std::collections::HashMap::new();
+    let mut used_paths = fxhash::FxHashMap::default();
     for symbol in &candidate_symbols {
         if let veryl_parser::veryl_token::TokenSource::File { path, .. } = symbol.token.source {
             let path = PathBuf::from(format!("{path}"));

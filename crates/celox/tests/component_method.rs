@@ -1822,7 +1822,7 @@ fn synchronous_reset_without_runtime_reset_event_still_binds() {
     let bound = celox_runtime::bind_testbench_program(
         simulator.backend_ref(),
         isolated,
-        &std::collections::HashSet::new(),
+        &fxhash::FxHashSet::default(),
     )
     .unwrap();
     assert!(matches!(

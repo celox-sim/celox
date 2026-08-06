@@ -145,7 +145,7 @@ impl VcdWriter {
 
         let mut scope_order = Vec::<String>::new();
         let mut scope_groups = Vec::<Vec<usize>>::new();
-        let mut scope_idx = std::collections::HashMap::<String, usize>::new();
+        let mut scope_idx = fxhash::FxHashMap::<String, usize>::default();
         for (signal_index, signal) in self.signals.iter().enumerate() {
             if let Some(index) = scope_idx.get(&signal.scope).copied() {
                 scope_groups[index].push(signal_index);

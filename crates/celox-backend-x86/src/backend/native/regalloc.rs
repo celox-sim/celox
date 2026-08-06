@@ -232,13 +232,11 @@ pub(crate) fn run_regalloc_with_label_and_trace(
     label: &str,
     trace: Option<&mut RegallocTrace>,
 ) -> Result<RegallocResult, RegallocError> {
-    run_regalloc_with_label_and_trace_and_diagnostics(
-        func,
-        label,
-        trace,
-        &crate::NativeDiagnostics::default(),
-        true,
-    )
+    let diagnostics = crate::NativeDiagnostics {
+        verify_regalloc: true,
+        ..crate::NativeDiagnostics::default()
+    };
+    run_regalloc_with_label_and_trace_and_diagnostics(func, label, trace, &diagnostics, true)
 }
 
 pub(crate) fn run_regalloc_with_label_and_trace_and_diagnostics(
@@ -257,6 +255,22 @@ pub(crate) fn run_regalloc_with_label_and_trace_and_diagnostics(
     Ok(allocation)
 }
 
+/// Allocate the code-generation-owned MIR directly.
+///
+/// The public allocator keeps its transactional error contract by operating
+/// on a clone. Native emission owns and discards this MIR on error, so cloning
+/// a multi-million-instruction function only to provide the same rollback is
+/// redundant.
+pub(crate) fn run_regalloc_for_codegen(
+    func: &mut MFunction,
+    label: &str,
+    trace: Option<&mut RegallocTrace>,
+    diagnostics: &crate::NativeDiagnostics,
+    native_tick_loop: bool,
+) -> Result<RegallocResult, RegallocError> {
+    run_regalloc_in_place(func, label, trace, diagnostics, native_tick_loop)
+}
+
 fn run_regalloc_in_place(
     func: &mut MFunction,
     label: &str,
@@ -265,21 +279,26 @@ fn run_regalloc_in_place(
     native_tick_loop: bool,
 ) -> Result<RegallocResult, RegallocError> {
     let timing = diagnostics.regalloc_timing || diagnostics.phase_timing;
+    let verify = cfg!(debug_assertions) || diagnostics.verify_regalloc;
     // Allocation must never depend on callers having run the optional MIR
     // optimization pipeline. Select flag-consuming register branches at the
     // allocation boundary so their unmaterialized boolean result cannot
     // acquire a live range.
     super::mir_opt::fold_register_branch_predicates(func);
-    func.verify_result()
-        .map_err(|error| RegallocError::mir("input MIR verification", error))?;
+    if verify {
+        func.verify_result()
+            .map_err(|error| RegallocError::mir("input MIR verification", error))?;
+    }
     let cfg_start = timing.then(crate::timing::now);
     let normalized_cfg =
         cfg::normalize(func).map_err(|error| cfg_error("CFG normalization", error))?;
-    normalized_cfg
-        .verify(func)
-        .map_err(|error| cfg_error("CFG normalization verification", error))?;
-    func.verify_result()
-        .map_err(|error| RegallocError::mir("CFG normalization verification", error))?;
+    if verify {
+        normalized_cfg
+            .verify(func)
+            .map_err(|error| cfg_error("CFG normalization verification", error))?;
+        func.verify_result()
+            .map_err(|error| RegallocError::mir("CFG normalization verification", error))?;
+    }
     if let Some(start) = cfg_start {
         tracing::debug!(
             "[regalloc-timing] label={label} cfg_normalize blocks={} elapsed={:?}",
@@ -305,8 +324,10 @@ fn run_regalloc_in_place(
     super::mir_opt::eliminate_redundant_local_stores(func);
     let folded_direct_immediate_stores = super::mir_opt::fold_direct_immediate_stores(func);
     let folded_memory_branches = super::mir_opt::fold_memory_branch_predicates(func);
-    func.verify_result()
-        .map_err(|error| RegallocError::mir("late memory-fold verification", error))?;
+    if verify {
+        func.verify_result()
+            .map_err(|error| RegallocError::mir("late memory-fold verification", error))?;
+    }
     if let Some(trace) = trace.as_deref_mut() {
         trace.mir_after_late_memory_folds = func.to_string();
     }
@@ -316,11 +337,14 @@ fn run_regalloc_in_place(
             start.elapsed()
         );
     }
-    let allocation_constraints = constraints::ConstraintModel::build(func, &normalized_cfg)
-        .map_err(|error| constraint_error("placement constraint construction", error))?;
-    allocation_constraints
-        .verify(func)
-        .map_err(|error| constraint_error("placement constraint verification", error))?;
+    let allocation_constraints =
+        constraints::ConstraintModel::build_for_codegen(func, &normalized_cfg, verify)
+            .map_err(|error| constraint_error("placement constraint construction", error))?;
+    if verify {
+        allocation_constraints
+            .verify(func)
+            .map_err(|error| constraint_error("placement constraint verification", error))?;
+    }
     // W/S planning owns independent homes, explicit phi-edge transfers, and
     // the one authoritative dependency-ready instruction order. Introducing
     // snapshot copies before that walk would lengthen the ranges it is meant
@@ -344,9 +368,11 @@ fn run_regalloc_in_place(
         );
     }
     let next_use_verify_start = timing.then(crate::timing::now);
-    next_use
-        .verify(func, &normalized_cfg)
-        .map_err(|error| next_use_error("next-use verification", error))?;
+    if verify {
+        next_use
+            .verify(func, &normalized_cfg)
+            .map_err(|error| next_use_error("next-use verification", error))?;
+    }
     if let Some(start) = next_use_verify_start {
         tracing::debug!(
             "[regalloc-timing] label={label} next_use_verify elapsed={:?}",
@@ -362,6 +388,7 @@ fn run_regalloc_in_place(
         &allocation_constraints,
         trace,
         timing,
+        verify,
     )?;
     let mut assignment = allocation.assignment;
     let mut spill_frame_size = allocation.spill_frame_size;
@@ -408,7 +435,9 @@ fn run_regalloc_in_place(
     }
 
     let verify_start = timing.then(crate::timing::now);
-    verify_assignment(func, &assignment)?;
+    if verify {
+        verify_assignment(func, &assignment)?;
+    }
     if let Some(start) = verify_start {
         tracing::debug!(
             "[regalloc-timing] label={label} verify elapsed={:?}",
@@ -445,7 +474,7 @@ fn run_regalloc_in_place(
 /// order is not a valid way to distinguish forward edges from backedges.
 fn reorder_blocks_rpo(func: &mut MFunction) -> Result<(), cfg::CfgError> {
     use super::mir::BlockId;
-    use std::collections::{HashMap, HashSet};
+    use crate::{HashMap, HashSet};
 
     let Some(entry) = func.blocks.first().map(|block| block.id) else {
         return Ok(());
@@ -455,7 +484,7 @@ fn reorder_blocks_rpo(func: &mut MFunction) -> Result<(), cfg::CfgError> {
         .iter()
         .map(|block| (block.id, block.successors()))
         .collect::<HashMap<_, _>>();
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     let mut postorder = Vec::with_capacity(func.blocks.len());
     let mut stack: Vec<(BlockId, usize)> = vec![(entry, 0)];
     visited.insert(entry);
@@ -554,10 +583,7 @@ fn log_regalloc_stats(
     spill_frame_size: u32,
 ) {
     let after = collect_regalloc_block_stats(func);
-    let before_by_block = before
-        .iter()
-        .copied()
-        .collect::<std::collections::HashMap<_, _>>();
+    let before_by_block = before.iter().copied().collect::<crate::HashMap<_, _>>();
     let mut rows = Vec::new();
     let mut total = RegallocBlockStats::default();
     let mut total_delta = RegallocBlockStats::default();

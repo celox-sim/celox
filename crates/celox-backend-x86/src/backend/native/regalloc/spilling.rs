@@ -10,8 +10,7 @@
 //!   are reloaded from their original location, not from the stack.
 //! - **Spill slot allocation**: each spilled value gets a unique stack slot.
 
-use std::collections::HashMap;
-
+use crate::HashMap;
 use crate::native::mir::*;
 
 // ────────────────────────────────────────────────────────────────
@@ -29,7 +28,7 @@ pub(super) struct SpillSlotAllocator {
 impl SpillSlotAllocator {
     pub(super) fn new() -> Self {
         Self {
-            slots: HashMap::new(),
+            slots: HashMap::default(),
             next_offset: 0,
         }
     }

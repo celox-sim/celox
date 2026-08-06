@@ -1,5 +1,5 @@
+use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
 use veryl_analyzer::ir::{Component, Declaration, Ir, Module, TypeKind, VarId, VarKind};
 use veryl_analyzer::symbol::Affiliation;
 use veryl_parser::resource_table;
@@ -307,10 +307,10 @@ fn extract_instances(module: &Module) -> Vec<InstanceInfo> {
 /// under a synthetic parent entry with an `interface` map so that the
 /// TypeScript DUT can expose them as `dut.bus.data`.
 fn ports_to_json(ports: &[PortInfo]) -> HashMap<String, JsonPortInfo> {
-    let mut result: HashMap<String, JsonPortInfo> = HashMap::new();
+    let mut result: HashMap<String, JsonPortInfo> = HashMap::default();
     // Accumulate interface members for each parent name separately so we can
     // insert the parent entry once at the end.
-    let mut iface_maps: HashMap<String, HashMap<String, JsonPortInfo>> = HashMap::new();
+    let mut iface_maps: HashMap<String, HashMap<String, JsonPortInfo>> = HashMap::default();
 
     for p in ports {
         let json = JsonPortInfo {
@@ -1439,7 +1439,7 @@ module Top (
         // No port key collisions from scoped vars
         let port_names: Vec<&String> = top.ports.keys().collect();
         let unique_count = {
-            let mut s = std::collections::HashSet::new();
+            let mut s = HashSet::default();
             port_names.iter().filter(|n| s.insert(n.as_str())).count()
         };
         assert_eq!(port_names.len(), unique_count, "no duplicate port keys");

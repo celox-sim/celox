@@ -1,5 +1,6 @@
-use std::collections::HashMap;
 use std::sync::Arc;
+
+use crate::HashMap;
 
 use veryl_metadata::ComponentManifest;
 

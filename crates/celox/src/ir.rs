@@ -451,12 +451,12 @@ impl OptimizedSir {
     /// Collect the set of `AbsoluteAddr` values that are accessed in the working
     /// region (region != STABLE). These are the only variables that need working
     /// region space.
-    pub fn collect_working_region_addrs(&self) -> std::collections::HashSet<AbsoluteAddr> {
-        let mut addrs = std::collections::HashSet::new();
+    pub fn collect_working_region_addrs(&self) -> crate::HashSet<AbsoluteAddr> {
+        let mut addrs = crate::HashSet::default();
 
         let scan_units =
             |units: &HashMap<AbsoluteAddr, Vec<ExecutionUnit<RegionedAbsoluteAddr>>>,
-             addrs: &mut std::collections::HashSet<AbsoluteAddr>| {
+             addrs: &mut crate::HashSet<AbsoluteAddr>| {
                 for eu_list in units.values() {
                     for eu in eu_list {
                         for block in eu.blocks.values() {
@@ -491,8 +491,8 @@ impl OptimizedSir {
         addrs
     }
 
-    pub fn collect_sparse_working_region_addrs(&self) -> std::collections::HashSet<AbsoluteAddr> {
-        let mut addrs = std::collections::HashSet::new();
+    pub fn collect_sparse_working_region_addrs(&self) -> crate::HashSet<AbsoluteAddr> {
+        let mut addrs = crate::HashSet::default();
         for units in self
             .sir
             .eval_apply_ffs

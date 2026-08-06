@@ -13,6 +13,7 @@ celox-state-layout = { path = "../celox-state-layout" }
 celox-testbench = { path = "../celox-testbench" }
 bit-set = { workspace = true }
 chrono = "0.4"
+fxhash.workspace = true
 num-bigint = { workspace = true }
 
 [dev-dependencies]

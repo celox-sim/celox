@@ -2266,8 +2266,8 @@ struct SemanticTestbenchBuilder<'a> {
     lookup: &'a VerylFrontendLookup,
     testbench_source: &'a VerylTestbenchSource,
     runtime_event_site_count: usize,
-    event_map: std::collections::HashMap<StrId, StateAddr>,
-    signal_map: std::collections::HashMap<StrId, SemanticSignal<StateAddr>>,
+    event_map: HashMap<StrId, StateAddr>,
+    signal_map: HashMap<StrId, SemanticSignal<StateAddr>>,
     default_reset_duration: u64,
 }
 

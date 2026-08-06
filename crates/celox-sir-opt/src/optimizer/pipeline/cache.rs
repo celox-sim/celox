@@ -125,9 +125,7 @@ pub(super) fn optimize_unit_groups_cached(
             let units = groups
                 .get_mut(&class.representative)
                 .expect("equivalence-class representative must exist");
-            for eu in units {
-                passes.run(eu, options);
-            }
+            passes.run_parallel(units, options);
         }
         if class.aliases.is_empty() {
             continue;

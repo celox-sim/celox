@@ -1284,8 +1284,7 @@ pub fn lower_execution_unit_with_diagnostics(
     }
 
     let mut next_extra_block_id = block_ids.iter().map(|bid| bid.0).max().unwrap_or(0) + 1;
-    let mut sir_exit_mir_blocks: std::collections::HashMap<crate::BlockId, BlockId> =
-        std::collections::HashMap::new();
+    let mut sir_exit_mir_blocks: HashMap<crate::BlockId, BlockId> = HashMap::default();
 
     let mut mask_map = RegMap::new(max_sir_regs);
     // Pre-allocate mask VRegs for 4-state
@@ -1352,10 +1351,8 @@ pub fn lower_execution_unit_with_diagnostics(
     }
 
     // Collect mask phi sources per-block (captures mask state at each terminator)
-    let mut mask_phi_sources: std::collections::HashMap<
-        BlockId,
-        Vec<(BlockId, usize, usize, VReg)>,
-    > = std::collections::HashMap::new();
+    let mut mask_phi_sources: HashMap<BlockId, Vec<(BlockId, usize, usize, VReg)>> =
+        HashMap::default();
 
     for &sir_block_id in &block_ids {
         let sir_block = &eu.blocks[&sir_block_id];
@@ -1764,9 +1761,10 @@ pub fn lower_execution_unit_with_diagnostics(
     // Build phi nodes from SIR block params and predecessor terminators.
     // For each SIR block with params, find all predecessors that pass args.
     {
-        use std::collections::HashMap;
+        use crate::HashMap;
         // Collect phi sources: target_block → [(pred_block, param_idx, chunk_idx, arg_vreg)]
-        let mut phi_sources: HashMap<BlockId, Vec<(BlockId, usize, usize, VReg)>> = HashMap::new();
+        let mut phi_sources: HashMap<BlockId, Vec<(BlockId, usize, usize, VReg)>> =
+            HashMap::default();
         for &sir_block_id in &block_ids {
             let sir_block = &eu.blocks[&sir_block_id];
             let pred_mir_id = sir_exit_mir_blocks

@@ -414,10 +414,14 @@ pub fn parse(
         t.pre_optimized_sir = Some(program.clone());
     }
 
-    timed_phase!(
-        "verify_sir_before_optimize",
-        verify_program_sir(&program.sir, &program.runtime, "before optimization")
-    )?;
+    let verify_boundaries =
+        cfg!(debug_assertions) || optimize_options.diagnostics.verify_boundaries;
+    if verify_boundaries {
+        timed_phase!(
+            "verify_sir_before_optimize",
+            verify_program_sir(&program.sir, &program.runtime, "before optimization")
+        )?;
+    }
 
     // Always run the SIR pipeline so required canonicalization and explicit
     // per-pass overrides are applied consistently. Concrete backend planning
@@ -433,10 +437,12 @@ pub fn parse(
             crate::optimizer::optimize(&mut program, four_state, optimize_options)
         }
     });
-    timed_phase!(
-        "verify_sir_after_optimize",
-        verify_program_sir(&program.sir, &program.runtime, "after optimization")
-    )?;
+    if verify_boundaries {
+        timed_phase!(
+            "verify_sir_after_optimize",
+            verify_program_sir(&program.sir, &program.runtime, "after optimization")
+        )?;
+    }
 
     let program = program.into_optimized();
 

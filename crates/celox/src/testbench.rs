@@ -5,6 +5,7 @@
 //! memory buffer.  Signals ≤64 bits use native `u64` arithmetic with zero
 //! heap allocation; wider signals fall back to `BigUint`.
 
+use crate::HashMap;
 use crate::RuntimeErrorCode;
 use crate::backend::memory_layout::{
     RUNTIME_EVENT_HEADER_SIZE, RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET,
@@ -25,7 +26,6 @@ use num_bigint::{BigInt, BigUint, Sign};
 use num_traits::ToPrimitive as _;
 use rand::{RngExt as _, SeedableRng as _};
 use rand_pcg::Pcg64;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ── Public types ───────────────────────────────────────────────────────
@@ -220,7 +220,7 @@ impl RandomTable {
     fn new(base_seed: u64) -> Self {
         Self {
             base_seed,
-            rngs: HashMap::new(),
+            rngs: HashMap::default(),
         }
     }
 
