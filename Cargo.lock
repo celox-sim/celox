@@ -440,6 +440,7 @@ dependencies = [
  "miette",
  "num-bigint",
  "num-traits",
+ "postcard",
  "proptest",
  "rand 0.10.2",
  "rand_pcg",
@@ -640,6 +641,7 @@ dependencies = [
  "chrono",
  "fxhash",
  "num-bigint",
+ "serde",
  "tempfile",
 ]
 
@@ -694,6 +696,7 @@ version = "0.0.0"
 dependencies = [
  "celox-design",
  "fxhash",
+ "serde",
 ]
 
 [[package]]
@@ -715,6 +718,16 @@ dependencies = [
  "veryl-analyzer",
  "veryl-metadata",
  "veryl-parser",
+]
+
+[[package]]
+name = "celox-vpi"
+version = "0.0.0"
+dependencies = [
+ "celox",
+ "libloading",
+ "tempfile",
+ "veryl-metadata",
 ]
 
 [[package]]

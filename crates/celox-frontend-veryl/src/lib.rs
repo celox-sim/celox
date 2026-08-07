@@ -67,6 +67,7 @@ pub struct VariableInfo {
     pub id: VarId,
     pub path: VarPath,
     pub var_kind: veryl_analyzer::ir::VarKind,
+    pub signed: bool,
     pub metadata: VariableMetadata,
     /// Per-dimension sizes for the packed shape of the variable.
     ///
@@ -91,6 +92,7 @@ impl fmt::Debug for VariableInfo {
             .field("width", &self.width)
             .field("id", &self.id)
             .field("is_4state", &self.is_4state)
+            .field("signed", &self.signed)
             .field("kind", &self.kind)
             .field("type_kind", &self.type_kind)
             .finish()

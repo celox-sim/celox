@@ -3374,6 +3374,7 @@ mod tests {
             id: var_id,
             path: path.clone(),
             var_kind: VarKind::Variable,
+            signed: false,
             packed_dims: vec![8],
             metadata: VariableMetadata {
                 width: 8,

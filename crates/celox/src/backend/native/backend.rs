@@ -8,15 +8,56 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use bit_set::BitSet;
+use celox_design::{
+    InitialStateData, InitialStateValue, InitialStateWriteRun, RuntimeCombObserver,
+    RuntimeErrorInfo, RuntimeEventSite,
+};
+use celox_runtime::DesignReflection;
+use celox_runtime::backend::SimBackend;
 use num_bigint::BigUint;
+use serde::{Deserialize, Serialize};
 
-use crate::ir::{AbsoluteAddr, LaidOutProgram, SignalArrayLayout, SignalRef};
-use crate::{CodegenError, HashMap, SimulatorError, SimulatorOptions};
+use crate::ir::{
+    AbsoluteAddr, BlockId, ExecutionUnit, LaidOutProgram, RegionedAbsoluteAddr, RegisterId,
+    SIRInstruction, SIROffset, SIRTerminator, SignalArrayLayout, SignalRef,
+};
+use crate::{CodegenError, HashMap, HashSet, SimulatorError, SimulatorOptions};
 
 use super::super::RuntimeEventBuffer;
 use super::super::traits::SimulatorErrorCode;
 use super::super::{MemoryLayout, get_byte_size};
 use super::{emit, jit_mem, regalloc};
+
+const NATIVE_FEATURE_BMI2: u8 = 1 << 0;
+const NATIVE_FEATURE_AVX: u8 = 1 << 1;
+const NATIVE_FEATURE_FSGSBASE: u8 = 1 << 2;
+const KNOWN_NATIVE_FEATURES: u8 =
+    NATIVE_FEATURE_BMI2 | NATIVE_FEATURE_AVX | NATIVE_FEATURE_FSGSBASE;
+
+fn current_native_feature_bits() -> u8 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        celox_backend_x86::native::features::detected_image_feature_bits()
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        0
+    }
+}
+
+fn format_native_feature_bits(bits: u8) -> String {
+    let mut names = Vec::new();
+    if bits & NATIVE_FEATURE_BMI2 != 0 {
+        names.push("BMI2");
+    }
+    if bits & NATIVE_FEATURE_AVX != 0 {
+        names.push("AVX");
+    }
+    if bits & NATIVE_FEATURE_FSGSBASE != 0 {
+        names.push("FSGSBASE");
+    }
+    names.join(", ")
+}
 
 // ────────────────────────────────────────────────────────────────
 // Event handle
@@ -87,8 +128,12 @@ impl super::super::EventHandle for NativeEventRef {
 /// that share the same compiled machine code.
 pub struct SharedNativeCode {
     comb_func: NativeSimFunc,
-    /// Keep JitCode alive so the mmap regions remain valid.
-    _jit_codes: Vec<jit_mem::JitCode>,
+    comb_unit_funcs: Vec<NativeSimFunc>,
+    /// Keep the combined executable image alive so every entry pointer remains
+    /// valid. The image contains all native functions and their trailing
+    /// constant/literal data.
+    _jit_image: jit_mem::JitCode,
+    program_image: NativeProgramImage,
 
     event_map: HashMap<AbsoluteAddr, NativeEventRef>,
     eval_only_event_map: HashMap<AbsoluteAddr, NativeEventRef>,
@@ -99,7 +144,7 @@ pub struct SharedNativeCode {
     /// Simulation-state bytes plus the largest native spill/scratch arena
     /// required by any compiled function.
     native_memory_size: usize,
-    options: SimulatorOptions,
+    options: NativeRuntimeOptions,
     /// (offset, byte_size) pairs for 4-state variables that need X initialization.
     four_state_inits: Vec<(usize, usize)>,
 }
@@ -109,9 +154,300 @@ unsafe impl Send for SharedNativeCode {}
 unsafe impl Sync for SharedNativeCode {}
 
 impl SharedNativeCode {
+    /// Attach a compiler-produced image to the precompiled host runtime.
+    pub fn from_image(program_image: NativeProgramImage) -> Result<Self, SimulatorError> {
+        program_image.validate().map_err(|message| {
+            codegen_message(format!("invalid native program image: {message}"))
+        })?;
+        let unavailable = program_image.required_native_features & !current_native_feature_bits();
+        if unavailable != 0 {
+            return Err(codegen_message(format!(
+                "native program image requires unavailable host features: {}",
+                format_native_feature_bits(unavailable)
+            )));
+        }
+        let symbols = program_image
+            .symbols
+            .iter()
+            .map(|symbol| jit_mem::JitSymbol {
+                offset: symbol.offset,
+                size: symbol.size,
+                name: symbol.name.clone(),
+            })
+            .collect::<Vec<_>>();
+        let jit_image = jit_mem::JitCode::new_named_with_symbols_profiled(
+            program_image.code_image(),
+            "celox_native_image",
+            &symbols,
+            program_image.options.perf_map,
+        )
+        .map_err(|source| codegen_err(CodegenError::NativeMemory { source }))?;
+        let materialize = |event: NativeEventImageRef| -> Result<NativeEventRef, SimulatorError> {
+            Ok(NativeEventRef {
+                func: native_function_at(&jit_image, event.func_offset)?,
+                comb_apply_func: native_function_at(&jit_image, event.comb_apply_offset)?,
+                addr: event.addr,
+                id: event.id,
+            })
+        };
+        let materialize_map = |source: &HashMap<AbsoluteAddr, NativeEventImageRef>| {
+            source
+                .iter()
+                .map(|(&addr, &event)| Ok((addr, materialize(event)?)))
+                .collect::<Result<HashMap<_, _>, SimulatorError>>()
+        };
+        let comb_func = native_function_at(&jit_image, program_image.comb_offset)?;
+        let comb_unit_funcs = program_image
+            .comb_unit_offsets
+            .iter()
+            .copied()
+            .map(|offset| native_function_at(&jit_image, offset))
+            .collect::<Result<Vec<_>, _>>()?;
+        let event_map = materialize_map(&program_image.event_map)?;
+        let eval_only_event_map = materialize_map(&program_image.eval_only_event_map)?;
+        let apply_event_map = materialize_map(&program_image.apply_event_map)?;
+        let id_to_event = program_image
+            .id_to_event
+            .iter()
+            .copied()
+            .map(materialize)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            comb_func,
+            comb_unit_funcs,
+            _jit_image: jit_image,
+            event_map,
+            eval_only_event_map,
+            apply_event_map,
+            id_to_addr: program_image.id_to_addr.clone(),
+            id_to_event,
+            layout: program_image.layout.clone(),
+            native_memory_size: program_image.native_memory_size,
+            options: program_image.options,
+            four_state_inits: program_image.four_state_inits.clone(),
+            program_image,
+        })
+    }
+
     /// Returns a reference to the memory layout.
     pub fn layout(&self) -> &MemoryLayout {
         &self.layout
+    }
+
+    /// Exact relocatable native image used by this compiled design.
+    ///
+    /// Entry addresses are intentionally not serialized: consumers copy this
+    /// image and resolve [`Self::code_entries`] relative to the new base.
+    pub fn code_image(&self) -> &[u8] {
+        self.program_image.code_image()
+    }
+
+    /// Named function entries inside [`Self::code_image`].
+    pub fn code_entries(&self) -> &[NativeCodeEntry] {
+        self.program_image.code_entries()
+    }
+
+    /// Pointer-free compiler artifact from which this runtime image was loaded.
+    pub fn program_image(&self) -> &NativeProgramImage {
+        &self.program_image
+    }
+}
+
+/// One callable function in a packed native code image.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeCodeEntry {
+    /// Stable diagnostic name for the emitted function.
+    pub name: String,
+    /// Byte offset from the start of the native image.
+    pub offset: usize,
+    /// Size of this function blob, including its private literal data.
+    pub size: usize,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct NativeEventImageRef {
+    func_offset: usize,
+    comb_apply_offset: usize,
+    addr: AbsoluteAddr,
+    id: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct NativeCodeSymbol {
+    offset: usize,
+    size: usize,
+    name: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct NativeRuntimeOptions {
+    four_state: bool,
+    native_tick_loop: bool,
+    perf_map: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct NativeRuntimeSchema {
+    pub(crate) runtime_errors: HashMap<i64, RuntimeErrorInfo<AbsoluteAddr>>,
+    pub(crate) runtime_event_sites: Vec<RuntimeEventSite>,
+    pub(crate) comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct NativeEventTopology {
+    aliases: HashMap<AbsoluteAddr, AbsoluteAddr>,
+}
+
+impl NativeEventTopology {
+    pub(crate) fn canonical(&self, address: AbsoluteAddr) -> AbsoluteAddr {
+        self.aliases.get(&address).copied().unwrap_or(address)
+    }
+}
+
+/// Pointer-free native compiler artifact which can be attached to the
+/// precompiled Celox runtime.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct NativeProgramImage {
+    code: Vec<u8>,
+    code_entries: Vec<NativeCodeEntry>,
+    symbols: Vec<NativeCodeSymbol>,
+    comb_offset: usize,
+    comb_unit_offsets: Vec<usize>,
+    required_native_features: u8,
+    event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
+    eval_only_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
+    apply_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
+    id_to_addr: Vec<AbsoluteAddr>,
+    id_to_event: Vec<NativeEventImageRef>,
+    reflection: DesignReflection,
+    initial_state: Vec<InitialStateValue<AbsoluteAddr>>,
+    runtime_schema: NativeRuntimeSchema,
+    event_topology: NativeEventTopology,
+    layout: MemoryLayout,
+    native_memory_size: usize,
+    options: NativeRuntimeOptions,
+    four_state_inits: Vec<(usize, usize)>,
+}
+
+impl NativeProgramImage {
+    /// Complete relocatable machine-code image.
+    pub fn code_image(&self) -> &[u8] {
+        &self.code
+    }
+
+    /// Named entry offsets in [`Self::code_image`].
+    pub fn code_entries(&self) -> &[NativeCodeEntry] {
+        &self.code_entries
+    }
+
+    /// Final state layout consumed by every generated entry.
+    pub fn layout(&self) -> &MemoryLayout {
+        &self.layout
+    }
+
+    /// Source-independent instance hierarchy and signal metadata.
+    pub fn reflection(&self) -> &DesignReflection {
+        &self.reflection
+    }
+
+    /// Source-independent runtime diagnostics and combinational observers.
+    pub(crate) fn runtime_schema(&self) -> &NativeRuntimeSchema {
+        &self.runtime_schema
+    }
+
+    /// Canonical event-domain topology used by the runtime scheduler.
+    pub(crate) fn event_topology(&self) -> &NativeEventTopology {
+        &self.event_topology
+    }
+
+    pub(super) fn validate(&self) -> Result<(), String> {
+        self.reflection
+            .validate()
+            .map_err(|error| format!("invalid design reflection: {error}"))?;
+        if self.code.is_empty() {
+            return Err("code image is empty".into());
+        }
+        let mut entry_offsets = HashSet::default();
+        let mut previous_end = 0usize;
+        for entry in &self.code_entries {
+            if !entry.offset.is_multiple_of(NATIVE_CODE_ENTRY_ALIGNMENT) {
+                return Err(format!("entry `{}` is not aligned", entry.name));
+            }
+            if entry.size == 0 {
+                return Err(format!("entry `{}` is empty", entry.name));
+            }
+            let end = entry
+                .offset
+                .checked_add(entry.size)
+                .ok_or_else(|| format!("entry `{}` range overflows", entry.name))?;
+            if entry.offset < previous_end || end > self.code.len() {
+                return Err(format!("entry `{}` is outside the code image", entry.name));
+            }
+            if !entry_offsets.insert(entry.offset) {
+                return Err(format!("entry `{}` duplicates an offset", entry.name));
+            }
+            previous_end = end;
+        }
+        if !entry_offsets.contains(&self.comb_offset) {
+            return Err("eval_comb offset does not name an image entry".into());
+        }
+        if self
+            .comb_unit_offsets
+            .iter()
+            .any(|offset| !entry_offsets.contains(offset))
+        {
+            return Err("a combinational unit offset does not name an image entry".into());
+        }
+        if self.required_native_features & !KNOWN_NATIVE_FEATURES != 0 {
+            return Err("native image contains unknown feature requirements".into());
+        }
+        for symbol in &self.symbols {
+            let end = symbol
+                .offset
+                .checked_add(symbol.size)
+                .ok_or_else(|| format!("symbol `{}` range overflows", symbol.name))?;
+            if symbol.size == 0 || end > self.code.len() {
+                return Err(format!(
+                    "symbol `{}` is outside the code image",
+                    symbol.name
+                ));
+            }
+        }
+        for event in self
+            .event_map
+            .values()
+            .chain(self.eval_only_event_map.values())
+            .chain(self.apply_event_map.values())
+            .chain(self.id_to_event.iter())
+        {
+            if !entry_offsets.contains(&event.func_offset)
+                || !entry_offsets.contains(&event.comb_apply_offset)
+            {
+                return Err(format!(
+                    "event {} references a missing image entry",
+                    event.id
+                ));
+            }
+        }
+        let semantic_size = self
+            .layout
+            .merged_total_size
+            .checked_add(self.layout.triggered_bits_total_size)
+            .ok_or_else(|| "semantic memory size overflows".to_string())?;
+        if self.native_memory_size < semantic_size {
+            return Err("native memory is smaller than the semantic state".into());
+        }
+        for &(offset, size) in &self.four_state_inits {
+            let end = size
+                .checked_mul(2)
+                .and_then(|size| offset.checked_add(size))
+                .ok_or_else(|| "four-state initialization range overflows".to_string())?;
+            if end > self.native_memory_size {
+                return Err("four-state initialization exceeds native memory".into());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -128,7 +464,8 @@ fn codegen_message(message: impl Into<String>) -> SimulatorError {
 }
 
 struct CompiledNativeFunction {
-    code: jit_mem::JitCode,
+    code: Vec<u8>,
+    symbols: Vec<jit_mem::JitSymbol>,
     trace: Option<emit::NativeFunctionTrace>,
     required_state_size: usize,
 }
@@ -291,14 +628,10 @@ fn compile_unit_refs(
             spill_frame_size: 0,
             disassembly: emit::disassemble(&empty_result.code[..empty_result.text_size], 0),
         });
-        let code = jit_mem::JitCode::new_named_profiled(
-            &empty_result.code,
-            label,
-            x86_options.diagnostics.perf_map,
-        )
-        .map_err(|source| codegen_err(CodegenError::NativeMemory { source }))?;
+        let symbols = perf_symbols_for_emit_result(label, &empty_result);
         return Ok(CompiledNativeFunction {
-            code,
+            code: empty_result.code,
+            symbols,
             trace,
             required_state_size: empty_result.required_state_size as usize,
         });
@@ -332,15 +665,9 @@ fn compile_unit_refs(
     }
     let symbols = perf_symbols_for_emit_result(label, &emit_result);
     let required_state_size = emit_result.required_state_size as usize;
-    let code = jit_mem::JitCode::new_named_with_symbols_profiled(
-        &emit_result.code,
-        label,
-        &symbols,
-        x86_options.diagnostics.perf_map,
-    )
-    .map_err(|source| codegen_err(CodegenError::NativeMemory { source }))?;
     Ok(CompiledNativeFunction {
-        code,
+        code: emit_result.code,
+        symbols,
         trace,
         required_state_size,
     })
@@ -381,6 +708,73 @@ fn perf_symbols_for_emit_result(label: &str, result: &emit::EmitResult) -> Vec<j
     }
 
     symbols
+}
+
+const NATIVE_CODE_ENTRY_ALIGNMENT: usize = 16;
+
+fn append_native_code(
+    image: &mut Vec<u8>,
+    entries: &mut Vec<NativeCodeEntry>,
+    image_symbols: &mut Vec<NativeCodeSymbol>,
+    name: String,
+    compiled: &CompiledNativeFunction,
+) -> Result<usize, SimulatorError> {
+    let offset = image
+        .len()
+        .checked_add(NATIVE_CODE_ENTRY_ALIGNMENT - 1)
+        .map(|value| value & !(NATIVE_CODE_ENTRY_ALIGNMENT - 1))
+        .ok_or_else(|| codegen_message("packed native code image alignment overflow"))?;
+    image.resize(offset, 0);
+    let end = offset
+        .checked_add(compiled.code.len())
+        .ok_or_else(|| codegen_message("packed native code image size overflow"))?;
+    image.extend_from_slice(&compiled.code);
+
+    if compiled.symbols.is_empty() {
+        image_symbols.push(NativeCodeSymbol {
+            offset,
+            size: compiled.code.len(),
+            name: name.clone(),
+        });
+    } else {
+        for symbol in &compiled.symbols {
+            let symbol_end = symbol
+                .offset
+                .checked_add(symbol.size)
+                .ok_or_else(|| codegen_message("native function symbol range overflow"))?;
+            if symbol_end > compiled.code.len() {
+                return Err(codegen_message(format!(
+                    "native function symbol `{}` exceeds its emitted code",
+                    symbol.name
+                )));
+            }
+            image_symbols.push(NativeCodeSymbol {
+                offset: offset + symbol.offset,
+                size: symbol.size,
+                name: format!("{name}.{}", symbol.name),
+            });
+        }
+    }
+
+    entries.push(NativeCodeEntry {
+        name,
+        offset,
+        size: end - offset,
+    });
+    Ok(offset)
+}
+
+fn native_function_at(
+    image: &jit_mem::JitCode,
+    offset: usize,
+) -> Result<NativeSimFunc, SimulatorError> {
+    let ptr = image
+        .entry_ptr(offset)
+        .ok_or_else(|| codegen_message("native function entry exceeds packed code image"))?;
+    // Safety: `offset` was returned by `append_native_code` for a complete
+    // function emitted with `NativeSimFunc`'s target ABI. `image` owns the
+    // executable allocation for at least as long as the returned pointer.
+    Ok(unsafe { std::mem::transmute::<*const u8, NativeSimFunc>(ptr) })
 }
 
 struct NativeCompileTask<'a> {
@@ -641,18 +1035,136 @@ fn format_native_codegen_trace(
     }
 }
 
+fn offset_registers(offset: &SIROffset, registers: &mut Vec<RegisterId>) {
+    match offset {
+        SIROffset::Dynamic(register) => registers.push(*register),
+        SIROffset::Element {
+            index,
+            dynamic_bit_offset,
+            ..
+        } => {
+            registers.push(*index);
+            registers.extend(dynamic_bit_offset);
+        }
+        SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
+    }
+}
+
+fn instruction_registers<A>(instruction: &SIRInstruction<A>) -> Vec<RegisterId> {
+    let mut registers = Vec::new();
+    match instruction {
+        SIRInstruction::Imm(..) => {}
+        SIRInstruction::Binary(_, lhs, _, rhs) => registers.extend([*lhs, *rhs]),
+        SIRInstruction::Unary(_, _, source) | SIRInstruction::Slice(_, source, _, _) => {
+            registers.push(*source);
+        }
+        SIRInstruction::Load(_, _, offset, _) => offset_registers(offset, &mut registers),
+        SIRInstruction::Store(_, offset, _, source, _, _) => {
+            registers.push(*source);
+            offset_registers(offset, &mut registers);
+        }
+        SIRInstruction::Commit(..) => {}
+        SIRInstruction::Concat(_, sources) => registers.extend(sources),
+        SIRInstruction::Mux(_, condition, then_value, else_value) => {
+            registers.extend([*condition, *then_value, *else_value]);
+        }
+        SIRInstruction::RuntimeEvent { args, .. }
+        | SIRInstruction::CombCaptureEvent { args, .. } => registers.extend(args),
+        SIRInstruction::CombCaptureEnableIfChanged { old, new, .. } => {
+            registers.extend([*old, *new]);
+        }
+    }
+    registers
+}
+
+fn split_comb_execution_unit(
+    unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+) -> Vec<ExecutionUnit<RegionedAbsoluteAddr>> {
+    if unit.blocks.len() != 1 {
+        return vec![unit.clone()];
+    }
+    let block = &unit.blocks[&unit.entry_block_id];
+    if !block.params.is_empty() || block.terminator != SIRTerminator::Return {
+        return vec![unit.clone()];
+    }
+
+    let definitions = block
+        .instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, instruction)| {
+            instruction
+                .defined_register()
+                .map(|register| (register, index))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut segment_start = 0usize;
+    let mut ranges = Vec::new();
+    for (index, instruction) in block.instructions.iter().enumerate() {
+        let is_store_boundary = matches!(
+            instruction,
+            SIRInstruction::Store(..) | SIRInstruction::Commit(..)
+        );
+        if is_store_boundary && index + 1 < block.instructions.len() {
+            ranges.push(segment_start..index + 1);
+            segment_start = index + 1;
+        }
+    }
+    if ranges.is_empty() {
+        return vec![unit.clone()];
+    }
+    ranges.push(segment_start..block.instructions.len());
+    ranges
+        .into_iter()
+        .map(|range| {
+            let mut prefix = HashSet::<usize>::default();
+            let mut pending = block.instructions[range.clone()]
+                .iter()
+                .flat_map(instruction_registers)
+                .collect::<Vec<_>>();
+            while let Some(register) = pending.pop() {
+                let Some(&definition) = definitions.get(&register) else {
+                    continue;
+                };
+                if definition >= range.start || !prefix.insert(definition) {
+                    continue;
+                }
+                pending.extend(instruction_registers(&block.instructions[definition]));
+            }
+            let mut prefix = prefix.into_iter().collect::<Vec<_>>();
+            prefix.sort_unstable();
+            let instructions = prefix
+                .into_iter()
+                .map(|index| block.instructions[index].clone())
+                .chain(block.instructions[range].iter().cloned())
+                .collect();
+            let split_block = celox_sir::BasicBlock {
+                id: BlockId(0),
+                params: Vec::new(),
+                instructions,
+                terminator: SIRTerminator::Return,
+            };
+            ExecutionUnit {
+                entry_block_id: BlockId(0),
+                blocks: [(BlockId(0), split_block)].into_iter().collect(),
+                register_map: unit.register_map.clone(),
+            }
+        })
+        .collect()
+}
+
 fn compile_program(
     laid_out: &LaidOutProgram,
     options: &SimulatorOptions,
     capture_trace: bool,
-) -> Result<(SharedNativeCode, Option<NativeCodegenTrace>), SimulatorError> {
+) -> Result<(NativeProgramImage, Option<NativeCodegenTrace>), SimulatorError> {
     const MAX_PARALLEL_NATIVE_FUNCTIONS: usize = 4;
 
     let sir = laid_out;
     let layout = laid_out.layout();
     let (compile_tasks, task_bindings) = collect_ff_compile_tasks(sir);
     let next_task = AtomicUsize::new(0);
-    let (comb_jit, mut compiled_ff_codes) = std::thread::scope(|scope| {
+    let (comb_jit, compiled_ff_codes) = std::thread::scope(|scope| {
         let four_state = options.four_state;
         let x86_options = &options.x86_options;
         let comb_handle = scope.spawn(move || {
@@ -709,6 +1221,28 @@ fn compile_program(
         }
         Ok::<_, SimulatorError>((comb_jit, compiled_ff_codes))
     })?;
+    let comb_runtime_units = sir
+        .sir
+        .eval_comb
+        .iter()
+        .flat_map(split_comb_execution_unit)
+        .collect::<Vec<_>>();
+    let comb_unit_jits = comb_runtime_units
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| {
+            compile_unit_refs(
+                &[unit],
+                layout,
+                options.four_state,
+                &format!("eval_comb_unit[{index}]"),
+                None,
+                &options.x86_options,
+                false,
+                &options.optimize_options.diagnostics,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let codegen_trace = capture_trace
         .then(|| format_native_codegen_trace(&comb_jit, &compiled_ff_codes, &compile_tasks));
     let semantic_memory_size = layout
@@ -721,12 +1255,53 @@ fn compile_program(
                 .values()
                 .map(|compiled| compiled.required_state_size),
         )
+        .chain(
+            comb_unit_jits
+                .iter()
+                .map(|compiled| compiled.required_state_size),
+        )
         .fold(semantic_memory_size, usize::max);
-    let comb_func = comb_jit.code.fn_ptr;
-    let mut all_jit_codes: Vec<jit_mem::JitCode> = Vec::with_capacity(1 + compiled_ff_codes.len());
-    all_jit_codes.push(comb_jit.code);
-
-    // Compile FF units
+    let mut packed_image = Vec::new();
+    let mut code_entries = Vec::with_capacity(1 + compiled_ff_codes.len());
+    let mut image_symbols = Vec::new();
+    let comb_offset = append_native_code(
+        &mut packed_image,
+        &mut code_entries,
+        &mut image_symbols,
+        "eval_comb".into(),
+        &comb_jit,
+    )?;
+    let mut comb_unit_offsets = Vec::with_capacity(comb_unit_jits.len());
+    for (index, compiled) in comb_unit_jits.iter().enumerate() {
+        comb_unit_offsets.push(append_native_code(
+            &mut packed_image,
+            &mut code_entries,
+            &mut image_symbols,
+            format!("eval_comb_unit[{index}]"),
+            compiled,
+        )?);
+    }
+    let mut compiled_ff_keys = compiled_ff_codes.keys().copied().collect::<Vec<_>>();
+    compiled_ff_keys.sort_unstable();
+    let mut task_offsets = HashMap::default();
+    let mut label_indices = HashMap::<&str, usize>::default();
+    for &task_id in &compiled_ff_keys {
+        let task = &compile_tasks[task_id];
+        let index = label_indices.entry(task.label).or_default();
+        let name = format!("{}[{index}]", task.label);
+        *index += 1;
+        let offset = append_native_code(
+            &mut packed_image,
+            &mut code_entries,
+            &mut image_symbols,
+            name,
+            &compiled_ff_codes[&task_id],
+        )?;
+        task_offsets.insert(task_id, offset);
+    }
+    // Bind semantic event identities to image-relative function offsets. The
+    // precompiled runtime turns these into process-local pointers after it has
+    // copied the image into executable memory.
     let mut next_id = 0usize;
     let mut id_to_addr = Vec::new();
     let mut id_to_event = Vec::new();
@@ -734,22 +1309,18 @@ fn compile_program(
     let mut eval_only_event_map = HashMap::default();
     let mut apply_event_map = HashMap::default();
     let mut addr_to_id = HashMap::default();
-    let compiled_ff_cache: HashMap<usize, NativeSimFunc> = compiled_ff_codes
-        .iter()
-        .map(|(&task_id, compiled)| (task_id, compiled.code.fn_ptr))
-        .collect();
     let compile_ff_group = |ff_map: &HashMap<
         AbsoluteAddr,
         Vec<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>>,
     >,
                             label: &'static str,
-                            event_map_out: &mut HashMap<AbsoluteAddr, NativeEventRef>,
+                            event_map_out: &mut HashMap<AbsoluteAddr, NativeEventImageRef>,
                             addr_to_id: &mut HashMap<AbsoluteAddr, usize>,
-                            compiled_ff_cache: &HashMap<usize, NativeSimFunc>,
+                            compiled_ff_cache: &HashMap<usize, usize>,
                             comb_apply_label: Option<&'static str>,
                             next_id: &mut usize,
                             id_to_addr: &mut Vec<AbsoluteAddr>,
-                            id_to_event: &mut Vec<NativeEventRef>|
+                            id_to_event: &mut Vec<NativeEventImageRef>|
      -> Result<(), SimulatorError> {
         for addr in ff_map.keys() {
             let canonical = sir.design.events.canonical(*addr);
@@ -759,13 +1330,13 @@ fn compile_program(
             }
 
             let task_id = task_bindings[&(label, *addr)];
-            let func = compiled_ff_cache[&task_id];
-            let comb_apply_func = comb_apply_label
+            let func_offset = compiled_ff_cache[&task_id];
+            let comb_apply_offset = comb_apply_label
                 .map(|label| {
                     let task_id = task_bindings[&(label, *addr)];
                     compiled_ff_cache[&task_id]
                 })
-                .unwrap_or(func);
+                .unwrap_or(func_offset);
 
             let (id, is_new_id) = if let Some(&id) = addr_to_id.get(&canonical) {
                 (id, false)
@@ -777,9 +1348,9 @@ fn compile_program(
                 (id, true)
             };
 
-            let event = NativeEventRef {
-                func,
-                comb_apply_func,
+            let event = NativeEventImageRef {
+                func_offset,
+                comb_apply_offset,
                 addr: canonical,
                 id,
             };
@@ -799,7 +1370,7 @@ fn compile_program(
         "eval_apply_ff",
         &mut event_map,
         &mut addr_to_id,
-        &compiled_ff_cache,
+        &task_offsets,
         Some("eval_comb_apply_ff"),
         &mut next_id,
         &mut id_to_addr,
@@ -810,7 +1381,7 @@ fn compile_program(
         "eval_only_ff",
         &mut eval_only_event_map,
         &mut addr_to_id,
-        &compiled_ff_cache,
+        &task_offsets,
         None,
         &mut next_id,
         &mut id_to_addr,
@@ -821,22 +1392,12 @@ fn compile_program(
         "apply_ff",
         &mut apply_event_map,
         &mut addr_to_id,
-        &compiled_ff_cache,
+        &task_offsets,
         None,
         &mut next_id,
         &mut id_to_addr,
         &mut id_to_event,
     )?;
-    let mut compiled_ff_keys = compiled_ff_codes.keys().copied().collect::<Vec<_>>();
-    compiled_ff_keys.sort_unstable();
-    for task_id in compiled_ff_keys {
-        all_jit_codes.push(
-            compiled_ff_codes
-                .remove(&task_id)
-                .expect("compiled FF key exists")
-                .code,
-        );
-    }
     // Pre-compute 4-state initialization regions
     let mut four_state_inits = Vec::new();
     if options.four_state {
@@ -858,17 +1419,35 @@ fn compile_program(
     }
 
     Ok((
-        SharedNativeCode {
-            comb_func,
-            _jit_codes: all_jit_codes,
+        NativeProgramImage {
+            code: packed_image,
+            code_entries,
+            symbols: image_symbols,
+            comb_offset,
+            comb_unit_offsets,
+            required_native_features: current_native_feature_bits(),
             event_map,
             eval_only_event_map,
             apply_event_map,
             id_to_addr,
             id_to_event,
+            reflection: sir.runtime().build_design_reflection(layout),
+            initial_state: sir.runtime().design.initial_state.clone(),
+            runtime_schema: NativeRuntimeSchema {
+                runtime_errors: sir.runtime().runtime_schema.runtime_errors.clone(),
+                runtime_event_sites: sir.runtime().runtime_schema.runtime_event_sites.clone(),
+                comb_observers: sir.runtime().runtime_schema.comb_observers.clone(),
+            },
+            event_topology: NativeEventTopology {
+                aliases: sir.runtime().design.events.aliases.clone(),
+            },
             layout: layout.clone(),
             native_memory_size,
-            options: options.clone(),
+            options: NativeRuntimeOptions {
+                four_state: options.four_state,
+                native_tick_loop: options.x86_options.native_tick_loop,
+                perf_map: options.x86_options.diagnostics.perf_map,
+            },
             four_state_inits,
         },
         codegen_trace,
@@ -887,14 +1466,111 @@ pub struct NativeBackend {
     execution_timing: Option<NativeExecutionTiming>,
 }
 
+fn write_bits_to_memory_from(
+    memory: &mut [u8],
+    destination_bit_offset: usize,
+    bit_width: usize,
+    source: &[u8],
+    source_bit_offset: usize,
+) {
+    for bit in 0..bit_width {
+        let source_bit = source_bit_offset + bit;
+        let value = (source[source_bit / 8] >> (source_bit % 8)) & 1;
+        let destination_bit = destination_bit_offset + bit;
+        let destination = &mut memory[destination_bit / 8];
+        let mask = 1u8 << (destination_bit % 8);
+        if value == 0 {
+            *destination &= !mask;
+        } else {
+            *destination |= mask;
+        }
+    }
+}
+
+fn write_bits_to_memory(
+    memory: &mut [u8],
+    destination_bit_offset: usize,
+    bit_width: usize,
+    source: &[u8],
+) {
+    write_bits_to_memory_from(memory, destination_bit_offset, bit_width, source, 0);
+}
+
+fn write_initial_run_to_plane(
+    memory: &mut [u8],
+    signal: SignalRef,
+    mask_plane: bool,
+    run: &InitialStateWriteRun,
+    source: &[u8],
+) {
+    let Some(array) = signal.array_layout else {
+        let plane_size = signal.width.div_ceil(8);
+        let destination_bit_offset =
+            (signal.offset + usize::from(mask_plane) * plane_size) * 8 + run.bit_offset;
+        write_bits_to_memory(memory, destination_bit_offset, run.bit_width, source);
+        return;
+    };
+
+    let plane_offset = signal.offset + usize::from(mask_plane) * array.plane_size;
+    let mut consumed = 0usize;
+    while consumed < run.bit_width {
+        let logical_offset = run.bit_offset + consumed;
+        let element = logical_offset / array.element_width;
+        let intra_element = logical_offset % array.element_width;
+        let part_width = (run.bit_width - consumed).min(array.element_width - intra_element);
+        let destination_bit_offset =
+            (plane_offset + element * array.element_stride) * 8 + intra_element;
+
+        if consumed.is_multiple_of(8)
+            && destination_bit_offset.is_multiple_of(8)
+            && part_width.is_multiple_of(8)
+        {
+            let source_byte = consumed / 8;
+            let destination_byte = destination_bit_offset / 8;
+            let byte_width = part_width / 8;
+            memory[destination_byte..destination_byte + byte_width]
+                .copy_from_slice(&source[source_byte..source_byte + byte_width]);
+        } else {
+            write_bits_to_memory_from(memory, destination_bit_offset, part_width, source, consumed);
+        }
+        consumed += part_width;
+    }
+}
+
 impl NativeBackend {
+    pub(crate) fn eval_comb_units_with(
+        &mut self,
+        mut after_unit: impl FnMut(&mut Self),
+    ) -> Result<(), SimulatorErrorCode> {
+        let funcs = self.compiled.comb_unit_funcs.clone();
+        if funcs.is_empty() {
+            return self.eval_comb();
+        }
+        for func in funcs {
+            self.call_func_timed(func)?;
+            after_unit(self);
+        }
+        Ok(())
+    }
+
+    /// Compile a pointer-free native image without attaching it to executable
+    /// memory. A precompiled runtime can load the result with
+    /// [`SharedNativeCode::from_image`].
+    pub fn compile_image(
+        laid_out: &LaidOutProgram,
+        options: &SimulatorOptions,
+    ) -> Result<NativeProgramImage, SimulatorError> {
+        let (image, trace) = compile_program(laid_out, options, false)?;
+        debug_assert!(trace.is_none());
+        Ok(image)
+    }
+
     pub fn new(
         laid_out: &LaidOutProgram,
         options: &SimulatorOptions,
     ) -> Result<Self, SimulatorError> {
-        let (shared, trace) = compile_program(laid_out, options, false)?;
-        debug_assert!(trace.is_none());
-        let shared = Arc::new(shared);
+        let image = Self::compile_image(laid_out, options)?;
+        let shared = Arc::new(SharedNativeCode::from_image(image)?);
         Ok(Self::from_shared(shared))
     }
 
@@ -902,7 +1578,8 @@ impl NativeBackend {
         laid_out: &LaidOutProgram,
         options: &SimulatorOptions,
     ) -> Result<(Self, NativeCodegenTrace), SimulatorError> {
-        let (shared, trace) = compile_program(laid_out, options, true)?;
+        let (image, trace) = compile_program(laid_out, options, true)?;
+        let shared = SharedNativeCode::from_image(image)?;
         let backend = Self::from_shared(Arc::new(shared));
         Ok((
             backend,
@@ -938,7 +1615,85 @@ impl NativeBackend {
             execution_timing: None,
         };
         backend.install_event_buffers();
+        let compiled = Arc::clone(&backend.compiled);
+        backend.apply_initial_values(&compiled.program_image.initial_state);
         backend
+    }
+
+    fn apply_initial_values(&mut self, initial_state: &[InitialStateValue<AbsoluteAddr>]) {
+        for init in initial_state {
+            let signal = self.resolve_signal(&init.address);
+            match &init.data {
+                InitialStateData::Packed {
+                    value,
+                    mask,
+                    written_mask,
+                } => {
+                    let width_mask = if signal.width == 0 {
+                        BigUint::default()
+                    } else {
+                        (BigUint::from(1u8) << signal.width) - BigUint::from(1u8)
+                    };
+                    let preserve_mask = &width_mask ^ (written_mask & &width_mask);
+                    let (current_value, current_mask) = self.get_four_state(signal);
+                    let value = (current_value & &preserve_mask) | (value & written_mask);
+                    let mask = (current_mask & &preserve_mask) | (mask & written_mask);
+                    if signal.is_4state {
+                        self.set_four_state(signal, value, mask);
+                    } else {
+                        self.set_wide(signal, value);
+                    }
+                }
+                InitialStateData::Writes(runs) => self.apply_initial_memory_writes(signal, runs),
+            }
+        }
+    }
+
+    fn apply_initial_memory_writes(&mut self, signal: SignalRef, runs: &[InitialStateWriteRun]) {
+        let value_byte_size = signal.width.div_ceil(8);
+        let write_mask = self.compiled.options.four_state && signal.is_4state;
+        let mem = self.mem_bytes_mut();
+
+        for run in runs {
+            if run.bit_width == 0 {
+                continue;
+            }
+            if signal.array_layout.is_some() {
+                write_initial_run_to_plane(mem, signal, false, run, &run.value_bytes);
+                if write_mask {
+                    write_initial_run_to_plane(mem, signal, true, run, &run.mask_bytes);
+                }
+                continue;
+            }
+            if run.bit_offset.is_multiple_of(8) && run.bit_width.is_multiple_of(8) {
+                let byte_offset = run.bit_offset / 8;
+                let byte_width = run.bit_width / 8;
+                let value_offset = signal.offset + byte_offset;
+                mem[value_offset..value_offset + byte_width]
+                    .copy_from_slice(&run.value_bytes[..byte_width]);
+                if write_mask {
+                    let mask_offset = signal.offset + value_byte_size + byte_offset;
+                    mem[mask_offset..mask_offset + byte_width]
+                        .copy_from_slice(&run.mask_bytes[..byte_width]);
+                }
+                continue;
+            }
+
+            write_bits_to_memory(
+                mem,
+                signal.offset * 8 + run.bit_offset,
+                run.bit_width,
+                &run.value_bytes,
+            );
+            if write_mask {
+                write_bits_to_memory(
+                    mem,
+                    (signal.offset + value_byte_size) * 8 + run.bit_offset,
+                    run.bit_width,
+                    &run.mask_bytes,
+                );
+            }
+        }
     }
 
     /// Start a fresh opt-in measurement of generated native function calls.
@@ -1144,7 +1899,7 @@ impl super::super::SimBackend for NativeBackend {
         event: NativeEventRef,
         count: u64,
     ) -> (u64, Result<(), SimulatorErrorCode>) {
-        if self.compiled.options.x86_options.native_tick_loop {
+        if self.compiled.options.native_tick_loop {
             self.call_func_many_timed(event.comb_apply_func, count)
         } else if count == 0 {
             (0, Ok(()))

@@ -4,6 +4,7 @@ use dynasmrt::mmap::MutableBuffer;
 use dynasmrt::{AssemblyOffset, ExecutableBuffer};
 
 /// Optional subrange symbol retained for parity with the native runtime API.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JitSymbol {
     pub offset: usize,
     pub size: usize,
@@ -78,6 +79,22 @@ impl JitCode {
     }
 
     pub fn code(&self) -> &[u8] {
+        &self.buffer
+    }
+
+    /// Return a pointer to an entry inside this executable image.
+    ///
+    /// AArch64 functions are emitted with their internal branches already
+    /// resolved. Keeping each function blob intact therefore permits several
+    /// functions to be copied into one image and addressed by offset.
+    pub fn entry_ptr(&self, offset: usize) -> Option<*const u8> {
+        (offset < self.buffer.len()).then(|| self.buffer.ptr(AssemblyOffset(offset)))
+    }
+
+    /// Bytes of the executable image, including alignment padding and literal
+    /// data. This is the exact image that can later be copied into an AOT
+    /// container.
+    pub fn image(&self) -> &[u8] {
         &self.buffer
     }
 }

@@ -115,6 +115,29 @@ impl X86Features {
     }
 }
 
+/// Feature bits required by machine code emitted on this host.
+pub fn detected_image_feature_bits() -> u8 {
+    const BMI2: u8 = 1 << 0;
+    const AVX: u8 = 1 << 1;
+    const FSGSBASE: u8 = 1 << 2;
+
+    let features = X86Features::detect();
+    let mut bits = 0;
+    if features.bmi2() {
+        bits |= BMI2;
+    }
+    if features.avx() {
+        bits |= AVX;
+    }
+    if matches!(
+        features.state_base(),
+        StateBaseStrategy::Fs | StateBaseStrategy::Gs
+    ) {
+        bits |= FSGSBASE;
+    }
+    bits
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn detect_state_base_strategy() -> StateBaseStrategy {
     // CPUID alone is insufficient: older kernels can leave CR4.FSGSBASE
