@@ -22,7 +22,7 @@
     "@biomejs/biome": "^2.4.5",
     "@emnapi/core": "2.0.0-alpha.3",
     "@emnapi/runtime": "2.0.0-alpha.3",
-    "@napi-rs/wasm-runtime": "1.2.1",
+    "@napi-rs/wasm-runtime": "1.2.2",
     "@tybys/wasm-util": "^0.10.1",
     "chart.js": "^4.4.0",
     "emnapi": "2.0.0-alpha.3",
