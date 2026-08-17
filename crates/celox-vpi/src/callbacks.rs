@@ -172,6 +172,8 @@ fn fire(id: u64) -> bool {
     };
 
     let now = STATE.with_borrow(|state| state.time);
+    let delivered_snapshot = callback_signal(&registration.data)
+        .and_then(|signal| value_bits(signal).map(|(value, mask, _)| (value, mask)));
     if !registration.data.time.is_null() {
         // Safety: cocotb stores callback time in its live callback object.
         let time = unsafe { &mut *registration.data.time };
@@ -197,8 +199,7 @@ fn fire(id: u64) -> bool {
 
     let cancelled = STATE.with_borrow_mut(|state| state.firing.remove(&id).unwrap_or(true));
     if registration.data.reason == CB_VALUE_CHANGE && !cancelled {
-        registration.snapshot = callback_signal(&registration.data)
-            .and_then(|signal| value_bits(signal).map(|(value, mask, _)| (value, mask)));
+        registration.snapshot = delivered_snapshot;
         STATE.with_borrow_mut(|state| {
             state.callbacks.insert(id, registration);
         });
@@ -234,19 +235,28 @@ pub(super) fn run() -> bool {
             progressed |= fire(id);
         }
         super::flush_pending_writes();
-        progressed |= fire_all(CB_READ_WRITE_SYNCH);
-        super::flush_pending_writes();
         loop {
             let changed = changed_value_ids();
-            if changed.is_empty() {
-                break;
+            if !changed.is_empty() {
+                for id in changed {
+                    progressed |= fire(id);
+                }
+                if !super::flush_pending_writes() {
+                    break;
+                }
+                continue;
             }
-            for id in changed {
-                progressed |= fire(id);
+            let read_write = registration_ids(CB_READ_WRITE_SYNCH);
+            if !read_write.is_empty() {
+                for id in read_write {
+                    progressed |= fire(id);
+                }
+                if !super::flush_pending_writes() {
+                    break;
+                }
+                continue;
             }
-            if !super::flush_pending_writes() {
-                break;
-            }
+            break;
         }
         progressed |= fire_all(CB_READ_ONLY_SYNCH);
 

@@ -72,14 +72,50 @@ const COUNTER: &str = r#"
     }
 "#;
 
+const EDGE_SAMPLER: &str = r#"
+    module Top (
+        clk: input clock,
+        d: input logic<8>,
+        newest: output logic<8>,
+        previous: output logic<8>,
+    ) {
+        always_ff (clk) {
+            newest = d;
+            previous = newest;
+        }
+    }
+"#;
+
+const BRANCHED_COMB: &str = r#"
+    module Top (
+        sel: input logic,
+        a: input logic<8>,
+        b: input logic<8>,
+        y: output logic<8>,
+        z: output logic<8>,
+    ) {
+        always_comb {
+            if sel {
+                y = a;
+            } else {
+                y = b;
+            }
+            z = y + 1;
+        }
+    }
+"#;
+
 const WIDE_FOUR_STATE: &str = r#"
     module Top (
         signed_in: input signed logic<64>,
+        narrow_signed_in: input signed logic<8>,
         four_in: input logic<4>,
         signed_out: output signed logic<64>,
+        narrow_signed_out: output signed logic<8>,
         four_out: output logic<4>,
     ) {
         assign signed_out = signed_in;
+        assign narrow_signed_out = narrow_signed_in;
         assign four_out = four_in;
     }
 "#;
@@ -338,10 +374,54 @@ fn string_separators_delay_flags_and_force_release_follow_vpi_semantics() {
     clear_runtime();
 }
 
+#[test]
+fn force_is_reapplied_between_stores_in_branched_comb_logic() {
+    let simulator = Simulator::builder(BRANCHED_COMB, "Top")
+        .opt_level(celox::OptLevel::O0)
+        .build()
+        .unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+
+    unsafe {
+        let sel = vpi_handle_by_name(c"Top.sel".as_ptr(), ptr::null_mut());
+        let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        let b = vpi_handle_by_name(c"Top.b".as_ptr(), ptr::null_mut());
+        let y = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+        let z = vpi_handle_by_name(c"Top.z".as_ptr(), ptr::null_mut());
+        put_int(sel, 1);
+        put_int(a, 10);
+        put_int(b, 20);
+
+        let forced = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 99 },
+        };
+        assert_eq!(vpi_put_value(y, &forced, ptr::null(), VPI_FORCE_FLAG), y);
+        put_int(a, 11);
+
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        vpi_get_value(z, &mut value);
+        assert_eq!(value.value.integer, 100);
+
+        for handle in [sel, a, b, y, z] {
+            assert_eq!(vpi_free_object(handle), 1);
+        }
+    }
+    clear_runtime();
+}
+
 static CALLBACK_VALUE: AtomicI32 = AtomicI32::new(-1);
 static VALUE_CHANGE_DRIVE: AtomicBool = AtomicBool::new(false);
 static VALUE_CHANGE_INPUT: AtomicUsize = AtomicUsize::new(0);
 static READ_ONLY_VALUE: AtomicI32 = AtomicI32::new(-1);
+static SELF_CHANGE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SELF_CHANGE_VALUE: AtomicI32 = AtomicI32::new(-1);
+static REGION_ORDER: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" fn record_changed_value(data: *mut VpiCbData) -> i32 {
     // Safety: callback storage and its requested value are live while firing.
@@ -377,6 +457,49 @@ unsafe extern "C" fn drive_then_request_read_only(data: *mut VpiCbData) -> i32 {
         user_data: ptr::null_mut(),
     };
     assert!(!unsafe { vpi_register_cb(&read_only) }.is_null());
+    0
+}
+
+unsafe extern "C" fn change_watched_signal_once(data: *mut VpiCbData) -> i32 {
+    let value = unsafe { (*(*data).value).value.integer };
+    SELF_CHANGE_VALUE.store(value, Ordering::SeqCst);
+    let invocation = SELF_CHANGE_COUNT.fetch_add(1, Ordering::SeqCst);
+    if invocation == 0 {
+        unsafe { put_int((*data).obj, 2) };
+    }
+    0
+}
+
+fn record_region(digit: usize) {
+    REGION_ORDER
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |order| {
+            Some(order * 10 + digit)
+        })
+        .unwrap();
+}
+
+unsafe extern "C" fn record_read_write_region(_data: *mut VpiCbData) -> i32 {
+    record_region(2);
+    0
+}
+
+unsafe extern "C" fn record_read_only_region(_data: *mut VpiCbData) -> i32 {
+    record_region(3);
+    0
+}
+
+unsafe extern "C" fn record_value_change_region(_data: *mut VpiCbData) -> i32 {
+    record_region(1);
+    let read_write = VpiCbData {
+        reason: CB_READ_WRITE_SYNCH,
+        cb_rtn: Some(record_read_write_region),
+        obj: ptr::null_mut(),
+        time: ptr::null_mut(),
+        value: ptr::null_mut(),
+        index: 0,
+        user_data: ptr::null_mut(),
+    };
+    assert!(!unsafe { vpi_register_cb(&read_write) }.is_null());
     0
 }
 
@@ -458,6 +581,81 @@ fn value_change_writes_settle_before_read_only_callbacks() {
 }
 
 #[test]
+fn value_change_callback_observes_a_change_it_makes_itself() {
+    let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+    SELF_CHANGE_COUNT.store(0, Ordering::SeqCst);
+    SELF_CHANGE_VALUE.store(-1, Ordering::SeqCst);
+
+    unsafe {
+        let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        let mut callback_value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: -1 },
+        };
+        let callback = VpiCbData {
+            reason: CB_VALUE_CHANGE,
+            cb_rtn: Some(change_watched_signal_once),
+            obj: a,
+            time: ptr::null_mut(),
+            value: &mut callback_value,
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        let callback_handle = vpi_register_cb(&callback);
+        assert!(!callback_handle.is_null());
+        put_int(a, 1);
+        assert!(!run_callbacks());
+        assert_eq!(SELF_CHANGE_COUNT.load(Ordering::SeqCst), 2);
+        assert_eq!(SELF_CHANGE_VALUE.load(Ordering::SeqCst), 2);
+        assert_eq!(vpi_remove_cb(callback_handle), 1);
+        assert_eq!(vpi_free_object(a), 1);
+    }
+    clear_runtime();
+}
+
+#[test]
+fn value_change_precedes_read_write_and_read_only_regions() {
+    let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+    REGION_ORDER.store(0, Ordering::SeqCst);
+
+    unsafe {
+        let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        let y = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+        let value_change = VpiCbData {
+            reason: CB_VALUE_CHANGE,
+            cb_rtn: Some(record_value_change_region),
+            obj: y,
+            time: ptr::null_mut(),
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        let read_only = VpiCbData {
+            reason: CB_READ_ONLY_SYNCH,
+            cb_rtn: Some(record_read_only_region),
+            obj: ptr::null_mut(),
+            ..value_change
+        };
+        let value_change_handle = vpi_register_cb(&value_change);
+        assert!(!value_change_handle.is_null());
+        assert!(!vpi_register_cb(&read_only).is_null());
+        put_int(a, 1);
+        assert!(!run_callbacks());
+        assert_eq!(REGION_ORDER.load(Ordering::SeqCst), 123);
+        assert_eq!(vpi_remove_cb(value_change_handle), 1);
+        assert_eq!(vpi_free_object(a), 1);
+        assert_eq!(vpi_free_object(y), 1);
+    }
+    clear_runtime();
+}
+
+#[test]
 fn signed_integer_deposits_and_z_values_round_trip() {
     let simulator = Simulator::builder(WIDE_FOUR_STATE, "Top")
         .four_state(true)
@@ -470,9 +668,14 @@ fn signed_integer_deposits_and_z_values_round_trip() {
     unsafe {
         let signed_in = vpi_handle_by_name(c"Top.signed_in".as_ptr(), ptr::null_mut());
         let signed_out = vpi_handle_by_name(c"Top.signed_out".as_ptr(), ptr::null_mut());
+        let narrow_signed_in =
+            vpi_handle_by_name(c"Top.narrow_signed_in".as_ptr(), ptr::null_mut());
+        let narrow_signed_out =
+            vpi_handle_by_name(c"Top.narrow_signed_out".as_ptr(), ptr::null_mut());
         let four_in = vpi_handle_by_name(c"Top.four_in".as_ptr(), ptr::null_mut());
         let four_out = vpi_handle_by_name(c"Top.four_out".as_ptr(), ptr::null_mut());
         put_int(signed_in, -1);
+        put_int(narrow_signed_in, -1);
 
         let mut vector = VpiValue {
             format: VPI_VECTOR_VAL,
@@ -486,6 +689,13 @@ fn signed_integer_deposits_and_z_values_round_trip() {
         assert_eq!(words[1].aval as u32, u32::MAX);
         assert_eq!(words[0].bval, 0);
         assert_eq!(words[1].bval, 0);
+
+        let mut integer = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        vpi_get_value(narrow_signed_out, &mut integer);
+        assert_eq!(integer.value.integer, -1);
 
         let four = VpiValue {
             format: VPI_BIN_STR_VAL,
@@ -506,7 +716,14 @@ fn signed_integer_deposits_and_z_values_round_trip() {
         vpi_get_value(four_out, &mut string);
         assert_eq!(CStr::from_ptr(string.value.str_), c"z01x");
 
-        for handle in [signed_in, signed_out, four_in, four_out] {
+        for handle in [
+            signed_in,
+            signed_out,
+            narrow_signed_in,
+            narrow_signed_out,
+            four_in,
+            four_out,
+        ] {
             assert_eq!(vpi_free_object(handle), 1);
         }
     }
@@ -547,6 +764,21 @@ unsafe extern "C" fn drive_two_four_state_posedges(data: *mut VpiCbData) -> i32 
             vpi_put_value((*data).obj, &high, ptr::null(), VPI_NO_DELAY),
             (*data).obj
         );
+    }
+    0
+}
+
+static EDGE_DATA_HANDLE: AtomicUsize = AtomicUsize::new(0);
+
+unsafe extern "C" fn drive_two_edges_with_distinct_data(data: *mut VpiCbData) -> i32 {
+    let clk = unsafe { (*data).obj };
+    let d = EDGE_DATA_HANDLE.load(Ordering::SeqCst) as VpiHandle;
+    unsafe {
+        put_int(clk, 1);
+        put_int(d, 1);
+        put_int(clk, 0);
+        put_int(d, 2);
+        put_int(clk, 1);
     }
     0
 }
@@ -672,5 +904,58 @@ fn repeated_four_state_clock_edges_in_one_callback_are_not_lost() {
         assert_eq!(vpi_free_object(clk), 1);
         assert_eq!(vpi_free_object(q), 1);
     }
+    clear_runtime();
+}
+
+#[test]
+fn repeated_clock_edges_preserve_the_data_at_each_edge() {
+    let simulator = Simulator::builder(EDGE_SAMPLER, "Top").build().unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+
+    unsafe {
+        let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
+        let d = vpi_handle_by_name(c"Top.d".as_ptr(), ptr::null_mut());
+        let newest = vpi_handle_by_name(c"Top.newest".as_ptr(), ptr::null_mut());
+        let previous = vpi_handle_by_name(c"Top.previous".as_ptr(), ptr::null_mut());
+        put_int(clk, 0);
+        put_int(d, 0);
+        put_int(newest, 0);
+        put_int(previous, 0);
+        EDGE_DATA_HANDLE.store(d as usize, Ordering::SeqCst);
+
+        let mut time = VpiTime {
+            type_: 2,
+            high: 0,
+            low: 1,
+            real: 0.0,
+        };
+        let callback = VpiCbData {
+            reason: CB_AFTER_DELAY,
+            cb_rtn: Some(drive_two_edges_with_distinct_data),
+            obj: clk,
+            time: &mut time,
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        assert!(!vpi_register_cb(&callback).is_null());
+        assert!(!run_callbacks());
+
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        vpi_get_value(newest, &mut value);
+        assert_eq!(value.value.integer, 2);
+        vpi_get_value(previous, &mut value);
+        assert_eq!(value.value.integer, 1);
+
+        for handle in [clk, d, newest, previous] {
+            assert_eq!(vpi_free_object(handle), 1);
+        }
+    }
+    EDGE_DATA_HANDLE.store(0, Ordering::SeqCst);
     clear_runtime();
 }

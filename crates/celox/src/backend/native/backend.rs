@@ -1074,7 +1074,162 @@ fn split_comb_execution_unit(
     unit: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Vec<ExecutionUnit<RegionedAbsoluteAddr>> {
     if unit.blocks.len() != 1 {
-        return vec![unit.clone()];
+        let definitions = unit
+            .blocks
+            .iter()
+            .flat_map(|(block_id, block)| {
+                block
+                    .instructions
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, instruction)| {
+                        instruction
+                            .defined_register()
+                            .map(|register| (register, (*block_id, index)))
+                    })
+            })
+            .collect::<HashMap<_, _>>();
+        let store_sites = unit
+            .blocks
+            .iter()
+            .flat_map(|(block_id, block)| {
+                block
+                    .instructions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, instruction)| {
+                        matches!(
+                            instruction,
+                            SIRInstruction::Store(..) | SIRInstruction::Commit(..)
+                        )
+                    })
+                    .map(move |(index, _)| (*block_id, index))
+            })
+            .collect::<Vec<_>>();
+        if store_sites.is_empty() {
+            return vec![unit.clone()];
+        }
+
+        let instruction_at = |site: (BlockId, usize)| &unit.blocks[&site.0].instructions[site.1];
+        let register_dependencies = store_sites
+            .iter()
+            .copied()
+            .map(|store_site| {
+                let mut dependencies = HashSet::default();
+                let mut pending = instruction_registers(instruction_at(store_site));
+                while let Some(register) = pending.pop() {
+                    if !dependencies.insert(register) {
+                        continue;
+                    }
+                    if let Some(&definition) = definitions.get(&register) {
+                        pending.extend(instruction_registers(instruction_at(definition)));
+                    }
+                }
+                (store_site, dependencies)
+            })
+            .collect::<HashMap<_, _>>();
+        let store_source = |site| match instruction_at(site) {
+            SIRInstruction::Store(_, _, _, source, _, _) => Some(*source),
+            _ => None,
+        };
+        let mut remaining = store_sites;
+        let mut ordered_stores = Vec::with_capacity(remaining.len());
+        while !remaining.is_empty() {
+            let next = remaining
+                .iter()
+                .position(|candidate| {
+                    let candidate_source = store_source(*candidate);
+                    !remaining.iter().any(|predecessor| {
+                        if predecessor == candidate {
+                            return false;
+                        }
+                        store_source(*predecessor).is_some_and(|source| {
+                            Some(source) != candidate_source
+                                && register_dependencies[candidate].contains(&source)
+                        })
+                    })
+                })
+                .unwrap_or(0);
+            ordered_stores.push(remaining.remove(next));
+        }
+
+        let mut split = ordered_stores
+            .iter()
+            .enumerate()
+            .map(|(order, &target)| {
+                let reloads = ordered_stores[..order]
+                    .iter()
+                    .filter_map(|&prior_site| {
+                        let SIRInstruction::Store(address, offset, bits, source, _, _) =
+                            instruction_at(prior_site)
+                        else {
+                            return None;
+                        };
+                        (register_dependencies[&target].contains(source)
+                            && unit.register_map[source].width() == *bits)
+                            .then(|| (*source, (*address, offset.clone(), *bits)))
+                    })
+                    .collect::<HashMap<_, _>>();
+                let mut extracted = unit.clone();
+                for (block_id, block) in &mut extracted.blocks {
+                    block.instructions = std::mem::take(&mut block.instructions)
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(index, instruction)| {
+                            let site = (*block_id, index);
+                            match instruction {
+                                SIRInstruction::Store(..) | SIRInstruction::Commit(..) => {
+                                    (site == target).then_some(instruction)
+                                }
+                                SIRInstruction::RuntimeEvent { .. }
+                                | SIRInstruction::CombCaptureEvent { .. }
+                                | SIRInstruction::CombCaptureEnableIfChanged { .. } => None,
+                                _ => {
+                                    if let Some(register) = instruction.defined_register()
+                                        && let Some((address, offset, bits)) =
+                                            reloads.get(&register)
+                                    {
+                                        Some(SIRInstruction::Load(
+                                            register,
+                                            *address,
+                                            offset.clone(),
+                                            *bits,
+                                        ))
+                                    } else {
+                                        Some(instruction)
+                                    }
+                                }
+                            }
+                        })
+                        .collect();
+                }
+                extracted
+            })
+            .collect::<Vec<_>>();
+
+        let has_runtime_side_effects = unit.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    SIRInstruction::RuntimeEvent { .. }
+                        | SIRInstruction::CombCaptureEvent { .. }
+                        | SIRInstruction::CombCaptureEnableIfChanged { .. }
+                )
+            })
+        });
+        if has_runtime_side_effects {
+            let mut events = unit.clone();
+            for block in events.blocks.values_mut() {
+                block.instructions.retain(|instruction| {
+                    !matches!(
+                        instruction,
+                        SIRInstruction::Store(..) | SIRInstruction::Commit(..)
+                    )
+                });
+            }
+            split.push(events);
+        }
+        return split;
     }
     let block = &unit.blocks[&unit.entry_block_id];
     if !block.params.is_empty() || block.terminator != SIRTerminator::Return {
@@ -1091,46 +1246,111 @@ fn split_comb_execution_unit(
                 .map(|register| (register, index))
         })
         .collect::<HashMap<_, _>>();
-    let mut segment_start = 0usize;
-    let mut ranges = Vec::new();
-    for (index, instruction) in block.instructions.iter().enumerate() {
-        let is_store_boundary = matches!(
-            instruction,
-            SIRInstruction::Store(..) | SIRInstruction::Commit(..)
-        );
-        if is_store_boundary && index + 1 < block.instructions.len() {
-            ranges.push(segment_start..index + 1);
-            segment_start = index + 1;
-        }
-    }
-    if ranges.is_empty() {
+    let store_indices = block
+        .instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, instruction)| {
+            matches!(
+                instruction,
+                SIRInstruction::Store(..) | SIRInstruction::Commit(..)
+            )
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if store_indices.is_empty() {
         return vec![unit.clone()];
     }
-    ranges.push(segment_start..block.instructions.len());
-    ranges
-        .into_iter()
-        .map(|range| {
-            let mut prefix = HashSet::<usize>::default();
-            let mut pending = block.instructions[range.clone()]
+
+    let register_dependencies = store_indices
+        .iter()
+        .copied()
+        .map(|store_index| {
+            let mut dependencies = HashSet::default();
+            let mut pending = instruction_registers(&block.instructions[store_index]);
+            while let Some(register) = pending.pop() {
+                if !dependencies.insert(register) {
+                    continue;
+                }
+                if let Some(&definition) = definitions.get(&register) {
+                    pending.extend(instruction_registers(&block.instructions[definition]));
+                }
+            }
+            (store_index, dependencies)
+        })
+        .collect::<HashMap<_, _>>();
+    let store_source = |index| match &block.instructions[index] {
+        SIRInstruction::Store(_, _, _, source, _, _) => Some(*source),
+        _ => None,
+    };
+    let mut remaining = store_indices.clone();
+    let mut ordered_stores = Vec::with_capacity(remaining.len());
+    while !remaining.is_empty() {
+        let next = remaining
+            .iter()
+            .position(|candidate| {
+                let candidate_source = store_source(*candidate);
+                !remaining.iter().any(|predecessor| {
+                    if predecessor == candidate {
+                        return false;
+                    }
+                    store_source(*predecessor).is_some_and(|source| {
+                        Some(source) != candidate_source
+                            && register_dependencies[candidate].contains(&source)
+                    })
+                })
+            })
+            .unwrap_or(0);
+        ordered_stores.push(remaining.remove(next));
+    }
+
+    let mut split = ordered_stores
+        .iter()
+        .enumerate()
+        .map(|(order, &store_index)| {
+            let reloads = ordered_stores[..order]
                 .iter()
-                .flat_map(instruction_registers)
-                .collect::<Vec<_>>();
+                .filter_map(|&prior_index| {
+                    let SIRInstruction::Store(address, offset, bits, source, _, _) =
+                        &block.instructions[prior_index]
+                    else {
+                        return None;
+                    };
+                    (register_dependencies[&store_index].contains(source)
+                        && unit.register_map[source].width() == *bits)
+                        .then(|| (*source, (*address, offset.clone(), *bits)))
+                })
+                .collect::<HashMap<_, _>>();
+            let mut prefix = HashSet::<usize>::default();
+            let mut pending = instruction_registers(&block.instructions[store_index]);
             while let Some(register) = pending.pop() {
                 let Some(&definition) = definitions.get(&register) else {
                     continue;
                 };
-                if definition >= range.start || !prefix.insert(definition) {
+                if !prefix.insert(definition) {
+                    continue;
+                }
+                if let Some((_, offset, _)) = reloads.get(&register) {
+                    offset_registers(offset, &mut pending);
                     continue;
                 }
                 pending.extend(instruction_registers(&block.instructions[definition]));
             }
             let mut prefix = prefix.into_iter().collect::<Vec<_>>();
             prefix.sort_unstable();
-            let instructions = prefix
+            let mut instructions = prefix
                 .into_iter()
-                .map(|index| block.instructions[index].clone())
-                .chain(block.instructions[range].iter().cloned())
-                .collect();
+                .map(|index| {
+                    let instruction = &block.instructions[index];
+                    if let Some(register) = instruction.defined_register()
+                        && let Some((address, offset, bits)) = reloads.get(&register)
+                    {
+                        return SIRInstruction::Load(register, *address, offset.clone(), *bits);
+                    }
+                    instruction.clone()
+                })
+                .collect::<Vec<_>>();
+            instructions.push(block.instructions[store_index].clone());
             let split_block = celox_sir::BasicBlock {
                 id: BlockId(0),
                 params: Vec::new(),
@@ -1143,7 +1363,30 @@ fn split_comb_execution_unit(
                 register_map: unit.register_map.clone(),
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if block.instructions.iter().any(|instruction| {
+        matches!(
+            instruction,
+            SIRInstruction::RuntimeEvent { .. }
+                | SIRInstruction::CombCaptureEvent { .. }
+                | SIRInstruction::CombCaptureEnableIfChanged { .. }
+        )
+    }) {
+        let mut events = unit.clone();
+        events
+            .blocks
+            .get_mut(&events.entry_block_id)
+            .unwrap()
+            .instructions
+            .retain(|instruction| {
+                !matches!(
+                    instruction,
+                    SIRInstruction::Store(..) | SIRInstruction::Commit(..)
+                )
+            });
+        split.push(events);
+    }
+    split
 }
 
 fn compile_program(
@@ -1214,11 +1457,21 @@ fn compile_program(
         }
         Ok::<_, SimulatorError>((comb_jit, compiled_ff_codes))
     })?;
+    // The VPI image compiler deliberately uses O0 so force/release can observe
+    // procedural store boundaries. Avoid multiplying code size and compile
+    // time for ordinary optimized simulator images that do not use this path.
+    let force_store_boundaries = options.optimize_options.opt_level() == crate::OptLevel::O0;
     let comb_runtime_units = sir
         .sir
         .eval_comb
         .iter()
-        .flat_map(split_comb_execution_unit)
+        .flat_map(|unit| {
+            if force_store_boundaries {
+                split_comb_execution_unit(unit)
+            } else {
+                vec![unit.clone()]
+            }
+        })
         .collect::<Vec<_>>();
     let comb_unit_jits = comb_runtime_units
         .iter()

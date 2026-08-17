@@ -151,8 +151,15 @@ struct ForcedValue {
 
 #[derive(Default)]
 struct PendingWrites {
-    edge_batches: Vec<Vec<ReflectionSignalId>>,
+    deposits: HashMap<ReflectionSignalId, (BigUint, BigUint)>,
+    edge_batches: Vec<PendingEdgeBatch>,
+    open_edge_batch: Option<usize>,
     settle: bool,
+}
+
+struct PendingEdgeBatch {
+    signals: Vec<ReflectionSignalId>,
+    deposits: HashMap<ReflectionSignalId, (BigUint, BigUint)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -186,15 +193,58 @@ fn is_active_edge(kind: DomainKind, old: LogicLevel, new: LogicLevel) -> bool {
     }
 }
 
-fn queue_active_edge(pending: &mut PendingWrites, id: ReflectionSignalId) {
-    if let Some(batch) = pending
-        .edge_batches
-        .iter_mut()
-        .find(|batch| !batch.contains(&id))
-    {
-        batch.push(id);
-    } else {
-        pending.edge_batches.push(vec![id]);
+fn record_pending_write(
+    pending: &mut PendingWrites,
+    id: ReflectionSignalId,
+    value: BigUint,
+    mask: BigUint,
+    domain_kind: DomainKind,
+    old_level: LogicLevel,
+    new_level: LogicLevel,
+) {
+    let active = is_active_edge(domain_kind, old_level, new_level);
+    let level_changed = old_level != new_level;
+    let open_contains_signal = pending
+        .open_edge_batch
+        .is_some_and(|index| pending.edge_batches[index].signals.contains(&id));
+
+    if open_contains_signal && (active || level_changed) {
+        pending.open_edge_batch = None;
+    }
+
+    pending.deposits.insert(id, (value.clone(), mask.clone()));
+    if active {
+        if let Some(index) = pending.open_edge_batch {
+            pending.edge_batches[index].signals.push(id);
+            pending.edge_batches[index].deposits = pending.deposits.clone();
+        } else {
+            pending.edge_batches.push(PendingEdgeBatch {
+                signals: vec![id],
+                deposits: pending.deposits.clone(),
+            });
+            pending.open_edge_batch = Some(pending.edge_batches.len() - 1);
+        }
+    } else if let Some(index) = pending.open_edge_batch {
+        pending.edge_batches[index].deposits = pending.deposits.clone();
+    }
+    pending.settle = true;
+}
+
+fn apply_pending_deposits(
+    runtime: &mut NativeProgramInstance,
+    deposits: &HashMap<ReflectionSignalId, (BigUint, BigUint)>,
+) {
+    let writes = deposits
+        .iter()
+        .filter_map(|(id, (value, mask))| {
+            runtime
+                .reflection()
+                .signal(*id)
+                .map(|signal| (signal.signal, value.clone(), mask.clone()))
+        })
+        .collect::<Vec<_>>();
+    for (signal, value, mask) in writes {
+        runtime.backend_mut().set_four_state(signal, value, mask);
     }
 }
 
@@ -706,11 +756,19 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
     let Some((bits, mask, width)) = value_bits(id) else {
         return;
     };
+    let signed =
+        with_runtime(|runtime| runtime.reflection().signal(id).map(|signal| signal.signed))
+            .flatten()
+            .unwrap_or(false);
     // Safety: checked non-null above; caller owns the `VpiValue` allocation.
     let value = unsafe { &mut *value };
     match value.format {
         VPI_INT_VAL => {
-            value.value.integer = bits.to_u32_digits().first().copied().unwrap_or(0) as i32
+            let mut integer = bits.to_u32_digits().first().copied().unwrap_or(0);
+            if signed && width > 0 && width < 32 && bits.bit((width - 1) as u64) {
+                integer |= u32::MAX << width;
+            }
+            value.value.integer = integer as i32;
         }
         VPI_SCALAR_VAL => {
             value.value.scalar = if mask.bit(0) {
@@ -893,10 +951,15 @@ pub unsafe extern "C" fn vpi_put_value(
                 let old_level = logic_level(&old_value, &old_mask);
                 let new_level = logic_level(&released.deposited_value, &released.deposited_mask);
                 PENDING_WRITES.with_borrow_mut(|pending| {
-                    if is_active_edge(signal.domain_kind, old_level, new_level) {
-                        queue_active_edge(pending, id);
-                    }
-                    pending.settle = true;
+                    record_pending_write(
+                        pending,
+                        id,
+                        released.deposited_value.clone(),
+                        released.deposited_mask.clone(),
+                        signal.domain_kind,
+                        old_level,
+                        new_level,
+                    );
                 });
                 runtime.backend_mut().set_four_state(
                     signal.signal,
@@ -975,10 +1038,15 @@ pub unsafe extern "C" fn vpi_put_value(
         let old_level = logic_level(&old_value, &old_mask);
         let new_level = logic_level(&bits, &mask);
         PENDING_WRITES.with_borrow_mut(|pending| {
-            if is_active_edge(signal.domain_kind, old_level, new_level) {
-                queue_active_edge(pending, id);
-            }
-            pending.settle = true;
+            record_pending_write(
+                pending,
+                id,
+                bits.clone(),
+                mask.clone(),
+                signal.domain_kind,
+                old_level,
+                new_level,
+            );
         });
         if flags == VPI_FORCE_FLAG {
             runtime.force_signal(id, bits, mask)
@@ -1004,22 +1072,22 @@ fn flush_pending_writes() -> bool {
         return true;
     }
     let result: Result<(), celox::RuntimeErrorCode> = with_runtime_mut(|runtime| {
-        if pending.edge_batches.is_empty() {
-            runtime.settle_active_edges(&[])?;
-        } else {
-            for batch in pending.edge_batches {
-                let active_edges = batch
-                    .into_iter()
-                    .filter_map(|id| {
-                        runtime
-                            .reflection()
-                            .signal(id)
-                            .map(|signal| signal.state_address)
-                    })
-                    .collect::<Vec<_>>();
-                runtime.settle_active_edges(&active_edges)?;
-            }
+        for batch in pending.edge_batches {
+            apply_pending_deposits(runtime, &batch.deposits);
+            let active_edges = batch
+                .signals
+                .into_iter()
+                .filter_map(|id| {
+                    runtime
+                        .reflection()
+                        .signal(id)
+                        .map(|signal| signal.state_address)
+                })
+                .collect::<Vec<_>>();
+            runtime.settle_active_edges(&active_edges)?;
         }
+        apply_pending_deposits(runtime, &pending.deposits);
+        runtime.settle_active_edges(&[])?;
         Ok(())
     })
     .unwrap_or(Ok(()));
