@@ -183,7 +183,7 @@ impl NativeProgramInstance {
         if events.len() == 1 {
             self.backend
                 .eval_apply_ff_at(events[0])
-                .map_err(|error| self.decorate_runtime_error(error))?;
+                .map_err(|error| self.decorate_runtime_error_since(error, start_seq, context))?;
         } else if !events.is_empty() {
             let split = events
                 .iter()
@@ -196,20 +196,20 @@ impl NativeProgramInstance {
                 .collect::<Option<Vec<_>>>();
             if let Some(split) = split {
                 for (evaluate, _) in &split {
-                    self.backend
-                        .eval_only_ff_at(*evaluate)
-                        .map_err(|error| self.decorate_runtime_error(error))?;
+                    self.backend.eval_only_ff_at(*evaluate).map_err(|error| {
+                        self.decorate_runtime_error_since(error, start_seq, context)
+                    })?;
                 }
                 for (_, apply) in &split {
-                    self.backend
-                        .apply_ff_at(*apply)
-                        .map_err(|error| self.decorate_runtime_error(error))?;
+                    self.backend.apply_ff_at(*apply).map_err(|error| {
+                        self.decorate_runtime_error_since(error, start_seq, context)
+                    })?;
                 }
             } else {
                 for event in events {
-                    self.backend
-                        .eval_apply_ff_at(event)
-                        .map_err(|error| self.decorate_runtime_error(error))?;
+                    self.backend.eval_apply_ff_at(event).map_err(|error| {
+                        self.decorate_runtime_error_since(error, start_seq, context)
+                    })?;
                 }
             }
         }
@@ -334,6 +334,20 @@ impl NativeProgramInstance {
                 signals,
             }
         }
+    }
+
+    fn decorate_runtime_error_since(
+        &self,
+        error: celox_runtime::SimulatorErrorCode,
+        start_seq: Option<u64>,
+        context: RuntimeFormatContext<'_>,
+    ) -> celox_runtime::SimulatorErrorCode {
+        if let Some(start_seq) = start_seq
+            && let Err(runtime_event_error) = self.check_fatal_events_since(start_seq, context)
+        {
+            return runtime_event_error;
+        }
+        self.decorate_runtime_error(error)
     }
 
     fn eval_comb_checked(

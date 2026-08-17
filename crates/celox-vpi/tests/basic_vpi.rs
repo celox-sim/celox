@@ -205,6 +205,17 @@ const FATAL_ASSERT: &str = r#"
     }
 "#;
 
+const FF_FATAL_ASSERT: &str = r#"
+    module Top (
+        clk: input clock,
+        d: input logic<8>,
+    ) {
+        always_ff (clk) {
+            $assert(1'd0, "ff d=%0d time=%t", d);
+        }
+    }
+"#;
+
 const COMPILE_TIME_OBJECTS: &str = r#"
     module Top #(
         param WIDTH: u32 = 8,
@@ -1539,6 +1550,38 @@ fn fatal_settle_stops_remaining_callback_phases() {
         assert!(error.contains("time=1"));
         assert!(error.contains("scope=Top.child"));
         assert_eq!(FATAL_PHASES.load(Ordering::SeqCst), 0);
+    }
+    clear_runtime();
+}
+
+#[test]
+fn ff_fatal_error_uses_the_recorded_value_and_scheduler_time() {
+    let simulator = Simulator::builder(FF_FATAL_ASSERT, "Top").build().unwrap();
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
+
+    unsafe {
+        let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
+        let mut delay = VpiTime {
+            type_: VPI_SIM_TIME,
+            high: 0,
+            low: 5,
+            real: 0.0,
+        };
+        let rising_edge = VpiCbData {
+            reason: CB_AFTER_DELAY,
+            cb_rtn: Some(drive_callback_object_high),
+            obj: clk,
+            time: &mut delay,
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        assert!(!vpi_register_cb(&rising_edge).is_null());
+
+        let error = run_callbacks_result().unwrap_err();
+        assert!(error.contains("ff d=0 time=5"), "{error}");
     }
     clear_runtime();
 }
