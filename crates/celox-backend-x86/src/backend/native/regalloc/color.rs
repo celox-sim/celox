@@ -4,9 +4,9 @@
 //! only the colors live at the current program point: no program-point live
 //! table and no explicit interference graph are constructed.
 
-use std::collections::HashMap;
 use std::fmt;
 
+use crate::HashMap;
 use crate::native::mir::{BlockId, MFunction, MInst, PhiNode, VReg};
 
 use super::analysis::AnalysisResult;
@@ -132,8 +132,8 @@ pub(super) fn color_ssa(
     let forbidden = forbidden_colors(func, analysis)?;
     let preferences = phi_preferences(func, cfg);
     let mut colors = vec![None; func.vregs.count() as usize];
-    let mut perm_matching = HashMap::<VReg, PhysReg>::new();
-    let mut boundary_for_block = HashMap::<BlockId, &PermBoundary>::new();
+    let mut perm_matching = HashMap::<VReg, PhysReg>::default();
+    let mut boundary_for_block = HashMap::<BlockId, &PermBoundary>::default();
     for boundary in &perms.boundaries {
         if boundary_for_block
             .insert(boundary.block, boundary)
@@ -166,7 +166,7 @@ pub(super) fn color_ssa(
     let mut work = vec![0usize];
     while let Some(block_index) = work.pop() {
         let block = &func.blocks[block_index];
-        let mut last_use = HashMap::<VReg, usize>::new();
+        let mut last_use = HashMap::<VReg, usize>::default();
         for (instruction, inst) in block.insts.iter().enumerate() {
             for value in inst.uses() {
                 last_use.insert(value, instruction);
@@ -546,7 +546,7 @@ fn forbid(
 }
 
 fn phi_preferences(func: &MFunction, cfg: &NormalizedCfg) -> HashMap<VReg, Vec<VReg>> {
-    let mut preferences = HashMap::<VReg, Vec<VReg>>::new();
+    let mut preferences = HashMap::<VReg, Vec<VReg>>::default();
     for block in &func.blocks {
         for phi in &block.phis {
             for &(_, source) in &phi.sources {
@@ -890,7 +890,7 @@ fn best_phi_bundle_score(
 fn is_live_after_entry(
     value: VReg,
     last_use: &HashMap<VReg, usize>,
-    live_out: &crate::HashMap<VReg, u32>,
+    live_out: &celox_backend_common::regalloc::NextUseDistances<VReg>,
 ) -> bool {
     last_use.contains_key(&value) || live_out.contains_key(&value)
 }
@@ -1171,7 +1171,7 @@ mod tests {
         let destination = VReg(1);
         let required = vec![None; 2];
         let forbidden = vec![ColorMask::empty(); 2];
-        let preferences = HashMap::new();
+        let preferences = HashMap::default();
         let colors = vec![Some(PhysReg::R14), None];
 
         let color = choose_color(
@@ -1208,10 +1208,12 @@ mod tests {
         };
         let required = vec![None; 5];
         let forbidden = vec![ColorMask::empty(); 5];
-        let preferences = HashMap::from([
+        let preferences = [
             (first_destination, vec![first_rax, first_rdx]),
             (second_destination, vec![second_rax]),
-        ]);
+        ]
+        .into_iter()
+        .collect();
         let colors = vec![
             Some(PhysReg::RAX),
             Some(PhysReg::RDX),

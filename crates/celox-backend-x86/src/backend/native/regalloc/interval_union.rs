@@ -4,10 +4,11 @@
 //! one linear instruction interval. Each dynamically-created slot stores only
 //! the occupied CFG rows required for first-fit coloring.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::HashMap;
 use crate::native::mir::BlockId;
 
 use super::cfg::NormalizedCfg;
@@ -254,22 +255,38 @@ impl DynamicSlotUnion {
         }
     }
 
-    fn interferes_indexed(&self, segments: ValidatedSegments<'_>) -> bool {
-        for (segment, block) in segments.iter() {
-            let mut current = self.heads[block];
-            while current != Self::NONE {
-                let node = self.nodes[current as usize];
-                if node.end <= segment.start {
-                    current = node.next;
-                    continue;
-                }
-                if node.start >= segment.end {
-                    break;
-                }
-                return true;
+    fn interferes_segment(&self, segment: LiveSegment, block: usize) -> bool {
+        let mut current = self.heads[block];
+        while current != Self::NONE {
+            let node = self.nodes[current as usize];
+            if node.end <= segment.start {
+                current = node.next;
+                continue;
             }
+            if node.start >= segment.end {
+                break;
+            }
+            return true;
         }
         false
+    }
+
+    fn interferes_indexed(&self, segments: ValidatedSegments<'_>) -> bool {
+        segments
+            .iter()
+            .any(|(segment, block)| self.interferes_segment(segment, block))
+    }
+
+    fn interferes_indexed_with_hint(&self, segments: ValidatedSegments<'_>, hint: usize) -> bool {
+        if self.interferes_segment(segments.segments[hint], segments.block_indices[hint]) {
+            return true;
+        }
+        segments
+            .iter()
+            .enumerate()
+            .any(|(index, (segment, block))| {
+                index != hint && self.interferes_segment(segment, block)
+            })
     }
 
     fn insert_indexed(
@@ -448,12 +465,14 @@ pub(super) struct DynamicIntervalMatrix {
     index: Arc<IntervalIndex>,
     unions: Vec<DynamicSlotUnion>,
     assignments: BTreeMap<AllocationBundleId, usize>,
+    block_slot_counts: Vec<u32>,
 }
 
 impl PartialEq for DynamicIntervalMatrix {
     fn eq(&self, other: &Self) -> bool {
         self.index == other.index
             && self.assignments == other.assignments
+            && self.block_slot_counts == other.block_slot_counts
             && self.unions.len() == other.unions.len()
             && self
                 .unions
@@ -471,6 +490,7 @@ impl DynamicIntervalMatrix {
             index: Arc::new(IntervalIndex::new(cfg)?),
             unions: Vec::new(),
             assignments: BTreeMap::new(),
+            block_slot_counts: vec![0; cfg.successors.len()],
         })
     }
 
@@ -498,10 +518,19 @@ impl DynamicIntervalMatrix {
         segments: ValidatedSegments<'_>,
     ) -> Result<usize, IntervalUnionError> {
         self.validate_token(segments)?;
+        let Some(hint) = segments
+            .block_indices
+            .iter()
+            .enumerate()
+            .max_by_key(|&(_, &block)| self.block_slot_counts[block])
+            .map(|(index, _)| index)
+        else {
+            return Ok(self.unions.len());
+        };
         Ok(self
             .unions
             .iter()
-            .position(|union| !union.interferes_indexed(segments))
+            .position(|union| !union.interferes_indexed_with_hint(segments, hint))
             .unwrap_or(self.unions.len()))
     }
 
@@ -528,6 +557,18 @@ impl DynamicIntervalMatrix {
                 format!("dynamic slot {slot} skips the current color domain"),
             ));
         }
+        let mut newly_occupied_blocks = Vec::new();
+        let mut previous_block = None;
+        for (_, block) in segments.iter() {
+            if previous_block == Some(block) {
+                continue;
+            }
+            previous_block = Some(block);
+            if slot == self.unions.len() || self.unions[slot].heads[block] == DynamicSlotUnion::NONE
+            {
+                newly_occupied_blocks.push(block);
+            }
+        }
         if slot == self.unions.len() {
             let mut union = DynamicSlotUnion::new(self.index.block_ids.len());
             union.insert_indexed(bundle, segments)?;
@@ -535,16 +576,28 @@ impl DynamicIntervalMatrix {
         } else {
             self.unions[slot].insert_indexed(bundle, segments)?;
         }
+        for block in newly_occupied_blocks {
+            self.block_slot_counts[block] = self.block_slot_counts[block]
+                .checked_add(1)
+                .ok_or_else(|| {
+                    IntervalUnionError::new(
+                        "INTERVAL_UNION.BLOCK_SLOT_COUNT",
+                        self.index.block_ids.get(block).copied(),
+                        [bundle],
+                        "dynamic stack-slot occupancy count exceeds u32",
+                    )
+                })?;
+        }
         self.assignments.insert(bundle, slot);
         Ok(())
     }
 
-    pub(super) fn slot(&self, bundle: AllocationBundleId) -> Option<usize> {
-        self.assignments.get(&bundle).copied()
-    }
-
     pub(super) fn slot_count(&self) -> usize {
         self.unions.len()
+    }
+
+    pub(super) fn slot(&self, bundle: AllocationBundleId) -> Option<usize> {
+        self.assignments.get(&bundle).copied()
     }
 
     pub(super) fn verify(&self) -> Result<(), IntervalUnionError> {

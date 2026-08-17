@@ -414,6 +414,16 @@ fn reject_silently_ignored_constructs(
             continue;
         }
         match child {
+            RefNode::AnsiPortDeclarationNet(port) if port.nodes.3.is_some() => {
+                return Err(AnalyzerError::Unsupported(
+                    "ANSI port default value".to_string(),
+                ));
+            }
+            RefNode::AnsiPortDeclarationVariable(port) if port.nodes.3.is_some() => {
+                return Err(AnalyzerError::Unsupported(
+                    "ANSI port default value".to_string(),
+                ));
+            }
             RefNode::AnsiPortDeclarationVariable(port)
                 if RefNode::AnsiPortDeclarationVariable(port)
                     .into_iter()
@@ -2126,7 +2136,11 @@ fn signals_from_net_declaration(
             };
             (r#type, net.nodes.2.nodes.0.contents(), false)
         }
-        sv_parser::NetDeclaration::Interconnect(_) => return Ok(Vec::new()),
+        sv_parser::NetDeclaration::Interconnect(_) => {
+            return Err(AnalyzerError::Unsupported(
+                "interconnect net declaration".to_string(),
+            ));
+        }
     };
     let mut signals = Vec::new();
     for assignment in assignments {

@@ -347,6 +347,9 @@ fn run_branchify_mux(
     let mut next_block_id = eu.blocks.keys().map(|id| id.0).max().unwrap_or(0) + 1;
     let mut reg_counter = eu.register_map.keys().map(|reg| reg.0).max().unwrap_or(0);
     let mut applied = 0usize;
+    let mut cross_priority_applied = 0usize;
+    let mut cross_group_applied = 0usize;
+    let mut cross_mux_applied = 0usize;
     let mut use_counts = count_uses(eu);
 
     // Recover a source-level conditional state update before treating its
@@ -389,7 +392,6 @@ fn run_branchify_mux(
     }
     report_stage("coupled updates");
     use_counts = count_uses(eu);
-    let mut def_blocks = instruction_def_blocks(eu);
 
     // A priority spine is one short-circuit expression, not a collection
     // of independent selects.  Handle the whole spine before the
@@ -460,8 +462,8 @@ fn run_branchify_mux(
             panic!("cross-block priority rewrite produced invalid SIR");
         }
         applied += 1;
+        cross_priority_applied += 1;
         use_counts = count_uses(eu);
-        def_blocks = instruction_def_blocks(eu);
     }
     verify_stage(eu, "cross-block priority chains");
     report_stage("cross-block priority chains");
@@ -478,8 +480,8 @@ fn run_branchify_mux(
     {
         apply_cross_block_group_branchify(eu, plan, &mut next_block_id, &mut reg_counter);
         applied += 1;
+        cross_group_applied += 1;
         use_counts = count_uses(eu);
-        def_blocks = instruction_def_blocks(eu);
     }
     verify_stage(eu, "cross-block groups");
     report_stage("cross-block groups");
@@ -488,11 +490,12 @@ fn run_branchify_mux(
     {
         apply_cross_block_branchify(eu, plan, &mut next_block_id, &mut reg_counter);
         applied += 1;
+        cross_mux_applied += 1;
         use_counts = count_uses(eu);
-        def_blocks = instruction_def_blocks(eu);
     }
     verify_stage(eu, "cross-block muxes");
     report_stage("cross-block muxes");
+    let mut def_blocks = instruction_def_blocks(eu);
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
     block_ids.sort_by_key(|id| id.0);
     let mut worklist = VecDeque::from(block_ids);
@@ -610,7 +613,7 @@ fn run_branchify_mux(
             .map(|block| block.instructions.len())
             .sum::<usize>();
         tracing::debug!(
-            "[branchify-stats] done applied={applied} blocks={} insts={} elapsed={:?}",
+            "[branchify-stats] done applied={applied} cross_priority={cross_priority_applied} cross_group={cross_group_applied} cross_mux={cross_mux_applied} blocks={} insts={} elapsed={:?}",
             eu.blocks.len(),
             insts,
             stats_start.unwrap().elapsed()
@@ -2217,15 +2220,7 @@ fn apply_cross_block_priority_chain(
         .blocks
         .remove(&plan.block_id)
         .expect("priority chain target block must exist");
-    for block in eu.blocks.values_mut() {
-        block.instructions = block
-            .instructions
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| !removed_locations.contains(&(block.id, *index)))
-            .map(|(_, instruction)| instruction.clone())
-            .collect();
-    }
+    remove_instructions_at_locations(eu, &removed_locations, plan.block_id);
 
     let outer_index = plan.muxes.len() - 1;
     let outer = &plan.muxes[outer_index];
@@ -2373,14 +2368,8 @@ fn find_cross_block_branchify_plan(
             // remains in the Mux block.  Such a prefix is not independently
             // movable: the local node still executes before the new branch.
             let condition_defs = closed_cross_block_condition_slice(condition_defs, block_id);
-            let head = block
-                .instructions
-                .iter()
-                .enumerate()
-                .take(mux_idx)
-                .map(|(_, instruction)| instruction.clone())
-                .collect::<Vec<_>>();
-            if moved_defs_insertion_index(&head, &condition_defs).is_none() {
+            if moved_defs_insertion_index(&block.instructions[..mux_idx], &condition_defs).is_none()
+            {
                 continue;
             }
             let mut true_seen = HashSet::default();
@@ -2422,17 +2411,16 @@ fn find_cross_block_branchify_plan(
                 .iter()
                 .map(|def| (def.block, def.index))
                 .collect::<HashSet<_>>();
+            let false_locations = false_defs
+                .iter()
+                .map(|def| (def.block, def.index))
+                .collect::<HashSet<_>>();
             if condition_locations
                 .intersection(&true_locations)
                 .next()
                 .is_some()
                 || condition_locations
-                    .intersection(
-                        &false_defs
-                            .iter()
-                            .map(|def| (def.block, def.index))
-                            .collect::<HashSet<_>>(),
-                    )
+                    .intersection(&false_locations)
                     .next()
                     .is_some()
             {
@@ -4123,15 +4111,7 @@ fn apply_cross_block_group_branchify(
         .blocks
         .remove(&plan.block_id)
         .expect("cross-group branchify target block must exist");
-    for block in eu.blocks.values_mut() {
-        block.instructions = block
-            .instructions
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| !removed_locations.contains(&(block.id, *index)))
-            .map(|(_, instruction)| instruction.clone())
-            .collect();
-    }
+    remove_instructions_at_locations(eu, &removed_locations, plan.block_id);
 
     let mut head_insts = original
         .instructions
@@ -4247,15 +4227,7 @@ fn apply_cross_block_branchify(
         .blocks
         .remove(&plan.block_id)
         .expect("cross-block branchify target block must exist");
-    for block in eu.blocks.values_mut() {
-        block.instructions = block
-            .instructions
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| !removed_locations.contains(&(block.id, *index)))
-            .map(|(_, instruction)| instruction.clone())
-            .collect();
-    }
+    remove_instructions_at_locations(eu, &removed_locations, plan.block_id);
 
     let mut head_insts = original
         .instructions
@@ -4330,6 +4302,32 @@ fn apply_cross_block_branchify(
     eu.blocks.insert(true_id, true_block);
     eu.blocks.insert(false_id, false_block);
     eu.blocks.insert(merge_id, merge_block);
+}
+
+fn remove_instructions_at_locations(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    removed: &HashSet<(BlockId, usize)>,
+    removed_block: BlockId,
+) {
+    let mut affected = removed
+        .iter()
+        .map(|&(block, _)| block)
+        .filter(|&block| block != removed_block)
+        .collect::<Vec<_>>();
+    affected.sort_unstable_by_key(|block| block.0);
+    affected.dedup();
+    for block_id in affected {
+        let block = eu
+            .blocks
+            .get_mut(&block_id)
+            .expect("moved cross-block definition must remain in the execution unit");
+        let mut index = 0usize;
+        block.instructions.retain(|_| {
+            let keep = !removed.contains(&(block_id, index));
+            index += 1;
+            keep
+        });
+    }
 }
 
 fn eliminate_controlled_join_muxes(

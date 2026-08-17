@@ -1,9 +1,18 @@
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
-import type { Plugin } from "vite";
+import type { Plugin, ResolvedConfig } from "vite";
 import { GenTsCache } from "./cache.js";
 import { cleanSidecars, generateSidecars } from "./sidecar.js";
-import type { CeloxPluginOptions, GenTsModule } from "./types.js";
+import {
+	loadTestbenchComponentModule,
+	normalizeTestbenchComponentPath,
+	writeTestbenchComponentSidecar,
+} from "./testbench-components.js";
+import type {
+	CeloxPluginOptions,
+	GenTsModule,
+	TestbenchComponentManifests,
+} from "./types.js";
 
 export type { CeloxPluginOptions } from "./types.js";
 
@@ -26,12 +35,16 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 	let projectRoot: string;
 	let cache: GenTsCache;
 	let sidecarPaths: string[] = [];
+	let testbenchComponents: string | undefined;
+	let testbenchComponentDependencies = new Set<string>();
+	let viteConfig: ResolvedConfig;
 
 	return {
 		name: "vite-plugin-celox",
 		enforce: "pre",
 
 		configResolved(config) {
+			viteConfig = config;
 			// Determine project root
 			if (options?.projectRoot) {
 				projectRoot = resolve(options.projectRoot);
@@ -39,10 +52,39 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				projectRoot = findVerylProjectRoot(config.root);
 			}
 
-			cache = new GenTsCache(projectRoot);
+			if (options?.testbenchComponents) {
+				const componentsModule = options.testbenchComponents;
+				testbenchComponents = isAbsolute(componentsModule)
+					? componentsModule
+					: resolve(projectRoot, componentsModule);
+				if (!existsSync(testbenchComponents)) {
+					throw new Error(
+						`Could not find testbench components module: ${testbenchComponents}`,
+					);
+				}
+			}
 		},
 
-		buildStart() {
+		async buildStart() {
+			let componentManifests: TestbenchComponentManifests | undefined;
+			if (testbenchComponents) {
+				const loaded = await loadTestbenchComponentModule(
+					testbenchComponents,
+					projectRoot,
+					viteConfig,
+				);
+				componentManifests = loaded.manifests;
+				testbenchComponentDependencies = loaded.dependencies;
+				for (const dependency of testbenchComponentDependencies) {
+					this.addWatchFile(dependency);
+				}
+				writeTestbenchComponentSidecar(
+					projectRoot,
+					testbenchComponents,
+					componentManifests,
+				);
+			}
+			cache = new GenTsCache(projectRoot, componentManifests);
 			// Run generator and create type sidecars
 			const data = cache.get();
 			cleanSidecars(sidecarPaths);
@@ -129,14 +171,37 @@ export default function celoxPlugin(options?: CeloxPluginOptions): Plugin {
 				testModules.length > 0 &&
 				(process.env.VITEST === "true" || process.env.NODE_ENV === "test")
 			) {
-				parts.push(generateTestCode(testModules, data.projectPath));
+				parts.push(
+					generateTestCode(testModules, data.projectPath, testbenchComponents),
+				);
 			}
 
 			return parts.join("\n\n") || "export {};";
 		},
 
-		handleHotUpdate({ file }) {
-			if (!file.endsWith(".veryl")) return;
+		async handleHotUpdate({ file, server }) {
+			const componentChanged =
+				testbenchComponents !== undefined &&
+				testbenchComponentDependencies.has(
+					normalizeTestbenchComponentPath(file),
+				);
+			if (!file.endsWith(".veryl") && !componentChanged) return;
+
+			if (componentChanged && testbenchComponents) {
+				const loaded = await loadTestbenchComponentModule(
+					testbenchComponents,
+					projectRoot,
+					viteConfig,
+				);
+				testbenchComponentDependencies = loaded.dependencies;
+				server.watcher.add([...testbenchComponentDependencies]);
+				writeTestbenchComponentSidecar(
+					projectRoot,
+					testbenchComponents,
+					loaded.manifests,
+				);
+				cache.setTestbenchComponents(loaded.manifests);
+			}
 
 			// Invalidate cache so next load re-runs the generator
 			cache.invalidate();
@@ -228,19 +293,30 @@ function generateEsmExport(
 function generateTestCode(
 	testModuleNames: string[],
 	projectPath: string,
+	testbenchComponents?: string,
 ): string {
-	const lines: string[] = [
-		`import { test, expect } from "vitest";`,
-		`import { loadNativeAddon } from "@celox-sim/celox";`,
-		``,
-		`const __addon = loadNativeAddon();`,
-		``,
-	];
+	const lines: string[] = [`import { test, expect } from "vitest";`];
+	if (testbenchComponents) {
+		lines.push(
+			`import { runTestFromProject } from "@celox-sim/celox";`,
+			`import __components from ${JSON.stringify(testbenchComponents.replace(/\\/g, "/"))};`,
+			``,
+		);
+	} else {
+		lines.push(
+			`import { loadNativeAddon } from "@celox-sim/celox";`,
+			``,
+			`const __addon = loadNativeAddon();`,
+			``,
+		);
+	}
 
 	for (const name of testModuleNames) {
 		lines.push(`test(${JSON.stringify(name)}, () => {`);
 		lines.push(
-			`  const __result = __addon.runTestFromProject(${JSON.stringify(projectPath)}, ${JSON.stringify(name)});`,
+			testbenchComponents
+				? `  const __result = runTestFromProject(${JSON.stringify(projectPath)}, ${JSON.stringify(name)}, { components: __components });`
+				: `  const __result = __addon.runTestFromProject(${JSON.stringify(projectPath)}, ${JSON.stringify(name)});`,
 		);
 		lines.push(`  for (const __a of __result.assertions) {`);
 		lines.push(`    if (!__a.passed) {`);
@@ -252,7 +328,9 @@ function generateTestCode(
 		);
 		lines.push(`    }`);
 		lines.push(`  }`);
-		lines.push(`  expect(__result.passed).toBe(true);`);
+		lines.push(
+			`  expect(__result.passed, __result.error ?? "testbench failed").toBe(true);`,
+		);
 		lines.push(`});`);
 		lines.push(``);
 	}

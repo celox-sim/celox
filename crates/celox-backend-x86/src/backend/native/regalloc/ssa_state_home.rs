@@ -6,8 +6,9 @@
 //! home is established and consumed; this module only proves that replacing
 //! one stack home by one physical SimState word is valid at every reload.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
+use crate::HashMap;
 use crate::native::mir::{BaseReg, BlockId, MFunction, MInst, PackedStateHome, SpillKind, VReg};
 
 use super::cfg::NormalizedCfg;
@@ -533,7 +534,7 @@ fn build_probe(
     homes: &BTreeMap<SpillHome, PackedStateHome>,
     reloads: &BTreeMap<SpillHome, BTreeSet<ReloadKey>>,
 ) -> Result<Probe, StateHomeError> {
-    let mut insertions = HashMap::<(usize, usize), Vec<SpillInsertion>>::new();
+    let mut insertions = HashMap::<(usize, usize), Vec<SpillInsertion>>::default();
     for spill in planned_spills(func, cfg, plan)? {
         if spill.edge_transfer {
             // The probe has no synthetic VReg for the atomic source-home
@@ -845,8 +846,16 @@ mod tests {
 
         let requested = super::super::ssa::planner_reload_queries(&func, &cfg, &plan).unwrap();
         let ordinary_recipes = reload::analyze_with_queries(&func, &cfg, &requested).unwrap();
-        let result =
-            reconstruct::reconstruct(&mut func, &cfg, &plan, &next_use, &ordinary_recipes).unwrap();
+        let result = reconstruct::reconstruct(
+            &mut func,
+            &cfg,
+            &plan,
+            &next_use,
+            &ordinary_recipes,
+            false,
+            true,
+        )
+        .unwrap();
         assert_eq!(result.frame_size, 0);
         assert!(func.blocks[0].insts.iter().any(|inst| {
             matches!(

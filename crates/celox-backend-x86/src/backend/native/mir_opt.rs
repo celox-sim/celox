@@ -3,11 +3,12 @@
 //! - Copy propagation: `v2 = mov v1` → replace all uses of v2 with v1
 //! - Dead code elimination: remove instructions whose defs are unused
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::memory_effect;
 use super::mir::*;
 use super::regalloc::assignment::{AssignmentMap, PhysReg, clobbers};
+use crate::{HashMap, HashSet};
 
 mod pipeline;
 pub use pipeline::{optimize, optimize_with_diagnostics};
@@ -142,7 +143,7 @@ pub(crate) fn compact_vregs(func: &mut MFunction) -> VRegCompaction {
 /// justify with instruction reordering. Wider immediates are truncated to the
 /// access width, exactly as the original final store truncates the register.
 pub(crate) fn fold_direct_immediate_stores(func: &mut MFunction) -> usize {
-    let mut use_counts = HashMap::<VReg, usize>::new();
+    let mut use_counts = HashMap::<VReg, usize>::default();
     for block in &func.blocks {
         for phi in &block.phis {
             for (_, source) in &phi.sources {
@@ -259,7 +260,7 @@ pub(crate) fn fold_direct_immediate_stores(func: &mut MFunction) -> usize {
 /// indexed load. x86 effective-address scaling and the original shift both
 /// use modulo-64-bit arithmetic, so the rewrite preserves wrapping exactly.
 fn fold_scaled_indexed_loads(func: &mut MFunction) {
-    let mut use_counts = HashMap::<VReg, usize>::new();
+    let mut use_counts = HashMap::<VReg, usize>::default();
     for block in &func.blocks {
         for phi in &block.phis {
             for (_, source) in &phi.sources {
@@ -274,7 +275,7 @@ fn fold_scaled_indexed_loads(func: &mut MFunction) {
     }
 
     for block in &mut func.blocks {
-        let mut shifts = HashMap::<VReg, (VReg, u8)>::new();
+        let mut shifts = HashMap::<VReg, (VReg, u8)>::default();
         for inst in &mut block.insts {
             if let MInst::ShlImm { dst, src, imm } = inst {
                 if (1..=3).contains(imm) {
@@ -304,7 +305,7 @@ fn fold_scaled_indexed_loads(func: &mut MFunction) {
 /// adjacent. These conditions make the replacement independent of alias and
 /// scheduling speculation while removing one allocation value per chunk.
 fn fold_contiguous_memory_copies(func: &mut MFunction) {
-    let mut use_counts = HashMap::<VReg, usize>::new();
+    let mut use_counts = HashMap::<VReg, usize>::default();
     for block in &func.blocks {
         for phi in &block.phis {
             for (_, source) in &phi.sources {
@@ -421,7 +422,7 @@ fn refresh_constant_spill_descs(func: &mut MFunction) {
 /// `offset & 7`, so retaining that guard is unnecessary. Bounds here are
 /// intentionally limited to operations that cannot underestimate a value.
 fn fold_proven_comparisons(func: &mut MFunction) {
-    let mut defs = HashMap::new();
+    let mut defs = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(dst) = inst.def() {
@@ -429,7 +430,7 @@ fn fold_proven_comparisons(func: &mut MFunction) {
             }
         }
     }
-    let mut upper_bounds = HashMap::new();
+    let mut upper_bounds = HashMap::default();
     for block in &mut func.blocks {
         for inst in &mut block.insts {
             let replacement = match inst {
@@ -445,7 +446,7 @@ fn fold_proven_comparisons(func: &mut MFunction) {
                         *lhs,
                         &defs,
                         &mut upper_bounds,
-                        &mut HashSet::new(),
+                        &mut HashSet::default(),
                     )
                     .is_some_and(|bound| bound < *value)) =>
                 {
@@ -466,7 +467,7 @@ fn fold_proven_comparisons(func: &mut MFunction) {
                         *lhs,
                         &defs,
                         &mut upper_bounds,
-                        &mut HashSet::new(),
+                        &mut HashSet::default(),
                     )
                     .is_some_and(|bound| bound < *imm as u64) =>
                 {
@@ -489,8 +490,8 @@ fn fold_proven_comparisons(func: &mut MFunction) {
 /// comparison. These forms become visible especially after immediate lowering;
 /// eliminating them here avoids materializing an intermediate condition.
 fn fold_boolean_normalizations(func: &mut MFunction) {
-    let mut defs = HashMap::new();
-    let mut use_counts = HashMap::<VReg, usize>::new();
+    let mut defs = HashMap::default();
+    let mut use_counts = HashMap::<VReg, usize>::default();
     for block in &func.blocks {
         for phi in &block.phis {
             for &(_, source) in &phi.sources {
@@ -506,7 +507,7 @@ fn fold_boolean_normalizations(func: &mut MFunction) {
             }
         }
     }
-    let mut upper_bounds = HashMap::new();
+    let mut upper_bounds = HashMap::default();
     for block in &mut func.blocks {
         for inst in &mut block.insts {
             let replacement = match inst {
@@ -515,8 +516,13 @@ fn fold_boolean_normalizations(func: &mut MFunction) {
                     lhs,
                     imm: 0,
                     kind: CmpKind::Ne,
-                } if unsigned_upper_bound(*lhs, &defs, &mut upper_bounds, &mut HashSet::new())
-                    .is_some_and(|bound| bound <= 1) =>
+                } if unsigned_upper_bound(
+                    *lhs,
+                    &defs,
+                    &mut upper_bounds,
+                    &mut HashSet::default(),
+                )
+                .is_some_and(|bound| bound <= 1) =>
                 {
                     Some(MInst::Mov {
                         dst: *dst,
@@ -528,13 +534,17 @@ fn fold_boolean_normalizations(func: &mut MFunction) {
                     lhs,
                     rhs,
                     kind: CmpKind::Ne,
-                } if unsigned_upper_bound(*rhs, &defs, &mut upper_bounds, &mut HashSet::new())
-                    == Some(0)
+                } if unsigned_upper_bound(
+                    *rhs,
+                    &defs,
+                    &mut upper_bounds,
+                    &mut HashSet::default(),
+                ) == Some(0)
                     && unsigned_upper_bound(
                         *lhs,
                         &defs,
                         &mut upper_bounds,
-                        &mut HashSet::new(),
+                        &mut HashSet::default(),
                     )
                     .is_some_and(|bound| bound <= 1) =>
                 {
@@ -687,7 +697,7 @@ fn unsigned_upper_bound(
 pub fn post_regalloc_peephole(func: &mut MFunction) {
     const IMM_FOLD_SCAN_LIMIT: usize = 8;
 
-    let mut use_counts: HashMap<VReg, usize> = HashMap::new();
+    let mut use_counts: HashMap<VReg, usize> = HashMap::default();
     for block in &func.blocks {
         for phi in &block.phis {
             for (_, src) in &phi.sources {
@@ -703,7 +713,7 @@ pub fn post_regalloc_peephole(func: &mut MFunction) {
 
     for block in &mut func.blocks {
         let mut remove = vec![false; block.insts.len()];
-        let mut replacements: HashMap<usize, MInst> = HashMap::new();
+        let mut replacements: HashMap<usize, MInst> = HashMap::default();
 
         // A state-home rematerialization immediately before a forwarded
         // width-normalizing copy is one machine load, not a load followed by
@@ -857,7 +867,7 @@ pub(crate) fn post_regalloc_direct_load_cse(
 
     let mut reused = 0usize;
     for block in &mut func.blocks {
-        let mut available = HashMap::<PhysReg, AvailableDirectLoad>::new();
+        let mut available = HashMap::<PhysReg, AvailableDirectLoad>::default();
         let mut replacements = Vec::<(usize, VReg, VReg)>::new();
         for (position, instruction) in block.insts.iter().enumerate() {
             let writes = memory_effect::writes(instruction);
@@ -1154,7 +1164,7 @@ fn and_imm_ok(value: u64) -> bool {
 }
 
 fn fuse_compare_selects(func: &mut MFunction) {
-    let mut use_counts: HashMap<VReg, usize> = HashMap::new();
+    let mut use_counts: HashMap<VReg, usize> = HashMap::default();
     for block in &func.blocks {
         for phi in &block.phis {
             for (_, src) in &phi.sources {
@@ -1169,7 +1179,7 @@ fn fuse_compare_selects(func: &mut MFunction) {
     }
 
     for block in &mut func.blocks {
-        let mut def_pos: HashMap<VReg, usize> = HashMap::new();
+        let mut def_pos: HashMap<VReg, usize> = HashMap::default();
         for (idx, inst) in block.insts.iter().enumerate() {
             if let Some(def) = inst.def() {
                 def_pos.insert(def, idx);
@@ -1177,7 +1187,7 @@ fn fuse_compare_selects(func: &mut MFunction) {
         }
 
         let mut remove = vec![false; block.insts.len()];
-        let mut replacements: HashMap<usize, MInst> = HashMap::new();
+        let mut replacements: HashMap<usize, MInst> = HashMap::default();
 
         for (idx, inst) in block.insts.iter().enumerate() {
             let MInst::Select {
@@ -1348,7 +1358,7 @@ impl IndexedLoadTreeSummary {
 /// maximal roots are traversed, so failed nested candidates cannot cause
 /// quadratic rediscovery.
 fn sink_selected_indexed_loads(func: &mut MFunction) {
-    let mut use_counts = HashMap::<VReg, usize>::new();
+    let mut use_counts = HashMap::<VReg, usize>::default();
     for block in &func.blocks {
         for phi in &block.phis {
             for (_, source) in &phi.sources {
@@ -1364,7 +1374,7 @@ fn sink_selected_indexed_loads(func: &mut MFunction) {
 
     let mut plans = Vec::<Vec<IndexedLoadSelectionPlan>>::with_capacity(func.blocks.len());
     for block in &func.blocks {
-        let mut definitions = HashMap::<VReg, usize>::new();
+        let mut definitions = HashMap::<VReg, usize>::default();
         for (index, inst) in block.insts.iter().enumerate() {
             if let Some(dst) = inst.def() {
                 definitions.insert(dst, index);
@@ -1379,7 +1389,7 @@ fn sink_selected_indexed_loads(func: &mut MFunction) {
                     + usize::from(memory_effect::writes(inst).has_effect()),
             );
         }
-        let mut selectable = HashMap::<VReg, IndexedLoadTreeSummary>::new();
+        let mut selectable = HashMap::<VReg, IndexedLoadTreeSummary>::default();
         for (instruction, inst) in block.insts.iter().enumerate() {
             if let MInst::LoadIndexed {
                 dst,
@@ -1434,7 +1444,7 @@ fn sink_selected_indexed_loads(func: &mut MFunction) {
             );
         }
 
-        let mut claimed = HashSet::<usize>::new();
+        let mut claimed = HashSet::<usize>::default();
         let mut block_plans = Vec::new();
         for root in (0..block.insts.len()).rev() {
             if claimed.contains(&root)
@@ -1452,7 +1462,7 @@ fn sink_selected_indexed_loads(func: &mut MFunction) {
             pending.push(false_val);
             let mut select_indices = vec![root];
             let mut load_indices = Vec::new();
-            let mut seen_values = HashSet::new();
+            let mut seen_values = HashSet::default();
             let mut failed = false;
 
             while let Some(value) = pending.pop() {
@@ -1546,8 +1556,8 @@ fn sink_selected_indexed_loads(func: &mut MFunction) {
             select_indices.sort_unstable();
             load_indices.sort_unstable();
             let mut replacement = Vec::new();
-            let mut remapped = HashMap::<VReg, VReg>::new();
-            let mut offset_constants = HashMap::<i32, VReg>::new();
+            let mut remapped = HashMap::<VReg, VReg>::default();
+            let mut offset_constants = HashMap::<i32, VReg>::default();
             for &load_index in &load_indices {
                 let MInst::LoadIndexed { dst, offset, .. } = block.insts[load_index] else {
                     unreachable!()
@@ -1647,8 +1657,8 @@ fn sink_selected_indexed_loads(func: &mut MFunction) {
         if block_plans.is_empty() {
             continue;
         }
-        let mut removals = HashSet::new();
-        let mut replacements = HashMap::new();
+        let mut removals = HashSet::default();
+        let mut replacements = HashMap::default();
         for plan in block_plans {
             removals.extend(plan.remove);
             replacements.insert(plan.root, plan.replacement);
@@ -1673,7 +1683,7 @@ fn sink_selected_indexed_loads(func: &mut MFunction) {
 /// Constant folding: evaluate operations with constant operands at compile time.
 fn constant_fold(func: &mut MFunction) {
     // Build def map: VReg → LoadImm value
-    let mut consts: HashMap<VReg, u64> = HashMap::new();
+    let mut consts: HashMap<VReg, u64> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let MInst::LoadImm { dst, value } = inst {
@@ -1899,7 +1909,7 @@ fn mask_width(mask: u64) -> Option<usize> {
 /// fact across a block boundary does not extend a live range or add an
 /// ordering constraint.
 fn redundant_mask_eliminate(func: &mut MFunction) {
-    let mut constants: HashMap<VReg, u64> = HashMap::new();
+    let mut constants: HashMap<VReg, u64> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let MInst::LoadImm { dst, value } = inst {
@@ -1910,7 +1920,7 @@ fn redundant_mask_eliminate(func: &mut MFunction) {
     let possible_ones = global_possible_one_bits(func, &constants);
 
     for block in &mut func.blocks {
-        let mut definitions: HashMap<VReg, MaskDefinition> = HashMap::new();
+        let mut definitions: HashMap<VReg, MaskDefinition> = HashMap::default();
 
         for inst in &mut block.insts {
             let should_replace =
@@ -2641,7 +2651,7 @@ fn gvn_affected_memory_variables(
             }
         });
     }
-    let mut affected = HashSet::<GvnMemoryVariable>::new();
+    let mut affected = HashSet::<GvnMemoryVariable>::default();
     for range in effect.ranges() {
         let end = range.end()?;
         affected.extend(
@@ -2709,12 +2719,13 @@ fn compute_gvn_load_versions(
         }
     }
     if tracked.sim_state.is_empty() && tracked.stack_frame.is_empty() {
-        return Some(HashMap::new());
+        return Some(HashMap::default());
     }
 
     let frontiers = gvn_dominance_frontiers(predecessors, idom)?;
-    let mut definition_blocks = HashMap::<GvnMemoryVariable, BTreeSet<usize>>::new();
-    let mut write_versions = HashMap::<(usize, usize, GvnMemoryVariable), GvnMemoryVersion>::new();
+    let mut definition_blocks = HashMap::<GvnMemoryVariable, BTreeSet<usize>>::default();
+    let mut write_versions =
+        HashMap::<(usize, usize, GvnMemoryVariable), GvnMemoryVersion>::default();
     let mut write_ordinal = 0usize;
     for (block, mir_block) in func.blocks.iter().enumerate() {
         for (instruction, inst) in mir_block.insts.iter().enumerate() {
@@ -2771,8 +2782,8 @@ fn compute_gvn_load_versions(
         Enter(usize),
         Exit(Vec<(GvnMemoryVariable, Option<GvnMemoryVersion>)>),
     }
-    let mut current = HashMap::<GvnMemoryVariable, GvnMemoryVersion>::new();
-    let mut versions = HashMap::<(usize, usize), GvnLoadVersion>::new();
+    let mut current = HashMap::<GvnMemoryVariable, GvnMemoryVersion>::default();
+    let mut versions = HashMap::<(usize, usize), GvnLoadVersion>::default();
     let mut actions = vec![Action::Enter(0)];
     while let Some(action) = actions.pop() {
         let block = match action {
@@ -2849,7 +2860,7 @@ fn global_gvn(func: &mut MFunction) {
         .blocks
         .iter()
         .map(|block| {
-            let mut uses = HashMap::new();
+            let mut uses = HashMap::default();
             for (instruction, inst) in block.insts.iter().enumerate() {
                 for value in inst.uses() {
                     uses.insert(value, instruction);
@@ -2877,7 +2888,7 @@ fn global_gvn(func: &mut MFunction) {
     let mut leader_blocks = vec![None; vreg_count];
     debug_assert_eq!(value_numbers.len(), vreg_count);
 
-    let mut value_table: HashMap<GvnKey, ValueNumber> = HashMap::new();
+    let mut value_table: HashMap<GvnKey, ValueNumber> = HashMap::default();
     let mut table_changes: Vec<(GvnKey, Option<ValueNumber>)> = Vec::new();
     let mut leader_changes: Vec<(ValueNumber, VReg, Option<usize>)> = Vec::new();
     let mut replacements: Vec<(usize, usize, MInst)> = Vec::new(); // (block_idx, inst_idx, new_inst)
@@ -2893,7 +2904,7 @@ fn global_gvn(func: &mut MFunction) {
         value_numbers: &mut [ValueNumber],
         value_leaders: &mut [VReg],
         leader_blocks: &mut [Option<usize>],
-        live_out: &[HashSet<VReg>],
+        live_out: &[Vec<VReg>],
         last_uses: &[HashMap<VReg, usize>],
         load_versions: &HashMap<(usize, usize), GvnLoadVersion>,
         value_table: &mut HashMap<GvnKey, ValueNumber>,
@@ -2960,7 +2971,7 @@ fn global_gvn(func: &mut MFunction) {
         value_numbers: &mut [ValueNumber],
         value_leaders: &mut [VReg],
         leader_blocks: &mut [Option<usize>],
-        live_out: &HashSet<VReg>,
+        live_out: &[VReg],
         last_uses: &HashMap<VReg, usize>,
         load_versions: &HashMap<(usize, usize), GvnLoadVersion>,
         value_table: &mut HashMap<GvnKey, ValueNumber>,
@@ -2985,7 +2996,7 @@ fn global_gvn(func: &mut MFunction) {
                     let leader = value_leaders[number as usize];
                     value_numbers[dst.0 as usize] = number;
                     let leader_block = leader_blocks[number as usize];
-                    let reuse_does_not_extend_live_range = live_out.contains(&leader)
+                    let reuse_does_not_extend_live_range = live_out.binary_search(&leader).is_ok()
                         || last_uses
                             .get(&leader)
                             .is_some_and(|last_use| *last_use >= inst_idx);
@@ -3051,10 +3062,10 @@ fn compute_gvn_liveness(
     func: &MFunction,
     block_id_to_idx: &HashMap<BlockId, usize>,
     succs: &[Vec<usize>],
-) -> (Vec<HashSet<VReg>>, Vec<HashSet<VReg>>) {
+) -> (Vec<Vec<VReg>>, Vec<Vec<VReg>>) {
     let block_count = func.blocks.len();
-    let mut uses = vec![HashSet::new(); block_count];
-    let mut defs = vec![HashSet::new(); block_count];
+    let mut uses = vec![HashSet::default(); block_count];
+    let mut defs = vec![HashSet::default(); block_count];
 
     for (block_index, block) in func.blocks.iter().enumerate() {
         defs[block_index].extend(block.phis.iter().map(|phi| phi.dst));
@@ -3070,31 +3081,75 @@ fn compute_gvn_liveness(
         }
     }
 
-    let mut live_in = vec![HashSet::new(); block_count];
+    let uses = uses
+        .into_iter()
+        .map(|set| {
+            let mut values = set.into_iter().collect::<Vec<_>>();
+            values.sort_unstable();
+            values
+        })
+        .collect::<Vec<_>>();
+
+    fn sorted_union(left: &[VReg], right: &[VReg]) -> Vec<VReg> {
+        let mut merged = Vec::with_capacity(left.len().saturating_add(right.len()));
+        let (mut left_index, mut right_index) = (0usize, 0usize);
+        while left_index < left.len() && right_index < right.len() {
+            match left[left_index].cmp(&right[right_index]) {
+                std::cmp::Ordering::Less => {
+                    merged.push(left[left_index]);
+                    left_index += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    merged.push(left[left_index]);
+                    left_index += 1;
+                    right_index += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    merged.push(right[right_index]);
+                    right_index += 1;
+                }
+            }
+        }
+        merged.extend_from_slice(&left[left_index..]);
+        merged.extend_from_slice(&right[right_index..]);
+        merged
+    }
+
+    fn merged_successor_live(
+        func: &MFunction,
+        succs: &[Vec<usize>],
+        live_in: &[Vec<VReg>],
+        block_index: usize,
+    ) -> Vec<VReg> {
+        let block_id = func.blocks[block_index].id;
+        let mut live_out = Vec::new();
+        for &successor in &succs[block_index] {
+            let mut edge_uses = func.blocks[successor]
+                .phis
+                .iter()
+                .filter_map(|phi| {
+                    phi.sources
+                        .iter()
+                        .find(|(predecessor, _)| *predecessor == block_id)
+                        .map(|(_, source)| *source)
+                })
+                .collect::<Vec<_>>();
+            edge_uses.sort_unstable();
+            edge_uses.dedup();
+            let successor_live = sorted_union(&live_in[successor], &edge_uses);
+            live_out = sorted_union(&live_out, &successor_live);
+        }
+        live_out
+    }
+
+    let mut live_in = vec![Vec::new(); block_count];
     let mut changed = true;
     while changed {
         changed = false;
         for block_index in (0..block_count).rev() {
-            let block_id = func.blocks[block_index].id;
-            let mut live_out = HashSet::new();
-            for &successor in &succs[block_index] {
-                live_out.extend(live_in[successor].iter().copied());
-                for phi in &func.blocks[successor].phis {
-                    if let Some((_, source)) = phi
-                        .sources
-                        .iter()
-                        .find(|(predecessor, _)| *predecessor == block_id)
-                    {
-                        live_out.insert(*source);
-                    }
-                }
-            }
-            let mut next = uses[block_index].clone();
-            next.extend(
-                live_out
-                    .into_iter()
-                    .filter(|value| !defs[block_index].contains(value)),
-            );
+            let mut live_out = merged_successor_live(func, succs, &live_in, block_index);
+            live_out.retain(|value| !defs[block_index].contains(value));
+            let next = sorted_union(&uses[block_index], &live_out);
             if next != live_in[block_index] {
                 live_in[block_index] = next;
                 changed = true;
@@ -3102,20 +3157,9 @@ fn compute_gvn_liveness(
         }
     }
 
-    let mut live_out = vec![HashSet::new(); block_count];
-    for (block_index, block) in func.blocks.iter().enumerate() {
-        for &successor in &succs[block_index] {
-            live_out[block_index].extend(live_in[successor].iter().copied());
-            for phi in &func.blocks[successor].phis {
-                if let Some((_, source)) = phi
-                    .sources
-                    .iter()
-                    .find(|(predecessor, _)| *predecessor == block.id)
-                {
-                    live_out[block_index].insert(*source);
-                }
-            }
-        }
+    let mut live_out = vec![Vec::new(); block_count];
+    for (block_index, values) in live_out.iter_mut().enumerate() {
+        *values = merged_successor_live(func, succs, &live_in, block_index);
     }
 
     debug_assert!(
@@ -3318,7 +3362,7 @@ fn sink_bitwise_and_masks(func: &mut MFunction) {
 
             let mut stack = vec![(root_value, true)];
             let mut nodes = Vec::new();
-            let mut visited = HashSet::new();
+            let mut visited = HashSet::default();
             let mut combined_mask = u64::MAX;
             let mut immediate_masks = 0usize;
             let mut has_binary_and = false;
@@ -3376,7 +3420,7 @@ fn sink_bitwise_and_masks(func: &mut MFunction) {
         }
     }
 
-    let mut removals = vec![HashSet::<usize>::new(); func.blocks.len()];
+    let mut removals = vec![HashSet::<usize>::default(); func.blocks.len()];
     let mut replacements = vec![BTreeMap::<usize, Vec<MInst>>::new(); func.blocks.len()];
     for plan in plans {
         let root_instruction = func.blocks[plan.block].insts[plan.root].clone();
@@ -3388,7 +3432,7 @@ fn sink_bitwise_and_masks(func: &mut MFunction) {
         let root_raw_destination =
             (!root_is_mask && plan.combined_mask != u64::MAX).then(|| transient_vreg(func));
         let original = &func.blocks[plan.block].insts;
-        let mut aliases = HashMap::new();
+        let mut aliases = HashMap::default();
 
         for &instruction_index in &plan.nodes {
             match &original[instruction_index] {
@@ -3499,9 +3543,9 @@ fn algebraic_simplify(func: &mut MFunction) {
     sink_bitwise_and_masks(func);
 
     // Build def map for constant lookups
-    let mut consts: HashMap<VReg, u64> = HashMap::new();
-    let mut and_immediates: HashMap<VReg, (VReg, u64)> = HashMap::new();
-    let mut and_immediates32: HashMap<VReg, (VReg, u32)> = HashMap::new();
+    let mut consts: HashMap<VReg, u64> = HashMap::default();
+    let mut and_immediates: HashMap<VReg, (VReg, u64)> = HashMap::default();
+    let mut and_immediates32: HashMap<VReg, (VReg, u32)> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             match inst {
@@ -3911,7 +3955,7 @@ impl ContiguousLoadPack {
 /// version without moving a read across an effect.
 fn fold_contiguous_load_packs(func: &mut MFunction) {
     for block in &mut func.blocks {
-        let mut summaries = HashMap::<VReg, ContiguousLoadPack>::new();
+        let mut summaries = HashMap::<VReg, ContiguousLoadPack>::default();
         let mut last_write = None::<usize>;
 
         for instruction_index in 0..block.insts.len() {
@@ -3990,7 +4034,7 @@ enum BranchPredicateClass {
 }
 
 fn fold_branch_predicates(func: &mut MFunction, class: BranchPredicateClass) -> usize {
-    let mut use_counts = HashMap::<VReg, usize>::new();
+    let mut use_counts = HashMap::<VReg, usize>::default();
     for block in &func.blocks {
         for phi in &block.phis {
             for &(_, source) in &phi.sources {
@@ -4116,7 +4160,7 @@ fn simplify_cfg(func: &mut MFunction) {
 
     // Build jump-through map: if a block contains only `jmp target`,
     // redirect all references to this block directly to `target`.
-    let mut redirect: HashMap<BlockId, BlockId> = HashMap::new();
+    let mut redirect: HashMap<BlockId, BlockId> = HashMap::default();
     for block in &func.blocks {
         if Some(block.id) != entry
             && !phi_predecessors.contains(&block.id)
@@ -4131,10 +4175,10 @@ fn simplify_cfg(func: &mut MFunction) {
 
     if !redirect.is_empty() {
         // Transitively resolve redirects
-        let mut resolved: HashMap<BlockId, BlockId> = HashMap::new();
+        let mut resolved: HashMap<BlockId, BlockId> = HashMap::default();
         for &src in redirect.keys() {
             let mut target = src;
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = HashSet::default();
             while let Some(&next) = redirect.get(&target) {
                 if !seen.insert(next) {
                     break;
@@ -4235,7 +4279,7 @@ fn byte_range(offset: i32, byte_len: usize) -> Option<(i64, i64)> {
 /// This runs late (after CSE/constant fold) to maximize opportunities.
 fn lower_to_imm_forms(func: &mut MFunction) {
     // Collect constants
-    let mut consts: HashMap<VReg, u64> = HashMap::new();
+    let mut consts: HashMap<VReg, u64> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let MInst::LoadImm { dst, value } = inst {
@@ -4266,8 +4310,8 @@ fn lower_to_imm_forms(func: &mut MFunction) {
 /// algebraic pass. The 32-bit operation is a zero-extending machine
 /// operation, so mixed-width composition must retain an And32 result.
 fn fold_late_serial_and_immediates(func: &mut MFunction) {
-    let mut and64 = HashMap::<VReg, (VReg, u64)>::new();
-    let mut and32 = HashMap::<VReg, (VReg, u32)>::new();
+    let mut and64 = HashMap::<VReg, (VReg, u64)>::default();
+    let mut and32 = HashMap::<VReg, (VReg, u32)>::default();
     for block in &func.blocks {
         for instruction in &block.insts {
             match instruction {
@@ -4350,7 +4394,7 @@ fn fold_late_serial_and_immediates(func: &mut MFunction) {
 /// This is produced by dynamic bit-select XOR assignment such as
 /// `x[s] ^= 1`. For 2-state values it is equivalent to `x ^ (1 << s)`.
 fn fold_bit_toggle_insert(func: &mut MFunction) {
-    let mut defs: HashMap<VReg, MInst> = HashMap::new();
+    let mut defs: HashMap<VReg, MInst> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(d) = inst.def() {
@@ -4590,7 +4634,7 @@ fn shifted_source(result: VReg, expected_shift: u8, defs: &HashMap<VReg, MInst>)
 /// where source bits are the contiguous low bits `0..N` and destination bits
 /// are strictly increasing. This is exactly `pdep(src, mask)`.
 fn fold_deposit_chain_to_pdep(func: &mut MFunction) {
-    let mut defs: HashMap<VReg, MInst> = HashMap::new();
+    let mut defs: HashMap<VReg, MInst> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(d) = inst.def() {
@@ -4856,7 +4900,7 @@ fn load_imm_value(reg: VReg, defs: &HashMap<VReg, MInst>) -> Option<u64> {
 /// where destination chunks are contiguous low bits and source chunks are
 /// strictly increasing. This is `pext(src, mask)`.
 fn fold_extract_chain_to_pext(func: &mut MFunction) {
-    let mut defs: HashMap<VReg, MInst> = HashMap::new();
+    let mut defs: HashMap<VReg, MInst> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(d) = inst.def() {
@@ -4974,7 +5018,7 @@ fn fold_extract_chain_to_pext(func: &mut MFunction) {
 /// `mask = (1 << a) | (1 << b) | ...`
 fn fold_xor_chain_to_pext(func: &mut MFunction) {
     // Build def map: VReg → instruction (cloned to avoid borrowing func)
-    let mut defs: HashMap<VReg, MInst> = HashMap::new();
+    let mut defs: HashMap<VReg, MInst> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(d) = inst.def() {
@@ -5075,7 +5119,7 @@ fn fold_xor_chain_to_pext(func: &mut MFunction) {
 ///   if mask == all_ones: `popcnt src`
 ///   else: `masked = and src, mask; popcnt masked`
 fn fold_add_chain_to_popcnt(func: &mut MFunction) {
-    let mut defs: HashMap<VReg, MInst> = HashMap::new();
+    let mut defs: HashMap<VReg, MInst> = HashMap::default();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Some(d) = inst.def() {
@@ -5281,9 +5325,9 @@ fn collect_add_chain_bits(
 /// Constant deduplication: merge LoadImm instructions with the same value
 /// into a single VReg. Reduces register pressure and instruction count.
 fn constant_dedup(func: &mut MFunction) {
-    let mut aliases: HashMap<VReg, VReg> = HashMap::new();
+    let mut aliases: HashMap<VReg, VReg> = HashMap::default();
     // Map from constant value → canonical VReg
-    let mut const_map: HashMap<u64, VReg> = HashMap::new();
+    let mut const_map: HashMap<u64, VReg> = HashMap::default();
 
     for block in &func.blocks {
         const_map.clear(); // per-block to avoid cross-block live range extension
@@ -5486,7 +5530,7 @@ fn fold_relocated_bit_copy_groups(func: &mut MFunction) {
     // A bypassed projection must be private to the reconstructed root across
     // the whole function.  In particular, phi sources are edge uses and must
     // not disappear merely because this pass scans one block at a time.
-    let mut use_counts = HashMap::<VReg, usize>::new();
+    let mut use_counts = HashMap::<VReg, usize>::default();
     for block in &func.blocks {
         for phi in &block.phis {
             for &(_, source) in &phi.sources {
@@ -5509,7 +5553,7 @@ fn fold_relocated_bit_copy_groups(func: &mut MFunction) {
                 .enumerate()
                 .filter_map(|(index, instruction)| instruction.def().map(|dst| (dst, index)))
                 .collect::<HashMap<_, _>>();
-            let mut nested_or_inputs = HashSet::<VReg>::new();
+            let mut nested_or_inputs = HashSet::<VReg>::default();
             for instruction in &block.insts {
                 match instruction {
                     MInst::Or { lhs, rhs, .. } | MInst::Or32 { lhs, rhs, .. } => {
@@ -5547,7 +5591,7 @@ fn fold_relocated_bit_copy_groups(func: &mut MFunction) {
                 }
 
                 let mut groups = Vec::<RelocatedBitGroup>::new();
-                let mut grouped = HashMap::<(VReg, i16), usize>::new();
+                let mut grouped = HashMap::<(VReg, i16), usize>::default();
                 let mut shared_terms = Vec::<(usize, (VReg, i16), u64)>::new();
                 for term in terms {
                     // A nonzero copied mask normally proves that the affine
@@ -6075,10 +6119,10 @@ enum LinearCopyOp {
 
 fn eliminate_redundant_or_terms(func: &mut MFunction) {
     for block in &mut func.blocks {
-        let mut mov_aliases: HashMap<VReg, VReg> = HashMap::new();
-        let mut rewrite_aliases: HashMap<VReg, VReg> = HashMap::new();
-        let mut select_terms: HashMap<VReg, SelectTerm> = HashMap::new();
-        let mut or_terms: HashMap<VReg, HashSet<SelectTerm>> = HashMap::new();
+        let mut mov_aliases: HashMap<VReg, VReg> = HashMap::default();
+        let mut rewrite_aliases: HashMap<VReg, VReg> = HashMap::default();
+        let mut select_terms: HashMap<VReg, SelectTerm> = HashMap::default();
+        let mut or_terms: HashMap<VReg, HashSet<SelectTerm>> = HashMap::default();
 
         for inst in &mut block.insts {
             if !rewrite_aliases.is_empty() {
@@ -6309,12 +6353,12 @@ fn discover_partial_round_trips(
     possible_ones: &[u64],
     constants: &HashMap<VReg, u64>,
 ) -> (Vec<PartialRoundTripPlan>, Vec<Option<PartialStoreEvent>>) {
-    let mut last_events = HashMap::<LocalMemoryByte, LocalMemoryEvent>::new();
-    let mut last_writes = HashMap::<LocalMemoryByte, usize>::new();
+    let mut last_events = HashMap::<LocalMemoryByte, LocalMemoryEvent>::default();
+    let mut last_writes = HashMap::<LocalMemoryByte, usize>::default();
     let mut stores = vec![None; block.insts.len()];
     let mut plans = Vec::new();
     let mut region_start = 0usize;
-    let mut definitions = HashMap::<VReg, &MInst>::new();
+    let mut definitions = HashMap::<VReg, &MInst>::default();
 
     for (instruction, inst) in block.insts.iter().enumerate() {
         match *inst {
@@ -6466,8 +6510,8 @@ fn retain_dead_partial_store_plans(
         .map(|(plan, candidate)| (candidate.load_instruction, plan))
         .collect::<HashMap<_, _>>();
     let mut accepted = vec![false; plans.len()];
-    let mut removed_stores = HashSet::<usize>::new();
-    let mut next_events = HashMap::<LocalMemoryByte, LocalMemoryEvent>::new();
+    let mut removed_stores = HashSet::<usize>::default();
+    let mut next_events = HashMap::<LocalMemoryByte, LocalMemoryEvent>::default();
 
     for (instruction, inst) in block.insts.iter().enumerate().rev() {
         if let Some(plan) = plans_by_load.remove(&instruction) {
@@ -6699,9 +6743,9 @@ fn promote_partial_store_round_trips(func: &mut MFunction) {
             continue;
         }
 
-        let mut insertions = HashMap::<usize, Vec<MInst>>::new();
-        let mut replacements = HashMap::<usize, Vec<MInst>>::new();
-        let mut removals = HashSet::<usize>::new();
+        let mut insertions = HashMap::<usize, Vec<MInst>>::default();
+        let mut replacements = HashMap::<usize, Vec<MInst>>::default();
+        let mut removals = HashSet::<usize>::default();
         for plan in plans {
             let old = alloc_transient_vreg(vregs, spill_descs);
             insertions
@@ -6760,7 +6804,7 @@ fn promote_partial_store_round_trips(func: &mut MFunction) {
 fn forward_local_store_loads(func: &mut MFunction) {
     let (vregs, spill_descs, blocks) = (&mut func.vregs, &mut func.spill_descs, &mut func.blocks);
     for block in blocks {
-        let mut available: HashMap<MemorySlot, VReg> = HashMap::new();
+        let mut available: HashMap<MemorySlot, VReg> = HashMap::default();
         let mut rewritten = Vec::with_capacity(block.insts.len());
 
         for inst in block.insts.drain(..) {
@@ -7138,14 +7182,14 @@ fn invalidate_overlapping_byte_range<T>(
 /// remains a real truncating definition.
 fn copy_propagate(func: &mut MFunction) {
     // Build alias map: dst → src (transitively resolved)
-    let mut aliases: HashMap<VReg, VReg> = HashMap::new();
+    let mut aliases: HashMap<VReg, VReg> = HashMap::default();
     let definitions = func
         .blocks
         .iter()
         .flat_map(|block| &block.insts)
         .filter_map(|inst| inst.def().map(|dst| (dst, inst.clone())))
         .collect::<HashMap<_, _>>();
-    let mut upper_bounds = HashMap::new();
+    let mut upper_bounds = HashMap::default();
 
     for block in &func.blocks {
         for inst in &block.insts {
@@ -7156,7 +7200,7 @@ fn copy_propagate(func: &mut MFunction) {
                         *src,
                         &definitions,
                         &mut upper_bounds,
-                        &mut HashSet::new(),
+                        &mut HashSet::default(),
                     )
                     .is_some_and(|bound| bound <= u32::MAX as u64) =>
                 {
@@ -7226,7 +7270,7 @@ fn dead_code_eliminate_preserving_phis(func: &mut MFunction) {
 fn dead_code_eliminate_impl(func: &mut MFunction, remove_unused_phis: bool) {
     // Iterate until no more dead code is removed (cascading DCE).
     loop {
-        let mut used: std::collections::HashSet<VReg> = std::collections::HashSet::new();
+        let mut used: HashSet<VReg> = HashSet::default();
         for block in &func.blocks {
             for inst in &block.insts {
                 for u in inst.uses() {

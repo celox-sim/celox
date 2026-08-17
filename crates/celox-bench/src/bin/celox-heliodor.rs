@@ -198,7 +198,8 @@ fn run() -> Result<(), CeloxHeliodorError> {
         .opt_level(opts.opt_level)
         .optimize_options(optimize_options)
         .x86_slp(opts.x86_slp)
-        .four_state(opts.four_state);
+        .four_state(opts.four_state)
+        .diagnostics_from_env();
     for block in &opts.native_profile_blocks {
         builder = builder.trace_native_profile_block(&block.function, block.block, block.samples);
     }
@@ -404,7 +405,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
                 all(target_arch = "aarch64", feature = "experimental-arm64-backend")
             ))]
             Backend::Native => {
-                let _sim = builder.build_native()?;
+                let _compiled = builder.compile_native()?;
             }
             #[cfg(not(any(
                 target_arch = "x86_64",

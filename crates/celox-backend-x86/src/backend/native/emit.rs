@@ -8,7 +8,6 @@
 //! Function signature: `fn(unified_mem: *mut u8) -> i64`
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use iced_x86::BlockEncoderOptions;
@@ -25,7 +24,10 @@ use crate::native::ssa_destroy::{
     EdgeCopyPlan, ParallelCopyDestination, ParallelCopyOperation, ParallelCopySource,
     SsaDestructionPlan,
 };
-use crate::{STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET, STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET};
+use crate::{
+    HashMap, HashSet, STATE_HEADER_NATIVE_LOOP_EVENT_SEQ_OFFSET,
+    STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET,
+};
 use celox_state_layout::STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET;
 
 pub use crate::native::ssa_destroy::SsaDestructionError;
@@ -378,7 +380,7 @@ fn select_spill_register_cache(
     assignment: &AssignmentMap,
     tick_loop: bool,
 ) -> SpillRegisterCache {
-    let mut access_counts = HashMap::<i32, usize>::new();
+    let mut access_counts = HashMap::<i32, usize>::default();
     let mut incompatible_ranges = Vec::<(i32, u32)>::new();
     let mut indexed_stack_access = false;
 
@@ -456,7 +458,7 @@ fn select_spill_register_cache(
         return SpillRegisterCache::default();
     }
 
-    let mut edge_slots = HashSet::<i32>::new();
+    let mut edge_slots = HashSet::<i32>::default();
     for edge in plan.edges() {
         for row in &edge.rows {
             if let ParallelCopyDestination::Stack(offset) = row.destination {
@@ -1510,7 +1512,7 @@ impl BlockLabels {
         block_order: &[usize],
     ) -> Self {
         let mut labels = Vec::new();
-        let mut canonical = HashMap::new();
+        let mut canonical = HashMap::default();
 
         for (position, &block_index) in block_order.iter().enumerate().rev() {
             let block = &func.blocks[block_index];
@@ -2140,7 +2142,7 @@ fn emit_planned(
         .iter()
         .map(|_| asm.create_label())
         .collect::<Vec<_>>();
-    let mut jump_table_labels = HashMap::<(BlockId, usize), CodeLabel>::new();
+    let mut jump_table_labels = HashMap::<(BlockId, usize), CodeLabel>::default();
     for block in &func.blocks {
         for (instruction, inst) in block.insts.iter().enumerate() {
             if matches!(inst, MInst::JumpTable { .. }) {
@@ -2642,7 +2644,7 @@ fn emit_planned(
 }
 
 fn count_vreg_uses(func: &MFunction, plan: &SsaDestructionPlan) -> HashMap<VReg, usize> {
-    let mut counts = HashMap::new();
+    let mut counts = HashMap::default();
     for edge in plan.edges() {
         for row in &edge.rows {
             *counts.entry(row.source_value).or_default() += 1;
@@ -5186,12 +5188,23 @@ pub fn emit_prepared_eu(
         timing || mir_stats || diagnostics.regalloc_timing || diagnostics.regalloc_stats;
     let total_start = timing.then(crate::timing::now);
 
-    sir_eu
-        .verify_result()
-        .map_err(|error| ChainedEmitError::Sir {
-            phase: "at x86 backend boundary",
-            error,
-        })?;
+    if cfg!(debug_assertions) || diagnostics.verify_sir {
+        sir_eu
+            .verify_result()
+            .map_err(|error| ChainedEmitError::Sir {
+                phase: "at x86 backend boundary",
+                error,
+            })?;
+    }
+    let verify_mir = |mfunc: &MFunction, phase| {
+        if cfg!(debug_assertions) || diagnostics.verify_mir {
+            mfunc
+                .verify_result()
+                .map_err(|error| ChainedEmitError::Mir { phase, error })
+        } else {
+            Ok(())
+        }
+    };
     if let Some(trace) = trace.as_deref_mut() {
         trace.optimized_sir = sir_eu.to_string();
     }
@@ -5216,12 +5229,7 @@ pub fn emit_prepared_eu(
     if timing {
         tracing::debug!("[native-timing] emit_chained verify after_isel label={label}");
     }
-    mfunc
-        .verify_result()
-        .map_err(|error| ChainedEmitError::Mir {
-            phase: "after native instruction selection",
-            error,
-        })?;
+    verify_mir(&mfunc, "after native instruction selection")?;
     let legalize_start = timing.then(crate::timing::now);
     super::mir_legalize::legalize(&mut mfunc);
     if let Some(start) = legalize_start {
@@ -5237,12 +5245,7 @@ pub fn emit_prepared_eu(
     if timing {
         tracing::debug!("[native-timing] emit_chained verify after_legalize label={label}");
     }
-    mfunc
-        .verify_result()
-        .map_err(|error| ChainedEmitError::Mir {
-            phase: "after MIR legalization",
-            error,
-        })?;
+    verify_mir(&mfunc, "after MIR legalization")?;
     let opt_start = timing.then(crate::timing::now);
     super::mir_opt::optimize_with_diagnostics(&mut mfunc, diagnostics);
     if let Some(start) = opt_start {
@@ -5254,23 +5257,13 @@ pub fn emit_prepared_eu(
             start.elapsed()
         );
     }
-    mfunc
-        .verify_result()
-        .map_err(|error| ChainedEmitError::Mir {
-            phase: "after MIR optimization before x86 SLP",
-            error,
-        })?;
+    verify_mir(&mfunc, "after MIR optimization before x86 SLP")?;
     let slp_stats = if options.slp {
         super::x86_slp::select(&mut mfunc)
     } else {
         super::x86_slp::SlpStats::default()
     };
-    mfunc
-        .verify_result()
-        .map_err(|error| ChainedEmitError::Mir {
-            phase: "after x86 SLP before VReg compaction",
-            error,
-        })?;
+    verify_mir(&mfunc, "after x86 SLP before VReg compaction")?;
     if timing {
         tracing::debug!(
             "[native-timing] emit_chained x86_slp vector_zeroes={} vector_packs={} vector_loads={} vector_binary_ops={} vector_stores={} scalar_instructions_removed={}",
@@ -5303,18 +5296,13 @@ pub fn emit_prepared_eu(
     if timing {
         tracing::debug!("[native-timing] emit_chained verify after_mir_opt label={label}");
     }
-    mfunc
-        .verify_result()
-        .map_err(|error| ChainedEmitError::Mir {
-            phase: "after MIR optimization",
-            error,
-        })?;
+    verify_mir(&mfunc, "after MIR optimization")?;
     if let Some(trace) = trace.as_deref_mut() {
         trace.mir_before_regalloc = mfunc.to_string();
     }
     let regalloc_start = timing.then(crate::timing::now);
     let mut regalloc_trace = trace.as_ref().map(|_| regalloc::RegallocTrace::default());
-    let ra = regalloc::run_regalloc_with_label_and_trace_and_diagnostics(
+    let ra = regalloc::run_regalloc_for_codegen(
         &mut mfunc,
         label,
         regalloc_trace.as_mut(),
@@ -5340,7 +5328,9 @@ pub fn emit_prepared_eu(
     super::mir_opt::post_regalloc_peephole(&mut mfunc);
     super::mir_opt::post_regalloc_cleanup(&mut mfunc);
     super::mir_opt::post_regalloc_direct_load_cse(&mut mfunc, &ra.assignment);
-    regalloc::verify_assignment(&mfunc, &ra.assignment)?;
+    if cfg!(debug_assertions) || diagnostics.verify_regalloc {
+        regalloc::verify_assignment(&mfunc, &ra.assignment)?;
+    }
     if let Some(start) = post_regalloc_start {
         tracing::debug!(
             "[native-timing] emit_chained post_regalloc_cleanup mir_blocks={} mir_insts={} vregs={} elapsed={:?}",
@@ -5350,12 +5340,7 @@ pub fn emit_prepared_eu(
             start.elapsed()
         );
     }
-    mfunc
-        .verify_result()
-        .map_err(|error| ChainedEmitError::Mir {
-            phase: "after post-allocation MIR peepholes",
-            error,
-        })?;
+    verify_mir(&mfunc, "after post-allocation MIR peepholes")?;
     if let Some(trace) = trace.as_deref_mut() {
         trace.mir_after_regalloc = mfunc.to_string();
         trace.register_assignment.clear();
@@ -5377,7 +5362,9 @@ pub fn emit_prepared_eu(
     // present on a phi edge. Build the edge-copy plan from this final MIR, not
     // from the pre-cleanup allocation input.
     let ssa_destruction = SsaDestructionPlan::build(&mfunc, &ra.assignment)?;
-    ssa_destruction.verify(&mfunc, &ra.assignment, ra.spill_frame_size)?;
+    if cfg!(debug_assertions) || diagnostics.verify_regalloc {
+        ssa_destruction.verify(&mfunc, &ra.assignment, ra.spill_frame_size)?;
+    }
     if copy_stats {
         let stats = ssa_destruction.stats();
         tracing::debug!(

@@ -76,6 +76,16 @@ fn systemverilog_tokens(source: &str) -> Vec<String> {
             }
             continue;
         }
+        if bytes[index] == b'\\' {
+            let start = index;
+            index += 1;
+            while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+            let token = std::str::from_utf8(&bytes[start..index]).unwrap_or_default();
+            tokens.push(token.to_string());
+            continue;
+        }
         let directive = bytes[index] == b'`';
         if directive {
             index += 1;

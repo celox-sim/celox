@@ -1,7 +1,7 @@
 //! Register-allocation data types and target-independent allocation helpers.
 
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
-use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::hash::Hash;
 
@@ -297,10 +297,104 @@ where
 ///
 /// Distances are measured in target instructions. Loop-exit paths receive a
 /// deliberately large penalty so an allocator prefers uses within the loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NextUseDistances<V> {
+    entries: Vec<(V, u32)>,
+}
+
+impl<V> Default for NextUseDistances<V> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl<V: Ord> NextUseDistances<V> {
+    fn from_min_entries(mut entries: Vec<(V, u32)>) -> Self {
+        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let mut merged: Vec<(V, u32)> = Vec::with_capacity(entries.len());
+        for (value, distance) in entries {
+            if let Some((previous_value, previous_distance)) = merged.last_mut()
+                && *previous_value == value
+            {
+                *previous_distance = (*previous_distance).min(distance);
+            } else {
+                merged.push((value, distance));
+            }
+        }
+        Self { entries: merged }
+    }
+
+    pub fn get(&self, value: &V) -> Option<&u32> {
+        self.entries
+            .binary_search_by(|(candidate, _)| candidate.cmp(value))
+            .ok()
+            .map(|index| &self.entries[index].1)
+    }
+
+    pub fn contains_key(&self, value: &V) -> bool {
+        self.get(value).is_some()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn iter(&self) -> NextUseDistanceIter<'_, V> {
+        NextUseDistanceIter(self.entries.iter())
+    }
+
+    pub fn keys(&self) -> NextUseDistanceKeys<'_, V> {
+        NextUseDistanceKeys(self.entries.iter())
+    }
+}
+
+impl<V: Ord> std::ops::Index<&V> for NextUseDistances<V> {
+    type Output = u32;
+
+    fn index(&self, value: &V) -> &Self::Output {
+        self.get(value).expect("next-use distance key must exist")
+    }
+}
+
+pub struct NextUseDistanceIter<'a, V>(std::slice::Iter<'a, (V, u32)>);
+
+impl<'a, V> Iterator for NextUseDistanceIter<'a, V> {
+    type Item = (&'a V, &'a u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|(value, distance)| (value, distance))
+    }
+}
+
+pub struct NextUseDistanceKeys<'a, V>(std::slice::Iter<'a, (V, u32)>);
+
+impl<'a, V> Iterator for NextUseDistanceKeys<'a, V> {
+    type Item = &'a V;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|(value, _)| value)
+    }
+}
+
+impl<'a, V: Ord> IntoIterator for &'a NextUseDistances<V> {
+    type Item = (&'a V, &'a u32);
+    type IntoIter = NextUseDistanceIter<'a, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NextUseAnalysis<V> {
-    pub entry_distances: Vec<FxHashMap<V, u32>>,
-    pub exit_distances: Vec<FxHashMap<V, u32>>,
+    pub entry_distances: Vec<NextUseDistances<V>>,
+    pub exit_distances: Vec<NextUseDistances<V>>,
     pub predecessors: Vec<Vec<usize>>,
     pub backedge_successors: Vec<Vec<usize>>,
 }
@@ -344,8 +438,8 @@ where
     let phi_edge_uses = compute_phi_edge_uses(facts, &successors);
     let transfers = compute_block_transfers(facts);
 
-    let mut entry_distances = vec![FxHashMap::default(); block_count];
-    let mut exit_distances = vec![FxHashMap::default(); block_count];
+    let mut entry_distances = vec![NextUseDistances::default(); block_count];
+    let mut exit_distances = vec![NextUseDistances::default(); block_count];
     let mut worklist = (0..block_count).rev().collect::<VecDeque<_>>();
     let mut in_worklist = vec![true; block_count];
     while let Some(block) = worklist.pop_front() {
@@ -395,7 +489,7 @@ where
             let mut defs = FxHashSet::default();
             defs.reserve(block.phis.len() + block.instructions.len());
             defs.extend(block.phis.iter().map(|phi| phi.destination));
-            let mut local_uses = FxHashMap::default();
+            let mut local_uses = Vec::new();
             for (instruction_index, instruction) in block.instructions.iter().enumerate() {
                 for &definition in &instruction.defs {
                     defs.insert(definition);
@@ -403,12 +497,12 @@ where
                 let position = instruction_index as u32;
                 for &used in &instruction.uses {
                     if !defs.contains(&used) {
-                        local_uses.entry(used).or_insert(position);
+                        local_uses.push((used, position));
                     }
                 }
             }
-            let mut local_uses = local_uses.into_iter().collect::<Vec<_>>();
-            local_uses.sort_by_key(|(value, _)| *value);
+            local_uses.sort_unstable_by_key(|(value, position)| (*value, *position));
+            local_uses.dedup_by_key(|(value, _)| *value);
             BlockTransfer {
                 block_len: block.instructions.len() as u32,
                 defs,
@@ -454,19 +548,18 @@ fn compute_block_distances<V>(
     backedge_edges: &[Vec<bool>],
     phi_edge_uses: &[Vec<Vec<V>>],
     transfers: &[BlockTransfer<V>],
-    entry_distances: &[FxHashMap<V, u32>],
-) -> (FxHashMap<V, u32>, FxHashMap<V, u32>)
+    entry_distances: &[NextUseDistances<V>],
+) -> (NextUseDistances<V>, NextUseDistances<V>)
 where
-    V: Copy + Eq + Hash,
+    V: Copy + Hash + Ord,
 {
     let transfer = &transfers[block];
-    let mut new_exit = FxHashMap::default();
     let exit_capacity = successors[block]
         .iter()
         .map(|&successor| entry_distances[successor].len())
         .sum::<usize>()
         + phi_edge_uses[block].iter().map(Vec::len).sum::<usize>();
-    new_exit.reserve(exit_capacity);
+    let mut new_exit_entries = Vec::with_capacity(exit_capacity);
     for (edge, &successor) in successors[block].iter().enumerate() {
         let edge_length = if backedge_edges[block][edge] {
             LOOP_EXIT_LENGTH
@@ -475,25 +568,22 @@ where
         };
         for (&value, &distance) in &entry_distances[successor] {
             let distance = distance.saturating_add(edge_length);
-            let entry = new_exit.entry(value).or_insert(u32::MAX);
-            *entry = (*entry).min(distance);
+            new_exit_entries.push((value, distance));
         }
         for &value in &phi_edge_uses[block][edge] {
-            let entry = new_exit.entry(value).or_insert(u32::MAX);
-            *entry = (*entry).min(edge_length);
+            new_exit_entries.push((value, edge_length));
         }
     }
+    let new_exit = NextUseDistances::from_min_entries(new_exit_entries);
 
-    let mut new_entry = FxHashMap::default();
-    new_entry.reserve(new_exit.len() + transfer.local_uses.len());
+    let mut new_entry_entries = Vec::with_capacity(new_exit.len() + transfer.local_uses.len());
     for (&value, &distance) in &new_exit {
         if !transfer.defs.contains(&value) {
-            new_entry.insert(value, transfer.block_len.saturating_add(distance));
+            new_entry_entries.push((value, transfer.block_len.saturating_add(distance)));
         }
     }
-    for &(value, position) in &transfer.local_uses {
-        new_entry.insert(value, position);
-    }
+    new_entry_entries.extend(transfer.local_uses.iter().copied());
+    let new_entry = NextUseDistances::from_min_entries(new_entry_entries);
     (new_entry, new_exit)
 }
 
@@ -545,7 +635,7 @@ pub struct LiveRange<V> {
 /// Register assignment returned by [`allocate_linear_scan`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Allocation<V: Eq + Hash, R> {
-    assignments: HashMap<V, R>,
+    assignments: FxHashMap<V, R>,
 }
 
 impl<V: Eq + Hash, R: Copy> Allocation<V, R> {
@@ -617,7 +707,7 @@ where
     }
 
     let mut active = Vec::<(u32, V, R)>::new();
-    let mut assignments = HashMap::with_capacity(ordered.len());
+    let mut assignments = FxHashMap::with_capacity_and_hasher(ordered.len(), Default::default());
     for range in ordered {
         active.retain(|(end, _, _)| *end >= range.start);
         let register = allocatable

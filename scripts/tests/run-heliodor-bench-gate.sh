@@ -36,7 +36,7 @@ write_valid_gate_logs() {
     mkdir -p "$directory"
     printf '%s\n%s\n%s\n%s\n' \
         "v4 SoC linux boot smoke: cy=00d83790 x3=00000000000000aa pass=1" \
-        "VERYL_TEST_CONFIG test=$GATE_TEST backend=cc aot_c_async=false" \
+        "VERYL_TEST_CONFIG test=$GATE_TEST backend=cc aot_c_async=false compile_only=false" \
         "VERYL_TEST_TIMING test=$GATE_TEST compile_ns=$veryl_compile execute_ns=$veryl_execute" \
         "VERYL_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=$veryl_reported" \
         >"$directory/veryl.log"
@@ -287,7 +287,7 @@ assert_eq "$(sed -n '2p' "$TMP/cargo-env")" unset "CARGO_BUILD_TARGET neutraliza
 (
     HELIODOR_RESULTS_DIR="$TMP/source-enumeration-results"
     CELOX_RUNNER_BIN=/bin/true
-    HELIODOR_CELOX_COMPILE_ONLY=0
+    HELIODOR_COMPILE_ONLY=0
     mkdir -p "$HELIODOR_RESULTS_DIR"
     ensure_results_schema "$HELIODOR_RESULTS_DIR/results.tsv"
     test_source_files() {
@@ -487,7 +487,7 @@ run_one() {
         "benchmark-owned tools directory"
     assert_eq "$GATE_TIMEOUT_SEC" 420 "fixed gate timeout constant"
     assert_eq "$HELIODOR_TIMEOUT_SEC" "$GATE_TIMEOUT_SEC" "fixed timeout"
-    assert_eq "$HELIODOR_CELOX_COMPILE_ONLY" 0 "full Celox execution"
+    assert_eq "$HELIODOR_COMPILE_ONLY" 0 "full compiler execution"
     assert_eq "$CELOX_OPT_LEVEL" O2 "fixed Celox optimization"
     assert_eq "$CELOX_SIR_PASS_OVERRIDES" "" "no pass overrides"
     [[ "$HELIODOR_DIR" == "$HELIODOR_RESULTS_DIR/worktrees/$runner" ]] \
@@ -500,7 +500,7 @@ run_one() {
             execute_elapsed=40
             printf '%s\n%s\n%s\n%s\n' \
                 'v4 SoC linux boot smoke: cy=00d83790 x3=00000000000000aa pass=1' \
-                "VERYL_TEST_CONFIG test=$GATE_TEST backend=cc aot_c_async=false" \
+                "VERYL_TEST_CONFIG test=$GATE_TEST backend=cc aot_c_async=false compile_only=false" \
                 "VERYL_TEST_TIMING test=$GATE_TEST compile_ns=$compile_elapsed execute_ns=$execute_elapsed" \
                 "VERYL_TEST_RESULT test=$GATE_TEST status=pass elapsed_ns=$reported" >"$log"
             ;;
@@ -553,7 +553,7 @@ run_gate_fixture() {
     HELIODOR_TESTS=hostile-test
     HELIODOR_RUNNERS=celox-cranelift
     HELIODOR_TIMEOUT_SEC=1
-    HELIODOR_CELOX_COMPILE_ONLY=1
+    HELIODOR_COMPILE_ONLY=1
     HELIODOR_VERYL_VERSION=99.0.0
     VERYL_BIN="$TMP/hostile-path-veryl"
     CELOX_OPT_LEVEL=O0

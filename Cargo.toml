@@ -78,6 +78,7 @@ warnings = "deny"
 all = { level = "deny", priority = -1 }
 disallowed_macros = "deny"
 disallowed_methods = "deny"
+disallowed_types = "deny"
 type_complexity = "allow"
 too_many_arguments = "allow"
 collapsible_if = "allow"

@@ -74,7 +74,8 @@ jobs:
         run: bash scripts/tests/convert-heliodor-bench.sh
 
   heliodor:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Keep the x86_64 gate on every workflow trigger. Only the ARM64 PR lane is
+    # change-gated by arm64-changes below.
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:

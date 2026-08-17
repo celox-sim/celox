@@ -834,7 +834,7 @@ fn lower_module_with_overrides(
         let id = next_var_id(&mut next_id);
         let type_info = signal_type_from_sv(port.r#type(), &constants, &parameter_types)?;
         let path = VarPath::new(resource_table::insert_str(port.name()));
-        let kind = signal_kind_from_port_direction(port.direction());
+        let kind = signal_kind_from_port_direction(port.direction())?;
         let variable = SvVariable {
             id,
             path,
@@ -2166,13 +2166,20 @@ fn next_var_id(next_id: &mut VarId) -> VarId {
     id
 }
 
-fn signal_kind_from_port_direction(direction: sv::ir::PortDirection) -> VarKind {
-    match direction {
+fn signal_kind_from_port_direction(
+    direction: sv::ir::PortDirection,
+) -> Result<VarKind, sv::AnalyzerError> {
+    Ok(match direction {
         sv::ir::PortDirection::Input => VarKind::Input,
         sv::ir::PortDirection::Output => VarKind::Output,
         sv::ir::PortDirection::Inout => VarKind::Inout,
-        sv::ir::PortDirection::Ref | sv::ir::PortDirection::Unspecified => VarKind::Variable,
-    }
+        sv::ir::PortDirection::Ref => {
+            return Err(sv::AnalyzerError::Unsupported(
+                "ref port direction".to_string(),
+            ));
+        }
+        sv::ir::PortDirection::Unspecified => VarKind::Variable,
+    })
 }
 
 struct SvSignalType {

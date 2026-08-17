@@ -9,9 +9,10 @@
 //! operations; materialization emits all stores before any reload, and this
 //! verifier uses the same ordering.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
+use crate::HashMap;
 use crate::native::mir::{BlockId, MFunction, SpillKind, VReg};
 
 use super::cfg::NormalizedCfg;
@@ -171,7 +172,7 @@ fn verify_with_work(
         }
     }
 
-    let mut edge_ops = HashMap::<(usize, usize), Vec<PlannedEdgeOp>>::new();
+    let mut edge_ops = HashMap::<(usize, usize), Vec<PlannedEdgeOp>>::default();
     for (&(predecessor, successor), operations) in &plan.edge_ops {
         let Some(successors) = cfg.successors.get(predecessor) else {
             return Err(structural_error(
@@ -271,7 +272,7 @@ fn verify_with_work(
     // unless the source's S_exit says that the shared congruence home is
     // already valid.  Keep these stores edge-specific: a store on one arm may
     // not establish a home on another arm.
-    let mut implicit_edge_stores = HashMap::<(usize, usize), BTreeSet<SpillHome>>::new();
+    let mut implicit_edge_stores = HashMap::<(usize, usize), BTreeSet<SpillHome>>::default();
     for spilled_phi in &spilled_phis {
         for &(predecessor_id, source) in &spilled_phi.sources {
             let Some(&predecessor) = cfg.block_index.get(&predecessor_id) else {
@@ -318,7 +319,7 @@ fn verify_with_work(
         }
     }
 
-    let mut definition_blocks = HashMap::<SpillHome, BTreeSet<usize>>::new();
+    let mut definition_blocks = HashMap::<SpillHome, BTreeSet<usize>>::default();
     for (block, operations_by_point) in point_ops.iter().enumerate() {
         for operations in operations_by_point.values() {
             let mut stores = BTreeSet::new();
@@ -520,7 +521,7 @@ fn rename_and_collect_queries(
         Exit(Vec<(SpillHome, Option<SparseDefinition>)>),
     }
 
-    let mut current = HashMap::<SpillHome, SparseDefinition>::new();
+    let mut current = HashMap::<SpillHome, SparseDefinition>::default();
     let mut pending = Vec::<PendingQuery>::new();
     let mut actions = vec![Action::Enter(0)];
     while let Some(action) = actions.pop() {

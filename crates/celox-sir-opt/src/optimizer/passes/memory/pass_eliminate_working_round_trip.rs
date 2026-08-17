@@ -17,7 +17,7 @@ pub fn eliminate_working_round_trip(
     eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
     _eu_boundary_blocks: &[BlockId],
 ) {
-    use std::collections::HashMap;
+    use crate::HashMap;
 
     // Phase 1: Scan — collect info about each WORKING variable
     struct VarInfo {
@@ -33,10 +33,10 @@ pub fn eliminate_working_round_trip(
         invalid_apply: bool,
     }
 
-    let mut vars: HashMap<AbsoluteAddr, VarInfo> = HashMap::new();
-    let mut sparse_vars: HashMap<AbsoluteAddr, SparseVarInfo> = HashMap::new();
-    let mut working_loads = std::collections::HashSet::new();
-    let mut working_stores = std::collections::HashSet::new();
+    let mut vars: HashMap<AbsoluteAddr, VarInfo> = HashMap::default();
+    let mut sparse_vars: HashMap<AbsoluteAddr, SparseVarInfo> = HashMap::default();
+    let mut working_loads = crate::HashSet::default();
+    let mut working_stores = crate::HashSet::default();
 
     for (&bid, block) in &eu.blocks {
         for (ii, inst) in block.instructions.iter().enumerate() {
@@ -113,7 +113,7 @@ pub fn eliminate_working_round_trip(
     }
 
     // Phase 2: Determine eligible variables
-    let eligible: std::collections::HashSet<AbsoluteAddr> = vars
+    let eligible: crate::HashSet<AbsoluteAddr> = vars
         .iter()
         .filter(|(abs, info)| {
             // A seeded slot may retain its old value on paths without a
@@ -140,7 +140,7 @@ pub fn eliminate_working_round_trip(
         .collect();
 
     let unsafe_after_store = super::commit_ops::direct_stable_store_hazards(eu);
-    let eligible: std::collections::HashSet<AbsoluteAddr> = eligible
+    let eligible: crate::HashSet<AbsoluteAddr> = eligible
         .into_iter()
         .filter(|addr| !unsafe_after_store.contains_addr(*addr))
         .collect();
@@ -148,7 +148,7 @@ pub fn eliminate_working_round_trip(
     // Sparse state has no per-EU seed: every producer writes the same pending
     // value in merged event order.  Therefore producer count is not a safety
     // condition; only an observation/competing write before the tail Commit is.
-    let sparse_eligible: std::collections::HashSet<AbsoluteAddr> = sparse_vars
+    let sparse_eligible: crate::HashSet<AbsoluteAddr> = sparse_vars
         .iter()
         .filter(|(addr, info)| {
             info.has_store

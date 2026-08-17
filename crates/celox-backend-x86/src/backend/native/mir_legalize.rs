@@ -1,6 +1,5 @@
-use std::collections::{HashMap, HashSet};
-
 use super::mir::*;
+use crate::{HashMap, HashSet};
 
 pub fn legalize(func: &mut MFunction) {
     eliminate_trivial_phis(func);
@@ -108,7 +107,7 @@ fn alloc_shift_temp(
 }
 
 fn eliminate_trivial_phis(func: &mut MFunction) {
-    let mut aliases: HashMap<VReg, VReg> = HashMap::new();
+    let mut aliases: HashMap<VReg, VReg> = HashMap::default();
 
     for block in &func.blocks {
         for phi in &block.phis {
@@ -141,10 +140,11 @@ fn eliminate_trivial_phis(func: &mut MFunction) {
         return;
     }
 
-    let mut resolved: HashMap<VReg, VReg> = HashMap::with_capacity(aliases.len());
+    let mut resolved: HashMap<VReg, VReg> =
+        HashMap::with_capacity_and_hasher(aliases.len(), Default::default());
     for (&dst, &src) in &aliases {
         let mut target = src;
-        let mut seen = HashSet::from([dst]);
+        let mut seen = [dst].into_iter().collect::<HashSet<_>>();
         let mut cyclic = false;
         while let Some(&next) = aliases.get(&target) {
             if !seen.insert(target) || !seen.insert(next) {

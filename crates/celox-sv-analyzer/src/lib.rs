@@ -183,6 +183,8 @@ mod tests {
             `default_nettype none
             `resetall
             module Third(); endmodule
+            `default_nettype none
+            module \Top.core (); endmodule
         "#;
         assert_eq!(
             source_module_implicit_net_permissions(source, Path::new("nettype.sv")).unwrap(),
@@ -190,6 +192,7 @@ mod tests {
                 ("First".to_string(), false),
                 ("Second".to_string(), true),
                 ("Third".to_string(), true),
+                ("\\Top.core".to_string(), false),
             ]
         );
     }

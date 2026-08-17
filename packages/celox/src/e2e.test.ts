@@ -22,6 +22,7 @@ import {
 } from "./napi-helpers.js";
 import { Simulation } from "./simulation.js";
 import { Simulator } from "./simulator.js";
+import { defineTbComponent, runTest, runTestFromProject } from "./testbench.js";
 import {
 	FourState,
 	type FourStateSignalValue,
@@ -37,6 +38,7 @@ const FIXTURES_DIR = path.resolve(
 const ADDER_PROJECT = path.join(FIXTURES_DIR, "adder");
 const COUNTER_PROJECT = path.join(FIXTURES_DIR, "counter_project");
 const CELOX_TOML_PROJECT = path.join(FIXTURES_DIR, "celox_toml");
+const TESTBENCH_PROJECT = path.join(FIXTURES_DIR, "testbench_project");
 
 // ---------------------------------------------------------------------------
 // Test Veryl sources
@@ -2854,5 +2856,182 @@ describe("E2E: native testbench (runTest)", () => {
 		expect(a.file).toBeDefined();
 		expect(a.line).toBeGreaterThan(0);
 		expect(a.column).toBeGreaterThan(0);
+	});
+
+	test("normalizes public runTest options before calling NAPI", () => {
+		const options = {
+			deadStorePolicy: "preserveTopPorts",
+			craneliftOptLevel: "speedAndSize",
+			regallocAlgorithm: "singlePass",
+		} as const;
+		const sourceResult = runTest(
+			[{ content: TB_PASS_SOURCE, path: "test.veryl" }],
+			"CounterTbPass",
+			options,
+		);
+		const projectResult = runTestFromProject(
+			TESTBENCH_PROJECT,
+			"OptionNormalizationTb",
+			options,
+		);
+
+		expect(sourceResult.passed).toBe(true);
+		expect(projectResult.passed).toBe(true);
+	});
+
+	test("injects a synchronous TypeScript clocked component", () => {
+		const source = `
+#[test(InjectedComponentTb)]
+module InjectedComponentTb {
+    inst clk: $tb::clock_gen;
+    var d: logic<8>;
+    var q: logic<8>;
+    inst model: $comp::ts_model #(STEP: 3) (clk, d, q);
+
+    initial {
+        $assert(q == 0, "on_init output");
+        d = 8'h20;
+        clk.next();
+        $assert(q == 8'h23, "TypeScript component output");
+        $finish();
+    }
+}
+`;
+		const phases: string[] = [];
+		const component = defineTbComponent<{ clocks: number }>({
+			kind: "clocked",
+			ports: {
+				clk: { direction: "input", role: "clock" },
+				d: { direction: "input" },
+				q: { direction: "output" },
+			},
+			params: { STEP: { type: "value" } },
+			create: () => {
+				phases.push("create");
+				return { clocks: 0 };
+			},
+			onInit: () => ({ outputs: { q: 0n } }),
+			onClock: ({ inputs, params, state, cycle }) => {
+				state.clocks++;
+				phases.push(`clock:${cycle}`);
+				return {
+					outputs: { q: inputs.d! + (params.STEP as bigint) },
+				};
+			},
+			onFinish: ({ state }) => {
+				phases.push(`finish:${state.clocks}`);
+			},
+		});
+		const result = runTest(
+			[{ content: source, path: "injected_component.veryl" }],
+			"InjectedComponentTb",
+			{ components: { ts_model: component } },
+		);
+
+		expect(result.assertions).toHaveLength(2);
+		expect(result.assertions.every((assertion) => assertion.passed)).toBe(true);
+		expect(phases).toEqual(["create", "clock:1", "finish:1"]);
+		expect(result.passed).toBe(true);
+	});
+
+	test("injects a stateful TypeScript method-only component", () => {
+		const source = `
+#[test(InjectedMethodComponentTb)]
+module InjectedMethodComponentTb {
+    var first: $comp::ts_store;
+    var second: $comp::ts_store;
+
+    initial {
+        first.set(40);
+        $assert(first.add(2) == 42, "method argument and return");
+        $assert(first.get() == 40, "first instance retained state");
+        $assert(second.get() == 0, "instances have independent state");
+        first.set_label("hello");
+        $assert(first.label_len() == 5, "string method argument");
+        $finish();
+    }
+}
+`;
+		let finished = 0;
+		const component = defineTbComponent<{ value: bigint; label: string }>({
+			kind: "method_only",
+			create: () => ({ value: 0n, label: "" }),
+			methods: {
+				set: {
+					args: [{ name: "value", type: "value" }],
+					call: ({ state }, [value]) => {
+						state.value = value as bigint;
+					},
+				},
+				add: {
+					args: [{ name: "value", type: "value" }],
+					returns: { width: 8 },
+					call: ({ state }, [value]) => ({
+						returnValue: state.value + (value as bigint),
+					}),
+				},
+				get: {
+					returns: { width: 8 },
+					call: ({ state }) => ({ returnValue: state.value }),
+				},
+				set_label: {
+					args: [{ name: "value", type: "string" }],
+					call: ({ state }, [value]) => {
+						state.label = value as string;
+					},
+				},
+				label_len: {
+					returns: { width: 8 },
+					call: ({ state }) => ({
+						returnValue: BigInt(state.label.length),
+					}),
+				},
+			},
+			onFinish: () => {
+				finished++;
+			},
+		});
+
+		const result = runTest(
+			[{ content: source, path: "injected_method_component.veryl" }],
+			"InjectedMethodComponentTb",
+			{ components: { ts_store: component } },
+		);
+
+		expect(result.passed).toBe(true);
+		expect(result.assertions).toHaveLength(4);
+		expect(result.assertions.every((assertion) => assertion.passed)).toBe(true);
+		expect(finished).toBe(2);
+	});
+
+	test("preserves injected component failure messages", () => {
+		const source = `
+#[test(InjectedFailureTb)]
+module InjectedFailureTb {
+    var model: $comp::ts_failure;
+
+    initial {
+        model.fail();
+        $finish();
+    }
+}
+`;
+		const component = defineTbComponent({
+			kind: "method_only",
+			methods: {
+				fail: {
+					call: () => ({ failures: ["TypeScript component failed"] }),
+				},
+			},
+		});
+
+		const result = runTest(
+			[{ content: source, path: "injected_failure.veryl" }],
+			"InjectedFailureTb",
+			{ components: { ts_failure: component } },
+		);
+
+		expect(result.passed).toBe(false);
+		expect(result.error).toContain("TypeScript component failed");
 	});
 });

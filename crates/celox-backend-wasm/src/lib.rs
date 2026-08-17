@@ -13,6 +13,7 @@ use wasm_encoder::{
 };
 
 pub type HashMap<K, V> = fxhash::FxHashMap<K, V>;
+pub type HashSet<K> = fxhash::FxHashSet<K>;
 
 use celox_design::{
     BinaryOp, SPARSE_WORKING_REGION, STABLE_REGION, StateAddr, TriggerIdWithKind, UnaryOp,
@@ -5785,8 +5786,7 @@ fn emit_wide_get_chunk(instrs: &mut Vec<Instruction<'static>>, reg: &RegLocal, c
 fn collect_trigger_addrs(
     units: &[ExecutionUnit<RegionedAbsoluteAddr>],
 ) -> Vec<(AbsoluteAddr, u32)> {
-    let mut addrs: std::collections::HashSet<(AbsoluteAddr, u32)> =
-        std::collections::HashSet::new();
+    let mut addrs = HashSet::<(AbsoluteAddr, u32)>::default();
     for unit in units {
         for block in unit.blocks.values() {
             for inst in &block.instructions {

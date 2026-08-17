@@ -21,6 +21,7 @@ use crate::{HashMap, HashSet};
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 pub(in crate::optimizer) struct ControlFlowSimplifyPass;
@@ -549,10 +550,37 @@ fn resolve_condition_alias(
     (register, inverted)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 struct ExactCaseConstant {
+    fingerprint: u64,
     width: usize,
-    payload: Vec<u64>,
+    payload: Arc<[u64]>,
+}
+
+impl ExactCaseConstant {
+    fn new(width: usize, payload: Vec<u64>) -> Self {
+        Self {
+            fingerprint: fxhash::hash64(&(width, &payload)),
+            width,
+            payload: payload.into(),
+        }
+    }
+}
+
+impl PartialEq for ExactCaseConstant {
+    fn eq(&self, other: &Self) -> bool {
+        self.fingerprint == other.fingerprint
+            && self.width == other.width
+            && (Arc::ptr_eq(&self.payload, &other.payload) || self.payload == other.payload)
+    }
+}
+
+impl Eq for ExactCaseConstant {}
+
+impl Hash for ExactCaseConstant {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.fingerprint);
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1260,10 +1288,10 @@ fn exact_case_constant(
         let &(block, index) = definitions.get(&register)?;
         match &eu.blocks[&block].instructions[index] {
             SIRInstruction::Imm(_, value) if value.mask.is_zero() => {
-                return Some(ExactCaseConstant {
-                    width: eu.register_map.get(&register)?.width(),
-                    payload: value.payload.to_u64_digits(),
-                });
+                return Some(ExactCaseConstant::new(
+                    eu.register_map.get(&register)?.width(),
+                    value.payload.to_u64_digits(),
+                ));
             }
             SIRInstruction::Unary(_, UnaryOp::Ident | UnaryOp::ToTwoState, source) => {
                 register = *source;

@@ -2863,6 +2863,21 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(output tri1 y); endmodule
         "#,
         ),
+        (
+            "ANSI port default value",
+            r#"
+            module Top(input wire a = 1'b1, output wire y); assign y = a; endmodule
+        "#,
+        ),
+        (
+            "interconnect net declaration",
+            r#"
+            module Top(output wire y);
+                interconnect link;
+                assign y = 1'b0;
+            endmodule
+        "#,
+        ),
     ];
 
     for (expected, source) in cases {
