@@ -245,7 +245,7 @@ pub fn parse_comb_with_loop_recovery(
 
     // 2. Symbolic Execution: Evaluate statements sequentially to update the symbolic state.
     let effect_initial_store =
-        statements_contain_runtime_effect(module, &decl.statements).then(|| current_store.clone());
+        statements_contain_runtime_effect(module, &decl.statements).then(|| current_store.fork());
     let (final_store, boundaries) = recover_unrolled::eval_statements(
         module,
         current_store,
@@ -772,7 +772,7 @@ fn eval_case_with_recovery(
 
         let (then_store, then_boundaries) = eval_statements_with_recovery(
             module,
-            store.clone(),
+            store.fork(),
             boundaries.clone(),
             &arm.body,
             arena,
@@ -792,7 +792,7 @@ fn eval_case_with_recovery(
         )?;
 
         Ok((
-            merge_symbolic_stores(
+            merge_symbolic_versions(
                 module,
                 &then_store,
                 &else_store,
@@ -868,7 +868,7 @@ fn eval_case(
         }
 
         let (then_store, then_boundaries) =
-            eval_statements(module, store.clone(), boundaries.clone(), &arm.body, arena)?;
+            eval_statements(module, store.fork(), boundaries.clone(), &arm.body, arena)?;
         let (else_store, else_boundaries) = eval_from_arm(
             module,
             store,
@@ -880,7 +880,7 @@ fn eval_case(
         )?;
 
         Ok((
-            merge_symbolic_stores(
+            merge_symbolic_versions(
                 module,
                 &then_store,
                 &else_store,
@@ -997,7 +997,7 @@ fn merge_control_expr(
     }
 }
 
-fn merge_symbolic_stores(
+fn merge_symbolic_versions(
     module: &Module,
     then_store: &SymbolicStore<VarId>,
     else_store: &SymbolicStore<VarId>,
@@ -1005,15 +1005,20 @@ fn merge_symbolic_stores(
     cond_sources: &HashSet<VarAtomBase<VarId>>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<SymbolicStore<VarId>, ParserError> {
-    let mut merged_store = SymbolicStore::default();
-    merged_store.reserve(then_store.len());
-    for id in then_store.keys() {
-        let t_range_store = &then_store[id];
-        let e_range_store = &else_store[id];
+    // A branch clone is a symbolic version. Start with one version and only
+    // visit definitions whose copy-on-write entries diverged; shared pages and
+    // shared entries cannot need a phi.
+    let mut merged_store = then_store.fork();
+    for id in then_store.differing_keys(else_store) {
+        // Function-local state can be introduced while evaluating only the
+        // else branch. It is scoped to that branch and must not escape through
+        // this merge; the previous implementation likewise iterated then keys.
+        let Some(t_range_store) = then_store.get(&id) else {
+            continue;
+        };
+        let e_range_store = &else_store[&id];
 
         if t_range_store == e_range_store {
-            let inserted = merged_store.clone_entry_from(id, then_store);
-            debug_assert!(inserted);
             continue;
         }
 
@@ -1024,7 +1029,7 @@ fn merge_symbolic_stores(
         let mut all_lsbs: BTreeSet<usize> = t_range_store.ranges.keys().cloned().collect();
         all_lsbs.extend(e_range_store.ranges.keys().cloned());
 
-        let var = &module.variables[id];
+        let var = &module.variables[&id];
         let var_width = resolve_total_width(module, var)?;
         let mut lsbs_vec: Vec<usize> = all_lsbs.into_iter().collect();
         lsbs_vec.push(var_width);
@@ -1042,8 +1047,8 @@ fn merge_symbolic_stores(
                 .map_err(|error| range_store_error("conditional merge", error, None))?;
             let t_modified = then_parts.iter().any(|(v, _)| v.is_some());
             let e_modified = else_parts.iter().any(|(v, _)| v.is_some());
-            let (t_expr, t_sources) = combine_parts_with_default(*id, lsb, then_parts, arena)?;
-            let (e_expr, e_sources) = combine_parts_with_default(*id, lsb, else_parts, arena)?;
+            let (t_expr, t_sources) = combine_parts_with_default(id, lsb, then_parts, arena)?;
+            let (e_expr, e_sources) = combine_parts_with_default(id, lsb, else_parts, arena)?;
 
             let result_val = if !t_modified && !e_modified {
                 None
@@ -1071,7 +1076,7 @@ fn merge_symbolic_stores(
                 .insert(lsb, (result_val, next_lsb - lsb, lsb));
         }
 
-        merged_store.insert(*id, merged_range_store);
+        merged_store.insert(id, merged_range_store);
     }
 
     Ok(merged_store)
@@ -1094,7 +1099,7 @@ fn apply_loop_continue_guard(
             ..state
         })
     } else {
-        let merged_store = merge_symbolic_stores(
+        let merged_store = merge_symbolic_versions(
             module,
             &next_store,
             &base_store,
@@ -1299,7 +1304,7 @@ fn eval_loop_case(
         merged_sources.extend(else_state.continue_sources);
 
         Ok(LoopControlState {
-            store: merge_symbolic_stores(
+            store: merge_symbolic_versions(
                 module,
                 &then_state.store,
                 &else_state.store,
@@ -1377,7 +1382,7 @@ fn eval_loop_if(
     merged_sources.extend(else_state.continue_sources);
 
     Ok(LoopControlState {
-        store: merge_symbolic_stores(
+        store: merge_symbolic_versions(
             module,
             &then_state.store,
             &else_state.store,
@@ -3121,7 +3126,7 @@ fn eval_if_with_recovery(
     let else_guard = combine_active_guard(arena, active_guard, false_condition, &cond_sources)?;
     let (then_store, b_then) = eval_statements_with_recovery(
         module,
-        initial_store.clone(),
+        initial_store.fork(),
         boundaries.clone(),
         &stmt.true_side,
         arena,
@@ -3139,7 +3144,7 @@ fn eval_if_with_recovery(
     )?;
 
     Ok((
-        merge_symbolic_stores(
+        merge_symbolic_versions(
             module,
             &then_store,
             &else_store,
@@ -3177,7 +3182,7 @@ fn eval_if(
     }
 
     let (then_store, b_then) = stmt.true_side.iter().try_fold(
-        (initial_store.clone(), boundaries.clone()),
+        (initial_store.fork(), boundaries.clone()),
         |(s, b), step| eval_statement(module, s, b, step, arena),
     )?;
     let (else_store, b_else) = stmt
@@ -3188,7 +3193,7 @@ fn eval_if(
         })?;
 
     Ok((
-        merge_symbolic_stores(
+        merge_symbolic_versions(
             module,
             &then_store,
             &else_store,

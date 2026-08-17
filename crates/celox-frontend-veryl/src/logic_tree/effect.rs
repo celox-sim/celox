@@ -804,7 +804,7 @@ pub(crate) fn collect_expression_effects(
             )?;
             let mut then_store = branch_store.clone();
             let _ = eval_expression_effectful(module, &mut then_store, then_expr, arena, None)?;
-            let after_then = merge_symbolic_stores(
+            let after_then = merge_symbolic_versions(
                 module,
                 &then_store,
                 &branch_store,
@@ -1071,7 +1071,7 @@ fn collect_case_pattern_effects(
                 .map(|(_, sources)| sources)
                 .cloned()
                 .unwrap_or_default();
-            merge_symbolic_stores(
+            merge_symbolic_versions(
                 module,
                 &evaluated_store,
                 &base_store,
@@ -1308,7 +1308,7 @@ fn collect_function_body_effects(
         live_sources.extend(else_state.live_sources);
 
         Ok(FunctionControlState {
-            store: merge_symbolic_stores(
+            store: merge_symbolic_versions(
                 module,
                 &then_state.store,
                 &else_state.store,
@@ -1345,7 +1345,7 @@ fn collect_function_body_effects(
             }),
             Some(false) => Ok(state),
             None => {
-                let store = merge_symbolic_stores(
+                let store = merge_symbolic_versions(
                     module,
                     &next_store,
                     &state.store,
@@ -1446,7 +1446,7 @@ fn collect_function_body_effects(
             });
         }
 
-        let store = merge_symbolic_stores(
+        let store = merge_symbolic_versions(
             module,
             &next_function.store,
             &state.function.store,
@@ -1617,7 +1617,7 @@ fn collect_function_body_effects(
         live_sources.extend(else_state.function.live_sources);
         Ok(FunctionLoopControlState {
             function: FunctionControlState {
-                store: merge_symbolic_stores(
+                store: merge_symbolic_versions(
                     module,
                     &then_state.function.store,
                     &else_state.function.store,
@@ -1814,7 +1814,7 @@ fn collect_function_body_effects(
             live_sources.extend(else_state.function.live_sources);
             Ok(FunctionLoopControlState {
                 function: FunctionControlState {
-                    store: merge_symbolic_stores(
+                    store: merge_symbolic_versions(
                         module,
                         &then_state.function.store,
                         &else_state.function.store,
@@ -2397,7 +2397,7 @@ fn collect_function_body_effects(
                 live_sources.extend(false_state.live_sources.iter().copied());
 
                 Ok(FunctionControlState {
-                    store: merge_symbolic_stores(
+                    store: merge_symbolic_versions(
                         module,
                         &true_state.store,
                         &false_state.store,
@@ -2673,7 +2673,7 @@ pub(super) fn collect_comb_effects_statements(
                 )?;
                 collector.active_guard = saved_guard;
                 collector.active_guard_sources = saved_guard_sources;
-                store = merge_symbolic_stores(
+                store = merge_symbolic_versions(
                     module,
                     &side_store,
                     &else_store,
@@ -2777,7 +2777,7 @@ fn collect_comb_effects_case(
 
         collector.active_guard = saved_guard;
         collector.active_guard_sources = saved_guard_sources;
-        merge_symbolic_stores(module, &side_store, &else_store, cond_node, &sources, arena)
+        merge_symbolic_versions(module, &side_store, &else_store, cond_node, &sources, arena)
     }
 
     collect_expression_effects(module, &store, &case_stmt.case_target, arena, collector)?;

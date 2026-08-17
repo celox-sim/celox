@@ -492,7 +492,7 @@ pub(super) fn eval_function_body_return(
             }),
             Some(false) => Ok(state),
             None => {
-                let merged_store = merge_symbolic_stores(
+                let merged_store = merge_symbolic_versions(
                     module,
                     &next_store,
                     &state.store,
@@ -603,7 +603,7 @@ pub(super) fn eval_function_body_return(
         live_sources.extend(else_state.live_sources);
 
         Ok(FunctionControlState {
-            store: merge_symbolic_stores(
+            store: merge_symbolic_versions(
                 module,
                 &then_state.store,
                 &else_state.store,
@@ -647,7 +647,7 @@ pub(super) fn eval_function_body_return(
                     ..state
                 })
             } else {
-                let merged_store = merge_symbolic_stores(
+                let merged_store = merge_symbolic_versions(
                     module,
                     &next_function.store,
                     &state.function.store,
@@ -734,7 +734,7 @@ pub(super) fn eval_function_body_return(
 
             Ok(FunctionLoopControlState {
                 function: FunctionControlState {
-                    store: merge_symbolic_stores(
+                    store: merge_symbolic_versions(
                         module,
                         &then_state.function.store,
                         &else_state.function.store,
@@ -876,7 +876,7 @@ pub(super) fn eval_function_body_return(
 
                 Ok(FunctionLoopControlState {
                     function: FunctionControlState {
-                        store: merge_symbolic_stores(
+                        store: merge_symbolic_versions(
                             module,
                             &then_state.function.store,
                             &else_state.function.store,
@@ -1339,7 +1339,7 @@ pub(super) fn eval_function_body_return(
                 ..state
             })
         } else {
-            let merged_store = merge_symbolic_stores(
+            let merged_store = merge_symbolic_versions(
                 module,
                 &next_function.store,
                 &state.function.store,
@@ -1425,7 +1425,7 @@ pub(super) fn eval_function_body_return(
 
             FunctionLoopControlState {
                 function: FunctionControlState {
-                    store: merge_symbolic_stores(
+                    store: merge_symbolic_versions(
                         module,
                         &then_state.function.store,
                         &else_state.function.store,
@@ -1592,7 +1592,7 @@ pub(super) fn eval_function_body_return(
 
             Ok(FunctionLoopControlState {
                 function: FunctionControlState {
-                    store: merge_symbolic_stores(
+                    store: merge_symbolic_versions(
                         module,
                         &then_state.function.store,
                         &else_state.function.store,
@@ -1861,7 +1861,7 @@ pub(super) fn eval_function_body_return(
             live_sources.extend(else_state.live_sources);
 
             Ok(FunctionControlState {
-                store: merge_symbolic_stores(
+                store: merge_symbolic_versions(
                     module,
                     &then_state.store,
                     &else_state.store,
@@ -2307,7 +2307,7 @@ fn merge_short_circuit_case_condition(
     let mut rhs_store = base_store.clone();
     let ((rhs_node, rhs_sources), rhs_boundaries) = eval_rhs(&mut rhs_store, arena)?;
     let execute_rhs = short_circuit_rhs_guard(arena, lhs_node, is_and)?;
-    *store = super::merge_symbolic_stores(
+    *store = super::merge_symbolic_versions(
         module,
         &rhs_store,
         &base_store,
@@ -2584,7 +2584,7 @@ pub(super) fn eval_expression_in_context(
                 };
                 let shortcut = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, shortcut_truth))?;
                 let execute_rhs = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, shortcut))?;
-                let merged_store = super::merge_symbolic_stores(
+                let merged_store = super::merge_symbolic_versions(
                     module,
                     &rhs_store,
                     &base_store,
@@ -2782,7 +2782,7 @@ pub(super) fn eval_expression_in_context(
                 let true_truth = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, not_cond))?;
                 let known_true = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, true_truth))?;
                 let execute_then = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, known_false))?;
-                let after_then = super::merge_symbolic_stores(
+                let after_then = super::merge_symbolic_versions(
                     module,
                     &then_store,
                     &base_store,
@@ -2802,7 +2802,7 @@ pub(super) fn eval_expression_in_context(
                 )?;
 
                 let execute_else = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, known_true))?;
-                let final_store = super::merge_symbolic_stores(
+                let final_store = super::merge_symbolic_versions(
                     module,
                     &else_store,
                     &after_then,
