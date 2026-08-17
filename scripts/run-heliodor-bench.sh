@@ -884,15 +884,22 @@ prepare() {
     fi
     if ! git -C "$HELIODOR_DIR" checkout --quiet "$HELIODOR_REF"; then
         # A restored Actions cache can contain refs whose reachable object
-        # graph is incomplete. A normal fetch trusts the advertised local
-        # tips and will not repair that cache, so retry the requested ref as a
-        # full refetch before declaring the checkout unusable.
-        echo "warning: cached Heliodor checkout is incomplete; refetching $HELIODOR_REF" >&2
-        if ! git -C "$HELIODOR_DIR" fetch --quiet --refetch origin \
-            || ! git -C "$HELIODOR_DIR" checkout --quiet "$HELIODOR_REF"; then
+        # graph is incomplete. Git may trust that corrupt graph even during a
+        # refetch, so leave it untouched and continue from a fresh checkout.
+        local fallback_root
+        local fallback_checkout
+        echo "warning: cached Heliodor checkout is incomplete; cloning a fresh copy" >&2
+        if ! fallback_root="$(mktemp -d "$(dirname "$HELIODOR_DIR")/heliodor-reclone.XXXXXX")"; then
+            echo "error: could not create a fallback Heliodor directory" >&2
+            return 1
+        fi
+        fallback_checkout="$fallback_root/source"
+        if ! git clone --quiet "$HELIODOR_REPO" "$fallback_checkout" \
+            || ! git -C "$fallback_checkout" checkout --quiet "$HELIODOR_REF"; then
             echo "error: could not check out Heliodor ref $HELIODOR_REF" >&2
             return 1
         fi
+        HELIODOR_DIR="$fallback_checkout"
     fi
     if ! rm -f "$HELIODOR_DIR/.build/lock"; then
         echo "error: could not remove stale Heliodor build lock" >&2
