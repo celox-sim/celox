@@ -64,8 +64,8 @@ mutation($prId: ID!) {
 }`;
 
 const DEQUEUE_PULL_REQUEST_MUTATION = `
-mutation($entryId: ID!) {
-  dequeuePullRequest(input: {id: $entryId}) {
+mutation($prId: ID!) {
+  dequeuePullRequest(input: {id: $prId}) {
     clientMutationId
   }
 }`;
@@ -90,12 +90,7 @@ export function selectReleasePullRequest(pullRequests) {
 
 async function stopHeldRelease(github, pullRequest, log) {
   if (pullRequest.isInMergeQueue) {
-    if (pullRequest.mergeQueueEntry?.id === undefined) {
-      throw new Error(
-        `Release pull request #${pullRequest.number} is queued without a queue entry ID`,
-      );
-    }
-    await github.dequeuePullRequest(pullRequest.mergeQueueEntry.id);
+    await github.dequeuePullRequest(pullRequest.id);
     log(`Removed release pull request #${pullRequest.number} from the merge queue.`);
     pullRequest = await github.getPullRequest(pullRequest.id);
   }
@@ -290,16 +285,8 @@ export class GitHubCli {
     return data.enqueuePullRequest.mergeQueueEntry;
   }
 
-  async dequeuePullRequest(entryId) {
-    const output = await this.run([
-      "api",
-      "graphql",
-      "-f",
-      `query=${DEQUEUE_PULL_REQUEST_MUTATION}`,
-      "-f",
-      `entryId=${entryId}`,
-    ]);
-    JSON.parse(output);
+  async dequeuePullRequest(pullRequestId) {
+    await this.graphql(DEQUEUE_PULL_REQUEST_MUTATION, pullRequestId);
   }
 }
 

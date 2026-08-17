@@ -230,6 +230,11 @@ test("removes an already queued held release", async () => {
   assert.deepEqual(result, { outcome: "held", number: 388 });
   assert.ok(
     github.calls.some(
+      (call) => call[0] === "dequeue" && call[1] === "PR_1",
+    ),
+  );
+  assert.ok(
+    !github.calls.some(
       (call) => call[0] === "dequeue" && call[1] === "MQE_1",
     ),
   );
