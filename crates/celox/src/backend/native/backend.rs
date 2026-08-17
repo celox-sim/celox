@@ -1463,22 +1463,25 @@ fn compile_program(
         }
         Ok::<_, SimulatorError>((comb_jit, compiled_ff_codes))
     })?;
-    // The VPI image compiler deliberately uses O0 so force/release can observe
-    // procedural store boundaries. Avoid multiplying code size and compile
-    // time for ordinary optimized simulator images that do not use this path.
+    // A foreign-interface image can request per-unit entries so force/release
+    // can reapply overrides between procedural store boundaries. Ordinary
+    // images do not compile or retain this duplicate combinational code.
     let force_store_boundaries = options.optimize_options.opt_level() == crate::OptLevel::O0;
-    let comb_runtime_units = sir
-        .sir
-        .eval_comb
-        .iter()
-        .flat_map(|unit| {
-            if force_store_boundaries {
-                split_comb_execution_unit(unit)
-            } else {
-                vec![unit.clone()]
-            }
-        })
-        .collect::<Vec<_>>();
+    let comb_runtime_units = if options.native_force_support {
+        sir.sir
+            .eval_comb
+            .iter()
+            .flat_map(|unit| {
+                if force_store_boundaries {
+                    split_comb_execution_unit(unit)
+                } else {
+                    vec![unit.clone()]
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let comb_unit_jits = comb_runtime_units
         .iter()
         .enumerate()

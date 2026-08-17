@@ -108,7 +108,7 @@ mod host_api {
     pub use crate::backend::native::{
         AppendedNativeImage, NativeBackend, NativeCodeEntry, NativeImageArchitecture,
         NativeImageContainerError, NativeProgramImage, NativeProgramInstance,
-        NativeProgramLoadError, SharedNativeCode,
+        NativeProgramLoadError, NativeSignalIdentity, SharedNativeCode,
     };
     #[cfg(any(
         target_arch = "x86_64",

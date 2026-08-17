@@ -86,6 +86,34 @@ fn shared_code_packs_every_function_into_one_image() {
 }
 
 #[test]
+fn ordinary_images_do_not_duplicate_combinational_entries_for_force_support() {
+    let ordinary = Simulator::builder(ADDER, "Top")
+        .opt_level(celox::OptLevel::O0)
+        .build()
+        .unwrap();
+    assert!(
+        ordinary
+            .shared_code()
+            .code_entries()
+            .iter()
+            .all(|entry| !entry.name.starts_with("eval_comb_unit["))
+    );
+
+    let force_capable = Simulator::builder(ADDER, "Top")
+        .opt_level(celox::OptLevel::O0)
+        .native_force_support(true)
+        .build()
+        .unwrap();
+    assert!(
+        force_capable
+            .shared_code()
+            .code_entries()
+            .iter()
+            .any(|entry| entry.name.starts_with("eval_comb_unit["))
+    );
+}
+
+#[test]
 fn copied_native_image_executes_from_recorded_entry_offset() {
     let sim = Simulator::builder(ADDER, "Top").build().unwrap();
     let shared = sim.shared_code();

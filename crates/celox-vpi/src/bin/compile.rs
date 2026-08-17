@@ -69,6 +69,7 @@ fn run() -> Result<(), String> {
         Simulator::from_sources(source_refs, &arguments.top)
             .with_metadata(metadata)
             .four_state(true)
+            .native_force_support(true)
             .opt_level(celox::OptLevel::O0)
             .build()
     } else {
@@ -76,6 +77,7 @@ fn run() -> Result<(), String> {
             .map_err(|error| format!("failed to read {}: {error}", arguments.source.display()))?;
         Simulator::builder(&source, &arguments.top)
             .four_state(true)
+            .native_force_support(true)
             .opt_level(celox::OptLevel::O0)
             .build()
     }

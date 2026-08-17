@@ -21,16 +21,17 @@ use std::{
 };
 
 use celox::{
-    BigUint, DomainKind, NativeProgramInstance, ReflectionScopeId, ReflectionSignalId,
-    RuntimeEvent, SignalDirection, SimBackend,
+    BigUint, DomainKind, NativeProgramInstance, NativeSignalIdentity, ReflectionScopeId,
+    ReflectionSignalId, RuntimeEvent, SignalDirection, SimBackend,
 };
 
 mod callbacks;
 pub use callbacks::{
     CB_AFTER_DELAY, CB_END_OF_SIMULATION, CB_NEXT_SIM_TIME, CB_READ_ONLY_SYNCH,
-    CB_READ_WRITE_SYNCH, CB_START_OF_SIMULATION, CB_VALUE_CHANGE, VpiCbData, VpiErrorInfo, VpiTime,
-    VpiVlogInfo, celox_vpi_current_time, vpi_chk_error, vpi_control, vpi_get_time,
-    vpi_get_vlog_info, vpi_handle_by_index, vpi_register_cb, vpi_remove_cb,
+    CB_READ_WRITE_SYNCH, CB_START_OF_SIMULATION, CB_VALUE_CHANGE, VPI_SCALED_REAL_TIME,
+    VPI_SIM_TIME, VPI_SUPPRESS_TIME, VpiCbData, VpiErrorInfo, VpiTime, VpiVlogInfo,
+    celox_vpi_current_time, vpi_chk_error, vpi_control, vpi_get_time, vpi_get_vlog_info,
+    vpi_handle_by_index, vpi_register_cb, vpi_remove_cb,
 };
 
 pub const VPI_BIN_STR_VAL: i32 = 1;
@@ -137,7 +138,7 @@ pub type VpiHandle = *mut VpiHandleObject;
 
 thread_local! {
     static RUNTIME: RefCell<Option<NativeProgramInstance>> = const { RefCell::new(None) };
-    static FORCED_VALUES: RefCell<HashMap<ReflectionSignalId, ForcedValue>> = RefCell::new(HashMap::new());
+    static FORCED_VALUES: RefCell<HashMap<NativeSignalIdentity, ForcedValue>> = RefCell::new(HashMap::new());
     static PENDING_WRITES: RefCell<PendingWrites> = RefCell::new(PendingWrites::default());
 }
 
@@ -673,14 +674,14 @@ pub unsafe extern "C" fn vpi_get_str(property: i32, reference: VpiHandle) -> *mu
 }
 
 fn value_bits(id: ReflectionSignalId) -> Option<(BigUint, BigUint, usize)> {
-    if let Some(forced) = FORCED_VALUES.with_borrow(|forced| forced.get(&id).cloned()) {
-        let width = with_runtime(|runtime| {
-            runtime
-                .reflection()
-                .signal(id)
-                .map(|signal| signal.signal.width)
-        })
-        .flatten()?;
+    let (identity, width) = with_runtime(|runtime| {
+        Some((
+            runtime.signal_identity(id)?,
+            runtime.reflection().signal(id)?.signal.width,
+        ))
+    })
+    .flatten()?;
+    if let Some(forced) = FORCED_VALUES.with_borrow(|forced| forced.get(&identity).cloned()) {
         return Some((forced.value, forced.mask, width));
     }
     with_runtime(|runtime| {
@@ -939,8 +940,12 @@ pub unsafe extern "C" fn vpi_put_value(
     let Some(ObjectRef::Signal(id)) = (unsafe { object_ref(reference) }) else {
         return ptr::null_mut();
     };
+    let identity = with_runtime(|runtime| runtime.signal_identity(id)).flatten();
+    let Some(identity) = identity else {
+        return ptr::null_mut();
+    };
     if flags == VPI_RELEASE_FLAG {
-        let released = FORCED_VALUES.with_borrow_mut(|forced| forced.remove(&id));
+        let released = FORCED_VALUES.with_borrow_mut(|forced| forced.remove(&identity));
         let succeeded = released.is_none_or(|released| {
             with_runtime_mut(|runtime| {
                 let Some(signal) = runtime.reflection().signal(id).cloned() else {
@@ -993,7 +998,7 @@ pub unsafe extern "C" fn vpi_put_value(
     if flags == VPI_FORCE_FLAG {
         let deposited = FORCED_VALUES
             .with_borrow(|forced| {
-                forced.get(&id).map(|forced| {
+                forced.get(&identity).map(|forced| {
                     (
                         forced.deposited_value.clone(),
                         forced.deposited_mask.clone(),
@@ -1012,7 +1017,7 @@ pub unsafe extern "C" fn vpi_put_value(
         };
         FORCED_VALUES.with_borrow_mut(|forced| {
             forced.insert(
-                id,
+                identity,
                 ForcedValue {
                     value: bits.clone(),
                     mask: mask.clone(),
@@ -1022,7 +1027,7 @@ pub unsafe extern "C" fn vpi_put_value(
             );
         });
     } else if FORCED_VALUES.with_borrow_mut(|forced| {
-        forced.get_mut(&id).is_some_and(|forced| {
+        forced.get_mut(&identity).is_some_and(|forced| {
             forced.deposited_value = bits.clone();
             forced.deposited_mask = mask.clone();
             true

@@ -18,8 +18,9 @@ pub const CB_AFTER_DELAY: i32 = 9;
 pub const CB_START_OF_SIMULATION: i32 = 11;
 pub const CB_END_OF_SIMULATION: i32 = 12;
 
-const VPI_SIM_TIME: i32 = 2;
-const VPI_SUPPRESS_TIME: i32 = 3;
+pub const VPI_SCALED_REAL_TIME: i32 = 1;
+pub const VPI_SIM_TIME: i32 = 2;
+pub const VPI_SUPPRESS_TIME: i32 = 3;
 const VPI_STOP: i32 = 66;
 use super::VPI_FINISH;
 
@@ -407,9 +408,15 @@ pub unsafe extern "C" fn vpi_get_time(_object: VpiHandle, time: *mut VpiTime) {
     let now = STATE.with_borrow(|state| state.time);
     // Safety: checked non-null above.
     let time = unsafe { &mut *time };
-    time.high = (now >> 32) as u32;
-    time.low = now as u32;
-    time.real = 0.0;
+    if time.type_ == VPI_SCALED_REAL_TIME {
+        time.high = 0;
+        time.low = 0;
+        time.real = now as f64;
+    } else {
+        time.high = (now >> 32) as u32;
+        time.low = now as u32;
+        time.real = 0.0;
+    }
 }
 
 #[unsafe(no_mangle)]

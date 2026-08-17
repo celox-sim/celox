@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use celox_design::StateAddr;
+use celox_design::{DomainKind, StateAddr};
 use celox_runtime::backend::EventHandle;
 use celox_runtime::{DesignReflection, ReflectionSignal, SignalRef};
 use num_bigint::BigUint;
@@ -27,6 +27,15 @@ pub enum NativeProgramLoadError {
     Initialize(#[source] celox_runtime::SimulatorErrorCode),
 }
 
+/// Source-independent identity shared by reflected handles for one signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NativeSignalIdentity {
+    /// Ordinary state aliases share their final native-memory location.
+    State(SignalRef),
+    /// Clock and reset aliases share their canonical event-domain address.
+    Event(StateAddr),
+}
+
 /// One independently mutable instance of a precompiled native program.
 ///
 /// Construction needs only a serialized [`NativeProgramImage`]. Source text,
@@ -37,7 +46,7 @@ pub struct NativeProgramInstance {
     runtime_event_read_seq: u64,
     comb_observer_snapshots: Vec<Vec<(BigUint, BigUint)>>,
     comb_observer_initial_eval: bool,
-    forced_values: crate::HashMap<celox_runtime::ReflectionSignalId, (BigUint, BigUint)>,
+    forced_values: crate::HashMap<NativeSignalIdentity, (BigUint, BigUint)>,
 }
 
 impl NativeProgramInstance {
@@ -90,6 +99,24 @@ impl NativeProgramInstance {
     /// Resolve only the compact state handle for a fully qualified signal.
     pub fn signal_ref(&self, full_name: &str) -> Option<SignalRef> {
         self.signal(full_name).map(|signal| signal.signal)
+    }
+
+    /// Resolve the canonical state/event identity behind a reflected handle.
+    pub fn signal_identity(
+        &self,
+        id: celox_runtime::ReflectionSignalId,
+    ) -> Option<NativeSignalIdentity> {
+        let signal = self.reflection().signal(id)?;
+        Some(if signal.domain_kind == DomainKind::Other {
+            NativeSignalIdentity::State(signal.signal)
+        } else {
+            NativeSignalIdentity::Event(
+                self.shared
+                    .program_image()
+                    .event_topology()
+                    .canonical(signal.state_address),
+            )
+        })
     }
 
     /// Execute combinational logic after one or more foreign writes.
@@ -192,18 +219,40 @@ impl NativeProgramInstance {
         value: BigUint,
         mask: BigUint,
     ) -> bool {
-        let Some(signal) = self.reflection().signal(id).cloned() else {
+        let Some(identity) = self.signal_identity(id) else {
             return false;
         };
-        self.backend
-            .set_four_state(signal.signal, value.clone(), mask.clone());
-        self.forced_values.insert(id, (value, mask));
+        let aliases = self.signal_refs_for_identity(identity);
+        for signal in aliases {
+            self.backend
+                .set_four_state(signal, value.clone(), mask.clone());
+        }
+        self.forced_values.insert(identity, (value, mask));
         true
     }
 
     /// Restore normal design-driver control for a reflected signal.
     pub fn release_signal(&mut self, id: celox_runtime::ReflectionSignalId) {
-        self.forced_values.remove(&id);
+        if let Some(identity) = self.signal_identity(id) {
+            self.forced_values.remove(&identity);
+        }
+    }
+
+    fn signal_refs_for_identity(&self, identity: NativeSignalIdentity) -> Vec<SignalRef> {
+        let mut signals = self
+            .reflection()
+            .signals()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, signal)| {
+                (self.signal_identity(celox_runtime::ReflectionSignalId(index as u32))
+                    == Some(identity))
+                .then_some(signal.signal)
+            })
+            .collect::<Vec<_>>();
+        signals.sort_unstable();
+        signals.dedup();
+        signals
     }
 
     fn runtime_schema(&self) -> &NativeRuntimeSchema {
@@ -299,10 +348,10 @@ impl NativeProgramInstance {
         let overrides = self
             .forced_values
             .iter()
-            .filter_map(|(id, (value, mask))| {
-                self.reflection()
-                    .signal(*id)
-                    .map(|signal| (signal.signal, value.clone(), mask.clone()))
+            .flat_map(|(identity, (value, mask))| {
+                self.signal_refs_for_identity(*identity)
+                    .into_iter()
+                    .map(|signal| (signal, value.clone(), mask.clone()))
             })
             .collect::<Vec<_>>();
         for (signal, value, mask) in &overrides {

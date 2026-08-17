@@ -415,6 +415,9 @@ mod host {
         /// When true, JIT-compiled functions emit trigger detection code for
         /// edge-based event discovery. Only needed by [`crate::Simulation`].
         pub emit_triggers: bool,
+        /// Emit the additional combinational entries needed to reapply foreign
+        /// force overrides between procedural store boundaries.
+        pub native_force_support: bool,
         /// Dead store elimination policy.
         pub dead_store_policy: DeadStorePolicy,
     }
@@ -434,6 +437,7 @@ mod host {
                 trace: Default::default(),
                 diagnostics: Default::default(),
                 emit_triggers: false,
+                native_force_support: false,
                 dead_store_policy: DeadStorePolicy::Off,
             }
         }
@@ -517,6 +521,17 @@ mod host {
         /// Enable 4-state (0, 1, X, Z) simulation mode.
         pub fn four_state(mut self, enable: bool) -> Self {
             self.options.four_state = enable;
+            self
+        }
+
+        /// Enable native-image support for foreign force/release operations.
+        ///
+        /// This emits extra combinational entry points, so ordinary simulator
+        /// builds leave it disabled. Foreign-interface runtimes that require
+        /// force semantics should also compile at O0 to preserve each store
+        /// boundary.
+        pub fn native_force_support(mut self, enable: bool) -> Self {
+            self.options.native_force_support = enable;
             self
         }
 

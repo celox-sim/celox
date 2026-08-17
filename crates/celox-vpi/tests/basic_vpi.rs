@@ -105,6 +105,27 @@ const BRANCHED_COMB: &str = r#"
     }
 "#;
 
+const ALIASED_CLOCK: &str = r#"
+    module Child (
+        clk: input clock,
+        q: output logic<8>,
+    ) {
+        always_ff (clk) {
+            q += 1;
+        }
+    }
+
+    module Top (
+        clk: input clock,
+        q: output logic<8>,
+    ) {
+        inst child: Child (
+            clk: clk,
+            q: q,
+        );
+    }
+"#;
+
 const WIDE_FOUR_STATE: &str = r#"
     module Top (
         signed_in: input signed logic<64>,
@@ -150,6 +171,29 @@ unsafe extern "C" fn record_callback(data: *mut VpiCbData) -> i32 {
         }
         CB_AFTER_DELAY => {
             assert_eq!(celox_vpi_current_time(), 5);
+            let mut scaled = VpiTime {
+                type_: VPI_SCALED_REAL_TIME,
+                high: u32::MAX,
+                low: u32::MAX,
+                real: -1.0,
+            };
+            // Safety: `scaled` is live writable storage for the duration of the call.
+            unsafe { vpi_get_time(ptr::null_mut(), &mut scaled) };
+            assert_eq!(scaled.high, 0);
+            assert_eq!(scaled.low, 0);
+            assert_eq!(scaled.real, 5.0);
+
+            let mut integer = VpiTime {
+                type_: VPI_SIM_TIME,
+                high: u32::MAX,
+                low: u32::MAX,
+                real: -1.0,
+            };
+            // Safety: `integer` is live writable storage for the duration of the call.
+            unsafe { vpi_get_time(ptr::null_mut(), &mut integer) };
+            assert_eq!(integer.high, 0);
+            assert_eq!(integer.low, 5);
+            assert_eq!(integer.real, 0.0);
             CALLBACKS_SEEN.fetch_or(2, Ordering::SeqCst);
             assert_eq!(vpi_control(VPI_FINISH), 1);
         }
@@ -279,6 +323,7 @@ fn vpi_discovers_hierarchy_and_reads_and_writes_values() {
 fn string_separators_delay_flags_and_force_release_follow_vpi_semantics() {
     let simulator = Simulator::builder(DESIGN, "Top")
         .opt_level(celox::OptLevel::O0)
+        .native_force_support(true)
         .build()
         .unwrap();
     install_runtime(
@@ -388,6 +433,7 @@ fn string_separators_delay_flags_and_force_release_follow_vpi_semantics() {
 fn force_is_reapplied_between_stores_in_branched_comb_logic() {
     let simulator = Simulator::builder(BRANCHED_COMB, "Top")
         .opt_level(celox::OptLevel::O0)
+        .native_force_support(true)
         .build()
         .unwrap();
     install_runtime(
@@ -419,6 +465,73 @@ fn force_is_reapplied_between_stores_in_branched_comb_logic() {
         assert_eq!(value.value.integer, 100);
 
         for handle in [sel, a, b, y, z] {
+            assert_eq!(vpi_free_object(handle), 1);
+        }
+    }
+    clear_runtime();
+}
+
+#[test]
+fn force_state_is_shared_by_reflected_clock_aliases() {
+    let simulator = Simulator::builder(ALIASED_CLOCK, "Top")
+        .opt_level(celox::OptLevel::O0)
+        .native_force_support(true)
+        .build()
+        .unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+
+    unsafe {
+        let top_clock = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
+        let child_clock = vpi_handle_by_name(c"Top.child[0].clk".as_ptr(), ptr::null_mut());
+        let q = vpi_handle_by_name(c"Top.q".as_ptr(), ptr::null_mut());
+        assert!(!top_clock.is_null());
+        assert!(!child_clock.is_null());
+        assert!(!q.is_null());
+        put_int(top_clock, 0);
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: -1 },
+        };
+        vpi_get_value(q, &mut value);
+        let q_before_force = value.value.integer;
+
+        let low = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        assert_eq!(
+            vpi_put_value(top_clock, &low, ptr::null(), VPI_FORCE_FLAG),
+            top_clock
+        );
+        vpi_get_value(q, &mut value);
+        assert_eq!(
+            value.value.integer, q_before_force,
+            "forcing low must not create an edge"
+        );
+        put_int(child_clock, 1);
+
+        vpi_get_value(child_clock, &mut value);
+        assert_eq!(value.value.integer, 0, "alias reads must observe the force");
+        vpi_get_value(q, &mut value);
+        assert_eq!(
+            value.value.integer, q_before_force,
+            "an alias deposit must not create an edge while forced"
+        );
+
+        assert_eq!(
+            vpi_put_value(child_clock, ptr::null(), ptr::null(), VPI_RELEASE_FLAG),
+            child_clock
+        );
+        vpi_get_value(q, &mut value);
+        assert_eq!(
+            value.value.integer,
+            q_before_force + 1,
+            "release through an alias must restore the shared deposited value"
+        );
+
+        for handle in [top_clock, child_clock, q] {
             assert_eq!(vpi_free_object(handle), 1);
         }
     }
