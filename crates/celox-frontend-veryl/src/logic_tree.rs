@@ -266,10 +266,14 @@ pub fn parse_comb_with_loop_recovery(
         )?;
     }
 
-    // 3. Path Extraction: Convert the final symbolic store into a list of LogicPaths.
-    // Each LogicPath represents a modified bit-range and the logic required to compute it.
+    // 3. Path Extraction: Convert written definitions into LogicPaths. The
+    // statement scan already found every possible write, so avoid revisiting
+    // unrelated module variables in the final symbolic store.
     let mut paths = Vec::new();
-    for (id, range_store) in &final_store {
+    for id in written_accesses.keys() {
+        let Some(range_store) = final_store.get(id) else {
+            continue;
+        };
         if module.variables[id].affiliation == veryl_analyzer::symbol::Affiliation::AlwaysComb {
             continue;
         }
