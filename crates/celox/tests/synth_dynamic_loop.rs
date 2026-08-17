@@ -114,6 +114,7 @@ fn test_runtime_bounds_in_synth_for_loops(sim) {
     @setup { let code = r#"
         module Top (
             count: input logic<32>,
+            step_start: input logic<32>,
             sum_fwd: output logic<32>,
             sum_rev: output logic<32>,
             sum_inc: output logic<32>,
@@ -136,7 +137,7 @@ fn test_runtime_bounds_in_synth_for_loops(sim) {
                 }
 
                 sum_step = 0;
-                for i in 1..(count + 4) step *= 2 {
+                for i in step_start..(count + 4) step *= 2 {
                     sum_step += i;
                 }
             }
@@ -145,12 +146,14 @@ fn test_runtime_bounds_in_synth_for_loops(sim) {
     @build Simulator::builder(code, "Top");
 
     let count = sim.signal("count");
+    let step_start = sim.signal("step_start");
     let sum_fwd = sim.signal("sum_fwd");
     let sum_rev = sim.signal("sum_rev");
     let sum_inc = sim.signal("sum_inc");
     let sum_step = sim.signal("sum_step");
 
     sim.set(count, 4u32);
+    sim.set(step_start, 1u32);
     sim.eval_comb().unwrap();
     assert_eq!(sim.get(sum_fwd), 6u32.into());
     assert_eq!(sim.get(sum_rev), 3210u32.into());
@@ -242,6 +245,7 @@ fn test_i32_bitwise_steps_discard_bits_above_the_counter_width(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
+            start: input signed logic<32>,
             or_end: input signed logic<128>,
             xor_end: input signed logic<128>,
             or_last: output signed logic<32>,
@@ -249,7 +253,7 @@ fn test_i32_bitwise_steps_discard_bits_above_the_counter_width(sim) {
         ) {
             always_comb {
                 or_last = 0;
-                for i in 3..=or_end step |= 4294967302 {
+                for i in start..=or_end step |= 4294967302 {
                     or_last = i;
                     if i == 7 {
                         break;
@@ -257,7 +261,7 @@ fn test_i32_bitwise_steps_discard_bits_above_the_counter_width(sim) {
                 }
 
                 xor_last = 0;
-                for i in 3..=xor_end step ^= 4294967302 {
+                for i in start..=xor_end step ^= 4294967302 {
                     xor_last = i;
                     if i == 5 {
                         break;
@@ -268,11 +272,13 @@ fn test_i32_bitwise_steps_discard_bits_above_the_counter_width(sim) {
     "#; }
     @build Simulator::builder(code, "Top");
 
+    let start = sim.signal("start");
     let or_end = sim.signal("or_end");
     let xor_end = sim.signal("xor_end");
     let or_last = sim.signal("or_last");
     let xor_last = sim.signal("xor_last");
     sim.modify(|io| {
+        io.set(start, 3i32);
         io.set_wide(or_end, BigUint::from(7u8));
         io.set_wide(xor_end, BigUint::from(5u8));
     })
@@ -286,12 +292,13 @@ fn test_i32_xor_step_with_only_high_bits_reports_true_loop(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
+            start: input logic<32>,
             end_bound: input logic<32>,
             last: output logic<32>
         ) {
             always_comb {
                 last = 0;
-                for i in 3..end_bound step ^= 4294967296 {
+                for i in start..end_bound step ^= 4294967296 {
                     last = i;
                 }
             }
@@ -299,7 +306,9 @@ fn test_i32_xor_step_with_only_high_bits_reports_true_loop(sim) {
     "#; }
     @build Simulator::builder(code, "Top");
 
+    let start = sim.signal("start");
     let end_bound = sim.signal("end_bound");
+    sim.set(start, 3u32);
     sim.set(end_bound, 4u32);
     assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
 }
@@ -308,12 +317,13 @@ fn test_i32_or_step_with_only_existing_low_bits_reports_true_loop(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
+            start: input logic<32>,
             end_bound: input logic<32>,
             last: output logic<32>
         ) {
             always_comb {
                 last = 0;
-                for i in 3..end_bound step |= 4294967299 {
+                for i in start..end_bound step |= 4294967299 {
                     last = i;
                 }
             }
@@ -321,7 +331,9 @@ fn test_i32_or_step_with_only_existing_low_bits_reports_true_loop(sim) {
     "#; }
     @build Simulator::builder(code, "Top");
 
+    let start = sim.signal("start");
     let end_bound = sim.signal("end_bound");
+    sim.set(start, 3u32);
     sim.set(end_bound, 4u32);
     assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
 }
@@ -330,12 +342,13 @@ fn test_i32_mul_step_overflow_reports_true_loop(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
+            start: input signed logic<32>,
             end_bound: input signed logic<64>,
             hits: output logic<32>
         ) {
             always_comb {
                 hits = 0;
-                for i in 1500000000..end_bound step *= 2 {
+                for i in start..end_bound step *= 2 {
                     hits += 1;
                 }
             }
@@ -343,7 +356,9 @@ fn test_i32_mul_step_overflow_reports_true_loop(sim) {
     "#; }
     @build Simulator::builder(code, "Top");
 
+    let start = sim.signal("start");
     let end_bound = sim.signal("end_bound");
+    sim.set(start, 1_500_000_000u32);
     sim.set(end_bound, 3_100_000_000u64);
     assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
 }
@@ -352,12 +367,13 @@ fn test_i32_shl_step_overflow_reports_true_loop(sim) {
     @ignore_on(veryl);
     @setup { let code = r#"
         module Top (
+            start: input signed logic<32>,
             end_bound: input signed logic<64>,
             hits: output logic<32>
         ) {
             always_comb {
                 hits = 0;
-                for i in 1073741824..end_bound step <<= 1 {
+                for i in start..end_bound step <<= 1 {
                     hits += 1;
                 }
             }
@@ -365,7 +381,9 @@ fn test_i32_shl_step_overflow_reports_true_loop(sim) {
     "#; }
     @build Simulator::builder(code, "Top");
 
+    let start = sim.signal("start");
     let end_bound = sim.signal("end_bound");
+    sim.set(start, 1_073_741_824u32);
     sim.set(end_bound, 2_147_483_649u64);
     assert_eq!(sim.eval_comb().unwrap_err(), RuntimeErrorCode::DetectedTrueLoop);
 }
