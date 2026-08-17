@@ -14,6 +14,7 @@ cargo build --release -p celox-vpi \
 Attach a design to the runtime:
 
 ```sh
+mkdir -p build
 target/release/celox-vpi-compile design.veryl \
   --top Top \
   --runtime target/release/celox-vpi-runtime \

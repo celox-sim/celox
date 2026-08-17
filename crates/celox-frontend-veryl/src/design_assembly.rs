@@ -37,6 +37,36 @@ fn string_of(id: StrId) -> String {
     resource_table::get_str_value(id).unwrap_or_default()
 }
 
+fn elaborated_scope_name(
+    root_name: &str,
+    path: &InstancePath,
+    expanded: &HashMap<InstancePath, InstanceId>,
+    indexed_instances: &HashSet<InstanceId>,
+) -> String {
+    let mut prefix = Vec::with_capacity(path.0.len());
+    let segments = path
+        .0
+        .iter()
+        .map(|&(name, index)| {
+            prefix.push((name, index));
+            let name = string_of(name);
+            let indexed = expanded
+                .get(&InstancePath(prefix.clone()))
+                .is_some_and(|id| indexed_instances.contains(id));
+            if indexed {
+                format!("{name}[{index}]")
+            } else {
+                name
+            }
+        })
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        root_name.to_string()
+    } else {
+        format!("{root_name}.{}", segments.join("."))
+    }
+}
+
 fn testbench_source_location(
     token: &veryl_parser::token_range::TokenRange,
 ) -> Option<TestbenchSourceLocation> {
@@ -502,6 +532,8 @@ pub fn schedule_symbolic_rtl(
             &expanded,
             &instance_modules,
             &modules,
+            &string_of(module_names[&root_id]),
+            &indexed_instances,
             &global_boundaries,
             &unpacked_element_widths,
             &clock_domains,
@@ -1623,6 +1655,8 @@ fn relocate_units(
     expanded: &HashMap<InstancePath, InstanceId>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
+    root_name: &str,
+    indexed_instances: &HashSet<InstanceId>,
     global_boundaries: &HashMap<AbsoluteAddr, std::collections::BTreeSet<usize>>,
     unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
@@ -1758,10 +1792,13 @@ fn relocate_units(
             },
         );
         let mut runtime_event_site_map = HashMap::default();
+        let scope = elaborated_scope_name(root_name, path, expanded, indexed_instances);
         for (local_site, site) in sim_module.runtime_event_sites.iter().enumerate() {
             let global_site = runtime_event_sites.len() as u32;
             runtime_event_site_map.insert(local_site as u32, global_site);
-            runtime_event_sites.push(site.clone());
+            let mut site = site.clone();
+            site.scope = Some(scope.clone());
+            runtime_event_sites.push(site);
         }
 
         let arena_start = global_arena.len();

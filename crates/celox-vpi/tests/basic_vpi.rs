@@ -188,12 +188,20 @@ const TWO_STATE_VALUES: &str = r#"
 "#;
 
 const FATAL_ASSERT: &str = r#"
-    module Top (
+    module Child (
         a: input logic<8>,
     ) {
         always_comb {
-            $assert(a != 8'd1, "fatal a=%0d", a);
+            $assert(a != 8'd1, "fatal a=%0d time=%t scope=%m", a);
         }
+    }
+
+    module Top (
+        a: input logic<8>,
+    ) {
+        inst child: Child (
+            a: a,
+        );
     }
 "#;
 
@@ -490,6 +498,7 @@ fn vpi_discovers_hierarchy_and_reads_and_writes_values() {
         assert_eq!(vpi_get(VPI_TYPE, a), VPI_REG);
         assert_eq!(vpi_get(VPI_DIRECTION, a), VPI_INPUT);
         assert_eq!(vpi_get(VPI_SIZE, a), 8);
+        assert_eq!(vpi_get(VPI_SIGNED, a), 0);
         let parent = vpi_handle(VPI_SCOPE, a);
         assert!(!parent.is_null());
 
@@ -1408,6 +1417,8 @@ fn fatal_settle_stops_remaining_callback_phases() {
 
         let error = run_callbacks_result().unwrap_err();
         assert!(error.contains("fatal a=1"));
+        assert!(error.contains("time=1"));
+        assert!(error.contains("scope=Top.child"));
         assert_eq!(FATAL_PHASES.load(Ordering::SeqCst), 0);
     }
     clear_runtime();
@@ -1435,6 +1446,10 @@ fn signed_integer_deposits_and_z_values_round_trip() {
             vpi_handle_by_name(c"Top.narrow_signed_out".as_ptr(), ptr::null_mut());
         let four_in = vpi_handle_by_name(c"Top.four_in".as_ptr(), ptr::null_mut());
         let four_out = vpi_handle_by_name(c"Top.four_out".as_ptr(), ptr::null_mut());
+        assert_eq!(vpi_get(VPI_SIGNED, signed_in), 1);
+        assert_eq!(vpi_get(VPI_SIGNED, signed_out), 1);
+        assert_eq!(vpi_get(VPI_SIGNED, unsigned_in), 0);
+        assert_eq!(vpi_get(VPI_SIGNED, unsigned_out), 0);
         put_int(signed_in, -1);
         put_int(unsigned_in, -1);
         put_int(narrow_signed_in, -1);

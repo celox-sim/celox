@@ -329,7 +329,9 @@ mod host {
                     arg_idx += 1;
                 }
                 't' | 'T' => out.push_str(&ctx.tb_time.unwrap_or(0).to_string()),
-                'm' | 'M' => out.push_str(ctx.scope.unwrap_or("<hierarchy>")),
+                'm' | 'M' => {
+                    out.push_str(ctx.scope.or(site.scope.as_deref()).unwrap_or("<hierarchy>"))
+                }
                 other => {
                     out.push('%');
                     out.push(other);

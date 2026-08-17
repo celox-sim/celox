@@ -65,6 +65,8 @@ pub enum RuntimeEventKind {
 pub struct RuntimeEventSite {
     pub kind: RuntimeEventKind,
     pub template: Option<String>,
+    /// Fully elaborated module-instance scope that emitted this event.
+    pub scope: Option<String>,
     pub arg_widths: Vec<usize>,
     pub arg_signed: Vec<bool>,
     pub arg_is_string: Vec<bool>,
@@ -588,6 +590,7 @@ mod tests {
         runtime.runtime_event_sites.push(RuntimeEventSite {
             kind: RuntimeEventKind::AssertFatal,
             template: Some("failed".to_string()),
+            scope: None,
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),

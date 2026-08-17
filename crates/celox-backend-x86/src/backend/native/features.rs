@@ -41,6 +41,7 @@ pub(crate) enum StateBaseStrategy {
 pub(crate) struct X86Features {
     bmi2: bool,
     avx: bool,
+    popcnt: bool,
     state_base: StateBaseStrategy,
 }
 
@@ -54,10 +55,15 @@ impl X86Features {
         let avx = std::arch::is_x86_feature_detected!("avx");
         #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         let avx = false;
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        let popcnt = std::arch::is_x86_feature_detected!("popcnt");
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        let popcnt = false;
 
         Self {
             bmi2,
             avx,
+            popcnt,
             state_base: detect_state_base_strategy(),
         }
     }
@@ -68,6 +74,10 @@ impl X86Features {
 
     pub(crate) const fn avx(self) -> bool {
         self.avx
+    }
+
+    pub(crate) const fn popcnt(self) -> bool {
+        self.popcnt
     }
 
     pub(crate) const fn variable_shift_encoding(self) -> VariableShiftEncoding {
@@ -98,6 +108,7 @@ impl X86Features {
         Self {
             bmi2,
             avx: false,
+            popcnt: false,
             state_base: StateBaseStrategy::R15,
         }
     }
@@ -110,6 +121,7 @@ impl X86Features {
         Self {
             bmi2,
             avx: false,
+            popcnt: false,
             state_base,
         }
     }
@@ -122,11 +134,13 @@ pub fn detected_image_feature_bits() -> u8 {
 
 pub(crate) const IMAGE_FEATURE_BMI2: u8 = 1 << 0;
 pub(crate) const IMAGE_FEATURE_AVX: u8 = 1 << 1;
+pub(crate) const IMAGE_FEATURE_POPCNT: u8 = 1 << 4;
 
 pub(crate) fn emitted_image_feature_bits(
     features: X86Features,
     uses_bmi2: bool,
     uses_avx: bool,
+    uses_popcnt: bool,
 ) -> u8 {
     let mut bits = image_feature_bits(features);
     if !uses_bmi2 {
@@ -134,6 +148,11 @@ pub(crate) fn emitted_image_feature_bits(
     }
     if !uses_avx {
         bits &= !IMAGE_FEATURE_AVX;
+    }
+    if uses_popcnt {
+        bits |= IMAGE_FEATURE_POPCNT;
+    } else {
+        bits &= !IMAGE_FEATURE_POPCNT;
     }
     bits
 }
@@ -148,6 +167,9 @@ fn image_feature_bits(features: X86Features) -> u8 {
     }
     if features.avx() {
         bits |= IMAGE_FEATURE_AVX;
+    }
+    if features.popcnt() {
+        bits |= IMAGE_FEATURE_POPCNT;
     }
     match features.state_base() {
         StateBaseStrategy::Fs => bits |= FS_STATE_BASE,

@@ -73,7 +73,7 @@ impl NativeProgramInstance {
         };
         instance.comb_observer_snapshots = instance.snapshot_all_comb_observers();
         instance
-            .eval_comb_checked()
+            .eval_comb_checked(RuntimeFormatContext::default())
             .map_err(NativeProgramLoadError::Initialize)?;
         Ok(instance)
     }
@@ -140,7 +140,7 @@ impl NativeProgramInstance {
 
     /// Execute combinational logic after one or more foreign writes.
     pub fn eval_comb(&mut self) -> Result<(), celox_runtime::SimulatorErrorCode> {
-        self.eval_comb_checked()
+        self.eval_comb_checked(RuntimeFormatContext::default())
     }
 
     /// Settle foreign writes and commit all active source domains together.
@@ -152,9 +152,18 @@ impl NativeProgramInstance {
         &mut self,
         active_edges: &[StateAddr],
     ) -> Result<(), celox_runtime::SimulatorErrorCode> {
+        self.settle_active_edges_with_context(active_edges, RuntimeFormatContext::default())
+    }
+
+    /// Settle foreign writes using host-provided diagnostic formatting data.
+    pub fn settle_active_edges_with_context(
+        &mut self,
+        active_edges: &[StateAddr],
+        context: RuntimeFormatContext<'_>,
+    ) -> Result<(), celox_runtime::SimulatorErrorCode> {
         let start_seq = (!self.runtime_schema().runtime_event_sites.is_empty())
             .then(|| crate::simulator::runtime_event_write_seq_for_backend(&self.backend));
-        self.eval_comb_checked()?;
+        self.eval_comb_checked(context)?;
         let mut seen = crate::HashSet::default();
         let mut events = Vec::new();
         for address in active_edges {
@@ -204,9 +213,9 @@ impl NativeProgramInstance {
                 }
             }
         }
-        self.eval_comb_checked()?;
+        self.eval_comb_checked(context)?;
         if let Some(start_seq) = start_seq {
-            self.check_fatal_events_since(start_seq)?;
+            self.check_fatal_events_since(start_seq, context)?;
         }
         Ok(())
     }
@@ -327,7 +336,10 @@ impl NativeProgramInstance {
         }
     }
 
-    fn eval_comb_checked(&mut self) -> Result<(), celox_runtime::SimulatorErrorCode> {
+    fn eval_comb_checked(
+        &mut self,
+        context: RuntimeFormatContext<'_>,
+    ) -> Result<(), celox_runtime::SimulatorErrorCode> {
         if self.runtime_schema().runtime_event_sites.is_empty() {
             return self.eval_comb_backend();
         }
@@ -335,7 +347,7 @@ impl NativeProgramInstance {
         let start_seq = crate::simulator::runtime_event_write_seq_for_backend(&self.backend);
         if self.runtime_schema().comb_observers.is_empty() {
             let result = self.eval_comb_backend();
-            self.check_fatal_events_since(start_seq)?;
+            self.check_fatal_events_since(start_seq, context)?;
             return result;
         }
 
@@ -371,7 +383,7 @@ impl NativeProgramInstance {
         ]);
         self.comb_observer_snapshots = after;
         self.comb_observer_initial_eval = false;
-        self.check_fatal_events_since(start_seq)?;
+        self.check_fatal_events_since(start_seq, context)?;
         result
     }
 
@@ -407,13 +419,14 @@ impl NativeProgramInstance {
     fn check_fatal_events_since(
         &self,
         start_seq: u64,
+        context: RuntimeFormatContext<'_>,
     ) -> Result<(), celox_runtime::SimulatorErrorCode> {
         let mut read_seq = start_seq;
         let events = crate::simulator::collect_runtime_events_for_backend(
             &self.backend,
             &self.runtime_schema().runtime_event_sites,
             &mut read_seq,
-            RuntimeFormatContext::default(),
+            context,
         );
         if let Some(message) = events.into_iter().find_map(|event| match event {
             RuntimeEvent::AssertFatal { message } => Some(message),

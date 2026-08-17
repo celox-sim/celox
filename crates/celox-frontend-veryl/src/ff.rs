@@ -543,6 +543,7 @@ impl<'a> FfParser<'a> {
         let site = RuntimeEventSite {
             kind,
             template,
+            scope: None,
             arg_widths: value_args
                 .iter()
                 .map(|arg| self.get_expression_width(&arg.0))

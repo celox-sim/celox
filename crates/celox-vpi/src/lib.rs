@@ -69,6 +69,7 @@ pub const VPI_DEF_NAME: i32 = 9;
 pub const VPI_SCALAR: i32 = 17;
 pub const VPI_VECTOR: i32 = 18;
 pub const VPI_DIRECTION: i32 = 20;
+pub const VPI_SIGNED: i32 = 65;
 pub const VPI_TIME_UNIT: i32 = 11;
 pub const VPI_TIME_PRECISION: i32 = 12;
 
@@ -631,27 +632,30 @@ pub unsafe extern "C" fn vpi_get(property: i32, reference: VpiHandle) -> i32 {
     match property {
         VPI_TYPE => object_type(object),
         VPI_TOP_MODULE => i32::from(object == ObjectRef::Scope(ReflectionScopeId(0))),
-        VPI_SIZE | VPI_SCALAR | VPI_VECTOR | VPI_DIRECTION => with_runtime(|runtime| {
-            let ObjectRef::Signal(id) = object else {
-                return 0;
-            };
-            let Some(signal) = runtime.reflection().signal(id) else {
-                return 0;
-            };
-            match property {
-                VPI_SIZE => i32::try_from(signal.signal.width).unwrap_or(i32::MAX),
-                VPI_SCALAR => i32::from(signal.signal.width == 1),
-                VPI_VECTOR => i32::from(signal.signal.width != 1),
-                VPI_DIRECTION => match signal.direction {
-                    SignalDirection::Input => VPI_INPUT,
-                    SignalDirection::Output => VPI_OUTPUT,
-                    SignalDirection::Inout => VPI_INOUT,
-                    SignalDirection::Internal => VPI_NO_DIRECTION,
-                },
-                _ => 0,
-            }
-        })
-        .unwrap_or(0),
+        VPI_SIZE | VPI_SCALAR | VPI_VECTOR | VPI_DIRECTION | VPI_SIGNED => {
+            with_runtime(|runtime| {
+                let ObjectRef::Signal(id) = object else {
+                    return 0;
+                };
+                let Some(signal) = runtime.reflection().signal(id) else {
+                    return 0;
+                };
+                match property {
+                    VPI_SIZE => i32::try_from(signal.signal.width).unwrap_or(i32::MAX),
+                    VPI_SCALAR => i32::from(signal.signal.width == 1),
+                    VPI_VECTOR => i32::from(signal.signal.width != 1),
+                    VPI_SIGNED => i32::from(signal.signed),
+                    VPI_DIRECTION => match signal.direction {
+                        SignalDirection::Input => VPI_INPUT,
+                        SignalDirection::Output => VPI_OUTPUT,
+                        SignalDirection::Inout => VPI_INOUT,
+                        SignalDirection::Internal => VPI_NO_DIRECTION,
+                    },
+                    _ => 0,
+                }
+            })
+            .unwrap_or(0)
+        }
         _ => 0,
     }
 }
@@ -1203,7 +1207,13 @@ fn flush_pending_writes() -> bool {
                 })
                 .collect::<Vec<_>>();
             apply_pending_deposits(runtime, &batch.deposits);
-            runtime.settle_active_edges(&active_edges)
+            runtime.settle_active_edges_with_context(
+                &active_edges,
+                RuntimeFormatContext {
+                    tb_time: Some(celox_vpi_current_time()),
+                    scope: None,
+                },
+            )
         })
         .unwrap_or(Ok(()));
         if let Err(error) = result {
@@ -1251,7 +1261,13 @@ fn flush_pending_writes() -> bool {
     }
     let result: Result<(), celox::RuntimeErrorCode> = with_runtime_mut(|runtime| {
         apply_pending_deposits(runtime, &final_deposits);
-        runtime.settle_active_edges(&[])
+        runtime.settle_active_edges_with_context(
+            &[],
+            RuntimeFormatContext {
+                tb_time: Some(celox_vpi_current_time()),
+                scope: None,
+            },
+        )
     })
     .unwrap_or(Ok(()));
     if let Err(error) = result {

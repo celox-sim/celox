@@ -104,6 +104,7 @@ fn runtime_event_site_for_assert(
             AssertKind::Continue => RuntimeEventKind::AssertContinue,
         },
         template,
+        scope: None,
         arg_widths: value_args.iter().map(assert_arg_width).collect(),
         arg_signed: value_args
             .iter()
