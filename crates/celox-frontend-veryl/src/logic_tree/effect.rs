@@ -242,24 +242,25 @@ fn collect_system_function_effect(
         });
     let observed_ids: HashSet<_> = observed_inputs.iter().map(|atom| atom.id).collect();
     let position_ids: HashSet<_> = position_inputs.iter().map(|atom| atom.id).collect();
-    let preceding_writes: Vec<_> = store
-        .iter()
-        .flat_map(|(id, range_store)| {
-            range_store
-                .ranges
-                .iter()
-                .filter_map(move |(&lsb, (value, width, _))| {
-                    value
-                        .is_some()
-                        .then_some(VarAtomBase::new(*id, lsb, lsb + width - 1))
-                })
-        })
-        .collect();
-    let mut local_inputs = Vec::new();
-    for (id, range_store) in observer_store.iter() {
-        if !observed_ids.contains(id) {
-            continue;
+    let mut preceding_writes = Vec::new();
+    let mut written_before = Vec::new();
+    for (id, range_store) in store.iter() {
+        for (&lsb, (value, width, _)) in &range_store.ranges {
+            if value.is_none() {
+                continue;
+            }
+            let atom = VarAtomBase::new(*id, lsb, lsb + width - 1);
+            preceding_writes.push(atom);
+            if position_ids.contains(id) {
+                written_before.push(atom);
+            }
         }
+    }
+    let mut local_inputs = Vec::new();
+    for id in &observed_ids {
+        let Some(range_store) = observer_store.get(id) else {
+            continue;
+        };
         if guard.is_none() {
             let overlaps_observed_input =
                 range_store.ranges.iter().any(|(&lsb, (value, width, _))| {
@@ -315,21 +316,8 @@ fn collect_system_function_effect(
         local_inputs,
         observed_inputs: observed_inputs.into_iter().collect(),
         position_inputs: position_inputs.into_iter().collect(),
-        preceding_writes: preceding_writes.clone(),
-        written_before: store
-            .iter()
-            .filter(|(id, _)| position_ids.contains(id))
-            .flat_map(|(id, range_store)| {
-                range_store
-                    .ranges
-                    .iter()
-                    .filter_map(move |(&lsb, (value, width, _))| {
-                        value
-                            .is_some()
-                            .then_some(VarAtomBase::new(*id, lsb, lsb + width - 1))
-                    })
-            })
-            .collect(),
+        preceding_writes,
+        written_before,
         written_input_atoms: Vec::new(),
         written_inputs: Vec::new(),
         captured_in_loop: loop_effect.is_some(),
