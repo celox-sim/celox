@@ -883,8 +883,16 @@ prepare() {
         fi
     fi
     if ! git -C "$HELIODOR_DIR" checkout --quiet "$HELIODOR_REF"; then
-        echo "error: could not check out Heliodor ref $HELIODOR_REF" >&2
-        return 1
+        # A restored Actions cache can contain refs whose reachable object
+        # graph is incomplete. A normal fetch trusts the advertised local
+        # tips and will not repair that cache, so retry the requested ref as a
+        # full refetch before declaring the checkout unusable.
+        echo "warning: cached Heliodor checkout is incomplete; refetching $HELIODOR_REF" >&2
+        if ! git -C "$HELIODOR_DIR" fetch --quiet --refetch origin "$HELIODOR_REF" \
+            || ! git -C "$HELIODOR_DIR" checkout --quiet "$HELIODOR_REF"; then
+            echo "error: could not check out Heliodor ref $HELIODOR_REF" >&2
+            return 1
+        fi
     fi
     if ! rm -f "$HELIODOR_DIR/.build/lock"; then
         echo "error: could not remove stale Heliodor build lock" >&2
