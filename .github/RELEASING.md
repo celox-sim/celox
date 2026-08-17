@@ -22,9 +22,12 @@ features are minor releases, and breaking changes are major releases.
 ## Automated release train
 
 Release Please maintains one release pull request against `master`. Every Monday
-at 03:00 UTC, the release workflow enables auto-merge for that pull request. The
-required checks and merge queue decide when it is safe to merge. If there are no
-releasable changes, the run is a no-op.
+at 03:00 UTC, the release workflow enables auto-merge for that pull request and
+waits for GitHub to accept it into the merge queue. The workflow also calls the
+queue API explicitly because enabling auto-merge alone does not prove that the
+queue entry was created. It succeeds only after observing a merge queue entry;
+required-check failures or a queue timeout therefore remain visible as a failed
+workflow. If there are no releasable changes, the run is a no-op.
 
 The commit that introduces this policy is the release-history baseline. Earlier
 commits after `v0.1.34` are intentionally not retroactively classified; release
@@ -105,8 +108,9 @@ follow-up workflows from running.
 
 The App has Issues write permission for Release Please's status labels. The
 weekly workflow still identifies the release pull request by the exact
-`release-please--branches--master--components--celox` branch from this repository
-and honors a manually applied `release:hold` label before enabling auto-merge.
+`release-please--branches--master--components--celox` branch from this repository.
+It rechecks the `release:hold` label while waiting and disables auto-merge or
+removes an existing queue entry before returning when the release is held.
 
 Configure merge commits to use the pull request title as the merge commit title.
 This preserves the Conventional Commit title consumed by Release Please. Protect
