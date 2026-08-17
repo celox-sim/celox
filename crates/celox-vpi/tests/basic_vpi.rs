@@ -627,6 +627,50 @@ fn string_separators_delay_flags_and_force_release_follow_vpi_semantics() {
 }
 
 #[test]
+fn releasing_a_sequential_variable_keeps_its_forced_value_until_the_next_edge() {
+    let simulator = Simulator::builder(COUNTER, "Top")
+        .native_force_support(true)
+        .build()
+        .unwrap();
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
+
+    unsafe {
+        let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
+        let q = vpi_handle_by_name(c"Top.q".as_ptr(), ptr::null_mut());
+        put_int(clk, 0);
+        put_int(q, 0);
+
+        let forced = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 1 },
+        };
+        assert_eq!(vpi_put_value(q, &forced, ptr::null(), VPI_FORCE_FLAG), q);
+        assert_eq!(
+            vpi_put_value(q, ptr::null(), ptr::null(), VPI_RELEASE_FLAG),
+            q
+        );
+
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: -1 },
+        };
+        vpi_get_value(q, &mut value);
+        assert_eq!(value.value.integer, 1);
+
+        put_int(clk, 1);
+        vpi_get_value(q, &mut value);
+        assert_eq!(value.value.integer, 2);
+
+        for handle in [clk, q] {
+            assert_eq!(vpi_free_object(handle), 1);
+        }
+    }
+    clear_runtime();
+}
+
+#[test]
 fn force_is_reapplied_between_stores_in_branched_comb_logic() {
     let simulator = Simulator::builder(BRANCHED_COMB, "Top")
         .opt_level(celox::OptLevel::O0)
@@ -810,6 +854,9 @@ static VALUE_CHANGE_INPUT: AtomicUsize = AtomicUsize::new(0);
 static READ_ONLY_VALUE: AtomicI32 = AtomicI32::new(-1);
 static SELF_CHANGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static SELF_CHANGE_VALUE: AtomicI32 = AtomicI32::new(-1);
+static BATCH_CALLBACK_RESET: AtomicBool = AtomicBool::new(false);
+static BATCH_CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
+static BATCH_CALLBACK_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 static REGION_ORDER: AtomicUsize = AtomicUsize::new(0);
 static FATAL_PHASES: AtomicUsize = AtomicUsize::new(0);
 
@@ -857,6 +904,24 @@ unsafe extern "C" fn change_watched_signal_once(data: *mut VpiCbData) -> i32 {
     if invocation == 0 {
         unsafe { put_int((*data).obj, 2) };
     }
+    0
+}
+
+unsafe extern "C" fn reset_signal_in_first_batch_callback(data: *mut VpiCbData) -> i32 {
+    if BATCH_CALLBACK_RESET.swap(false, Ordering::SeqCst) {
+        unsafe { put_int((*data).obj, 0) };
+    }
+    0
+}
+
+unsafe extern "C" fn record_batch_callback_value(data: *mut VpiCbData) -> i32 {
+    let value = unsafe { (*(*data).value).value.integer } as usize;
+    BATCH_CALLBACK_COUNT.fetch_add(1, Ordering::SeqCst);
+    BATCH_CALLBACK_SEQUENCE
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |sequence| {
+            Some(sequence * 10 + value)
+        })
+        .unwrap();
     0
 }
 
@@ -1042,6 +1107,54 @@ fn value_change_callback_observes_a_change_it_makes_itself() {
         assert_eq!(SELF_CHANGE_COUNT.load(Ordering::SeqCst), 2);
         assert_eq!(SELF_CHANGE_VALUE.load(Ordering::SeqCst), 2);
         assert_eq!(vpi_remove_cb(callback_handle), 1);
+        assert_eq!(vpi_free_object(a), 1);
+    }
+    clear_runtime();
+}
+
+#[test]
+fn callback_batch_preserves_the_value_that_triggered_each_callback() {
+    let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
+    BATCH_CALLBACK_RESET.store(true, Ordering::SeqCst);
+    BATCH_CALLBACK_COUNT.store(0, Ordering::SeqCst);
+    BATCH_CALLBACK_SEQUENCE.store(0, Ordering::SeqCst);
+
+    unsafe {
+        let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        let reset = VpiCbData {
+            reason: CB_VALUE_CHANGE,
+            cb_rtn: Some(reset_signal_in_first_batch_callback),
+            obj: a,
+            time: ptr::null_mut(),
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        let reset_handle = vpi_register_cb(&reset);
+        assert!(!reset_handle.is_null());
+
+        let mut observed_value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: -1 },
+        };
+        let observe = VpiCbData {
+            cb_rtn: Some(record_batch_callback_value),
+            value: &mut observed_value,
+            ..reset
+        };
+        let observe_handle = vpi_register_cb(&observe);
+        assert!(!observe_handle.is_null());
+
+        put_int(a, 1);
+        assert!(!run_callbacks());
+        assert_eq!(BATCH_CALLBACK_COUNT.load(Ordering::SeqCst), 2);
+        assert_eq!(BATCH_CALLBACK_SEQUENCE.load(Ordering::SeqCst), 10);
+
+        assert_eq!(vpi_remove_cb(reset_handle), 1);
+        assert_eq!(vpi_remove_cb(observe_handle), 1);
         assert_eq!(vpi_free_object(a), 1);
     }
     clear_runtime();

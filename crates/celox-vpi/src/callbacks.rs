@@ -9,7 +9,7 @@ use fxhash::FxHashMap as HashMap;
 
 use super::{
     HandleKind, ObjectRef, VpiHandle, VpiValue, handle_mut, new_callback_handle, object_ref,
-    value_bits, vpi_get_value,
+    value_bits, vpi_get_value, write_snapshot_value,
 };
 
 pub const CB_VALUE_CHANGE: i32 = 1;
@@ -141,7 +141,7 @@ fn registration_ids(reason: i32) -> Vec<u64> {
     })
 }
 
-fn changed_value_ids() -> Vec<u64> {
+fn changed_values() -> Vec<(u64, celox::BigUint, celox::BigUint)> {
     STATE.with_borrow(|state| {
         state
             .callbacks
@@ -149,7 +149,13 @@ fn changed_value_ids() -> Vec<u64> {
             .filter_map(|(&id, registration)| {
                 let signal = callback_signal(&registration.data)?;
                 let (value, mask, _) = value_bits(signal)?;
-                (registration.snapshot.as_ref() != Some(&(value, mask))).then_some(id)
+                registration
+                    .snapshot
+                    .as_ref()
+                    .is_none_or(|(previous_value, previous_mask)| {
+                        previous_value != &value || previous_mask != &mask
+                    })
+                    .then_some((id, value, mask))
             })
             .collect()
     })
@@ -159,10 +165,10 @@ pub(super) fn dispatch_value_changes() -> bool {
     if finish_requested() {
         return false;
     }
-    let changed = changed_value_ids();
+    let changed = changed_values();
     let progressed = !changed.is_empty();
-    for id in changed {
-        fire(id);
+    for (id, value, mask) in changed {
+        fire_with_snapshot(id, Some((value, mask)));
         if STATE.with_borrow(|state| state.finish) {
             break;
         }
@@ -185,6 +191,13 @@ fn due_ids() -> Vec<u64> {
 }
 
 fn fire(id: u64) -> bool {
+    fire_with_snapshot(id, None)
+}
+
+fn fire_with_snapshot(
+    id: u64,
+    delivered_snapshot: Option<(celox::BigUint, celox::BigUint)>,
+) -> bool {
     let Some(mut registration) = STATE.with_borrow_mut(|state| {
         let registration = state.callbacks.remove(&id)?;
         state.firing.insert(id, false);
@@ -194,8 +207,10 @@ fn fire(id: u64) -> bool {
     };
 
     let now = STATE.with_borrow(|state| state.time);
-    let delivered_snapshot = callback_signal(&registration.data)
-        .and_then(|signal| value_bits(signal).map(|(value, mask, _)| (value, mask)));
+    let delivered_snapshot = delivered_snapshot.or_else(|| {
+        callback_signal(&registration.data)
+            .and_then(|signal| value_bits(signal).map(|(value, mask, _)| (value, mask)))
+    });
     if !registration.data.time.is_null() {
         // Safety: cocotb stores callback time in its live callback object.
         let time = unsafe { &mut *registration.data.time };
@@ -217,8 +232,15 @@ fn fire(id: u64) -> bool {
 
     if registration.data.reason == CB_VALUE_CHANGE && !registration.data.value.is_null() {
         // Safety: callback registration keeps both pointers live until the
-        // callback is removed, and vpi_get_value writes the requested format.
-        unsafe { vpi_get_value(registration.data.obj, registration.data.value) };
+        // callback is removed. A dispatch snapshot preserves the value which
+        // selected the whole callback batch even if an earlier callback wrote.
+        if let Some((value, mask)) = &delivered_snapshot {
+            unsafe {
+                write_snapshot_value(registration.data.obj, registration.data.value, value, mask)
+            };
+        } else {
+            unsafe { vpi_get_value(registration.data.obj, registration.data.value) };
+        }
     }
 
     if let Some(callback) = registration.data.cb_rtn {

@@ -747,6 +747,88 @@ fn format_hex(value: &BigUint, mask: &BigUint, width: usize) -> String {
         .collect()
 }
 
+fn encode_signal_value(
+    handle: &mut VpiHandleObject,
+    value: &mut VpiValue,
+    bits: &BigUint,
+    mask: &BigUint,
+    width: usize,
+    signed: bool,
+) {
+    match value.format {
+        VPI_INT_VAL => {
+            let mut integer = bits.to_u32_digits().first().copied().unwrap_or(0);
+            if signed && width > 0 && width < 32 && bits.bit((width - 1) as u64) {
+                integer |= u32::MAX << width;
+            }
+            value.value.integer = integer as i32;
+        }
+        VPI_SCALAR_VAL => {
+            value.value.scalar = if mask.bit(0) {
+                if bits.bit(0) { VPI_X } else { VPI_Z }
+            } else if bits.bit(0) {
+                VPI_1
+            } else {
+                VPI_0
+            };
+        }
+        VPI_BIN_STR_VAL => {
+            handle.value_string = Some(c_string(&format_binary(bits, mask, width)));
+            value.value.str_ = handle.value_string.as_ref().unwrap().as_ptr().cast_mut();
+        }
+        VPI_HEX_STR_VAL => {
+            let string = format_hex(bits, mask, width);
+            handle.value_string = Some(c_string(&string));
+            value.value.str_ = handle.value_string.as_ref().unwrap().as_ptr().cast_mut();
+        }
+        VPI_VECTOR_VAL => {
+            let words = width.div_ceil(32);
+            let value_words = bits.to_u32_digits();
+            let mask_words = mask.to_u32_digits();
+            handle.value_vector.clear();
+            handle
+                .value_vector
+                .extend((0..words).map(|index| VpiVecVal {
+                    aval: value_words.get(index).copied().unwrap_or(0) as i32,
+                    bval: mask_words.get(index).copied().unwrap_or(0) as i32,
+                }));
+            value.value.vector = handle.value_vector.as_mut_ptr();
+        }
+        VPI_SUPPRESS_VAL => {}
+        _ => {}
+    }
+}
+
+unsafe fn write_snapshot_value(
+    reference: VpiHandle,
+    value: *mut VpiValue,
+    bits: &BigUint,
+    mask: &BigUint,
+) {
+    if value.is_null() {
+        return;
+    }
+    // Safety: the caller upholds the VPI handle contract.
+    let Some(handle) = (unsafe { handle_mut(reference) }) else {
+        return;
+    };
+    let HandleKind::Object(ObjectRef::Signal(id)) = handle.kind else {
+        return;
+    };
+    let metadata = with_runtime(|runtime| {
+        runtime
+            .reflection()
+            .signal(id)
+            .map(|signal| (signal.signal.width, signal.signed))
+    })
+    .flatten();
+    let Some((width, signed)) = metadata else {
+        return;
+    };
+    // Safety: checked non-null above; the caller owns writable value storage.
+    encode_signal_value(handle, unsafe { &mut *value }, bits, mask, width, signed);
+}
+
 #[unsafe(no_mangle)]
 /// Read a signal value in the requested VPI format.
 ///
@@ -781,49 +863,7 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
             .flatten()
             .unwrap_or(false);
     // Safety: checked non-null above; caller owns the `VpiValue` allocation.
-    let value = unsafe { &mut *value };
-    match value.format {
-        VPI_INT_VAL => {
-            let mut integer = bits.to_u32_digits().first().copied().unwrap_or(0);
-            if signed && width > 0 && width < 32 && bits.bit((width - 1) as u64) {
-                integer |= u32::MAX << width;
-            }
-            value.value.integer = integer as i32;
-        }
-        VPI_SCALAR_VAL => {
-            value.value.scalar = if mask.bit(0) {
-                if bits.bit(0) { VPI_X } else { VPI_Z }
-            } else if bits.bit(0) {
-                VPI_1
-            } else {
-                VPI_0
-            };
-        }
-        VPI_BIN_STR_VAL => {
-            handle.value_string = Some(c_string(&format_binary(&bits, &mask, width)));
-            value.value.str_ = handle.value_string.as_ref().unwrap().as_ptr().cast_mut();
-        }
-        VPI_HEX_STR_VAL => {
-            let string = format_hex(&bits, &mask, width);
-            handle.value_string = Some(c_string(&string));
-            value.value.str_ = handle.value_string.as_ref().unwrap().as_ptr().cast_mut();
-        }
-        VPI_VECTOR_VAL => {
-            let words = width.div_ceil(32);
-            let value_words = bits.to_u32_digits();
-            let mask_words = mask.to_u32_digits();
-            handle.value_vector.clear();
-            handle
-                .value_vector
-                .extend((0..words).map(|index| VpiVecVal {
-                    aval: value_words.get(index).copied().unwrap_or(0) as i32,
-                    bval: mask_words.get(index).copied().unwrap_or(0) as i32,
-                }));
-            value.value.vector = handle.value_vector.as_mut_ptr();
-        }
-        VPI_SUPPRESS_VAL => {}
-        _ => {}
-    }
+    encode_signal_value(handle, unsafe { &mut *value }, &bits, &mask, width, signed);
 }
 
 unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint, BigUint)> {
@@ -966,27 +1006,36 @@ pub unsafe extern "C" fn vpi_put_value(
                 let Some(signal) = runtime.reflection().signal(id).cloned() else {
                     return false;
                 };
+                let (released_value, released_mask) = if matches!(
+                    signal.direction,
+                    SignalDirection::Output | SignalDirection::Internal
+                ) {
+                    // Releasing a VPI variable retains its forced value until
+                    // its next procedural assignment. Continuously driven
+                    // outputs are overwritten again by the settle below.
+                    (released.value, released.mask)
+                } else {
+                    (released.deposited_value, released.deposited_mask)
+                };
                 runtime.release_signal(id);
                 let (old_value, old_mask) = runtime.backend().get_four_state(signal.signal);
                 let old_level = logic_level(&old_value, &old_mask);
-                let new_level = logic_level(&released.deposited_value, &released.deposited_mask);
+                let new_level = logic_level(&released_value, &released_mask);
                 PENDING_WRITES.with_borrow_mut(|pending| {
                     record_pending_write(
                         pending,
                         id,
                         identity,
-                        released.deposited_value.clone(),
-                        released.deposited_mask.clone(),
+                        released_value.clone(),
+                        released_mask.clone(),
                         signal.domain_kind,
                         old_level,
                         new_level,
                     );
                 });
-                runtime.backend_mut().set_four_state(
-                    signal.signal,
-                    released.deposited_value,
-                    released.deposited_mask,
-                );
+                runtime
+                    .backend_mut()
+                    .set_four_state(signal.signal, released_value, released_mask);
                 true
             })
             .unwrap_or(false)
