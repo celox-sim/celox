@@ -474,6 +474,7 @@ struct CompiledNativeFunction {
     symbols: Vec<jit_mem::JitSymbol>,
     trace: Option<emit::NativeFunctionTrace>,
     required_state_size: usize,
+    required_native_features: u8,
 }
 
 pub(crate) struct NativeCodegenTrace {
@@ -640,6 +641,10 @@ fn compile_unit_refs(
             symbols,
             trace,
             required_state_size: empty_result.required_state_size as usize,
+            #[cfg(target_arch = "x86_64")]
+            required_native_features: empty_result.required_image_features,
+            #[cfg(target_arch = "aarch64")]
+            required_native_features: 0,
         });
     }
 
@@ -676,6 +681,10 @@ fn compile_unit_refs(
         symbols,
         trace,
         required_state_size,
+        #[cfg(target_arch = "x86_64")]
+        required_native_features: emit_result.required_image_features,
+        #[cfg(target_arch = "aarch64")]
+        required_native_features: 0,
     })
 }
 
@@ -1580,6 +1589,18 @@ fn compile_program(
                 .map(|compiled| compiled.required_state_size),
         )
         .fold(semantic_memory_size, usize::max);
+    let required_native_features = std::iter::once(comb_jit.required_native_features)
+        .chain(
+            compiled_ff_codes
+                .values()
+                .map(|compiled| compiled.required_native_features),
+        )
+        .chain(
+            comb_unit_jits
+                .iter()
+                .map(|compiled| compiled.required_native_features),
+        )
+        .fold(0, |features, required| features | required);
     let mut packed_image = Vec::new();
     let mut code_entries = Vec::with_capacity(1 + compiled_ff_codes.len());
     let mut image_symbols = Vec::new();
@@ -1744,7 +1765,7 @@ fn compile_program(
             symbols: image_symbols,
             comb_offset,
             comb_unit_offsets,
-            required_native_features: current_native_feature_bits(),
+            required_native_features,
             event_map,
             eval_only_event_map,
             apply_event_map,

@@ -160,6 +160,9 @@ pub(super) fn dispatch_value_changes() -> bool {
     let progressed = !changed.is_empty();
     for id in changed {
         fire(id);
+        if STATE.with_borrow(|state| state.finish) {
+            break;
+        }
     }
     progressed
 }
@@ -240,6 +243,9 @@ fn fire_all(reason: i32) -> bool {
     let progressed = !ids.is_empty();
     for id in ids {
         fire(id);
+        if STATE.with_borrow(|state| state.finish) {
+            break;
+        }
     }
     progressed
 }
@@ -249,6 +255,9 @@ pub(super) fn run() -> bool {
     fire_all(CB_START_OF_SIMULATION);
     let mut iterations = 0usize;
     'scheduler: loop {
+        if STATE.with_borrow(|state| state.finish) {
+            break;
+        }
         iterations += 1;
         if iterations > 1_000_000 {
             fail("VPI callback scheduler exceeded 1000000 iterations".to_string());
@@ -258,14 +267,26 @@ pub(super) fn run() -> bool {
         let mut progressed = false;
         for id in due_ids() {
             progressed |= fire(id);
+            if STATE.with_borrow(|state| state.finish) {
+                break 'scheduler;
+            }
         }
         if !super::flush_pending_writes() {
+            break;
+        }
+        if STATE.with_borrow(|state| state.finish) {
             break;
         }
         loop {
             if dispatch_value_changes() {
                 progressed = true;
+                if STATE.with_borrow(|state| state.finish) {
+                    break 'scheduler;
+                }
                 if !super::flush_pending_writes() {
+                    break 'scheduler;
+                }
+                if STATE.with_borrow(|state| state.finish) {
                     break 'scheduler;
                 }
                 continue;
@@ -274,8 +295,14 @@ pub(super) fn run() -> bool {
             if !read_write.is_empty() {
                 for id in read_write {
                     progressed |= fire(id);
+                    if STATE.with_borrow(|state| state.finish) {
+                        break 'scheduler;
+                    }
                 }
                 if !super::flush_pending_writes() {
+                    break 'scheduler;
+                }
+                if STATE.with_borrow(|state| state.finish) {
                     break 'scheduler;
                 }
                 continue;
@@ -305,7 +332,11 @@ pub(super) fn run() -> bool {
         fire_all(CB_NEXT_SIM_TIME);
     }
     let finished = STATE.with_borrow(|state| state.finish);
-    fire_all(CB_END_OF_SIMULATION);
+    // End-of-simulation callbacks are the one region intentionally dispatched
+    // after finish has already been requested.
+    for id in registration_ids(CB_END_OF_SIMULATION) {
+        fire(id);
+    }
     STATE.with_borrow_mut(|state| state.running = false);
     finished
 }

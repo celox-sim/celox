@@ -120,18 +120,34 @@ pub fn detected_image_feature_bits() -> u8 {
     image_feature_bits(X86Features::detect())
 }
 
+pub(crate) const IMAGE_FEATURE_BMI2: u8 = 1 << 0;
+pub(crate) const IMAGE_FEATURE_AVX: u8 = 1 << 1;
+
+pub(crate) fn emitted_image_feature_bits(
+    features: X86Features,
+    uses_bmi2: bool,
+    uses_avx: bool,
+) -> u8 {
+    let mut bits = image_feature_bits(features);
+    if !uses_bmi2 {
+        bits &= !IMAGE_FEATURE_BMI2;
+    }
+    if !uses_avx {
+        bits &= !IMAGE_FEATURE_AVX;
+    }
+    bits
+}
+
 fn image_feature_bits(features: X86Features) -> u8 {
-    const BMI2: u8 = 1 << 0;
-    const AVX: u8 = 1 << 1;
     const FS_STATE_BASE: u8 = 1 << 2;
     const GS_STATE_BASE: u8 = 1 << 3;
 
     let mut bits = 0;
     if features.bmi2() {
-        bits |= BMI2;
+        bits |= IMAGE_FEATURE_BMI2;
     }
     if features.avx() {
-        bits |= AVX;
+        bits |= IMAGE_FEATURE_AVX;
     }
     match features.state_base() {
         StateBaseStrategy::Fs => bits |= FS_STATE_BASE,

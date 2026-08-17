@@ -201,6 +201,9 @@ fn value_layout_matches_vpi_user_header() {
 }
 
 static CALLBACKS_SEEN: AtomicUsize = AtomicUsize::new(0);
+static CALLBACKS_AFTER_FINISH: AtomicUsize = AtomicUsize::new(0);
+static ALIAS_WRITE_FIRST: AtomicUsize = AtomicUsize::new(0);
+static ALIAS_WRITE_SECOND: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" fn record_callback(data: *mut VpiCbData) -> i32 {
     // Safety: the callback runtime passes back the registration storage.
@@ -247,6 +250,34 @@ unsafe extern "C" fn record_callback(data: *mut VpiCbData) -> i32 {
             CALLBACKS_SEEN.fetch_or(4, Ordering::SeqCst);
         }
         _ => unreachable!(),
+    }
+    0
+}
+
+unsafe extern "C" fn finish_immediately(_data: *mut VpiCbData) -> i32 {
+    assert_eq!(vpi_control(VPI_FINISH), 1);
+    0
+}
+
+unsafe extern "C" fn record_callback_after_finish(data: *mut VpiCbData) -> i32 {
+    // Safety: the callback runtime passes back the live registration storage.
+    let bit = match unsafe { (*data).reason } {
+        CB_START_OF_SIMULATION => 1,
+        CB_READ_WRITE_SYNCH => 2,
+        CB_READ_ONLY_SYNCH => 4,
+        CB_END_OF_SIMULATION => 8,
+        _ => unreachable!(),
+    };
+    CALLBACKS_AFTER_FINISH.fetch_or(bit, Ordering::SeqCst);
+    0
+}
+
+unsafe extern "C" fn write_reflected_aliases(_data: *mut VpiCbData) -> i32 {
+    let first = ALIAS_WRITE_FIRST.load(Ordering::SeqCst) as VpiHandle;
+    let second = ALIAS_WRITE_SECOND.load(Ordering::SeqCst) as VpiHandle;
+    unsafe {
+        put_int(first, 1);
+        put_int(second, 7);
     }
     0
 }
@@ -312,6 +343,97 @@ fn callback_runtime_advances_time_and_finishes_regions() {
     }
     assert!(run_callbacks());
     assert_eq!(CALLBACKS_SEEN.load(Ordering::SeqCst), 7);
+    clear_runtime();
+}
+
+#[test]
+fn finish_stops_remaining_callback_regions_but_still_runs_end_callbacks() {
+    let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+    CALLBACKS_AFTER_FINISH.store(0, Ordering::SeqCst);
+
+    let finish = VpiCbData {
+        reason: CB_START_OF_SIMULATION,
+        cb_rtn: Some(finish_immediately),
+        obj: ptr::null_mut(),
+        time: ptr::null_mut(),
+        value: ptr::null_mut(),
+        index: 0,
+        user_data: ptr::null_mut(),
+    };
+    let skipped_start = VpiCbData {
+        cb_rtn: Some(record_callback_after_finish),
+        ..finish
+    };
+    let skipped_read_write = VpiCbData {
+        reason: CB_READ_WRITE_SYNCH,
+        ..skipped_start
+    };
+    let skipped_read_only = VpiCbData {
+        reason: CB_READ_ONLY_SYNCH,
+        ..skipped_start
+    };
+    let end = VpiCbData {
+        reason: CB_END_OF_SIMULATION,
+        ..skipped_start
+    };
+    unsafe {
+        assert!(!vpi_register_cb(&finish).is_null());
+        assert!(!vpi_register_cb(&skipped_start).is_null());
+        assert!(!vpi_register_cb(&skipped_read_write).is_null());
+        assert!(!vpi_register_cb(&skipped_read_only).is_null());
+        assert!(!vpi_register_cb(&end).is_null());
+    }
+
+    assert!(run_callbacks());
+    assert_eq!(CALLBACKS_AFTER_FINISH.load(Ordering::SeqCst), 8);
+    clear_runtime();
+}
+
+#[test]
+fn callback_deposits_preserve_order_across_reflected_aliases() {
+    let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+
+    unsafe {
+        let parent = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        let child = vpi_handle_by_name(c"Top.child.i".as_ptr(), ptr::null_mut());
+        let output = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+        assert!(!parent.is_null());
+        assert!(!child.is_null());
+        assert!(!output.is_null());
+        ALIAS_WRITE_FIRST.store(parent as usize, Ordering::SeqCst);
+        ALIAS_WRITE_SECOND.store(child as usize, Ordering::SeqCst);
+
+        let callback = VpiCbData {
+            reason: CB_START_OF_SIMULATION,
+            cb_rtn: Some(write_reflected_aliases),
+            obj: ptr::null_mut(),
+            time: ptr::null_mut(),
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        assert!(!vpi_register_cb(&callback).is_null());
+        assert!(!run_callbacks());
+
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        vpi_get_value(output, &mut value);
+        assert_eq!(value.value.integer, 8);
+
+        for handle in [parent, child, output] {
+            assert_eq!(vpi_free_object(handle), 1);
+        }
+    }
+    ALIAS_WRITE_FIRST.store(0, Ordering::SeqCst);
+    ALIAS_WRITE_SECOND.store(0, Ordering::SeqCst);
     clear_runtime();
 }
 

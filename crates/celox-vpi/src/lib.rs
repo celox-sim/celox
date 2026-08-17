@@ -152,15 +152,22 @@ struct ForcedValue {
 
 #[derive(Default)]
 struct PendingWrites {
-    deposits: HashMap<ReflectionSignalId, (BigUint, BigUint)>,
+    deposits: HashMap<NativeSignalIdentity, PendingDeposit>,
     edge_batches: Vec<PendingEdgeBatch>,
     open_edge_batch: Option<usize>,
     settle: bool,
 }
 
 struct PendingEdgeBatch {
-    signals: Vec<ReflectionSignalId>,
-    deposits: HashMap<ReflectionSignalId, (BigUint, BigUint)>,
+    signals: Vec<NativeSignalIdentity>,
+    deposits: HashMap<NativeSignalIdentity, PendingDeposit>,
+}
+
+#[derive(Clone)]
+struct PendingDeposit {
+    id: ReflectionSignalId,
+    value: BigUint,
+    mask: BigUint,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -197,6 +204,7 @@ fn is_active_edge(kind: DomainKind, old: LogicLevel, new: LogicLevel) -> bool {
 fn record_pending_write(
     pending: &mut PendingWrites,
     id: ReflectionSignalId,
+    identity: NativeSignalIdentity,
     value: BigUint,
     mask: BigUint,
     domain_kind: DomainKind,
@@ -207,20 +215,22 @@ fn record_pending_write(
     let level_changed = old_level != new_level;
     let open_contains_signal = pending
         .open_edge_batch
-        .is_some_and(|index| pending.edge_batches[index].signals.contains(&id));
+        .is_some_and(|index| pending.edge_batches[index].signals.contains(&identity));
 
     if open_contains_signal && (active || level_changed) {
         pending.open_edge_batch = None;
     }
 
-    pending.deposits.insert(id, (value.clone(), mask.clone()));
+    pending
+        .deposits
+        .insert(identity, PendingDeposit { id, value, mask });
     if active {
         if let Some(index) = pending.open_edge_batch {
-            pending.edge_batches[index].signals.push(id);
+            pending.edge_batches[index].signals.push(identity);
             pending.edge_batches[index].deposits = pending.deposits.clone();
         } else {
             pending.edge_batches.push(PendingEdgeBatch {
-                signals: vec![id],
+                signals: vec![identity],
                 deposits: pending.deposits.clone(),
             });
             pending.open_edge_batch = Some(pending.edge_batches.len() - 1);
@@ -233,15 +243,15 @@ fn record_pending_write(
 
 fn apply_pending_deposits(
     runtime: &mut NativeProgramInstance,
-    deposits: &HashMap<ReflectionSignalId, (BigUint, BigUint)>,
+    deposits: &HashMap<NativeSignalIdentity, PendingDeposit>,
 ) {
     let writes = deposits
-        .iter()
-        .filter_map(|(id, (value, mask))| {
+        .values()
+        .filter_map(|deposit| {
             runtime
                 .reflection()
-                .signal(*id)
-                .map(|signal| (signal.signal, value.clone(), mask.clone()))
+                .signal(deposit.id)
+                .map(|signal| (signal.signal, deposit.value.clone(), deposit.mask.clone()))
         })
         .collect::<Vec<_>>();
     for (signal, value, mask) in writes {
@@ -966,6 +976,7 @@ pub unsafe extern "C" fn vpi_put_value(
                     record_pending_write(
                         pending,
                         id,
+                        identity,
                         released.deposited_value.clone(),
                         released.deposited_mask.clone(),
                         signal.domain_kind,
@@ -1062,6 +1073,7 @@ pub unsafe extern "C" fn vpi_put_value(
             record_pending_write(
                 pending,
                 id,
+                identity,
                 bits.clone(),
                 mask.clone(),
                 signal.domain_kind,
@@ -1093,7 +1105,7 @@ fn flush_pending_writes() -> bool {
         return true;
     }
     let mut final_deposits = pending.deposits;
-    let mut replay_overrides: HashMap<ReflectionSignalId, (BigUint, BigUint)> = HashMap::default();
+    let mut replay_overrides: HashMap<NativeSignalIdentity, PendingDeposit> = HashMap::default();
     for mut batch in pending.edge_batches {
         for (id, value) in &replay_overrides {
             batch.deposits.insert(*id, value.clone());
@@ -1103,10 +1115,11 @@ fn flush_pending_writes() -> bool {
             let active_edges = batch
                 .signals
                 .into_iter()
-                .filter_map(|id| {
+                .filter_map(|identity| {
+                    let deposit = batch.deposits.get(&identity)?;
                     runtime
                         .reflection()
-                        .signal(id)
+                        .signal(deposit.id)
                         .map(|signal| signal.state_address)
                 })
                 .collect::<Vec<_>>();
