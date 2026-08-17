@@ -528,7 +528,7 @@ pub(super) fn eval_function_body_return(
         context_width: Option<usize>,
         arena: &mut SLTNodeArena<VarId>,
     ) -> Result<(FunctionControlState, NodeId, HashSet<VarAtomBase<VarId>>), ParserError> {
-        let mut next_store = state.store.clone();
+        let mut next_store = state.store.fork();
         let ((node, sources), boundaries) =
             eval_expression_effectful(module, &mut next_store, expression, arena, context_width)?;
         let state = apply_function_guard(
@@ -576,7 +576,7 @@ pub(super) fn eval_function_body_return(
         let then_state = eval_function_statements(
             module,
             FunctionControlState {
-                store: state.store.clone(),
+                store: state.store.fork(),
                 boundaries: state.boundaries.clone(),
                 live_expr: state.live_expr,
                 live_sources: state.live_sources.clone(),
@@ -701,7 +701,7 @@ pub(super) fn eval_function_body_return(
             let then_state = if_stmt.true_side.iter().try_fold(
                 FunctionLoopControlState {
                     function: FunctionControlState {
-                        store: state.function.store.clone(),
+                        store: state.function.store.fork(),
                         boundaries: state.function.boundaries.clone(),
                         live_expr: state.function.live_expr,
                         live_sources: state.function.live_sources.clone(),
@@ -786,7 +786,7 @@ pub(super) fn eval_function_body_return(
                     });
                 };
 
-                let mut next_store = state.function.store.clone();
+                let mut next_store = state.function.store.fork();
                 let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
                     module,
                     &mut next_store,
@@ -838,7 +838,7 @@ pub(super) fn eval_function_body_return(
                 let then_state = arm.body.iter().try_fold(
                     FunctionLoopControlState {
                         function: FunctionControlState {
-                            store: state.function.store.clone(),
+                            store: state.function.store.fork(),
                             boundaries: boundaries.clone(),
                             live_expr: state.function.live_expr,
                             live_sources: state.function.live_sources.clone(),
@@ -995,7 +995,7 @@ pub(super) fn eval_function_body_return(
         }
 
         let guard_state = state.clone();
-        let mut bound_store = state.store.clone();
+        let mut bound_store = state.store.fork();
         let (
             start,
             end,
@@ -1103,7 +1103,7 @@ pub(super) fn eval_function_body_return(
             arena,
         )?;
 
-        let mut symbolic_store = state.store.clone();
+        let mut symbolic_store = state.store.fork();
         let mut written_accesses = HashMap::default();
         collect_written_accesses(module, &for_stmt.body, &mut written_accesses)?;
         for (id, accesses) in &written_accesses {
@@ -1153,7 +1153,7 @@ pub(super) fn eval_function_body_return(
             symbolic_store.insert(*id, loop_store);
         }
         symbolic_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
-        let iter_store_before = symbolic_store.clone();
+        let iter_store_before = symbolic_store.fork();
 
         let iter_state = for_stmt.body.iter().try_fold(
             FunctionLoopControlState {
@@ -1209,7 +1209,7 @@ pub(super) fn eval_function_body_return(
             })
             .collect::<Result<Vec<_>, ParserError>>()?;
 
-        let mut result_store = state.store.clone();
+        let mut result_store = state.store.fork();
         let loop_effective_continue = arena.alloc(SLTNode::Binary(
             iter_state.continue_expr,
             BinaryOp::And,
@@ -1392,7 +1392,7 @@ pub(super) fn eval_function_body_return(
             let then_state = if_stmt.true_side.iter().try_fold(
                 FunctionLoopControlState {
                     function: FunctionControlState {
-                        store: state.function.store.clone(),
+                        store: state.function.store.fork(),
                         boundaries: state.function.boundaries.clone(),
                         live_expr: state.function.live_expr,
                         live_sources: state.function.live_sources.clone(),
@@ -1505,7 +1505,7 @@ pub(super) fn eval_function_body_return(
                 });
             };
 
-            let mut next_store = state.function.store.clone();
+            let mut next_store = state.function.store.fork();
             let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
                 module,
                 &mut next_store,
@@ -1554,7 +1554,7 @@ pub(super) fn eval_function_body_return(
             let then_state = arm.body.iter().try_fold(
                 FunctionLoopControlState {
                     function: FunctionControlState {
-                        store: state.function.store.clone(),
+                        store: state.function.store.fork(),
                         boundaries: boundaries.clone(),
                         live_expr: state.function.live_expr,
                         live_sources: state.function.live_sources.clone(),
@@ -1788,7 +1788,7 @@ pub(super) fn eval_function_body_return(
                 return eval_function_statements(module, state, &case_stmt.default, ret_id, arena);
             };
 
-            let mut next_store = state.store.clone();
+            let mut next_store = state.store.fork();
             let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
                 module,
                 &mut next_store,
@@ -1832,7 +1832,7 @@ pub(super) fn eval_function_body_return(
             let then_state = eval_function_statements(
                 module,
                 FunctionControlState {
-                    store: state.store.clone(),
+                    store: state.store.fork(),
                     boundaries: boundaries.clone(),
                     live_expr: state.live_expr,
                     live_sources: state.live_sources.clone(),
@@ -1981,7 +1981,7 @@ pub(super) fn eval_function_body_return(
         }
     }
 
-    let mut local_store = caller_store.clone();
+    let mut local_store = caller_store.fork();
     let local_bounds = BoundaryMap::default();
     let mut written = HashMap::default();
 
@@ -2116,7 +2116,7 @@ fn eval_function_call_expression(
         }
     }
 
-    let mut local_store = store.current().clone();
+    let mut local_store = store.current().fork();
     for (arg_id, arg_node, sources, arg_width) in evaluated_inputs {
         local_store.insert(
             arg_id,
@@ -2303,8 +2303,8 @@ fn merge_short_circuit_case_condition(
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
     let ((lhs_node, mut sources), lhs_boundaries) = lhs;
-    let base_store = store.clone();
-    let mut rhs_store = base_store.clone();
+    let base_store = store.fork();
+    let mut rhs_store = base_store.fork();
     let ((rhs_node, rhs_sources), rhs_boundaries) = eval_rhs(&mut rhs_store, arena)?;
     let execute_rhs = short_circuit_rhs_guard(arena, lhs_node, is_and)?;
     *store = super::merge_symbolic_versions(
@@ -2563,8 +2563,8 @@ pub(super) fn eval_expression_in_context(
             let ((r_expr, r_sources), r_bounds) = if store.effectful_mut().is_some()
                 && matches!(op, Op::LogicAnd | Op::LogicOr)
             {
-                let base_store = store.current().clone();
-                let mut rhs_store = base_store.clone();
+                let base_store = store.current().fork();
+                let mut rhs_store = base_store.fork();
                 let mut rhs_state = ExpressionStore::Effectful(&mut rhs_store);
                 let rhs_value = eval_expression_in_context(
                     module,
@@ -2763,8 +2763,8 @@ pub(super) fn eval_expression_in_context(
                 ((then_expr, then_sources), then_bounds),
                 ((else_expr, else_sources), else_bounds),
             ) = if store.effectful_mut().is_some() {
-                let base_store = store.current().clone();
-                let mut then_store = base_store.clone();
+                let base_store = store.current().fork();
+                let mut then_store = base_store.fork();
                 let mut then_state = ExpressionStore::Effectful(&mut then_store);
                 let then_value = eval_expression_in_context(
                     module,

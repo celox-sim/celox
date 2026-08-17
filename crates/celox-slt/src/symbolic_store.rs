@@ -474,6 +474,33 @@ mod tests {
     }
 
     #[test]
+    fn branch_versions_report_only_their_divergent_definitions() {
+        let mut entry = SymbolicStore::<u32, u32>::default();
+        for key in 0..1024 {
+            entry.insert(key, RangeStore::new(None, 8));
+        }
+
+        let mut then_version = entry.fork();
+        then_version
+            .get_mut(&17)
+            .unwrap()
+            .update(BitAccess::new(0, 3), Some((1, HashSet::default())))
+            .unwrap();
+        let mut else_version = entry.fork();
+        else_version
+            .get_mut(&900)
+            .unwrap()
+            .update(BitAccess::new(4, 7), Some((2, HashSet::default())))
+            .unwrap();
+
+        let mut differing = then_version.differing_keys(&else_version);
+        differing.sort_unstable();
+        assert_eq!(differing, vec![17, 900]);
+        assert_eq!(entry.differing_keys(&then_version), vec![17]);
+        assert_eq!(entry.differing_keys(&else_version), vec![900]);
+    }
+
+    #[test]
     fn sharded_iterators_and_entry_api_preserve_map_semantics() {
         let mut store = SymbolicStore::<u32, u32>::default();
         for key in 0..256 {

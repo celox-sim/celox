@@ -37,7 +37,7 @@ pub(super) fn eval_statements(
             let guarded_matches = matching_candidates(module, &if_stmt.true_side, candidates);
             if guarded_matches.len() == 1 {
                 let candidate = guarded_matches[0];
-                let store_before_probe = store.clone();
+                let store_before_probe = store.fork();
                 let ((guard, guard_sources), guard_boundaries) =
                     eval_expression_effectful(module, &mut store, &if_stmt.cond, arena, None)?;
                 let guard = procedural_condition(arena, guard)?;
@@ -1491,7 +1491,7 @@ fn recover_group(
 
     let total_width = get_width(group, arena);
     let mut next_msb = total_width;
-    let mut result_store = initial_store.clone();
+    let mut result_store = initial_store.fork();
     for target in &proof.targets {
         let width = target.access.msb - target.access.lsb + 1;
         next_msb -= width;
@@ -1529,7 +1529,7 @@ fn expanded_outputs_are_count_idioms(
     let (store, _) = statements
         .iter()
         .try_fold(
-            (initial_store.clone(), BoundaryMap::default()),
+            (initial_store.fork(), BoundaryMap::default()),
             |(store, boundaries), statement| {
                 eval_statement(module, store, boundaries, statement, &mut scratch)
             },

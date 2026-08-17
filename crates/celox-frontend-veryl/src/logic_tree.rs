@@ -1089,7 +1089,7 @@ fn apply_loop_continue_guard(
     next_boundaries: BoundaryMap<VarId>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<LoopControlState, ParserError> {
-    let base_store = state.store.clone();
+    let base_store = state.store.fork();
     let boundaries = merge_boundaries(state.boundaries, next_boundaries);
 
     if matches!(constant_bool(arena, state.continue_expr), Some(true)) {
@@ -1249,7 +1249,7 @@ fn eval_loop_case(
                 .try_fold(state, |s, step| eval_loop_statement(module, s, step, arena));
         };
 
-        let mut cond_store = state.store.clone();
+        let mut cond_store = state.store.fork();
         let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
             module,
             &mut cond_store,
@@ -1278,7 +1278,7 @@ fn eval_loop_case(
 
         let then_state = arm.body.iter().try_fold(
             LoopControlState {
-                store: state.store.clone(),
+                store: state.store.fork(),
                 boundaries: boundaries.clone(),
                 continue_expr: state.continue_expr,
                 continue_sources: state.continue_sources.clone(),
@@ -1323,7 +1323,7 @@ fn eval_loop_case(
         })
     }
 
-    let mut target_store = state.store.clone();
+    let mut target_store = state.store.fork();
     let (target, target_boundaries) =
         eval_case_target_effectful(module, &mut target_store, &case_stmt.case_target, arena)?;
     state = apply_loop_continue_guard(module, state, target_store, target_boundaries, arena)?;
@@ -1336,7 +1336,7 @@ fn eval_loop_if(
     stmt: &IfStatement,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<LoopControlState, ParserError> {
-    let mut cond_store = state.store.clone();
+    let mut cond_store = state.store.fork();
     let ((cond_expr, cond_sources), cond_bounds) =
         eval_expression_effectful(module, &mut cond_store, &stmt.cond, arena, None)?;
     state = apply_loop_continue_guard(module, state, cond_store, cond_bounds, arena)?;
@@ -1360,7 +1360,7 @@ fn eval_loop_if(
 
     let then_state = stmt.true_side.iter().try_fold(
         LoopControlState {
-            store: state.store.clone(),
+            store: state.store.fork(),
             boundaries: boundaries.clone(),
             continue_expr: state.continue_expr,
             continue_sources: state.continue_sources.clone(),
@@ -1975,7 +1975,7 @@ fn eval_for_with_effects(
             }
         };
 
-    let mut symbolic_store = store.clone();
+    let mut symbolic_store = store.fork();
     let mut written_accesses = HashMap::default();
     collect_written_accesses(module, &for_stmt.body, &mut written_accesses)?;
     for (id, accesses) in written_accesses {
@@ -2014,7 +2014,7 @@ fn eval_for_with_effects(
         symbolic_store.insert(id, loop_store);
     }
     symbolic_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
-    let iter_store_before = symbolic_store.clone();
+    let iter_store_before = symbolic_store.fork();
 
     let loop_state = for_stmt.body.iter().try_fold(
         LoopControlState {
@@ -2676,7 +2676,7 @@ fn eval_statement_form_function_call(
         }
     }
 
-    let mut local_store = store.clone();
+    let mut local_store = store.fork();
     for (arg_id, arg_node, arg_sources, arg_width) in evaluated_inputs {
         local_store.insert(
             arg_id,

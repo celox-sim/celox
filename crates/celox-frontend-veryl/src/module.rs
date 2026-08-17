@@ -1146,7 +1146,7 @@ impl<'a> ModuleParser<'a> {
             }
             let mut written_accesses = HashMap::default();
             collect_written_expression(self.module, &input.expr, &mut written_accesses)?;
-            let mut connection_store = parent_store.clone();
+            let mut connection_store = parent_store.fork();
             let ((expr_node, expr_sources), _bounds) = eval_assignment_expression_effectful(
                 self.module,
                 &mut connection_store,
