@@ -550,17 +550,24 @@ pub unsafe extern "C" fn vpi_iterate(kind: i32, reference: VpiHandle) -> VpiHand
 ///
 /// `iterator` must be a live iterator handle returned by [`vpi_iterate`].
 pub unsafe extern "C" fn vpi_scan(iterator: VpiHandle) -> VpiHandle {
-    // Safety: iterator follows the VPI handle contract.
-    let Some(iterator_ref) = (unsafe { handle_mut(iterator) }) else {
+    let object = {
+        // Safety: iterator follows the VPI handle contract.
+        let Some(iterator_ref) = (unsafe { handle_mut(iterator) }) else {
+            return ptr::null_mut();
+        };
+        let HandleKind::Iterator { objects, next } = &mut iterator_ref.kind else {
+            return ptr::null_mut();
+        };
+        let object = objects.get(*next).copied();
+        *next += usize::from(object.is_some());
+        object
+    };
+    let Some(object) = object else {
+        // Safety: exhausted iterators are consumed by vpi_scan per the VPI
+        // contract, and the borrow above ended before reclaiming the handle.
+        drop(unsafe { Box::from_raw(iterator) });
         return ptr::null_mut();
     };
-    let HandleKind::Iterator { objects, next } = &mut iterator_ref.kind else {
-        return ptr::null_mut();
-    };
-    let Some(object) = objects.get(*next).copied() else {
-        return ptr::null_mut();
-    };
-    *next += 1;
     new_object_handle(object)
 }
 
@@ -578,11 +585,11 @@ fn object_type(object: ObjectRef) -> i32 {
 ///
 /// `reference` must be a live handle returned by this library.
 pub unsafe extern "C" fn vpi_get(property: i32, reference: VpiHandle) -> i32 {
+    if matches!(property, VPI_TIME_UNIT | VPI_TIME_PRECISION) {
+        return -12;
+    }
     if reference.is_null() {
-        return match property {
-            VPI_TIME_UNIT | VPI_TIME_PRECISION => -12,
-            _ => 0,
-        };
+        return 0;
     }
     // Safety: reference follows the VPI handle contract.
     let Some(handle) = (unsafe { handle_mut(reference) }) else {
@@ -1085,7 +1092,12 @@ fn flush_pending_writes() -> bool {
     if !pending.settle {
         return true;
     }
-    for batch in pending.edge_batches {
+    let mut final_deposits = pending.deposits;
+    let mut replay_overrides: HashMap<ReflectionSignalId, (BigUint, BigUint)> = HashMap::default();
+    for mut batch in pending.edge_batches {
+        for (id, value) in &replay_overrides {
+            batch.deposits.insert(*id, value.clone());
+        }
         let result: Result<(), celox::RuntimeErrorCode> = with_runtime_mut(|runtime| {
             apply_pending_deposits(runtime, &batch.deposits);
             let active_edges = batch
@@ -1111,10 +1123,32 @@ fn flush_pending_writes() -> bool {
         }
         if callbacks::is_running() {
             callbacks::dispatch_value_changes();
+            let mut callback_iterations = 0usize;
+            loop {
+                let callback_pending = PENDING_WRITES.with_borrow_mut(std::mem::take);
+                if !callback_pending.settle {
+                    break;
+                }
+                callback_iterations += 1;
+                if callback_iterations > 1_000_000 {
+                    callbacks::fail(
+                        "VPI callback writes exceeded 1000000 intermediate settlements".to_string(),
+                    );
+                    return false;
+                }
+                let overrides = callback_pending.deposits.clone();
+                PENDING_WRITES.with_borrow_mut(|pending| *pending = callback_pending);
+                if !flush_pending_writes() {
+                    return false;
+                }
+                replay_overrides.extend(overrides.clone());
+                final_deposits.extend(overrides);
+                callbacks::dispatch_value_changes();
+            }
         }
     }
     let result: Result<(), celox::RuntimeErrorCode> = with_runtime_mut(|runtime| {
-        apply_pending_deposits(runtime, &pending.deposits);
+        apply_pending_deposits(runtime, &final_deposits);
         runtime.settle_active_edges(&[])
     })
     .unwrap_or(Ok(()));

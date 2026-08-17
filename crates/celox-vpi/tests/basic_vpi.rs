@@ -332,6 +332,8 @@ fn vpi_discovers_hierarchy_and_reads_and_writes_values() {
         assert!(!top.is_null());
         assert_eq!(vpi_get(VPI_TYPE, top), VPI_MODULE);
         assert_eq!(vpi_get(VPI_TOP_MODULE, top), 1);
+        assert_eq!(vpi_get(VPI_TIME_UNIT, top), -12);
+        assert_eq!(vpi_get(VPI_TIME_PRECISION, top), -12);
         assert_eq!(CStr::from_ptr(vpi_get_str(VPI_NAME, top)), c"Top");
 
         let modules = vpi_iterate(VPI_MODULE, top);
@@ -343,7 +345,6 @@ fn vpi_discovers_hierarchy_and_reads_and_writes_values() {
         );
         assert!(!vpi_handle_by_name(c"Top.child".as_ptr(), ptr::null_mut()).is_null());
         assert!(vpi_scan(modules).is_null());
-        assert_eq!(vpi_free_object(modules), 1);
 
         let a = vpi_handle_by_name(c"a".as_ptr(), top);
         let y = vpi_handle_by_name(c"y".as_ptr(), top);
@@ -1128,6 +1129,7 @@ unsafe extern "C" fn drive_two_four_state_posedges(data: *mut VpiCbData) -> i32 
 static EDGE_DATA_HANDLE: AtomicUsize = AtomicUsize::new(0);
 static EDGE_VALUE_CHANGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static EDGE_VALUE_CHANGE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static EDGE_VALUE_CHANGE_DRIVE_DATA: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "C" fn drive_two_edges_with_distinct_data(data: *mut VpiCbData) -> i32 {
     let clk = unsafe { (*data).obj };
@@ -1151,6 +1153,16 @@ unsafe extern "C" fn drive_clock_pulse(data: *mut VpiCbData) -> i32 {
     0
 }
 
+unsafe extern "C" fn drive_two_clock_posedges(data: *mut VpiCbData) -> i32 {
+    let clk = unsafe { (*data).obj };
+    unsafe {
+        put_int(clk, 1);
+        put_int(clk, 0);
+        put_int(clk, 1);
+    }
+    0
+}
+
 unsafe extern "C" fn record_clock_value_change(data: *mut VpiCbData) -> i32 {
     // Safety: the callback's requested integer storage is live while firing.
     let value = unsafe { (*(*data).value).value.integer } as usize;
@@ -1160,6 +1172,21 @@ unsafe extern "C" fn record_clock_value_change(data: *mut VpiCbData) -> i32 {
             Some(sequence * 10 + value)
         })
         .unwrap();
+    0
+}
+
+unsafe extern "C" fn drive_data_after_first_clock_edge(data: *mut VpiCbData) -> i32 {
+    let mut value = VpiValue {
+        format: VPI_INT_VAL,
+        value: VpiValueData { integer: -1 },
+    };
+    unsafe { vpi_get_value((*data).obj, &mut value) };
+    if unsafe { value.value.integer } == 1
+        && EDGE_VALUE_CHANGE_DRIVE_DATA.swap(false, Ordering::SeqCst)
+    {
+        let d = EDGE_DATA_HANDLE.load(Ordering::SeqCst) as VpiHandle;
+        unsafe { put_int(d, 1) };
+    }
     0
 }
 
@@ -1391,5 +1418,71 @@ fn value_change_callbacks_observe_each_queued_clock_transition() {
         assert_eq!(vpi_remove_cb(value_change_handle), 1);
         assert_eq!(vpi_free_object(clk), 1);
     }
+    clear_runtime();
+}
+
+#[test]
+fn callback_writes_override_later_queued_edge_snapshots() {
+    let simulator = Simulator::builder(EDGE_SAMPLER, "Top").build().unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+    EDGE_VALUE_CHANGE_DRIVE_DATA.store(true, Ordering::SeqCst);
+
+    unsafe {
+        let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
+        let d = vpi_handle_by_name(c"Top.d".as_ptr(), ptr::null_mut());
+        let newest = vpi_handle_by_name(c"Top.newest".as_ptr(), ptr::null_mut());
+        let previous = vpi_handle_by_name(c"Top.previous".as_ptr(), ptr::null_mut());
+        put_int(clk, 0);
+        put_int(d, 0);
+        put_int(newest, 0);
+        put_int(previous, 0);
+        EDGE_DATA_HANDLE.store(d as usize, Ordering::SeqCst);
+
+        let value_change = VpiCbData {
+            reason: CB_VALUE_CHANGE,
+            cb_rtn: Some(drive_data_after_first_clock_edge),
+            obj: clk,
+            time: ptr::null_mut(),
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        let value_change_handle = vpi_register_cb(&value_change);
+        assert!(!value_change_handle.is_null());
+        let mut time = VpiTime {
+            type_: VPI_SIM_TIME,
+            high: 0,
+            low: 1,
+            real: 0.0,
+        };
+        let edges = VpiCbData {
+            reason: CB_AFTER_DELAY,
+            cb_rtn: Some(drive_two_clock_posedges),
+            obj: clk,
+            time: &mut time,
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        assert!(!vpi_register_cb(&edges).is_null());
+        assert!(!run_callbacks());
+
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: -1 },
+        };
+        vpi_get_value(newest, &mut value);
+        assert_eq!(value.value.integer, 1);
+        vpi_get_value(previous, &mut value);
+        assert_eq!(value.value.integer, 0);
+
+        assert_eq!(vpi_remove_cb(value_change_handle), 1);
+        for handle in [clk, d, newest, previous] {
+            assert_eq!(vpi_free_object(handle), 1);
+        }
+    }
+    EDGE_DATA_HANDLE.store(0, Ordering::SeqCst);
     clear_runtime();
 }
