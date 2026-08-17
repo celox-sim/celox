@@ -229,6 +229,33 @@ static CALLBACKS_SEEN: AtomicUsize = AtomicUsize::new(0);
 static CALLBACKS_AFTER_FINISH: AtomicUsize = AtomicUsize::new(0);
 static ALIAS_WRITE_FIRST: AtomicUsize = AtomicUsize::new(0);
 static ALIAS_WRITE_SECOND: AtomicUsize = AtomicUsize::new(0);
+static STARTUP_TIMER_VALUE: AtomicI32 = AtomicI32::new(-1);
+static NEXT_TIME_TIMER_VALUE: AtomicI32 = AtomicI32::new(-1);
+
+unsafe extern "C" fn drive_before_due_timer(data: *mut VpiCbData) -> i32 {
+    let value = match unsafe { (*data).reason } {
+        CB_START_OF_SIMULATION => 10,
+        CB_NEXT_SIM_TIME => 20,
+        _ => unreachable!(),
+    };
+    unsafe { put_int((*data).obj, value) };
+    0
+}
+
+unsafe extern "C" fn record_due_timer_output(data: *mut VpiCbData) -> i32 {
+    let mut value = VpiValue {
+        format: VPI_INT_VAL,
+        value: VpiValueData { integer: -1 },
+    };
+    unsafe { vpi_get_value((*data).obj, &mut value) };
+    let value = unsafe { value.value.integer };
+    match celox_vpi_current_time() {
+        0 => STARTUP_TIMER_VALUE.store(value, Ordering::SeqCst),
+        5 => NEXT_TIME_TIMER_VALUE.store(value, Ordering::SeqCst),
+        time => panic!("unexpected timer time {time}"),
+    }
+    0
+}
 
 unsafe extern "C" fn record_callback(data: *mut VpiCbData) -> i32 {
     // Safety: the callback runtime passes back the registration storage.
@@ -367,6 +394,98 @@ fn callback_runtime_advances_time_and_finishes_regions() {
     }
     assert!(run_callbacks());
     assert_eq!(CALLBACKS_SEEN.load(Ordering::SeqCst), 7);
+    clear_runtime();
+}
+
+#[test]
+fn pre_time_callback_writes_settle_before_due_timers() {
+    let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
+    STARTUP_TIMER_VALUE.store(-1, Ordering::SeqCst);
+    NEXT_TIME_TIMER_VALUE.store(-1, Ordering::SeqCst);
+
+    unsafe {
+        let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        let y = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+        let start = VpiCbData {
+            reason: CB_START_OF_SIMULATION,
+            cb_rtn: Some(drive_before_due_timer),
+            obj: a,
+            time: ptr::null_mut(),
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        let next_time = VpiCbData {
+            reason: CB_NEXT_SIM_TIME,
+            ..start
+        };
+        let mut zero = VpiTime {
+            type_: VPI_SIM_TIME,
+            high: 0,
+            low: 0,
+            real: 0.0,
+        };
+        let timer_zero = VpiCbData {
+            reason: CB_AFTER_DELAY,
+            cb_rtn: Some(record_due_timer_output),
+            obj: y,
+            time: &mut zero,
+            ..start
+        };
+        let mut five = VpiTime { low: 5, ..zero };
+        let timer_five = VpiCbData {
+            time: &mut five,
+            ..timer_zero
+        };
+        for callback in [&start, &next_time, &timer_zero, &timer_five] {
+            assert!(!vpi_register_cb(callback).is_null());
+        }
+
+        assert!(!run_callbacks());
+        assert_eq!(STARTUP_TIMER_VALUE.load(Ordering::SeqCst), 11);
+        assert_eq!(NEXT_TIME_TIMER_VALUE.load(Ordering::SeqCst), 21);
+        assert_eq!(vpi_free_object(a), 1);
+        assert_eq!(vpi_free_object(y), 1);
+    }
+    clear_runtime();
+}
+
+#[test]
+fn scaled_real_zero_delay_inertial_write_is_immediate() {
+    let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
+
+    unsafe {
+        let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        let y = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+        let input = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 41 },
+        };
+        let delay = VpiTime {
+            type_: VPI_SCALED_REAL_TIME,
+            high: u32::MAX,
+            low: u32::MAX,
+            real: 0.0,
+        };
+        assert_eq!(
+            vpi_put_value(a, &input, ptr::from_ref(&delay).cast(), VPI_INERTIAL_DELAY),
+            a
+        );
+        let mut output = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: -1 },
+        };
+        vpi_get_value(y, &mut output);
+        assert_eq!(output.value.integer, 42);
+        assert_eq!(vpi_free_object(a), 1);
+        assert_eq!(vpi_free_object(y), 1);
+    }
     clear_runtime();
 }
 

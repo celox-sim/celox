@@ -280,6 +280,9 @@ fn fire_all(reason: i32) -> bool {
 pub(super) fn run() -> bool {
     STATE.with_borrow_mut(|state| state.running = true);
     fire_all(CB_START_OF_SIMULATION);
+    if !finish_requested() {
+        super::flush_pending_writes();
+    }
     let mut iterations = 0usize;
     'scheduler: loop {
         if STATE.with_borrow(|state| state.finish) {
@@ -357,6 +360,9 @@ pub(super) fn run() -> bool {
         };
         STATE.with_borrow_mut(|state| state.time = next_time);
         fire_all(CB_NEXT_SIM_TIME);
+        if !finish_requested() {
+            super::flush_pending_writes();
+        }
     }
     let finished = STATE.with_borrow(|state| state.finish);
     // End-of-simulation callbacks are the one region intentionally dispatched

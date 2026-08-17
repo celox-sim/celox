@@ -996,7 +996,11 @@ pub unsafe extern "C" fn vpi_put_value(
         && (when.is_null() || {
             // Safety: a non-null VPI delay pointer addresses `s_vpi_time`.
             let delay = unsafe { &*when.cast::<VpiTime>() };
-            delay.type_ == 2 && delay.high == 0 && delay.low == 0
+            match delay.type_ {
+                VPI_SIM_TIME => delay.high == 0 && delay.low == 0,
+                VPI_SCALED_REAL_TIME => delay.real == 0.0,
+                _ => false,
+            }
         });
     if !matches!(
         flags,
