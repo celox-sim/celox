@@ -5,9 +5,9 @@ overrides:
   "@celox-sim/celox": "workspace:*"
   "@celox-sim/celox-napi": "workspace:*"
   "@celox-sim/vite-plugin": "workspace:*"
-  "@emnapi/core": "2.0.0-alpha.3"
-  "@emnapi/runtime": "2.0.0-alpha.3"
-  emnapi: "2.0.0-alpha.3"
+  "@emnapi/core": "2.0.0-alpha.4"
+  "@emnapi/runtime": "2.0.0-alpha.4"
+  emnapi: "2.0.0-alpha.4"
 allowBuilds:
   esbuild: true
   lefthook: true
