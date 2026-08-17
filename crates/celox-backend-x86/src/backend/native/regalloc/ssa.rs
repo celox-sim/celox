@@ -25,6 +25,7 @@ pub(super) fn allocate(
     constraints: &super::constraints::ConstraintModel,
     trace: Option<&mut super::RegallocTrace>,
     timing: bool,
+    verify: bool,
 ) -> Result<Allocation, super::RegallocError> {
     let register_count = func.target_features.allocatable_register_count();
     let phase = timing.then(crate::timing::now);
@@ -49,16 +50,18 @@ pub(super) fn allocate(
     if let Some(trace) = trace {
         trace.mir_after_scheduling = func.to_string();
     }
-    plan.verify(func, cfg, register_count).map_err(|error| {
-        super::RegallocError::new(
-            "spill-plan verification",
-            error.rule,
-            error.block,
-            error.instruction,
-            error.values,
-            error.message,
-        )
-    })?;
+    if verify {
+        plan.verify(func, cfg, register_count).map_err(|error| {
+            super::RegallocError::new(
+                "spill-plan verification",
+                error.rule,
+                error.block,
+                error.instruction,
+                error.values,
+                error.message,
+            )
+        })?;
+    }
     if let Some(start) = phase {
         tracing::debug!(
             "[regalloc-timing] ssa spill_plan elapsed={:?}",
@@ -77,16 +80,18 @@ pub(super) fn allocate(
             error.message,
         )
     })?;
-    super::ssa_state_home::verify(func, cfg, &plan).map_err(|error| {
-        super::RegallocError::new(
-            "packed state-home verification",
-            error.rule,
-            error.block,
-            error.instruction,
-            error.values,
-            error.message,
-        )
-    })?;
+    if verify {
+        super::ssa_state_home::verify(func, cfg, &plan).map_err(|error| {
+            super::RegallocError::new(
+                "packed state-home verification",
+                error.rule,
+                error.block,
+                error.instruction,
+                error.values,
+                error.message,
+            )
+        })?;
+    }
     if let Some(start) = phase {
         tracing::debug!(
             "[regalloc-timing] ssa packed_state_homes homes={} reloads={} elapsed={:?}",
@@ -117,20 +122,10 @@ pub(super) fn allocate(
                 error.message,
             )
         })?;
-    plan.verify(func, cfg, register_count).map_err(|error| {
-        super::RegallocError::new(
-            "final spill-plan verification",
-            error.rule,
-            error.block,
-            error.instruction,
-            error.values,
-            error.message,
-        )
-    })?;
-    plan.verify_recipe_homes(func, cfg, &reload_recipes)
-        .map_err(|error| {
+    if verify {
+        plan.verify(func, cfg, register_count).map_err(|error| {
             super::RegallocError::new(
-                "recipe-home verification",
+                "final spill-plan verification",
                 error.rule,
                 error.block,
                 error.instruction,
@@ -138,34 +133,46 @@ pub(super) fn allocate(
                 error.message,
             )
         })?;
-    super::ssa_state_home::verify(func, cfg, &plan).map_err(|error| {
-        super::RegallocError::new(
-            "final packed state-home verification",
-            error.rule,
-            error.block,
-            error.instruction,
-            error.values,
-            error.message,
-        )
-    })?;
-    if let Err(error) = super::home_verify::verify(func, cfg, &plan) {
-        let (block, instruction) = match error.location {
-            Some(super::home_verify::HomeLocation::Point(point)) => {
-                (Some(point.block), Some(point.instruction))
-            }
-            Some(super::home_verify::HomeLocation::Edge { predecessor, .. }) => {
-                (Some(predecessor), None)
-            }
-            None => (None, None),
-        };
-        return Err(super::RegallocError::new(
-            "spill-home verification",
-            error.rule,
-            block,
-            instruction,
-            error.value.map(|value| VReg(value.0)).into_iter().collect(),
-            error.message,
-        ));
+        plan.verify_recipe_homes(func, cfg, &reload_recipes)
+            .map_err(|error| {
+                super::RegallocError::new(
+                    "recipe-home verification",
+                    error.rule,
+                    error.block,
+                    error.instruction,
+                    error.values,
+                    error.message,
+                )
+            })?;
+        super::ssa_state_home::verify(func, cfg, &plan).map_err(|error| {
+            super::RegallocError::new(
+                "final packed state-home verification",
+                error.rule,
+                error.block,
+                error.instruction,
+                error.values,
+                error.message,
+            )
+        })?;
+        if let Err(error) = super::home_verify::verify(func, cfg, &plan) {
+            let (block, instruction) = match error.location {
+                Some(super::home_verify::HomeLocation::Point(point)) => {
+                    (Some(point.block), Some(point.instruction))
+                }
+                Some(super::home_verify::HomeLocation::Edge { predecessor, .. }) => {
+                    (Some(predecessor), None)
+                }
+                None => (None, None),
+            };
+            return Err(super::RegallocError::new(
+                "spill-home verification",
+                error.rule,
+                block,
+                instruction,
+                error.value.map(|value| VReg(value.0)).into_iter().collect(),
+                error.message,
+            ));
+        }
     }
     if let Some(start) = phase {
         tracing::debug!(
@@ -176,19 +183,25 @@ pub(super) fn allocate(
     }
 
     let phase = timing.then(crate::timing::now);
-    let reconstruction =
-        super::reconstruct::reconstruct(func, cfg, &plan, next_use, &reload_recipes).map_err(
-            |error| {
-                super::RegallocError::new(
-                    "SSA reconstruction",
-                    error.rule,
-                    error.block,
-                    error.instruction,
-                    error.values,
-                    error.message,
-                )
-            },
-        )?;
+    let reconstruction = super::reconstruct::reconstruct(
+        func,
+        cfg,
+        &plan,
+        next_use,
+        &reload_recipes,
+        timing,
+        verify,
+    )
+    .map_err(|error| {
+        super::RegallocError::new(
+            "SSA reconstruction",
+            error.rule,
+            error.block,
+            error.instruction,
+            error.values,
+            error.message,
+        )
+    })?;
     if let Some(start) = phase {
         tracing::debug!(
             "[regalloc-timing] ssa reconstruct vregs={} insts={} frame={} shared_reload_blocks={} elapsed={:?}",
@@ -202,9 +215,11 @@ pub(super) fn allocate(
             start.elapsed()
         );
     }
-    func.verify_result().map_err(|error| {
-        super::RegallocError::mir("SSA reconstruction structural verification", error)
-    })?;
+    if verify {
+        func.verify_result().map_err(|error| {
+            super::RegallocError::mir("SSA reconstruction structural verification", error)
+        })?;
+    }
 
     // Shared edge-reload tails add real CFG blocks after the original
     // allocation graph was frozen. Rebuild the normalized graph once, then
@@ -213,67 +228,75 @@ pub(super) fn allocate(
     let reconstructed_cfg = if !reconstruction.shared_reload_blocks.is_empty() {
         let rebuilt = super::cfg::normalize(func)
             .map_err(|error| super::cfg_error("shared reload CFG normalization", error))?;
-        rebuilt.verify(func).map_err(|error| {
-            super::cfg_error("shared reload CFG normalization verification", error)
-        })?;
-        func.verify_result().map_err(|error| {
-            super::RegallocError::mir("shared reload CFG structural verification", error)
-        })?;
+        if verify {
+            rebuilt.verify(func).map_err(|error| {
+                super::cfg_error("shared reload CFG normalization verification", error)
+            })?;
+            func.verify_result().map_err(|error| {
+                super::RegallocError::mir("shared reload CFG structural verification", error)
+            })?;
+        }
         Some(rebuilt)
     } else {
         None
     };
     let cfg = reconstructed_cfg.as_ref().unwrap_or(cfg);
 
-    super::materialized_state_home::verify_materialized_state_homes(
-        func,
-        cfg,
-        &reconstruction.state_stores,
-        &reconstruction.state_reloads,
-    )
-    .map_err(|error| {
-        super::RegallocError::new(
-            "materialized packed state-home verification",
-            error.rule,
-            error.block,
-            error.instruction,
-            error.values,
-            error.message,
+    if verify {
+        super::materialized_state_home::verify_materialized_state_homes(
+            func,
+            cfg,
+            &reconstruction.state_stores,
+            &reconstruction.state_reloads,
         )
-    })?;
+        .map_err(|error| {
+            super::RegallocError::new(
+                "materialized packed state-home verification",
+                error.rule,
+                error.block,
+                error.instruction,
+                error.values,
+                error.message,
+            )
+        })?;
+    }
 
     let inserted_state_writes = reconstruction
         .state_stores
         .iter()
         .map(|store| (store.block, store.write_ordinal))
         .collect::<Vec<_>>();
-    super::reload::verify_expected_materialized_reloads_after_state_spills(
-        func,
-        cfg,
-        &reconstruction.recipe_reloads,
-        &inserted_state_writes,
-        &reconstruction.shared_reload_blocks,
-    )
-    .map_err(|error| {
-        super::reload_recipe_error("spill-planner reload-recipe verification", error)
-    })?;
+    if verify {
+        super::reload::verify_expected_materialized_reloads_after_state_spills(
+            func,
+            cfg,
+            &reconstruction.recipe_reloads,
+            &inserted_state_writes,
+            &reconstruction.shared_reload_blocks,
+        )
+        .map_err(|error| {
+            super::reload_recipe_error("spill-planner reload-recipe verification", error)
+        })?;
+    }
 
     // Prove the spill result itself fits the machine before Perm boundaries
     // introduce fresh representatives.  This keeps pressure correctness
     // independent from constraint legalization and follows the frozen phase
     // order: reconstruct -> pressure proof -> Perm -> color.
     let phase = timing.then(crate::timing::now);
-    let reconstructed_analysis = super::analysis::analyze(func);
-    if let Err(error) = super::pressure::verify(func, &reconstructed_analysis, register_count) {
-        let message = error.to_string();
-        return Err(super::RegallocError::new(
-            "reconstructed pressure verification",
-            "PRESSURE.EXCEEDS_CAPACITY",
-            Some(error.block),
-            Some(error.instruction),
-            error.values,
-            message,
-        ));
+    if verify {
+        let reconstructed_analysis = super::analysis::analyze(func);
+        if let Err(error) = super::pressure::verify(func, &reconstructed_analysis, register_count) {
+            let message = error.to_string();
+            return Err(super::RegallocError::new(
+                "reconstructed pressure verification",
+                "PRESSURE.EXCEEDS_CAPACITY",
+                Some(error.block),
+                Some(error.instruction),
+                error.values,
+                message,
+            ));
+        }
     }
     if let Some(start) = phase {
         tracing::debug!(
@@ -296,8 +319,10 @@ pub(super) fn allocate(
                 )
             },
         )?;
-    func.verify_result()
-        .map_err(|error| super::RegallocError::mir("Perm structural verification", error))?;
+    if verify {
+        func.verify_result()
+            .map_err(|error| super::RegallocError::mir("Perm structural verification", error))?;
+    }
     if let Some(start) = phase {
         tracing::debug!(
             "[regalloc-timing] ssa constraint_perms boundaries={} vregs={} elapsed={:?}",
@@ -321,16 +346,18 @@ pub(super) fn allocate(
                 message,
             )
         })?;
-    for (&destination, &register) in &coloring.perm_matching {
-        if coloring.assignment.get(destination) != Some(register) {
-            return Err(super::RegallocError::new(
-                "SSA coloring verification",
-                "COLOR.PERM_MATCHING_APPLIED",
-                None,
-                None,
-                vec![destination],
-                format!("Perm matching color {register:?} was not applied"),
-            ));
+    if verify {
+        for (&destination, &register) in &coloring.perm_matching {
+            if coloring.assignment.get(destination) != Some(register) {
+                return Err(super::RegallocError::new(
+                    "SSA coloring verification",
+                    "COLOR.PERM_MATCHING_APPLIED",
+                    None,
+                    None,
+                    vec![destination],
+                    format!("Perm matching color {register:?} was not applied"),
+                ));
+            }
         }
     }
     if let Some(start) = phase {

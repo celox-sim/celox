@@ -1,9 +1,10 @@
 //! Sparse physical MemorySSA verification for allocation-owned state homes.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::native::memory_effect::{self, UnknownMemory};
 use crate::native::mir::{BaseReg, BlockId, MFunction, MInst, PackedStateHome, StateHomeId, VReg};
+use crate::{HashMap, HashSet};
 
 use super::cfg::NormalizedCfg;
 
@@ -422,7 +423,7 @@ fn verify_program(
 ) -> Result<(), MaterializedStateHomeError> {
     validate_cfg(program, cfg)?;
 
-    let mut homes = HashMap::<StateHomeId, PackedStateHome>::new();
+    let mut homes = HashMap::<StateHomeId, PackedStateHome>::default();
     let mut required = BTreeSet::<StateHomeId>::new();
     for block in &program.blocks {
         for instruction in &block.instructions {
@@ -445,7 +446,7 @@ fn verify_program(
     }
 
     let mut tracked = BTreeSet::<i64>::new();
-    let mut entry_owner = HashMap::<i64, StateHomeId>::new();
+    let mut entry_owner = HashMap::<i64, StateHomeId>::default();
     for &home_id in &required {
         let home = homes[&home_id];
         let bytes = home
@@ -553,10 +554,10 @@ fn verify_program(
         }
     }
 
-    let mut definitions = HashSet::<(ByteId, usize)>::new();
-    let mut upward_uses = HashSet::<(ByteId, usize)>::new();
+    let mut definitions = HashSet::<(ByteId, usize)>::default();
+    let mut upward_uses = HashSet::<(ByteId, usize)>::default();
     for block in 0..program.blocks.len() {
-        let mut defined = HashSet::<ByteId>::new();
+        let mut defined = HashSet::<ByteId>::default();
         let mut event = 0usize;
         let mut query = 0usize;
         for position in 0..program.blocks[block].instructions.len() {
@@ -595,7 +596,7 @@ fn verify_program(
         }
     }
 
-    let mut phi_pairs = HashSet::<(ByteId, usize)>::new();
+    let mut phi_pairs = HashSet::<(ByteId, usize)>::default();
     let mut queued = definitions.clone();
     for byte in 0..byte_count {
         queued.insert((ByteId(byte), 0));

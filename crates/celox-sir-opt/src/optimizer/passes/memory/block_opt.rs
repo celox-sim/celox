@@ -382,7 +382,7 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
         return false;
     }
 
-    let mut replaced_indices = std::collections::HashSet::new();
+    let mut replaced_indices = HashSet::default();
     let mut insertions: HashMap<usize, Vec<SIRInstruction<A>>> = HashMap::default();
 
     // Pre-index loads by address for efficient safety checks.
@@ -460,7 +460,7 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                     })
                     .or_insert(i);
             }
-            let keep: std::collections::HashSet<usize> = best.into_values().collect();
+            let keep: crate::HashSet<usize> = best.into_values().collect();
             let mut i = 0;
             details.retain(|_| {
                 let k = keep.contains(&i);

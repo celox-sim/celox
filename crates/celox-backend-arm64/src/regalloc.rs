@@ -6,7 +6,7 @@
 //! analyses and algorithms are shared.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use celox_backend_common::regalloc::{
@@ -14,9 +14,9 @@ use celox_backend_common::regalloc::{
     PhiAllocationFacts, PhiSource, analyze_live_intervals, color_stack_slots,
 };
 
-use crate::Arm64Reg;
 use crate::allocation::{Assignment, CopyDestination, CopyOperation, CopySource, EdgeCopyPlan};
 use crate::mir::{AllocatedFunction, BlockId, MFunction, MInst, VReg};
+use crate::{Arm64Reg, HashMap};
 
 pub(crate) type AllocationFacts = FunctionAllocationFacts<VReg, Arm64Reg>;
 

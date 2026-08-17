@@ -2,7 +2,11 @@
 //! `VrlCtx`, the `VrlHostApi` service table, and a safe wrapper around a
 //! component instance's vtable.
 
+use crate::component::injected::InjectedComponentDefinition;
 use crate::component::loader::ComponentError;
+use crate::component::{
+    InjectedCall, InjectedHook, InjectedNamedValue, InjectedResult, InjectedValue,
+};
 use std::ffi::c_void;
 use veryl_component_sys as sys;
 
@@ -241,6 +245,126 @@ impl HostContext {
 
     fn as_ctx(&mut self) -> *mut sys::VrlCtx {
         self as *mut HostContext as *mut sys::VrlCtx
+    }
+
+    fn injected_value(value: &HostValue) -> InjectedValue {
+        match value {
+            HostValue::Bits { words, width } => InjectedValue::Bits {
+                words: words.clone(),
+                mask_xz: vec![0; words.len()],
+                width: *width,
+            },
+            HostValue::Str(value) => InjectedValue::String(value.clone()),
+            HostValue::Unit => InjectedValue::Unit,
+        }
+    }
+
+    fn injected_call(&self, instance: &str, hook: InjectedHook) -> InjectedCall {
+        let fired_clock = if matches!(&hook, InjectedHook::Clock) {
+            self.ports
+                .get(self.fired_clock as usize)
+                .filter(|port| port.role == PortRole::Clock)
+                .map(|port| port.name.clone())
+        } else {
+            None
+        };
+        InjectedCall {
+            instance: instance.to_string(),
+            hook,
+            inputs: self
+                .ports
+                .iter()
+                .filter(|port| port.dir == PortDir::Input)
+                .map(|port| InjectedNamedValue {
+                    name: port.name.clone(),
+                    value: InjectedValue::Bits {
+                        words: port.words.clone(),
+                        mask_xz: port.mask_xz.clone(),
+                        width: port.width,
+                    },
+                })
+                .collect(),
+            params: self
+                .params
+                .iter()
+                .map(|(name, value)| InjectedNamedValue {
+                    name: name.clone(),
+                    value: Self::injected_value(value),
+                })
+                .collect(),
+            ports: self
+                .ports
+                .iter()
+                .map(|port| crate::InjectedPort {
+                    name: port.name.clone(),
+                    direction: match port.dir {
+                        PortDir::Input => "input",
+                        PortDir::Output => "output",
+                    }
+                    .into(),
+                    role: match port.role {
+                        PortRole::Data => None,
+                        PortRole::Clock => Some("clock".into()),
+                        PortRole::Reset => Some("reset".into()),
+                    },
+                    width: port.width,
+                })
+                .collect(),
+            cycle: self.cycle,
+            time: self.time,
+            seed: self.seed,
+            fired_clock,
+            four_state: self.use_4state,
+        }
+    }
+
+    fn apply_injected_result(
+        &mut self,
+        result: InjectedResult,
+    ) -> Result<Option<HostValue>, String> {
+        for output in result.outputs {
+            let Some(index) = self.port_position(&output.name, PortDir::Output) else {
+                return Err(format!("callback wrote unknown output `{}`", output.name));
+            };
+            let expected_width = self.svc_port_width(index);
+            let InjectedValue::Bits {
+                mut words,
+                mut mask_xz,
+                width,
+            } = output.value
+            else {
+                return Err(format!(
+                    "callback output `{}` is not a bit value",
+                    output.name
+                ));
+            };
+            if width != expected_width {
+                return Err(format!(
+                    "callback output `{}` has width {width}, expected {expected_width}",
+                    output.name
+                ));
+            }
+            let word_count = words_for(width);
+            words.resize(word_count, 0);
+            mask_xz.resize(word_count, 0);
+            words.truncate(word_count);
+            mask_xz.truncate(word_count);
+            self.svc_write_output(index, &words, Some(&mask_xz));
+        }
+        for failure in result.failures {
+            self.svc_fail(&failure);
+        }
+        for log in result.logs {
+            self.svc_log(&log);
+        }
+        if result.finish {
+            self.svc_finish();
+        }
+        Ok(result.return_value.map(|value| match value {
+            InjectedValue::Bits { words, width, .. } => HostValue::Bits { words, width },
+            InjectedValue::String(value) => HostValue::Str(value),
+            InjectedValue::Unit => HostValue::Unit,
+        }))
     }
 }
 
@@ -683,6 +807,10 @@ enum InstanceInner {
     },
     #[cfg(not(target_family = "wasm"))]
     Wasm(Box<crate::component::wasm::WasmInstance>),
+    Injected {
+        instance: String,
+        definition: InjectedComponentDefinition,
+    },
 }
 
 // The ABI contract requires the component state to be `Send` (hooks may run
@@ -690,6 +818,51 @@ enum InstanceInner {
 unsafe impl Send for ExternalInstance {}
 
 impl ExternalInstance {
+    pub fn create_injected(
+        definition: InjectedComponentDefinition,
+        host: &mut HostContext,
+    ) -> Result<Self, ComponentError> {
+        let instance = host.label.clone();
+        let result = definition
+            .handler
+            .call(host.injected_call(&instance, InjectedHook::Create))
+            .map_err(|message| ComponentError::CreateFailed { messages: message })?;
+        host.apply_injected_result(result)
+            .map_err(|messages| ComponentError::CreateFailed { messages })?;
+        if !host.failures().is_empty() {
+            return Err(ComponentError::CreateFailed {
+                messages: host.take_failures().join("; "),
+            });
+        }
+        Ok(Self {
+            inner: InstanceInner::Injected {
+                instance,
+                definition,
+            },
+        })
+    }
+
+    fn call_injected(
+        instance: &str,
+        definition: &InjectedComponentDefinition,
+        host: &mut HostContext,
+        hook: InjectedHook,
+    ) -> Option<HostValue> {
+        match definition.handler.call(host.injected_call(instance, hook)) {
+            Ok(result) => match host.apply_injected_result(result) {
+                Ok(value) => value.or(Some(HostValue::Unit)),
+                Err(message) => {
+                    host.svc_fail(&message);
+                    None
+                }
+            },
+            Err(message) => {
+                host.svc_fail(&message);
+                None
+            }
+        }
+    }
+
     /// Port and parameter resolution happens inside the component's `new`;
     /// failures surface as `CreateFailed` with the messages the component
     /// reported.
@@ -741,6 +914,7 @@ impl ExternalInstance {
             InstanceInner::Native { vtable, .. } => vtable.kind,
             #[cfg(not(target_family = "wasm"))]
             InstanceInner::Wasm(instance) => instance.kind(),
+            InstanceInner::Injected { definition, .. } => definition.kind,
         }
     }
 
@@ -751,6 +925,12 @@ impl ExternalInstance {
             },
             #[cfg(not(target_family = "wasm"))]
             InstanceInner::Wasm(instance) => instance.on_init(host),
+            InstanceInner::Injected {
+                instance,
+                definition,
+            } => i32::from(
+                Self::call_injected(instance, definition, host, InjectedHook::Init).is_none(),
+            ),
         }
     }
 
@@ -761,6 +941,12 @@ impl ExternalInstance {
             },
             #[cfg(not(target_family = "wasm"))]
             InstanceInner::Wasm(instance) => instance.on_reset(host),
+            InstanceInner::Injected {
+                instance,
+                definition,
+            } => i32::from(
+                Self::call_injected(instance, definition, host, InjectedHook::Reset).is_none(),
+            ),
         }
     }
 
@@ -771,6 +957,12 @@ impl ExternalInstance {
             },
             #[cfg(not(target_family = "wasm"))]
             InstanceInner::Wasm(instance) => instance.on_clock(host),
+            InstanceInner::Injected {
+                instance,
+                definition,
+            } => i32::from(
+                Self::call_injected(instance, definition, host, InjectedHook::Clock).is_none(),
+            ),
         }
     }
 
@@ -781,6 +973,12 @@ impl ExternalInstance {
             },
             #[cfg(not(target_family = "wasm"))]
             InstanceInner::Wasm(instance) => instance.on_finish(host),
+            InstanceInner::Injected {
+                instance,
+                definition,
+            } => i32::from(
+                Self::call_injected(instance, definition, host, InjectedHook::Finish).is_none(),
+            ),
         }
     }
 
@@ -833,6 +1031,18 @@ impl ExternalInstance {
             }
             #[cfg(not(target_family = "wasm"))]
             InstanceInner::Wasm(instance) => instance.call_method(host, name, args),
+            InstanceInner::Injected {
+                instance,
+                definition,
+            } => Self::call_injected(
+                instance,
+                definition,
+                host,
+                InjectedHook::Method {
+                    name: name.to_string(),
+                    args: args.iter().map(HostContext::injected_value).collect(),
+                },
+            ),
         }
     }
 }
@@ -844,6 +1054,7 @@ impl Drop for ExternalInstance {
             // The wasm instance's own Drop calls the guest destructor.
             #[cfg(not(target_family = "wasm"))]
             InstanceInner::Wasm(_) => {}
+            InstanceInner::Injected { .. } => {}
         }
     }
 }
@@ -854,6 +1065,7 @@ impl std::fmt::Debug for ExternalInstance {
             InstanceInner::Native { .. } => "native",
             #[cfg(not(target_family = "wasm"))]
             InstanceInner::Wasm(_) => "wasm",
+            InstanceInner::Injected { .. } => "injected",
         };
         f.debug_struct("ExternalInstance")
             .field("transport", &transport)

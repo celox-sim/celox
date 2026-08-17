@@ -2,7 +2,11 @@ mod backend;
 #[cfg(feature = "host-runtime")]
 mod component;
 #[cfg(feature = "host-runtime")]
-pub use component::{register_static_component, register_static_component_manifest};
+pub use component::{
+    InjectedCall, InjectedComponentHandler, InjectedComponents, InjectedHook, InjectedNamedValue,
+    InjectedPort, InjectedResult, InjectedValue, register_static_component,
+    register_static_component_manifest,
+};
 mod debug;
 mod diagnostics;
 mod ir;
@@ -56,6 +60,11 @@ mod host_api {
     pub use crate::debug::CompilationTraceResult;
     pub use crate::diagnostics::DiagnosticsOptions;
     pub use crate::simulation::Simulation;
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
+    pub use crate::simulator::NativeCompilation;
     pub use crate::simulator::{
         DeadStorePolicy, InstanceHierarchy, NamedEvent, NamedSignal, RuntimeEvent,
         RuntimeEventDrain, RuntimeFormatContext, Simulator, SimulatorBuilder, SimulatorOptions,

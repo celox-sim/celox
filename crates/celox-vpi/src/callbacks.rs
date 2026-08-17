@@ -1,9 +1,11 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     ffi::{CString, c_char, c_void},
     ptr,
 };
+
+use fxhash::FxHashMap as HashMap;
 
 use super::{
     HandleKind, ObjectRef, VpiHandle, VpiValue, handle_mut, new_callback_handle, object_ref,

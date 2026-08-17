@@ -1,9 +1,8 @@
 //! AArch64-owned register assignments and out-of-SSA copy plans.
 
-use std::collections::HashMap;
 use std::hash::Hash;
 
-use crate::Arm64Reg;
+use crate::{Arm64Reg, HashMap};
 
 /// Physical register assignment produced for one target MIR function.
 #[derive(Debug, Clone)]
@@ -14,7 +13,7 @@ pub(crate) struct Assignment<V> {
 impl<V> Default for Assignment<V> {
     fn default() -> Self {
         Self {
-            registers: HashMap::new(),
+            registers: HashMap::default(),
         }
     }
 }
@@ -72,7 +71,7 @@ pub(crate) struct EdgeCopyPlan<B> {
 impl<B> Default for EdgeCopyPlan<B> {
     fn default() -> Self {
         Self {
-            edges: HashMap::new(),
+            edges: HashMap::default(),
         }
     }
 }

@@ -1,13 +1,21 @@
 import { type Dirent, readdirSync, statSync } from "node:fs";
 import { extname, join } from "node:path";
 import { runGenTs } from "./generator.js";
-import type { GenTsJsonOutput } from "./types.js";
+import type { GenTsJsonOutput, TestbenchComponentManifests } from "./types.js";
 
 export class GenTsCache {
 	private _data: GenTsJsonOutput | undefined;
 	private _mtimeKey = "";
 
-	constructor(private readonly _projectRoot: string) {}
+	constructor(
+		private readonly _projectRoot: string,
+		private _testbenchComponents?: TestbenchComponentManifests,
+	) {}
+
+	setTestbenchComponents(components: TestbenchComponentManifests): void {
+		this._testbenchComponents = components;
+		this.invalidate();
+	}
 
 	/** Get cached data, refreshing if any .veryl file has changed. */
 	get(): GenTsJsonOutput {
@@ -15,7 +23,7 @@ export class GenTsCache {
 		if (this._data && this._mtimeKey === key) {
 			return this._data;
 		}
-		this._data = runGenTs(this._projectRoot);
+		this._data = runGenTs(this._projectRoot, this._testbenchComponents);
 		this._mtimeKey = key;
 		return this._data;
 	}

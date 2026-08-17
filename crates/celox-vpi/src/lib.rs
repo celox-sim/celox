@@ -14,7 +14,6 @@ compile_error!("celox-vpi currently supports only x86-64 and AArch64");
 
 use std::{
     cell::RefCell,
-    collections::HashMap,
     ffi::{CStr, CString, c_char, c_void},
     io::Write,
     ptr,
@@ -24,6 +23,7 @@ use celox::{
     BigUint, DomainKind, NativeProgramInstance, NativeSignalIdentity, ReflectionScopeId,
     ReflectionSignalId, RuntimeEvent, SignalDirection, SimBackend,
 };
+use fxhash::FxHashMap as HashMap;
 
 mod callbacks;
 pub use callbacks::{
@@ -138,7 +138,7 @@ pub type VpiHandle = *mut VpiHandleObject;
 
 thread_local! {
     static RUNTIME: RefCell<Option<NativeProgramInstance>> = const { RefCell::new(None) };
-    static FORCED_VALUES: RefCell<HashMap<NativeSignalIdentity, ForcedValue>> = RefCell::new(HashMap::new());
+    static FORCED_VALUES: RefCell<HashMap<NativeSignalIdentity, ForcedValue>> = RefCell::new(HashMap::default());
     static PENDING_WRITES: RefCell<PendingWrites> = RefCell::new(PendingWrites::default());
 }
 

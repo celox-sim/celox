@@ -491,14 +491,17 @@ fn prepare_merged_sir(
     first_ff_unit: Option<usize>,
     diagnostics: &crate::optimizer::SirDiagnostics,
 ) -> Result<crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>, SimulatorError> {
-    for (unit_index, unit) in units.iter().enumerate() {
-        if let Err(error) = unit.verify_result() {
-            return Err(codegen_err(CodegenError::SirVerification {
-                phase: format!(
-                    "invalid SIR before x86 source-unit merge: {label} source unit {unit_index}"
-                ),
-                source: error,
-            }));
+    let verify_enabled = cfg!(debug_assertions) || diagnostics.verify_boundaries;
+    if verify_enabled {
+        for (unit_index, unit) in units.iter().enumerate() {
+            if let Err(error) = unit.verify_result() {
+                return Err(codegen_err(CodegenError::SirVerification {
+                    phase: format!(
+                        "invalid SIR before x86 source-unit merge: {label} source unit {unit_index}"
+                    ),
+                    source: error,
+                }));
+            }
         }
     }
 
@@ -506,12 +509,16 @@ fn prepare_merged_sir(
     let boundaries = merge_provenance.unit_entries[1..].to_vec();
     let verify = |eu: &crate::ir::ExecutionUnit<crate::ir::RegionedAbsoluteAddr>,
                   phase: &'static str| {
-        eu.verify_result().map_err(|source| {
-            codegen_err(CodegenError::SirVerification {
-                phase: phase.to_string(),
-                source,
+        if verify_enabled {
+            eu.verify_result().map_err(|source| {
+                codegen_err(CodegenError::SirVerification {
+                    phase: phase.to_string(),
+                    source,
+                })
             })
-        })
+        } else {
+            Ok(())
+        }
     };
 
     verify(&sir_eu, "before x86 merged-SIR optimization")?;

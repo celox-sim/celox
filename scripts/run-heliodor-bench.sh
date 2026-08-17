@@ -20,8 +20,8 @@ CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/$HELIODOR_CELOX_CARGO_P
 VERYL_TIMED_RUNNER_BIN="${VERYL_TIMED_RUNNER_BIN:-$CELOX_ROOT/target/$HELIODOR_CELOX_CARGO_PROFILE/veryl-heliodor}"
 HELIODOR_BUILD_CELOX_RUNNER="${HELIODOR_BUILD_CELOX_RUNNER:-1}"
 HELIODOR_CELOX_TARGET_DIR="${HELIODOR_CELOX_TARGET_DIR:-}"
-HELIODOR_CELOX_COMPILE_ONLY="${HELIODOR_CELOX_COMPILE_ONLY:-0}"
-HELIODOR_CELOX_COMPILE_TIMEOUT_SEC="${HELIODOR_CELOX_COMPILE_TIMEOUT_SEC:-}"
+HELIODOR_COMPILE_ONLY="${HELIODOR_COMPILE_ONLY:-${HELIODOR_CELOX_COMPILE_ONLY:-0}}"
+HELIODOR_COMPILE_TIMEOUT_SEC="${HELIODOR_COMPILE_TIMEOUT_SEC:-${HELIODOR_CELOX_COMPILE_TIMEOUT_SEC:-}}"
 HELIODOR_CELOX_TIMEOUT_MULTIPLIER="${HELIODOR_CELOX_TIMEOUT_MULTIPLIER:-2}"
 HELIODOR_INSTALL_TOOLS="${HELIODOR_INSTALL_TOOLS:-1}"
 HELIODOR_VERYL_VERSION="${HELIODOR_VERYL_VERSION:-0.20.3}"
@@ -88,10 +88,10 @@ Environment:
                        build CELOX_RUNNER_BIN before Celox runs (default: 1)
   HELIODOR_CELOX_TARGET_DIR
                        optional explicit Cargo target directory for the Celox build
-  HELIODOR_CELOX_COMPILE_ONLY
-                       for Celox runners, build the simulator and exit without running the testbench
-  HELIODOR_CELOX_COMPILE_TIMEOUT_SEC
-                       optional safety timeout for Celox compile-only mode
+  HELIODOR_COMPILE_ONLY
+                       for Celox and veryl-cc-sync, build the simulator and exit without running the testbench
+  HELIODOR_COMPILE_TIMEOUT_SEC
+                       optional safety timeout for compile-only mode
   HELIODOR_INSTALL_TOOLS
                        install missing tools into HELIODOR_TOOLS_DIR (default: 1)
   HELIODOR_VERYL_VERSION
@@ -390,10 +390,11 @@ classify_timed_veryl_result() {
     local log="$1"
     local expected_test="$2"
     local exit_status="$3"
+    local compile_only="${4:-0}"
     local line result_count=0 result_valid=0 timing_count=0 timing_valid=0
     local marker_test="" marker_status="" marker_elapsed=""
     local timing_test="" compile_elapsed="" execute_elapsed=""
-    local result_pattern='^VERYL_TEST_RESULT test=([^[:space:]]+) status=(pass|fail) elapsed_ns=([0-9]+)$'
+    local result_pattern='^VERYL_TEST_RESULT test=([^[:space:]]+) status=(pass|fail|compile-only) elapsed_ns=([0-9]+)$'
     local timing_pattern='^VERYL_TEST_TIMING test=([^[:space:]]+) compile_ns=([0-9]+) execute_ns=([0-9]+)( execute_cpu_ns=[0-9]+)?$'
 
     VERYL_TIMED_SEMANTIC_STATUS="unreported"
@@ -437,12 +438,16 @@ classify_timed_veryl_result() {
     VERYL_TIMED_REPORTED_ELAPSED_NS="$marker_elapsed"
     VERYL_TIMED_COMPILE_ELAPSED_NS="$compile_elapsed"
     VERYL_TIMED_EXECUTE_ELAPSED_NS="$execute_elapsed"
-    case "$marker_status:$exit_status" in
-        pass:0)
+    case "$marker_status:$exit_status:$compile_only" in
+        pass:0:0)
             VERYL_TIMED_SEMANTIC_STATUS="pass"
             return 0
             ;;
-        fail:[1-9]*)
+        compile-only:0:1)
+            VERYL_TIMED_SEMANTIC_STATUS="compile-only"
+            return 0
+            ;;
+        fail:[1-9]*:0)
             VERYL_TIMED_SEMANTIC_STATUS="fail"
             return 0
             ;;
@@ -484,7 +489,7 @@ validate_gate_celox_config() {
 validate_gate_timed_veryl_config() {
     local log="$1"
     local expected_test="$2"
-    local expected="VERYL_TEST_CONFIG test=$expected_test backend=cc aot_c_async=false"
+    local expected="VERYL_TEST_CONFIG test=$expected_test backend=cc aot_c_async=false compile_only=false"
     local line config_count=0 valid_count=0
 
     if [[ ! -f "$log" ]]; then
@@ -1151,8 +1156,8 @@ fallback_timeout_sec() {
 timeout_sec_for() {
     local runner="$1"
     local test="$2"
-    if [[ "$runner" == celox* && "$HELIODOR_CELOX_COMPILE_ONLY" == 1 ]]; then
-        printf '%s\n' "$HELIODOR_CELOX_COMPILE_TIMEOUT_SEC"
+    if [[ ("$runner" == celox* || "$runner" == veryl-cc-sync) && "$HELIODOR_COMPILE_ONLY" == 1 ]]; then
+        printf '%s\n' "$HELIODOR_COMPILE_TIMEOUT_SEC"
         return
     fi
     if [[ -n "${HELIODOR_TIMEOUT_SEC:-}" ]]; then
@@ -1217,15 +1222,18 @@ run_one() {
         timed_veryl_args+=(--source-file "$source_file")
     done
     for pass_override in $CELOX_SIR_PASS_OVERRIDES; do
-        celox_args+=(--sir-pass "$pass_override")
+        # Keep a leading '-' attached to the option so clap does not parse a
+        # disabled pass as a new command-line flag.
+        celox_args+=(--sir-pass="$pass_override")
     done
-    if [[ "$HELIODOR_CELOX_COMPILE_ONLY" == 1 ]]; then
+    if [[ "$HELIODOR_COMPILE_ONLY" == 1 ]]; then
         celox_args+=(--compile-only)
+        timed_veryl_args+=(--compile-only)
     fi
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     log="$HELIODOR_RESULTS_DIR/${stamp}_${runner}_${test}.log"
     timeout_sec="$(timeout_sec_for "$runner" "$test")"
-    if [[ "$runner" == celox* && "$HELIODOR_CELOX_COMPILE_ONLY" == 1 ]]; then
+    if [[ ("$runner" == celox* || "$runner" == veryl-cc-sync) && "$HELIODOR_COMPILE_ONLY" == 1 ]]; then
         if [[ -n "$timeout_sec" && "$timeout_sec" != 0 ]]; then
             echo "== $runner :: $test (compile-only, safety timeout ${timeout_sec}s) =="
         else
@@ -1317,7 +1325,7 @@ run_one() {
     case "$runner" in
         celox*)
             if classify_celox_result \
-                "$log" "$test" "$process_status" "$HELIODOR_CELOX_COMPILE_ONLY"; then
+                "$log" "$test" "$process_status" "$HELIODOR_COMPILE_ONLY"; then
                 semantic_status="$CELOX_SEMANTIC_STATUS"
                 reported_elapsed="$CELOX_REPORTED_ELAPSED_NS"
                 compile_elapsed="$CELOX_COMPILE_ELAPSED_NS"
@@ -1334,7 +1342,7 @@ run_one() {
             fi
             ;;
         veryl-cc-sync)
-            if classify_timed_veryl_result "$log" "$test" "$process_status"; then
+            if classify_timed_veryl_result "$log" "$test" "$process_status" "$HELIODOR_COMPILE_ONLY"; then
                 semantic_status="$VERYL_TIMED_SEMANTIC_STATUS"
                 reported_elapsed="$VERYL_TIMED_REPORTED_ELAPSED_NS"
                 compile_elapsed="$VERYL_TIMED_COMPILE_ELAPSED_NS"
@@ -1698,8 +1706,8 @@ run_gate() {
     HELIODOR_RUNNERS="veryl-cc-sync celox"
     HELIODOR_TIMEOUT_SEC="$GATE_TIMEOUT_SEC"
     HELIODOR_CELOX_TIMEOUT_MULTIPLIER=1
-    HELIODOR_CELOX_COMPILE_ONLY=0
-    HELIODOR_CELOX_COMPILE_TIMEOUT_SEC=""
+    HELIODOR_COMPILE_ONLY=0
+    HELIODOR_COMPILE_TIMEOUT_SEC=""
     HELIODOR_BUILD_CELOX_RUNNER=1
     HELIODOR_INSTALL_TOOLS=0
     VERYL_BIN=""

@@ -11,7 +11,7 @@ pub struct RuntimeDiagnostics {
 #[cfg(feature = "host-runtime")]
 mod host {
     use super::RuntimeDiagnostics;
-    use std::collections::HashMap;
+    use crate::HashMap;
     use std::ffi::{OsStr, OsString};
 
     /// Complete explicit diagnostics configuration for a simulator build.

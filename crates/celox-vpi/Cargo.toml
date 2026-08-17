@@ -26,6 +26,7 @@ celox = { path = "../celox" }
 celox = { path = "../celox", features = ["experimental-arm64-backend"] }
 
 [dependencies]
+fxhash.workspace = true
 libloading = "0.9"
 veryl-metadata.workspace = true
 

@@ -20,10 +20,10 @@ fn bind_expr<B: SimBackend>(
     Some(CompiledExpr::new(bytecode))
 }
 
-fn bind_component<B: SimBackend, S: std::hash::BuildHasher>(
+fn bind_component<B: SimBackend>(
     backend: &B,
     component: SemanticComponentBinding<AbsoluteAddr>,
-    rtl_writes: &std::collections::HashSet<VarAtomBase<AbsoluteAddr>, S>,
+    rtl_writes: &fxhash::FxHashSet<VarAtomBase<AbsoluteAddr>>,
 ) -> Option<celox_testbench::ExecutableComponentBinding<B::Event, SignalRef>> {
     Some(celox_testbench::ComponentBinding {
         instance: component.instance,
@@ -338,10 +338,10 @@ fn bind_statement<B: SimBackend>(
     }
 }
 
-pub fn bind_testbench_program<B: SimBackend, S: std::hash::BuildHasher>(
+pub fn bind_testbench_program<B: SimBackend>(
     backend: &B,
     program: TestbenchProgram<AbsoluteAddr>,
-    rtl_writes: &std::collections::HashSet<VarAtomBase<AbsoluteAddr>, S>,
+    rtl_writes: &fxhash::FxHashSet<VarAtomBase<AbsoluteAddr>>,
 ) -> Option<ExecutableTestbench<B::Event, SignalRef>> {
     let random_seed = program.configured_random_seed();
     let components = program.components().to_vec();
