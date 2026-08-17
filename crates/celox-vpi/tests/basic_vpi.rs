@@ -274,8 +274,9 @@ fn vpi_discovers_hierarchy_and_reads_and_writes_values() {
         assert!(!child.is_null());
         assert_eq!(
             CStr::from_ptr(vpi_get_str(VPI_FULL_NAME, child)),
-            c"Top.child[0]"
+            c"Top.child"
         );
+        assert!(!vpi_handle_by_name(c"Top.child".as_ptr(), ptr::null_mut()).is_null());
         assert!(vpi_scan(modules).is_null());
         assert_eq!(vpi_free_object(modules), 1);
 
@@ -484,7 +485,7 @@ fn force_state_is_shared_by_reflected_clock_aliases() {
 
     unsafe {
         let top_clock = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
-        let child_clock = vpi_handle_by_name(c"Top.child[0].clk".as_ptr(), ptr::null_mut());
+        let child_clock = vpi_handle_by_name(c"Top.child.clk".as_ptr(), ptr::null_mut());
         let q = vpi_handle_by_name(c"Top.q".as_ptr(), ptr::null_mut());
         assert!(!top_clock.is_null());
         assert!(!child_clock.is_null());

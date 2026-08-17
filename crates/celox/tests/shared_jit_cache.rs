@@ -61,6 +61,14 @@ const HIERARCHICAL: &str = r#"
     }
 "#;
 
+const INDEXED_HIERARCHY: &str = r#"
+    module Leaf {}
+
+    module Top {
+        inst one: Leaf [1];
+    }
+"#;
+
 #[cfg(target_arch = "x86_64")]
 type CopiedNativeFunc = unsafe extern "sysv64" fn(*mut u8) -> i64;
 #[cfg(target_arch = "aarch64")]
@@ -209,8 +217,8 @@ fn native_program_image_carries_source_independent_design_reflection() {
     assert_eq!(root.name, "Top");
     assert_eq!(root.module_name, "Top");
     assert!(root.parent.is_none());
-    let (_, child) = reflection.scope_by_name("Top.u_child[0]").unwrap();
-    assert_eq!(child.name, "u_child[0]");
+    let (_, child) = reflection.scope_by_name("Top.u_child").unwrap();
+    assert_eq!(child.name, "u_child");
     assert_eq!(child.module_name, "Child");
     assert_eq!(
         child.parent.unwrap(),
@@ -221,10 +229,10 @@ fn native_program_image_carries_source_independent_design_reflection() {
     assert_eq!(input.direction, SignalDirection::Input);
     assert!(input.signed);
     assert_eq!(input.signal.width, 8);
-    let (_, child_input) = reflection.signal_by_name("Top.u_child[0].i").unwrap();
+    let (_, child_input) = reflection.signal_by_name("Top.u_child.i").unwrap();
     assert_eq!(child_input.direction, SignalDirection::Input);
     assert!(child_input.signed);
-    let (_, child_state) = reflection.signal_by_name("Top.u_child[0].state").unwrap();
+    let (_, child_state) = reflection.signal_by_name("Top.u_child.state").unwrap();
     assert_eq!(child_state.direction, SignalDirection::Internal);
 
     let input = input.signal;
@@ -234,6 +242,19 @@ fn native_program_image_carries_source_independent_design_reflection() {
     backend.set(input, 0xa5u8);
     backend.eval_comb().unwrap();
     assert_eq!(backend.get_as::<u8>(output), 0xa5);
+}
+
+#[test]
+fn native_program_reflection_only_indexes_declared_instance_arrays() {
+    let sim = Simulator::builder(INDEXED_HIERARCHY, "Top")
+        .build()
+        .unwrap();
+    let compiled = sim.shared_code();
+    let image = compiled.program_image();
+    let reflection = image.reflection();
+
+    assert!(reflection.scope_by_name("Top.one[0]").is_some());
+    assert!(reflection.scope_by_name("Top.one").is_none());
 }
 
 #[test]

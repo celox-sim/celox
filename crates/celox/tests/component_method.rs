@@ -1920,7 +1920,7 @@ fn component_declared_in_nested_module_is_elaborated_and_runs() {
         .build()
         .unwrap();
     let program = simulator.program().testbench.as_ref().unwrap();
-    assert_eq!(program.components()[0].instance, "child[0].component");
+    assert_eq!(program.components()[0].instance, "child.component");
     let testbench = celox::testbench::compile_initial_testbench(&simulator).unwrap();
     assert_eq!(
         celox::testbench::run_compiled_testbench(&mut simulator, &testbench),

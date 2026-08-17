@@ -109,6 +109,8 @@ pub struct InstancePath(pub Vec<(StrId, usize)>);
 pub struct VerylFrontendLookup {
     pub instance_ids: HashMap<InstancePath, InstanceId>,
     pub instance_module: HashMap<InstanceId, ModuleId>,
+    /// Elaborated children whose source-facing name requires an index.
+    pub indexed_instances: HashSet<InstanceId>,
     pub module_variables: HashMap<ModuleId, HashMap<VarId, VariableInfo>>,
     /// Reverse index from source path to source variable ID. `None` marks a
     /// path that is ambiguous within the module.
@@ -133,6 +135,23 @@ impl fmt::Debug for VerylFrontendLookup {
 }
 
 impl VerylFrontendLookup {
+    pub fn instance_path_segments(&self, path: &InstancePath) -> Vec<String> {
+        let mut prefix = Vec::with_capacity(path.0.len());
+        path.0
+            .iter()
+            .map(|&(name, index)| {
+                prefix.push((name, index));
+                let name = veryl_parser::resource_table::get_str_value(name).unwrap();
+                let instance = self.instance_ids.get(&InstancePath(prefix.clone()));
+                if instance.is_some_and(|id| self.indexed_instances.contains(id)) {
+                    format!("{name}[{index}]")
+                } else {
+                    name.to_string()
+                }
+            })
+            .collect()
+    }
+
     pub fn root_instance_and_module(&self) -> Option<(InstanceId, ModuleId)> {
         let instance_id = *self.instance_ids.get(&InstancePath(Vec::new()))?;
         let module_id = *self.instance_module.get(&instance_id)?;
@@ -184,13 +203,7 @@ impl VerylFrontendLookup {
 
         let mut result = Vec::new();
         if let Some(instance_path) = instance_path {
-            for part in &instance_path.0 {
-                result.push(format!(
-                    "{}[{}]",
-                    veryl_parser::resource_table::get_str_value(part.0).unwrap(),
-                    part.1
-                ));
-            }
+            result.extend(self.instance_path_segments(instance_path));
         }
         if let Some(variable_path) = variable_path {
             for part in &variable_path.0 {

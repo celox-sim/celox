@@ -13,6 +13,7 @@ async def drives_native_flip_flop(dut):
     await RisingEdge(dut.i_clk)
     await ReadOnly()
     assert dut.q.value == 0
+    assert dut.child.q.value == 0
 
     await Timer(1, unit="ps")
     dut.i_rst.value = 1
@@ -20,3 +21,4 @@ async def drives_native_flip_flop(dut):
     await RisingEdge(dut.i_clk)
     await ReadOnly()
     assert dut.q.value == 0x5A
+    assert dut.child.q.value == 0x5A

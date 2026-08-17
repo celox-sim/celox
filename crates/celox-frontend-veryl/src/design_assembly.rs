@@ -112,6 +112,8 @@ fn collect_testbench_components(
     module: &Module,
     parent_instance: InstanceId,
     parent_path: &InstancePath,
+    instance_ids: &HashMap<InstancePath, InstanceId>,
+    indexed_instances: &HashSet<InstanceId>,
     names: &mut HashSet<String>,
 ) -> Result<(Vec<TestbenchComponent>, Vec<VerylComponentBinding>), ParserError> {
     let mut components = Vec::new();
@@ -121,10 +123,19 @@ fn collect_testbench_components(
             continue;
         };
         let local_name = string_of(external.name);
+        let mut path_prefix = Vec::with_capacity(parent_path.0.len());
         let prefix = parent_path
             .0
             .iter()
-            .map(|(name, index)| format!("{}[{index}]", string_of(*name)))
+            .map(|&(name, index)| {
+                path_prefix.push((name, index));
+                let instance = instance_ids.get(&InstancePath(path_prefix.clone()));
+                if instance.is_some_and(|id| indexed_instances.contains(id)) {
+                    format!("{}[{index}]", string_of(name))
+                } else {
+                    string_of(name)
+                }
+            })
             .collect::<Vec<_>>()
             .join(".");
         let instance = if prefix.is_empty() {
@@ -443,7 +454,7 @@ pub fn schedule_symbolic_rtl(
         t.sim_modules = Some(modules.clone());
     }
 
-    let (expanded, instance_modules) =
+    let (expanded, instance_modules, indexed_instances) =
         timed_sub!("expand_hierarchy", expand_hierarchy(&root_id, &modules));
     let global_boundaries = timed_sub!(
         "propagate_boundaries",
@@ -703,6 +714,7 @@ pub fn schedule_symbolic_rtl(
             let frontend_lookup = VerylFrontendLookup {
                 instance_ids: expanded.clone(),
                 instance_module: instance_modules.clone(),
+                indexed_instances: indexed_instances.clone(),
                 module_variables: err_vars,
                 module_var_path_index: err_path_idx,
                 module_names: module_names.clone(),
@@ -894,8 +906,14 @@ pub fn schedule_symbolic_rtl(
         let Some(module) = module_ir.get(module_id) else {
             continue;
         };
-        let (mut instance_components, mut instance_bindings) =
-            collect_testbench_components(module, instance_id, path, &mut component_names)?;
+        let (mut instance_components, mut instance_bindings) = collect_testbench_components(
+            module,
+            instance_id,
+            path,
+            &expanded,
+            &indexed_instances,
+            &mut component_names,
+        )?;
         components.append(&mut instance_components);
         component_bindings.append(&mut instance_bindings);
     }
@@ -1064,6 +1082,7 @@ pub fn schedule_symbolic_rtl(
         frontend_lookup: VerylFrontendLookup {
             instance_ids: expanded,
             instance_module: instance_modules,
+            indexed_instances,
             module_variables: mod_vars,
             module_var_path_index: mod_path_idx,
             module_names,
@@ -1217,9 +1236,11 @@ fn expand_hierarchy(
 ) -> (
     HashMap<InstancePath, InstanceId>,
     HashMap<InstanceId, ModuleId>,
+    HashSet<InstanceId>,
 ) {
     let mut expanded = HashMap::default();
     let mut instance_modules = HashMap::default();
+    let mut indexed_instances = HashSet::default();
     let mut instance_id = 0;
     let path = vec![];
     let id = InstanceId(instance_id);
@@ -1232,9 +1253,10 @@ fn expand_hierarchy(
         modules,
         &mut expanded,
         &mut instance_modules,
+        &mut indexed_instances,
         &mut instance_id,
     );
-    (expanded, instance_modules)
+    (expanded, instance_modules, indexed_instances)
 }
 
 fn propagate_boundaries(
@@ -1377,16 +1399,24 @@ fn expand(
     modules: &HashMap<ModuleId, SimModule>,
     expanded: &mut HashMap<InstancePath, InstanceId>,
     instance_modules: &mut HashMap<InstanceId, ModuleId>,
+    indexed_instances: &mut HashSet<InstanceId>,
     instance_id: &mut usize,
 ) {
     let module = &modules[target];
     for (inst_name, gbs) in &module.glue_blocks {
+        // Generate loops can elaborate several scalar declarations under the
+        // same flattened name. Keep those scopes distinct until generate
+        // hierarchy segments become part of InstancePath.
+        let indexed = module.indexed_instance_names.contains(inst_name) || gbs.len() > 1;
         for (idx, gb) in gbs.iter().enumerate() {
             let mut path = path.clone();
             path.push((*inst_name, idx));
             let id = InstanceId(*instance_id);
             expanded.insert(InstancePath(path.clone()), id);
             instance_modules.insert(id, gb.module_id);
+            if indexed {
+                indexed_instances.insert(id);
+            }
             *instance_id += 1;
             expand(
                 &gb.module_id,
@@ -1394,6 +1424,7 @@ fn expand(
                 modules,
                 expanded,
                 instance_modules,
+                indexed_instances,
                 instance_id,
             );
         }

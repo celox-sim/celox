@@ -1,7 +1,7 @@
-module Top (
-    i_clk: input clock,
-    i_rst: input reset,
-    d:     input logic<8>,
+module Child (
+    i_clk: input  clock,
+    i_rst: input  reset,
+    d:     input  logic<8>,
     q:     output logic<8>,
 ) {
     always_ff (i_clk, i_rst) {
@@ -11,4 +11,13 @@ module Top (
             q = d;
         }
     }
+}
+
+module Top (
+    i_clk: input  clock,
+    i_rst: input  reset,
+    d:     input  logic<8>,
+    q:     output logic<8>,
+) {
+    inst child: Child (i_clk, i_rst, d, q);
 }

@@ -377,16 +377,7 @@ impl RuntimeProgram {
                     .and_then(|name| veryl_parser::resource_table::get_str_value(*name))
                     .map(|name| name.to_string())
                     .unwrap_or_else(|| module_id.to_string());
-                let segments = path
-                    .0
-                    .iter()
-                    .map(|(name, index)| {
-                        format!(
-                            "{}[{index}]",
-                            veryl_parser::resource_table::get_str_value(*name).unwrap()
-                        )
-                    })
-                    .collect::<Vec<_>>();
+                let segments = self.frontend.instance_path_segments(path);
                 let name = segments
                     .last()
                     .cloned()
