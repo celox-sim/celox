@@ -158,13 +158,16 @@ const ALIASED_CLOCK: &str = r#"
 const WIDE_FOUR_STATE: &str = r#"
     module Top (
         signed_in: input signed logic<64>,
+        unsigned_in: input logic<64>,
         narrow_signed_in: input signed logic<8>,
         four_in: input logic<4>,
         signed_out: output signed logic<64>,
+        unsigned_out: output logic<64>,
         narrow_signed_out: output signed logic<8>,
         four_out: output logic<4>,
     ) {
         assign signed_out = signed_in;
+        assign unsigned_out = unsigned_in;
         assign narrow_signed_out = narrow_signed_in;
         assign four_out = four_in;
     }
@@ -1125,6 +1128,8 @@ fn signed_integer_deposits_and_z_values_round_trip() {
     unsafe {
         let signed_in = vpi_handle_by_name(c"Top.signed_in".as_ptr(), ptr::null_mut());
         let signed_out = vpi_handle_by_name(c"Top.signed_out".as_ptr(), ptr::null_mut());
+        let unsigned_in = vpi_handle_by_name(c"Top.unsigned_in".as_ptr(), ptr::null_mut());
+        let unsigned_out = vpi_handle_by_name(c"Top.unsigned_out".as_ptr(), ptr::null_mut());
         let narrow_signed_in =
             vpi_handle_by_name(c"Top.narrow_signed_in".as_ptr(), ptr::null_mut());
         let narrow_signed_out =
@@ -1132,6 +1137,7 @@ fn signed_integer_deposits_and_z_values_round_trip() {
         let four_in = vpi_handle_by_name(c"Top.four_in".as_ptr(), ptr::null_mut());
         let four_out = vpi_handle_by_name(c"Top.four_out".as_ptr(), ptr::null_mut());
         put_int(signed_in, -1);
+        put_int(unsigned_in, -1);
         put_int(narrow_signed_in, -1);
 
         let mut vector = VpiValue {
@@ -1146,6 +1152,11 @@ fn signed_integer_deposits_and_z_values_round_trip() {
         assert_eq!(words[1].aval as u32, u32::MAX);
         assert_eq!(words[0].bval, 0);
         assert_eq!(words[1].bval, 0);
+
+        vpi_get_value(unsigned_out, &mut vector);
+        let words = std::slice::from_raw_parts(vector.value.vector, 2);
+        assert_eq!(words[0].aval as u32, u32::MAX);
+        assert_eq!(words[1].aval as u32, u32::MAX);
 
         let mut integer = VpiValue {
             format: VPI_INT_VAL,
@@ -1199,6 +1210,8 @@ fn signed_integer_deposits_and_z_values_round_trip() {
         for handle in [
             signed_in,
             signed_out,
+            unsigned_in,
+            unsigned_out,
             narrow_signed_in,
             narrow_signed_out,
             four_in,
@@ -1252,6 +1265,8 @@ static EDGE_DATA_HANDLE: AtomicUsize = AtomicUsize::new(0);
 static EDGE_VALUE_CHANGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static EDGE_VALUE_CHANGE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 static EDGE_VALUE_CHANGE_DRIVE_DATA: AtomicBool = AtomicBool::new(false);
+static FINISH_EDGE_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+static CALLBACKS_AFTER_EDGE_FINISH: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" fn drive_two_edges_with_distinct_data(data: *mut VpiCbData) -> i32 {
     let clk = unsafe { (*data).obj };
@@ -1282,6 +1297,17 @@ unsafe extern "C" fn drive_two_clock_posedges(data: *mut VpiCbData) -> i32 {
         put_int(clk, 0);
         put_int(clk, 1);
     }
+    0
+}
+
+unsafe extern "C" fn finish_on_clock_change(_data: *mut VpiCbData) -> i32 {
+    FINISH_EDGE_CALLBACKS.fetch_add(1, Ordering::SeqCst);
+    assert_eq!(vpi_control(VPI_FINISH), 1);
+    0
+}
+
+unsafe extern "C" fn record_callback_after_edge_finish(_data: *mut VpiCbData) -> i32 {
+    CALLBACKS_AFTER_EDGE_FINISH.fetch_add(1, Ordering::SeqCst);
     0
 }
 
@@ -1606,5 +1632,58 @@ fn callback_writes_override_later_queued_edge_snapshots() {
         }
     }
     EDGE_DATA_HANDLE.store(0, Ordering::SeqCst);
+    clear_runtime();
+}
+
+#[test]
+fn finish_during_queued_edge_replay_stops_remaining_callbacks_and_edges() {
+    let simulator = Simulator::builder(COUNTER, "Top").build().unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+    FINISH_EDGE_CALLBACKS.store(0, Ordering::SeqCst);
+    CALLBACKS_AFTER_EDGE_FINISH.store(0, Ordering::SeqCst);
+
+    unsafe {
+        let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
+        put_int(clk, 0);
+        let finish = VpiCbData {
+            reason: CB_VALUE_CHANGE,
+            cb_rtn: Some(finish_on_clock_change),
+            obj: clk,
+            time: ptr::null_mut(),
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        let after_finish = VpiCbData {
+            cb_rtn: Some(record_callback_after_edge_finish),
+            ..finish
+        };
+        assert!(!vpi_register_cb(&finish).is_null());
+        assert!(!vpi_register_cb(&after_finish).is_null());
+
+        let mut time = VpiTime {
+            type_: VPI_SIM_TIME,
+            high: 0,
+            low: 1,
+            real: 0.0,
+        };
+        let edges = VpiCbData {
+            reason: CB_AFTER_DELAY,
+            cb_rtn: Some(drive_two_clock_posedges),
+            obj: clk,
+            time: &mut time,
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        assert!(!vpi_register_cb(&edges).is_null());
+        assert!(run_callbacks());
+
+        assert_eq!(FINISH_EDGE_CALLBACKS.load(Ordering::SeqCst), 1);
+        assert_eq!(CALLBACKS_AFTER_EDGE_FINISH.load(Ordering::SeqCst), 0);
+        assert_eq!(vpi_free_object(clk), 1);
+    }
     clear_runtime();
 }

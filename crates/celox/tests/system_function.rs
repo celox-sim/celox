@@ -698,7 +698,7 @@ module Top (clk: input clock, d: input logic) {
             celox::RuntimeEvent::Display {
                 message: "display d=1".to_string(),
             },
-            celox::RuntimeEvent::Display {
+            celox::RuntimeEvent::Write {
                 message: "write d=1".to_string(),
             },
         ]

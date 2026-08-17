@@ -56,6 +56,7 @@ pub struct TriggerSet<A> {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum RuntimeEventKind {
     Display,
+    Write,
     AssertContinue,
     AssertFatal,
 }

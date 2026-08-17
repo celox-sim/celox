@@ -387,6 +387,7 @@ impl NativeProgramInstance {
         if let Some(message) = events.into_iter().find_map(|event| match event {
             RuntimeEvent::AssertFatal { message } => Some(message),
             RuntimeEvent::Display { .. }
+            | RuntimeEvent::Write { .. }
             | RuntimeEvent::AssertContinue { .. }
             | RuntimeEvent::Missed { .. } => None,
         }) {

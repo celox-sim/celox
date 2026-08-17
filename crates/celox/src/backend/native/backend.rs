@@ -1285,6 +1285,7 @@ fn split_comb_execution_unit(
                             return None;
                         };
                         (register_dependencies[&target].contains(source)
+                            && store_source(target) != Some(*source)
                             && unit.register_map[source].width() == *bits)
                             .then(|| (*source, (*address, offset.clone(), *bits)))
                     })
@@ -1414,6 +1415,7 @@ fn split_comb_execution_unit(
                         return None;
                     };
                     (register_dependencies[&store_index].contains(source)
+                        && store_source(store_index) != Some(*source)
                         && unit.register_map[source].width() == *bits)
                         .then(|| (*source, (*address, offset.clone(), *bits)))
                 })

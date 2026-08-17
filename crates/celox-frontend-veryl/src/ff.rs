@@ -720,7 +720,12 @@ impl<'a> FfParser<'a> {
     ) -> Result<ControlFlow, ParserError> {
         match &call.kind {
             SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
-                let site_id = self.register_runtime_event_site(RuntimeEventKind::Display, args);
+                let kind = if matches!(call.kind, SystemFunctionKind::Display(_)) {
+                    RuntimeEventKind::Display
+                } else {
+                    RuntimeEventKind::Write
+                };
+                let site_id = self.register_runtime_event_site(kind, args);
                 self.emit_runtime_event(
                     site_id, args, targets, domain, convert, sources, ir_builder,
                 )?;

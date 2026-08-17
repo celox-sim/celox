@@ -824,11 +824,7 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
     }
 }
 
-unsafe fn decode_value(
-    value: *const VpiValue,
-    width: usize,
-    signed: bool,
-) -> Option<(BigUint, BigUint)> {
+unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint, BigUint)> {
     if value.is_null() {
         return None;
     }
@@ -839,7 +835,7 @@ unsafe fn decode_value(
             // Safety: reading the active union member selected by `format`.
             let integer = unsafe { value.value.integer };
             let mut bits = BigUint::from(integer as u32);
-            if signed && integer < 0 && width > 32 {
+            if integer < 0 && width > 32 {
                 bits |= ((BigUint::from(1u8) << (width - 32)) - BigUint::from(1u8)) << 32;
             }
             Some((bits, 0u8.into()))
@@ -1000,18 +996,18 @@ pub unsafe extern "C" fn vpi_put_value(
         };
     }
 
-    let signal_info = with_runtime(|runtime| {
+    let width = with_runtime(|runtime| {
         runtime
             .reflection()
             .signal(id)
-            .map(|signal| (signal.signal.width, signal.signed))
+            .map(|signal| signal.signal.width)
     })
     .flatten();
-    let Some((width, signed)) = signal_info else {
+    let Some(width) = width else {
         return ptr::null_mut();
     };
     // Safety: value follows the VPI value contract.
-    let Some((mut bits, mut mask)) = (unsafe { decode_value(value, width, signed) }) else {
+    let Some((mut bits, mut mask)) = (unsafe { decode_value(value, width) }) else {
         return ptr::null_mut();
     };
     if width == 0 {
@@ -1136,6 +1132,9 @@ fn flush_pending_writes() -> bool {
         }
         if callbacks::is_running() {
             callbacks::dispatch_value_changes();
+            if callbacks::finish_requested() {
+                return true;
+            }
             let mut callback_iterations = 0usize;
             loop {
                 let callback_pending = PENDING_WRITES.with_borrow_mut(std::mem::take);
@@ -1154,9 +1153,15 @@ fn flush_pending_writes() -> bool {
                 if !flush_pending_writes() {
                     return false;
                 }
+                if callbacks::finish_requested() {
+                    return true;
+                }
                 replay_overrides.extend(overrides.clone());
                 final_deposits.extend(overrides);
                 callbacks::dispatch_value_changes();
+                if callbacks::finish_requested() {
+                    return true;
+                }
             }
         }
     }
@@ -1179,6 +1184,9 @@ fn process_runtime_events() {
         match event {
             RuntimeEvent::Display { message } => {
                 let _ = writeln!(std::io::stdout().lock(), "{message}");
+            }
+            RuntimeEvent::Write { message } => {
+                let _ = write!(std::io::stdout().lock(), "{message}");
             }
             RuntimeEvent::AssertContinue { message } => {
                 let _ = writeln!(std::io::stderr().lock(), "assertion failed: {message}");

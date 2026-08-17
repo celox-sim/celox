@@ -144,9 +144,8 @@ fn collect_system_function_effect(
     }
 
     let (kind, cond, args) = match &call.kind {
-        SystemFunctionKind::Display(args) | SystemFunctionKind::Write(args) => {
-            (RuntimeEventKind::Display, None, args.as_slice())
-        }
+        SystemFunctionKind::Display(args) => (RuntimeEventKind::Display, None, args.as_slice()),
+        SystemFunctionKind::Write(args) => (RuntimeEventKind::Write, None, args.as_slice()),
         SystemFunctionKind::Assert { kind, cond, args } => {
             let event_kind = match kind {
                 veryl_analyzer::ir::AssertKind::Fatal => RuntimeEventKind::AssertFatal,
@@ -205,7 +204,7 @@ fn collect_system_function_effect(
     }
     observed_inputs.extend(collector.active_guard_sources.iter().copied());
     let guard = match (kind, collector.active_guard, explicit_guard) {
-        (RuntimeEventKind::Display, active, None) => active,
+        (RuntimeEventKind::Display | RuntimeEventKind::Write, active, None) => active,
         (RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal, None, explicit) => {
             explicit
         }
@@ -220,7 +219,9 @@ fn collect_system_function_effect(
         (RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal, Some(active), None) => {
             Some(active)
         }
-        (RuntimeEventKind::Display, _, Some(_)) => unreachable!("display has no explicit guard"),
+        (RuntimeEventKind::Display | RuntimeEventKind::Write, _, Some(_)) => {
+            unreachable!("display/write has no explicit guard")
+        }
     }
     .map(|node| -> Result<NodeId, ParserError> {
         Ok(arena.alloc(SLTNode::Capture {
@@ -235,7 +236,7 @@ fn collect_system_function_effect(
         .map(|_| SLTForEffect::Event {
             site_id,
             guard,
-            emit_on_true: matches!(kind, RuntimeEventKind::Display),
+            emit_on_true: matches!(kind, RuntimeEventKind::Display | RuntimeEventKind::Write),
             args: observer_args.clone(),
             fatal_error_code: matches!(kind, RuntimeEventKind::AssertFatal)
                 .then_some(1_000_000 + site_id as i64),

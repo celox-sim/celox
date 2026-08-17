@@ -156,6 +156,9 @@ fn changed_value_ids() -> Vec<u64> {
 }
 
 pub(super) fn dispatch_value_changes() -> bool {
+    if finish_requested() {
+        return false;
+    }
     let changed = changed_value_ids();
     let progressed = !changed.is_empty();
     for id in changed {
@@ -343,6 +346,10 @@ pub(super) fn run() -> bool {
 
 pub(super) fn is_running() -> bool {
     STATE.with_borrow(|state| state.running)
+}
+
+pub(super) fn finish_requested() -> bool {
+    STATE.with_borrow(|state| state.finish)
 }
 
 pub(super) fn fail(message: String) {

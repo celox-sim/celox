@@ -92,6 +92,7 @@ mod host {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum RuntimeEvent {
         Display { message: String },
+        Write { message: String },
         AssertContinue { message: String },
         AssertFatal { message: String },
         Missed { count: u64 },
@@ -279,7 +280,7 @@ mod host {
     ) -> String {
         let Some(template) = site.template.as_deref() else {
             let default_spec = match site.kind {
-                RuntimeEventKind::Display => 'd',
+                RuntimeEventKind::Display | RuntimeEventKind::Write => 'd',
                 RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal => {
                     if args.is_empty() {
                         return "assertion failed".to_string();
@@ -350,6 +351,7 @@ mod host {
                 let message = render_runtime_event_message(site, &args, ctx);
                 Some(match site.kind {
                     RuntimeEventKind::Display => RuntimeEvent::Display { message },
+                    RuntimeEventKind::Write => RuntimeEvent::Write { message },
                     RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
                     RuntimeEventKind::AssertFatal => RuntimeEvent::AssertFatal { message },
                 })

@@ -387,6 +387,74 @@ fn forced_comb_runtime_events_preserve_procedural_order() {
 }
 
 #[test]
+fn forced_store_does_not_replace_a_shared_rhs_for_other_destinations() {
+    let sim = Simulator::builder(
+        r#"
+            module Top (
+                a: input logic<8>,
+                x: output logic<8>,
+                y: output logic<8>,
+            ) {
+                always_comb {
+                    x = a;
+                    y = a;
+                }
+            }
+        "#,
+        "Top",
+    )
+    .opt_level(celox::OptLevel::O0)
+    .native_force_support(true)
+    .build()
+    .unwrap();
+    let image = sim.shared_code().program_image().clone();
+    drop(sim);
+
+    let mut runtime = NativeProgramInstance::from_image(image).unwrap();
+    let input = runtime.reflection().signal_by_name("Top.a").unwrap().0;
+    let input = runtime.reflection().signal(input).unwrap().signal;
+    let forced = runtime.reflection().signal_by_name("Top.x").unwrap().0;
+    let output = runtime.signal_ref("Top.y").unwrap();
+    assert!(runtime.force_signal(forced, 99u8.into(), 0u8.into()));
+    runtime.backend_mut().set(input, 7u8);
+    runtime.eval_comb().unwrap();
+
+    assert_eq!(runtime.backend().get_as::<u8>(output), 7);
+}
+
+#[test]
+fn precompiled_runtime_distinguishes_write_from_display() {
+    let sim = Simulator::builder(
+        r#"
+            module Top (a: input logic) {
+                always_comb {
+                    $write("a");
+                    $display("b");
+                }
+            }
+        "#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let image = sim.shared_code().program_image().clone();
+    drop(sim);
+
+    let mut runtime = NativeProgramInstance::from_image(image).unwrap();
+    assert_eq!(
+        runtime.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Write {
+                message: "a".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "b".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
 fn precompiled_runtime_reports_fatal_assertions() {
     let sim = Simulator::builder(
         r#"
