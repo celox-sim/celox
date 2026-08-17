@@ -458,6 +458,12 @@ impl RuntimeProgram {
             let variables = &self.frontend.module_variables[&module_id];
             let path_index = &self.frontend.module_var_path_index[&module_id];
             for info in variables.values() {
+                if matches!(
+                    info.var_kind,
+                    veryl_analyzer::ir::VarKind::Param | veryl_analyzer::ir::VarKind::Const
+                ) {
+                    continue;
+                }
                 if path_index.get(&info.path) != Some(&Some(info.id)) {
                     continue;
                 }

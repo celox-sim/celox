@@ -180,6 +180,17 @@ const FATAL_ASSERT: &str = r#"
     }
 "#;
 
+const COMPILE_TIME_OBJECTS: &str = r#"
+    module Top #(
+        param WIDTH: u32 = 8,
+    ) (
+        y: output logic<WIDTH>,
+    ) {
+        const BIAS: logic<WIDTH> = 1;
+        assign y = BIAS;
+    }
+"#;
+
 #[test]
 fn value_layout_matches_vpi_user_header() {
     assert_eq!(std::mem::size_of::<VpiVecVal>(), 8);
@@ -200,6 +211,12 @@ unsafe extern "C" fn record_callback(data: *mut VpiCbData) -> i32 {
         }
         CB_AFTER_DELAY => {
             assert_eq!(celox_vpi_current_time(), 5);
+            // Safety: this callback was registered with live time storage.
+            let delivered = unsafe { &*(*data).time };
+            assert_eq!(delivered.type_, VPI_SCALED_REAL_TIME);
+            assert_eq!(delivered.high, 0);
+            assert_eq!(delivered.low, 0);
+            assert_eq!(delivered.real, 5.0);
             let mut scaled = VpiTime {
                 type_: VPI_SCALED_REAL_TIME,
                 high: u32::MAX,
@@ -232,6 +249,25 @@ unsafe extern "C" fn record_callback(data: *mut VpiCbData) -> i32 {
         _ => unreachable!(),
     }
     0
+}
+
+#[test]
+fn compile_time_objects_are_not_exposed_as_writable_registers() {
+    let simulator = Simulator::builder(COMPILE_TIME_OBJECTS, "Top")
+        .build()
+        .unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+
+    unsafe {
+        assert!(vpi_handle_by_name(c"Top.WIDTH".as_ptr(), ptr::null_mut()).is_null());
+        assert!(vpi_handle_by_name(c"Top.BIAS".as_ptr(), ptr::null_mut()).is_null());
+        let output = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+        assert!(!output.is_null());
+        assert_eq!(vpi_free_object(output), 1);
+    }
+    clear_runtime();
 }
 
 #[test]

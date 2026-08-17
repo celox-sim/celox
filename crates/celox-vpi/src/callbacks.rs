@@ -184,11 +184,19 @@ fn fire(id: u64) -> bool {
     if !registration.data.time.is_null() {
         // Safety: cocotb stores callback time in its live callback object.
         let time = unsafe { &mut *registration.data.time };
-        if time.type_ != VPI_SUPPRESS_TIME {
-            time.type_ = VPI_SIM_TIME;
-            time.high = (now >> 32) as u32;
-            time.low = now as u32;
-            time.real = 0.0;
+        match time.type_ {
+            VPI_SUPPRESS_TIME => {}
+            VPI_SCALED_REAL_TIME => {
+                time.high = 0;
+                time.low = 0;
+                time.real = now as f64;
+            }
+            _ => {
+                time.type_ = VPI_SIM_TIME;
+                time.high = (now >> 32) as u32;
+                time.low = now as u32;
+                time.real = 0.0;
+            }
         }
     }
 

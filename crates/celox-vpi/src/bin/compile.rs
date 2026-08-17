@@ -51,11 +51,10 @@ fn run() -> Result<(), String> {
         let mut metadata = Metadata::load(&metadata_path)
             .map_err(|error| format!("failed to load {}: {error}", metadata_path.display()))?;
         let paths = metadata
-            .paths::<&std::path::Path>(&[], false, true)
+            .paths(&[arguments.source.as_path()], false, true)
             .map_err(|error| format!("failed to discover project sources: {error}"))?;
         let sources = paths
             .into_iter()
-            .filter(|path| !path.example)
             .map(|path| {
                 let source = std::fs::read_to_string(&path.src)
                     .map_err(|error| format!("failed to read {}: {error}", path.src.display()))?;

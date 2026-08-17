@@ -282,3 +282,57 @@ module Top (
     runtime.eval_comb().unwrap();
     assert_eq!(runtime.backend().get_as::<u8>(output), 42);
 }
+
+#[test]
+fn compile_includes_the_explicit_project_example_source() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source_dir = temporary.path().join("src");
+    let example_dir = temporary.path().join("examples");
+    fs::create_dir(&source_dir).unwrap();
+    fs::create_dir(&example_dir).unwrap();
+    fs::write(
+        temporary.path().join("Veryl.toml"),
+        r#"
+[project]
+name = "explicit_example"
+version = "0.1.0"
+
+[build]
+sources = ["src"]
+"#,
+    )
+    .unwrap();
+    fs::write(source_dir.join("unrelated.veryl"), "module Unrelated {}\n").unwrap();
+    let source = example_dir.join("top.veryl");
+    fs::write(
+        &source,
+        r#"
+module Top (
+    y: output logic<8>,
+) {
+    assign y = 42;
+}
+"#,
+    )
+    .unwrap();
+
+    let executable = temporary.path().join("example-sim");
+    let compile = Command::new(env!("CARGO_BIN_EXE_celox-vpi-compile"))
+        .arg(&source)
+        .args(["--top", "Top", "--runtime"])
+        .arg(env!("CARGO_BIN_EXE_celox-vpi-runtime"))
+        .arg("--output")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "native compilation failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let bytes = fs::read(executable).unwrap();
+    let runtime = NativeProgramInstance::from_attached_bytes(&bytes).unwrap();
+    let output = runtime.signal_ref("Top.y").unwrap();
+    assert_eq!(runtime.backend().get_as::<u8>(output), 42);
+}
