@@ -1013,10 +1013,10 @@ fn merge_symbolic_versions(
         // Function-local state can be introduced while evaluating only the
         // else branch. It is scoped to that branch and must not escape through
         // this merge; the previous implementation likewise iterated then keys.
-        let Some(t_range_store) = then_store.get(&id) else {
+        let Some(t_range_store) = then_store.get(id) else {
             continue;
         };
-        let e_range_store = &else_store[&id];
+        let e_range_store = &else_store[id];
 
         if t_range_store == e_range_store {
             continue;
@@ -1029,7 +1029,7 @@ fn merge_symbolic_versions(
         let mut all_lsbs: BTreeSet<usize> = t_range_store.ranges.keys().cloned().collect();
         all_lsbs.extend(e_range_store.ranges.keys().cloned());
 
-        let var = &module.variables[&id];
+        let var = &module.variables[id];
         let var_width = resolve_total_width(module, var)?;
         let mut lsbs_vec: Vec<usize> = all_lsbs.into_iter().collect();
         lsbs_vec.push(var_width);
@@ -1047,8 +1047,8 @@ fn merge_symbolic_versions(
                 .map_err(|error| range_store_error("conditional merge", error, None))?;
             let t_modified = then_parts.iter().any(|(v, _)| v.is_some());
             let e_modified = else_parts.iter().any(|(v, _)| v.is_some());
-            let (t_expr, t_sources) = combine_parts_with_default(id, lsb, then_parts, arena)?;
-            let (e_expr, e_sources) = combine_parts_with_default(id, lsb, else_parts, arena)?;
+            let (t_expr, t_sources) = combine_parts_with_default(*id, lsb, then_parts, arena)?;
+            let (e_expr, e_sources) = combine_parts_with_default(*id, lsb, else_parts, arena)?;
 
             let result_val = if !t_modified && !e_modified {
                 None
@@ -1076,7 +1076,7 @@ fn merge_symbolic_versions(
                 .insert(lsb, (result_val, next_lsb - lsb, lsb));
         }
 
-        merged_store.insert(id, merged_range_store);
+        merged_store.insert(*id, merged_range_store);
     }
 
     Ok(merged_store)
@@ -1408,7 +1408,10 @@ fn extract_store_updates(
 ) -> Result<Vec<(VarAtomBase<VarId>, NodeId, HashSet<VarAtomBase<VarId>>)>, SLTNodeFactsError> {
     let mut updates = Vec::new();
 
-    for (id, range_store_after) in store_after {
+    for id in store_before.differing_keys(store_after) {
+        let Some(range_store_after) = store_after.get(id) else {
+            continue;
+        };
         let Some(range_store_before) = store_before.get(id) else {
             continue;
         };

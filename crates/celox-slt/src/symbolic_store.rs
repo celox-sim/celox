@@ -165,32 +165,70 @@ impl<A: Eq + Hash, N> SymbolicStore<A, N> {
     ///
     /// Entire shared pages are skipped without visiting their keys. Within a
     /// copied page, entries that still share the same range version are also
-    /// skipped. The returned sparse set is therefore the only set that can
-    /// require phi construction.
-    pub fn differing_keys(&self, other: &Self) -> Vec<A>
-    where
-        A: Clone,
-    {
-        let mut differing = Vec::new();
-        for (left_shard, right_shard) in self.entries.iter().zip(&other.entries) {
-            if Arc::ptr_eq(left_shard, right_shard) {
-                continue;
-            }
-            for (key, left) in left_shard.iter() {
-                if right_shard
+    /// skipped. The returned sparse iterator is therefore the only set that
+    /// can require phi construction. Keys are borrowed directly from their
+    /// store version, so walking a diff does not allocate or clone addresses.
+    pub fn differing_keys<'a>(&'a self, other: &'a Self) -> impl Iterator<Item = &'a A> {
+        DifferingKeys {
+            left_shards: &self.entries,
+            right_shards: &other.entries,
+            next_shard: 0,
+            left_shard: None,
+            right_shard: None,
+            left_entries: None,
+            right_keys: None,
+        }
+    }
+}
+
+struct DifferingKeys<'a, A, N> {
+    left_shards: &'a [Arc<StoreShard<A, N>>; STORE_SHARDS],
+    right_shards: &'a [Arc<StoreShard<A, N>>; STORE_SHARDS],
+    next_shard: usize,
+    left_shard: Option<&'a StoreShard<A, N>>,
+    right_shard: Option<&'a StoreShard<A, N>>,
+    left_entries: Option<std::collections::hash_map::Iter<'a, A, RangeEntry<A, N>>>,
+    right_keys: Option<std::collections::hash_map::Keys<'a, A, RangeEntry<A, N>>>,
+}
+
+impl<'a, A: Eq + Hash, N> Iterator for DifferingKeys<'a, A, N> {
+    type Item = &'a A;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            while let Some((key, left)) = self.left_entries.as_mut().and_then(Iterator::next) {
+                if self
+                    .right_shard
+                    .expect("a diff iterator has a right shard")
                     .get(key)
                     .is_none_or(|right| !Arc::ptr_eq(left, right))
                 {
-                    differing.push(key.clone());
+                    return Some(key);
                 }
             }
-            for key in right_shard.keys() {
-                if !left_shard.contains_key(key) {
-                    differing.push(key.clone());
+
+            while let Some(key) = self.right_keys.as_mut().and_then(Iterator::next) {
+                if !self
+                    .left_shard
+                    .expect("a diff iterator has a left shard")
+                    .contains_key(key)
+                {
+                    return Some(key);
                 }
             }
+
+            let left = self.left_shards.get(self.next_shard)?;
+            let right = &self.right_shards[self.next_shard];
+            self.next_shard += 1;
+            if Arc::ptr_eq(left, right) {
+                continue;
+            }
+
+            self.left_shard = Some(left);
+            self.right_shard = Some(right);
+            self.left_entries = Some(left.iter());
+            self.right_keys = Some(right.keys());
         }
-        differing
     }
 }
 
@@ -470,7 +508,13 @@ mod tests {
         assert_eq!(shared_pages, STORE_SHARDS - 1);
         assert!(original.shares_entry_with(&branch, &7));
         assert!(!original.shares_entry_with(&branch, &2048));
-        assert_eq!(original.differing_keys(&branch), vec![2048]);
+        assert_eq!(
+            original
+                .differing_keys(&branch)
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![2048]
+        );
     }
 
     #[test]
@@ -493,11 +537,45 @@ mod tests {
             .update(BitAccess::new(4, 7), Some((2, HashSet::default())))
             .unwrap();
 
-        let mut differing = then_version.differing_keys(&else_version);
+        let mut differing = then_version
+            .differing_keys(&else_version)
+            .copied()
+            .collect::<Vec<_>>();
         differing.sort_unstable();
         assert_eq!(differing, vec![17, 900]);
-        assert_eq!(entry.differing_keys(&then_version), vec![17]);
-        assert_eq!(entry.differing_keys(&else_version), vec![900]);
+        assert_eq!(
+            entry
+                .differing_keys(&then_version)
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![17]
+        );
+        assert_eq!(
+            entry
+                .differing_keys(&else_version)
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![900]
+        );
+    }
+
+    #[test]
+    fn branch_diff_iterator_reports_insertions_and_removals_once() {
+        let mut left = SymbolicStore::<u32, u32>::default();
+        left.insert(1, RangeStore::new(None, 8));
+        left.insert(2, RangeStore::new(None, 8));
+
+        let mut right = left.fork();
+        right.remove(&1);
+        right.insert(3, RangeStore::new(None, 8));
+
+        let mut differing = left.differing_keys(&right).copied().collect::<Vec<_>>();
+        differing.sort_unstable();
+        assert_eq!(differing, vec![1, 3]);
+
+        let mut reverse = right.differing_keys(&left).copied().collect::<Vec<_>>();
+        reverse.sort_unstable();
+        assert_eq!(reverse, vec![1, 3]);
     }
 
     #[test]
