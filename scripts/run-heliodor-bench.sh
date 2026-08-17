@@ -888,7 +888,7 @@ prepare() {
         # tips and will not repair that cache, so retry the requested ref as a
         # full refetch before declaring the checkout unusable.
         echo "warning: cached Heliodor checkout is incomplete; refetching $HELIODOR_REF" >&2
-        if ! git -C "$HELIODOR_DIR" fetch --quiet --refetch origin "$HELIODOR_REF" \
+        if ! git -C "$HELIODOR_DIR" fetch --quiet --refetch origin \
             || ! git -C "$HELIODOR_DIR" checkout --quiet "$HELIODOR_REF"; then
             echo "error: could not check out Heliodor ref $HELIODOR_REF" >&2
             return 1
