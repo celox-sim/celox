@@ -950,6 +950,7 @@ fn force_state_is_shared_by_reflected_clock_aliases() {
 }
 
 static CALLBACK_VALUE: AtomicI32 = AtomicI32::new(-1);
+static OWNED_CALLBACK_TIME: AtomicUsize = AtomicUsize::new(usize::MAX);
 static VALUE_CHANGE_DRIVE: AtomicBool = AtomicBool::new(false);
 static VALUE_CHANGE_INPUT: AtomicUsize = AtomicUsize::new(0);
 static READ_ONLY_VALUE: AtomicI32 = AtomicI32::new(-1);
@@ -966,6 +967,56 @@ unsafe extern "C" fn record_changed_value(data: *mut VpiCbData) -> i32 {
     let value = unsafe { (*(*data).value).value.integer };
     CALLBACK_VALUE.store(value, Ordering::SeqCst);
     0
+}
+
+unsafe extern "C" fn record_owned_callback_storage(data: *mut VpiCbData) -> i32 {
+    let value = unsafe { (*(*data).value).value.integer };
+    let time = unsafe { (*(*data).time).low } as usize;
+    CALLBACK_VALUE.store(value, Ordering::SeqCst);
+    OWNED_CALLBACK_TIME.store(time, Ordering::SeqCst);
+    0
+}
+
+unsafe fn register_stack_value_callback(object: VpiHandle) -> VpiHandle {
+    let mut time = VpiTime {
+        type_: VPI_SIM_TIME,
+        high: 0,
+        low: 0,
+        real: 0.0,
+    };
+    let mut value = VpiValue {
+        format: VPI_INT_VAL,
+        value: VpiValueData { integer: -1 },
+    };
+    let callback = VpiCbData {
+        reason: CB_VALUE_CHANGE,
+        cb_rtn: Some(record_owned_callback_storage),
+        obj: object,
+        time: &mut time,
+        value: &mut value,
+        index: 0,
+        user_data: ptr::null_mut(),
+    };
+    unsafe { vpi_register_cb(&callback) }
+}
+
+unsafe fn register_stack_timer(object: VpiHandle) {
+    let mut time = VpiTime {
+        type_: VPI_SIM_TIME,
+        high: 0,
+        low: 3,
+        real: 0.0,
+    };
+    let callback = VpiCbData {
+        reason: CB_AFTER_DELAY,
+        cb_rtn: Some(drive_callback_object_high),
+        obj: object,
+        time: &mut time,
+        value: ptr::null_mut(),
+        index: 0,
+        user_data: ptr::null_mut(),
+    };
+    assert!(!unsafe { vpi_register_cb(&callback) }.is_null());
 }
 
 unsafe extern "C" fn record_read_only_value(data: *mut VpiCbData) -> i32 {
@@ -1138,6 +1189,34 @@ fn value_change_callback_receives_the_requested_current_value() {
         assert_eq!(vpi_remove_cb(callback_handle), 1);
         assert_eq!(vpi_free_object(a), 1);
         assert_eq!(vpi_free_object(y), 1);
+    }
+    clear_runtime();
+}
+
+#[test]
+fn callback_registration_owns_copied_time_and_value_records() {
+    let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
+    CALLBACK_VALUE.store(-1, Ordering::SeqCst);
+    OWNED_CALLBACK_TIME.store(usize::MAX, Ordering::SeqCst);
+
+    unsafe {
+        let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        let value_change = register_stack_value_callback(a);
+        assert!(!value_change.is_null());
+        register_stack_timer(a);
+
+        // Reuse the caller stack after both registration functions returned.
+        let clobber = [0xa5u8; 4096];
+        std::hint::black_box(&clobber);
+        assert!(!run_callbacks());
+        assert_eq!(CALLBACK_VALUE.load(Ordering::SeqCst), 1);
+        assert_eq!(OWNED_CALLBACK_TIME.load(Ordering::SeqCst), 3);
+
+        assert_eq!(vpi_remove_cb(value_change), 1);
+        assert_eq!(vpi_free_object(a), 1);
     }
     clear_runtime();
 }
@@ -1799,6 +1878,60 @@ fn value_change_callbacks_observe_each_queued_clock_transition() {
 
         assert_eq!(EDGE_VALUE_CHANGE_COUNT.load(Ordering::SeqCst), 2);
         assert_eq!(EDGE_VALUE_CHANGE_SEQUENCE.load(Ordering::SeqCst), 10);
+        assert_eq!(vpi_remove_cb(value_change_handle), 1);
+        assert_eq!(vpi_free_object(clk), 1);
+    }
+    clear_runtime();
+}
+
+#[test]
+fn inactive_clock_transition_is_replayed_between_two_active_edges() {
+    let simulator = Simulator::builder(COUNTER, "Top").build().unwrap();
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
+    EDGE_VALUE_CHANGE_COUNT.store(0, Ordering::SeqCst);
+    EDGE_VALUE_CHANGE_SEQUENCE.store(0, Ordering::SeqCst);
+
+    unsafe {
+        let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
+        put_int(clk, 0);
+        let mut callback_value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: -1 },
+        };
+        let value_change = VpiCbData {
+            reason: CB_VALUE_CHANGE,
+            cb_rtn: Some(record_clock_value_change),
+            obj: clk,
+            time: ptr::null_mut(),
+            value: &mut callback_value,
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        let value_change_handle = vpi_register_cb(&value_change);
+        assert!(!value_change_handle.is_null());
+
+        let mut time = VpiTime {
+            type_: VPI_SIM_TIME,
+            high: 0,
+            low: 1,
+            real: 0.0,
+        };
+        let edges = VpiCbData {
+            reason: CB_AFTER_DELAY,
+            cb_rtn: Some(drive_two_clock_posedges),
+            obj: clk,
+            time: &mut time,
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        assert!(!vpi_register_cb(&edges).is_null());
+        assert!(!run_callbacks());
+
+        assert_eq!(EDGE_VALUE_CHANGE_COUNT.load(Ordering::SeqCst), 3);
+        assert_eq!(EDGE_VALUE_CHANGE_SEQUENCE.load(Ordering::SeqCst), 101);
         assert_eq!(vpi_remove_cb(value_change_handle), 1);
         assert_eq!(vpi_free_object(clk), 1);
     }

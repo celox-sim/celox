@@ -70,6 +70,8 @@ pub struct VpiErrorInfo {
 
 struct Registration {
     data: VpiCbData,
+    _time_storage: Option<Box<VpiTime>>,
+    _value_storage: Option<Box<VpiValue>>,
     handle: VpiHandle,
     due: Option<u64>,
     snapshot: Option<(celox::BigUint, celox::BigUint)>,
@@ -418,7 +420,7 @@ pub unsafe extern "C" fn vpi_register_cb(data: *const VpiCbData) -> VpiHandle {
         return ptr::null_mut();
     }
     // Safety: checked above and copied before returning.
-    let data = unsafe { *data };
+    let mut data = unsafe { *data };
     if data.cb_rtn.is_none()
         || !matches!(
             data.reason,
@@ -437,6 +439,31 @@ pub unsafe extern "C" fn vpi_register_cb(data: *const VpiCbData) -> VpiHandle {
     if data.reason == CB_VALUE_CHANGE && signal.is_none() {
         return ptr::null_mut();
     }
+    // VPI registration copies the selected records. Their original storage is
+    // commonly stack-local and need not outlive this call.
+    let mut time_storage = if data.time.is_null() {
+        None
+    } else {
+        // Safety: the registration contract makes the pointed record readable
+        // for the duration of this call.
+        Some(Box::new(unsafe { *data.time }))
+    };
+    let mut value_storage = if data.value.is_null() {
+        None
+    } else {
+        // Safety: copy the active request record while registration storage is live.
+        let value = unsafe { &*data.value };
+        Some(Box::new(VpiValue {
+            format: value.format,
+            value: value.value,
+        }))
+    };
+    data.time = time_storage
+        .as_deref_mut()
+        .map_or(ptr::null_mut(), std::ptr::from_mut);
+    data.value = value_storage
+        .as_deref_mut()
+        .map_or(ptr::null_mut(), std::ptr::from_mut);
     STATE.with_borrow_mut(|state| {
         let id = state.next_id;
         state.next_id += 1;
@@ -449,6 +476,8 @@ pub unsafe extern "C" fn vpi_register_cb(data: *const VpiCbData) -> VpiHandle {
             id,
             Registration {
                 data,
+                _time_storage: time_storage,
+                _value_storage: value_storage,
                 handle,
                 due,
                 snapshot,

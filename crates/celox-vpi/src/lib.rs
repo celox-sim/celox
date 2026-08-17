@@ -159,7 +159,8 @@ struct PendingWrites {
 }
 
 struct PendingEdgeBatch {
-    signals: Vec<NativeSignalIdentity>,
+    active_signals: Vec<NativeSignalIdentity>,
+    transition_signals: Vec<NativeSignalIdentity>,
     deposits: HashMap<NativeSignalIdentity, PendingDeposit>,
 }
 
@@ -213,24 +214,33 @@ fn record_pending_write(
 ) {
     let active = is_active_edge(domain_kind, old_level, new_level);
     let level_changed = old_level != new_level;
-    let open_contains_signal = pending
-        .open_edge_batch
-        .is_some_and(|index| pending.edge_batches[index].signals.contains(&identity));
+    let event_transition = domain_kind != DomainKind::Other && level_changed;
+    let open_contains_signal = pending.open_edge_batch.is_some_and(|index| {
+        pending.edge_batches[index]
+            .transition_signals
+            .contains(&identity)
+    });
 
-    if open_contains_signal && (active || level_changed) {
+    if open_contains_signal && event_transition {
         pending.open_edge_batch = None;
     }
 
     pending
         .deposits
         .insert(identity, PendingDeposit { id, value, mask });
-    if active {
+    if event_transition {
         if let Some(index) = pending.open_edge_batch {
-            pending.edge_batches[index].signals.push(identity);
+            pending.edge_batches[index]
+                .transition_signals
+                .push(identity);
+            if active {
+                pending.edge_batches[index].active_signals.push(identity);
+            }
             pending.edge_batches[index].deposits = pending.deposits.clone();
         } else {
             pending.edge_batches.push(PendingEdgeBatch {
-                signals: vec![identity],
+                active_signals: active.then_some(identity).into_iter().collect(),
+                transition_signals: vec![identity],
                 deposits: pending.deposits.clone(),
             });
             pending.open_edge_batch = Some(pending.edge_batches.len() - 1);
@@ -1174,7 +1184,7 @@ fn flush_pending_writes() -> bool {
         let overridden = replay_overrides.keys().copied().collect::<HashSet<_>>();
         let result: Result<(), celox::RuntimeErrorCode> = with_runtime_mut(|runtime| {
             let active_edges = batch
-                .signals
+                .active_signals
                 .into_iter()
                 .filter_map(|identity| {
                     let deposit = batch.deposits.get(&identity)?;
