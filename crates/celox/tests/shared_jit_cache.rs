@@ -346,6 +346,47 @@ fn precompiled_runtime_preserves_comb_runtime_events() {
 }
 
 #[test]
+fn forced_comb_runtime_events_preserve_procedural_order() {
+    let sim = Simulator::builder(
+        r#"
+            module Top (a: input logic<8>, x: output logic<8>) {
+                always_comb {
+                    $display("before=%0d", x);
+                    x = a;
+                    $display("after=%0d", x);
+                }
+            }
+        "#,
+        "Top",
+    )
+    .opt_level(celox::OptLevel::O0)
+    .native_force_support(true)
+    .build()
+    .unwrap();
+    let image = sim.shared_code().program_image().clone();
+    drop(sim);
+
+    let mut runtime = NativeProgramInstance::from_image(image).unwrap();
+    runtime.drain_runtime_events();
+    let input = runtime.reflection().signal_by_name("Top.a").unwrap().0;
+    assert!(runtime.force_signal(input, 7u8.into(), 0u8.into()));
+    runtime.eval_comb().unwrap();
+    assert_eq!(
+        runtime.drain_runtime_events(),
+        vec![
+            celox::RuntimeEvent::Display {
+                message: "before=0".to_string(),
+            },
+            celox::RuntimeEvent::Display {
+                message: "after=7".to_string(),
+            },
+        ]
+    );
+    let output = runtime.signal_ref("Top.x").unwrap();
+    assert_eq!(runtime.backend().get_as::<u8>(output), 7);
+}
+
+#[test]
 fn precompiled_runtime_reports_fatal_assertions() {
     let sim = Simulator::builder(
         r#"
@@ -372,6 +413,39 @@ fn precompiled_runtime_reports_fatal_assertions() {
         runtime.drain_runtime_events(),
         vec![celox::RuntimeEvent::AssertFatal {
             message: "fatal a=1".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn precompiled_runtime_reports_sequential_fatal_assertions() {
+    let sim = Simulator::builder(
+        r#"
+            module Top (clk: input clock) {
+                always_ff (clk) {
+                    $assert(1'b0, "ff fatal");
+                }
+            }
+        "#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let image = sim.shared_code().program_image().clone();
+    drop(sim);
+
+    let mut runtime = NativeProgramInstance::from_image(image).unwrap();
+    runtime.drain_runtime_events();
+    let clock = runtime.signal("Top.clk").unwrap().clone();
+    runtime.backend_mut().set(clock.signal, 1u8);
+    let error = runtime
+        .settle_active_edges(&[clock.state_address])
+        .unwrap_err();
+    assert!(error.to_string().contains("ff fatal"));
+    assert_eq!(
+        runtime.drain_runtime_events(),
+        vec![celox::RuntimeEvent::AssertFatal {
+            message: "ff fatal".to_string(),
         }]
     );
 }

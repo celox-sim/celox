@@ -155,6 +155,15 @@ fn changed_value_ids() -> Vec<u64> {
     })
 }
 
+pub(super) fn dispatch_value_changes() -> bool {
+    let changed = changed_value_ids();
+    let progressed = !changed.is_empty();
+    for id in changed {
+        fire(id);
+    }
+    progressed
+}
+
 fn due_ids() -> Vec<u64> {
     STATE.with_borrow(|state| {
         state
@@ -254,11 +263,8 @@ pub(super) fn run() -> bool {
             break;
         }
         loop {
-            let changed = changed_value_ids();
-            if !changed.is_empty() {
-                for id in changed {
-                    progressed |= fire(id);
-                }
+            if dispatch_value_changes() {
+                progressed = true;
                 if !super::flush_pending_writes() {
                     break 'scheduler;
                 }

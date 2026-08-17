@@ -133,6 +133,8 @@ impl NativeProgramInstance {
         &mut self,
         active_edges: &[StateAddr],
     ) -> Result<(), celox_runtime::SimulatorErrorCode> {
+        let start_seq = (!self.runtime_schema().runtime_event_sites.is_empty())
+            .then(|| crate::simulator::runtime_event_write_seq_for_backend(&self.backend));
         self.eval_comb_checked()?;
         let mut seen = crate::HashSet::default();
         let mut events = Vec::new();
@@ -183,7 +185,11 @@ impl NativeProgramInstance {
                 }
             }
         }
-        self.eval_comb_checked()
+        self.eval_comb_checked()?;
+        if let Some(start_seq) = start_seq {
+            self.check_fatal_events_since(start_seq)?;
+        }
+        Ok(())
     }
 
     /// Drain source-independent `$display` and assertion records emitted by

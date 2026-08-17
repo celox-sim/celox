@@ -1085,8 +1085,8 @@ fn flush_pending_writes() -> bool {
     if !pending.settle {
         return true;
     }
-    let result: Result<(), celox::RuntimeErrorCode> = with_runtime_mut(|runtime| {
-        for batch in pending.edge_batches {
+    for batch in pending.edge_batches {
+        let result: Result<(), celox::RuntimeErrorCode> = with_runtime_mut(|runtime| {
             apply_pending_deposits(runtime, &batch.deposits);
             let active_edges = batch
                 .signals
@@ -1098,11 +1098,24 @@ fn flush_pending_writes() -> bool {
                         .map(|signal| signal.state_address)
                 })
                 .collect::<Vec<_>>();
-            runtime.settle_active_edges(&active_edges)?;
+            runtime.settle_active_edges(&active_edges)
+        })
+        .unwrap_or(Ok(()));
+        if let Err(error) = result {
+            callbacks::fail(error.to_string());
+            return false;
         }
+        process_runtime_events();
+        if callbacks::has_error() {
+            return false;
+        }
+        if callbacks::is_running() {
+            callbacks::dispatch_value_changes();
+        }
+    }
+    let result: Result<(), celox::RuntimeErrorCode> = with_runtime_mut(|runtime| {
         apply_pending_deposits(runtime, &pending.deposits);
-        runtime.settle_active_edges(&[])?;
-        Ok(())
+        runtime.settle_active_edges(&[])
     })
     .unwrap_or(Ok(()));
     if let Err(error) = result {

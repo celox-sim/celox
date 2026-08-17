@@ -1106,6 +1106,80 @@ fn comb_block_execution_order<A>(unit: &ExecutionUnit<A>) -> Vec<BlockId> {
     postorder
 }
 
+fn is_comb_runtime_effect(instruction: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
+    matches!(
+        instruction,
+        SIRInstruction::RuntimeEvent { .. }
+            | SIRInstruction::CombCaptureEvent { .. }
+            | SIRInstruction::CombCaptureEnableIfChanged { .. }
+    )
+}
+
+fn interleave_comb_runtime_effects(
+    unit: &ExecutionUnit<RegionedAbsoluteAddr>,
+    ordered_stores: &[(BlockId, usize)],
+    store_units: Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+) -> Vec<ExecutionUnit<RegionedAbsoluteAddr>> {
+    let ordered_sites = comb_block_execution_order(unit)
+        .into_iter()
+        .flat_map(|block_id| {
+            (0..unit.blocks[&block_id].instructions.len()).map(move |index| (block_id, index))
+        })
+        .collect::<Vec<_>>();
+    let positions = ordered_sites
+        .iter()
+        .enumerate()
+        .map(|(position, &site)| (site, position))
+        .collect::<HashMap<_, _>>();
+    let mut effect_groups = vec![Vec::new(); ordered_stores.len() + 1];
+    for site in ordered_sites {
+        if !is_comb_runtime_effect(&unit.blocks[&site.0].instructions[site.1]) {
+            continue;
+        }
+        let boundary = ordered_stores
+            .iter()
+            .filter(|store| positions[store] < positions[&site])
+            .count();
+        effect_groups[boundary].push(site);
+    }
+    if effect_groups.iter().all(Vec::is_empty) {
+        return store_units;
+    }
+
+    let mut result = Vec::with_capacity(store_units.len() + effect_groups.len());
+    let mut stores = store_units.into_iter();
+    for (boundary, group) in effect_groups.into_iter().enumerate() {
+        if !group.is_empty() {
+            let group = group.into_iter().collect::<HashSet<_>>();
+            let mut events = unit.clone();
+            for (block_id, block) in &mut events.blocks {
+                block.instructions = std::mem::take(&mut block.instructions)
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(index, instruction)| {
+                        let site = (*block_id, index);
+                        if matches!(
+                            instruction,
+                            SIRInstruction::Store(..) | SIRInstruction::Commit(..)
+                        ) {
+                            None
+                        } else if is_comb_runtime_effect(&instruction) {
+                            group.contains(&site).then_some(instruction)
+                        } else {
+                            Some(instruction)
+                        }
+                    })
+                    .collect();
+            }
+            result.push(events);
+        }
+        if boundary < ordered_stores.len() {
+            result.push(stores.next().unwrap());
+        }
+    }
+    result
+}
+
 fn split_comb_execution_unit(
     unit: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Vec<ExecutionUnit<RegionedAbsoluteAddr>> {
@@ -1189,7 +1263,7 @@ fn split_comb_execution_unit(
             ordered_stores.push(remaining.remove(next));
         }
 
-        let mut split = ordered_stores
+        let split = ordered_stores
             .iter()
             .enumerate()
             .map(|(order, &target)| {
@@ -1243,29 +1317,7 @@ fn split_comb_execution_unit(
             })
             .collect::<Vec<_>>();
 
-        let has_runtime_side_effects = unit.blocks.values().any(|block| {
-            block.instructions.iter().any(|instruction| {
-                matches!(
-                    instruction,
-                    SIRInstruction::RuntimeEvent { .. }
-                        | SIRInstruction::CombCaptureEvent { .. }
-                        | SIRInstruction::CombCaptureEnableIfChanged { .. }
-                )
-            })
-        });
-        if has_runtime_side_effects {
-            let mut events = unit.clone();
-            for block in events.blocks.values_mut() {
-                block.instructions.retain(|instruction| {
-                    !matches!(
-                        instruction,
-                        SIRInstruction::Store(..) | SIRInstruction::Commit(..)
-                    )
-                });
-            }
-            split.push(events);
-        }
-        return split;
+        return interleave_comb_runtime_effects(unit, &ordered_stores, split);
     }
     let block = &unit.blocks[&unit.entry_block_id];
     if !block.params.is_empty() || block.terminator != SIRTerminator::Return {
@@ -1340,7 +1392,7 @@ fn split_comb_execution_unit(
         ordered_stores.push(remaining.remove(next));
     }
 
-    let mut split = ordered_stores
+    let split = ordered_stores
         .iter()
         .enumerate()
         .map(|(order, &store_index)| {
@@ -1400,29 +1452,11 @@ fn split_comb_execution_unit(
             }
         })
         .collect::<Vec<_>>();
-    if block.instructions.iter().any(|instruction| {
-        matches!(
-            instruction,
-            SIRInstruction::RuntimeEvent { .. }
-                | SIRInstruction::CombCaptureEvent { .. }
-                | SIRInstruction::CombCaptureEnableIfChanged { .. }
-        )
-    }) {
-        let mut events = unit.clone();
-        events
-            .blocks
-            .get_mut(&events.entry_block_id)
-            .unwrap()
-            .instructions
-            .retain(|instruction| {
-                !matches!(
-                    instruction,
-                    SIRInstruction::Store(..) | SIRInstruction::Commit(..)
-                )
-            });
-        split.push(events);
-    }
-    split
+    let ordered_store_sites = ordered_stores
+        .iter()
+        .map(|&index| (unit.entry_block_id, index))
+        .collect::<Vec<_>>();
+    interleave_comb_runtime_effects(unit, &ordered_store_sites, split)
 }
 
 fn compile_program(
