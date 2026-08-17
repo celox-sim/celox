@@ -7,6 +7,11 @@ use std::{
 use celox::{NativeProgramInstance, Simulator};
 use celox_vpi::*;
 
+fn trusted_instance(image: celox::NativeProgramImage) -> NativeProgramInstance {
+    // Safety: tests execute only images produced in-process by the Celox compiler.
+    unsafe { NativeProgramInstance::from_image(image) }.unwrap()
+}
+
 const DESIGN: &str = r#"
     module Child (
         i: input logic<8>,
@@ -290,9 +295,9 @@ fn compile_time_objects_are_not_exposed_as_writable_registers() {
     let simulator = Simulator::builder(COMPILE_TIME_OBJECTS, "Top")
         .build()
         .unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
 
     unsafe {
         assert!(vpi_handle_by_name(c"Top.WIDTH".as_ptr(), ptr::null_mut()).is_null());
@@ -307,8 +312,7 @@ fn compile_time_objects_are_not_exposed_as_writable_registers() {
 #[test]
 fn callback_runtime_advances_time_and_finishes_regions() {
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    let runtime =
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap();
+    let runtime = trusted_instance(simulator.shared_code().program_image().clone());
     install_runtime(runtime);
     CALLBACKS_SEEN.store(0, Ordering::SeqCst);
 
@@ -352,9 +356,9 @@ fn callback_runtime_advances_time_and_finishes_regions() {
 #[test]
 fn finish_stops_remaining_callback_regions_but_still_runs_end_callbacks() {
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
     CALLBACKS_AFTER_FINISH.store(0, Ordering::SeqCst);
 
     let finish = VpiCbData {
@@ -398,9 +402,9 @@ fn finish_stops_remaining_callback_regions_but_still_runs_end_callbacks() {
 #[test]
 fn callback_deposits_preserve_order_across_reflected_aliases() {
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
 
     unsafe {
         let parent = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
@@ -448,7 +452,8 @@ fn vpi_discovers_hierarchy_and_reads_and_writes_values() {
         .program_image()
         .to_container_bytes()
         .unwrap();
-    let runtime = NativeProgramInstance::from_attached_bytes(&container).unwrap();
+    // Safety: the container was created above from an in-process compiled image.
+    let runtime = unsafe { NativeProgramInstance::from_attached_bytes(&container) }.unwrap();
     drop(simulator);
     install_runtime(runtime);
 
@@ -518,9 +523,9 @@ fn string_separators_delay_flags_and_force_release_follow_vpi_semantics() {
         .native_force_support(true)
         .build()
         .unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
 
     unsafe {
         let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
@@ -628,9 +633,9 @@ fn force_is_reapplied_between_stores_in_branched_comb_logic() {
         .native_force_support(true)
         .build()
         .unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
 
     unsafe {
         let sel = vpi_handle_by_name(c"Top.sel".as_ptr(), ptr::null_mut());
@@ -670,9 +675,9 @@ fn force_split_preserves_procedural_order_across_branches() {
         .native_force_support(true)
         .build()
         .unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
 
     unsafe {
         let sel = vpi_handle_by_name(c"Top.sel".as_ptr(), ptr::null_mut());
@@ -706,9 +711,9 @@ fn force_is_reapplied_between_unrolled_loop_iterations() {
         .native_force_support(true)
         .build()
         .unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
 
     unsafe {
         let x = vpi_handle_by_name(c"Top.x".as_ptr(), ptr::null_mut());
@@ -739,9 +744,9 @@ fn force_state_is_shared_by_reflected_clock_aliases() {
         .native_force_support(true)
         .build()
         .unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
 
     unsafe {
         let top_clock = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
@@ -932,9 +937,9 @@ unsafe extern "C" fn trigger_fatal_and_register_phases(data: *mut VpiCbData) -> 
 #[test]
 fn value_change_callback_receives_the_requested_current_value() {
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
     CALLBACK_VALUE.store(-1, Ordering::SeqCst);
 
     unsafe {
@@ -974,9 +979,9 @@ fn value_change_callback_receives_the_requested_current_value() {
 #[test]
 fn value_change_writes_settle_before_read_only_callbacks() {
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
     VALUE_CHANGE_DRIVE.store(true, Ordering::SeqCst);
     READ_ONLY_VALUE.store(-1, Ordering::SeqCst);
 
@@ -1009,9 +1014,9 @@ fn value_change_writes_settle_before_read_only_callbacks() {
 #[test]
 fn value_change_callback_observes_a_change_it_makes_itself() {
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
     SELF_CHANGE_COUNT.store(0, Ordering::SeqCst);
     SELF_CHANGE_VALUE.store(-1, Ordering::SeqCst);
 
@@ -1045,9 +1050,9 @@ fn value_change_callback_observes_a_change_it_makes_itself() {
 #[test]
 fn value_change_precedes_read_write_and_read_only_regions() {
     let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
     REGION_ORDER.store(0, Ordering::SeqCst);
 
     unsafe {
@@ -1084,9 +1089,9 @@ fn value_change_precedes_read_write_and_read_only_regions() {
 #[test]
 fn fatal_settle_stops_remaining_callback_phases() {
     let simulator = Simulator::builder(FATAL_ASSERT, "Top").build().unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
     FATAL_PHASES.store(0, Ordering::SeqCst);
 
     unsafe {
@@ -1119,11 +1124,12 @@ fn fatal_settle_stops_remaining_callback_phases() {
 fn signed_integer_deposits_and_z_values_round_trip() {
     let simulator = Simulator::builder(WIDE_FOUR_STATE, "Top")
         .four_state(true)
+        .native_force_support(true)
         .build()
         .unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
 
     unsafe {
         let signed_in = vpi_handle_by_name(c"Top.signed_in".as_ptr(), ptr::null_mut());
@@ -1265,6 +1271,7 @@ static EDGE_DATA_HANDLE: AtomicUsize = AtomicUsize::new(0);
 static EDGE_VALUE_CHANGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static EDGE_VALUE_CHANGE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 static EDGE_VALUE_CHANGE_DRIVE_DATA: AtomicBool = AtomicBool::new(false);
+static EDGE_VALUE_CHANGE_OVERRIDE_CLOCK: AtomicBool = AtomicBool::new(false);
 static FINISH_EDGE_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
 static CALLBACKS_AFTER_EDGE_FINISH: AtomicUsize = AtomicUsize::new(0);
 
@@ -1338,6 +1345,21 @@ unsafe extern "C" fn drive_data_after_first_clock_edge(data: *mut VpiCbData) -> 
     0
 }
 
+unsafe extern "C" fn override_clock_after_first_edge(data: *mut VpiCbData) -> i32 {
+    let mut value = VpiValue {
+        format: VPI_INT_VAL,
+        value: VpiValueData { integer: -1 },
+    };
+    // Safety: callback data and its object handle remain live while firing.
+    unsafe { vpi_get_value((*data).obj, &mut value) };
+    if unsafe { value.value.integer } == 1
+        && EDGE_VALUE_CHANGE_OVERRIDE_CLOCK.swap(false, Ordering::SeqCst)
+    {
+        unsafe { put_int((*data).obj, 0) };
+    }
+    0
+}
+
 unsafe fn put_int(handle: VpiHandle, integer: i32) {
     let value = VpiValue {
         format: VPI_INT_VAL,
@@ -1353,9 +1375,9 @@ unsafe fn put_int(handle: VpiHandle, integer: i32) {
 #[test]
 fn same_time_clock_callbacks_commit_domains_simultaneously() {
     let simulator = Simulator::builder(TWO_CLOCKS, "Top").build().unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
 
     unsafe {
         let clk_a = vpi_handle_by_name(c"Top.clk_a".as_ptr(), ptr::null_mut());
@@ -1423,9 +1445,9 @@ fn repeated_four_state_clock_edges_in_one_callback_are_not_lost() {
         .four_state(true)
         .build()
         .unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
 
     unsafe {
         let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
@@ -1465,9 +1487,9 @@ fn repeated_four_state_clock_edges_in_one_callback_are_not_lost() {
 #[test]
 fn repeated_clock_edges_preserve_the_data_at_each_edge() {
     let simulator = Simulator::builder(EDGE_SAMPLER, "Top").build().unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
 
     unsafe {
         let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
@@ -1518,9 +1540,9 @@ fn repeated_clock_edges_preserve_the_data_at_each_edge() {
 #[test]
 fn value_change_callbacks_observe_each_queued_clock_transition() {
     let simulator = Simulator::builder(COUNTER, "Top").build().unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
     EDGE_VALUE_CHANGE_COUNT.store(0, Ordering::SeqCst);
     EDGE_VALUE_CHANGE_SEQUENCE.store(0, Ordering::SeqCst);
 
@@ -1572,9 +1594,9 @@ fn value_change_callbacks_observe_each_queued_clock_transition() {
 #[test]
 fn callback_writes_override_later_queued_edge_snapshots() {
     let simulator = Simulator::builder(EDGE_SAMPLER, "Top").build().unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
     EDGE_VALUE_CHANGE_DRIVE_DATA.store(true, Ordering::SeqCst);
 
     unsafe {
@@ -1636,11 +1658,70 @@ fn callback_writes_override_later_queued_edge_snapshots() {
 }
 
 #[test]
+fn callback_clock_override_removes_a_later_queued_edge() {
+    let simulator = Simulator::builder(COUNTER, "Top").build().unwrap();
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
+    EDGE_VALUE_CHANGE_OVERRIDE_CLOCK.store(true, Ordering::SeqCst);
+
+    unsafe {
+        let clk = vpi_handle_by_name(c"Top.clk".as_ptr(), ptr::null_mut());
+        let q = vpi_handle_by_name(c"Top.q".as_ptr(), ptr::null_mut());
+        put_int(clk, 0);
+        put_int(q, 0);
+
+        let value_change = VpiCbData {
+            reason: CB_VALUE_CHANGE,
+            cb_rtn: Some(override_clock_after_first_edge),
+            obj: clk,
+            time: ptr::null_mut(),
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        let value_change_handle = vpi_register_cb(&value_change);
+        assert!(!value_change_handle.is_null());
+
+        let mut time = VpiTime {
+            type_: VPI_SIM_TIME,
+            high: 0,
+            low: 1,
+            real: 0.0,
+        };
+        let edges = VpiCbData {
+            reason: CB_AFTER_DELAY,
+            cb_rtn: Some(drive_two_clock_posedges),
+            obj: clk,
+            time: &mut time,
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        assert!(!vpi_register_cb(&edges).is_null());
+        assert!(!run_callbacks());
+
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: -1 },
+        };
+        vpi_get_value(q, &mut value);
+        assert_eq!(value.value.integer, 1);
+
+        assert_eq!(vpi_remove_cb(value_change_handle), 1);
+        for handle in [clk, q] {
+            assert_eq!(vpi_free_object(handle), 1);
+        }
+    }
+    clear_runtime();
+}
+
+#[test]
 fn finish_during_queued_edge_replay_stops_remaining_callbacks_and_edges() {
     let simulator = Simulator::builder(COUNTER, "Top").build().unwrap();
-    install_runtime(
-        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
-    );
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
     FINISH_EDGE_CALLBACKS.store(0, Ordering::SeqCst);
     CALLBACKS_AFTER_EDGE_FINISH.store(0, Ordering::SeqCst);
 

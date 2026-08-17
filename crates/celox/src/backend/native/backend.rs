@@ -161,7 +161,13 @@ unsafe impl Sync for SharedNativeCode {}
 
 impl SharedNativeCode {
     /// Attach a compiler-produced image to the precompiled host runtime.
-    pub fn from_image(program_image: NativeProgramImage) -> Result<Self, SimulatorError> {
+    ///
+    /// # Safety
+    ///
+    /// The image's machine code must come from a trusted source. Structural
+    /// validation and the container checksum detect corruption, but do not
+    /// authenticate code before it is mapped executable and invoked.
+    pub unsafe fn from_image(program_image: NativeProgramImage) -> Result<Self, SimulatorError> {
         program_image.validate().map_err(|message| {
             codegen_message(format!("invalid native program image: {message}"))
         })?;
@@ -258,6 +264,10 @@ impl SharedNativeCode {
     pub fn program_image(&self) -> &NativeProgramImage {
         &self.program_image
     }
+
+    pub(crate) fn supports_forces(&self) -> bool {
+        self.options.native_force_support
+    }
 }
 
 /// One callable function in a packed native code image.
@@ -290,6 +300,7 @@ struct NativeCodeSymbol {
 struct NativeRuntimeOptions {
     four_state: bool,
     native_tick_loop: bool,
+    native_force_support: bool,
     perf_map: bool,
 }
 
@@ -1788,6 +1799,7 @@ fn compile_program(
             options: NativeRuntimeOptions {
                 four_state: options.four_state,
                 native_tick_loop: options.x86_options.native_tick_loop,
+                native_force_support: options.native_force_support,
                 perf_map: options.x86_options.diagnostics.perf_map,
             },
             four_state_inits,
@@ -1912,7 +1924,8 @@ impl NativeBackend {
         options: &SimulatorOptions,
     ) -> Result<Self, SimulatorError> {
         let image = Self::compile_image(laid_out, options)?;
-        let shared = Arc::new(SharedNativeCode::from_image(image)?);
+        // Safety: `image` was produced in-process by the Celox compiler above.
+        let shared = Arc::new(unsafe { SharedNativeCode::from_image(image)? });
         Ok(Self::from_shared(shared))
     }
 
@@ -1921,7 +1934,8 @@ impl NativeBackend {
         options: &SimulatorOptions,
     ) -> Result<(Self, NativeCodegenTrace), SimulatorError> {
         let (image, trace) = compile_program(laid_out, options, true)?;
-        let shared = SharedNativeCode::from_image(image)?;
+        // Safety: `image` was produced in-process by the Celox compiler above.
+        let shared = unsafe { SharedNativeCode::from_image(image)? };
         let backend = Self::from_shared(Arc::new(shared));
         Ok((
             backend,

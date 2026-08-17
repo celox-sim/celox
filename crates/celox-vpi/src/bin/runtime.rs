@@ -20,7 +20,9 @@ fn plugin_path() -> Result<String, String> {
 }
 
 fn run() -> Result<(), String> {
-    let instance = NativeProgramInstance::from_current_executable()
+    // Safety: this runtime executes the image attached to the same trusted
+    // compiler-produced executable artifact.
+    let instance = unsafe { NativeProgramInstance::from_current_executable() }
         .map_err(|error| format!("failed to load attached design: {error}"))?;
     celox_vpi::install_runtime(instance);
 

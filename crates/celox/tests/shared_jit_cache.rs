@@ -11,6 +11,16 @@ use celox::{
     SignalDirection, SimBackend, Simulator,
 };
 
+fn trusted_instance(image: celox::NativeProgramImage) -> NativeProgramInstance {
+    // Safety: tests execute only images produced in-process by the Celox compiler.
+    unsafe { NativeProgramInstance::from_image(image) }.unwrap()
+}
+
+fn trusted_attached_instance(bytes: &[u8]) -> NativeProgramInstance {
+    // Safety: callers pass containers created in-process by these tests.
+    unsafe { NativeProgramInstance::from_attached_bytes(bytes) }.unwrap()
+}
+
 const ADDER: &str = r#"
     module Top (
         a: input logic<8>,
@@ -151,7 +161,8 @@ fn copied_native_image_executes_from_recorded_entry_offset() {
 fn precompiled_runtime_reattaches_pointer_free_program_image() {
     let sim = Simulator::builder(FF, "Top").build().unwrap();
     let image = sim.shared_code().program_image().clone();
-    let reloaded = Arc::new(SharedNativeCode::from_image(image).unwrap());
+    // Safety: the image was produced in-process above.
+    let reloaded = Arc::new(unsafe { SharedNativeCode::from_image(image) }.unwrap());
     let mut backend = NativeBackend::from_shared(reloaded);
     let clock = backend.id_to_event_slice()[0];
     let reset = sim.signal("i_rst");
@@ -192,7 +203,8 @@ fn native_program_image_round_trips_through_appended_runtime() {
         sim.shared_code().program_image().reflection()
     );
 
-    let reloaded = Arc::new(SharedNativeCode::from_image(appended.image).unwrap());
+    // Safety: the attached image was produced in-process above.
+    let reloaded = Arc::new(unsafe { SharedNativeCode::from_image(appended.image) }.unwrap());
     let mut backend = NativeBackend::from_shared(reloaded);
     let clock = backend.id_to_event_slice()[0];
     let reset = sim.signal("i_rst");
@@ -237,7 +249,8 @@ fn native_program_image_carries_source_independent_design_reflection() {
 
     let input = input.signal;
     let output = reflection.signal_by_name("Top.y").unwrap().1.signal;
-    let shared = Arc::new(SharedNativeCode::from_image(image.clone()).unwrap());
+    // Safety: the image was produced in-process above.
+    let shared = Arc::new(unsafe { SharedNativeCode::from_image(image.clone()) }.unwrap());
     let mut backend = NativeBackend::from_shared(shared);
     backend.set(input, 0xa5u8);
     backend.eval_comb().unwrap();
@@ -267,7 +280,7 @@ fn precompiled_runtime_instance_loads_and_runs_attached_bytes_without_source() {
         .unwrap();
     drop(sim);
 
-    let mut runtime = NativeProgramInstance::from_attached_bytes(&attached).unwrap();
+    let mut runtime = trusted_attached_instance(&attached);
     let a = runtime.signal_ref("Top.a").unwrap();
     let b = runtime.signal_ref("Top.b").unwrap();
     let sum = runtime.signal_ref("Top.sum").unwrap();
@@ -277,7 +290,8 @@ fn precompiled_runtime_instance_loads_and_runs_attached_bytes_without_source() {
     assert_eq!(runtime.backend().get_as::<u8>(sum), 127);
 
     assert!(matches!(
-        NativeProgramInstance::from_attached_bytes(b"plain runtime"),
+        // Safety: no image is present, so no machine code can be executed.
+        unsafe { NativeProgramInstance::from_attached_bytes(b"plain runtime") },
         Err(NativeProgramLoadError::MissingImage)
     ));
 }
@@ -303,7 +317,7 @@ fn precompiled_runtime_restores_initial_state_and_settles_outputs() {
     let image = sim.shared_code().program_image().clone();
     drop(sim);
 
-    let runtime = NativeProgramInstance::from_image(image).unwrap();
+    let runtime = trusted_instance(image);
     let output = runtime.signal_ref("Top.out").unwrap();
     assert_eq!(runtime.backend().get_as::<u8>(output), 0x2b);
 }
@@ -326,7 +340,7 @@ fn precompiled_runtime_preserves_comb_runtime_events() {
     let image = sim.shared_code().program_image().clone();
     drop(sim);
 
-    let mut runtime = NativeProgramInstance::from_image(image).unwrap();
+    let mut runtime = trusted_instance(image);
     assert_eq!(
         runtime.drain_runtime_events(),
         vec![celox::RuntimeEvent::Display {
@@ -343,6 +357,17 @@ fn precompiled_runtime_preserves_comb_runtime_events() {
             message: "y=7".to_string(),
         }]
     );
+}
+
+#[test]
+fn ordinary_precompiled_runtime_rejects_force_operations() {
+    let sim = Simulator::builder(ADDER, "Top").build().unwrap();
+    let image = sim.shared_code().program_image().clone();
+    drop(sim);
+
+    let mut runtime = trusted_instance(image);
+    let input = runtime.reflection().signal_by_name("Top.a").unwrap().0;
+    assert!(!runtime.force_signal(input, 7u8.into(), 0u8.into()));
 }
 
 #[test]
@@ -366,7 +391,7 @@ fn forced_comb_runtime_events_preserve_procedural_order() {
     let image = sim.shared_code().program_image().clone();
     drop(sim);
 
-    let mut runtime = NativeProgramInstance::from_image(image).unwrap();
+    let mut runtime = trusted_instance(image);
     runtime.drain_runtime_events();
     let input = runtime.reflection().signal_by_name("Top.a").unwrap().0;
     assert!(runtime.force_signal(input, 7u8.into(), 0u8.into()));
@@ -410,7 +435,7 @@ fn forced_store_does_not_replace_a_shared_rhs_for_other_destinations() {
     let image = sim.shared_code().program_image().clone();
     drop(sim);
 
-    let mut runtime = NativeProgramInstance::from_image(image).unwrap();
+    let mut runtime = trusted_instance(image);
     let input = runtime.reflection().signal_by_name("Top.a").unwrap().0;
     let input = runtime.reflection().signal(input).unwrap().signal;
     let forced = runtime.reflection().signal_by_name("Top.x").unwrap().0;
@@ -440,7 +465,7 @@ fn precompiled_runtime_distinguishes_write_from_display() {
     let image = sim.shared_code().program_image().clone();
     drop(sim);
 
-    let mut runtime = NativeProgramInstance::from_image(image).unwrap();
+    let mut runtime = trusted_instance(image);
     assert_eq!(
         runtime.drain_runtime_events(),
         vec![
@@ -471,7 +496,7 @@ fn precompiled_runtime_reports_fatal_assertions() {
     let image = sim.shared_code().program_image().clone();
     drop(sim);
 
-    let mut runtime = NativeProgramInstance::from_image(image).unwrap();
+    let mut runtime = trusted_instance(image);
     runtime.drain_runtime_events();
     let input = runtime.signal_ref("Top.a").unwrap();
     runtime.backend_mut().set(input, 1u8);
@@ -502,7 +527,7 @@ fn precompiled_runtime_reports_sequential_fatal_assertions() {
     let image = sim.shared_code().program_image().clone();
     drop(sim);
 
-    let mut runtime = NativeProgramInstance::from_image(image).unwrap();
+    let mut runtime = trusted_instance(image);
     runtime.drain_runtime_events();
     let clock = runtime.signal("Top.clk").unwrap().clone();
     runtime.backend_mut().set(clock.signal, 1u8);

@@ -51,9 +51,17 @@ pub struct NativeProgramInstance {
 
 impl NativeProgramInstance {
     /// Attach an already-decoded program image and allocate fresh state.
-    pub fn from_image(image: NativeProgramImage) -> Result<Self, NativeProgramLoadError> {
-        let shared =
-            Arc::new(SharedNativeCode::from_image(image).map_err(NativeProgramLoadError::Attach)?);
+    ///
+    /// # Safety
+    ///
+    /// The image's machine code must come from a trusted source. Image
+    /// validation is structural and does not authenticate executable code.
+    pub unsafe fn from_image(image: NativeProgramImage) -> Result<Self, NativeProgramLoadError> {
+        // Safety: upheld by this constructor's caller.
+        let shared = Arc::new(
+            unsafe { SharedNativeCode::from_image(image) }
+                .map_err(NativeProgramLoadError::Attach)?,
+        );
         let backend = NativeBackend::from_shared(Arc::clone(&shared));
         let mut instance = Self {
             shared,
@@ -71,17 +79,28 @@ impl NativeProgramInstance {
     }
 
     /// Discover a program image appended to arbitrary runtime bytes.
-    pub fn from_attached_bytes(bytes: &[u8]) -> Result<Self, NativeProgramLoadError> {
+    ///
+    /// # Safety
+    ///
+    /// The appended machine code must come from a trusted source. The
+    /// container checksum is not an authenticity check.
+    pub unsafe fn from_attached_bytes(bytes: &[u8]) -> Result<Self, NativeProgramLoadError> {
         let appended = NativeProgramImage::discover_appended(bytes)?
             .ok_or(NativeProgramLoadError::MissingImage)?;
-        Self::from_image(appended.image)
+        // Safety: upheld by this constructor's caller.
+        unsafe { Self::from_image(appended.image) }
     }
 
     /// Discover the program image appended to the running executable.
-    pub fn from_current_executable() -> Result<Self, NativeProgramLoadError> {
+    ///
+    /// # Safety
+    ///
+    /// The running executable and its appended image must be trusted.
+    pub unsafe fn from_current_executable() -> Result<Self, NativeProgramLoadError> {
         let appended = NativeProgramImage::discover_in_current_executable()?
             .ok_or(NativeProgramLoadError::MissingImage)?;
-        Self::from_image(appended.image)
+        // Safety: upheld by this constructor's caller.
+        unsafe { Self::from_image(appended.image) }
     }
 
     /// Elaborated hierarchy and signal metadata embedded by the compiler.
@@ -225,6 +244,9 @@ impl NativeProgramInstance {
         value: BigUint,
         mask: BigUint,
     ) -> bool {
+        if !self.shared.supports_forces() {
+            return false;
+        }
         let Some(identity) = self.signal_identity(id) else {
             return false;
         };

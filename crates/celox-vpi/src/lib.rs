@@ -23,7 +23,7 @@ use celox::{
     BigUint, DomainKind, NativeProgramInstance, NativeSignalIdentity, ReflectionScopeId,
     ReflectionSignalId, RuntimeEvent, SignalDirection, SimBackend,
 };
-use fxhash::FxHashMap as HashMap;
+use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 mod callbacks;
 pub use callbacks::{
@@ -297,7 +297,9 @@ pub fn run_callbacks_result() -> Result<bool, String> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn celox_vpi_load_current_executable() -> i32 {
-    match NativeProgramInstance::from_current_executable() {
+    // Safety: the VPI host only loads the image attached to its own trusted
+    // executable artifact.
+    match unsafe { NativeProgramInstance::from_current_executable() } {
         Ok(instance) => {
             install_runtime(instance);
             1
@@ -1106,19 +1108,28 @@ fn flush_pending_writes() -> bool {
         for (id, value) in &replay_overrides {
             batch.deposits.insert(*id, value.clone());
         }
+        let overridden = replay_overrides.keys().copied().collect::<HashSet<_>>();
         let result: Result<(), celox::RuntimeErrorCode> = with_runtime_mut(|runtime| {
-            apply_pending_deposits(runtime, &batch.deposits);
             let active_edges = batch
                 .signals
                 .into_iter()
                 .filter_map(|identity| {
                     let deposit = batch.deposits.get(&identity)?;
-                    runtime
-                        .reflection()
-                        .signal(deposit.id)
-                        .map(|signal| signal.state_address)
+                    let signal = runtime.reflection().signal(deposit.id)?;
+                    if overridden.contains(&identity) {
+                        let (old_value, old_mask) = runtime.backend().get_four_state(signal.signal);
+                        if !is_active_edge(
+                            signal.domain_kind,
+                            logic_level(&old_value, &old_mask),
+                            logic_level(&deposit.value, &deposit.mask),
+                        ) {
+                            return None;
+                        }
+                    }
+                    Some(signal.state_address)
                 })
                 .collect::<Vec<_>>();
+            apply_pending_deposits(runtime, &batch.deposits);
             runtime.settle_active_edges(&active_edges)
         })
         .unwrap_or(Ok(()));

@@ -4,6 +4,11 @@ use std::{env, fs, path::Path, process::Command};
 
 use celox::{DomainKind, NativeProgramInstance, SimBackend};
 
+fn trusted_attached_instance(bytes: &[u8]) -> NativeProgramInstance {
+    // Safety: every caller passes a runtime compiled in-process by the test.
+    unsafe { NativeProgramInstance::from_attached_bytes(bytes) }.unwrap()
+}
+
 fn python_output(python: &str, arguments: &[&str]) -> String {
     let output = Command::new(python).args(arguments).output().unwrap();
     assert!(
@@ -140,7 +145,7 @@ module Top (
     );
 
     let bytes = fs::read(executable).unwrap();
-    let runtime = NativeProgramInstance::from_attached_bytes(&bytes).unwrap();
+    let runtime = trusted_attached_instance(&bytes);
     assert_eq!(
         runtime.signal("Top.clk").unwrap().domain_kind,
         DomainKind::ClockNegedge
@@ -191,7 +196,7 @@ module Top (
     );
 
     let bytes = fs::read(executable).unwrap();
-    let mut runtime = NativeProgramInstance::from_attached_bytes(&bytes).unwrap();
+    let mut runtime = trusted_attached_instance(&bytes);
     runtime.eval_comb().unwrap();
     let output = runtime.signal_ref("Top.y").unwrap();
     assert_eq!(runtime.backend().get_as::<u8>(output), 0xa5);
@@ -275,7 +280,7 @@ module Top (
     );
 
     let bytes = fs::read(executable).unwrap();
-    let mut runtime = NativeProgramInstance::from_attached_bytes(&bytes).unwrap();
+    let mut runtime = trusted_attached_instance(&bytes);
     let input = runtime.signal_ref("Top.a").unwrap();
     let output = runtime.signal_ref("Top.y").unwrap();
     runtime.backend_mut().set(input, 41u8);
@@ -332,7 +337,7 @@ module Top (
     );
 
     let bytes = fs::read(executable).unwrap();
-    let runtime = NativeProgramInstance::from_attached_bytes(&bytes).unwrap();
+    let runtime = trusted_attached_instance(&bytes);
     let output = runtime.signal_ref("Top.y").unwrap();
     assert_eq!(runtime.backend().get_as::<u8>(output), 42);
 }
