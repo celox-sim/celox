@@ -627,12 +627,22 @@ mod host {
         /// Enable native-image support for foreign force/release operations.
         ///
         /// This emits extra combinational entry points, so ordinary simulator
-        /// builds leave it disabled. Foreign-interface runtimes that require
-        /// force semantics should also compile at O0 to preserve each store
-        /// boundary.
+        /// builds leave it disabled. Enabling it forces SIR O0 at build time so
+        /// every store boundary needed to reapply a force remains intact.
         pub fn native_force_support(mut self, enable: bool) -> Self {
             self.options.native_force_support = enable;
+            self.enforce_native_force_optimizer();
             self
+        }
+
+        fn enforce_native_force_optimizer(&mut self) {
+            if !self.options.native_force_support {
+                return;
+            }
+            let diagnostics = self.options.optimize_options.diagnostics.clone();
+            self.options.optimize_options = crate::optimizer::OptimizeOptions::none();
+            self.options.optimize_options.diagnostics = diagnostics;
+            self.options.dead_store_policy = DeadStorePolicy::Off;
         }
 
         /// Set the overall optimization level. Sets defaults for SIR passes,
@@ -922,7 +932,7 @@ mod host {
         /// along with the remaining builder state.
         /// Consumes self.
         fn into_laid_out_program(
-            self,
+            mut self,
             layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
         ) -> Result<
             (
@@ -934,6 +944,7 @@ mod host {
             ),
             SimulatorError,
         > {
+            self.enforce_native_force_optimizer();
             let phase_timing = self.options.diagnostics.phase_timing;
             let compile_start = phase_timing.then(crate::timing::now);
             let injected_manifests = self.injected_components.manifests();
@@ -1156,7 +1167,8 @@ mod host {
 
         /// Compiles the Veryl source and constructs the core logic simulator,
         /// while capturing compilation trace data as configured by TraceOptions.
-        pub fn build_with_trace(self) -> crate::debug::CompilationTraceResult {
+        pub fn build_with_trace(mut self) -> crate::debug::CompilationTraceResult {
+            self.enforce_native_force_optimizer();
             let mut trace = crate::debug::CompilationTrace::default();
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1299,6 +1311,7 @@ mod host {
         /// Compiles the Veryl source and constructs the timed simulation wrapper.
         pub fn build(mut self) -> Result<crate::Simulation, SimulatorError> {
             self.options.emit_triggers = true;
+            self.enforce_native_force_optimizer();
             #[cfg(any(
                 target_arch = "x86_64",
                 all(target_arch = "aarch64", feature = "experimental-arm64-backend")

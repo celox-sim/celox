@@ -371,6 +371,93 @@ fn ordinary_precompiled_runtime_rejects_force_operations() {
 }
 
 #[test]
+fn force_support_preserves_store_boundaries_at_the_default_opt_level() {
+    let sim = Simulator::builder(
+        r#"
+            module Top (
+                a: input logic<8>,
+                x: output logic<8>,
+                y: output logic<8>,
+            ) {
+                assign x = a;
+                assign y = x;
+            }
+        "#,
+        "Top",
+    )
+    .native_force_support(true)
+    .build()
+    .unwrap();
+    let image = sim.shared_code().program_image().clone();
+    drop(sim);
+
+    let mut runtime = trusted_instance(image);
+    let input = runtime.signal_ref("Top.a").unwrap();
+    let forced = runtime.reflection().signal_by_name("Top.x").unwrap().0;
+    let output = runtime.signal_ref("Top.y").unwrap();
+    assert!(runtime.force_signal(forced, 99u8.into(), 0u8.into()));
+    runtime.backend_mut().set(input, 7u8);
+    runtime.eval_comb().unwrap();
+    assert_eq!(runtime.backend().get_as::<u8>(output), 99);
+}
+
+#[test]
+fn precompiled_runtime_formats_events_with_the_host_time() {
+    let sim = Simulator::builder(
+        r#"
+            module Top () {
+                always_comb {
+                    $display("time=%t");
+                }
+            }
+        "#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let image = sim.shared_code().program_image().clone();
+    drop(sim);
+
+    let mut runtime = trusted_instance(image);
+    assert_eq!(
+        runtime.drain_runtime_events_with_context(celox::RuntimeFormatContext {
+            tb_time: Some(37),
+            scope: None,
+        }),
+        vec![celox::RuntimeEvent::Display {
+            message: "time=37".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn precompiled_runtime_rejects_overwritten_runtime_events() {
+    let sim = Simulator::builder(
+        r#"
+            module Top () {
+                always_comb {
+                    for i in 0..1025 {
+                        $display("event=%0d", i);
+                    }
+                }
+            }
+        "#,
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let image = sim.shared_code().program_image().clone();
+    drop(sim);
+
+    // Safety: the image was produced in-process above.
+    let error = match unsafe { NativeProgramInstance::from_image(image) } {
+        Ok(_) => panic!("overflowed runtime events must reject the image instance"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("missed 1 runtime events"));
+}
+
+#[test]
 fn forced_comb_runtime_events_preserve_procedural_order() {
     let sim = Simulator::builder(
         r#"

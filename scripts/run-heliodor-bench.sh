@@ -37,6 +37,7 @@ readonly GATE_EXPECTED_X3=aa
 # paths global lets the direct-execution EXIT trap clean up an interrupted gate.
 GATE_WORKTREE_REPO=""
 GATE_WORKTREE_ROOT=""
+HELIODOR_FALLBACK_ROOT=""
 
 declare -A BASELINE_ELAPSED_NS=()
 
@@ -898,6 +899,7 @@ prepare() {
             echo "error: could not create a fallback Heliodor directory" >&2
             return 1
         fi
+        HELIODOR_FALLBACK_ROOT="$fallback_root"
         fallback_checkout="$fallback_root/source"
         if ! git clone --quiet "$HELIODOR_REPO" "$fallback_checkout" \
             || ! git -C "$fallback_checkout" checkout --quiet "$HELIODOR_REF"; then
@@ -916,6 +918,18 @@ prepare() {
         return 1
     fi
     echo "Heliodor: $head at $HELIODOR_DIR"
+}
+
+cleanup_heliodor_fallback() {
+    local fallback_root="$HELIODOR_FALLBACK_ROOT"
+    HELIODOR_FALLBACK_ROOT=""
+    if [[ -z "$fallback_root" || ! -d "$fallback_root" ]]; then
+        return
+    fi
+    case "$(basename "$fallback_root")" in
+        heliodor-reclone.*) rm -rf -- "$fallback_root" ;;
+        *) echo "warning: refusing to remove unexpected fallback path: $fallback_root" >&2 ;;
+    esac
 }
 
 installed_veryl_bin() {
@@ -1820,6 +1834,6 @@ main() {
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    trap gate_cleanup_worktrees EXIT
+    trap 'gate_cleanup_worktrees; cleanup_heliodor_fallback' EXIT
     main "$@"
 fi

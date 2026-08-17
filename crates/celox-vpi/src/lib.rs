@@ -21,7 +21,7 @@ use std::{
 
 use celox::{
     BigUint, DomainKind, NativeProgramInstance, NativeSignalIdentity, ReflectionScopeId,
-    ReflectionSignalId, RuntimeEvent, SignalDirection, SimBackend,
+    ReflectionSignalId, RuntimeEvent, RuntimeFormatContext, SignalDirection, SimBackend,
 };
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
@@ -1239,7 +1239,14 @@ fn flush_pending_writes() -> bool {
 }
 
 fn process_runtime_events() {
-    let events = with_runtime_mut(NativeProgramInstance::drain_runtime_events).unwrap_or_default();
+    let time = celox_vpi_current_time();
+    let events = with_runtime_mut(|runtime| {
+        runtime.drain_runtime_events_with_context(RuntimeFormatContext {
+            tb_time: Some(time),
+            scope: None,
+        })
+    })
+    .unwrap_or_default();
     for event in events {
         match event {
             RuntimeEvent::Display { message } => {
@@ -1263,6 +1270,9 @@ fn process_runtime_events() {
                     std::io::stderr().lock(),
                     "celox-vpi: missed {count} runtime events"
                 );
+                callbacks::fail(format!(
+                    "missed {count} runtime events; a fatal assertion may have been overwritten"
+                ));
             }
         }
     }

@@ -214,6 +214,15 @@ impl NativeProgramInstance {
     /// Drain source-independent `$display` and assertion records emitted by
     /// generated code since the preceding call.
     pub fn drain_runtime_events(&mut self) -> Vec<RuntimeEvent> {
+        self.drain_runtime_events_with_context(RuntimeFormatContext::default())
+    }
+
+    /// Drain runtime events while formatting `%t` and `%m` from a host-provided
+    /// simulation context.
+    pub fn drain_runtime_events_with_context(
+        &mut self,
+        context: RuntimeFormatContext<'_>,
+    ) -> Vec<RuntimeEvent> {
         crate::simulator::collect_runtime_events_for_backend(
             &self.backend,
             &self
@@ -222,7 +231,7 @@ impl NativeProgramInstance {
                 .runtime_schema()
                 .runtime_event_sites,
             &mut self.runtime_event_read_seq,
-            RuntimeFormatContext::default(),
+            context,
         )
     }
 
@@ -408,10 +417,12 @@ impl NativeProgramInstance {
         );
         if let Some(message) = events.into_iter().find_map(|event| match event {
             RuntimeEvent::AssertFatal { message } => Some(message),
+            RuntimeEvent::Missed { count } => Some(format!(
+                "missed {count} runtime events; a fatal assertion may have been overwritten"
+            )),
             RuntimeEvent::Display { .. }
             | RuntimeEvent::Write { .. }
-            | RuntimeEvent::AssertContinue { .. }
-            | RuntimeEvent::Missed { .. } => None,
+            | RuntimeEvent::AssertContinue { .. } => None,
         }) {
             return Err(celox_runtime::SimulatorErrorCode::Runtime {
                 message,
