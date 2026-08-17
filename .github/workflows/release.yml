@@ -89,15 +89,24 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: write
-    env:
-      # Queueing an existing PR does not need to trigger another workflow, so
-      # the job-scoped token is sufficient and avoids minting a second app token.
-      GH_TOKEN: ${{ github.token }}
+      contents: read
     steps:
       - uses: actions/checkout@v7
 
+      # An enqueue event created with GITHUB_TOKEN would not start the required
+      # merge_group workflows. Use the release App so queue checks run normally.
+      - name: Create release app token
+        id: release-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+
       - name: Queue the release pull request
         timeout-minutes: 65
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
         run: node scripts/queue-release-pr.mjs

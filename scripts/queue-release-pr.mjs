@@ -141,10 +141,6 @@ export async function queueReleasePullRequest({
     log(`Release pull request #${pullRequest.number} is already queued.`);
     return { outcome: "queued", number: pullRequest.number };
   }
-  if (pullRequest.autoMergeRequest === null) {
-    await github.enableAutoMerge(pullRequest.id);
-    log(`Enabled auto-merge for release pull request #${pullRequest.number}.`);
-  }
 
   const deadline = now() + timeoutMs;
   let lastError = null;
@@ -186,6 +182,20 @@ export async function queueReleasePullRequest({
       lastError = new Error("enqueuePullRequest returned no merge queue entry");
     } catch (error) {
       lastError = error;
+    }
+
+    // A green pull request can be enqueued directly, while GitHub rejects
+    // enablePullRequestAutoMerge once its requirements have already passed.
+    // Only use auto-merge as the fallback that waits for pending requirements.
+    if (pullRequest.autoMergeRequest === null) {
+      try {
+        await github.enableAutoMerge(pullRequest.id);
+        log(`Enabled auto-merge for release pull request #${pullRequest.number}.`);
+      } catch (error) {
+        lastError = new Error(
+          `${lastError?.message ?? "enqueuePullRequest failed"}; enabling auto-merge also failed: ${error.message}`,
+        );
+      }
     }
 
     if (now() >= deadline) {

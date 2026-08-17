@@ -23,7 +23,7 @@ function pullRequest(overrides = {}) {
   };
 }
 
-function fakeGitHub({ candidates = [pullRequest()], states, enqueue }) {
+function fakeGitHub({ candidates = [pullRequest()], states, enqueue, enable }) {
   const calls = [];
   const queuedStates = [...(states ?? [pullRequest()])];
   let lastState = queuedStates.at(-1);
@@ -41,6 +41,7 @@ function fakeGitHub({ candidates = [pullRequest()], states, enqueue }) {
     },
     async enableAutoMerge(id) {
       calls.push(["enable", id]);
+      return enable?.();
     },
     async disableAutoMerge(id) {
       calls.push(["disable", id]);
@@ -81,17 +82,79 @@ test("does nothing when no release pull request is open", async () => {
   assert.deepEqual(github.calls, ["list"]);
 });
 
-test("enables auto-merge and requires an explicit queue entry", async () => {
+test("enqueues a green release before trying to enable auto-merge", async () => {
   const github = fakeGitHub({});
   const result = await queueReleasePullRequest({ github });
   assert.deepEqual(result, { outcome: "queued", number: 388, position: 1 });
   assert.deepEqual(github.calls, [
     "list",
     ["get", "PR_1"],
-    ["enable", "PR_1"],
     ["get", "PR_1"],
     ["enqueue", "PR_1"],
   ]);
+});
+
+test("enables auto-merge after pending requirements reject direct enqueue", async () => {
+  const github = fakeGitHub({
+    states: [
+      pullRequest(),
+      pullRequest(),
+      pullRequest({
+        autoMergeRequest: { enabledAt: "now" },
+        isInMergeQueue: true,
+      }),
+    ],
+    enqueue() {
+      throw new Error("Required checks have not passed");
+    },
+  });
+  let clock = 0;
+  const result = await queueReleasePullRequest({
+    github,
+    timeoutMs: 100,
+    pollIntervalMs: 10,
+    now: () => clock,
+    sleep: async (duration) => {
+      clock += duration;
+    },
+    log() {},
+  });
+  assert.deepEqual(result, { outcome: "queued", number: 388 });
+  assert.deepEqual(github.calls.slice(0, 5), [
+    "list",
+    ["get", "PR_1"],
+    ["get", "PR_1"],
+    ["enqueue", "PR_1"],
+    ["enable", "PR_1"],
+  ]);
+});
+
+test("keeps polling when auto-merge is rejected for a green release", async () => {
+  const github = fakeGitHub({
+    states: [
+      pullRequest(),
+      pullRequest(),
+      pullRequest({ isInMergeQueue: true }),
+    ],
+    enqueue() {
+      throw new Error("Queue entry is not visible yet");
+    },
+    enable() {
+      throw new Error("Pull request is already queueable");
+    },
+  });
+  let clock = 0;
+  const result = await queueReleasePullRequest({
+    github,
+    timeoutMs: 100,
+    pollIntervalMs: 10,
+    now: () => clock,
+    sleep: async (duration) => {
+      clock += duration;
+    },
+    log() {},
+  });
+  assert.deepEqual(result, { outcome: "queued", number: 388 });
 });
 
 test("observes a queue entry created asynchronously", async () => {
