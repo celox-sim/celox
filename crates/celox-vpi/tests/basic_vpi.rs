@@ -178,6 +178,15 @@ const WIDE_FOUR_STATE: &str = r#"
     }
 "#;
 
+const TWO_STATE_VALUES: &str = r#"
+    module Top (
+        a: input bit<4>,
+        y: output bit<4>,
+    ) {
+        assign y = a;
+    }
+"#;
+
 const FATAL_ASSERT: &str = r#"
     module Top (
         a: input logic<8>,
@@ -622,6 +631,98 @@ fn string_separators_delay_flags_and_force_release_follow_vpi_semantics() {
         assert_eq!(vpi_free_object(a), 1);
         assert_eq!(vpi_free_object(y), 1);
         assert_eq!(vpi_free_object(z), 1);
+    }
+    clear_runtime();
+}
+
+#[test]
+fn rejected_force_does_not_leave_vpi_overlay_or_pending_state() {
+    let simulator = Simulator::builder(DESIGN, "Top").build().unwrap();
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
+
+    unsafe {
+        let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        let y = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+        let forced = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 5 },
+        };
+        assert!(
+            vpi_put_value(a, &forced, ptr::null(), VPI_FORCE_FLAG).is_null(),
+            "ordinary images must reject force"
+        );
+
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: -1 },
+        };
+        vpi_get_value(a, &mut value);
+        assert_eq!(value.value.integer, 0);
+        vpi_get_value(y, &mut value);
+        assert_eq!(value.value.integer, 1);
+        assert!(!run_callbacks());
+        vpi_get_value(a, &mut value);
+        assert_eq!(value.value.integer, 0);
+
+        put_int(a, 10);
+        vpi_get_value(y, &mut value);
+        assert_eq!(value.value.integer, 11);
+        for handle in [a, y] {
+            assert_eq!(vpi_free_object(handle), 1);
+        }
+    }
+    clear_runtime();
+}
+
+#[test]
+fn two_state_deposits_and_forces_convert_unknown_bits_to_zero() {
+    let simulator = Simulator::builder(TWO_STATE_VALUES, "Top")
+        .four_state(true)
+        .native_force_support(true)
+        .build()
+        .unwrap();
+    install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ));
+
+    unsafe {
+        let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        let y = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+        let mut word = VpiVecVal {
+            aval: 0b1111,
+            bval: 0b1010,
+        };
+        let mut value = VpiValue {
+            format: VPI_VECTOR_VAL,
+            value: VpiValueData { vector: &mut word },
+        };
+        assert_eq!(vpi_put_value(a, &value, ptr::null(), VPI_NO_DELAY), a);
+        vpi_get_value(y, &mut value);
+        assert_eq!((*value.value.vector).aval, 0b0101);
+        assert_eq!((*value.value.vector).bval, 0);
+
+        word = VpiVecVal {
+            aval: 0b1111,
+            bval: 0b1100,
+        };
+        value.value.vector = &mut word;
+        assert_eq!(vpi_put_value(a, &value, ptr::null(), VPI_FORCE_FLAG), a);
+        vpi_get_value(a, &mut value);
+        assert_eq!((*value.value.vector).aval, 0b0011);
+        assert_eq!((*value.value.vector).bval, 0);
+
+        assert_eq!(
+            vpi_put_value(a, ptr::null(), ptr::null(), VPI_RELEASE_FLAG),
+            a
+        );
+        vpi_get_value(y, &mut value);
+        assert_eq!((*value.value.vector).aval, 0b0101);
+        assert_eq!((*value.value.vector).bval, 0);
+        for handle in [a, y] {
+            assert_eq!(vpi_free_object(handle), 1);
+        }
     }
     clear_runtime();
 }

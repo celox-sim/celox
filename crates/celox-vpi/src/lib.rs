@@ -1047,14 +1047,14 @@ pub unsafe extern "C" fn vpi_put_value(
         };
     }
 
-    let width = with_runtime(|runtime| {
+    let signal_info = with_runtime(|runtime| {
         runtime
             .reflection()
             .signal(id)
-            .map(|signal| signal.signal.width)
+            .map(|signal| (signal.signal.width, signal.signal.is_4state))
     })
     .flatten();
-    let Some(width) = width else {
+    let Some((width, is_4state)) = signal_info else {
         return ptr::null_mut();
     };
     // Safety: value follows the VPI value contract.
@@ -1067,9 +1067,14 @@ pub unsafe extern "C" fn vpi_put_value(
     } else {
         let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
         bits &= &width_mask;
-        mask &= width_mask;
+        mask &= &width_mask;
+        if !is_4state {
+            let known_bits = &width_mask ^ &mask;
+            bits &= known_bits;
+            mask = 0u8.into();
+        }
     }
-    if flags == VPI_FORCE_FLAG {
+    let force_deposited = if flags == VPI_FORCE_FLAG {
         let deposited = FORCED_VALUES
             .with_borrow(|forced| {
                 forced.get(&identity).map(|forced| {
@@ -1089,17 +1094,7 @@ pub unsafe extern "C" fn vpi_put_value(
         let Some((deposited_value, deposited_mask)) = deposited else {
             return ptr::null_mut();
         };
-        FORCED_VALUES.with_borrow_mut(|forced| {
-            forced.insert(
-                identity,
-                ForcedValue {
-                    value: bits.clone(),
-                    mask: mask.clone(),
-                    deposited_value,
-                    deposited_mask,
-                },
-            );
-        });
+        Some((deposited_value, deposited_mask))
     } else if FORCED_VALUES.with_borrow_mut(|forced| {
         forced.get_mut(&identity).is_some_and(|forced| {
             forced.deposited_value = bits.clone();
@@ -1108,7 +1103,9 @@ pub unsafe extern "C" fn vpi_put_value(
         })
     }) {
         return reference;
-    }
+    } else {
+        None
+    };
     let succeeded = with_runtime_mut(|runtime| {
         let Some(signal) = runtime.reflection().signal(id).cloned() else {
             return false;
@@ -1116,6 +1113,15 @@ pub unsafe extern "C" fn vpi_put_value(
         let (old_value, old_mask) = runtime.backend().get_four_state(signal.signal);
         let old_level = logic_level(&old_value, &old_mask);
         let new_level = logic_level(&bits, &mask);
+        if flags == VPI_FORCE_FLAG {
+            if !runtime.force_signal(id, bits.clone(), mask.clone()) {
+                return false;
+            }
+        } else {
+            runtime
+                .backend_mut()
+                .set_four_state(signal.signal, bits.clone(), mask.clone());
+        }
         PENDING_WRITES.with_borrow_mut(|pending| {
             record_pending_write(
                 pending,
@@ -1128,16 +1134,24 @@ pub unsafe extern "C" fn vpi_put_value(
                 new_level,
             );
         });
-        if flags == VPI_FORCE_FLAG {
-            runtime.force_signal(id, bits, mask)
-        } else {
-            runtime
-                .backend_mut()
-                .set_four_state(signal.signal, bits, mask);
-            true
-        }
+        true
     })
     .unwrap_or(false);
+    if succeeded {
+        if let Some((deposited_value, deposited_mask)) = force_deposited {
+            FORCED_VALUES.with_borrow_mut(|forced| {
+                forced.insert(
+                    identity,
+                    ForcedValue {
+                        value: bits,
+                        mask,
+                        deposited_value,
+                        deposited_mask,
+                    },
+                );
+            });
+        }
+    }
     let succeeded = succeeded && (callbacks::is_running() || flush_pending_writes());
     if succeeded {
         reference
