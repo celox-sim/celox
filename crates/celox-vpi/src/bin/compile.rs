@@ -51,7 +51,7 @@ fn run() -> Result<(), String> {
         let mut metadata = Metadata::load(&metadata_path)
             .map_err(|error| format!("failed to load {}: {error}", metadata_path.display()))?;
         let paths = metadata
-            .paths::<&std::path::Path>(&[], false, false)
+            .paths::<&std::path::Path>(&[], false, true)
             .map_err(|error| format!("failed to discover project sources: {error}"))?;
         let sources = paths
             .into_iter()

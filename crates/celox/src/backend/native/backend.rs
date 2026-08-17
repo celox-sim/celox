@@ -30,9 +30,12 @@ use super::{emit, jit_mem, regalloc};
 
 const NATIVE_FEATURE_BMI2: u8 = 1 << 0;
 const NATIVE_FEATURE_AVX: u8 = 1 << 1;
-const NATIVE_FEATURE_FSGSBASE: u8 = 1 << 2;
-const KNOWN_NATIVE_FEATURES: u8 =
-    NATIVE_FEATURE_BMI2 | NATIVE_FEATURE_AVX | NATIVE_FEATURE_FSGSBASE;
+const NATIVE_FEATURE_FS_STATE_BASE: u8 = 1 << 2;
+const NATIVE_FEATURE_GS_STATE_BASE: u8 = 1 << 3;
+const KNOWN_NATIVE_FEATURES: u8 = NATIVE_FEATURE_BMI2
+    | NATIVE_FEATURE_AVX
+    | NATIVE_FEATURE_FS_STATE_BASE
+    | NATIVE_FEATURE_GS_STATE_BASE;
 
 fn current_native_feature_bits() -> u8 {
     #[cfg(target_arch = "x86_64")]
@@ -53,8 +56,11 @@ fn format_native_feature_bits(bits: u8) -> String {
     if bits & NATIVE_FEATURE_AVX != 0 {
         names.push("AVX");
     }
-    if bits & NATIVE_FEATURE_FSGSBASE != 0 {
-        names.push("FSGSBASE");
+    if bits & NATIVE_FEATURE_FS_STATE_BASE != 0 {
+        names.push("FS state base");
+    }
+    if bits & NATIVE_FEATURE_GS_STATE_BASE != 0 {
+        names.push("GS state base");
     }
     names.join(", ")
 }

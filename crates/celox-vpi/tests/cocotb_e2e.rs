@@ -2,7 +2,7 @@
 
 use std::{env, fs, path::Path, process::Command};
 
-use celox::{DomainKind, NativeProgramInstance};
+use celox::{DomainKind, NativeProgramInstance, SimBackend};
 
 fn python_output(python: &str, arguments: &[&str]) -> String {
     let output = Command::new(python).args(arguments).output().unwrap();
@@ -148,4 +148,90 @@ module Top (
         runtime.signal("Top.rst").unwrap().domain_kind,
         DomainKind::ResetAsyncHigh
     );
+}
+
+#[test]
+fn compile_includes_project_dependency_sources() {
+    let temporary = tempfile::tempdir().unwrap();
+    let dependency = temporary.path().join("dependency");
+    let dependency_src = dependency.join("src");
+    let root = temporary.path().join("root");
+    let root_src = root.join("src");
+    fs::create_dir_all(&dependency_src).unwrap();
+    fs::create_dir_all(&root_src).unwrap();
+    fs::write(
+        dependency.join("Veryl.toml"),
+        r#"
+[project]
+name = "dependency"
+version = "0.1.0"
+
+[build]
+sources = ["src"]
+"#,
+    )
+    .unwrap();
+    fs::write(
+        dependency_src.join("dep.veryl"),
+        r#"
+pub module Dep (
+    a: input logic<8>,
+    y: output logic<8>,
+) {
+    assign y = a + 1;
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("Veryl.toml"),
+        r#"
+[project]
+name = "root"
+version = "0.1.0"
+
+[build]
+sources = ["src"]
+
+[dependencies]
+dep = { path = "../dependency" }
+"#,
+    )
+    .unwrap();
+    let source = root_src.join("top.veryl");
+    fs::write(
+        &source,
+        r#"
+module Top (
+    a: input logic<8>,
+    y: output logic<8>,
+) {
+    inst u_dep: dep::Dep (a, y);
+}
+"#,
+    )
+    .unwrap();
+
+    let executable = temporary.path().join("dependency-sim");
+    let compile = Command::new(env!("CARGO_BIN_EXE_celox-vpi-compile"))
+        .arg(&source)
+        .args(["--top", "Top", "--runtime"])
+        .arg(env!("CARGO_BIN_EXE_celox-vpi-runtime"))
+        .arg("--output")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "native compilation failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let bytes = fs::read(executable).unwrap();
+    let mut runtime = NativeProgramInstance::from_attached_bytes(&bytes).unwrap();
+    let input = runtime.signal_ref("Top.a").unwrap();
+    let output = runtime.signal_ref("Top.y").unwrap();
+    runtime.backend_mut().set(input, 41u8);
+    runtime.eval_comb().unwrap();
+    assert_eq!(runtime.backend().get_as::<u8>(output), 42);
 }

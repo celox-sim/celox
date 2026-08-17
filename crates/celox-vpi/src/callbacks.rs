@@ -224,9 +224,10 @@ pub(super) fn run() -> bool {
     STATE.with_borrow_mut(|state| state.running = true);
     fire_all(CB_START_OF_SIMULATION);
     let mut iterations = 0usize;
-    loop {
+    'scheduler: loop {
         iterations += 1;
         if iterations > 1_000_000 {
+            fail("VPI callback scheduler exceeded 1000000 iterations".to_string());
             break;
         }
 
@@ -234,7 +235,9 @@ pub(super) fn run() -> bool {
         for id in due_ids() {
             progressed |= fire(id);
         }
-        super::flush_pending_writes();
+        if !super::flush_pending_writes() {
+            break;
+        }
         loop {
             let changed = changed_value_ids();
             if !changed.is_empty() {
@@ -242,7 +245,7 @@ pub(super) fn run() -> bool {
                     progressed |= fire(id);
                 }
                 if !super::flush_pending_writes() {
-                    break;
+                    break 'scheduler;
                 }
                 continue;
             }
@@ -252,7 +255,7 @@ pub(super) fn run() -> bool {
                     progressed |= fire(id);
                 }
                 if !super::flush_pending_writes() {
-                    break;
+                    break 'scheduler;
                 }
                 continue;
             }

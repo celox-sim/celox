@@ -120,6 +120,16 @@ const WIDE_FOUR_STATE: &str = r#"
     }
 "#;
 
+const FATAL_ASSERT: &str = r#"
+    module Top (
+        a: input logic<8>,
+    ) {
+        always_comb {
+            $assert(a != 8'd1, "fatal a=%0d", a);
+        }
+    }
+"#;
+
 #[test]
 fn value_layout_matches_vpi_user_header() {
     assert_eq!(std::mem::size_of::<VpiVecVal>(), 8);
@@ -422,6 +432,7 @@ static READ_ONLY_VALUE: AtomicI32 = AtomicI32::new(-1);
 static SELF_CHANGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static SELF_CHANGE_VALUE: AtomicI32 = AtomicI32::new(-1);
 static REGION_ORDER: AtomicUsize = AtomicUsize::new(0);
+static FATAL_PHASES: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" fn record_changed_value(data: *mut VpiCbData) -> i32 {
     // Safety: callback storage and its requested value are live while firing.
@@ -500,6 +511,47 @@ unsafe extern "C" fn record_value_change_region(_data: *mut VpiCbData) -> i32 {
         user_data: ptr::null_mut(),
     };
     assert!(!unsafe { vpi_register_cb(&read_write) }.is_null());
+    0
+}
+
+unsafe extern "C" fn record_fatal_phase(data: *mut VpiCbData) -> i32 {
+    // Safety: callback storage remains live while the runtime invokes it.
+    let reason = unsafe { (*data).reason };
+    let bit = match reason {
+        CB_VALUE_CHANGE => 1,
+        CB_READ_WRITE_SYNCH => 2,
+        CB_READ_ONLY_SYNCH => 4,
+        _ => unreachable!(),
+    };
+    FATAL_PHASES.fetch_or(bit, Ordering::SeqCst);
+    0
+}
+
+unsafe extern "C" fn trigger_fatal_and_register_phases(data: *mut VpiCbData) -> i32 {
+    // Safety: the callback object is the live signal handle supplied below.
+    let signal = unsafe { (*data).obj };
+    let value_change = VpiCbData {
+        reason: CB_VALUE_CHANGE,
+        cb_rtn: Some(record_fatal_phase),
+        obj: signal,
+        time: ptr::null_mut(),
+        value: ptr::null_mut(),
+        index: 0,
+        user_data: ptr::null_mut(),
+    };
+    let read_write = VpiCbData {
+        reason: CB_READ_WRITE_SYNCH,
+        obj: ptr::null_mut(),
+        ..value_change
+    };
+    let read_only = VpiCbData {
+        reason: CB_READ_ONLY_SYNCH,
+        ..read_write
+    };
+    assert!(!unsafe { vpi_register_cb(&value_change) }.is_null());
+    assert!(!unsafe { vpi_register_cb(&read_write) }.is_null());
+    assert!(!unsafe { vpi_register_cb(&read_only) }.is_null());
+    unsafe { put_int(signal, 1) };
     0
 }
 
@@ -651,6 +703,40 @@ fn value_change_precedes_read_write_and_read_only_regions() {
         assert_eq!(vpi_remove_cb(value_change_handle), 1);
         assert_eq!(vpi_free_object(a), 1);
         assert_eq!(vpi_free_object(y), 1);
+    }
+    clear_runtime();
+}
+
+#[test]
+fn fatal_settle_stops_remaining_callback_phases() {
+    let simulator = Simulator::builder(FATAL_ASSERT, "Top").build().unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+    FATAL_PHASES.store(0, Ordering::SeqCst);
+
+    unsafe {
+        let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
+        let mut delay = VpiTime {
+            type_: 2,
+            high: 0,
+            low: 1,
+            real: 0.0,
+        };
+        let delayed = VpiCbData {
+            reason: CB_AFTER_DELAY,
+            cb_rtn: Some(trigger_fatal_and_register_phases),
+            obj: a,
+            time: &mut delay,
+            value: ptr::null_mut(),
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        assert!(!vpi_register_cb(&delayed).is_null());
+
+        let error = run_callbacks_result().unwrap_err();
+        assert!(error.contains("fatal a=1"));
+        assert_eq!(FATAL_PHASES.load(Ordering::SeqCst), 0);
     }
     clear_runtime();
 }

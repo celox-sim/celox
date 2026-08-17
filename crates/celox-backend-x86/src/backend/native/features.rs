@@ -16,7 +16,7 @@ pub(crate) enum StateBaseStrategy {
     R15,
     /// Borrow the FS base while generated code is running.
     #[cfg_attr(
-        not(all(target_os = "windows", target_arch = "x86_64")),
+        not(any(all(target_os = "windows", target_arch = "x86_64"), test)),
         expect(dead_code, reason = "constructed by Windows x86-64 target detection")
     )]
     Fs,
@@ -117,11 +117,15 @@ impl X86Features {
 
 /// Feature bits required by machine code emitted on this host.
 pub fn detected_image_feature_bits() -> u8 {
+    image_feature_bits(X86Features::detect())
+}
+
+fn image_feature_bits(features: X86Features) -> u8 {
     const BMI2: u8 = 1 << 0;
     const AVX: u8 = 1 << 1;
-    const FSGSBASE: u8 = 1 << 2;
+    const FS_STATE_BASE: u8 = 1 << 2;
+    const GS_STATE_BASE: u8 = 1 << 3;
 
-    let features = X86Features::detect();
     let mut bits = 0;
     if features.bmi2() {
         bits |= BMI2;
@@ -129,11 +133,10 @@ pub fn detected_image_feature_bits() -> u8 {
     if features.avx() {
         bits |= AVX;
     }
-    if matches!(
-        features.state_base(),
-        StateBaseStrategy::Fs | StateBaseStrategy::Gs
-    ) {
-        bits |= FSGSBASE;
+    match features.state_base() {
+        StateBaseStrategy::Fs => bits |= FS_STATE_BASE,
+        StateBaseStrategy::Gs => bits |= GS_STATE_BASE,
+        StateBaseStrategy::R15 => {}
     }
     bits
 }
@@ -181,4 +184,29 @@ fn detect_state_base_strategy() -> StateBaseStrategy {
 )))]
 const fn detect_state_base_strategy() -> StateBaseStrategy {
     StateBaseStrategy::R15
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_features_distinguish_fs_and_gs_state_bases() {
+        let fs = image_feature_bits(X86Features::for_test_with_state_base(
+            false,
+            StateBaseStrategy::Fs,
+        ));
+        let gs = image_feature_bits(X86Features::for_test_with_state_base(
+            false,
+            StateBaseStrategy::Gs,
+        ));
+        let r15 = image_feature_bits(X86Features::for_test_with_state_base(
+            false,
+            StateBaseStrategy::R15,
+        ));
+
+        assert_ne!(fs, gs);
+        assert_ne!(fs, r15);
+        assert_ne!(gs, r15);
+    }
 }
