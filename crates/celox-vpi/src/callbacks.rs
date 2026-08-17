@@ -122,7 +122,11 @@ fn callback_delay(data: &VpiCbData) -> u64 {
     // Safety: VPI registration requires the time pointer to remain readable
     // until registration returns; the value is copied here immediately.
     let time = unsafe { &*data.time };
-    (u64::from(time.high) << 32) | u64::from(time.low)
+    if time.type_ == VPI_SCALED_REAL_TIME {
+        time.real.round() as u64
+    } else {
+        (u64::from(time.high) << 32) | u64::from(time.low)
+    }
 }
 
 fn registration_ids(reason: i32) -> Vec<u64> {

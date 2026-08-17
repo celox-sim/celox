@@ -38,7 +38,6 @@ use veryl_analyzer::ir::{
 };
 use veryl_analyzer::value::Value;
 use veryl_analyzer::value::byte_value_to_string;
-use veryl_analyzer::{symbol::SymbolKind, symbol_table};
 use veryl_parser::resource_table::StrId;
 
 pub struct ModuleParser<'a> {
@@ -52,8 +51,6 @@ pub struct ModuleParser<'a> {
     comb_runtime_event_sites: Vec<RuntimeEventSite>,
     comb_boundaries: HashMap<VarId, BTreeSet<usize>>,
     glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
-    indexed_instance_names: HashSet<StrId>,
-    module_namespace: Option<veryl_analyzer::namespace::Namespace>,
     initial_memory_values: Vec<ModuleInitialMemoryValue>,
     ff_parser: FfParser<'a>,
     arena: SLTNodeArena<VarId>,
@@ -981,9 +978,6 @@ impl<'a> ModuleParser<'a> {
         config: &BuildConfig,
         inst_ids: &'a [ModuleId],
     ) -> Result<Self, ParserError> {
-        let module_namespace = symbol_table::resolve(&module.token.beg)
-            .ok()
-            .map(|symbol| symbol.found.inner_namespace());
         Ok(Self {
             module,
             inst_ids,
@@ -995,8 +989,6 @@ impl<'a> ModuleParser<'a> {
             comb_runtime_event_sites: Vec::new(),
             comb_boundaries: HashMap::default(),
             glue_blocks: HashMap::default(),
-            indexed_instance_names: HashSet::default(),
-            module_namespace,
             initial_memory_values: Vec::new(),
             ff_parser: FfParser::new(module, *config),
             arena: SLTNodeArena::new(),
@@ -1102,27 +1094,6 @@ impl<'a> ModuleParser<'a> {
         decl: &InstDeclaration,
         module_id: ModuleId,
     ) -> Result<(), ParserError> {
-        let explicitly_indexed = self
-            .module_namespace
-            .as_ref()
-            .is_some_and(|module_namespace| {
-                let mut namespace = module_namespace.clone();
-                for segment in &decl.hierarchy {
-                    namespace.push(*segment);
-                }
-                symbol_table::resolve((decl.name, &namespace))
-                    .ok()
-                    .is_some_and(|symbol| {
-                        matches!(
-                            &symbol.found.kind,
-                            SymbolKind::Instance(property) if !property.array.is_empty()
-                        )
-                    })
-            });
-        if explicitly_indexed {
-            self.indexed_instance_names.insert(decl.name);
-        }
-
         if let Component::SystemVerilog(system_verilog) = &*decl.component {
             return Err(ParserError::unsupported(
                 64,
@@ -2014,7 +1985,7 @@ impl<'a> ModuleParser<'a> {
             variables: self.module.variables.clone(),
             name: self.module.name,
             glue_blocks: self.glue_blocks,
-            indexed_instance_names: self.indexed_instance_names,
+            indexed_instance_names: HashSet::default(),
             ff_access_summaries,
             eval_only_ff_blocks,
             apply_ff_blocks,

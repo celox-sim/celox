@@ -989,12 +989,21 @@ pub unsafe extern "C" fn vpi_put_value(
             .map(|signal| (signal.signal.width, signal.signed))
     })
     .flatten();
-    // Safety: value follows the VPI value contract.
-    let Some((bits, mask)) =
-        signal_info.and_then(|(width, signed)| unsafe { decode_value(value, width, signed) })
-    else {
+    let Some((width, signed)) = signal_info else {
         return ptr::null_mut();
     };
+    // Safety: value follows the VPI value contract.
+    let Some((mut bits, mut mask)) = (unsafe { decode_value(value, width, signed) }) else {
+        return ptr::null_mut();
+    };
+    if width == 0 {
+        bits = 0u8.into();
+        mask = 0u8.into();
+    } else {
+        let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        bits &= &width_mask;
+        mask &= width_mask;
+    }
     if flags == VPI_FORCE_FLAG {
         let deposited = FORCED_VALUES
             .with_borrow(|forced| {

@@ -136,6 +136,7 @@ fn analyze(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
+    recover_comb_loops: bool,
 ) -> (
     Result<OptimizedSir, ParserError>,
     Vec<AnalyzerError>,
@@ -227,7 +228,14 @@ fn analyze(
     } else {
         celox_frontend_veryl::check_dynamic_for_bounds(&ir)
     };
-    let loop_provenance = loop_sources.match_unrolled(&ir);
+    // Force-capable native images reapply an override after each static store.
+    // Keep analyzer-unrolled loops expanded for that mode so one compiled
+    // entry cannot execute the same store across multiple iterations.
+    let loop_provenance = if recover_comb_loops {
+        loop_sources.match_unrolled(&ir)
+    } else {
+        Default::default()
+    };
 
     let top = veryl_parser::resource_table::insert_str(top);
     let mut build_config = BuildConfig::from(&metadata.build);
@@ -301,6 +309,7 @@ pub fn compile_to_sir(
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
+        true,
     )
 }
 
@@ -326,6 +335,7 @@ fn compile_to_sir_with_layout_mode(
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+    recover_comb_loops: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics) = analyze(
         sources,
@@ -342,6 +352,7 @@ fn compile_to_sir_with_layout_mode(
         optimize_options,
         diagnostics,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+        recover_comb_loops,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -848,6 +859,7 @@ mod host {
                 &self.options.optimize_options,
                 &self.options.diagnostics,
                 layout_mode,
+                !self.options.native_force_support,
             )?;
             if let Some(start) = compile_start {
                 tracing::debug!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
@@ -1071,6 +1083,7 @@ mod host {
                 &self.options.optimize_options,
                 &self.options.diagnostics,
                 layout_mode,
+                !self.options.native_force_support,
             );
 
             let sim_res = program_res.and_then(|(program, warnings)| {
@@ -1206,6 +1219,7 @@ mod host {
                 &self.options.optimize_options,
                 &self.options.diagnostics,
                 layout_mode,
+                !self.options.native_force_support,
             )?;
             let mut laid_out =
                 program.into_laid_out_with_mode(self.options.four_state, layout_mode);

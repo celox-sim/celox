@@ -120,6 +120,7 @@ module Top (
         }
     }
 }
+
 "#,
     )
     .unwrap();
@@ -148,6 +149,52 @@ module Top (
         runtime.signal("Top.rst").unwrap().domain_kind,
         DomainKind::ResetAsyncHigh
     );
+}
+
+#[test]
+fn compile_resolves_standalone_readmem_relative_to_the_source() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source_dir = temporary.path().join("standalone");
+    fs::create_dir(&source_dir).unwrap();
+    fs::write(source_dir.join("mem.hex"), "a5\n5a\n").unwrap();
+    let source = source_dir.join("top.veryl");
+    fs::write(
+        &source,
+        r#"
+module Top (
+    y: output logic<8>,
+) {
+    var mem: logic<8> [2];
+    initial {
+        $readmemh("mem.hex", mem);
+    }
+    assign y = mem[0];
+}
+"#,
+    )
+    .unwrap();
+
+    let executable = temporary.path().join("standalone-sim");
+    let compile = Command::new(env!("CARGO_BIN_EXE_celox-vpi-compile"))
+        .arg(&source)
+        .args(["--top", "Top", "--runtime"])
+        .arg(env!("CARGO_BIN_EXE_celox-vpi-runtime"))
+        .arg("--output")
+        .arg(&executable)
+        .current_dir(temporary.path())
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "native compilation failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+
+    let bytes = fs::read(executable).unwrap();
+    let mut runtime = NativeProgramInstance::from_attached_bytes(&bytes).unwrap();
+    runtime.eval_comb().unwrap();
+    let output = runtime.signal_ref("Top.y").unwrap();
+    assert_eq!(runtime.backend().get_as::<u8>(output), 0xa5);
 }
 
 #[test]

@@ -75,11 +75,14 @@ fn run() -> Result<(), String> {
     } else {
         let source = std::fs::read_to_string(&arguments.source)
             .map_err(|error| format!("failed to read {}: {error}", arguments.source.display()))?;
-        Simulator::builder(&source, &arguments.top)
-            .four_state(true)
-            .native_force_support(true)
-            .opt_level(celox::OptLevel::O0)
-            .build()
+        Simulator::from_sources(
+            vec![(source.as_str(), arguments.source.as_path())],
+            &arguments.top,
+        )
+        .four_state(true)
+        .native_force_support(true)
+        .opt_level(celox::OptLevel::O0)
+        .build()
     }
     .map_err(|error| format!("compilation failed: {error:?}"))?;
     simulator

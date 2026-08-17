@@ -1,5 +1,6 @@
 use celox_design::ModuleId;
 use veryl_analyzer::ir::{Component, Declaration, Module, VarKind};
+use veryl_analyzer::{symbol::SymbolKind, symbol_table};
 use veryl_parser::resource_table::{self, StrId};
 
 use crate::{
@@ -33,6 +34,16 @@ pub fn parse_ir_with_loop_provenance<'a>(
     config: &BuildConfig,
     top: &StrId,
 ) -> Result<SymbolicRtl<'a>, ParserError> {
+    // Token-to-scope resolution uses process-global analyzer state and is not
+    // safe while independent compilations run on other test threads. Snapshot
+    // the thread-local symbols once for hierarchy-bearing designs instead.
+    // Designs without instances avoid this work entirely; this is the common
+    // path for small compilation benchmarks.
+    let has_instances = ir.components.iter().any(|component| {
+        matches!(component, Component::Module(module) if module.declarations.iter().any(|declaration| matches!(declaration, Declaration::Inst(_))))
+    });
+    let symbols = has_instances.then(symbol_table::get_all);
+
     let mut name_to_ir: HashMap<StrId, &'a Module> = HashMap::default();
     let mut generic_names: HashSet<StrId> = HashSet::default();
     for component in &ir.components {
@@ -144,8 +155,29 @@ pub fn parse_ir_with_loop_provenance<'a>(
             .get(module_id)
             .map(Vec::as_slice)
             .unwrap_or_default();
-        let sim_module =
+        let mut sim_module =
             ModuleParser::parse_with_loop_provenance(ir_module, loop_provenance, config, inst_ids)?;
+        if let Some(symbols) = &symbols
+            && let Some(module_symbol) = symbols.iter().find(|symbol| {
+                matches!(symbol.kind, SymbolKind::Module(_))
+                    && symbol.token.text == ir_module.name
+                    && symbol.token.source == ir_module.token.beg.source
+            })
+        {
+            let module_namespace = module_symbol.inner_namespace();
+            sim_module.indexed_instance_names = symbols
+                .iter()
+                .filter_map(|symbol| match &symbol.kind {
+                    SymbolKind::Instance(property)
+                        if !property.array.is_empty()
+                            && symbol.namespace.included(&module_namespace) =>
+                    {
+                        Some(symbol.token.text)
+                    }
+                    _ => None,
+                })
+                .collect();
+        }
         modules.insert(*module_id, sim_module);
     }
 

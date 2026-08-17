@@ -105,6 +105,35 @@ const BRANCHED_COMB: &str = r#"
     }
 "#;
 
+const ORDERED_BRANCHED_COMB: &str = r#"
+    module Top (
+        sel: input logic,
+        y: output logic<8>,
+    ) {
+        always_comb {
+            y = 1;
+            if sel {
+                y = 2;
+            }
+        }
+    }
+"#;
+
+const LOOPED_COMB: &str = r#"
+    module Top (
+        x: output logic<8>,
+        total: output logic<8>,
+    ) {
+        always_comb {
+            total = 0;
+            for i in 0..4 {
+                x = 1;
+                total += x;
+            }
+        }
+    }
+"#;
+
 const ALIASED_CLOCK: &str = r#"
     module Child (
         clk: input clock,
@@ -215,10 +244,10 @@ fn callback_runtime_advances_time_and_finishes_regions() {
 
     let mut start_time = VpiTime::default();
     let mut delay_time = VpiTime {
-        type_: 2,
-        high: 0,
-        low: 5,
-        real: 0.0,
+        type_: VPI_SCALED_REAL_TIME,
+        high: u32::MAX,
+        low: u32::MAX,
+        real: 5.0,
     };
     let mut end_time = VpiTime::default();
     let start = VpiCbData {
@@ -468,6 +497,75 @@ fn force_is_reapplied_between_stores_in_branched_comb_logic() {
         for handle in [sel, a, b, y, z] {
             assert_eq!(vpi_free_object(handle), 1);
         }
+    }
+    clear_runtime();
+}
+
+#[test]
+fn force_split_preserves_procedural_order_across_branches() {
+    let simulator = Simulator::builder(ORDERED_BRANCHED_COMB, "Top")
+        .opt_level(celox::OptLevel::O0)
+        .native_force_support(true)
+        .build()
+        .unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+
+    unsafe {
+        let sel = vpi_handle_by_name(c"Top.sel".as_ptr(), ptr::null_mut());
+        let y = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+        let forced = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 1 },
+        };
+        assert_eq!(
+            vpi_put_value(sel, &forced, ptr::null(), VPI_FORCE_FLAG),
+            sel
+        );
+
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        vpi_get_value(y, &mut value);
+        assert_eq!(value.value.integer, 2);
+
+        assert_eq!(vpi_free_object(sel), 1);
+        assert_eq!(vpi_free_object(y), 1);
+    }
+    clear_runtime();
+}
+
+#[test]
+fn force_is_reapplied_between_unrolled_loop_iterations() {
+    let simulator = Simulator::builder(LOOPED_COMB, "Top")
+        .opt_level(celox::OptLevel::O0)
+        .native_force_support(true)
+        .build()
+        .unwrap();
+    install_runtime(
+        NativeProgramInstance::from_image(simulator.shared_code().program_image().clone()).unwrap(),
+    );
+
+    unsafe {
+        let x = vpi_handle_by_name(c"Top.x".as_ptr(), ptr::null_mut());
+        let total = vpi_handle_by_name(c"Top.total".as_ptr(), ptr::null_mut());
+        let forced = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 3 },
+        };
+        assert_eq!(vpi_put_value(x, &forced, ptr::null(), VPI_FORCE_FLAG), x);
+
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        vpi_get_value(total, &mut value);
+        assert_eq!(value.value.integer, 12);
+
+        assert_eq!(vpi_free_object(x), 1);
+        assert_eq!(vpi_free_object(total), 1);
     }
     clear_runtime();
 }
@@ -915,6 +1013,29 @@ fn signed_integer_deposits_and_z_values_round_trip() {
         };
         vpi_get_value(four_out, &mut string);
         assert_eq!(CStr::from_ptr(string.value.str_), c"z01x");
+
+        let mut forced_word = VpiVecVal {
+            aval: 0x1f,
+            bval: 0x10,
+        };
+        let forced = VpiValue {
+            format: VPI_VECTOR_VAL,
+            value: VpiValueData {
+                vector: &mut forced_word,
+            },
+        };
+        assert_eq!(
+            vpi_put_value(four_in, &forced, ptr::null(), VPI_FORCE_FLAG),
+            four_in
+        );
+        vpi_get_value(four_in, &mut vector);
+        let forced_word = &*vector.value.vector;
+        assert_eq!(forced_word.aval, 0x0f);
+        assert_eq!(forced_word.bval, 0);
+        assert_eq!(
+            vpi_put_value(four_in, ptr::null(), ptr::null(), VPI_RELEASE_FLAG),
+            four_in
+        );
 
         for handle in [
             signed_in,

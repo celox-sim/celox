@@ -1076,6 +1076,29 @@ fn instruction_registers<A>(instruction: &SIRInstruction<A>) -> Vec<RegisterId> 
     registers
 }
 
+fn comb_block_execution_order<A>(unit: &ExecutionUnit<A>) -> Vec<BlockId> {
+    fn visit<A>(
+        unit: &ExecutionUnit<A>,
+        block_id: BlockId,
+        visited: &mut HashSet<BlockId>,
+        postorder: &mut Vec<BlockId>,
+    ) {
+        if !visited.insert(block_id) {
+            return;
+        }
+        for successor in celox_sir::cfg::terminator_successors(&unit.blocks[&block_id].terminator) {
+            visit(unit, successor, visited, postorder);
+        }
+        postorder.push(block_id);
+    }
+
+    let mut visited = HashSet::default();
+    let mut postorder = Vec::with_capacity(unit.blocks.len());
+    visit(unit, unit.entry_block_id, &mut visited, &mut postorder);
+    postorder.reverse();
+    postorder
+}
+
 fn split_comb_execution_unit(
     unit: &ExecutionUnit<RegionedAbsoluteAddr>,
 ) -> Vec<ExecutionUnit<RegionedAbsoluteAddr>> {
@@ -1095,10 +1118,10 @@ fn split_comb_execution_unit(
                     })
             })
             .collect::<HashMap<_, _>>();
-        let store_sites = unit
-            .blocks
-            .iter()
-            .flat_map(|(block_id, block)| {
+        let store_sites = comb_block_execution_order(unit)
+            .into_iter()
+            .flat_map(|block_id| {
+                let block = &unit.blocks[&block_id];
                 block
                     .instructions
                     .iter()
@@ -1109,7 +1132,7 @@ fn split_comb_execution_unit(
                             SIRInstruction::Store(..) | SIRInstruction::Commit(..)
                         )
                     })
-                    .map(move |(index, _)| (*block_id, index))
+                    .map(move |(index, _)| (block_id, index))
             })
             .collect::<Vec<_>>();
         if store_sites.is_empty() {
