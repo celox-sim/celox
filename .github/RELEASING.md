@@ -22,9 +22,12 @@ features are minor releases, and breaking changes are major releases.
 ## Automated release train
 
 Release Please maintains one release pull request against `master`. Every Monday
-at 03:00 UTC, the release workflow enables auto-merge for that pull request. The
-required checks and merge queue decide when it is safe to merge. If there are no
-releasable changes, the run is a no-op.
+at 03:00 UTC, the release workflow first tries to add that pull request directly
+to the merge queue. If requirements are still pending, it enables auto-merge and
+retries until GitHub accepts the pull request. It succeeds only after observing a
+merge queue entry; required-check failures or a queue timeout therefore remain
+visible as a failed workflow. If there are no releasable changes, the run is a
+no-op.
 
 The commit that introduces this policy is the release-history baseline. Earlier
 commits after `v0.1.34` are intentionally not retroactively classified; release
@@ -98,15 +101,17 @@ repository with repository contents and pull request write access. Store its
 numeric App ID as the `RELEASE_APP_ID` Actions variable and its complete PEM
 private key as the `RELEASE_APP_PRIVATE_KEY` Actions secret. Each job mints a
 short-lived, repository-scoped installation token; never store an installation
-token itself because it expires. The Veryl HEAD and vendored-metadata workflows
-use the same mechanism so generated branch pushes start normal CI. Using the
-default `GITHUB_TOKEN` to create or update those branches would prevent their
-follow-up workflows from running.
+token itself because it expires. The weekly queue job uses this token so adding a
+pull request to the queue starts the required `merge_group` checks. The Veryl
+HEAD and vendored-metadata workflows use the same mechanism so generated branch
+pushes start normal CI. Using the default `GITHUB_TOKEN` for these events would
+prevent their follow-up workflows from running.
 
 The App has Issues write permission for Release Please's status labels. The
 weekly workflow still identifies the release pull request by the exact
-`release-please--branches--master--components--celox` branch from this repository
-and honors a manually applied `release:hold` label before enabling auto-merge.
+`release-please--branches--master--components--celox` branch from this repository.
+It rechecks the `release:hold` label while waiting and disables auto-merge or
+removes an existing queue entry before returning when the release is held.
 
 Configure merge commits to use the pull request title as the merge commit title.
 This preserves the Conventional Commit title consumed by Release Please. Protect
