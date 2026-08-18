@@ -12,10 +12,11 @@ type RangeEntry<A, N> = Arc<SymbolicRange<A, N>>;
 type StoreShard<A, N> = HashMap<A, RangeEntry<A, N>>;
 
 // A fixed page table keeps branch snapshots cheap without adding a persistent
-// collection dependency. Empty pages allocate nothing. Forking shares every
-// populated page; the first write to one key copies only that key's page and
-// then the touched RangeStore.
+// collection dependency. Empty stores allocate nothing. Forking shares the
+// page table; the first write copies its small pointer array, then only the
+// touched page and RangeStore.
 const STORE_SHARDS: usize = 64;
+type StorePages<A, N> = [Option<Arc<StoreShard<A, N>>>; STORE_SHARDS];
 
 fn shard_index(key: &(impl Hash + ?Sized)) -> usize {
     let mut hasher = FxHasher::default();
@@ -25,20 +26,20 @@ fn shard_index(key: &(impl Hash + ?Sized)) -> usize {
 
 /// Statement-ordered symbolic state used while constructing SLT values.
 ///
-/// Each clone is a cheap branch version: the fixed-size page table and every
-/// range remain shared until a definition mutates them. This gives conditional
-/// evaluation SSA-like snapshot semantics while preserving the map-shaped API
-/// expected by the frontend.
+/// Each clone is a cheap branch version: the fixed-size page table, its pages,
+/// and every range remain shared until a definition mutates them. This gives
+/// conditional evaluation SSA-like snapshot semantics while preserving the
+/// map-shaped API expected by the frontend.
 #[derive(Clone, Debug)]
 pub struct SymbolicStore<A, N> {
-    entries: [Option<Arc<StoreShard<A, N>>>; STORE_SHARDS],
+    entries: Option<Arc<StorePages<A, N>>>,
     len: usize,
 }
 
 impl<A, N> Default for SymbolicStore<A, N> {
     fn default() -> Self {
         Self {
-            entries: std::array::from_fn(|_| None),
+            entries: None,
             len: 0,
         }
     }
@@ -47,12 +48,12 @@ impl<A, N> Default for SymbolicStore<A, N> {
 impl<A, N> SymbolicStore<A, N> {
     /// Create an independent statement branch from the current symbolic version.
     ///
-    /// The fixed page table makes this operation independent of the number of
+    /// The shared page table makes this operation independent of the number of
     /// variables in the module. Definitions remain shared until either branch
     /// writes their page.
     pub fn fork(&self) -> Self {
         Self {
-            entries: std::array::from_fn(|index| self.entries[index].as_ref().map(Arc::clone)),
+            entries: self.entries.as_ref().map(Arc::clone),
             len: self.len,
         }
     }
@@ -60,7 +61,9 @@ impl<A, N> SymbolicStore<A, N> {
 
 impl<A: Eq + Hash, N> SymbolicStore<A, N> {
     fn entry_arc(&self, key: &A) -> Option<&RangeEntry<A, N>> {
-        self.entries[shard_index(key)].as_deref()?.get(key)
+        self.entries.as_deref()?[shard_index(key)]
+            .as_deref()?
+            .get(key)
     }
 
     pub fn len(&self) -> usize {
@@ -76,8 +79,15 @@ impl<A: Eq + Hash, N> SymbolicStore<A, N> {
         A: Clone,
         N: Clone,
     {
+        if additional == 0 {
+            return;
+        }
         let per_shard = additional.div_ceil(STORE_SHARDS);
-        for shard in &mut self.entries {
+        let pages = Arc::make_mut(
+            self.entries
+                .get_or_insert_with(|| Arc::new(std::array::from_fn(|_| None))),
+        );
+        for shard in pages {
             Arc::make_mut(shard.get_or_insert_with(|| Arc::new(HashMap::default())))
                 .reserve(per_shard);
         }
@@ -96,8 +106,12 @@ impl<A: Eq + Hash, N> SymbolicStore<A, N> {
         A: Clone,
         N: Clone,
     {
+        let pages = Arc::make_mut(
+            self.entries
+                .get_or_insert_with(|| Arc::new(std::array::from_fn(|_| None))),
+        );
         let shard = Arc::make_mut(
-            self.entries[shard_index(&key)].get_or_insert_with(|| Arc::new(HashMap::default())),
+            pages[shard_index(&key)].get_or_insert_with(|| Arc::new(HashMap::default())),
         );
         let previous = shard.insert(key, Arc::new(value));
         if previous.is_none() {
@@ -112,23 +126,30 @@ impl<A: Eq + Hash, N> SymbolicStore<A, N> {
         N: Clone,
     {
         let index = shard_index(key);
-        let shard = self.entries[index].as_mut()?;
-        if !shard.contains_key(key) {
+        if !self.entries.as_deref()?[index]
+            .as_deref()?
+            .contains_key(key)
+        {
             return None;
         }
+        let pages = Arc::make_mut(self.entries.as_mut().expect("the page table exists"));
+        let shard = pages[index].as_mut().expect("the populated shard exists");
         let removed = Arc::make_mut(shard).remove(key);
         if removed.is_some() {
             self.len -= 1;
         }
         if shard.is_empty() {
-            self.entries[index] = None;
+            pages[index] = None;
+        }
+        if self.len == 0 {
+            self.entries = None;
         }
         removed
     }
 
     pub fn iter(&self) -> Iter<'_, A, N> {
         Iter {
-            shards: self.entries.iter(),
+            shards: self.entries.as_deref().map(|pages| pages.iter()),
             current: None,
             remaining: self.len,
         }
@@ -136,7 +157,7 @@ impl<A: Eq + Hash, N> SymbolicStore<A, N> {
 
     pub fn values(&self) -> Values<'_, A, N> {
         Values {
-            shards: self.entries.iter(),
+            shards: self.entries.as_deref().map(|pages| pages.iter()),
             current: None,
             remaining: self.len,
         }
@@ -144,7 +165,7 @@ impl<A: Eq + Hash, N> SymbolicStore<A, N> {
 
     pub fn keys(&self) -> Keys<'_, A, N> {
         Keys {
-            shards: self.entries.iter(),
+            shards: self.entries.as_deref().map(|pages| pages.iter()),
             current: None,
             remaining: self.len,
         }
@@ -181,10 +202,15 @@ impl<A: Eq + Hash, N> SymbolicStore<A, N> {
     /// can require phi construction. Keys are borrowed directly from their
     /// store version, so walking a diff does not allocate or clone addresses.
     pub fn differing_keys<'a>(&'a self, other: &'a Self) -> impl Iterator<Item = &'a A> {
+        let versions_match = match (&self.entries, &other.entries) {
+            (None, None) => true,
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        };
         DifferingKeys {
-            left_shards: &self.entries,
-            right_shards: &other.entries,
-            next_shard: 0,
+            left_shards: self.entries.as_deref(),
+            right_shards: other.entries.as_deref(),
+            next_shard: if versions_match { STORE_SHARDS } else { 0 },
             left_shard: None,
             right_shard: None,
             left_entries: None,
@@ -194,8 +220,8 @@ impl<A: Eq + Hash, N> SymbolicStore<A, N> {
 }
 
 struct DifferingKeys<'a, A, N> {
-    left_shards: &'a [Option<Arc<StoreShard<A, N>>>; STORE_SHARDS],
-    right_shards: &'a [Option<Arc<StoreShard<A, N>>>; STORE_SHARDS],
+    left_shards: Option<&'a StorePages<A, N>>,
+    right_shards: Option<&'a StorePages<A, N>>,
     next_shard: usize,
     left_shard: Option<&'a StoreShard<A, N>>,
     right_shard: Option<&'a StoreShard<A, N>>,
@@ -224,8 +250,15 @@ impl<'a, A: Eq + Hash, N> Iterator for DifferingKeys<'a, A, N> {
                 }
             }
 
-            let left = self.left_shards.get(self.next_shard)?;
-            let right = &self.right_shards[self.next_shard];
+            if self.next_shard == STORE_SHARDS {
+                return None;
+            }
+            let left = self
+                .left_shards
+                .and_then(|shards| shards[self.next_shard].as_ref());
+            let right = self
+                .right_shards
+                .and_then(|shards| shards[self.next_shard].as_ref());
             self.next_shard += 1;
             if match (left, right) {
                 (None, None) => true,
@@ -235,10 +268,10 @@ impl<'a, A: Eq + Hash, N> Iterator for DifferingKeys<'a, A, N> {
                 continue;
             }
 
-            self.left_shard = left.as_deref();
-            self.right_shard = right.as_deref();
-            self.left_entries = left.as_deref().map(StoreShard::iter);
-            self.right_keys = right.as_deref().map(StoreShard::keys);
+            self.left_shard = left.map(|shard| shard.as_ref());
+            self.right_shard = right.map(|shard| shard.as_ref());
+            self.left_entries = left.map(|shard| shard.iter());
+            self.right_keys = right.map(|shard| shard.keys());
         }
     }
 }
@@ -248,8 +281,12 @@ impl<A: Clone + Eq + Hash, N: Clone> SymbolicStore<A, N> {
         let Some(value) = source.entry_arc(key) else {
             return false;
         };
+        let pages = Arc::make_mut(
+            self.entries
+                .get_or_insert_with(|| Arc::new(std::array::from_fn(|_| None))),
+        );
         let shard = Arc::make_mut(
-            self.entries[shard_index(key)].get_or_insert_with(|| Arc::new(HashMap::default())),
+            pages[shard_index(key)].get_or_insert_with(|| Arc::new(HashMap::default())),
         );
         if shard.insert(key.clone(), Arc::clone(value)).is_none() {
             self.len += 1;
@@ -259,9 +296,13 @@ impl<A: Clone + Eq + Hash, N: Clone> SymbolicStore<A, N> {
 
     pub fn entry(&mut self, key: A) -> Entry<'_, A, N> {
         let shard_index = shard_index(&key);
+        let pages = Arc::make_mut(
+            self.entries
+                .get_or_insert_with(|| Arc::new(std::array::from_fn(|_| None))),
+        );
         Entry {
             inner: Arc::make_mut(
-                self.entries[shard_index].get_or_insert_with(|| Arc::new(HashMap::default())),
+                pages[shard_index].get_or_insert_with(|| Arc::new(HashMap::default())),
             )
             .entry(key),
             len: &mut self.len,
@@ -269,16 +310,25 @@ impl<A: Clone + Eq + Hash, N: Clone> SymbolicStore<A, N> {
     }
 
     pub fn get_mut(&mut self, key: &A) -> Option<&mut SymbolicRange<A, N>> {
-        let shard = self.entries[shard_index(key)].as_mut()?;
-        if !shard.contains_key(key) {
+        let index = shard_index(key);
+        if !self.entries.as_deref()?[index]
+            .as_deref()?
+            .contains_key(key)
+        {
             return None;
         }
+        let pages = Arc::make_mut(self.entries.as_mut().expect("the page table exists"));
+        let shard = pages[index].as_mut().expect("the populated shard exists");
         Arc::make_mut(shard).get_mut(key).map(Arc::make_mut)
     }
 
     pub fn values_mut(&mut self) -> ValuesMut<'_, A, N> {
         ValuesMut {
-            shards: self.entries.iter_mut(),
+            shards: self
+                .entries
+                .as_mut()
+                .map(Arc::make_mut)
+                .map(|pages| pages.iter_mut()),
             current: None,
             remaining: self.len,
         }
@@ -315,7 +365,7 @@ impl<A: Eq + Hash, N> Index<&A> for SymbolicStore<A, N> {
 }
 
 pub struct Iter<'a, A, N> {
-    shards: std::slice::Iter<'a, Option<Arc<StoreShard<A, N>>>>,
+    shards: Option<std::slice::Iter<'a, Option<Arc<StoreShard<A, N>>>>>,
     current: Option<std::collections::hash_map::Iter<'a, A, RangeEntry<A, N>>>,
     remaining: usize,
 }
@@ -329,7 +379,7 @@ impl<'a, A, N> Iterator for Iter<'a, A, N> {
                 self.remaining -= 1;
                 return Some((key, value.as_ref()));
             }
-            let Some(shard) = self.shards.next()?.as_deref() else {
+            let Some(shard) = self.shards.as_mut()?.next()?.as_deref() else {
                 continue;
             };
             self.current = Some(shard.iter());
@@ -344,7 +394,7 @@ impl<'a, A, N> Iterator for Iter<'a, A, N> {
 impl<A, N> ExactSizeIterator for Iter<'_, A, N> {}
 
 pub struct Values<'a, A, N> {
-    shards: std::slice::Iter<'a, Option<Arc<StoreShard<A, N>>>>,
+    shards: Option<std::slice::Iter<'a, Option<Arc<StoreShard<A, N>>>>>,
     current: Option<std::collections::hash_map::Values<'a, A, RangeEntry<A, N>>>,
     remaining: usize,
 }
@@ -358,7 +408,7 @@ impl<'a, A, N> Iterator for Values<'a, A, N> {
                 self.remaining -= 1;
                 return Some(value.as_ref());
             }
-            let Some(shard) = self.shards.next()?.as_deref() else {
+            let Some(shard) = self.shards.as_mut()?.next()?.as_deref() else {
                 continue;
             };
             self.current = Some(shard.values());
@@ -373,7 +423,7 @@ impl<'a, A, N> Iterator for Values<'a, A, N> {
 impl<A, N> ExactSizeIterator for Values<'_, A, N> {}
 
 pub struct Keys<'a, A, N> {
-    shards: std::slice::Iter<'a, Option<Arc<StoreShard<A, N>>>>,
+    shards: Option<std::slice::Iter<'a, Option<Arc<StoreShard<A, N>>>>>,
     current: Option<std::collections::hash_map::Keys<'a, A, RangeEntry<A, N>>>,
     remaining: usize,
 }
@@ -387,7 +437,7 @@ impl<'a, A, N> Iterator for Keys<'a, A, N> {
                 self.remaining -= 1;
                 return Some(key);
             }
-            let Some(shard) = self.shards.next()?.as_deref() else {
+            let Some(shard) = self.shards.as_mut()?.next()?.as_deref() else {
                 continue;
             };
             self.current = Some(shard.keys());
@@ -402,7 +452,7 @@ impl<'a, A, N> Iterator for Keys<'a, A, N> {
 impl<A, N> ExactSizeIterator for Keys<'_, A, N> {}
 
 pub struct ValuesMut<'a, A: Clone, N: Clone> {
-    shards: std::slice::IterMut<'a, Option<Arc<StoreShard<A, N>>>>,
+    shards: Option<std::slice::IterMut<'a, Option<Arc<StoreShard<A, N>>>>>,
     current: Option<std::collections::hash_map::ValuesMut<'a, A, RangeEntry<A, N>>>,
     remaining: usize,
 }
@@ -416,7 +466,7 @@ impl<'a, A: Clone, N: Clone> Iterator for ValuesMut<'a, A, N> {
                 self.remaining -= 1;
                 return Some(Arc::make_mut(value));
             }
-            let Some(shard) = self.shards.next()?.as_mut() else {
+            let Some(shard) = self.shards.as_mut()?.next()?.as_mut() else {
                 continue;
             };
             self.current = Some(Arc::make_mut(shard).values_mut());
@@ -463,15 +513,19 @@ impl<A: Clone + Eq + Hash, N: Clone> IntoIterator for SymbolicStore<A, N> {
 
     fn into_iter(self) -> Self::IntoIter {
         let mut values = Vec::with_capacity(self.len);
-        for shard in self.entries {
-            let Some(shard) = shard else {
-                continue;
-            };
-            let shard = Arc::try_unwrap(shard).unwrap_or_else(|shared| shared.as_ref().clone());
-            values.extend(shard.into_iter().map(|(key, value)| {
-                let value = Arc::try_unwrap(value).unwrap_or_else(|shared| shared.as_ref().clone());
-                (key, value)
-            }));
+        if let Some(pages) = self.entries {
+            let pages = Arc::try_unwrap(pages).unwrap_or_else(|shared| shared.as_ref().clone());
+            for shard in pages {
+                let Some(shard) = shard else {
+                    continue;
+                };
+                let shard = Arc::try_unwrap(shard).unwrap_or_else(|shared| shared.as_ref().clone());
+                values.extend(shard.into_iter().map(|(key, value)| {
+                    let value =
+                        Arc::try_unwrap(value).unwrap_or_else(|shared| shared.as_ref().clone());
+                    (key, value)
+                }));
+            }
         }
         IntoIter {
             inner: values.into_iter(),
@@ -498,12 +552,12 @@ mod tests {
     #[test]
     fn empty_store_allocates_no_shard_pages() {
         let mut store = SymbolicStore::<u32, u32>::default();
-        assert!(store.entries.iter().all(Option::is_none));
+        assert!(store.entries.is_none());
         assert!(store.get_mut(&7).is_none());
-        assert!(store.entries.iter().all(Option::is_none));
+        assert!(store.entries.is_none());
 
         let branch = store.fork();
-        assert!(branch.entries.iter().all(Option::is_none));
+        assert!(branch.entries.is_none());
     }
 
     #[test]
@@ -511,10 +565,10 @@ mod tests {
         let mut store = SymbolicStore::<u32, u32>::default();
         store.insert(7, RangeStore::new(None, 8));
         let index = shard_index(&7);
-        assert!(store.entries[index].is_some());
+        assert!(store.entries.as_deref().unwrap()[index].is_some());
 
         assert!(store.remove(&7).is_some());
-        assert!(store.entries[index].is_none());
+        assert!(store.entries.is_none());
         assert!(store.is_empty());
     }
 
@@ -549,16 +603,25 @@ mod tests {
         }
 
         let mut branch = original.fork();
+        assert!(Arc::ptr_eq(
+            original.entries.as_ref().unwrap(),
+            branch.entries.as_ref().unwrap()
+        ));
         branch
             .get_mut(&2048)
             .unwrap()
             .update(BitAccess::new(0, 0), Some((1, HashSet::default())))
             .unwrap();
+        assert!(!Arc::ptr_eq(
+            original.entries.as_ref().unwrap(),
+            branch.entries.as_ref().unwrap()
+        ));
 
-        let shared_pages = original
-            .entries
+        let original_pages = original.entries.as_deref().unwrap();
+        let branch_pages = branch.entries.as_deref().unwrap();
+        let shared_pages = original_pages
             .iter()
-            .zip(&branch.entries)
+            .zip(branch_pages)
             .filter(|(left, right)| {
                 left.as_ref()
                     .zip(right.as_ref())
