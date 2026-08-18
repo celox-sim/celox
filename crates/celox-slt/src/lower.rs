@@ -3222,14 +3222,15 @@ impl SLTToSIRLowerer {
 
         // Region lowering deliberately pushes a slice through bitwise and Mux
         // nodes so a narrow consumer does not compute an unnecessarily wide
-        // value.  Do not do that through a shared compound node, however: a
-        // read-modify-write chain commonly references its previous version in
-        // both Mux arms, and recursively projecting both references expands a
-        // compact DAG as an exponential tree.  Materializing the shared value
-        // once preserves the ordinary lowering cache's linear-DAG behavior;
-        // later projections reuse that snapshot and only emit their slice.
+        // value. A small read-modify-write value is better materialized when
+        // shared, however: recursively projecting both references expands a
+        // compact DAG as an exponential tree, while the ordinary lowering
+        // cache keeps its materialization linear. Limit this shortcut to one
+        // backend chunk so narrow projections of wide operations (notably Mul)
+        // do not accidentally pay for the full value.
         let shared_compound = allow_cache
             && env.is_none()
+            && Self::chunks(self.get_width(expr, arena)) == 1
             && self
                 .cost_cache
                 .borrow()
@@ -6441,6 +6442,68 @@ mod tests {
             assert!(
                 instructions < 256,
                 "shared RMW DAG expanded to {instructions} instructions in four_state={four_state}"
+            );
+        }
+    }
+
+    #[test]
+    fn region_slice_keeps_wide_shared_multiply_narrow() {
+        const WIDTH: usize = 4096;
+
+        let mut arena = SLTNodeArena::new();
+        let lhs = input(&mut arena, 10, WIDTH);
+        let rhs = input(&mut arena, 20, WIDTH);
+        let shared = arena
+            .alloc(SLTNode::Binary(lhs, BinaryOp::Mul, rhs))
+            .unwrap();
+        let ones = constant(&mut arena, 1, WIDTH);
+        let first_user = arena
+            .alloc(SLTNode::Binary(shared, BinaryOp::And, ones))
+            .unwrap();
+        let second_user = arena
+            .alloc(SLTNode::Binary(shared, BinaryOp::Xor, ones))
+            .unwrap();
+        let first_bit = arena
+            .alloc(SLTNode::Slice {
+                expr: first_user,
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let second_bit = arena
+            .alloc(SLTNode::Slice {
+                expr: second_user,
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let root = arena
+            .alloc(SLTNode::Concat(vec![(first_bit, 1), (second_bit, 1)]))
+            .unwrap();
+
+        for four_state in [false, true] {
+            let mut builder = SIRBuilder::new();
+            SLTToSIRLowerer::new(four_state).lower(
+                &mut builder,
+                root,
+                &arena,
+                &mut crate::HashMap::default(),
+            );
+            let eu = finish_lowering(builder);
+
+            let multiply_widths = eu
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .filter_map(|instruction| match instruction {
+                    SIRInstruction::Binary(dst, _, BinaryOp::Mul, _) => {
+                        Some(eu.register_map[dst].width())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                multiply_widths,
+                [1, 1],
+                "wide multiply was materialized in four_state={four_state}"
             );
         }
     }
