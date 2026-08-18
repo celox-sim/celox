@@ -25,8 +25,9 @@ use crate::{
         PartSelectGeometry, celox_value_from_comptime, eval_constexpr, eval_var_select,
         eval_var_select_with_geometry, select_geometry,
     },
-    function_call_has_arg, resolve_total_width,
-    veryl::loop_provenance::LoopRecoveryCandidate,
+    function_call_has_arg,
+    loop_provenance::LoopRecoveryCandidate,
+    resolve_total_width,
 };
 use celox_design::{BinaryOp, BitAccess, RuntimeEventKind, RuntimeEventSite, UnaryOp, VarAtomBase};
 use celox_slt::{CombObserver, RangeStore, RangeStoreError};

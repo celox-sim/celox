@@ -15,7 +15,7 @@ use super::{
     eval_statement_with_recovery, get_width, merge_boundaries, procedural_condition,
     range_store_error,
 };
-use crate::veryl::loop_provenance::{LoopRecoveryCandidate, UnrolledLoopCandidate};
+use crate::loop_provenance::{LoopRecoveryCandidate, UnrolledLoopCandidate};
 use crate::{HashMap, HashSet, ParserError, function_call_arg, resolve_total_width};
 use celox_design::{BinaryOp, BitAccess, UnaryOp, VarAtomBase};
 use celox_slt::RangeStore;
@@ -2088,7 +2088,7 @@ fn whole_fold_matches_expansion(
     dynamic_updates: &[NodeId],
     targets: &[VarAtomBase<VarId>],
     loop_var: VarId,
-    iterations: &[crate::veryl::loop_provenance::UnrolledIteration],
+    iterations: &[crate::loop_provenance::UnrolledIteration],
 ) -> Option<bool> {
     let variables = proof_variable_ids(statements, targets)?;
     let mut proof_arena = SLTNodeArena::new();
@@ -3651,7 +3651,7 @@ mod tests {
 
     use super::*;
     use crate::logic_tree::parse_comb_with_loop_recovery;
-    use crate::veryl::loop_provenance::{LoopProvenance, LoopSourceTable};
+    use crate::loop_provenance::{LoopProvenance, LoopSourceTable};
 
     #[test]
     fn constant_specialization_distinguishes_signed_division_and_remainder() {

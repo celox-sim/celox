@@ -15,7 +15,7 @@ use veryl_parser::resource_table::StrId;
 
 use crate::{
     BuildConfig, HashMap, ParserError, SourceVarId, VariableKind,
-    veryl::lowering::{bitaccess, types::resolve_total_width},
+    lowering::{bitaccess, types::resolve_total_width},
 };
 
 type RegionedVarAddr = RegionedVarAddrBase<VarId>;

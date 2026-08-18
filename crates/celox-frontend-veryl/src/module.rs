@@ -18,9 +18,9 @@ use crate::{
         expression_contains_runtime_effect, get_width, parse_comb_with_loop_recovery,
         subtract_written_sensitivity,
     },
+    loop_provenance::{LoopProvenance, LoopRecoveryCandidate},
     registry::get_port_type,
     resolve_total_width,
-    veryl::loop_provenance::{LoopProvenance, LoopRecoveryCandidate},
 };
 use celox_design::{
     BinaryOp, BitAccess, InitialStateData as InitialMemoryData,
