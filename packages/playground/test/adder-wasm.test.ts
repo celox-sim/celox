@@ -22,8 +22,11 @@ module Adder (
 }
 `;
 
-// Only run when NAPI_RS_FORCE_WASI is set (i.e., testing the WASM path).
-const isWasm = !!process.env.NAPI_RS_FORCE_WASI;
+// Only run when the NAPI loader is explicitly using the WASM binding.
+const isWasm =
+  !!process.env.NAPI_RS_WASI_FLAVOR ||
+  process.env.NAPI_RS_FORCE_WASI === "true" ||
+  process.env.NAPI_RS_FORCE_WASI === "error";
 
 describe.skipIf(!isWasm)("Adder (WASM bridge)", () => {
   test("adds two numbers via WASM", () => {

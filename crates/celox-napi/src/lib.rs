@@ -1682,19 +1682,26 @@ impl NativeSimulatorHandle {
                 continue;
             };
             let name = program.get_path(addr);
-            let width = layout.widths.get(addr).copied().unwrap_or(0);
+            let total_width = layout.widths.get(addr).copied().unwrap_or(0);
+            let (width, array_dims) = if info.array_dims.is_empty() {
+                (total_width, None)
+            } else {
+                let element_count = info.array_dims.iter().product::<usize>();
+                (total_width / element_count, Some(&info.array_dims))
+            };
             let byte_size = celox::get_byte_size(width);
-            layout_map.insert(
-                name,
-                serde_json::json!({
-                    "offset": offset,
-                    "width": width,
-                    "byte_size": byte_size,
-                    "is_4state": four_state && info.is_4state,
-                    "direction": layout::direction_str(info.var_kind),
-                    "type_kind": layout::type_kind_str(info.type_kind),
-                }),
-            );
+            let mut entry = serde_json::json!({
+                "offset": offset,
+                "width": width,
+                "byte_size": byte_size,
+                "is_4state": four_state && info.is_4state,
+                "direction": layout::direction_str(info.var_kind),
+                "type_kind": layout::type_kind_str(info.type_kind),
+            });
+            if let Some(array_dims) = array_dims {
+                entry["array_dims"] = serde_json::json!(array_dims);
+            }
+            layout_map.insert(name, entry);
         }
 
         serde_json::to_string(&layout_map).unwrap_or_else(|_| "{}".to_string())
