@@ -105,7 +105,7 @@ jobs:
 
       - name: cargo clippy
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
-        run: cargo clippy --locked -p celox -p celox-macros -p celox-napi -p celox-ts-gen --all-targets --no-deps
+        run: cargo clippy --locked -p celox -p celox-macros -p celox-napi -p celox-ts-gen -p celox-vpi --all-targets --no-deps
 
       - uses: pnpm/action-setup@v6
         if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true'
@@ -144,9 +144,25 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: actions/setup-python@v6
+        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Install cocotb
+        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
+        run: python -m pip install cocotb==2.0.1
+
       - name: Run tests
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
         run: cargo test --locked
+
+      - name: Run cocotb VPI end-to-end test
+        if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
+        run: |
+          CELOX_COCOTB_PYTHON="$(command -v python)" \
+            cargo test --locked -p celox-vpi --test cocotb_e2e \
+            cocotb_drives_an_attached_native_flip_flop -- --exact --ignored
 
       - uses: pnpm/action-setup@v6
 

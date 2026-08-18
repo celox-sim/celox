@@ -20,21 +20,59 @@ fn python_output(python: &str, arguments: &[&str]) -> String {
 }
 
 #[test]
+fn celox_cli_builds_a_self_running_native_image() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cocotb");
+    let temporary = tempfile::tempdir().unwrap();
+    let executable = temporary.path().join("counter-sim");
+
+    let compile = Command::new(env!("CARGO_BIN_EXE_celox"))
+        .arg("vpi")
+        .arg("build")
+        .arg(fixture.join("counter.veryl"))
+        .args(["--top", "Top", "--output"])
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        compile.status.success(),
+        "native compilation failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    assert!(executable.is_file());
+    assert!(
+        celox::NativeProgramImage::discover_appended(&fs::read(&executable).unwrap())
+            .unwrap()
+            .is_some()
+    );
+
+    let help = Command::new(&executable).arg("--help").output().unwrap();
+    assert!(
+        help.status.success(),
+        "attached runtime help failed: {}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&help.stdout).contains("--test-module"),
+        "attached runtime did not expose cocotb options"
+    );
+}
+
+#[test]
+#[ignore = "requires a cocotb installation; CI runs this test explicitly"]
 fn cocotb_drives_an_attached_native_flip_flop() {
-    let Some(python) = env::var_os("CELOX_COCOTB_PYTHON") else {
-        return;
-    };
+    let python = env::var_os("CELOX_COCOTB_PYTHON")
+        .expect("CELOX_COCOTB_PYTHON must name the cocotb Python interpreter");
     let python = python.to_string_lossy().into_owned();
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cocotb");
     let temporary = tempfile::tempdir().unwrap();
     let executable = temporary.path().join("counter-sim");
     let results = temporary.path().join("results.xml");
 
-    let compile = Command::new(env!("CARGO_BIN_EXE_celox-vpi-compile"))
+    let compile = Command::new(env!("CARGO_BIN_EXE_celox"))
+        .arg("vpi")
+        .arg("build")
         .arg(fixture.join("counter.veryl"))
-        .args(["--top", "Top", "--runtime"])
-        .arg(env!("CARGO_BIN_EXE_celox-vpi-runtime"))
-        .arg("--output")
+        .args(["--top", "Top", "--output"])
         .arg(&executable)
         .output()
         .unwrap();
@@ -44,29 +82,25 @@ fn cocotb_drives_an_attached_native_flip_flop() {
         String::from_utf8_lossy(&compile.stderr)
     );
 
-    let libpython = python_output(&python, &["-m", "cocotb_tools.config", "--libpython"]);
-    let vpi = python_output(
-        &python,
-        &[
-            "-c",
-            "from pathlib import Path; import cocotb; print(Path(cocotb.__file__).parent / 'libs' / 'libcocotbvpi_icarus.vpl')",
-        ],
-    );
     let site_packages = python_output(
         &python,
         &["-c", "import site; print(':'.join(site.getsitepackages()))"],
     );
     let python_path = format!("{}:{site_packages}", fixture.display());
     let runtime = Command::new(&executable)
-        .args(["--vpi", &vpi])
+        .args([
+            "--test-module",
+            "test_counter",
+            "--test-filter",
+            "drives_native_flip_flop",
+            "--python",
+            &python,
+        ])
+        .arg("--results-file")
+        .arg(&results)
         .current_dir(&fixture)
-        .env("LIBPYTHON_LOC", libpython)
-        .env("PYGPI_PYTHON_BIN", &python)
+        .env("COCOTB_TESTCASE", "inherited_selector_must_be_cleared")
         .env("PYTHONPATH", python_path)
-        .env("COCOTB_TOPLEVEL", "Top")
-        .env("COCOTB_TEST_MODULES", "test_counter")
-        .env("TOPLEVEL_LANG", "verilog")
-        .env("COCOTB_RESULTS_FILE", &results)
         .output()
         .unwrap();
     assert!(
@@ -76,16 +110,24 @@ fn cocotb_drives_an_attached_native_flip_flop() {
         String::from_utf8_lossy(&runtime.stderr)
     );
 
-    let checked = Command::new(&python)
-        .args(["-m", "cocotb_tools.check_results"])
+    assert!(results.is_file());
+
+    let failed_runtime = Command::new(&executable)
+        .args(["--test-module", "missing_test_module", "--python", &python])
+        .arg("--results-file")
         .arg(&results)
+        .current_dir(&fixture)
         .output()
         .unwrap();
     assert!(
-        checked.status.success(),
-        "cocotb reported a failure:\n{}\n{}",
-        String::from_utf8_lossy(&checked.stdout),
-        String::from_utf8_lossy(&checked.stderr)
+        !failed_runtime.status.success(),
+        "cocotb startup failure reused stale passing results:\n{}\n{}",
+        String::from_utf8_lossy(&failed_runtime.stdout),
+        String::from_utf8_lossy(&failed_runtime.stderr)
+    );
+    assert!(
+        !results.exists(),
+        "failed cocotb startup left stale results in place"
     );
 }
 
