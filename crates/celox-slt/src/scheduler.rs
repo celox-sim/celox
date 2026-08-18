@@ -1,7 +1,9 @@
 use crate::{
     HashMap, HashSet, LogicPath, LogicPathTarget, NodeId, SLTNode, SLTNodeArena, SLTNodeFactsError,
 };
-use celox_analysis::dag_schedule::schedule_min_live_values_and_tokens;
+use celox_analysis::dag_schedule::{
+    MappedNodeRows, MappedUserRows, schedule_min_live_values_and_tokens_with_mapped_rows,
+};
 use celox_analysis::interval::{DisjointIntervalError, DisjointIntervalMap, ExactInterval};
 use celox_design::{BinaryOp, BitAccess, RuntimeErrorInfo, UnaryOp, VarAtomBase};
 use celox_sir::{
@@ -3081,9 +3083,7 @@ fn schedule_acyclic_path_region(
     let result = (|| {
         let mut local_dependencies = vec![Vec::<usize>::new(); paths.len()];
         let mut local_values = vec![Vec::<usize>::new(); paths.len()];
-        let mut local_tokens = vec![Vec::<usize>::new(); paths.len()];
         for (definition, &path) in paths.iter().enumerate() {
-            local_tokens[definition] = materialization_tokens.get(path)?.clone();
             for &user_path in dependencies.get(path)? {
                 let user = *local_by_path.get(user_path)?;
                 if user != usize::MAX && definition != user {
@@ -3105,11 +3105,16 @@ fn schedule_acyclic_path_region(
             row.sort_unstable();
             row.dedup();
         }
-        let order = schedule_min_live_values_and_tokens(
+        let tokens = MappedNodeRows::new(materialization_tokens, paths).ok()?;
+        let successors = MappedUserRows::new(dependencies, paths, local_by_path).ok()?;
+        let value_users = MappedUserRows::new(value_dependencies, paths, local_by_path).ok()?;
+        let order = schedule_min_live_values_and_tokens_with_mapped_rows(
             &local_dependencies,
             &local_values,
-            &local_tokens,
+            tokens,
             token_weights,
+            successors,
+            value_users,
         )
         .ok()?;
         Some(order.into_iter().map(|local| paths[local]).collect())
