@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use veryl_analyzer::ir::{Comptime, Expression, VarPath};
+use veryl_analyzer::conv::utils::get_component;
+use veryl_analyzer::ir::{Comptime, Expression, Signature, VarPath};
 use veryl_analyzer::value::Value;
 use veryl_analyzer::{Analyzer, AnalyzerError, Context, attribute_table, ir::Ir, symbol_table};
 use veryl_metadata::{ClockType, Component, ComponentBackendKind, Metadata, ResetType};
@@ -113,6 +114,69 @@ fn component_runtime_config(
     (libraries, Some(root))
 }
 
+fn elaborate_parameterized_top(
+    ir: &mut Ir,
+    context: &mut Context,
+    top: &str,
+    param_overrides: &[(String, u64)],
+) -> Result<(), ParserError> {
+    let top_name = resource_table::insert_str(top);
+    let Some(top_index) = ir.components.iter().rposition(
+        |component| matches!(component, veryl_analyzer::ir::Component::Module(module) if module.name == top_name),
+    ) else {
+        // Preserve the existing TopNotFound diagnostic from the frontend.
+        return Ok(());
+    };
+    let top_token = match &ir.components[top_index] {
+        veryl_analyzer::ir::Component::Module(module) => module.token,
+        _ => unreachable!(),
+    };
+    let symbol = symbol_table::resolve(&top_token.beg).map_err(|error| {
+        ParserError::illegal_context(
+            "top-level parameter override",
+            format!("unable to resolve top module `{top}`: {error:?}"),
+            Some(&top_token),
+        )
+    })?;
+
+    let mut signature = Signature::new(symbol.found.id);
+    let mut override_map = fxhash::FxHashMap::default();
+    let token = veryl_parser::token_range::TokenRange::default();
+    for (name, value) in param_overrides {
+        let name_id = resource_table::insert_str(name);
+        let path = VarPath::new(name_id);
+        let value = Value::new(*value, 64, false);
+        let comptime = Comptime::create_value(value.clone(), token);
+        let expr = Expression::create_value(value, token);
+        signature.add_parameter(name_id, comptime.value.clone());
+        override_map.insert(path, (comptime, expr));
+    }
+
+    context.push_override(override_map);
+    let component = get_component(context, &signature, top_token).map_err(|_| {
+        ParserError::illegal_context(
+            "top-level parameter override",
+            format!("unable to elaborate top module `{top}` with parameter overrides"),
+            Some(&top_token),
+        )
+    });
+    let mut module = component.and_then(|component| match component.as_ref() {
+        veryl_analyzer::ir::Component::Module(module) => Ok(module.clone()),
+        _ => Err(ParserError::illegal_context(
+            "top-level parameter override",
+            format!("top `{top}` did not elaborate to a module"),
+            Some(&top_token),
+        )),
+    });
+    if let Ok(module) = &mut module {
+        module.eval_assign(context);
+    }
+    context.pop_override();
+
+    ir.components[top_index] = veryl_analyzer::ir::Component::Module(module?);
+    Ok(())
+}
+
 fn analyze(
     sources: &[(&str, &Path)],
     top: &str,
@@ -207,25 +271,18 @@ fn analyze(
     // Shared context for pass2
     let mut context = Context::default();
 
-    if !param_overrides.is_empty() {
-        let mut override_map = fxhash::FxHashMap::default();
-        let token = veryl_parser::token_range::TokenRange::default();
-        for (name, value) in param_overrides {
-            let name_id = resource_table::insert_str(name);
-            let path = VarPath::new(name_id);
-            let val = Value::new(*value, 64, false);
-            let comptime = Comptime::create_value(val.clone(), token);
-            let expr = Expression::create_value(val, token);
-            override_map.insert(path, (comptime, expr));
-        }
-        context.push_override(override_map);
-    }
-
     let mut ir = Ir::default();
 
     for parsed in &parsers {
         errors.append(&mut analyzer.analyze_pass2(&parsed.veryl, &mut context, Some(&mut ir)));
     }
+    if !param_overrides.is_empty()
+        && let Err(error) = elaborate_parameterized_top(&mut ir, &mut context, top, param_overrides)
+    {
+        errors.append(&mut context.drain_errors());
+        return (Err(error), errors, Vec::new());
+    }
+    errors.append(&mut context.drain_errors());
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
 
     // Veryl reports combinational loops before Celox can apply its path-level
