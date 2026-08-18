@@ -13,7 +13,6 @@ pub(crate) use celox_design::{
 };
 pub use celox_frontend::{
     FrontendLookup, InstancePath, SourceAddr, SourceVarId, VariableInfo, VariableKind,
-    VerylFrontendLookup,
 };
 #[cfg(all(
     feature = "host-runtime",

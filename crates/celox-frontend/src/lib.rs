@@ -278,10 +278,6 @@ impl FrontendLookup {
     }
 }
 
-/// Compatibility alias for callers compiled against the Veryl-only frontend
-/// facade. New code should use [`FrontendLookup`].
-pub type VerylFrontendLookup = FrontendLookup;
-
 /// Compiler-only bridge from Veryl analyzer IDs into neutral frontend IDs.
 /// This is carried by the Veryl testbench source and discarded after frontend
 /// bytecode compilation.
