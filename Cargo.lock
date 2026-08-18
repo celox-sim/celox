@@ -428,7 +428,9 @@ dependencies = [
  "celox-backend-wasm",
  "celox-backend-x86",
  "celox-design",
- "celox-frontend",
+ "celox-frontend-core",
+ "celox-frontend-sv",
+ "celox-frontend-veryl",
  "celox-macros",
  "celox-runtime",
  "celox-sir",
@@ -578,29 +580,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "celox-frontend"
-version = "0.0.0"
-dependencies = [
- "bit-set 0.11.1",
- "celox-design",
- "celox-frontend-core",
- "celox-sir",
- "celox-slt",
- "celox-systemverilog-frontend",
- "celox-testbench",
- "fxhash",
- "miette",
- "num-bigint",
- "num-traits",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "veryl-analyzer",
- "veryl-metadata",
- "veryl-parser",
-]
-
-[[package]]
 name = "celox-frontend-core"
 version = "0.0.0"
 dependencies = [
@@ -612,6 +591,42 @@ dependencies = [
  "num-bigint",
  "thiserror 2.0.20",
  "tracing",
+]
+
+[[package]]
+name = "celox-frontend-sv"
+version = "0.0.0"
+dependencies = [
+ "celox-design",
+ "celox-frontend-core",
+ "celox-sir",
+ "celox-slt",
+ "celox-sv-analyzer",
+ "fxhash",
+ "num-bigint",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "celox-frontend-veryl"
+version = "0.0.0"
+dependencies = [
+ "bit-set 0.11.1",
+ "celox-design",
+ "celox-frontend-core",
+ "celox-sir",
+ "celox-slt",
+ "celox-testbench",
+ "fxhash",
+ "miette",
+ "num-bigint",
+ "num-traits",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "veryl-analyzer",
+ "veryl-metadata",
+ "veryl-parser",
 ]
 
 [[package]]
@@ -729,20 +744,6 @@ dependencies = [
  "miette",
  "num-bigint",
  "sv-parser",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "celox-systemverilog-frontend"
-version = "0.0.0"
-dependencies = [
- "celox-design",
- "celox-frontend-core",
- "celox-sir",
- "celox-slt",
- "celox-sv-analyzer",
- "fxhash",
- "num-bigint",
  "thiserror 2.0.20",
 ]
 

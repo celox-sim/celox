@@ -31,7 +31,7 @@ fn setup_to_flatting(
     let top_id = resource_table::insert_str(top_name);
 
     let parsed =
-        celox_frontend::veryl::parse_ir(&ir, &crate::parser::BuildConfig::default(), &top_id)
+        celox_frontend_veryl::parse_ir(&ir, &crate::parser::BuildConfig::default(), &top_id)
             .expect("hierarchy parse failed");
     let top_module_id = parsed.symbolic.root_id;
     let modules = parsed.symbolic.modules;
@@ -123,7 +123,7 @@ fn setup_to_flatting(
 
     // Call flatting
     let mut arena = SLTNodeArena::<SourceAddr>::new();
-    let r = celox_frontend::veryl::flattening::flatten_module(
+    let r = celox_frontend_core::symbolic::flattening::flatten_module(
         sim_module,
         &path,
         &instance_ids,
@@ -276,13 +276,13 @@ fn setup_and_parse(code: &str, top_name: &str) -> crate::ir::UnoptimizedSir {
     // crate::parser::parse(&top_id, &ir).expect("Failed to parse program")
     let build_config = crate::parser::BuildConfig::default();
     let result = crate::parser::parse_ir(&ir, &build_config, &top_id).expect("Failed to parse IR");
-    let scheduled = celox_frontend::veryl::schedule_symbolic_rtl(
+    let scheduled = celox_frontend_veryl::schedule_symbolic_rtl(
         result,
         &build_config,
         &[],
         &[],
         false,
-        &celox_frontend::FrontendTraceOptions::default(),
+        &celox_frontend_core::FrontendTraceOptions::default(),
         None,
     )
     .expect("Failed to flatten");

@@ -25,7 +25,7 @@ pub use backend::{
     EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, SimBackend, get_byte_size,
 };
 pub use celox_design::{DomainKind, ElaboratedDesign, EventTopology, RuntimeSchema};
-pub use celox_frontend::{FrontendDiagnostic, LoweringPhase, ParserError};
+pub use celox_frontend_veryl::{FrontendDiagnostic, LoweringPhase, ParserError};
 pub use celox_runtime::{
     DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,
     SignalDirection,

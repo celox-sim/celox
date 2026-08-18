@@ -2,19 +2,19 @@ use crate::HashSet;
 
 use veryl_parser::resource_table::{self, StrId};
 
-pub(crate) use celox_frontend::BuildConfig;
+pub(crate) use celox_frontend_veryl::BuildConfig;
 pub(crate) mod loop_provenance;
 use crate::ir::{RegionedAbsoluteAddr, RuntimeProgram, STABLE_REGION, SirProgram, UnoptimizedSir};
 
-pub use celox_frontend::ParserError;
+pub use celox_frontend_veryl::ParserError;
 
 #[cfg(test)]
-pub use celox_frontend::veryl::parse_ir;
-use celox_frontend::veryl::parse_ir_with_loop_provenance;
+pub use celox_frontend_veryl::parse_ir;
+use celox_frontend_veryl::parse_ir_with_loop_provenance;
 
 fn apply_fused_optimization_hints(
-    scheduled: &mut celox_frontend::ScheduledRtl,
-    hints: celox_frontend::FusedSirOptimizationHints,
+    scheduled: &mut celox_frontend_core::ScheduledRtl,
+    hints: celox_frontend_core::FusedSirOptimizationHints,
 ) -> Result<(), ParserError> {
     for (event, direct_ff_writes) in hints.direct_ff_writes {
         let Some(units) = scheduled.sir.eval_comb_apply_ffs.get_mut(&event) else {
@@ -286,8 +286,8 @@ fn verify_region_contract(
 }
 
 fn finalize_scheduled_rtl(
-    mut scheduled: celox_frontend::ScheduledRtlOutput,
-    mut testbench_source: Option<celox_frontend::veryl::VerylTestbenchSource>,
+    mut scheduled: celox_frontend_core::ScheduledRtlOutput,
+    mut testbench_source: Option<celox_frontend_veryl::VerylTestbenchSource>,
     four_state: bool,
     trace_opts: &crate::debug::TraceOptions,
     mut trace: Option<&mut crate::debug::CompilationTrace>,
@@ -369,9 +369,9 @@ fn finalize_scheduled_rtl(
 }
 
 fn dynamic_for_diagnostics(
-    scheduled: &celox_frontend::veryl::VerylScheduledRtlOutput,
+    scheduled: &celox_frontend_veryl::VerylScheduledRtlOutput,
     ir: &veryl_analyzer::ir::Ir,
-) -> Vec<celox_frontend::FrontendDiagnostic> {
+) -> Vec<celox_frontend_veryl::FrontendDiagnostic> {
     scheduled
         .scheduled
         .frontend_lookup
@@ -396,7 +396,7 @@ fn dynamic_for_diagnostics(
             })
         })
         .map(|module| {
-            celox_frontend::veryl::check_elaborated_dynamic_for_bounds(
+            celox_frontend_veryl::check_elaborated_dynamic_for_bounds(
                 &scheduled.scheduled,
                 &scheduled.testbench_source,
                 module,
@@ -432,7 +432,7 @@ pub fn parse(
 ) -> Result<
     (
         crate::ir::OptimizedSir,
-        Vec<celox_frontend::FrontendDiagnostic>,
+        Vec<celox_frontend_veryl::FrontendDiagnostic>,
     ),
     ParserError,
 > {
@@ -465,10 +465,10 @@ pub fn parse(
         t.analyzer_ir = Some(ir.to_string());
     }
     let frontend_trace_options = trace_opts.frontend(diagnostics);
-    let mut frontend_trace = celox_frontend::FrontendTrace::default();
+    let mut frontend_trace = celox_frontend_core::FrontendTrace::default();
     let scheduled = timed_phase!(
         "flatten",
-        celox_frontend::veryl::schedule_symbolic_rtl(
+        celox_frontend_veryl::schedule_symbolic_rtl(
             result,
             config,
             ignored_loops,
@@ -483,13 +483,13 @@ pub fn parse(
     }
     let scheduled = scheduled?;
     let dynamic_for_diagnostics = dynamic_for_diagnostics(&scheduled, ir);
-    let celox_frontend::veryl::VerylScheduledRtlOutput {
+    let celox_frontend_veryl::VerylScheduledRtlOutput {
         scheduled,
         fused_optimization_hints,
         testbench_source,
     } = scheduled;
     let program = finalize_scheduled_rtl(
-        celox_frontend::ScheduledRtlOutput {
+        celox_frontend_core::ScheduledRtlOutput {
             scheduled,
             fused_optimization_hints,
         },
@@ -533,8 +533,8 @@ pub fn parse_sv(
     component_file_base: Option<std::path::PathBuf>,
 ) -> Result<crate::ir::OptimizedSir, ParserError> {
     let frontend_trace_options = trace_opts.frontend(diagnostics);
-    let mut frontend_trace = celox_frontend::FrontendTrace::default();
-    let scheduled = celox_frontend::systemverilog::schedule_sources(
+    let mut frontend_trace = celox_frontend_core::FrontendTrace::default();
+    let scheduled = celox_frontend_sv::schedule_sources(
         sources,
         top,
         parameter_overrides,
@@ -545,10 +545,10 @@ pub fn parse_sv(
         trace.is_some().then_some(&mut frontend_trace),
     )
     .map_err(|error| match error {
-        celox_frontend::systemverilog::FrontendError::Lowering(error) => error.into(),
-        celox_frontend::systemverilog::FrontendError::Analyzer(error) => ParserError::unsupported(
+        celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
+        celox_frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
             64,
-            celox_frontend::LoweringPhase::SimulatorParser,
+            celox_frontend_veryl::LoweringPhase::SimulatorParser,
             "systemverilog analysis",
             error.to_string(),
             None,
@@ -601,7 +601,7 @@ pub fn parse_mixed(
 ) -> Result<
     (
         crate::ir::OptimizedSir,
-        Vec<celox_frontend::FrontendDiagnostic>,
+        Vec<celox_frontend_veryl::FrontendDiagnostic>,
     ),
     ParserError,
 > {
@@ -610,22 +610,19 @@ pub fn parse_mixed(
         .into_iter()
         .map(|name| resource_table::get_str_value(name).unwrap_or_default())
         .collect();
-    let external = celox_frontend::systemverilog::prepare_external_hierarchy(
-        sv_sources,
-        &external_roots,
-        four_state,
-    )
-    .map_err(|error| match error {
-        celox_frontend::systemverilog::FrontendError::Lowering(error) => error.into(),
-        celox_frontend::systemverilog::FrontendError::Analyzer(error) => ParserError::unsupported(
-            64,
-            celox_frontend::LoweringPhase::SimulatorParser,
-            "systemverilog analysis",
-            error.to_string(),
-            None,
-        ),
-    })?;
-    let symbolic = celox_frontend::veryl::parse_ir_with_external_hierarchy(
+    let external =
+        celox_frontend_sv::prepare_external_hierarchy(sv_sources, &external_roots, four_state)
+            .map_err(|error| match error {
+                celox_frontend_sv::FrontendError::Lowering(error) => error.into(),
+                celox_frontend_sv::FrontendError::Analyzer(error) => ParserError::unsupported(
+                    64,
+                    celox_frontend_veryl::LoweringPhase::SimulatorParser,
+                    "systemverilog analysis",
+                    error.to_string(),
+                    None,
+                ),
+            })?;
+    let symbolic = celox_frontend_veryl::parse_ir_with_external_hierarchy(
         ir,
         loop_provenance,
         &external,
@@ -638,8 +635,8 @@ pub fn parse_mixed(
         trace.analyzer_ir = Some(ir.to_string());
     }
     let frontend_trace_options = trace_opts.frontend(diagnostics);
-    let mut frontend_trace = celox_frontend::FrontendTrace::default();
-    let scheduled = celox_frontend::veryl::schedule_symbolic_rtl(
+    let mut frontend_trace = celox_frontend_core::FrontendTrace::default();
+    let scheduled = celox_frontend_veryl::schedule_symbolic_rtl(
         symbolic,
         config,
         ignored_loops,
@@ -652,13 +649,13 @@ pub fn parse_mixed(
         trace.absorb_frontend(frontend_trace);
     }
     let dynamic_for_diagnostics = dynamic_for_diagnostics(&scheduled, ir);
-    let celox_frontend::veryl::VerylScheduledRtlOutput {
+    let celox_frontend_veryl::VerylScheduledRtlOutput {
         scheduled,
         fused_optimization_hints,
         testbench_source,
     } = scheduled;
     let program = finalize_scheduled_rtl(
-        celox_frontend::ScheduledRtlOutput {
+        celox_frontend_core::ScheduledRtlOutput {
             scheduled,
             fused_optimization_hints,
         },

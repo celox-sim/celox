@@ -8,28 +8,34 @@ refactors.
 ## Pipeline
 
 ```text
-Veryl source ───────────────┐
-                            ├─► celox-frontend ─► SymbolicRtl ─► ScheduledRtl
-SystemVerilog source        │         │                 │               │
-        │                   │         │            celox-slt            ▼
-        ▼                   │         │                         UnoptimizedSir
-celox-sv-analyzer ──────────┘         │                               │
-                                      │                         celox-sir-opt
-                                      │                               ▼
-                                      │                          OptimizedSir
-                                      │                               │
-                                      │                      celox-state-layout
-                                      │                               ▼
-                                      │                         LaidOutProgram
-                                      │                               │
-                                      │            ┌──────────────────┼──────────────────┐
-                                      │            ▼                  ▼                  ▼
-                                      │     backend-x86      backend-cranelift    backend-wasm
-                                      │            └──────────────────┼──────────────────┘
-                                      │                               ▼
-                                      └──────────────────────── RuntimeProgram
-                                                                      │
-                                                                celox-runtime
+Veryl source ─────────────► celox-frontend-veryl ──┐
+                                                   ├─► celox-frontend-core
+SystemVerilog source ─► celox-sv-analyzer          │          │
+                               │                   │          ▼
+                               └► celox-frontend-sv ┘     SymbolicRtl
+                                                              │
+                                                         celox-slt
+                                                              ▼
+                                                         ScheduledRtl
+                                                              │
+                                                        UnoptimizedSir
+                                                              │
+                                                        celox-sir-opt
+                                                              ▼
+                                                         OptimizedSir
+                                                              │
+                                                     celox-state-layout
+                                                              ▼
+                                                        LaidOutProgram
+                                                              │
+                                           ┌──────────────────┼──────────────────┐
+                                           ▼                  ▼                  ▼
+                                    backend-x86      backend-cranelift    backend-wasm
+                                           └──────────────────┼──────────────────┘
+                                                              ▼
+                                                       RuntimeProgram
+                                                              │
+                                                        celox-runtime
 ```
 
 The `celox` crate is the public facade and compiler driver. It wires these phases
@@ -38,29 +44,24 @@ not depend on the facade. `celox-backend-x86` and `celox-backend-arm64` depend o
 `celox-backend-common` for allocation machinery; that crate is a compile-time
 library, not another pipeline artifact.
 
-`celox-frontend` is intentionally a multi-language frontend boundary rather than
-a dependency from one language frontend to another. Its SystemVerilog feature
-depends on the independently reusable `celox-sv-analyzer`, then adapts analyzed
-SV into the same symbolic module vocabulary used by Veryl. That internal
-vocabulary still uses Veryl-shaped local IDs and metadata in places; those types
-are confined to the private symbolic compatibility core and Veryl-owned source
-sidecars. They do not enter `FrontendLookup` or `ScheduledRtl`. Scheduled design
-state, SIR, optimization, layout, and backends use `celox-design` identities. A
-future neutralization of the local vocabulary can therefore happen inside this
-crate without recreating a `frontend-sv -> frontend-veryl` dependency.
+The frontend boundary is split into one source-independent crate and one adapter
+crate per source language. `celox-frontend-core` owns the symbolic assembly,
+flattening, source lookup, tracing, and scheduled output contracts shared by all
+adapters. It must not depend on a parser, analyzer, or language adapter.
 
-The frontend crate's internal modules make that ownership explicit:
+`celox-frontend-veryl` owns Veryl analysis, lowering, diagnostics, and testbench
+source sidecars. `celox-frontend-sv` depends on the independently reusable
+`celox-sv-analyzer` and adapts analyzed SystemVerilog into the core symbolic
+vocabulary. Both adapters may depend on `celox-frontend-core`; neither adapter
+may depend on the other. The public `celox` compiler driver selects an adapter
+and consumes core contracts directly, so there is no multi-language frontend
+facade or language-specific compatibility re-export.
 
-| Module | Owns | Dependency rule |
-|---|---|---|
-| `shared` | `SourceVarId`, `FrontendLookup`, and scheduled output contracts | Must not import parser or analyzer types |
-| `veryl` | Veryl analysis, module lowering, dynamic-loop diagnostics, and testbench source sidecars | May lower into `symbolic`; must not own SV analysis |
-| `systemverilog` | SV analysis adapter, hierarchy preparation, and SV lowering | May lower into `symbolic`; must not import `veryl` |
-| `symbolic` | Private pre-scheduling compatibility vocabulary and assembly | Must not be exposed as the runtime/frontend public contract |
-
-The crate root is a facade over those areas. Parser-native aliases are exposed
-only through the owning language module; source-independent consumers import
-contracts from `shared`.
+Each adapter projects parser-native identities into the source-independent
+`SourceVarId` namespace before constructing core symbolic structures. Veryl IDs
+therefore remain in the Veryl adapter and its source sidecars; they do not enter
+`celox-frontend-core`, `FrontendLookup`, or `ScheduledRtl`. Scheduled design
+state, SIR, optimization, layout, and backends use `celox-design` identities.
 
 `celox-backend-arm64` is wired into native backend selection behind the
 default-off `experimental-arm64-backend` feature and emits complete scalar
@@ -110,7 +111,9 @@ for.
 | `celox-analysis` | Reusable graph and data-flow algorithms | Veryl or backend-specific types |
 | `celox-design` | Source-independent design identities, hierarchy, events, and runtime schema | Parser nodes or physical addresses |
 | `celox-sv-analyzer` | Reusable SystemVerilog syntax and semantic analysis | Celox scheduling or Veryl dependencies |
-| `celox-frontend` | HDL adapters, source lookup, module construction, shared symbolic assembly, and frontend diagnostics | Optimization or target code generation |
+| `celox-frontend-core` | Source lookup, shared symbolic assembly, flattening, tracing, and scheduled frontend contracts | Parser, analyzer, or language-adapter dependencies |
+| `celox-frontend-sv` | SystemVerilog hierarchy preparation and lowering into frontend-core contracts | Veryl dependencies, optimization, or target code generation |
+| `celox-frontend-veryl` | Veryl analysis, lowering, diagnostics, and testbench source sidecars | SystemVerilog dependencies, optimization, or target code generation |
 | `celox-slt` | Symbolic logic trees, dependency scheduling, and SLT-to-SIR lowering | Veryl parser details or physical layout |
 | `celox-sir` | Backend-independent simulator IR and control-flow structures | Target instructions or runtime scheduling |
 | `celox-sir-opt` | Backend-independent SIR analyses and transformation passes | Veryl ASTs or target MIR |
@@ -171,7 +174,7 @@ The following rules define the intended architecture:
 
 1. Source-language types stop at the frontend boundary. One language adapter
    must not depend on another language frontend; shared assembly belongs in
-   `celox-frontend`.
+   `celox-frontend-core`.
 2. Semantic state identities remain distinct from physical memory offsets until
    layout finalization.
 3. SIR optimizations are independent of any concrete backend.
@@ -191,10 +194,12 @@ is therefore an architectural change, not a convenient shortcut.
 ## Where changes belong
 
 - A new Veryl lowering rule or source diagnostic belongs in the Veryl adapter
-  within `celox-frontend`.
+  `celox-frontend-veryl`.
 - SystemVerilog syntax and semantic rules belong in `celox-sv-analyzer`; their
   conversion into Celox symbolic modules belongs in the SystemVerilog adapter
-  within `celox-frontend`.
+  `celox-frontend-sv`.
+- Source-independent frontend lookup, symbolic assembly, flattening, and tracing
+  belong in `celox-frontend-core`.
 - A symbolic scheduling rule belongs in `celox-slt`.
 - A backend-independent instruction or CFG rule belongs in `celox-sir`.
 - A backend-independent transformation belongs in `celox-sir-opt`.

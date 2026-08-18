@@ -1,4 +1,4 @@
-//! SystemVerilog source adapter for the source-neutral frontend core.
+//! SystemVerilog frontend adapter for Celox.
 
 mod lowering;
 

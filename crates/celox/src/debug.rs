@@ -65,8 +65,8 @@ impl TraceOptions {
     pub(crate) fn frontend(
         &self,
         diagnostics: &crate::RuntimeDiagnostics,
-    ) -> celox_frontend::FrontendTraceOptions {
-        celox_frontend::FrontendTraceOptions {
+    ) -> celox_frontend_core::FrontendTraceOptions {
+        celox_frontend_core::FrontendTraceOptions {
             phase_timing: diagnostics.phase_timing,
             sim_modules: self.sim_modules,
             pre_atomized_comb_blocks: self.pre_atomized_comb_blocks,
@@ -78,7 +78,7 @@ impl TraceOptions {
 }
 
 impl CompilationTrace {
-    pub(crate) fn absorb_frontend(&mut self, trace: celox_frontend::FrontendTrace) {
+    pub(crate) fn absorb_frontend(&mut self, trace: celox_frontend_core::FrontendTrace) {
         self.sim_modules = trace.sim_modules;
         self.pre_atomized_comb_blocks = trace.pre_atomized_comb_blocks;
         self.atomized_comb_blocks = trace.atomized_comb_blocks;
