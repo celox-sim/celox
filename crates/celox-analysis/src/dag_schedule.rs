@@ -88,18 +88,28 @@ impl NodeRows for MappedNodeRows<'_> {
     }
 }
 
-trait UserRows {
+trait GraphRows {
     type Iter<'a>: Iterator<Item = usize>
     where
         Self: 'a;
 
     fn len(&self) -> usize;
-    fn users(&self, node: usize) -> Self::Iter<'_>;
+    fn nodes(&self, row: usize) -> Self::Iter<'_>;
+    fn contains(&self, row: usize, node: usize) -> bool;
 }
 
-struct LocalUserRows<'a>(&'a [Vec<usize>]);
+struct LocalGraphRows<'a>(&'a [Vec<usize>]);
 
-impl UserRows for LocalUserRows<'_> {
+impl<'a> LocalGraphRows<'a> {
+    fn new(rows: &'a [Vec<usize>]) -> Result<Self, DagScheduleError> {
+        for row in rows {
+            validate_row(row, rows.len())?;
+        }
+        Ok(Self(rows))
+    }
+}
+
+impl GraphRows for LocalGraphRows<'_> {
     type Iter<'a>
         = std::iter::Copied<std::slice::Iter<'a, usize>>
     where
@@ -109,67 +119,71 @@ impl UserRows for LocalUserRows<'_> {
         self.0.len()
     }
 
-    fn users(&self, node: usize) -> Self::Iter<'_> {
-        self.0[node].iter().copied()
+    fn nodes(&self, row: usize) -> Self::Iter<'_> {
+        self.0[row].iter().copied()
+    }
+
+    fn contains(&self, row: usize, node: usize) -> bool {
+        self.0[row].binary_search(&node).is_ok()
     }
 }
 
-struct MappedUserRowsIter<'a> {
-    external_users: std::slice::Iter<'a, usize>,
+struct MappedGraphRowsIter<'a> {
+    external_nodes: std::slice::Iter<'a, usize>,
     local_by_external: &'a [usize],
-    definition: usize,
+    row: usize,
 }
 
-impl Iterator for MappedUserRowsIter<'_> {
+impl Iterator for MappedGraphRowsIter<'_> {
     type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.external_users.find_map(|external| {
+        self.external_nodes.find_map(|external| {
             let local = self.local_by_external[*external];
-            (local != usize::MAX && local != self.definition).then_some(local)
+            (local != usize::MAX && local != self.row).then_some(local)
         })
     }
 }
 
-/// Borrow successor rows from a larger graph and expose only users mapped into
+/// Borrow adjacency rows from a larger graph and expose only nodes mapped into
 /// the current local DAG.
 #[derive(Clone, Copy)]
-pub struct MappedUserRows<'a> {
-    users_by_external_node: &'a [Vec<usize>],
+pub struct MappedGraphRows<'a> {
+    rows_by_external_node: &'a [Vec<usize>],
     external_by_local: &'a [usize],
     local_by_external: &'a [usize],
 }
 
-impl<'a> MappedUserRows<'a> {
+impl<'a> MappedGraphRows<'a> {
     pub fn new(
-        users_by_external_node: &'a [Vec<usize>],
+        rows_by_external_node: &'a [Vec<usize>],
         external_by_local: &'a [usize],
         local_by_external: &'a [usize],
     ) -> Result<Self, DagScheduleError> {
         for (local, &external) in external_by_local.iter().enumerate() {
-            if external >= users_by_external_node.len()
+            if external >= rows_by_external_node.len()
                 || external >= local_by_external.len()
                 || local_by_external[external] != local
             {
                 return Err(DagScheduleError::InvalidNode);
             }
             validate_mapped_user_row(
-                &users_by_external_node[external],
+                &rows_by_external_node[external],
                 external_by_local,
                 local_by_external,
             )?;
         }
         Ok(Self {
-            users_by_external_node,
+            rows_by_external_node,
             external_by_local,
             local_by_external,
         })
     }
 }
 
-impl UserRows for MappedUserRows<'_> {
+impl GraphRows for MappedGraphRows<'_> {
     type Iter<'a>
-        = MappedUserRowsIter<'a>
+        = MappedGraphRowsIter<'a>
     where
         Self: 'a;
 
@@ -177,12 +191,19 @@ impl UserRows for MappedUserRows<'_> {
         self.external_by_local.len()
     }
 
-    fn users(&self, node: usize) -> Self::Iter<'_> {
-        MappedUserRowsIter {
-            external_users: self.users_by_external_node[self.external_by_local[node]].iter(),
+    fn nodes(&self, row: usize) -> Self::Iter<'_> {
+        MappedGraphRowsIter {
+            external_nodes: self.rows_by_external_node[self.external_by_local[row]].iter(),
             local_by_external: self.local_by_external,
-            definition: node,
+            row,
         }
+    }
+
+    fn contains(&self, row: usize, node: usize) -> bool {
+        row != node
+            && self.rows_by_external_node[self.external_by_local[row]]
+                .binary_search(&self.external_by_local[node])
+                .is_ok()
     }
 }
 
@@ -211,10 +232,12 @@ pub fn schedule_min_live_values_and_tokens(
     tokens_by_node: &[Vec<usize>],
     token_weights: &[usize],
 ) -> Result<Vec<usize>, DagScheduleError> {
+    let dependencies = LocalGraphRows::new(dependencies)?;
+    let value_dependencies = LocalGraphRows::new(value_dependencies)?;
     let tokens_by_node = LocalNodeRows(tokens_by_node);
     let token_users = validate_inputs(
-        dependencies,
-        value_dependencies,
+        &dependencies,
+        &value_dependencies,
         &tokens_by_node,
         token_weights,
     )?;
@@ -222,49 +245,18 @@ pub fn schedule_min_live_values_and_tokens(
     let mut successors = vec![Vec::<usize>::new(); node_count];
     let mut value_users = vec![Vec::<usize>::new(); node_count];
     for user in 0..node_count {
-        for &definition in &dependencies[user] {
+        for definition in dependencies.nodes(user) {
             successors[definition].push(user);
         }
-        for &definition in &value_dependencies[user] {
+        for definition in value_dependencies.nodes(user) {
             value_users[definition].push(user);
         }
     }
+    let successors = LocalGraphRows::new(&successors)?;
+    let value_users = LocalGraphRows::new(&value_users)?;
     schedule_with_users(
-        dependencies,
-        value_dependencies,
-        &tokens_by_node,
-        token_weights,
-        &token_users,
-        &LocalUserRows(&successors),
-        &LocalUserRows(&value_users),
-    )
-}
-
-/// Schedule a local DAG while borrowing reverse-edge and token rows from a
-/// larger graph.
-///
-/// This avoids reconstructing successor and value-user adjacency when the
-/// caller already owns those relations. The mapped user rows must be the exact
-/// reverse of `dependencies` and `value_dependencies`, respectively.
-pub fn schedule_min_live_values_and_tokens_with_mapped_rows(
-    dependencies: &[Vec<usize>],
-    value_dependencies: &[Vec<usize>],
-    tokens_by_node: MappedNodeRows<'_>,
-    token_weights: &[usize],
-    successors: MappedUserRows<'_>,
-    value_users: MappedUserRows<'_>,
-) -> Result<Vec<usize>, DagScheduleError> {
-    let token_users = validate_inputs(
-        dependencies,
-        value_dependencies,
-        &tokens_by_node,
-        token_weights,
-    )?;
-    validate_reverse_users(&successors, dependencies)?;
-    validate_reverse_users(&value_users, value_dependencies)?;
-    schedule_with_users(
-        dependencies,
-        value_dependencies,
+        &dependencies,
+        &value_dependencies,
         &tokens_by_node,
         token_weights,
         &token_users,
@@ -273,9 +265,42 @@ pub fn schedule_min_live_values_and_tokens_with_mapped_rows(
     )
 }
 
-fn validate_inputs<T: NodeRows>(
-    dependencies: &[Vec<usize>],
-    value_dependencies: &[Vec<usize>],
+/// Schedule a local DAG while borrowing dependency, user, and token rows from
+/// a larger graph.
+///
+/// This avoids reconstructing either direction of the hard- and value-edge
+/// adjacency. The mapped user rows must be the exact reverse of the mapped
+/// dependency rows.
+pub fn schedule_min_live_values_and_tokens_with_mapped_rows(
+    dependencies: MappedGraphRows<'_>,
+    value_dependencies: MappedGraphRows<'_>,
+    tokens_by_node: MappedNodeRows<'_>,
+    token_weights: &[usize],
+    successors: MappedGraphRows<'_>,
+    value_users: MappedGraphRows<'_>,
+) -> Result<Vec<usize>, DagScheduleError> {
+    let token_users = validate_inputs(
+        &dependencies,
+        &value_dependencies,
+        &tokens_by_node,
+        token_weights,
+    )?;
+    validate_reverse_users(&successors, &dependencies)?;
+    validate_reverse_users(&value_users, &value_dependencies)?;
+    schedule_with_users(
+        &dependencies,
+        &value_dependencies,
+        &tokens_by_node,
+        token_weights,
+        &token_users,
+        &successors,
+        &value_users,
+    )
+}
+
+fn validate_inputs<D: GraphRows, V: GraphRows, T: NodeRows>(
+    dependencies: &D,
+    value_dependencies: &V,
     tokens_by_node: &T,
     token_weights: &[usize],
 ) -> Result<Vec<Vec<usize>>, DagScheduleError> {
@@ -285,12 +310,10 @@ fn validate_inputs<T: NodeRows>(
     }
     let mut token_users = vec![Vec::<usize>::new(); token_weights.len()];
     for user in 0..node_count {
-        validate_row(&dependencies[user], node_count)?;
-        validate_row(&value_dependencies[user], node_count)?;
         validate_token_row(tokens_by_node.row(user), token_weights.len())?;
-        if value_dependencies[user]
-            .iter()
-            .any(|value| dependencies[user].binary_search(value).is_err())
+        if value_dependencies
+            .nodes(user)
+            .any(|value| !dependencies.contains(user, value))
         {
             return Err(DagScheduleError::ValueIsNotDependency);
         }
@@ -301,22 +324,22 @@ fn validate_inputs<T: NodeRows>(
     Ok(token_users)
 }
 
-fn validate_reverse_users<U: UserRows>(
+fn validate_reverse_users<U: GraphRows, D: GraphRows>(
     users: &U,
-    dependencies: &[Vec<usize>],
+    dependencies: &D,
 ) -> Result<(), DagScheduleError> {
     if users.len() != dependencies.len() {
         return Err(DagScheduleError::Shape);
     }
-    let expected_edges = dependencies.iter().try_fold(0usize, |total, row| {
+    let expected_edges = (0..dependencies.len()).try_fold(0usize, |total, row| {
         total
-            .checked_add(row.len())
+            .checked_add(dependencies.nodes(row).count())
             .ok_or(DagScheduleError::ArithmeticOverflow)
     })?;
     let mut actual_edges = 0usize;
     for definition in 0..users.len() {
-        for user in users.users(definition) {
-            if dependencies[user].binary_search(&definition).is_err() {
+        for user in users.nodes(definition) {
+            if !dependencies.contains(user, definition) {
                 return Err(DagScheduleError::UsersAreNotReverseDependencies);
             }
             actual_edges = actual_edges
@@ -331,20 +354,22 @@ fn validate_reverse_users<U: UserRows>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn schedule_with_users<T: NodeRows, S: UserRows, V: UserRows>(
-    dependencies: &[Vec<usize>],
-    value_dependencies: &[Vec<usize>],
+fn schedule_with_users<D: GraphRows, V: GraphRows, T: NodeRows, S: GraphRows, U: GraphRows>(
+    dependencies: &D,
+    value_dependencies: &V,
     tokens_by_node: &T,
     token_weights: &[usize],
     token_users: &[Vec<usize>],
     successors: &S,
-    value_users: &V,
+    value_users: &U,
 ) -> Result<Vec<usize>, DagScheduleError> {
     let node_count = dependencies.len();
     if successors.len() != node_count || value_users.len() != node_count {
         return Err(DagScheduleError::Shape);
     }
-    let indegree = dependencies.iter().map(Vec::len).collect();
+    let indegree = (0..node_count)
+        .map(|node| dependencies.nodes(node).count())
+        .collect();
 
     let (topological, entry_depth) = topological_order(successors, indegree)?;
     let mut exit_depth = vec![1usize; node_count];
@@ -352,13 +377,13 @@ fn schedule_with_users<T: NodeRows, S: UserRows, V: UserRows>(
         let successor_depth = exit_depth[node]
             .checked_add(1)
             .ok_or(DagScheduleError::ArithmeticOverflow)?;
-        for &dependency in &dependencies[node] {
+        for dependency in dependencies.nodes(node) {
             exit_depth[dependency] = exit_depth[dependency].max(successor_depth);
         }
     }
 
     let mut unscheduled_users = (0..node_count)
-        .map(|node| successors.users(node).count())
+        .map(|node| successors.nodes(node).count())
         .collect::<Vec<_>>();
     let mut live = vec![false; node_count];
     let mut remaining_token_users = token_users.iter().map(Vec::len).collect::<Vec<_>>();
@@ -410,7 +435,7 @@ fn schedule_with_users<T: NodeRows, S: UserRows, V: UserRows>(
                 &mut ready,
             )?;
         }
-        for &definition in &value_dependencies[selected] {
+        for definition in value_dependencies.nodes(selected) {
             if !live[definition] {
                 live[definition] = true;
                 update_for_value(
@@ -466,7 +491,7 @@ fn schedule_with_users<T: NodeRows, S: UserRows, V: UserRows>(
                 live_tokens[token] = false;
             }
         }
-        for &dependency in &dependencies[selected] {
+        for dependency in dependencies.nodes(selected) {
             unscheduled_users[dependency] = unscheduled_users[dependency]
                 .checked_sub(1)
                 .ok_or(DagScheduleError::ArithmeticOverflow)?;
@@ -550,7 +575,7 @@ fn validate_token_row(row: &[usize], token_count: usize) -> Result<(), DagSchedu
     Ok(())
 }
 
-fn topological_order<U: UserRows>(
+fn topological_order<U: GraphRows>(
     successors: &U,
     mut indegree: Vec<usize>,
 ) -> Result<(Vec<usize>, Vec<usize>), DagScheduleError> {
@@ -567,7 +592,7 @@ fn topological_order<U: UserRows>(
         let next_depth = entry_depth[node]
             .checked_add(1)
             .ok_or(DagScheduleError::ArithmeticOverflow)?;
-        for successor in successors.users(node) {
+        for successor in successors.nodes(node) {
             entry_depth[successor] = entry_depth[successor].max(next_depth);
             indegree[successor] = indegree[successor]
                 .checked_sub(1)
@@ -584,10 +609,10 @@ fn topological_order<U: UserRows>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn insert_ready<T: NodeRows>(
+fn insert_ready<D: GraphRows, V: GraphRows, T: NodeRows>(
     node: usize,
-    dependencies: &[Vec<usize>],
-    value_dependencies: &[Vec<usize>],
+    dependencies: &D,
+    value_dependencies: &V,
     tokens_by_node: &T,
     token_weights: &[usize],
     live: &[bool],
@@ -602,9 +627,9 @@ fn insert_ready<T: NodeRows>(
     if present[node] {
         return Err(DagScheduleError::DuplicateDependency);
     }
-    let missing = value_dependencies[node]
-        .iter()
-        .filter(|definition| !live[**definition])
+    let missing = value_dependencies
+        .nodes(node)
+        .filter(|definition| !live[*definition])
         .count();
     let removed = usize::from(live[node]);
     let value_delta = isize::try_from(missing)
@@ -636,9 +661,9 @@ fn insert_ready<T: NodeRows>(
         .checked_add(token_delta)
         .ok_or(DagScheduleError::ArithmeticOverflow)?;
     debug_assert!(
-        value_dependencies[node]
-            .iter()
-            .all(|value| dependencies[node].binary_search(value).is_ok())
+        value_dependencies
+            .nodes(node)
+            .all(|value| dependencies.contains(node, value))
     );
     deltas[node] = delta;
     present[node] = true;
@@ -704,7 +729,7 @@ fn remove_ready(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update_for_value<U: UserRows>(
+fn update_for_value<U: GraphRows>(
     value: usize,
     adjustment: isize,
     value_users: &U,
@@ -714,7 +739,7 @@ fn update_for_value<U: UserRows>(
     present: &[bool],
     ready: &mut BTreeSet<(isize, Reverse<usize>, Reverse<usize>, Reverse<usize>)>,
 ) -> Result<(), DagScheduleError> {
-    for candidate in value_users.users(value).chain(std::iter::once(value)) {
+    for candidate in value_users.nodes(value).chain(std::iter::once(value)) {
         if !present[candidate] {
             continue;
         }
@@ -854,18 +879,31 @@ mod tests {
         let mut external_users = vec![Vec::new(); 5];
         external_users[1] = vec![3];
         external_users[4] = vec![1, 3];
+        let mut external_dependencies = vec![Vec::new(); 5];
+        external_dependencies[1] = vec![4];
+        external_dependencies[3] = vec![1, 4];
         let mut external_tokens = vec![Vec::new(); 5];
         external_tokens[4] = vec![0];
         external_tokens[1] = vec![0, 1];
         external_tokens[3] = vec![1];
 
         let actual = schedule_min_live_values_and_tokens_with_mapped_rows(
-            &dependencies,
-            &values,
+            MappedGraphRows::new(
+                &external_dependencies,
+                &external_by_local,
+                &local_by_external,
+            )
+            .unwrap(),
+            MappedGraphRows::new(
+                &external_dependencies,
+                &external_by_local,
+                &local_by_external,
+            )
+            .unwrap(),
             MappedNodeRows::new(&external_tokens, &external_by_local).unwrap(),
             &[2, 1],
-            MappedUserRows::new(&external_users, &external_by_local, &local_by_external).unwrap(),
-            MappedUserRows::new(&external_users, &external_by_local, &local_by_external).unwrap(),
+            MappedGraphRows::new(&external_users, &external_by_local, &local_by_external).unwrap(),
+            MappedGraphRows::new(&external_users, &external_by_local, &local_by_external).unwrap(),
         )
         .unwrap();
 
@@ -879,13 +917,15 @@ mod tests {
         let local_by_external = vec![0, 1];
         let missing_users = vec![Vec::new(), Vec::new()];
         let empty_tokens = vec![Vec::new(), Vec::new()];
+        let dependencies =
+            MappedGraphRows::new(&dependencies, &external_by_local, &local_by_external).unwrap();
         let users =
-            MappedUserRows::new(&missing_users, &external_by_local, &local_by_external).unwrap();
+            MappedGraphRows::new(&missing_users, &external_by_local, &local_by_external).unwrap();
 
         assert_eq!(
             schedule_min_live_values_and_tokens_with_mapped_rows(
-                &dependencies,
-                &dependencies,
+                dependencies,
+                dependencies,
                 MappedNodeRows::new(&empty_tokens, &external_by_local).unwrap(),
                 &[],
                 users,
@@ -900,7 +940,7 @@ mod tests {
         let users = vec![vec![1], vec![]];
 
         assert!(matches!(
-            MappedUserRows::new(&users, &[0], &[0, 1]),
+            MappedGraphRows::new(&users, &[0], &[0, 1]),
             Err(DagScheduleError::InvalidNode)
         ));
     }
@@ -910,7 +950,7 @@ mod tests {
         let users = vec![vec![1], vec![]];
 
         assert!(matches!(
-            MappedUserRows::new(&users, &[0], &[0, 0]),
+            MappedGraphRows::new(&users, &[0], &[0, 0]),
             Err(DagScheduleError::InvalidNode)
         ));
     }

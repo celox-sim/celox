@@ -2,7 +2,7 @@ use crate::{
     HashMap, HashSet, LogicPath, LogicPathTarget, NodeId, SLTNode, SLTNodeArena, SLTNodeFactsError,
 };
 use celox_analysis::dag_schedule::{
-    MappedNodeRows, MappedUserRows, schedule_min_live_values_and_tokens_with_mapped_rows,
+    MappedGraphRows, MappedNodeRows, schedule_min_live_values_and_tokens_with_mapped_rows,
 };
 use celox_analysis::interval::{DisjointIntervalError, DisjointIntervalMap, ExactInterval};
 use celox_design::{BinaryOp, BitAccess, RuntimeErrorInfo, UnaryOp, VarAtomBase};
@@ -561,12 +561,44 @@ fn add_acyclic_ff_write_order_edges(
 /// A variable target is one bit-range MemoryDef. A current-value source is a
 /// MemoryUse of every overlapping definition; a previous-value source is a
 /// live-on-entry use plus an anti-dependence which keeps that use before an
-/// overlapping definition. `successors` contains all semantic edges while
-/// `value_users` contains only Def-to-Use edges which can become a forwarded
-/// value during later lowering. Both tables are indexed by the predecessor.
+/// overlapping definition. `dependencies` contains all semantic edges while
+/// `values` contains only Def-to-Use edges which can become a forwarded value
+/// during later lowering. Both relations retain their forward and reverse
+/// adjacency so regional scheduling can borrow either direction.
 struct LogicPathMemorySsa {
-    successors: Vec<Vec<usize>>,
-    value_users: Vec<Vec<usize>>,
+    dependencies: LogicPathEdges,
+    values: LogicPathEdges,
+}
+
+struct LogicPathEdges {
+    users: Vec<Vec<usize>>,
+    predecessors: Vec<Vec<usize>>,
+}
+
+impl LogicPathEdges {
+    fn new(node_count: usize) -> Self {
+        Self {
+            users: vec![Vec::new(); node_count],
+            predecessors: vec![Vec::new(); node_count],
+        }
+    }
+
+    fn resize(&mut self, node_count: usize) {
+        self.users.resize_with(node_count, Vec::new);
+        self.predecessors.resize_with(node_count, Vec::new);
+    }
+
+    fn push(&mut self, predecessor: usize, user: usize) {
+        self.users[predecessor].push(user);
+        self.predecessors[user].push(predecessor);
+    }
+
+    fn canonicalize(&mut self) {
+        for row in self.users.iter_mut().chain(&mut self.predecessors) {
+            row.sort_unstable();
+            row.dedup();
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -617,8 +649,8 @@ where
         }
     };
 
-    let mut successors = vec![Vec::new(); input.len()];
-    let mut value_users = vec![Vec::new(); input.len()];
+    let mut dependencies = LogicPathEdges::new(input.len());
+    let mut values = LogicPathEdges::new(input.len());
     for (user, path) in input.iter().enumerate() {
         for source in &path.sources {
             let Some((start, length)) = bit_interval(source.access) else {
@@ -628,8 +660,8 @@ where
                 .overlapping(&source.id, start, length)
                 .map_err(|_| SchedulerError::InvalidDependencyGraph)?;
             for definition in reaching {
-                successors[definition].push(user);
-                value_users[definition].push(user);
+                dependencies.push(definition, user);
+                values.push(definition, user);
             }
         }
 
@@ -644,26 +676,20 @@ where
                 .overlapping(&source.id, start, length)
                 .map_err(|_| SchedulerError::InvalidDependencyGraph)?;
             for definition in reaching.filter(|definition| *definition != user) {
-                successors[user].push(definition);
+                dependencies.push(user, definition);
             }
         }
         for target in &path.order_before {
             if target.0 < input.len() && target.0 != user {
-                successors[user].push(target.0);
+                dependencies.push(user, target.0);
             }
         }
     }
-    for edges in &mut successors {
-        edges.sort_unstable();
-        edges.dedup();
-    }
-    for edges in &mut value_users {
-        edges.sort_unstable();
-        edges.dedup();
-    }
+    dependencies.canonicalize();
+    values.canonicalize();
     Ok(LogicPathMemorySsa {
-        successors,
-        value_users,
+        dependencies,
+        values,
     })
 }
 
@@ -724,14 +750,8 @@ where
         row.dedup();
     }
 
-    let mut predecessors = vec![Vec::new(); input.len()];
-    for (definition, users) in memory.successors.iter().enumerate() {
-        for &user in users {
-            predecessors[user].push(definition);
-        }
-    }
     while let Some(path) = work.pop() {
-        for &predecessor in &predecessors[path] {
+        for &predecessor in &memory.dependencies.predecessors[path] {
             if !std::mem::replace(&mut required_comb[predecessor], true) {
                 work.push(predecessor);
             }
@@ -3064,8 +3084,8 @@ fn direct_ff_write_ranges<Addr: Copy + Eq + Hash>(
 
 fn schedule_acyclic_path_region(
     paths: &[usize],
-    dependencies: &[Vec<usize>],
-    value_dependencies: &[Vec<usize>],
+    dependencies: &LogicPathEdges,
+    values: &LogicPathEdges,
     materialization_tokens: &[Vec<usize>],
     token_weights: &[usize],
     local_by_path: &mut [usize],
@@ -3081,36 +3101,16 @@ fn schedule_acyclic_path_region(
     }
 
     let result = (|| {
-        let mut local_dependencies = vec![Vec::<usize>::new(); paths.len()];
-        let mut local_values = vec![Vec::<usize>::new(); paths.len()];
-        for (definition, &path) in paths.iter().enumerate() {
-            for &user_path in dependencies.get(path)? {
-                let user = *local_by_path.get(user_path)?;
-                if user != usize::MAX && definition != user {
-                    local_dependencies[user].push(definition);
-                }
-            }
-            for &user_path in value_dependencies.get(path)? {
-                let user = *local_by_path.get(user_path)?;
-                if user != usize::MAX && definition != user {
-                    local_values[user].push(definition);
-                }
-            }
-        }
-        for row in &mut local_dependencies {
-            row.sort_unstable();
-            row.dedup();
-        }
-        for row in &mut local_values {
-            row.sort_unstable();
-            row.dedup();
-        }
+        let dependency_predecessors =
+            MappedGraphRows::new(&dependencies.predecessors, paths, local_by_path).ok()?;
+        let value_predecessors =
+            MappedGraphRows::new(&values.predecessors, paths, local_by_path).ok()?;
         let tokens = MappedNodeRows::new(materialization_tokens, paths).ok()?;
-        let successors = MappedUserRows::new(dependencies, paths, local_by_path).ok()?;
-        let value_users = MappedUserRows::new(value_dependencies, paths, local_by_path).ok()?;
+        let successors = MappedGraphRows::new(&dependencies.users, paths, local_by_path).ok()?;
+        let value_users = MappedGraphRows::new(&values.users, paths, local_by_path).ok()?;
         let order = schedule_min_live_values_and_tokens_with_mapped_rows(
-            &local_dependencies,
-            &local_values,
+            dependency_predecessors,
+            value_predecessors,
             tokens,
             token_weights,
             successors,
@@ -3131,19 +3131,19 @@ fn schedule_acyclic_path_region(
 /// across an iteration or externally visible effect.
 fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
     topological_sccs: Vec<Vec<usize>>,
-    dependencies: &[Vec<usize>],
-    value_dependencies: &[Vec<usize>],
+    dependencies: &LogicPathEdges,
+    values: &LogicPathEdges,
     materialization_tokens: &[Vec<usize>],
     token_weights: &[usize],
     input: &[LogicPath<Addr>],
 ) -> Option<Vec<ScheduledWork>> {
-    if dependencies.len() != value_dependencies.len()
-        || dependencies.len() != materialization_tokens.len()
-        || dependencies.len() < input.len()
+    if dependencies.users.len() != values.users.len()
+        || dependencies.users.len() != materialization_tokens.len()
+        || dependencies.users.len() < input.len()
     {
         return None;
     }
-    let mut local_by_path = vec![usize::MAX; dependencies.len()];
+    let mut local_by_path = vec![usize::MAX; dependencies.users.len()];
     let mut result = Vec::with_capacity(topological_sccs.len());
     let mut pending = Vec::new();
     let flush = |pending: &mut Vec<usize>,
@@ -3156,7 +3156,7 @@ fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
         let ordered = schedule_acyclic_path_region(
             pending,
             dependencies,
-            value_dependencies,
+            values,
             materialization_tokens,
             token_weights,
             local_by_path,
@@ -3174,7 +3174,7 @@ fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
 
     for scc in topological_sccs {
         if let [path] = scc.as_slice()
-            && !dependencies[*path].contains(path)
+            && !dependencies.users[*path].contains(path)
             && (*path >= input.len() || !logic_path_is_scheduling_barrier(&input[*path]))
         {
             pending.push(*path);
@@ -3261,8 +3261,8 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     let (mut materialization_tokens, token_weights) =
         logic_path_materialization_tokens(&input, arena);
     let LogicPathMemorySsa {
-        successors: mut adj,
-        mut value_users,
+        mut dependencies,
+        mut values,
     } = build_logic_path_memory_ssa(&input).map_err(ClockSortError::Scheduler)?;
 
     // FF actions are ordinary sinks in the existing comb dependency graph.
@@ -3273,14 +3273,14 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         .map_or(0, |lowering| lowering.summaries().len());
     let mut direct_ff_writes_by_action = vec![Vec::new(); ff_count];
     if let Some(plan) = &ff_plan {
-        adj.resize_with(n + ff_count, Vec::new);
-        value_users.resize_with(n + ff_count, Vec::new);
+        dependencies.resize(n + ff_count);
+        values.resize(n + ff_count);
         materialization_tokens.resize_with(n + ff_count, Vec::new);
         for (ff_index, predecessors) in plan.comb_value_predecessors.iter().enumerate() {
             let ff_node = n + ff_index;
             for &definition in predecessors {
-                adj[definition].push(ff_node);
-                value_users[definition].push(ff_node);
+                dependencies.push(definition, ff_node);
+                values.push(definition, ff_node);
             }
         }
         let write_order_edges = plan
@@ -3302,8 +3302,13 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        let retained =
-            add_acyclic_ff_write_order_edges(&mut adj, write_order_edges.iter().flatten().copied());
+        let retained = add_acyclic_ff_write_order_edges(
+            &mut dependencies.users,
+            write_order_edges.iter().flatten().copied(),
+        );
+        for &(predecessor, user) in &retained {
+            dependencies.predecessors[user].push(predecessor);
+        }
         direct_ff_writes_by_action = direct_ff_write_ranges(
             &input,
             ff.as_deref()
@@ -3315,10 +3320,8 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
             var_widths,
             unpacked_element_widths,
         );
-        for edges in adj.iter_mut().chain(&mut value_users) {
-            edges.sort_unstable();
-            edges.dedup();
-        }
+        dependencies.canonicalize();
+        values.canonicalize();
     }
     let direct_ff_writes = direct_ff_writes_by_action
         .iter()
@@ -3338,20 +3341,20 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     };
     for i in 0..(n + ff_count) {
         if ctx.indices[i].is_none() {
-            strong_connect(i, &adj, &mut ctx);
+            strong_connect(i, &dependencies.users, &mut ctx);
         }
     }
     let fold_group_schedule_index = build_fold_group_schedule_index(&input, arena);
     let mut path_domains = logic_path_scheduling_domains(&input, &fold_group_schedule_index);
     path_domains.resize(n + ff_count, None);
     let (topological_sccs, component_by_path) =
-        stable_topological_sccs(ctx.sccs, &adj, &path_domains).ok_or(ClockSortError::Scheduler(
-            SchedulerError::InvalidDependencyGraph,
-        ))?;
+        stable_topological_sccs(ctx.sccs, &dependencies.users, &path_domains).ok_or(
+            ClockSortError::Scheduler(SchedulerError::InvalidDependencyGraph),
+        )?;
     let scheduled_work = schedule_logic_path_regions(
         topological_sccs,
-        &adj,
-        &value_users,
+        &dependencies,
+        &values,
         &materialization_tokens,
         &token_weights,
         &input,
@@ -3359,6 +3362,9 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     .ok_or(ClockSortError::Scheduler(
         SchedulerError::InvalidDependencyGraph,
     ))?;
+    let adj = dependencies.users;
+    drop(dependencies.predecessors);
+    drop(values);
     let scheduled_work = form_scheduled_guard_regions(scheduled_work, &input, arena, four_state);
 
     let mut builder = SIRBuilder::new();
@@ -4453,9 +4459,14 @@ mod tests {
         let paths = vec![previous_user, writer];
 
         let memory_ssa = build_logic_path_memory_ssa(&paths).unwrap();
-        assert_eq!(memory_ssa.successors, vec![vec![1], vec![]]);
+        assert_eq!(memory_ssa.dependencies.users, vec![vec![1], vec![]]);
+        assert_eq!(memory_ssa.dependencies.predecessors, vec![vec![], vec![0]]);
         assert_eq!(
-            memory_ssa.value_users,
+            memory_ssa.values.users,
+            vec![Vec::<usize>::new(), Vec::new()]
+        );
+        assert_eq!(
+            memory_ssa.values.predecessors,
             vec![Vec::<usize>::new(), Vec::new()]
         );
 
@@ -4492,8 +4503,19 @@ mod tests {
         user.sources = [VarAtomBase::new(10, 2, 5)].into_iter().collect();
 
         let memory_ssa = build_logic_path_memory_ssa(&[low, high, user]).unwrap();
-        assert_eq!(memory_ssa.successors, vec![vec![2], vec![2], vec![]]);
-        assert_eq!(memory_ssa.value_users, vec![vec![2], vec![2], vec![]]);
+        assert_eq!(
+            memory_ssa.dependencies.users,
+            vec![vec![2], vec![2], vec![]]
+        );
+        assert_eq!(
+            memory_ssa.dependencies.predecessors,
+            vec![vec![], vec![], vec![0, 1]]
+        );
+        assert_eq!(memory_ssa.values.users, vec![vec![2], vec![2], vec![]]);
+        assert_eq!(
+            memory_ssa.values.predecessors,
+            vec![vec![], vec![], vec![0, 1]]
+        );
     }
 
     fn fixed_group_path(
