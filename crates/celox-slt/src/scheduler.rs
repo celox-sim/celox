@@ -2369,7 +2369,8 @@ pub enum ClockSortError<Addr: Display + Debug + Eq + Hash + Clone, E> {
 }
 
 enum ScheduledWork {
-    Comb(Vec<usize>),
+    CombPath(usize),
+    CombScc(Vec<usize>),
     /// A dependency-ordered run of state publications selected by one SLT
     /// condition.  The path scheduler has already fixed the order; lowering
     /// only preserves the exclusivity which would otherwise become several
@@ -2579,24 +2580,17 @@ fn form_scheduled_guard_regions<A: Clone + Eq + Hash>(
     let mut result = Vec::with_capacity(work.len());
     let mut pending = work.into_iter().peekable();
     while let Some(item) = pending.next() {
-        let ScheduledWork::Comb(first) = item else {
+        let ScheduledWork::CombPath(first_path) = item else {
             result.push(item);
             continue;
         };
-        let [first_path] = first.as_slice() else {
-            result.push(ScheduledWork::Comb(first));
-            continue;
-        };
-        let Some((condition, _, _)) = scheduled_root_mux(&input[*first_path], arena) else {
-            result.push(ScheduledWork::Comb(first));
+        let Some((condition, _, _)) = scheduled_root_mux(&input[first_path], arena) else {
+            result.push(ScheduledWork::CombPath(first_path));
             continue;
         };
 
-        let mut paths = vec![*first_path];
-        while let Some(ScheduledWork::Comb(next)) = pending.peek() {
-            let [next_path] = next.as_slice() else {
-                break;
-            };
+        let mut paths = vec![first_path];
+        while let Some(ScheduledWork::CombPath(next_path)) = pending.peek() {
             if scheduled_root_mux(&input[*next_path], arena)
                 .is_none_or(|(next_condition, _, _)| next_condition != condition)
             {
@@ -2616,11 +2610,7 @@ fn form_scheduled_guard_regions<A: Clone + Eq + Hash>(
         {
             result.push(ScheduledWork::GuardedComb { condition, paths });
         } else {
-            result.extend(
-                paths
-                    .into_iter()
-                    .map(|path| ScheduledWork::Comb(vec![path])),
-            );
+            result.extend(paths.into_iter().map(ScheduledWork::CombPath));
         }
     }
     result
@@ -3077,7 +3067,7 @@ fn schedule_acyclic_path_region(
     materialization_tokens: &[Vec<usize>],
     token_weights: &[usize],
     local_by_path: &mut [usize],
-) -> Option<Vec<Vec<usize>>> {
+) -> Option<Vec<usize>> {
     for (local, &path) in paths.iter().enumerate() {
         if path >= local_by_path.len() || local_by_path[path] != usize::MAX {
             for &mapped in &paths[..local] {
@@ -3122,7 +3112,7 @@ fn schedule_acyclic_path_region(
             token_weights,
         )
         .ok()?;
-        Some(order.into_iter().map(|local| vec![paths[local]]).collect())
+        Some(order.into_iter().map(|local| paths[local]).collect())
     })();
 
     for &path in paths {
@@ -3141,7 +3131,7 @@ fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
     materialization_tokens: &[Vec<usize>],
     token_weights: &[usize],
     input: &[LogicPath<Addr>],
-) -> Option<Vec<Vec<usize>>> {
+) -> Option<Vec<ScheduledWork>> {
     if dependencies.len() != value_dependencies.len()
         || dependencies.len() != materialization_tokens.len()
         || dependencies.len() < input.len()
@@ -3152,20 +3142,27 @@ fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
     let mut result = Vec::with_capacity(topological_sccs.len());
     let mut pending = Vec::new();
     let flush = |pending: &mut Vec<usize>,
-                 result: &mut Vec<Vec<usize>>,
+                 result: &mut Vec<ScheduledWork>,
                  local_by_path: &mut [usize]|
      -> Option<()> {
         if pending.is_empty() {
             return Some(());
         }
-        result.extend(schedule_acyclic_path_region(
+        let ordered = schedule_acyclic_path_region(
             pending,
             dependencies,
             value_dependencies,
             materialization_tokens,
             token_weights,
             local_by_path,
-        )?);
+        )?;
+        result.extend(ordered.into_iter().map(|path| {
+            if path < input.len() {
+                ScheduledWork::CombPath(path)
+            } else {
+                ScheduledWork::Ff(path - input.len())
+            }
+        }));
         pending.clear();
         Some(())
     };
@@ -3178,7 +3175,17 @@ fn schedule_logic_path_regions<Addr: Clone + Eq + Hash>(
             pending.push(*path);
         } else {
             flush(&mut pending, &mut result, &mut local_by_path)?;
-            result.push(scc);
+            if let [path] = scc.as_slice() {
+                if *path < input.len() {
+                    result.push(ScheduledWork::CombPath(*path));
+                } else {
+                    result.push(ScheduledWork::Ff(*path - input.len()));
+                }
+            } else if scc.iter().all(|path| *path < input.len()) {
+                result.push(ScheduledWork::CombScc(scc));
+            } else {
+                return None;
+            }
         }
     }
     flush(&mut pending, &mut result, &mut local_by_path)?;
@@ -3336,7 +3343,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         stable_topological_sccs(ctx.sccs, &adj, &path_domains).ok_or(ClockSortError::Scheduler(
             SchedulerError::InvalidDependencyGraph,
         ))?;
-    let scheduled_nodes = schedule_logic_path_regions(
+    let scheduled_work = schedule_logic_path_regions(
         topological_sccs,
         &adj,
         &value_users,
@@ -3347,20 +3354,6 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     .ok_or(ClockSortError::Scheduler(
         SchedulerError::InvalidDependencyGraph,
     ))?;
-    let mut scheduled_work = Vec::with_capacity(scheduled_nodes.len());
-    for nodes in scheduled_nodes {
-        if nodes.iter().all(|node| *node < n) {
-            scheduled_work.push(ScheduledWork::Comb(nodes));
-        } else if let [node] = nodes.as_slice()
-            && *node >= n
-        {
-            scheduled_work.push(ScheduledWork::Ff(*node - n));
-        } else {
-            return Err(ClockSortError::Scheduler(
-                SchedulerError::InvalidDependencyGraph,
-            ));
-        }
-    }
     let scheduled_work = form_scheduled_guard_regions(scheduled_work, &input, arena, four_state);
 
     let mut builder = SIRBuilder::new();
@@ -3416,8 +3409,13 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     // 4. Lower each scheduled component, selecting static unrolling or
     // dynamic convergence for cyclic SCCs.
     for work in scheduled_work {
-        let scc = match work {
-            ScheduledWork::Comb(scc) => scc,
+        let singleton;
+        let scc = match &work {
+            ScheduledWork::CombPath(path) => {
+                singleton = [*path];
+                singleton.as_slice()
+            }
+            ScheduledWork::CombScc(scc) => scc.as_slice(),
             ScheduledWork::GuardedComb { condition, paths } => {
                 flush_pending_fold_paths(
                     &mut pending_fold_indices,
@@ -3436,8 +3434,8 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                 emit_scheduled_guard_region(
                     &lowerer,
                     &mut builder,
-                    condition,
-                    &paths,
+                    *condition,
+                    paths,
                     &input,
                     arena,
                     &mut lower_cache,
@@ -3466,7 +3464,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                     .ok_or(ClockSortError::Scheduler(
                         SchedulerError::InvalidDependencyGraph,
                     ))?
-                    .lower(index, &direct_ff_writes_by_action[index], &mut builder)
+                    .lower(*index, &direct_ff_writes_by_action[*index], &mut builder)
                     .map_err(ClockSortError::Lowering)?;
                 // Any directly published range is ordered after all of its
                 // old-state readers. Other FF state stays invisible in
@@ -3478,7 +3476,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         };
         let component = component_by_path[scc[0]];
         let mut user_safety_limit = None;
-        for &v_idx in &scc {
+        for &v_idx in scc {
             for &u_idx in &adj[v_idx] {
                 if component_by_path[u_idx] == component {
                     if let (Some(v_target), Some(u_target)) =
@@ -3512,7 +3510,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
             );
             pending_fold_roots.clear();
             let mut authorized = user_safety_limit.is_some();
-            'check_scc: for &v_idx in &scc {
+            'check_scc: for &v_idx in scc {
                 for &u_idx in &adj[v_idx] {
                     if component_by_path[u_idx] == component
                         && input[v_idx]
@@ -3531,13 +3529,13 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
             if !authorized {
                 return Err(ClockSortError::Scheduler(
                     SchedulerError::CombinationalLoop {
-                        blocks: scc.into_iter().map(|idx| input[idx].clone()).collect(),
+                        blocks: scc.iter().map(|idx| input[*idx].clone()).collect(),
                     },
                 ));
             }
 
             // FAS Sort
-            let optimized_scc_order = greedy_fas_sort(&scc, &adj);
+            let optimized_scc_order = greedy_fas_sort(scc, &adj);
             let force_strategy_b = user_safety_limit.is_some();
             let iterations = calculate_required_iterations(&adj, &optimized_scc_order);
             let total_ops_estimate = optimized_scc_order.len().saturating_mul(iterations);
