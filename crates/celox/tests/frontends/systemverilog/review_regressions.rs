@@ -3831,6 +3831,70 @@ fn rejects_bind_directives() {
 }
 
 #[test]
+fn rejects_specify_blocks() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic a, output logic y);
+            assign y = a;
+            specify
+                (a => y) = 5;
+            endspecify
+        endmodule
+        "#,
+    );
+    assert!(error.contains("specify block"), "unexpected error: {error}");
+}
+
+#[test]
+fn context_sizes_unbased_fill_literals_in_constant_binary_expressions() {
+    let source = r#"
+        module Top(output logic y);
+            localparam MATCH = 8'hff == '1;
+            assign y = MATCH;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("constant_unbased_fill.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn rejects_expressionless_function_returns() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic a, output logic y);
+            function automatic logic f(input logic value);
+                return;
+            endfunction
+            assign y = f(a);
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("expressionless function return"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn collapses_unknowns_for_two_state_parameters() {
+    let source = r#"
+        module Top(output logic y);
+            localparam bit P = 1'bx;
+            assign y = P;
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("two_state_parameter.sv"))], "Top")
+            .four_state(true)
+            .build_cranelift()
+            .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0u8.into());
+}
+
+#[test]
 fn preserves_wide_unsigned_parameters_in_generate_conditions() {
     let source = r#"
         module Top(output logic y);

@@ -67,9 +67,17 @@ static EMPTY_EXTERNAL_MODULES: std::sync::LazyLock<HashMap<ModuleId, ExternalMod
 fn external_port_formal_names(decl: &InstDeclaration) -> Result<(bool, Vec<String>), ParserError> {
     let source = decl.token.source().get_text();
     let start = decl.token.beg.pos as usize;
+    let source = source.get(start..).ok_or_else(|| {
+        ParserError::illegal_context(
+            "external module port connections",
+            "instance source range is unavailable",
+            Some(&decl.token),
+        )
+    })?;
+    let source = without_comments(source);
     let declaration = source
-        .get(start..)
-        .and_then(|source| source.split_once(';').map(|(declaration, _)| declaration))
+        .split_once(';')
+        .map(|(declaration, _)| declaration)
         .ok_or_else(|| {
             ParserError::illegal_context(
                 "external module port connections",
@@ -124,6 +132,68 @@ fn external_port_formal_names(decl: &InstDeclaration) -> Result<(bool, Vec<Strin
         ));
     }
     Ok((uses_named_associations, formal_names))
+}
+
+fn without_comments(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut string = false;
+    let mut escaped = false;
+    let mut line_comment = false;
+    let mut block_comment = false;
+
+    while let Some(ch) = chars.next() {
+        if line_comment {
+            if ch == '\n' {
+                line_comment = false;
+                result.push(ch);
+            } else {
+                result.push(' ');
+            }
+            continue;
+        }
+        if block_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                result.push_str("  ");
+                block_comment = false;
+            } else if ch == '\n' {
+                result.push(ch);
+            } else {
+                result.push(' ');
+            }
+            continue;
+        }
+        if string {
+            result.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                string = false;
+            }
+            continue;
+        }
+        match (ch, chars.peek().copied()) {
+            ('"', _) => {
+                string = true;
+                result.push(ch);
+            }
+            ('/', Some('/')) => {
+                chars.next();
+                result.push_str("  ");
+                line_comment = true;
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                result.push_str("  ");
+                block_comment = true;
+            }
+            _ => result.push(ch),
+        }
+    }
+    result
 }
 
 fn uses_named_external_port_associations(items: &[&str]) -> bool {

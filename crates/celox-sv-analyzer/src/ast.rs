@@ -604,6 +604,9 @@ fn reject_silently_ignored_constructs(
             RefNode::BindDirective(_) => {
                 return Err(AnalyzerError::Unsupported("bind directive".to_string()));
             }
+            RefNode::SpecifyBlock(_) => {
+                return Err(AnalyzerError::Unsupported("specify block".to_string()));
+            }
             RefNode::ConcurrentAssertionItem(_) => {
                 return Err(AnalyzerError::Unsupported(
                     "concurrent assertion".to_string(),
@@ -1176,6 +1179,7 @@ pub struct Parameter {
     value: Option<ConstExpr>,
     declared_width: Option<usize>,
     declared_signed: Option<bool>,
+    declared_is_2state: bool,
     is_local: bool,
 }
 
@@ -1185,6 +1189,7 @@ impl Parameter {
         value: Option<ConstExpr>,
         declared_width: Option<usize>,
         declared_signed: Option<bool>,
+        declared_is_2state: bool,
         is_local: bool,
     ) -> Self {
         Self {
@@ -1192,6 +1197,7 @@ impl Parameter {
             value,
             declared_width,
             declared_signed,
+            declared_is_2state,
             is_local,
         }
     }
@@ -1209,8 +1215,14 @@ impl Parameter {
         constants: &HashMap<String, i128>,
         parameter_types: &HashMap<String, ExprType>,
     ) -> Option<i128> {
-        let value =
+        let mut value =
             substitute_typed_parameter_literals(self.value()?.clone(), constants, parameter_types);
+        if self.declared_is_2state {
+            value = ConstExpr::Unary {
+                op: UnaryOp::ToTwoState,
+                expr: Box::new(value),
+            };
+        }
         let mut value = typecheck::eval_const_expr(&value.into(), constants)?;
         if let Some(width) = self.declared_width {
             value =
@@ -2455,6 +2467,8 @@ fn parameters_from_ref_node(
             .map(|r#type| r#type.signed)
             .unwrap_or_else(|| is_signed_from_ref_node(node.clone()).unwrap_or(false))
     });
+    let parameter_is_2state = type_from_ref_node(node.clone(), syntax_tree)
+        .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
     for child in node {
         if let RefNode::ParamAssignment(param) = child {
             let name = parameter_name(RefNode::ParameterIdentifier(&param.nodes.0), syntax_tree)?;
@@ -2470,6 +2484,7 @@ fn parameters_from_ref_node(
                 value,
                 parameter_width,
                 parameter_signed,
+                parameter_is_2state,
                 is_local,
             ));
         }
@@ -2584,7 +2599,7 @@ fn parameter_value_env(
             parameter_types.insert(parameter.name().to_string(), ExprType { width, signed });
         }
 
-        let value = if let Some(value) = const_env.get(parameter.name()).copied() {
+        let mut value = if let Some(value) = const_env.get(parameter.name()).copied() {
             if let Some(width) = width {
                 Expr::Literal(format_typed_parameter_literal(value, width, signed))
             } else if value.is_negative() {
@@ -2620,6 +2635,12 @@ fn parameter_value_env(
         } else {
             continue;
         };
+        if parameter.declared_is_2state {
+            value = Expr::Unary {
+                op: UnaryOp::ToTwoState,
+                expr: Box::new(value),
+            };
+        }
         values.insert(parameter.name().to_string(), value);
     }
     values
@@ -3759,17 +3780,15 @@ fn validate_function_statement(
         sv_parser::StatementItem::JumpStatement(statement)
             if matches!(&**statement, sv_parser::JumpStatement::Return(_)) =>
         {
-            if let sv_parser::JumpStatement::Return(statement) = &**statement
-                && let Some(expr) = &statement.nodes.1
-            {
-                expr_from_expression_with_types(expr, syntax_tree, packed_dimensions).ok_or_else(
-                    || {
-                        AnalyzerError::Unsupported(
-                            "unsupported function return expression".to_string(),
-                        )
-                    },
-                )?;
-            }
+            let sv_parser::JumpStatement::Return(statement) = &**statement else {
+                unreachable!();
+            };
+            let expr = statement.nodes.1.as_ref().ok_or_else(|| {
+                AnalyzerError::Unsupported("expressionless function return".to_string())
+            })?;
+            expr_from_expression_with_types(expr, syntax_tree, packed_dimensions).ok_or_else(
+                || AnalyzerError::Unsupported("unsupported function return expression".to_string()),
+            )?;
             Ok(())
         }
         sv_parser::StatementItem::BlockingAssignment(assignment) => {

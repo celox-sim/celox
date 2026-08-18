@@ -212,8 +212,27 @@ fn format_typed_constant_literal(value: i128, width: usize, signed: bool) -> Str
 }
 
 fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Option<i128> {
-    let mut left = integral_literal_from_const_expr(left)?;
-    let mut right = integral_literal_from_const_expr(right)?;
+    let left_fill = unbased_fill_from_const_expr(left);
+    let right_fill = unbased_fill_from_const_expr(right);
+    let (mut left, mut right) = match (left_fill, right_fill) {
+        (Some(left_fill), Some(right_fill)) => (
+            integral_fill_literal(left_fill, 1)?,
+            integral_fill_literal(right_fill, 1)?,
+        ),
+        (Some(fill), None) => {
+            let right = integral_literal_from_const_expr(right)?;
+            (integral_fill_literal(fill, right.width)?, right)
+        }
+        (None, Some(fill)) => {
+            let left = integral_literal_from_const_expr(left)?;
+            let right = integral_fill_literal(fill, left.width)?;
+            (left, right)
+        }
+        (None, None) => (
+            integral_literal_from_const_expr(left)?,
+            integral_literal_from_const_expr(right)?,
+        ),
+    };
     if left.mask != BigUint::default() || right.mask != BigUint::default() {
         return None;
     }
@@ -390,6 +409,13 @@ fn integral_literal_as_i128(literal: &IntegralLiteral, signed: bool) -> Option<i
 fn eval_literal_unary(op: UnaryOp, literal: &str) -> Option<i128> {
     let literal_text = literal;
     let literal = parse_integral_literal(literal_text)?;
+    if op == UnaryOp::ToTwoState {
+        let mut literal = literal;
+        let width_mask = (BigUint::from(1u8) << literal.width) - BigUint::from(1u8);
+        literal.value &= width_mask ^ &literal.mask;
+        literal.mask = BigUint::default();
+        return integral_literal_as_i128(&literal, literal.signed);
+    }
     if literal.mask != BigUint::default() {
         return None;
     }
@@ -503,6 +529,13 @@ fn unbased_fill_literal(value: &str) -> Option<char> {
     let normalized = value.trim().to_ascii_lowercase();
     let mut chars = normalized.chars();
     (chars.next()? == '\'' && chars.clone().count() == 1).then_some(chars.next()?)
+}
+
+fn unbased_fill_from_const_expr(expr: &ConstExpr) -> Option<char> {
+    let ConstExpr::Literal(value) = expr else {
+        return None;
+    };
+    unbased_fill_literal(value)
 }
 
 fn integral_fill_literal(fill: char, width: usize) -> Option<IntegralLiteral> {

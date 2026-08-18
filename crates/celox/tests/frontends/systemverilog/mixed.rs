@@ -71,6 +71,43 @@ sv_backends! {
     assert_eq!(sim.get(sim.signal("y")), 2u8.into());
     }
 
+    fn ignores_comments_when_parsing_veryl_to_systemverilog_ports(sim) {
+        @setup {
+    let veryl = r#"
+        module Top (
+            a: input logic,
+            b: input logic,
+            y: output logic<2>,
+        ) {
+            inst child: $sv::CommentedPorts (
+                a, // forwarded; comma, and terminator text must be ignored
+                b,
+                y,
+            );
+        }
+    "#;
+    let sv = r#"
+        module CommentedPorts(input logic a, input logic b, output logic [1:0] y);
+            assign y = {a, b};
+        endmodule
+    "#;
+        }
+        @build Simulator::from_mixed_sources(
+            vec![(veryl, Path::new("commented_ports.veryl"))],
+            vec![(sv, Path::new("commented_ports.sv"))],
+            "Top",
+        );
+
+    let a = sim.signal("a");
+    let b = sim.signal("b");
+    sim.modify(|io| {
+        io.set(a, 1u8);
+        io.set(b, 0u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 2u8.into());
+    }
+
     fn converts_veryl_logic_to_systemverilog_bit_input(sim) {
         @setup {
     let veryl = r#"
