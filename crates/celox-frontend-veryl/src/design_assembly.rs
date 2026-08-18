@@ -1236,11 +1236,28 @@ fn expand_hierarchy(
     (expanded, instance_modules)
 }
 
+fn extend_boundaries(
+    boundaries: &mut HashMap<AbsoluteAddr, BTreeSet<usize>>,
+    source: AbsoluteAddr,
+    target: AbsoluteAddr,
+) -> bool {
+    if source == target || boundaries.get(&source).is_none_or(BTreeSet::is_empty) {
+        return false;
+    }
+    boundaries.entry(target).or_default();
+    let [Some(source), Some(target)] = boundaries.get_disjoint_mut([&source, &target]) else {
+        unreachable!("distinct boundary keys were inserted before lookup");
+    };
+    let old_len = target.len();
+    target.extend(source.iter().copied());
+    target.len() != old_len
+}
+
 fn propagate_boundaries(
     expanded: &HashMap<InstancePath, InstanceId>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
-) -> HashMap<AbsoluteAddr, std::collections::BTreeSet<usize>> {
+) -> HashMap<AbsoluteAddr, BTreeSet<usize>> {
     let mut current_boundaries = HashMap::default();
 
     // Initialize with local boundaries
@@ -1281,27 +1298,16 @@ fn propagate_boundaries(
                             };
 
                             // Collect boundaries from all parent variables connected to this port
-                            let mut incoming_boundaries = std::collections::BTreeSet::new();
                             for parent_var in parent_vars {
                                 let parent_abs = AbsoluteAddr {
                                     instance_id: *id,
                                     var_id: *parent_var,
                                 };
-                                if let Some(bounds) = current_boundaries.get(&parent_abs) {
-                                    for b in bounds {
-                                        incoming_boundaries.insert(*b);
-                                    }
-                                }
-                            }
-
-                            // Apply to child
-                            if !incoming_boundaries.is_empty() {
-                                let child_bounds = current_boundaries.entry(child_abs).or_default();
-                                let old_len = child_bounds.len();
-                                child_bounds.extend(incoming_boundaries);
-                                if child_bounds.len() != old_len {
-                                    changed = true;
-                                }
+                                changed |= extend_boundaries(
+                                    &mut current_boundaries,
+                                    parent_abs,
+                                    child_abs,
+                                );
                             }
                         }
                     }
@@ -1317,48 +1323,31 @@ fn propagate_boundaries(
                                 };
 
                                 // Child -> Parent
-                                if let Some(child_bounds) =
-                                    current_boundaries.get(&child_abs).cloned()
-                                {
-                                    for parent_var in parent_vars {
-                                        let parent_abs = AbsoluteAddr {
-                                            instance_id: *id,
-                                            var_id: *parent_var,
-                                        };
-                                        let parent_bounds =
-                                            current_boundaries.entry(parent_abs).or_default();
-                                        let old_len = parent_bounds.len();
-                                        parent_bounds.extend(child_bounds.clone());
-                                        if parent_bounds.len() != old_len {
-                                            changed = true;
-                                        }
-                                    }
-                                }
-
-                                // Parent -> Child (Sink -> Source propagation)
-                                // If the parent wire connected to this output has boundaries (e.g. used in slices),
-                                // those boundaries should propagate to the child output port so it drives them appropriately.
-                                let mut incoming_boundaries = std::collections::BTreeSet::new();
                                 for parent_var in parent_vars {
                                     let parent_abs = AbsoluteAddr {
                                         instance_id: *id,
                                         var_id: *parent_var,
                                     };
-                                    if let Some(bounds) = current_boundaries.get(&parent_abs) {
-                                        for b in bounds {
-                                            incoming_boundaries.insert(*b);
-                                        }
-                                    }
+                                    changed |= extend_boundaries(
+                                        &mut current_boundaries,
+                                        child_abs,
+                                        parent_abs,
+                                    );
                                 }
 
-                                if !incoming_boundaries.is_empty() {
-                                    let child_bounds =
-                                        current_boundaries.entry(child_abs).or_default();
-                                    let old_len = child_bounds.len();
-                                    child_bounds.extend(incoming_boundaries);
-                                    if child_bounds.len() != old_len {
-                                        changed = true;
-                                    }
+                                // Parent -> Child (Sink -> Source propagation)
+                                // If the parent wire connected to this output has boundaries (e.g. used in slices),
+                                // those boundaries should propagate to the child output port so it drives them appropriately.
+                                for parent_var in parent_vars {
+                                    let parent_abs = AbsoluteAddr {
+                                        instance_id: *id,
+                                        var_id: *parent_var,
+                                    };
+                                    changed |= extend_boundaries(
+                                        &mut current_boundaries,
+                                        parent_abs,
+                                        child_abs,
+                                    );
                                 }
                             }
                         }
