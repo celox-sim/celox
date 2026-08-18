@@ -1420,14 +1420,14 @@ fn ensure_parent_output_signals(
         let variable = SvVariable {
             id: next_id,
             path: VarPath::new(resource_table::insert_str(actual)),
-            width: child_var.width,
-            signed: child_var.signed,
-            is_4state: child_var.is_4state,
-            packed_ranges: child_var.packed_ranges.clone(),
+            width: 1,
+            signed: false,
+            is_4state: true,
+            packed_ranges: Vec::new(),
             domain_kind: DomainKind::Other,
             kind: VarKind::Variable,
-            type_kind: child_var.type_kind,
-            token: child_var.token,
+            type_kind: PortTypeKind::Logic,
+            token: TokenRange::default(),
         };
         parent
             .variables
@@ -3157,6 +3157,15 @@ fn lower_ff_processes(
                 "multi-bit always_ff event signal".to_string(),
             ));
         }
+        if four_state
+            && variables
+                .get(&clock_id)
+                .is_some_and(|variable| variable.is_4state)
+        {
+            return Err(sv::AnalyzerError::Unsupported(
+                "four-state always_ff event signal".to_string(),
+            ));
+        }
         if reset_edges.contains_key(&clock_id) {
             return Err(sv::AnalyzerError::Unsupported(
                 "mixed clock/reset-edge polarities for one signal".to_string(),
@@ -3184,6 +3193,15 @@ fn lower_ff_processes(
             {
                 return Err(sv::AnalyzerError::Unsupported(
                     "multi-bit always_ff event signal".to_string(),
+                ));
+            }
+            if four_state
+                && variables
+                    .get(&reset_id)
+                    .is_some_and(|variable| variable.is_4state)
+            {
+                return Err(sv::AnalyzerError::Unsupported(
+                    "four-state always_ff event signal".to_string(),
                 ));
             }
             if clock_edges.contains_key(&reset_id) {

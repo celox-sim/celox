@@ -656,8 +656,8 @@ sv_backends! {
         @setup {
     let sv = r#"
         module Top(
-            input logic clk,
-            input logic rst,
+            input bit clk,
+            input bit rst,
             input logic [1:0] mode,
             input logic [1:0] dynamic_label,
             input logic signed [1:0] signed_mode,
@@ -1031,7 +1031,7 @@ sv_backends! {
         @setup {
     let sv = r#"
         module Top(
-            input logic clk,
+            input bit clk,
             input logic [1:0] mode,
             input logic signed [1:0] signed_mode,
             input logic [7:0] d,

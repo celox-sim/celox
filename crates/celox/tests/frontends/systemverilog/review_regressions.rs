@@ -9,6 +9,16 @@ fn cranelift_build_error(source: &str) -> String {
     }
 }
 
+fn four_state_cranelift_build_error(source: &str) -> String {
+    match Simulator::from_sv_sources(vec![(source, Path::new("review.sv"))], "Top")
+        .four_state(true)
+        .build_cranelift()
+    {
+        Ok(_) => panic!("unsupported SystemVerilog unexpectedly compiled:\n{source}"),
+        Err(error) => error.to_string(),
+    }
+}
+
 #[test]
 fn rejects_cross_lhs_read_before_write_in_always_comb() {
     let error = cranelift_build_error(
@@ -1614,7 +1624,7 @@ fn handles_fill_literals_ascending_ranges_atom_types_and_unary_constants() {
 #[test]
 fn treats_unknown_procedural_conditions_as_false() {
     let source = r#"
-        module Top(input logic clk, input logic clear, input logic en, output logic q);
+        module Top(input bit clk, input logic clear, input logic en, output logic q);
             always_ff @(posedge clk) begin
                 if (clear) q <= 1'b0;
                 else if (en) q <= 1'b1;
@@ -1646,7 +1656,7 @@ fn treats_unknown_procedural_conditions_as_false() {
 #[test]
 fn takes_always_ff_else_branch_for_unknown_predicates() {
     let source = r#"
-        module Top(input logic clk, input logic sel, output logic q);
+        module Top(input bit clk, input logic sel, output logic q);
             always_ff @(posedge clk) begin
                 if (sel) q <= 1'b1;
                 else q <= 1'b0;
@@ -1867,7 +1877,7 @@ fn lowers_complemented_reductions_in_always_ff() {
 #[test]
 fn converts_unknown_ff_values_when_storing_to_bit() {
     let source = r#"
-        module Top(input logic clk, input logic d, output bit q);
+        module Top(input bit clk, input logic d, output bit q);
             always_ff @(posedge clk) q <= d;
         endmodule
     "#;
@@ -4001,6 +4011,47 @@ fn tracks_packed_ranges_for_function_scoped_values() {
     assert_eq!(sim.get(sim.signal("local_y")), 1u8.into());
     assert_eq!(sim.get(sim.signal("formal_slice")), 2u8.into());
     assert_eq!(sim.get(sim.signal("local_slice")), 2u8.into());
+}
+
+#[test]
+fn declares_implicit_child_output_nets_as_scalar_unsigned_wires() {
+    let source = r#"
+        module Child(output logic signed [7:0] y); assign y = 8'h81; endmodule
+        module Top(output logic [7:0] y);
+            Child child(.y(w));
+            assign y = w;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("implicit_output_net_type.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn rejects_four_state_always_ff_event_signals_in_four_state_mode() {
+    for source in [
+        r#"
+        module Top(input logic clk, input bit d, output bit q);
+            always_ff @(posedge clk) q <= d;
+        endmodule
+        "#,
+        r#"
+        module Top(input bit clk, input logic rst, input bit d, output bit q);
+            always_ff @(posedge clk or negedge rst)
+                if (!rst) q <= 1'b0; else q <= d;
+        endmodule
+        "#,
+    ] {
+        let error = four_state_cranelift_build_error(source);
+        assert!(
+            error.contains("four-state always_ff event signal"),
+            "unexpected error: {error}"
+        );
+    }
 }
 
 #[test]
