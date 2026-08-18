@@ -705,6 +705,14 @@ fn select_store_fanout_packs(func: &mut MFunction, stats: &mut SlpStats) {
                     if plan.zero {
                         replacement.push(MInst::X86Simd(X86SimdInst::Zero128 { dst: vector }));
                         stats.vector_zeroes += 1;
+                    } else if plan.low == plan.high {
+                        replacement.push(MInst::X86Simd(X86SimdInst::Pack128 {
+                            dst: vector,
+                            low: plan.low,
+                            high: plan.high,
+                            scratch: None,
+                        }));
+                        stats.vector_packs += 1;
                     } else {
                         let scratch =
                             scratch.expect("non-zero pack with distinct lanes has vector scratch");
@@ -1418,6 +1426,47 @@ mod tests {
                 .filter(|inst| matches!(inst, MInst::X86Simd(X86SimdInst::Store128 { .. })))
                 .count(),
             4
+        );
+        func.verify();
+    }
+
+    #[test]
+    fn scalar_splat_with_four_store_destinations_is_packed_without_scratch() {
+        let mut scalar = VRegAllocator::new();
+        let value = scalar.alloc();
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm {
+            dst: value,
+            value: 1,
+        });
+        for offset in [32, 64, 96, 128] {
+            for lane_offset in [0, 8] {
+                block.push(MInst::Store {
+                    base: BaseReg::SimState,
+                    offset: offset + lane_offset,
+                    src: value,
+                    size: OpSize::S64,
+                });
+            }
+        }
+        block.push(MInst::Return);
+        let mut func = MFunction::new(scalar, vec![SpillDesc::transient()]);
+        func.blocks.push(block);
+
+        let stats = select(&mut func);
+
+        assert_eq!(stats.vector_packs, 1);
+        assert_eq!(stats.vector_stores, 4);
+        assert_eq!(stats.scalar_instructions_removed, 2);
+        assert!(func.blocks[0].insts.iter().any(|inst| matches!(
+            inst,
+            MInst::X86Simd(X86SimdInst::Pack128 { scratch: None, .. })
+        )));
+        assert!(
+            !func.blocks[0]
+                .insts
+                .iter()
+                .any(|inst| matches!(inst, MInst::X86Simd(X86SimdInst::Scratch128 { .. })))
         );
         func.verify();
     }
