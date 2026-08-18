@@ -628,6 +628,73 @@ function createArrayDut(
 	const totalValueBytes = Math.ceil((totalElements * elementWidth) / 8);
 	const maskBase = baseOffset + totalValueBytes;
 
+	if (
+		baseSig.arrayElementStride !== undefined &&
+		baseSig.arrayPlaneSize !== undefined
+	) {
+		const elementStride = baseSig.arrayElementStride;
+		const elementByteSize = Math.ceil(elementWidth / 8);
+		const planeSize = baseSig.arrayPlaneSize;
+		const elementSignal = (i: number, mask: boolean): SignalLayout => ({
+			offset: baseOffset + (mask ? planeSize : 0) + i * elementStride,
+			width: elementWidth,
+			byteSize: elementByteSize,
+			is4state: false,
+			direction: baseSig.direction,
+		});
+
+		return {
+			length: totalElements,
+
+			at(i: number): bigint {
+				if (state.disposed) throw new Error("Simulator has been disposed");
+				if (state.dirty && !isInput) {
+					handle.evalComb();
+					state.dirty = false;
+				}
+				return readSignal(view, elementSignal(i, false));
+			},
+
+			set(i: number, value: bigint | number | symbol | FourStateValue): void {
+				if (state.disposed) throw new Error("Simulator has been disposed");
+				if (isOutput) {
+					throw new Error("Cannot write to output array port");
+				}
+
+				const valueSignal = elementSignal(i, false);
+				const maskSignal = elementSignal(i, true);
+				const allOnes = (1n << BigInt(elementWidth)) - 1n;
+				if (value === Symbol.for("veryl:X")) {
+					if (!is4state) {
+						throw new Error("Array port is not 4-state; cannot assign X");
+					}
+					writeSignal(view, valueSignal, allOnes);
+					writeSignal(view, maskSignal, allOnes);
+				} else if (value === Symbol.for("veryl:Z")) {
+					if (!is4state) {
+						throw new Error("Array port is not 4-state; cannot assign Z");
+					}
+					writeSignal(view, valueSignal, 0n);
+					writeSignal(view, maskSignal, allOnes);
+				} else if (isFourStateValue(value)) {
+					if (!is4state) {
+						throw new Error(
+							"Array port is not 4-state; cannot assign FourState",
+						);
+					}
+					writeSignal(view, valueSignal, value.value);
+					writeSignal(view, maskSignal, value.mask);
+				} else {
+					const bigVal =
+						typeof value === "bigint" ? value : BigInt(value as number);
+					writeSignal(view, valueSignal, bigVal);
+					if (is4state) writeSignal(view, maskSignal, 0n);
+				}
+				state.dirty = true;
+			},
+		};
+	}
+
 	if (elementWidth < 8) {
 		// Sub-byte elements: use optimised number-based bit-packed I/O.
 		return {

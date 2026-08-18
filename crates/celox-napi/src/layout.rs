@@ -21,6 +21,10 @@ pub struct SignalLayout {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub array_dims: Vec<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub array_element_stride: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub array_plane_size: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub associated_clock: Option<String>,
 }
 
@@ -65,6 +69,11 @@ fn build_signal_layout_entry(ns: &NamedSignal, four_state_mode: bool) -> SignalL
         let element_width = ns.signal.width / ns.info.array_dims.iter().product::<usize>();
         (element_width, ns.info.array_dims.clone())
     };
+    let (array_element_stride, array_plane_size) = ns
+        .signal
+        .array_layout
+        .map(|layout| (Some(layout.element_stride), Some(layout.plane_size)))
+        .unwrap_or((None, None));
 
     SignalLayout {
         offset: ns.signal.offset,
@@ -74,6 +83,8 @@ fn build_signal_layout_entry(ns: &NamedSignal, four_state_mode: bool) -> SignalL
         direction,
         type_kind,
         array_dims,
+        array_element_stride,
+        array_plane_size,
         associated_clock: ns.associated_clock.clone(),
     }
 }

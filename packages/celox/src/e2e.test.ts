@@ -2672,6 +2672,107 @@ describe("E2E: Proto package ordering (issue #22)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Bug fix: constant indexing of unpacked array inputs from always_ff
+// ---------------------------------------------------------------------------
+
+const UNPACKED_ARRAY_INPUT_INDEX_SOURCE = `
+module UnpackedArrayInputIndex (
+    clk: input clock,
+    rst: input reset,
+    i_valid: input logic [2],
+    i_data: input logic<8> [2],
+    o_valid: output logic,
+    o_data: output logic<8>,
+) {
+    always_ff (clk, rst) {
+        if_reset {
+            o_valid = 0;
+            o_data = 0;
+        } else {
+            o_valid = 0;
+            if i_valid[0] {
+                o_valid = 1;
+                o_data = i_data[0];
+            }
+            if i_valid[1] {
+                o_valid = 1;
+                o_data = i_data[1];
+            }
+        }
+    }
+}
+`;
+
+describe("E2E: constant indexing of unpacked array inputs", () => {
+	test.each([
+		[0, 0x11n],
+		[1, 0xa5n],
+	])("element %i is readable from always_ff", (index, value) => {
+		interface Ports {
+			rst: bigint;
+			i_valid: {
+				at(i: number): bigint;
+				set(i: number, value: bigint): void;
+			};
+			i_data: {
+				at(i: number): bigint;
+				set(i: number, value: bigint): void;
+			};
+			readonly o_valid: bigint;
+			readonly o_data: bigint;
+		}
+
+		const sim = Simulator.create<Ports>(
+			{
+				__celox_module: true,
+				name: "UnpackedArrayInputIndex",
+				sources: [{ path: "", content: UNPACKED_ARRAY_INPUT_INDEX_SOURCE }],
+				ports: {
+					clk: { direction: "input", type: "clock", width: 1 },
+					rst: { direction: "input", type: "reset", width: 1 },
+					i_valid: {
+						direction: "input",
+						type: "logic",
+						width: 1,
+						arrayDims: [2],
+					},
+					i_data: {
+						direction: "input",
+						type: "logic",
+						width: 8,
+						arrayDims: [2],
+					},
+					o_valid: { direction: "output", type: "logic", width: 1 },
+					o_data: { direction: "output", type: "logic", width: 8 },
+				},
+				events: ["clk"],
+			},
+			{ __nativeCreate: createSimulatorBridge(loadNativeAddon()) },
+		);
+
+		sim.dut.rst = 0n;
+		for (let i = 0; i < 2; i++) {
+			sim.dut.i_valid.set(i, 0n);
+			sim.dut.i_data.set(i, 0n);
+		}
+		sim.tick();
+		sim.tick();
+		sim.dut.rst = 1n;
+		sim.tick();
+
+		sim.dut.i_valid.set(index, 1n);
+		sim.dut.i_data.set(index, value);
+		expect(sim.dut.i_valid.at(index)).toBe(1n);
+		expect(sim.dut.i_data.at(index)).toBe(value);
+		sim.tick();
+
+		expect(sim.dut.o_valid).toBe(1n);
+		expect(sim.dut.o_data).toBe(value);
+		sim.dispose();
+	});
+});
+
+// ---------------------------------------------------------------------------
 // Bug fix: non-byte-aligned unpacked array port (logic<34> [N])
 // ---------------------------------------------------------------------------
 

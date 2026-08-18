@@ -694,6 +694,74 @@ describe("createDut — array ports", () => {
 		expect(dut.data.length).toBe(4);
 	});
 
+	test("native element-strided sub-byte elements use separate slots", () => {
+		const buffer = makeBuffer(64);
+		const layout: Record<string, SignalLayout> = {
+			bits: {
+				offset: 4,
+				width: 1,
+				byteSize: 1,
+				is4state: false,
+				direction: "input",
+				arrayElementStride: 1,
+				arrayPlaneSize: 4,
+			},
+		};
+		const ports: Record<string, PortInfo> = {
+			bits: { direction: "input", type: "logic", width: 1, arrayDims: [4] },
+		};
+		const dut = createDut<{
+			bits: { at(i: number): bigint; set(i: number, v: bigint): void };
+		}>(buffer, layout, ports, mockHandle(), { dirty: false });
+
+		dut.bits.set(1, 1n);
+		dut.bits.set(3, 1n);
+
+		const view = new DataView(buffer);
+		expect(view.getUint8(4)).toBe(0);
+		expect(view.getUint8(5)).toBe(1);
+		expect(view.getUint8(6)).toBe(0);
+		expect(view.getUint8(7)).toBe(1);
+		expect(dut.bits.at(1)).toBe(1n);
+		expect(dut.bits.at(3)).toBe(1n);
+	});
+
+	test("native element-strided 4-state arrays use the reported mask plane", () => {
+		const buffer = makeBuffer(64);
+		const layout: Record<string, SignalLayout> = {
+			data: {
+				offset: 2,
+				width: 3,
+				byteSize: 1,
+				is4state: true,
+				direction: "input",
+				arrayElementStride: 1,
+				arrayPlaneSize: 3,
+			},
+		};
+		const ports: Record<string, PortInfo> = {
+			data: {
+				direction: "input",
+				type: "logic",
+				width: 3,
+				arrayDims: [3],
+				is4state: true,
+			},
+		};
+		const dut = createDut<{
+			data: { at(i: number): bigint; set(i: number, v: unknown): void };
+		}>(buffer, layout, ports, mockHandle(), { dirty: false });
+
+		dut.data.set(1, X);
+
+		const view = new DataView(buffer);
+		expect(view.getUint8(3)).toBe(0b111);
+		expect(view.getUint8(6)).toBe(0b111);
+		expect(view.getUint8(2)).toBe(0);
+		expect(view.getUint8(5)).toBe(0);
+		expect(dut.data.at(1)).toBe(0b111n);
+	});
+
 	test("1-bit elements (logic [N]): bit-packed read/write", () => {
 		// logic[4]: 4 elements of 1 bit each = 1 byte total in native memory
 		const buffer = makeBuffer(64);
