@@ -3308,21 +3308,18 @@ fn combine_parts<A: Clone + PartialEq + Eq + Hash>(
         ));
     }
     if parts.len() == 1 {
-        let ((expr, sources), access) = &parts[0];
-        let w = get_width(*expr, arena);
+        let ((expr, sources), access) = parts
+            .into_iter()
+            .next()
+            .expect("the single symbolic part exists");
+        let w = get_width(expr, arena);
         if w == 0 {
-            return Ok((*expr, sources.clone()));
+            return Ok((expr, sources));
         }
         if access.lsb == 0 && access.msb == w - 1 {
-            return Ok((*expr, sources.clone()));
+            return Ok((expr, sources));
         } else {
-            return Ok((
-                arena.alloc(SLTNode::Slice {
-                    expr: *expr,
-                    access: *access,
-                })?,
-                sources.clone(),
-            ));
+            return Ok((arena.alloc(SLTNode::Slice { expr, access })?, sources));
         }
     }
 
