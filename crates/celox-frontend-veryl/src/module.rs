@@ -338,13 +338,12 @@ fn build_dynamic_output_glue(
         ));
     }
     let full_access = BitAccess::new(0, variable_width - 1);
-    let range_store = parent_store.get(&dst.id).ok_or_else(|| {
-        ParserError::illegal_context(
-            "dynamic output port destination",
-            "destination variable is absent from the parent symbolic store",
-            Some(&dst.token),
-        )
-    })?;
+    // Keep the instance preview sparse. Untracked ranges represent the
+    // unmodified parent input and are materialized only for the destination
+    // touched by this dynamic connection.
+    let range_store = parent_store
+        .entry(dst.id)
+        .or_insert_with(|| RangeStore::new(None, variable_width));
     let parts = range_store.get_parts_ref(full_access).map_err(|error| {
         ParserError::illegal_context(
             "dynamic output port destination",
@@ -485,9 +484,7 @@ fn build_dynamic_output_glue(
             access: prefix,
         })?
     };
-    parent_store
-        .get_mut(&dst.id)
-        .expect("destination store entry checked above")
+    range_store
         .update(prefix, Some((preview_result, preview_sources)))
         .map_err(|error| {
             ParserError::illegal_context(
@@ -1115,24 +1112,9 @@ impl<'a> ModuleParser<'a> {
         let mut output_ports = Vec::new();
         let mut glue_arena = SLTNodeArena::<GlueAddr>::new();
 
-        // Parent context store
-        let mut parent_store = SymbolicStore::default();
-        for (id, var) in &self.module.variables {
-            let width = resolve_total_width(self.module, var)?;
-            if width == 0 {
-                parent_store.insert(*id, RangeStore::new(None, 0));
-                continue;
-            }
-            let initial_node = self.arena.alloc(SLTNode::Input {
-                variable: *id,
-                signed: var.r#type.signed,
-                index: vec![],
-                access: BitAccess::new(0, width - 1),
-            })?;
-            let mut sources = HashSet::default();
-            sources.insert(VarAtomBase::new(*id, 0, width - 1));
-            parent_store.insert(*id, RangeStore::new(Some((initial_node, sources)), width));
-        }
+        // Parent variables are implicit inputs until a connection expression
+        // writes them, so instance parsing only needs sparse, touched entries.
+        let parent_store = SymbolicStore::default();
 
         for input in &decl.inputs {
             let child_port_id = input.id;
@@ -1169,13 +1151,7 @@ impl<'a> ModuleParser<'a> {
                 let mut effects = CombEffectCollector::with_capture_namespace(
                     self.comb_runtime_event_sites.len() as u32,
                 );
-                let mut effect_store = SymbolicStore::default();
-                for (&id, variable) in &self.module.variables {
-                    effect_store.insert(
-                        id,
-                        RangeStore::new(None, resolve_total_width(self.module, variable)?),
-                    );
-                }
+                let effect_store = SymbolicStore::default();
                 collect_expression_effects(
                     self.module,
                     &effect_store,
@@ -1293,24 +1269,6 @@ impl<'a> ModuleParser<'a> {
             let mut current_offset = 0usize;
             let mut destination_arena = SLTNodeArena::<VarId>::new();
             let mut destination_store = SymbolicStore::default();
-            for (id, var) in &self.module.variables {
-                let parent_width = resolve_total_width(self.module, var)?;
-                if parent_width == 0 {
-                    destination_store.insert(*id, RangeStore::new(None, 0));
-                    continue;
-                }
-                let initial_node = destination_arena.alloc(SLTNode::Input {
-                    variable: *id,
-                    signed: var.r#type.signed,
-                    index: vec![],
-                    access: BitAccess::new(0, parent_width - 1),
-                })?;
-                let sources = std::iter::once(VarAtomBase::new(*id, 0, parent_width - 1)).collect();
-                destination_store.insert(
-                    *id,
-                    RangeStore::new(Some((initial_node, sources)), parent_width),
-                );
-            }
             let preview_rhs_node = destination_arena.alloc(SLTNode::Input {
                 variable: child_port_id,
                 signed: child_port.r#type.signed,
@@ -1325,12 +1283,6 @@ impl<'a> ModuleParser<'a> {
                 self.comb_runtime_event_sites.len() as u32,
             );
             let mut output_effect_store = SymbolicStore::default();
-            for (&id, variable) in &self.module.variables {
-                output_effect_store.insert(
-                    id,
-                    RangeStore::new(None, resolve_total_width(self.module, variable)?),
-                );
-            }
             // Iterate destinations from LSB (last in list for multi-dst assign usually? No wait)
             // `emit_multi_dst_assign` iterates `dsts.iter().rev()`.
             // So we strictly follow `emit_multi_dst_assign` logic.
@@ -1492,9 +1444,11 @@ impl<'a> ModuleParser<'a> {
                 })?;
                 let effect_sources =
                     std::iter::once(VarAtomBase::new(dst.id, access.lsb, access.msb)).collect();
+                let parent_width =
+                    resolve_total_width(self.module, &self.module.variables[&dst.id])?;
                 output_effect_store
-                    .get_mut(&dst.id)
-                    .expect("output effect store contains every parent variable")
+                    .entry(dst.id)
+                    .or_insert_with(|| RangeStore::new(None, parent_width))
                     .update(access, Some((effect_preview, effect_sources)))
                     .map_err(|error| {
                         ParserError::illegal_context(
