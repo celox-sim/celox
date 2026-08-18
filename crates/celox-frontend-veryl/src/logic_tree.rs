@@ -2885,13 +2885,18 @@ fn eval_dynamic_select_offset(
         64,
         false,
     ))?;
-    let mut indices = Vec::new();
+    let mut indices =
+        Vec::with_capacity(geometry.dimension_count + usize::from(geometry.part.is_some()));
     let mut sources = HashSet::default();
     let mut boundaries = BoundaryMap::default();
 
-    let mut expressions = index.0.clone();
-    expressions.extend(select.0.clone());
-    for (dimension, expression) in expressions[..geometry.dimension_count].iter().enumerate() {
+    for (dimension, expression) in index
+        .0
+        .iter()
+        .chain(&select.0)
+        .take(geometry.dimension_count)
+        .enumerate()
+    {
         let ((node, node_sources), node_boundaries) =
             expr::eval_expression_in_context(module, store, expression, arena, None)?;
         sources.extend(node_sources);

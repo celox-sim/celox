@@ -98,11 +98,16 @@ fn build_dynamic_output_glue(
     let mut address_sources = HashSet::default();
     let mut preview_sources = preview_rhs_sources;
 
-    let mut index_exprs = dst.index.0.clone();
-    index_exprs.extend(dst.select.0.clone());
     let dim_limit = geometry.dimension_count;
 
-    for (dimension, index_expr) in index_exprs[..dim_limit].iter().enumerate() {
+    for (dimension, index_expr) in dst
+        .index
+        .0
+        .iter()
+        .chain(&dst.select.0)
+        .take(dim_limit)
+        .enumerate()
+    {
         let ((index, index_sources), _) = crate::logic_tree::eval_expression_effectful(
             module,
             parent_store,
@@ -159,7 +164,7 @@ fn build_dynamic_output_glue(
     }
 
     if let Some(part) = geometry.part {
-        let anchor_expr = index_exprs.last().ok_or_else(|| {
+        let anchor_expr = dst.select.0.last().ok_or_else(|| {
             ParserError::illegal_context(
                 "dynamic output port destination",
                 "part select is missing its anchor expression",

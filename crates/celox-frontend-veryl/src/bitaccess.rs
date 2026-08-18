@@ -8,7 +8,7 @@ use veryl_analyzer::ir::{
 use veryl_analyzer::value::Value;
 use veryl_parser::token_range::TokenRange;
 
-use crate::{ParserError, resolve_dims};
+use crate::{ParserError, types::extend_resolved_dims};
 
 /// Extract a compile-time constant value for Celox 4-state encoding.
 ///
@@ -213,24 +213,27 @@ fn checked_bit_access(
 fn collect_dims(module: &Module, var_id: VarId) -> Result<Vec<usize>, ParserError> {
     let variable = &module.variables[&var_id];
     let var_type = &variable.r#type;
+    let width = var_type.width();
 
-    let mut dims = resolve_dims(module, variable, var_type.array.as_slice(), "array")?;
+    let mut dims = Vec::with_capacity(var_type.array.as_slice().len() + width.as_slice().len() + 1);
+    extend_resolved_dims(
+        module,
+        variable,
+        var_type.array.as_slice(),
+        "array",
+        &mut dims,
+    )?;
     // For enum-typed variables, the width Shape is empty but the actual
     // bit width is encoded in the TypeKind. Use kind.width() as the
     // base scalar width when the explicit width shape is absent.
-    if var_type.width().is_empty() {
+    if width.is_empty() {
         if let Some(kind_width) = var_type.kind.width()
             && kind_width > 1
         {
             dims.push(kind_width);
         }
     } else {
-        dims.extend(resolve_dims(
-            module,
-            variable,
-            var_type.width().as_slice(),
-            "width",
-        )?);
+        extend_resolved_dims(module, variable, width.as_slice(), "width", &mut dims)?;
     }
     Ok(dims)
 }
@@ -486,19 +489,16 @@ pub fn eval_var_select(
         Ok(access)
     };
 
-    let mut all_indices = index.0.clone();
-    all_indices.extend(select.0.iter().cloned());
-
     let mut base_offset = 0usize;
     let mut processed_count = 0;
 
-    let limit = if select.1.is_some() {
-        all_indices.len().saturating_sub(1)
-    } else {
-        all_indices.len()
-    };
-
-    for (i, index_val) in all_indices[..limit].iter().enumerate() {
+    for (i, index_val) in index
+        .0
+        .iter()
+        .chain(&select.0)
+        .take(geometry.dimension_count)
+        .enumerate()
+    {
         if let Some(idx) = eval_constexpr_usize(index_val, "variable select index")? {
             if let Some(&stride) = strides.get(i) {
                 let term = idx.checked_mul(stride).ok_or_else(|| {
@@ -524,7 +524,7 @@ pub fn eval_var_select(
     }
 
     if let Some((op, range_expr)) = &select.1 {
-        let Some(anchor_expr) = all_indices.last() else {
+        let Some(anchor_expr) = select.0.last() else {
             return Err(ParserError::illegal_context(
                 "variable select",
                 "part select is missing its anchor expression",
