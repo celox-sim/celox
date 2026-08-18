@@ -182,6 +182,12 @@ jobs:
       - name: Build NAPI WASM compatibility target
         run: pnpm --filter @celox-sim/celox-napi exec napi build --platform --target wasm32-wasip1-threads --manifest-path ../../Cargo.toml -p celox-napi
 
+      - name: Build TypeScript runtime for WASM tests
+        run: pnpm --filter @celox-sim/celox build
+
+      - name: Run WASM tests
+        run: pnpm --filter @celox-sim/playground test:wasm
+
       - name: Upload NAPI WASM artifact
         uses: actions/upload-artifact@v7
         with:
