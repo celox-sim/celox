@@ -704,7 +704,6 @@ pub(crate) fn expression_contains_runtime_effect(module: &Module, expression: &E
             Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
         },
         Expression::Unary(_, inner, _) => expression_contains_runtime_effect(module, inner),
-        Expression::Binary(lhs, Op::Pow, _, _) => expression_contains_runtime_effect(module, lhs),
         Expression::Binary(lhs, _, rhs, _) => {
             expression_contains_runtime_effect(module, lhs)
                 || expression_contains_runtime_effect(module, rhs)
@@ -759,9 +758,6 @@ pub(crate) fn collect_expression_effects(
                     collect_expression_effects(module, &rhs_store, rhs, arena, collector)
                 },
             )
-        }
-        Expression::Binary(lhs, Op::Pow, _, _) => {
-            collect_expression_effects(module, store, lhs, arena, collector)
         }
         Expression::Binary(lhs, _, rhs, _) => {
             collect_expression_effects(module, store, lhs, arena, collector)?;
@@ -2511,9 +2507,6 @@ fn collect_expression_position_inputs(
 ) -> Result<(), ParserError> {
     match expr {
         Expression::Term(factor) => collect_factor_position_inputs(module, factor, out),
-        Expression::Binary(lhs, Op::Pow, _, _) => {
-            collect_expression_position_inputs(module, lhs, out)
-        }
         Expression::Binary(lhs, _, rhs, _) => {
             collect_expression_position_inputs(module, lhs, out)?;
             collect_expression_position_inputs(module, rhs, out)

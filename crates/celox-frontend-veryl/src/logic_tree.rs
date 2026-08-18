@@ -1789,9 +1789,6 @@ pub(super) fn collect_written_expression(
         Expression::Unary(_, inner, _) => collect_written_expression(module, inner, out),
         Expression::Binary(lhs, op, rhs, _) => {
             collect_written_expression(module, lhs, out)?;
-            if matches!(op, Op::Pow) {
-                return Ok(());
-            }
             let lhs_value = eval_fully_known_constexpr(lhs);
             let skips_rhs = match op {
                 Op::LogicAnd => lhs_value
@@ -3806,7 +3803,7 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_written_accesses_excludes_repeat_and_pow_constexpr_operands() {
+    fn test_collect_written_accesses_excludes_repeat_but_includes_runtime_pow_operand() {
         let code = r#"
             module Top (
                 d: input logic<8>,
@@ -3912,7 +3909,7 @@ mod tests {
         }
 
         assert!(!written.contains_key(&var_id_of(&module, &["repeat_output"])));
-        assert!(!written.contains_key(&var_id_of(&module, &["pow_output"])));
+        assert!(written.contains_key(&var_id_of(&module, &["pow_output"])));
     }
 
     #[test]

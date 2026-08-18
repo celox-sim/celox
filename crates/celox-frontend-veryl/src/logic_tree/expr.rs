@@ -2516,35 +2516,19 @@ pub(super) fn eval_expression_in_context(
             let semantics =
                 binary_semantics(*op, lhs_width, rhs_width, lhs_signed, rhs_signed, context);
 
-            // `pow`: currently lowered for constant exponent only.
             if matches!(op, Op::Pow) {
                 let ((l_expr, l_sources), l_bounds) =
                     eval_expression_in_context(module, store, lhs, arena, semantics.lhs_context)?;
-                let Some(exp) = eval_constexpr(rhs).and_then(|x| x.to_u64().map(|v| v as usize))
-                else {
-                    return Err(ParserError::unsupported(
-                        67,
-                        LoweringPhase::CombLowering,
-                        "pow non-constant exponent",
-                        format!("{:?}", rhs),
-                        Some(&rhs.token_range()),
-                    ));
-                };
-                let lhs_width = get_width(l_expr, arena);
-                let result_node = if exp == 0 {
-                    arena.alloc(SLTNode::Constant(
-                        BigUint::from(1u8),
-                        BigUint::from(0u32),
-                        lhs_width,
-                        false,
-                    ))?
-                } else {
-                    let mut acc = l_expr;
-                    for _ in 1..exp {
-                        acc = arena.alloc(SLTNode::Binary(acc, BinaryOp::Mul, l_expr))?;
-                    }
-                    acc
-                };
+                let ((r_expr, r_sources), r_bounds) =
+                    eval_expression_in_context(module, store, rhs, arena, semantics.rhs_context)?;
+                let result_node = lower_runtime_pow(
+                    arena,
+                    l_expr,
+                    r_expr,
+                    semantics.result_width,
+                    rhs_signed,
+                    semantics.result_signed,
+                )?;
                 let result_node = coerce_node_width(
                     arena,
                     result_node,
@@ -2553,7 +2537,9 @@ pub(super) fn eval_expression_in_context(
                         .map(|context| context.signed)
                         .unwrap_or(semantics.result_signed),
                 )?;
-                return Ok(((result_node, l_sources), l_bounds));
+                let mut sources = l_sources;
+                sources.extend(r_sources);
+                return Ok(((result_node, sources), merge_boundaries(l_bounds, r_bounds)));
             }
             let ((l_expr, l_sources), l_bounds) =
                 eval_expression_in_context(module, store, lhs, arena, semantics.lhs_context)?;
@@ -3250,6 +3236,108 @@ pub(super) fn merge_boundaries(
         base.entry(id).or_default().extend(bits);
     }
     base
+}
+
+fn lower_runtime_pow<A: Hash + Eq + Clone>(
+    arena: &mut SLTNodeArena<A>,
+    base: NodeId,
+    exponent: NodeId,
+    width: usize,
+    exponent_signed: bool,
+    result_signed: bool,
+) -> Result<NodeId, SLTNodeFactsError> {
+    let exponent_width = get_width(exponent, arena);
+    debug_assert!(width > 0);
+    debug_assert!(exponent_width > 0);
+
+    let constant = |arena: &mut SLTNodeArena<A>, value: BigUint, mask: BigUint| {
+        arena.alloc(SLTNode::Constant(value, mask, width, result_signed))
+    };
+    let zero = constant(arena, BigUint::from(0u8), BigUint::from(0u8))?;
+    let one = constant(arena, BigUint::from(1u8), BigUint::from(0u8))?;
+    let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+    let minus_one = constant(arena, width_mask.clone(), BigUint::from(0u8))?;
+    let unknown = constant(arena, BigUint::from(0u8), width_mask)?;
+
+    // Exponentiation by squaring keeps the generated graph linear in the
+    // exponent width instead of in its runtime value.
+    let mut result = one;
+    let mut factor = base;
+    let exponent_lsb = arena.alloc(SLTNode::Slice {
+        expr: exponent,
+        access: BitAccess::new(0, 0),
+    })?;
+    let magnitude_width = exponent_width - usize::from(exponent_signed);
+    for bit_index in 0..magnitude_width {
+        let bit = arena.alloc(SLTNode::Slice {
+            expr: exponent,
+            access: BitAccess::new(bit_index, bit_index),
+        })?;
+        let product = arena.alloc(SLTNode::Binary(result, BinaryOp::Mul, factor))?;
+        result = arena.alloc(SLTNode::Mux {
+            cond: bit,
+            then_expr: product,
+            else_expr: result,
+        })?;
+        if bit_index + 1 != magnitude_width {
+            factor = arena.alloc(SLTNode::Binary(factor, BinaryOp::Mul, factor))?;
+        }
+    }
+
+    if exponent_signed {
+        let sign = arena.alloc(SLTNode::Slice {
+            expr: exponent,
+            access: BitAccess::new(exponent_width - 1, exponent_width - 1),
+        })?;
+        let base_is_zero = arena.alloc(SLTNode::Binary(base, BinaryOp::Eq, zero))?;
+        let base_is_one = arena.alloc(SLTNode::Binary(base, BinaryOp::Eq, one))?;
+        let base_is_minus_one = arena.alloc(SLTNode::Binary(base, BinaryOp::Eq, minus_one))?;
+        let minus_one_result = arena.alloc(SLTNode::Mux {
+            cond: exponent_lsb,
+            then_expr: minus_one,
+            else_expr: one,
+        })?;
+        let negative_nonzero = arena.alloc(SLTNode::Mux {
+            cond: base_is_minus_one,
+            then_expr: minus_one_result,
+            else_expr: zero,
+        })?;
+        let negative_nonzero = arena.alloc(SLTNode::Mux {
+            cond: base_is_one,
+            then_expr: one,
+            else_expr: negative_nonzero,
+        })?;
+        let negative_result = arena.alloc(SLTNode::Mux {
+            cond: base_is_zero,
+            then_expr: unknown,
+            else_expr: negative_nonzero,
+        })?;
+        result = arena.alloc(SLTNode::Mux {
+            cond: sign,
+            then_expr: negative_result,
+            else_expr: result,
+        })?;
+    }
+
+    // IEEE power semantics produce an entirely unknown result if either
+    // operand contains X/Z. Comparing each operand with its two-state image is
+    // known one exactly when it has no unknown bits; muxing against all-X
+    // expands any unknown predicate to the complete result width.
+    let base_two_state = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, base))?;
+    let exponent_two_state = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, exponent))?;
+    let base_known = arena.alloc(SLTNode::Binary(base, BinaryOp::Eq, base_two_state))?;
+    let exponent_known =
+        arena.alloc(SLTNode::Binary(exponent, BinaryOp::Eq, exponent_two_state))?;
+    let operands_known = arena.alloc(SLTNode::Binary(
+        base_known,
+        BinaryOp::LogicAnd,
+        exponent_known,
+    ))?;
+    arena.alloc(SLTNode::Mux {
+        cond: operands_known,
+        then_expr: result,
+        else_expr: unknown,
+    })
 }
 
 pub fn coerce_node_width<A: Hash + Eq + Clone>(

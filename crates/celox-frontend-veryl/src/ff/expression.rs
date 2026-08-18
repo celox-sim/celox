@@ -3832,16 +3832,6 @@ impl<'a> FfParser<'a> {
             binary_semantics(*op, lhs_width, rhs_width, lhs_signed, rhs_signed, context);
 
         if matches!(op, Op::Pow) {
-            let Some(exp) = self.get_constant_value(right) else {
-                return Err(ParserError::unsupported(
-                    68,
-                    LoweringPhase::FfLowering,
-                    "pow non-constant exponent",
-                    format!("{:?}", right),
-                    Some(&right.token_range()),
-                ));
-            };
-
             let width = semantics.result_width;
             self.parse_expression_in_context(
                 left,
@@ -3856,20 +3846,20 @@ impl<'a> FfParser<'a> {
                 .stack
                 .pop_back()
                 .expect("Invalid LHS for power operation");
-
-            let result = if exp == 0 {
-                let one = ir_builder.alloc_bit(width, false);
-                ir_builder.emit(SIRInstruction::Imm(one, SIRValue::new(1u32)));
-                one
-            } else {
-                let mut acc = base;
-                for _ in 1..exp {
-                    let next = ir_builder.alloc_logic(width);
-                    ir_builder.emit(SIRInstruction::Binary(next, acc, BinaryOp::Mul, base));
-                    acc = next;
-                }
-                acc
-            };
+            self.parse_expression_in_context(
+                right,
+                targets,
+                domain,
+                convert,
+                sources,
+                ir_builder,
+                semantics.rhs_context,
+            )?;
+            let exponent = self
+                .stack
+                .pop_back()
+                .expect("Invalid RHS for power operation");
+            let result = self.lower_runtime_pow(base, exponent, width, rhs_signed, ir_builder);
 
             let result = if let Some(context) = context {
                 self.cast_reg_width_ext(ir_builder, result, context.width, context.signed)
@@ -3911,6 +3901,165 @@ impl<'a> FfParser<'a> {
             self.stack.push_back(result);
         }
         Ok(())
+    }
+
+    fn lower_runtime_pow<A>(
+        &self,
+        base: RegisterId,
+        exponent: RegisterId,
+        width: usize,
+        exponent_signed: bool,
+        ir_builder: &mut SIRBuilder<A>,
+    ) -> RegisterId {
+        let exponent_width = ir_builder.register(&exponent).width();
+        debug_assert!(width > 0);
+        debug_assert!(exponent_width > 0);
+
+        let mut constant = |value: BigUint, mask: BigUint| {
+            let reg = ir_builder.alloc_logic(width);
+            ir_builder.emit(SIRInstruction::Imm(
+                reg,
+                SIRValue::new_four_state(value, mask),
+            ));
+            reg
+        };
+        let zero = constant(BigUint::from(0u8), BigUint::from(0u8));
+        let one = constant(BigUint::from(1u8), BigUint::from(0u8));
+        let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        let minus_one = constant(width_mask.clone(), BigUint::from(0u8));
+        let unknown = constant(BigUint::from(0u8), width_mask);
+
+        // Exponentiation by squaring keeps the generated SIR linear in the
+        // exponent width instead of in its runtime value.
+        let mut result = one;
+        let mut factor = base;
+        let exponent_lsb = ir_builder.alloc_logic(1);
+        ir_builder.emit(SIRInstruction::Slice(exponent_lsb, exponent, 0, 1));
+        let magnitude_width = exponent_width - usize::from(exponent_signed);
+        for bit_index in 0..magnitude_width {
+            let bit = ir_builder.alloc_logic(1);
+            ir_builder.emit(SIRInstruction::Slice(bit, exponent, bit_index, 1));
+
+            let product = ir_builder.alloc_logic(width);
+            ir_builder.emit(SIRInstruction::Binary(
+                product,
+                result,
+                BinaryOp::Mul,
+                factor,
+            ));
+            let next = ir_builder.alloc_logic(width);
+            ir_builder.emit(SIRInstruction::Mux(next, bit, product, result));
+            result = next;
+
+            if bit_index + 1 != magnitude_width {
+                let squared = ir_builder.alloc_logic(width);
+                ir_builder.emit(SIRInstruction::Binary(
+                    squared,
+                    factor,
+                    BinaryOp::Mul,
+                    factor,
+                ));
+                factor = squared;
+            }
+        }
+
+        if exponent_signed {
+            let sign = ir_builder.alloc_logic(1);
+            ir_builder.emit(SIRInstruction::Slice(sign, exponent, exponent_width - 1, 1));
+            let base_is_zero = ir_builder.alloc_logic(1);
+            ir_builder.emit(SIRInstruction::Binary(
+                base_is_zero,
+                base,
+                BinaryOp::Eq,
+                zero,
+            ));
+            let base_is_one = ir_builder.alloc_logic(1);
+            ir_builder.emit(SIRInstruction::Binary(base_is_one, base, BinaryOp::Eq, one));
+            let base_is_minus_one = ir_builder.alloc_logic(1);
+            ir_builder.emit(SIRInstruction::Binary(
+                base_is_minus_one,
+                base,
+                BinaryOp::Eq,
+                minus_one,
+            ));
+            let minus_one_result = ir_builder.alloc_logic(width);
+            ir_builder.emit(SIRInstruction::Mux(
+                minus_one_result,
+                exponent_lsb,
+                minus_one,
+                one,
+            ));
+            let nonunit = ir_builder.alloc_logic(width);
+            ir_builder.emit(SIRInstruction::Mux(
+                nonunit,
+                base_is_minus_one,
+                minus_one_result,
+                zero,
+            ));
+            let negative_nonzero = ir_builder.alloc_logic(width);
+            ir_builder.emit(SIRInstruction::Mux(
+                negative_nonzero,
+                base_is_one,
+                one,
+                nonunit,
+            ));
+            let negative_result = ir_builder.alloc_logic(width);
+            ir_builder.emit(SIRInstruction::Mux(
+                negative_result,
+                base_is_zero,
+                unknown,
+                negative_nonzero,
+            ));
+            let selected = ir_builder.alloc_logic(width);
+            ir_builder.emit(SIRInstruction::Mux(selected, sign, negative_result, result));
+            result = selected;
+        }
+
+        // IEEE power semantics produce an entirely unknown result if either
+        // operand contains X/Z. Comparing each operand with its two-state
+        // image is known one exactly when it has no unknown bits; muxing
+        // against all-X expands any unknown predicate to the result width.
+        let base_two_state = ir_builder.alloc_bit(width, false);
+        ir_builder.emit(SIRInstruction::Unary(
+            base_two_state,
+            UnaryOp::ToTwoState,
+            base,
+        ));
+        let exponent_two_state = ir_builder.alloc_bit(exponent_width, false);
+        ir_builder.emit(SIRInstruction::Unary(
+            exponent_two_state,
+            UnaryOp::ToTwoState,
+            exponent,
+        ));
+        let base_known = ir_builder.alloc_logic(1);
+        ir_builder.emit(SIRInstruction::Binary(
+            base_known,
+            base,
+            BinaryOp::Eq,
+            base_two_state,
+        ));
+        let exponent_known = ir_builder.alloc_logic(1);
+        ir_builder.emit(SIRInstruction::Binary(
+            exponent_known,
+            exponent,
+            BinaryOp::Eq,
+            exponent_two_state,
+        ));
+        let operands_known = ir_builder.alloc_logic(1);
+        ir_builder.emit(SIRInstruction::Binary(
+            operands_known,
+            base_known,
+            BinaryOp::LogicAnd,
+            exponent_known,
+        ));
+        let final_result = ir_builder.alloc_logic(width);
+        ir_builder.emit(SIRInstruction::Mux(
+            final_result,
+            operands_known,
+            result,
+            unknown,
+        ));
+        final_result
     }
 
     pub(super) fn parse_unary<A>(
