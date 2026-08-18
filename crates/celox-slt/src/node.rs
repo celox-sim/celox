@@ -381,6 +381,8 @@ impl<A: Hash + Eq + Clone> SLTNode<A> {
                     celox_design::BinaryOp::Sar => ">>>",
                     celox_design::BinaryOp::Eq => "==",
                     celox_design::BinaryOp::Ne => "!=",
+                    celox_design::BinaryOp::EqCase => "===",
+                    celox_design::BinaryOp::NeCase => "!==",
                     celox_design::BinaryOp::LtU | celox_design::BinaryOp::LtS => "<",
                     celox_design::BinaryOp::LeU | celox_design::BinaryOp::LeS => "<=",
                     celox_design::BinaryOp::GtU | celox_design::BinaryOp::GtS => ">",

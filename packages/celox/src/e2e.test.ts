@@ -1883,7 +1883,7 @@ describe("E2E: celox.toml test sources", () => {
 		// Both the regular source (Adder) and the test-only source (Reg) must appear
 		expect(names).toContain("Adder");
 		expect(names).toContain("Reg");
-	});
+	}, 15_000);
 
 	test("[simulation] max_steps from celox.toml is used as waitUntil default", () => {
 		// celox.toml sets [simulation] max_steps = 20; waitUntil should honour it

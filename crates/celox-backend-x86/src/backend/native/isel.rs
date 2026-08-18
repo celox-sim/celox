@@ -8832,6 +8832,57 @@ fn lower_instruction(
                     rhs: rhs_vreg,
                     kind: CmpKind::Ne,
                 }),
+                BinaryOp::EqCase | BinaryOp::NeCase => {
+                    if ctx.four_state {
+                        let l_m = ctx.get_mask(*lhs, block);
+                        let r_m = ctx.get_mask(*rhs, block);
+                        let value_diff = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Xor {
+                            dst: value_diff,
+                            lhs: lhs_vreg,
+                            rhs: rhs_vreg,
+                        });
+                        let mask_diff = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Xor {
+                            dst: mask_diff,
+                            lhs: l_m,
+                            rhs: r_m,
+                        });
+                        let diff = ctx.alloc_vreg(SpillDesc::transient());
+                        block.push(MInst::Or {
+                            dst: diff,
+                            lhs: value_diff,
+                            rhs: mask_diff,
+                        });
+                        let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                        block.push(MInst::LoadImm {
+                            dst: zero,
+                            value: 0,
+                        });
+                        block.push(MInst::Cmp {
+                            dst: dst_vreg,
+                            lhs: diff,
+                            rhs: zero,
+                            kind: if matches!(op, BinaryOp::EqCase) {
+                                CmpKind::Eq
+                            } else {
+                                CmpKind::Ne
+                            },
+                        });
+                        ctx.set_mask(*dst, zero);
+                    } else {
+                        block.push(MInst::Cmp {
+                            dst: dst_vreg,
+                            lhs: lhs_vreg,
+                            rhs: rhs_vreg,
+                            kind: if matches!(op, BinaryOp::EqCase) {
+                                CmpKind::Eq
+                            } else {
+                                CmpKind::Ne
+                            },
+                        });
+                    }
+                }
                 BinaryOp::LtU => block.push(MInst::Cmp {
                     dst: dst_vreg,
                     lhs: lhs_vreg,
@@ -9148,6 +9199,8 @@ fn lower_instruction(
                 op,
                 BinaryOp::Eq
                     | BinaryOp::Ne
+                    | BinaryOp::EqCase
+                    | BinaryOp::NeCase
                     | BinaryOp::LtU
                     | BinaryOp::LtS
                     | BinaryOp::LeU
@@ -9165,7 +9218,15 @@ fn lower_instruction(
             }
 
             // 4-state: compute result mask (skip for wildcards which handle it inline)
-            if ctx.four_state && !matches!(op, BinaryOp::EqWildcard | BinaryOp::NeWildcard) {
+            if ctx.four_state
+                && !matches!(
+                    op,
+                    BinaryOp::EqWildcard
+                        | BinaryOp::NeWildcard
+                        | BinaryOp::EqCase
+                        | BinaryOp::NeCase
+                )
+            {
                 let l_m = ctx.get_mask(*lhs, block);
                 let r_m = ctx.get_mask(*rhs, block);
                 let res_m =
@@ -10607,10 +10668,25 @@ fn lower_wide_binary(
         }
 
         // Wide equality/inequality: chunk-wise AND/OR of per-chunk comparisons
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqWildcard | BinaryOp::NeWildcard => {
-            let is_eq = matches!(op, BinaryOp::Eq | BinaryOp::EqWildcard);
+        BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::EqCase
+        | BinaryOp::NeCase
+        | BinaryOp::EqWildcard
+        | BinaryOp::NeWildcard => {
+            let is_eq = matches!(op, BinaryOp::Eq | BinaryOp::EqCase | BinaryOp::EqWildcard);
             let lhs_chunks = ctx.get_wide_chunks(&lhs, block);
             let rhs_chunks = ctx.get_wide_chunks(&rhs, block);
+            let lhs_masks = if ctx.four_state && matches!(op, BinaryOp::EqCase | BinaryOp::NeCase) {
+                Some(get_wide_mask_chunks(ctx, block, &lhs, n_chunks))
+            } else {
+                None
+            };
+            let rhs_masks = if ctx.four_state && matches!(op, BinaryOp::EqCase | BinaryOp::NeCase) {
+                Some(get_wide_mask_chunks(ctx, block, &rhs, n_chunks))
+            } else {
+                None
+            };
 
             let init = ctx.alloc_vreg(SpillDesc::remat(if is_eq { 1 } else { 0 }));
             block.push(MInst::LoadImm {
@@ -10629,6 +10705,26 @@ fn lower_wide_binary(
                     rhs: r,
                     kind: CmpKind::Eq,
                 });
+                let eq = if let (Some(lhs_masks), Some(rhs_masks)) =
+                    (lhs_masks.as_ref(), rhs_masks.as_ref())
+                {
+                    let mask_eq = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Cmp {
+                        dst: mask_eq,
+                        lhs: lhs_masks[i],
+                        rhs: rhs_masks[i],
+                        kind: CmpKind::Eq,
+                    });
+                    let both_eq = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::And {
+                        dst: both_eq,
+                        lhs: eq,
+                        rhs: mask_eq,
+                    });
+                    both_eq
+                } else {
+                    eq
+                };
                 let next = ctx.alloc_vreg(SpillDesc::transient());
                 if is_eq {
                     block.push(MInst::And {
@@ -10639,11 +10735,12 @@ fn lower_wide_binary(
                 } else {
                     // ne: accumulate OR of (chunk != chunk)
                     let neq = ctx.alloc_vreg(SpillDesc::transient());
-                    block.push(MInst::Cmp {
+                    let one = ctx.alloc_vreg(SpillDesc::remat(1));
+                    block.push(MInst::LoadImm { dst: one, value: 1 });
+                    block.push(MInst::Xor {
                         dst: neq,
-                        lhs: l,
-                        rhs: r,
-                        kind: CmpKind::Ne,
+                        lhs: eq,
+                        rhs: one,
                     });
                     block.push(MInst::Or {
                         dst: next,
@@ -14253,6 +14350,15 @@ fn lower_wide_binary_mask(
             });
             ctx.set_mask(dst, result_mask);
             ctx.wide_masks.insert(dst, vec![(result_mask, d_width)]);
+        }
+        BinaryOp::EqCase | BinaryOp::NeCase => {
+            let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+            block.push(MInst::LoadImm {
+                dst: zero,
+                value: 0,
+            });
+            ctx.set_mask(dst, zero);
+            ctx.wide_masks.insert(dst, vec![(zero, d_width)]);
         }
         _ => {
             // Conservative: any X in any chunk of either operand → all-X result

@@ -1,0 +1,19 @@
+[package]
+name                  = "celox-sv-analyzer"
+version.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+license.workspace     = true
+description           = "SystemVerilog analyzer frontend for Celox"
+edition.workspace     = true
+rust-version.workspace = true
+
+[dependencies]
+fxhash    = { workspace = true }
+miette    = { workspace = true }
+num-bigint = { workspace = true }
+sv-parser = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
