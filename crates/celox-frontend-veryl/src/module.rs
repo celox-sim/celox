@@ -345,7 +345,7 @@ fn build_dynamic_output_glue(
             Some(&dst.token),
         )
     })?;
-    let parts = range_store.get_parts(full_access).map_err(|error| {
+    let parts = range_store.get_parts_ref(full_access).map_err(|error| {
         ParserError::illegal_context(
             "dynamic output port destination",
             error.to_string(),
@@ -685,16 +685,17 @@ fn build_parent_effect_glue(
 
                 let target_access = BitAccess::new(target_lsb, target_msb);
                 if let Some(initial_range_store) = initial_store.get(id) {
-                    let final_parts = range_store.get_parts(target_access).map_err(|error| {
-                        ParserError::illegal_context(
-                            "instance input function output",
-                            error.to_string(),
-                            None,
-                        )
-                    })?;
+                    let final_parts =
+                        range_store.get_parts_ref(target_access).map_err(|error| {
+                            ParserError::illegal_context(
+                                "instance input function output",
+                                error.to_string(),
+                                None,
+                            )
+                        })?;
                     let initial_parts =
                         initial_range_store
-                            .get_parts(target_access)
+                            .get_parts_ref(target_access)
                             .map_err(|error| {
                                 ParserError::illegal_context(
                                     "instance input function output",
@@ -1190,7 +1191,7 @@ impl<'a> ModuleParser<'a> {
                         continue;
                     };
                     for &access in accesses {
-                        for (value, _) in range_store.get_parts(access).map_err(|error| {
+                        for (value, _) in range_store.get_parts_ref(access).map_err(|error| {
                             ParserError::illegal_context(
                                 "instance input function output",
                                 error.to_string(),

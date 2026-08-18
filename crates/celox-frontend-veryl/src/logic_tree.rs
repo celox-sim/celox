@@ -2063,7 +2063,7 @@ fn eval_for_with_effects(
             let end = bit - 1;
             let access = BitAccess::new(start, end);
             let parts = original
-                .get_parts(access)
+                .get_parts_ref(access)
                 .map_err(|error| range_store_error("for-loop state", error, None))?;
             let (expr, sources) = combine_parts_with_default(id, access.lsb, parts, arena)?;
             loop_store
@@ -2134,8 +2134,12 @@ fn eval_for_with_effects(
                     "for-loop initial state",
                     Some(&for_stmt.token),
                 )?;
-                let (expr, sources) =
-                    combine_parts_with_default(target.id, target.access.lsb, parts, arena)?;
+                let (expr, sources) = combine_parts_with_default(
+                    target.id,
+                    target.access.lsb,
+                    parts.iter().map(|(value, access)| (value, *access)),
+                    arena,
+                )?;
                 initial_sources.extend(sources);
                 Ok(SLTForUpdate {
                     target: *target,
@@ -2842,7 +2846,7 @@ pub(super) fn function_output_value(
             Some(&call.comptime.token),
         )
     })?;
-    let parts = range_store.get_parts(access).map_err(|error| {
+    let parts = range_store.get_parts_ref(access).map_err(|error| {
         range_store_error("function output value", error, Some(&call.comptime.token))
     })?;
     let (output_expr, output_sources) = combine_parts_with_default(arg_id, 0, parts, arena)?;
@@ -3069,7 +3073,7 @@ fn eval_dynamic_assign(
     // Evaluate the variable's current state.
     // Sub-ranges that haven't been assigned yet will fall back to their initial input state.
     let old_parts = range_store
-        .get_parts(access_full)
+        .get_parts_ref(access_full)
         .map_err(|error| range_store_error("dynamic assignment", error, Some(&dst.token)))?;
     let (old_val, old_sources) = combine_parts_with_default(dst.id, 0, old_parts, arena)?;
     // Note: Partial dynamic updates are not treated as self-dependencies (latches)
@@ -3257,19 +3261,25 @@ fn eval_if(
     ))
 }
 
-pub(crate) fn combine_parts_with_default<A: Clone + PartialEq + Eq + Hash>(
+pub(crate) fn combine_parts_with_default<'a, A, I>(
     var_id: A,
     start_lsb: usize,
-    parts: Vec<(Option<(NodeId, HashSet<VarAtomBase<A>>)>, BitAccess)>,
+    parts: I,
     arena: &mut SLTNodeArena<A>,
-) -> Result<(NodeId, HashSet<VarAtomBase<A>>), SLTNodeFactsError> {
+) -> Result<(NodeId, HashSet<VarAtomBase<A>>), SLTNodeFactsError>
+where
+    A: Clone + PartialEq + Eq + Hash + 'a,
+    I: IntoIterator<Item = (&'a Option<(NodeId, HashSet<VarAtomBase<A>>)>, BitAccess)>,
+{
     let mut fixed_parts = Vec::new();
+    let mut total_sources = HashSet::default();
     let mut current_lsb = start_lsb;
     for (val_opt, access) in parts {
         let width = access.msb - access.lsb + 1;
         match val_opt {
             Some((expr, s)) => {
-                fixed_parts.push(((expr, s), access));
+                total_sources.extend(s.iter().cloned());
+                fixed_parts.push((*expr, access));
             }
             None => {
                 let input_node = arena.alloc(SLTNode::Input {
@@ -3278,25 +3288,17 @@ pub(crate) fn combine_parts_with_default<A: Clone + PartialEq + Eq + Hash>(
                     index: vec![],
                     access: BitAccess::new(current_lsb, current_lsb + width - 1),
                 })?;
-                let mut sources = HashSet::default();
-                sources.insert(VarAtomBase::new(
+                total_sources.insert(VarAtomBase::new(
                     var_id.clone(),
                     current_lsb,
                     current_lsb + width - 1,
                 ));
-                fixed_parts.push(((input_node, sources), BitAccess::new(0, width - 1)));
+                fixed_parts.push((input_node, BitAccess::new(0, width - 1)));
             }
         }
         current_lsb += width;
     }
-    combine_parts(fixed_parts, arena)
-}
-
-fn combine_parts<A: Clone + PartialEq + Eq + Hash>(
-    parts: Vec<((NodeId, HashSet<VarAtomBase<A>>), BitAccess)>,
-    arena: &mut SLTNodeArena<A>,
-) -> Result<(NodeId, HashSet<VarAtomBase<A>>), SLTNodeFactsError> {
-    if parts.is_empty() {
+    if fixed_parts.is_empty() {
         return Ok((
             arena.alloc(SLTNode::Constant(
                 BigUint::from(0u32),
@@ -3307,27 +3309,24 @@ fn combine_parts<A: Clone + PartialEq + Eq + Hash>(
             HashSet::default(),
         ));
     }
-    if parts.len() == 1 {
-        let ((expr, sources), access) = parts
+    if fixed_parts.len() == 1 {
+        let (expr, access) = fixed_parts
             .into_iter()
             .next()
             .expect("the single symbolic part exists");
         let w = get_width(expr, arena);
         if w == 0 {
-            return Ok((expr, sources));
+            return Ok((expr, total_sources));
         }
         if access.lsb == 0 && access.msb == w - 1 {
-            return Ok((expr, sources));
+            return Ok((expr, total_sources));
         } else {
-            return Ok((arena.alloc(SLTNode::Slice { expr, access })?, sources));
+            return Ok((arena.alloc(SLTNode::Slice { expr, access })?, total_sources));
         }
     }
 
     let mut concat_parts = Vec::new();
-    let mut total_sources = HashSet::default();
-
-    for ((expr, sources), access) in parts {
-        total_sources.extend(sources);
+    for (expr, access) in fixed_parts {
         let w = access.msb - access.lsb + 1;
         let slice = arena.alloc(SLTNode::Slice { expr, access })?;
         concat_parts.push((slice, w));

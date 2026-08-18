@@ -1455,7 +1455,7 @@ fn recover_group(
             )
         })?;
         let parts = range_store
-            .get_parts(target.access)
+            .get_parts_ref(target.access)
             .map_err(|error| range_store_error("recovered loop initial state", error, None))?;
         if parts.iter().any(|(value, _)| value.is_none()) {
             return Ok(None);
@@ -1539,7 +1539,7 @@ fn expanded_outputs_are_count_idioms(
     targets
         .iter()
         .map(|target| {
-            let parts = store.get(&target.id)?.get_parts(target.access).ok()?;
+            let parts = store.get(&target.id)?.get_parts_ref(target.access).ok()?;
             let (output, _) =
                 combine_parts_with_default(target.id, target.access.lsb, parts, &mut scratch)
                     .ok()?;
@@ -1591,7 +1591,7 @@ fn prove_group(
     for target in &targets {
         let parts = initial_store
             .get(&target.id)?
-            .get_parts(target.access)
+            .get_parts_ref(target.access)
             .ok()?;
         if parts.iter().any(|(value, _)| value.is_none()) {
             return None;
@@ -1748,7 +1748,7 @@ fn prove_group(
         let Some(ranges) = initial_store.get(&source.id) else {
             continue;
         };
-        let parts = ranges.get_parts(source.access).ok()?;
+        let parts = ranges.get_parts_ref(source.access).ok()?;
         if parts.iter().any(|(value, _)| value.is_some()) {
             return None;
         }
@@ -1913,7 +1913,7 @@ fn eval_chunk_outputs_with_facts(
     let mut outputs = Vec::with_capacity(targets.len());
     let mut sources = HashSet::default();
     for target in targets {
-        let parts = store.get(&target.id)?.get_parts(target.access).ok()?;
+        let parts = store.get(&target.id)?.get_parts_ref(target.access).ok()?;
         let (output, output_sources) =
             combine_parts_with_default(target.id, target.access.lsb, parts, arena).ok()?;
         outputs.push(output);
@@ -1983,7 +1983,7 @@ fn eval_chunk_outputs_with_initial_store(
     let mut outputs = Vec::with_capacity(targets.len());
     let mut sources = HashSet::default();
     for target in targets {
-        let parts = store.get(&target.id)?.get_parts(target.access).ok()?;
+        let parts = store.get(&target.id)?.get_parts_ref(target.access).ok()?;
         let (output, output_sources) =
             combine_parts_with_default(target.id, target.access.lsb, parts, arena).ok()?;
         outputs.push(output);
@@ -2141,7 +2141,7 @@ fn whole_fold_matches_expansion(
             return None;
         }
         let access = BitAccess::new(0, width - 1);
-        let parts = mapped_initial.get(variable)?.get_parts(access).ok()?;
+        let parts = mapped_initial.get(variable)?.get_parts_ref(access).ok()?;
         if parts.iter().any(|(value, _)| value.is_none()) {
             continue;
         }
@@ -2242,7 +2242,7 @@ fn read_target_outputs(
     targets
         .iter()
         .map(|target| {
-            let parts = store.get(&target.id)?.get_parts(target.access).ok()?;
+            let parts = store.get(&target.id)?.get_parts_ref(target.access).ok()?;
             combine_parts_with_default(target.id, target.access.lsb, parts, arena)
                 .ok()
                 .map(|(output, _)| output)

@@ -292,7 +292,7 @@ fn collect_system_function_effect(
             continue;
         }
         let parts = range_store
-            .get_parts(BitAccess::new(0, width - 1))
+            .get_parts_ref(BitAccess::new(0, width - 1))
             .map_err(|error| {
                 super::range_store_error(
                     "combinational observer capture",
@@ -1983,7 +1983,7 @@ fn collect_function_body_effects(
                     bit += 1;
                 }
                 let access = BitAccess::new(start, bit - 1);
-                let parts = original.get_parts(access).map_err(|error| {
+                let parts = original.get_parts_ref(access).map_err(|error| {
                     super::range_store_error(
                         "function observer for-loop state",
                         error,
@@ -2906,7 +2906,7 @@ fn collect_dynamic_for_effects(
             }
             let end = bit - 1;
             let access = BitAccess::new(start, end);
-            let parts = original.get_parts(access).map_err(|error| {
+            let parts = original.get_parts_ref(access).map_err(|error| {
                 super::range_store_error("observer for-loop state", error, Some(&for_stmt.token))
             })?;
             let (expr, sources) = combine_parts_with_default(id, access.lsb, parts, arena)?;

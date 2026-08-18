@@ -259,9 +259,12 @@ impl<T: Clone + PartialEq + Eq> RangeStore<T> {
         Ok(())
     }
 
-    /// Returns parts overlapping with the requested range.
+    /// Returns borrowed parts overlapping with the requested range.
     /// relative_access will be the relative position from the origin of that expression.
-    pub fn get_parts(&self, access: BitAccess) -> Result<Vec<(T, BitAccess)>, RangeStoreError> {
+    pub fn get_parts_ref(
+        &self,
+        access: BitAccess,
+    ) -> Result<Vec<(&T, BitAccess)>, RangeStoreError> {
         self.validate_access(access)?;
         let mut parts = Vec::new();
         let first_lsb = self
@@ -293,10 +296,20 @@ impl<T: Clone + PartialEq + Eq> RangeStore<T> {
                     RangeStoreError::new("range origin is above its overlapping MSB")
                 })?;
                 let relative_access = BitAccess::new(relative_lsb, relative_msb);
-                parts.push((expr.clone(), relative_access));
+                parts.push((expr, relative_access));
             }
         }
         Ok(parts)
+    }
+
+    /// Returns owned parts overlapping with the requested range.
+    pub fn get_parts(&self, access: BitAccess) -> Result<Vec<(T, BitAccess)>, RangeStoreError> {
+        self.get_parts_ref(access).map(|parts| {
+            parts
+                .into_iter()
+                .map(|(value, access)| (value.clone(), access))
+                .collect()
+        })
     }
 }
 

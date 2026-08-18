@@ -469,7 +469,7 @@ pub(super) fn eval_function_body_return(
             )
         })?;
         let ret_parts = range_store
-            .get_parts(ret_access)
+            .get_parts_ref(ret_access)
             .map_err(|error| super::range_store_error("function return value", error, None))?;
         Ok(combine_parts_with_default(ret_id, 0, ret_parts, arena)?)
     }
@@ -1132,7 +1132,7 @@ pub(super) fn eval_function_body_return(
                 }
                 let end = bit - 1;
                 let access = BitAccess::new(start, end);
-                let parts = original.get_parts(access).map_err(|error| {
+                let parts = original.get_parts_ref(access).map_err(|error| {
                     super::range_store_error(
                         "function for-loop state",
                         error,
@@ -1193,8 +1193,12 @@ pub(super) fn eval_function_body_return(
                     "function for-loop initial state",
                     Some(&for_stmt.token),
                 )?;
-                let (expr, _) =
-                    combine_parts_with_default(target.id, target.access.lsb, parts, arena)?;
+                let (expr, _) = combine_parts_with_default(
+                    target.id,
+                    target.access.lsb,
+                    parts.iter().map(|(value, access)| (value, *access)),
+                    arena,
+                )?;
                 Ok(SLTForUpdate {
                     target: *target,
                     expr,
@@ -3056,7 +3060,7 @@ fn eval_factor(
                 var_bounds.insert(access_end);
 
                 let (expr, sources) = if let Some(range_store) = store.current().get(var_id) {
-                    let parts = range_store.get_parts(access).map_err(|error| {
+                    let parts = range_store.get_parts_ref(access).map_err(|error| {
                         super::range_store_error(
                             "static variable read",
                             error,
@@ -3125,7 +3129,7 @@ fn eval_factor(
                     .current()
                     .get(var_id)
                     .map(|range_store| {
-                        range_store.get_parts(access_full).map_err(|error| {
+                        range_store.get_parts_ref(access_full).map_err(|error| {
                             super::range_store_error(
                                 "dynamic variable read",
                                 error,
