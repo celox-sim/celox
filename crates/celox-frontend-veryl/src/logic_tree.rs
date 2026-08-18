@@ -23,7 +23,7 @@ use crate::{
     HashMap, HashSet, LoweringPhase, ParserError,
     bitaccess::{
         PartSelectGeometry, celox_value_from_comptime, eval_constexpr, eval_var_select,
-        select_geometry,
+        eval_var_select_with_geometry, select_geometry,
     },
     function_call_has_arg,
     loop_provenance::LoopRecoveryCandidate,
@@ -2856,6 +2856,8 @@ pub(super) fn function_output_value(
 struct DynamicSelectOffset {
     node: NodeId,
     indices: Vec<SLTIndex>,
+    prefix_access: BitAccess,
+    selected_width: usize,
     sources: HashSet<VarAtomBase<VarId>>,
     boundaries: BoundaryMap<VarId>,
 }
@@ -3024,9 +3026,12 @@ fn eval_dynamic_select_offset(
         offset = arena.alloc(SLTNode::Binary(offset, BinaryOp::Add, term))?;
     }
 
+    let prefix_access = eval_var_select_with_geometry(index, select, &geometry)?;
     Ok(DynamicSelectOffset {
         node: offset,
         indices,
+        prefix_access,
+        selected_width: geometry.selected_width,
         sources,
         boundaries,
     })
@@ -3055,11 +3060,12 @@ fn eval_dynamic_assign(
             Some(&dst.token),
         )?
     };
+    let access_width = select_offset.selected_width;
+    let prefix_access = select_offset.prefix_access;
     boundaries = merge_boundaries(boundaries, select_offset.boundaries);
     all_sources.extend(select_offset.sources);
     let offset_node = select_offset.node;
 
-    let access_width = crate::bitaccess::get_access_width(module, dst.id, &dst.index, &dst.select)?;
     let var = &module.variables[&dst.id];
     let width = resolve_total_width(module, var)?;
     if width == 0 || access_width == 0 || access_width > width {
@@ -3134,7 +3140,6 @@ fn eval_dynamic_assign(
     let new_val_masked = arena.alloc(SLTNode::Binary(old_val, BinaryOp::And, mask_node))?;
     let final_val = arena.alloc(SLTNode::Binary(new_val_masked, BinaryOp::Or, new_val_term))?;
 
-    let prefix_access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
     let stored_expr = if prefix_access.lsb == 0 && prefix_access.msb == width - 1 {
         final_val
     } else {

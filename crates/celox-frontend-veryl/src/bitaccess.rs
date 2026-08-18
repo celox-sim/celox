@@ -460,6 +460,14 @@ pub fn eval_var_select(
     select: &VarSelect,
 ) -> Result<BitAccess, ParserError> {
     let geometry = select_geometry(module, var_id, index, select)?;
+    eval_var_select_with_geometry(index, select, &geometry)
+}
+
+pub(crate) fn eval_var_select_with_geometry(
+    index: &VarIndex,
+    select: &VarSelect,
+    geometry: &SelectGeometry,
+) -> Result<BitAccess, ParserError> {
     let strides = &geometry.strides;
     let total_width = geometry.total_width;
 

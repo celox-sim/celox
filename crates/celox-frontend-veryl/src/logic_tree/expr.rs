@@ -3112,6 +3112,7 @@ fn eval_factor(
                     indices: dynamic_indices,
                     sources: offset_sources,
                     boundaries: all_bounds,
+                    ..
                 } = super::eval_dynamic_select_offset(
                     module,
                     store,

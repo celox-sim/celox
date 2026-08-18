@@ -5,7 +5,8 @@ use crate::{
     BuildConfig, GlueAddr, GlueBlock, HashMap, HashSet, LoweringPhase, ModuleInitialMemoryValue,
     ParserError, RegionedVarAddr, SimModule,
     bitaccess::{
-        PartSelectGeometry, eval_var_select, get_access_width, is_static_access, select_geometry,
+        PartSelectGeometry, SelectGeometry, eval_var_select_with_geometry, is_static_access,
+        select_geometry,
     },
     bitslicer::BitSlicer,
     ff::FfParser,
@@ -60,6 +61,7 @@ pub struct ModuleParser<'a> {
 
 fn build_dynamic_output_glue(
     module: &Module,
+    geometry: &SelectGeometry,
     parent_store: &mut SymbolicStore<VarId>,
     parent_arena: &mut SLTNodeArena<VarId>,
     glue_arena: &mut SLTNodeArena<GlueAddr>,
@@ -80,7 +82,6 @@ fn build_dynamic_output_glue(
     ),
     ParserError,
 > {
-    let geometry = select_geometry(module, dst.id, &dst.index, &dst.select)?;
     let mut offset = glue_arena.alloc(SLTNode::Constant(
         BigUint::from(0u8),
         BigUint::from(0u8),
@@ -332,7 +333,7 @@ fn build_dynamic_output_glue(
         ))?;
     }
 
-    let access_width = get_access_width(module, dst.id, &dst.index, &dst.select)?;
+    let access_width = geometry.selected_width;
     let variable = &module.variables[&dst.id];
     let variable_width = resolve_total_width(module, variable)?;
     if variable_width == 0 || access_width == 0 || access_width > variable_width {
@@ -472,7 +473,7 @@ fn build_dynamic_output_glue(
         parent_shifted_rhs,
     ))?;
 
-    let prefix = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
+    let prefix = eval_var_select_with_geometry(&dst.index, &dst.select, geometry)?;
     let result = if prefix == full_access {
         updated_value
     } else {
@@ -1315,8 +1316,10 @@ impl<'a> ModuleParser<'a> {
                         &mut destination_address_sources,
                     )?;
                 }
-                let prefix_access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
-                let part_width = get_access_width(self.module, dst.id, &dst.index, &dst.select)?;
+                let geometry = select_geometry(self.module, dst.id, &dst.index, &dst.select)?;
+                let prefix_access =
+                    eval_var_select_with_geometry(&dst.index, &dst.select, &geometry)?;
+                let part_width = geometry.selected_width;
 
                 // Extract this part from rhs_node
                 let slice_end = current_offset.checked_add(part_width).ok_or_else(|| {
@@ -1383,6 +1386,7 @@ impl<'a> ModuleParser<'a> {
                 } else {
                     build_dynamic_output_glue(
                         self.module,
+                        &geometry,
                         &mut destination_store,
                         &mut destination_arena,
                         &mut glue_arena,
