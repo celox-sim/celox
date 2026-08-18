@@ -1,10 +1,10 @@
-//! SystemVerilog integration adapter.
+//! SystemVerilog lowering adapter for the shared Celox frontend.
 //!
 //! SystemVerilog syntax and semantic analysis belongs in the
-//! `celox-sv-analyzer` crate. The current symbolic assembly pipeline still
-//! uses Veryl-owned module identities and metadata, so the adapter that joins
-//! those two frontends belongs at the top-level `celox` integration boundary,
-//! not in a purportedly independent SystemVerilog frontend crate.
+//! `celox-sv-analyzer` crate. This module converts analyzed SV into the shared
+//! symbolic assembly model. It intentionally lives beside that assembly rather
+//! than in the public `celox` facade or in a misleading frontend-to-frontend
+//! dependency.
 
 use std::path::{Path, PathBuf};
 
@@ -13,29 +13,25 @@ use celox_design::{
     RegionedVarAddrBase, RuntimeErrorInfo, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase,
     WORKING_REGION,
 };
-use celox_frontend_veryl::{
-    BuildConfig, ExternalHierarchy, ExternalModule, FrontendTrace, FrontendTraceOptions, GlueAddr,
-    LoweringPhase, ParserError, ScheduledRtlOutput, SimModule, SymbolicRtl,
-    logic_tree::coerce_node_width,
+use celox_frontend_core::symbolic::artifact::{
+    ExternalHierarchy, ExternalModule, SimModule, SymbolicGlueAddr as GlueAddr, SymbolicRtl,
+    SymbolicVariable,
+};
+use celox_frontend_core::{
+    FrontendTrace, FrontendTraceOptions, LoweringPhase, ParserError, ScheduledRtlOutput,
+    SourceLocation, SourceVarId, VariableKind, symbolic::width::coerce_node_width,
 };
 use celox_sir::{
     BlockId, ExecutionUnit, RegisterType, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
     SIRValue, merge_sir_eus,
 };
-use celox_slt::{
-    CombObserver, GlueBlockBase, LogicPath, LogicPathTarget, SLTNode, SLTNodeArena, SymbolicStore,
-};
+use celox_slt::{CombObserver, GlueBlockBase, LogicPath, LogicPathTarget, SLTNode, SLTNodeArena};
 use celox_sv_analyzer as sv;
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use num_bigint::BigUint;
-use veryl_analyzer::{
-    ir::{Module, Shape, Type, TypeKind, VarId, VarKind, VarPath, Variable},
-    symbol::Affiliation,
-};
-use veryl_parser::{resource_table, token_range::TokenRange};
 
-type RegionedVarAddr = RegionedVarAddrBase<VarId>;
-type GlueBlock = GlueBlockBase<VarId>;
+type RegionedVarAddr = RegionedVarAddrBase<SourceVarId>;
+type GlueBlock = GlueBlockBase<SourceVarId>;
 const MAX_SV_SPECIALIZATIONS_PER_MODULE: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
@@ -48,42 +44,37 @@ pub enum FrontendError {
 
 #[derive(Clone)]
 struct SvVariable {
-    id: VarId,
-    path: VarPath,
+    path: Vec<String>,
     width: usize,
     signed: bool,
     is_4state: bool,
     packed_ranges: Vec<(i128, i128)>,
     domain_kind: DomainKind,
-    kind: VarKind,
+    kind: VariableKind,
     type_kind: PortTypeKind,
-    token: TokenRange,
+    source: Option<SourceLocation>,
 }
 
 impl SvVariable {
-    fn to_shared_variable(&self) -> Variable {
-        let kind = match self.domain_kind {
-            DomainKind::ClockPosedge => TypeKind::ClockPosedge,
-            DomainKind::ClockNegedge => TypeKind::ClockNegedge,
-            DomainKind::ResetAsyncHigh => TypeKind::ResetAsyncHigh,
-            DomainKind::ResetAsyncLow => TypeKind::ResetAsyncLow,
-            DomainKind::Other => match self.type_kind {
-                PortTypeKind::Bit => TypeKind::Bit,
-                _ => TypeKind::Logic,
-            },
-        };
-        let mut r#type = Type::new(kind);
-        r#type.signed = self.signed;
-        r#type.set_concrete_width(Shape::new(vec![Some(self.width)]));
-        Variable {
-            id: self.id,
+    fn to_symbolic_variable(&self) -> SymbolicVariable {
+        SymbolicVariable {
             path: self.path.clone(),
             kind: self.kind,
-            r#type,
-            value: Vec::new(),
-            assigned: Vec::new(),
-            affiliation: Affiliation::Module,
-            token: self.token,
+            signed: self.signed,
+            metadata: celox_design::VariableMetadata {
+                width: self.width,
+                is_4state: self.is_4state,
+                kind: self.domain_kind,
+                type_kind: self.type_kind,
+                array_dims: Vec::new(),
+            },
+            packed_dims: self
+                .packed_ranges
+                .iter()
+                .map(|(left, right)| left.abs_diff(*right) as usize + 1)
+                .collect(),
+            source: self.source.clone(),
+            module_affiliated: true,
         }
     }
 }
@@ -93,9 +84,9 @@ pub(crate) struct LoweredSvModule {
     source: sv::ir::Module,
     implicit_nets_allowed: bool,
     pub sim_module: SimModule,
-    variables: HashMap<VarId, SvVariable>,
-    pub port_order: Vec<VarId>,
-    pub signal_names: HashMap<String, VarId>,
+    variables: HashMap<SourceVarId, SvVariable>,
+    pub port_order: Vec<SourceVarId>,
+    pub signal_names: HashMap<String, SourceVarId>,
     constants: HashMap<String, i128>,
     parameter_types: HashMap<String, (usize, bool)>,
     pub instances: Vec<LoweredSvInstance>,
@@ -111,8 +102,8 @@ struct AnalyzedSvModule {
 
 #[derive(Clone)]
 pub(crate) struct LoweredSvInstance {
-    pub module_name: resource_table::StrId,
-    pub instance_name: resource_table::StrId,
+    pub module_name: String,
+    pub instance_name: String,
     pub parameter_overrides: Vec<LoweredSvParameterOverride>,
     pub port_connections: Vec<LoweredSvPortConnection>,
 }
@@ -132,12 +123,12 @@ pub(crate) struct LoweredSvPortConnection {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct LoweredSvModuleKey {
-    pub name: resource_table::StrId,
+    pub name: String,
     pub parameter_overrides: Vec<LoweredSvParameterOverride>,
 }
 
 impl LoweredSvModuleKey {
-    pub fn base(name: resource_table::StrId) -> Self {
+    pub fn base(name: String) -> Self {
         Self {
             name,
             parameter_overrides: Vec::new(),
@@ -148,7 +139,7 @@ impl LoweredSvModuleKey {
         let mut parameter_overrides = instance.parameter_overrides.clone();
         parameter_overrides.sort_by(|left, right| left.name.cmp(&right.name));
         Self {
-            name: instance.module_name,
+            name: instance.module_name.clone(),
             parameter_overrides,
         }
     }
@@ -156,12 +147,12 @@ impl LoweredSvModuleKey {
 
 fn analyze_sources(
     sources: &[(&str, &Path)],
-) -> Result<HashMap<resource_table::StrId, AnalyzedSvModule>, sv::AnalyzerError> {
+) -> Result<HashMap<String, AnalyzedSvModule>, sv::AnalyzerError> {
     let mut modules = HashMap::default();
     for (code, path) in sources {
         let implicit_net_permissions = sv::source_module_implicit_net_permissions(code, path)?;
         for module_name in sv::source_module_names(code, path)? {
-            let name = resource_table::insert_str(&module_name);
+            let name = module_name.clone();
             if modules.contains_key(&name) {
                 return Err(sv::AnalyzerError::DuplicateModule { name: module_name });
             }
@@ -453,28 +444,28 @@ fn net_driver_ranges_overlap(left: Option<(i128, i128)>, right: Option<(i128, i1
 
 /// Lower the requested SystemVerilog roots and their reachable children into
 /// an embeddable hierarchy. The module IDs in the returned graph are local and
-/// are remapped by the Veryl frontend.
+/// are remapped during mixed-language symbolic hierarchy assembly.
 pub fn prepare_external_hierarchy(
     sources: &[(&str, &Path)],
-    root_names: &HashSet<resource_table::StrId>,
+    root_names: &HashSet<String>,
     four_state: bool,
 ) -> Result<ExternalHierarchy, FrontendError> {
     let analyzed = analyze_sources(sources)?;
     let mut names = root_names
         .iter()
-        .copied()
-        .filter(|name| analyzed.contains_key(name))
+        .filter(|&name| analyzed.contains_key(name))
+        .cloned()
         .collect::<Vec<_>>();
-    names.sort_by_key(|name| resource_table::get_str_value(*name).unwrap_or_default());
+    names.sort();
 
     let mut module_ids = HashMap::default();
     let mut module_specialization_counts = HashMap::default();
     let mut queue = Vec::new();
     for name in names {
-        let key = LoweredSvModuleKey::base(name);
+        let key = LoweredSvModuleKey::base(name.clone());
         let module_id = ModuleId(module_ids.len());
         module_ids.insert(key.clone(), module_id);
-        module_specialization_counts.insert(name, 1usize);
+        module_specialization_counts.insert(name.clone(), 1usize);
         queue.push(key);
     }
 
@@ -484,7 +475,7 @@ pub fn prepare_external_hierarchy(
         index += 1;
         let base = analyzed
             .get(&key.name)
-            .ok_or_else(|| unsupported_sv_instance(key.name))?;
+            .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
         let lowered = specialize_module(base, &key, four_state)?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
@@ -493,10 +484,10 @@ pub fn prepare_external_hierarchy(
             }
             if !module_ids.contains_key(&child_key) {
                 let specialization_count = module_specialization_counts
-                    .entry(child_key.name)
+                    .entry(child_key.name.clone())
                     .or_insert(0);
                 if *specialization_count >= MAX_SV_SPECIALIZATIONS_PER_MODULE {
-                    return Err(sv_specialization_limit_error(child_key.name).into());
+                    return Err(sv_specialization_limit_error(child_key.name.clone()).into());
                 }
                 *specialization_count += 1;
                 let child_id = ModuleId(module_ids.len());
@@ -511,7 +502,7 @@ pub fn prepare_external_hierarchy(
         .map(|(key, &module_id)| {
             let base = analyzed
                 .get(&key.name)
-                .ok_or_else(|| unsupported_sv_instance(key.name))?;
+                .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
             Ok((module_id, specialize_module(base, key, four_state)?))
         })
         .collect::<Result<HashMap<_, _>, FrontendError>>()?;
@@ -520,12 +511,12 @@ pub fn prepare_external_hierarchy(
     for (key, &module_id) in &module_ids {
         let lowered = &lowered_modules[&module_id];
         let mut sim_module = lowered.sim_module.clone();
-        let unresolved_instances = lowered
+        let unresolved_instances: Vec<String> = lowered
             .instances
             .iter()
             .filter_map(|instance| {
                 (!module_ids.contains_key(&LoweredSvModuleKey::instance_key(instance)))
-                    .then_some(instance.module_name)
+                    .then_some(instance.module_name.clone())
             })
             .collect();
         let mut resolved = lowered.clone();
@@ -543,7 +534,6 @@ pub fn prepare_external_hierarchy(
         modules.insert(
             module_id,
             ExternalModule {
-                metadata: metadata_module(&sim_module),
                 sim_module,
                 port_order: lowered.port_order.clone(),
                 unresolved_instances,
@@ -553,25 +543,9 @@ pub fn prepare_external_hierarchy(
     let roots = module_ids
         .iter()
         .filter(|(key, _)| key.parameter_overrides.is_empty())
-        .map(|(key, &module_id)| (key.name, module_id))
+        .map(|(key, &module_id)| (key.name.clone(), module_id))
         .collect();
     Ok(ExternalHierarchy { modules, roots })
-}
-
-fn metadata_module(module: &SimModule) -> Module {
-    Module {
-        name: module.name,
-        token: TokenRange::default(),
-        ports: HashMap::default(),
-        port_types: HashMap::default(),
-        variables: module.variables.clone(),
-        functions: HashMap::default(),
-        declarations: Vec::new(),
-        suppress_unassigned: true,
-        per_decl_refs: HashMap::default(),
-        assign_tokens: HashMap::default(),
-        ff_table: Default::default(),
-    }
 }
 
 /// Analyze SystemVerilog sources and lower the selected top through Celox's
@@ -580,7 +554,6 @@ pub fn schedule_sources(
     sources: &[(&str, &Path)],
     top: &str,
     parameter_overrides: &[(String, u64)],
-    config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
         (Vec<(String, usize)>, Vec<String>),
@@ -595,9 +568,9 @@ pub fn schedule_sources(
     trace: Option<&mut FrontendTrace>,
 ) -> Result<ScheduledRtlOutput, FrontendError> {
     let analyzed = analyze_sources(sources)?;
-    let top = resource_table::insert_str(top);
+    let top = top.to_string();
     let root_key = LoweredSvModuleKey {
-        name: top,
+        name: top.clone(),
         parameter_overrides: parameter_overrides
             .iter()
             .map(|(name, value)| LoweredSvParameterOverride {
@@ -614,7 +587,7 @@ pub fn schedule_sources(
     let mut module_ids = HashMap::default();
     module_ids.insert(root_key.clone(), root_id);
     let mut module_specialization_counts = HashMap::default();
-    module_specialization_counts.insert(root_key.name, 1usize);
+    module_specialization_counts.insert(root_key.name.clone(), 1usize);
     let mut queue = vec![root_key.clone()];
     let mut index = 0;
     while index < queue.len() {
@@ -622,19 +595,19 @@ pub fn schedule_sources(
         index += 1;
         let base = analyzed
             .get(&key.name)
-            .ok_or_else(|| unsupported_sv_instance(key.name))?;
+            .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
         let lowered = specialize_module(base, &key, four_state)?;
         for instance in &lowered.instances {
             let child_key = LoweredSvModuleKey::instance_key(instance);
             if !analyzed.contains_key(&child_key.name) {
-                return Err(unsupported_sv_instance(child_key.name).into());
+                return Err(unsupported_sv_instance(child_key.name.clone()).into());
             }
             if !module_ids.contains_key(&child_key) {
                 let specialization_count = module_specialization_counts
-                    .entry(child_key.name)
+                    .entry(child_key.name.clone())
                     .or_insert(0);
                 if *specialization_count >= MAX_SV_SPECIALIZATIONS_PER_MODULE {
-                    return Err(sv_specialization_limit_error(child_key.name).into());
+                    return Err(sv_specialization_limit_error(child_key.name.clone()).into());
                 }
                 *specialization_count += 1;
                 let child_id = ModuleId(module_ids.len());
@@ -649,7 +622,7 @@ pub fn schedule_sources(
         .map(|(key, &module_id)| {
             let base = analyzed
                 .get(&key.name)
-                .ok_or_else(|| unsupported_sv_instance(key.name))?;
+                .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
             let lowered = specialize_module(base, key, four_state).map_err(FrontendError::from)?;
             Ok((module_id, lowered))
         })
@@ -660,9 +633,9 @@ pub fn schedule_sources(
         .port_order
         .iter()
         .map(|port_id| &root.variables[port_id])
-        .find(|port| port.kind == VarKind::Inout)
+        .find(|port| port.kind == VariableKind::Inout)
     {
-        return Err(unsupported_sv_inout(port.path.to_string(), &port.token).into());
+        return Err(unsupported_sv_inout(port.path.join(".")).into());
     }
     validate_sv_module_graph(
         &root_key,
@@ -685,29 +658,18 @@ pub fn schedule_sources(
             &lowered_modules,
             four_state,
         )?;
-        module_names.insert(module_id, key.name);
+        module_names.insert(module_id, key.name.clone());
         modules.insert(module_id, sim_module);
     }
 
-    // The shared scheduler still accepts a Veryl module metadata view. SV
-    // supplies variables only; declarations and functions remain empty.
-    let metadata_modules = modules
-        .iter()
-        .map(|(&module_id, module)| (module_id, metadata_module(module)))
-        .collect::<HashMap<_, _>>();
-    let module_ir = metadata_modules
-        .iter()
-        .map(|(&module_id, module)| (module_id, module))
-        .collect();
     let symbolic = SymbolicRtl {
         modules,
-        module_ir,
         module_names,
         root_id,
     };
-    celox_frontend_veryl::schedule_symbolic_rtl(
+    celox_frontend_core::symbolic::assembly::schedule_symbolic_rtl(
         symbolic,
-        config,
+        None,
         ignored_loops,
         true_loops,
         four_state,
@@ -717,12 +679,12 @@ pub fn schedule_sources(
     .map_err(FrontendError::from)
 }
 
-fn sv_specialization_limit_error(name: resource_table::StrId) -> ParserError {
+fn sv_specialization_limit_error(name: String) -> ParserError {
     ParserError::unsupported(
         64,
         LoweringPhase::SimulatorParser,
         "systemverilog module specialization limit exceeded (possible recursive instantiation)",
-        resource_table::get_str_value(name).unwrap_or_default(),
+        name,
         None,
     )
 }
@@ -742,17 +704,17 @@ fn validate_sv_module_graph(
             64,
             LoweringPhase::SimulatorParser,
             "recursive systemverilog module instantiation",
-            resource_table::get_str_value(key.name).unwrap_or_default(),
+            key.name.clone(),
             None,
         ));
     }
     let module_id = module_ids
         .get(key)
         .copied()
-        .ok_or_else(|| unsupported_sv_instance(key.name))?;
+        .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
     let module = lowered_modules
         .get(&module_id)
-        .ok_or_else(|| unsupported_sv_instance(key.name))?;
+        .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
     for instance in &module.instances {
         validate_sv_module_graph(
             &LoweredSvModuleKey::instance_key(instance),
@@ -801,9 +763,8 @@ fn lower_module_with_overrides(
     four_state: bool,
     implicit_nets_allowed: bool,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
-    let token = TokenRange::default();
-    let name = resource_table::insert_str(module.name());
-    let mut next_id = VarId::default();
+    let name = module.name().to_string();
+    let mut next_id = SourceVarId::default();
     let mut variables = HashMap::default();
     let mut name_to_id = HashMap::default();
     let mut port_order = Vec::new();
@@ -833,10 +794,9 @@ fn lower_module_with_overrides(
         }
         let id = next_var_id(&mut next_id);
         let type_info = signal_type_from_sv(port.r#type(), &constants, &parameter_types)?;
-        let path = VarPath::new(resource_table::insert_str(port.name()));
+        let path = vec![port.name().to_string()];
         let kind = signal_kind_from_port_direction(port.direction())?;
         let variable = SvVariable {
-            id,
             path,
             width: type_info.width,
             signed: type_info.signed,
@@ -845,7 +805,7 @@ fn lower_module_with_overrides(
             domain_kind: DomainKind::Other,
             kind,
             type_kind: type_info.type_kind,
-            token,
+            source: None,
         };
         name_to_id.insert(port.name().to_string(), id);
         port_order.push(id);
@@ -877,18 +837,17 @@ fn lower_module_with_overrides(
         }
         let id = next_var_id(&mut next_id);
         let type_info = signal_type_from_sv(signal.r#type(), &constants, &parameter_types)?;
-        let path = VarPath::new(resource_table::insert_str(signal.name()));
+        let path = vec![signal.name().to_string()];
         let variable = SvVariable {
-            id,
             path,
             width: type_info.width,
             signed: type_info.signed,
             is_4state: type_info.is_4state,
             packed_ranges: type_info.packed_ranges,
             domain_kind: DomainKind::Other,
-            kind: VarKind::Variable,
+            kind: VariableKind::Variable,
             type_kind: type_info.type_kind,
-            token,
+            source: None,
         };
         name_to_id.insert(signal.name().to_string(), id);
         if signal.is_net() || type_info.is_4state {
@@ -923,7 +882,7 @@ fn lower_module_with_overrides(
 
     let shared_variables = variables
         .iter()
-        .map(|(&id, variable)| (id, variable.to_shared_variable()))
+        .map(|(&id, variable)| (id, variable.to_symbolic_variable()))
         .collect();
     let mut instances = Vec::new();
     for instance in module.instances() {
@@ -940,8 +899,8 @@ fn lower_module_with_overrides(
             }
         }
         instances.push(LoweredSvInstance {
-            module_name: resource_table::insert_str(instance.module_name()),
-            instance_name: resource_table::insert_str(instance.name()),
+            module_name: instance.module_name().to_string(),
+            instance_name: instance.name().to_string(),
             parameter_overrides: lower_parameter_overrides(instance, &constants, &parameter_types),
             port_connections: instance
                 .port_connections()
@@ -968,13 +927,12 @@ fn lower_module_with_overrides(
             glue_blocks: HashMap::default(),
             indexed_instance_names: HashSet::default(),
             comb_blocks: Vec::new(),
-            comb_observers: Vec::<CombObserver<VarId>>::new(),
-            runtime_errors: HashMap::<i64, RuntimeErrorInfo<VarId>>::default(),
+            comb_observers: Vec::<CombObserver<SourceVarId>>::new(),
+            runtime_errors: HashMap::<i64, RuntimeErrorInfo<SourceVarId>>::default(),
             runtime_event_sites: Vec::new(),
             initial_memory_values,
             comb_boundaries: HashMap::default(),
             arena: SLTNodeArena::new(),
-            store: SymbolicStore::default(),
             reset_clock_map,
         },
         variables,
@@ -988,8 +946,8 @@ fn lower_module_with_overrides(
 
 fn mark_ff_event_domains(
     module: &sv::ir::Module,
-    variables: &mut HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &mut HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
 ) {
     for process in module.ff_processes() {
         let Some(clock) = clock_event_from_ff_process(process) else {
@@ -1139,19 +1097,19 @@ pub(crate) fn attach_instance_glue(
     for instance in &lowered.instances {
         let child_key = LoweredSvModuleKey::instance_key(instance);
         let Some(child_id) = module_ids.get(&child_key).copied() else {
-            return Err(unsupported_sv_instance(instance.module_name));
+            return Err(unsupported_sv_instance(instance.module_name.clone()));
         };
         if &child_key == current_key {
             return Err(ParserError::unsupported(
                 64,
                 LoweringPhase::SimulatorParser,
                 "recursive systemverilog module instantiation",
-                resource_table::get_str_value(instance.module_name).unwrap_or_default(),
+                instance.module_name.clone(),
                 None,
             ));
         }
         let Some(child) = lowered_modules.get(&child_id) else {
-            return Err(unsupported_sv_instance(instance.module_name));
+            return Err(unsupported_sv_instance(instance.module_name.clone()));
         };
         ensure_parent_output_signals(
             module,
@@ -1198,7 +1156,7 @@ pub(crate) fn attach_instance_glue(
         )?;
         module
             .glue_blocks
-            .entry(instance.instance_name)
+            .entry(instance.instance_name.clone())
             .or_default()
             .push(GlueBlock {
                 module_id: child_id,
@@ -1308,12 +1266,12 @@ fn expr_for_state_mode(expr: &sv::ir::Expr, four_state: bool) -> sv::ir::Expr {
 
 fn lower_comb_processes(
     module: &sv::ir::Module,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     four_state: bool,
-) -> Result<(Vec<LogicPath<VarId>>, SLTNodeArena<VarId>), sv::AnalyzerError> {
+) -> Result<(Vec<LogicPath<SourceVarId>>, SLTNodeArena<SourceVarId>), sv::AnalyzerError> {
     let mut arena = SLTNodeArena::new();
     let mut comb_blocks = Vec::new();
     for process in module.comb_processes() {
@@ -1344,8 +1302,8 @@ fn lower_comb_processes(
 
 fn ensure_parent_output_signals(
     parent: &mut SimModule,
-    parent_variables: &mut HashMap<VarId, SvVariable>,
-    parent_signal_names: &mut HashMap<String, VarId>,
+    parent_variables: &mut HashMap<SourceVarId, SvVariable>,
+    parent_signal_names: &mut HashMap<String, SourceVarId>,
     implicit_output_signals: &mut HashSet<String>,
     implicit_nets_allowed: bool,
     parent_source: &sv::ir::Module,
@@ -1356,10 +1314,10 @@ fn ensure_parent_output_signals(
 ) -> Result<(), ParserError> {
     for child_port_id in &child.port_order {
         let child_var = &child.variables[child_port_id];
-        if child_var.kind != VarKind::Output {
+        if child_var.kind != VariableKind::Output {
             continue;
         }
-        let formal = child_var.path.to_string();
+        let formal = child_var.path.join(".");
         let Some(connection) = connections
             .iter()
             .find(|connection| connection.formal == formal)
@@ -1411,41 +1369,40 @@ fn ensure_parent_output_signals(
                 None,
             ));
         }
-        let mut next_id = VarId::default();
+        let mut next_id = SourceVarId::default();
         while parent.variables.contains_key(&next_id) {
-            next_id.inc();
+            next_id.0 += 1;
         }
         parent_signal_names.insert(actual.to_string(), next_id);
         implicit_output_signals.insert(actual.to_string());
         let variable = SvVariable {
-            id: next_id,
-            path: VarPath::new(resource_table::insert_str(actual)),
+            path: vec![actual.to_string()],
             width: 1,
             signed: false,
             is_4state: true,
             packed_ranges: Vec::new(),
             domain_kind: DomainKind::Other,
-            kind: VarKind::Variable,
+            kind: VariableKind::Variable,
             type_kind: PortTypeKind::Logic,
-            token: TokenRange::default(),
+            source: None,
         };
         parent
             .variables
-            .insert(next_id, variable.to_shared_variable());
+            .insert(next_id, variable.to_symbolic_variable());
         parent_variables.insert(next_id, variable);
     }
     Ok(())
 }
 
 type SvGlue = (
-    Vec<(Vec<VarId>, LogicPath<GlueAddr>)>,
-    Vec<(Vec<VarId>, LogicPath<GlueAddr>)>,
+    Vec<(Vec<SourceVarId>, LogicPath<GlueAddr>)>,
+    Vec<(Vec<SourceVarId>, LogicPath<GlueAddr>)>,
     SLTNodeArena<GlueAddr>,
 );
 
 fn build_instance_glue(
-    parent_variables: &HashMap<VarId, SvVariable>,
-    parent_signal_names: &HashMap<String, VarId>,
+    parent_variables: &HashMap<SourceVarId, SvVariable>,
+    parent_signal_names: &HashMap<String, SourceVarId>,
     parent_constants: &HashMap<String, i128>,
     parent_parameter_types: &HashMap<String, (usize, bool)>,
     child: &LoweredSvModule,
@@ -1461,7 +1418,7 @@ fn build_instance_glue(
         let matches = child
             .port_order
             .iter()
-            .filter(|port_id| child.variables[port_id].path.to_string() == connection.formal)
+            .filter(|port_id| child.variables[port_id].path.join(".") == connection.formal)
             .count();
         if matches != 1 || !connected_formals.insert(connection.formal.clone()) {
             return Err(ParserError::unsupported(
@@ -1476,13 +1433,13 @@ fn build_instance_glue(
 
     for child_port_id in &child.port_order {
         let child_var = &child.variables[child_port_id];
-        let formal = child_var.path.to_string();
+        let formal = child_var.path.join(".");
         let connection = connections
             .iter()
             .find(|connection| connection.formal == formal);
         let width = child_var.width;
         match child_var.kind {
-            VarKind::Input => {
+            VariableKind::Input => {
                 let collapse_unknown_literal = !four_state
                     && connection
                         .and_then(|item| item.actual_expr.as_ref())
@@ -1564,7 +1521,7 @@ fn build_instance_glue(
                     },
                 ));
             }
-            VarKind::Output => {
+            VariableKind::Output => {
                 let Some(connection) = connection else {
                     continue;
                 };
@@ -1626,11 +1583,8 @@ fn build_instance_glue(
                     },
                 ));
             }
-            VarKind::Inout => {
-                return Err(unsupported_sv_inout(
-                    child_var.path.to_string(),
-                    &child_var.token,
-                ));
+            VariableKind::Inout => {
+                return Err(unsupported_sv_inout(child_var.path.join(".")));
             }
             _ => {}
         }
@@ -1649,8 +1603,8 @@ fn simple_output_lvalue_ident(expr: &sv::ir::Expr) -> Option<&str> {
 
 fn lower_glue_parent_expr(
     expr: &sv::ir::Expr,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     arena: &mut SLTNodeArena<GlueAddr>,
@@ -1659,7 +1613,7 @@ fn lower_glue_parent_expr(
 ) -> Option<(
     celox_slt::NodeId,
     HashSet<VarAtomBase<GlueAddr>>,
-    Vec<VarId>,
+    Vec<SourceVarId>,
 )> {
     match expr {
         sv::ir::Expr::Ident(name) => {
@@ -2162,25 +2116,25 @@ fn lower_glue_parent_expr(
     }
 }
 
-fn next_var_id(next_id: &mut VarId) -> VarId {
+fn next_var_id(next_id: &mut SourceVarId) -> SourceVarId {
     let id = *next_id;
-    next_id.inc();
+    next_id.0 += 1;
     id
 }
 
 fn signal_kind_from_port_direction(
     direction: sv::ir::PortDirection,
-) -> Result<VarKind, sv::AnalyzerError> {
+) -> Result<VariableKind, sv::AnalyzerError> {
     Ok(match direction {
-        sv::ir::PortDirection::Input => VarKind::Input,
-        sv::ir::PortDirection::Output => VarKind::Output,
-        sv::ir::PortDirection::Inout => VarKind::Inout,
+        sv::ir::PortDirection::Input => VariableKind::Input,
+        sv::ir::PortDirection::Output => VariableKind::Output,
+        sv::ir::PortDirection::Inout => VariableKind::Inout,
         sv::ir::PortDirection::Ref => {
             return Err(sv::AnalyzerError::Unsupported(
                 "ref port direction".to_string(),
             ));
         }
-        sv::ir::PortDirection::Unspecified => VarKind::Variable,
+        sv::ir::PortDirection::Unspecified => VariableKind::Variable,
     })
 }
 
@@ -2257,13 +2211,13 @@ fn signal_type_from_sv(
 
 fn lower_comb_process(
     process: &sv::ir::CombProcess,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
-    arena: &mut SLTNodeArena<VarId>,
+    arena: &mut SLTNodeArena<SourceVarId>,
     four_state: bool,
-) -> Result<Vec<LogicPath<VarId>>, sv::AnalyzerError> {
+) -> Result<Vec<LogicPath<SourceVarId>>, sv::AnalyzerError> {
     let assignments = process.assignments();
     if process.kind() == sv::ir::CombProcessKind::AlwaysComb {
         for (index, assignment) in assignments.iter().enumerate() {
@@ -2314,9 +2268,9 @@ fn lower_comb_process(
 }
 
 fn merge_overlapping_comb_path(
-    paths: &mut Vec<LogicPath<VarId>>,
-    mut later: LogicPath<VarId>,
-    arena: &mut SLTNodeArena<VarId>,
+    paths: &mut Vec<LogicPath<SourceVarId>>,
+    mut later: LogicPath<SourceVarId>,
+    arena: &mut SLTNodeArena<SourceVarId>,
 ) -> Result<(), sv::AnalyzerError> {
     let mut index = 0;
     while index < paths.len() {
@@ -2341,10 +2295,10 @@ fn merge_overlapping_comb_path(
 }
 
 fn overlay_comb_paths(
-    previous: LogicPath<VarId>,
-    later: LogicPath<VarId>,
-    arena: &mut SLTNodeArena<VarId>,
-) -> Result<LogicPath<VarId>, sv::AnalyzerError> {
+    previous: LogicPath<SourceVarId>,
+    later: LogicPath<SourceVarId>,
+    arena: &mut SLTNodeArena<SourceVarId>,
+) -> Result<LogicPath<SourceVarId>, sv::AnalyzerError> {
     let previous_target = previous.target.var().expect("variable path target");
     let later_target = later.target.var().expect("variable path target");
     debug_assert_eq!(previous_target.id, later_target.id);
@@ -2463,13 +2417,13 @@ fn expr_references_ident(expr: &sv::ir::Expr, name: &str) -> bool {
 
 fn lower_assignment(
     assignment: &sv::ir::Assignment,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
-    arena: &mut SLTNodeArena<VarId>,
+    arena: &mut SLTNodeArena<SourceVarId>,
     four_state: bool,
-) -> Result<LogicPath<VarId>, sv::AnalyzerError> {
+) -> Result<LogicPath<SourceVarId>, sv::AnalyzerError> {
     let target = lower_lvalue_target(
         assignment.lhs_value(),
         variables,
@@ -2567,11 +2521,11 @@ fn lower_assignment(
 
 fn lower_lvalue_target(
     lvalue: &sv::ir::LValue,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
-) -> Option<LogicPathTarget<VarId>> {
+) -> Option<LogicPathTarget<SourceVarId>> {
     let target_id = *name_to_id.get(lvalue.name())?;
     let target_width = variables.get(&target_id)?.width;
     let (lsb, msb) = match lvalue {
@@ -2591,12 +2545,12 @@ fn lower_lvalue_target(
 
 fn lower_expr(
     expr: &sv::ir::Expr,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
-    arena: &mut SLTNodeArena<VarId>,
-) -> Option<(celox_slt::NodeId, HashSet<VarAtomBase<VarId>>)> {
+    arena: &mut SLTNodeArena<SourceVarId>,
+) -> Option<(celox_slt::NodeId, HashSet<VarAtomBase<SourceVarId>>)> {
     lower_expr_with_context(
         expr,
         variables,
@@ -2611,14 +2565,14 @@ fn lower_expr(
 
 fn lower_expr_with_context(
     expr: &sv::ir::Expr,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
-    arena: &mut SLTNodeArena<VarId>,
+    arena: &mut SLTNodeArena<SourceVarId>,
     context_width: Option<usize>,
     context_signed: Option<bool>,
-) -> Option<(celox_slt::NodeId, HashSet<VarAtomBase<VarId>>)> {
+) -> Option<(celox_slt::NodeId, HashSet<VarAtomBase<SourceVarId>>)> {
     match expr {
         sv::ir::Expr::Ident(name) => {
             let Some(id) = name_to_id.get(name).copied() else {
@@ -3107,8 +3061,8 @@ fn packed_expr_select_offsets(
     expr: &sv::ir::Expr,
     msb: i128,
     lsb: i128,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
 ) -> Option<(usize, usize)> {
     if let sv::ir::Expr::Ident(name) = expr {
         if let Some(variable) = name_to_id.get(name).and_then(|id| variables.get(id)) {
@@ -3122,16 +3076,16 @@ fn packed_expr_select_offsets(
 }
 
 type SvFfBlocks = (
-    HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
-    HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
-    HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
-    HashMap<VarId, VarId>,
+    HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
+    HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
+    HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
+    HashMap<SourceVarId, SourceVarId>,
 );
 
 fn lower_ff_processes(
     module: &sv::ir::Module,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     four_state: bool,
@@ -3257,8 +3211,8 @@ fn lower_ff_processes(
 }
 
 fn insert_or_merge_ff_unit(
-    blocks: &mut HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
-    trigger_set: TriggerSet<VarId>,
+    blocks: &mut HashMap<TriggerSet<SourceVarId>, ExecutionUnit<RegionedVarAddr>>,
+    trigger_set: TriggerSet<SourceVarId>,
     unit: ExecutionUnit<RegionedVarAddr>,
 ) {
     if let Some(existing) = blocks.remove(&trigger_set) {
@@ -3319,8 +3273,8 @@ fn expr_uses_ident_as_condition(expr: &sv::ir::Expr, name: &str) -> bool {
 
 fn trigger_set_from_ff_process(
     process: &sv::ir::FfProcess,
-    name_to_id: &HashMap<String, VarId>,
-) -> Option<TriggerSet<VarId>> {
+    name_to_id: &HashMap<String, SourceVarId>,
+) -> Option<TriggerSet<SourceVarId>> {
     let clock = clock_event_from_ff_process(process)?;
     let clock_id = *name_to_id.get(clock.signal())?;
     let resets = process
@@ -3337,9 +3291,9 @@ fn trigger_set_from_ff_process(
 
 fn lower_ff_process(
     process: &sv::ir::FfProcess,
-    trigger_set: &TriggerSet<VarId>,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    trigger_set: &TriggerSet<SourceVarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     four_state: bool,
@@ -3400,11 +3354,11 @@ fn seal_builder(mut builder: SIRBuilder<RegionedVarAddr>) -> ExecutionUnit<Regio
 
 fn ff_targets(
     process: &sv::ir::FfProcess,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
-) -> Option<Vec<VarAtomBase<VarId>>> {
+) -> Option<Vec<VarAtomBase<SourceVarId>>> {
     let mut targets = Vec::new();
     for assignment in process.assignments() {
         let target = lvalue_atom(
@@ -3421,7 +3375,7 @@ fn ff_targets(
     Some(targets)
 }
 
-fn emit_ff_seeds(builder: &mut SIRBuilder<RegionedVarAddr>, targets: &[VarAtomBase<VarId>]) {
+fn emit_ff_seeds(builder: &mut SIRBuilder<RegionedVarAddr>, targets: &[VarAtomBase<SourceVarId>]) {
     for target in targets {
         builder.emit(SIRInstruction::Commit(
             RegionedVarAddrBase {
@@ -3439,7 +3393,10 @@ fn emit_ff_seeds(builder: &mut SIRBuilder<RegionedVarAddr>, targets: &[VarAtomBa
     }
 }
 
-fn emit_ff_commits(builder: &mut SIRBuilder<RegionedVarAddr>, targets: &[VarAtomBase<VarId>]) {
+fn emit_ff_commits(
+    builder: &mut SIRBuilder<RegionedVarAddr>,
+    targets: &[VarAtomBase<SourceVarId>],
+) {
     for target in targets {
         builder.emit(SIRInstruction::Commit(
             RegionedVarAddrBase {
@@ -3460,9 +3417,9 @@ fn emit_ff_commits(builder: &mut SIRBuilder<RegionedVarAddr>, targets: &[VarAtom
 fn emit_ff_assignment_stores(
     builder: &mut SIRBuilder<RegionedVarAddr>,
     process: &sv::ir::FfProcess,
-    targets: &[VarAtomBase<VarId>],
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    targets: &[VarAtomBase<SourceVarId>],
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     four_state: bool,
@@ -3624,8 +3581,8 @@ fn emit_ff_assignment_stores(
 fn lower_procedural_condition(
     builder: &mut SIRBuilder<RegionedVarAddr>,
     condition: &sv::ir::Expr,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<celox_sir::RegisterId> {
@@ -3689,11 +3646,11 @@ fn replace_sir_slice(
 
 fn lvalue_atom(
     lvalue: &sv::ir::LValue,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
-) -> Option<VarAtomBase<VarId>> {
+) -> Option<VarAtomBase<SourceVarId>> {
     let id = *name_to_id.get(lvalue.name())?;
     let width = variables.get(&id)?.width;
     match lvalue {
@@ -3713,8 +3670,8 @@ fn lvalue_atom(
 
 fn sv_glue_expr_is_signed(
     expr: &sv::ir::Expr,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> bool {
     match expr {
@@ -3768,8 +3725,8 @@ fn sv_glue_expr_is_signed(
 
 fn sv_expr_is_signed_with_parameters(
     expr: &sv::ir::Expr,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> bool {
     match expr {
@@ -3941,8 +3898,8 @@ fn lower_unbased_fill_literal(
 fn lower_expr_to_sir(
     builder: &mut SIRBuilder<RegionedVarAddr>,
     expr: &sv::ir::Expr,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<celox_sir::RegisterId> {
@@ -3960,8 +3917,8 @@ fn lower_expr_to_sir(
 
 fn sv_expr_natural_width(
     expr: &sv::ir::Expr,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<usize> {
@@ -4080,8 +4037,8 @@ fn sv_expr_natural_width(
 fn sv_comparison_operand_width(
     left: &sv::ir::Expr,
     right: &sv::ir::Expr,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<usize> {
@@ -4095,8 +4052,8 @@ fn sv_comparison_operand_width(
 fn lower_expr_to_sir_with_context(
     builder: &mut SIRBuilder<RegionedVarAddr>,
     expr: &sv::ir::Expr,
-    variables: &HashMap<VarId, SvVariable>,
-    name_to_id: &HashMap<String, VarId>,
+    variables: &HashMap<SourceVarId, SvVariable>,
+    name_to_id: &HashMap<String, SourceVarId>,
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     context_width: Option<usize>,
@@ -4600,13 +4557,11 @@ fn binary_op_from_sv(op: sv::ir::BinaryOp, operands_signed: bool) -> BinaryOp {
     }
 }
 
-pub(crate) fn sv_top_not_found(name: resource_table::StrId) -> ParserError {
-    ParserError::TopNotFound {
-        name: resource_table::get_str_value(name).unwrap_or_default(),
-    }
+pub(crate) fn sv_top_not_found(name: String) -> ParserError {
+    ParserError::TopNotFound { name }
 }
 
-pub(crate) fn unsupported_sv_instance(name: resource_table::StrId) -> ParserError {
+pub(crate) fn unsupported_sv_instance(name: String) -> ParserError {
     ParserError::unsupported(
         64,
         LoweringPhase::SimulatorParser,
@@ -4616,13 +4571,13 @@ pub(crate) fn unsupported_sv_instance(name: resource_table::StrId) -> ParserErro
     )
 }
 
-pub(crate) fn unsupported_sv_inout(path: String, token: &TokenRange) -> ParserError {
+pub(crate) fn unsupported_sv_inout(path: String) -> ParserError {
     ParserError::unsupported(
         64,
         LoweringPhase::SimulatorParser,
         "systemverilog inout port",
         path,
-        Some(token),
+        None,
     )
 }
 

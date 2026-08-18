@@ -11,7 +11,9 @@ pub(crate) use celox_design::{BinaryOp, UnaryOp};
 pub(crate) use celox_design::{
     InitialStateData, InitialStateWriteRun, RuntimeEventKind, RuntimeEventSite,
 };
-pub use celox_frontend_veryl::{InstancePath, VariableInfo, VerylFrontendLookup};
+pub use celox_frontend_core::shared::{
+    FrontendLookup, InstancePath, SourceAddr, SourceVarId, VariableInfo, VariableKind,
+};
 #[cfg(all(
     feature = "host-runtime",
     any(
@@ -31,7 +33,6 @@ pub(crate) use celox_sir::{
 };
 use celox_testbench::TestbenchProgram;
 use std::{fmt, ops::Deref};
-use veryl_analyzer::ir::VarPath;
 
 /// Source-independent identity of one elaborated state object.
 pub type AbsoluteAddr = celox_design::StateAddr;
@@ -57,9 +58,7 @@ pub(crate) enum DesignProjectionError {
     #[error("state object count differs: design={design} frontend={frontend}")]
     StateObjectCount { design: usize, frontend: usize },
     #[error("missing state projection for {source_address}")]
-    MissingStateProjection {
-        source_address: celox_frontend_veryl::AbsoluteAddr,
-    },
+    MissingStateProjection { source_address: SourceAddr },
     #[error("missing flattened state object {address}")]
     MissingStateObject { address: AbsoluteAddr },
     #[error("metadata differs for flattened state object {address}")]
@@ -79,7 +78,7 @@ pub type RuntimeErrorInfo<Addr = AbsoluteAddr> = celox_design::RuntimeErrorInfo<
 #[derive(Clone)]
 pub struct RuntimeProgram {
     pub design: celox_design::ElaboratedDesign<AbsoluteAddr>,
-    pub frontend: VerylFrontendLookup,
+    pub frontend: FrontendLookup,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
     pub testbench: Option<TestbenchProgram<AbsoluteAddr>>,
 }
@@ -360,8 +359,7 @@ impl RuntimeProgram {
             .frontend
             .module_names
             .get(&root_module)
-            .and_then(|name| veryl_parser::resource_table::get_str_value(*name))
-            .map(|name| name.to_string())
+            .cloned()
             .unwrap_or_else(|| root_module.to_string());
 
         let mut scope_sources = self
@@ -374,8 +372,7 @@ impl RuntimeProgram {
                     .frontend
                     .module_names
                     .get(&module_id)
-                    .and_then(|name| veryl_parser::resource_table::get_str_value(*name))
-                    .map(|name| name.to_string())
+                    .cloned()
                     .unwrap_or_else(|| module_id.to_string());
                 let segments = self.frontend.instance_path_segments(path);
                 let name = segments
@@ -460,24 +457,14 @@ impl RuntimeProgram {
             for info in variables.values() {
                 if matches!(
                     info.var_kind,
-                    veryl_analyzer::ir::VarKind::Param | veryl_analyzer::ir::VarKind::Const
+                    VariableKind::Parameter | VariableKind::Constant
                 ) {
                     continue;
                 }
                 if path_index.get(&info.path) != Some(&Some(info.id)) {
                     continue;
                 }
-                let name = info
-                    .path
-                    .0
-                    .iter()
-                    .map(|name| {
-                        veryl_parser::resource_table::get_str_value(*name)
-                            .unwrap()
-                            .to_string()
-                    })
-                    .collect::<Vec<_>>()
-                    .join(".");
+                let name = info.path.join(".");
                 let state_address = self
                     .state_address_for_source(scope.instance_id, info.id)
                     .expect("frontend state projection is complete");
@@ -492,9 +479,9 @@ impl RuntimeProgram {
                             plane_size: array.plane_size,
                         });
                 let direction = match info.var_kind {
-                    veryl_analyzer::ir::VarKind::Input => SignalDirection::Input,
-                    veryl_analyzer::ir::VarKind::Output => SignalDirection::Output,
-                    veryl_analyzer::ir::VarKind::Inout => SignalDirection::Inout,
+                    VariableKind::Input => SignalDirection::Input,
+                    VariableKind::Output => SignalDirection::Output,
+                    VariableKind::Inout => SignalDirection::Inout,
                     _ => SignalDirection::Internal,
                 };
                 signals.push(ReflectionSignal {
@@ -533,18 +520,17 @@ impl RuntimeProgram {
     pub(crate) fn state_address_for_source(
         &self,
         instance_id: InstanceId,
-        var_id: veryl_analyzer::ir::VarId,
+        var_id: SourceVarId,
     ) -> Option<AbsoluteAddr> {
-        self.frontend
-            .state_address(&celox_frontend_veryl::AbsoluteAddr {
-                instance_id,
-                var_id,
-            })
+        self.frontend.state_address(&SourceAddr {
+            instance_id,
+            var_id,
+        })
     }
 
     pub(crate) fn from_scheduled(
-        scheduled: celox_frontend_veryl::ScheduledRtl,
-    ) -> (SirProgram, Self, celox_frontend_veryl::VerylTestbenchSource) {
+        scheduled: celox_frontend_core::ScheduledRtl,
+    ) -> (SirProgram, Self) {
         (
             scheduled.sir,
             Self {
@@ -553,7 +539,6 @@ impl RuntimeProgram {
                 runtime_schema: scheduled.runtime_schema,
                 testbench: None,
             },
-            scheduled.testbench_source,
         )
     }
 
@@ -562,15 +547,14 @@ impl RuntimeProgram {
         instance_path: &[(&str, usize)],
         var_path: &[&str],
     ) -> Result<AbsoluteAddr, AddrLookupError> {
-        let mut instance_path_str_id = Vec::new();
-        for path in instance_path {
-            let id = veryl_parser::resource_table::insert_str(path.0);
-            instance_path_str_id.push((id, path.1));
-        }
+        let instance_path: Vec<(String, usize)> = instance_path
+            .iter()
+            .map(|(name, index)| ((*name).to_string(), *index))
+            .collect();
         let instance_id = *self
             .frontend
             .instance_ids
-            .get(&InstancePath(instance_path_str_id))
+            .get(&InstancePath(instance_path.clone()))
             .ok_or_else(|| AddrLookupError::InstanceNotFound {
                 path: instance_path
                     .iter()
@@ -579,13 +563,10 @@ impl RuntimeProgram {
                     .join("."),
             })?;
         let module_id = self.frontend.instance_module[&instance_id];
-        let mut var_path_str_id = Vec::new();
-        for path in var_path {
-            let id = veryl_parser::resource_table::insert_str(path);
-            var_path_str_id.push(id);
-        }
-
-        let target_path = VarPath(var_path_str_id);
+        let target_path = var_path
+            .iter()
+            .map(|segment| (*segment).to_string())
+            .collect::<Vec<_>>();
         let path_str = var_path.join(".");
         let entry = self.frontend.module_var_path_index[&module_id]
             .get(&target_path)
@@ -593,7 +574,7 @@ impl RuntimeProgram {
                 path: path_str.clone(),
             })?;
         let var_id = entry.ok_or_else(|| AddrLookupError::AmbiguousPath { path: path_str })?;
-        let source_addr = celox_frontend_veryl::AbsoluteAddr {
+        let source_addr = SourceAddr {
             instance_id,
             var_id,
         };
@@ -638,7 +619,7 @@ impl RuntimeProgram {
 
         for (&instance_id, module_id) in &self.frontend.instance_module {
             for info in self.frontend.module_variables[module_id].values() {
-                let source_address = celox_frontend_veryl::AbsoluteAddr {
+                let source_address = SourceAddr {
                     instance_id,
                     var_id: info.id,
                 };
@@ -763,7 +744,7 @@ pub(crate) mod verify {
 }
 pub use celox_slt::{GlueAddrBase, GlueBlockBase};
 
-pub use celox_frontend_veryl::SimModule;
+pub use celox_frontend_core::TraceSimModule as SimModule;
 #[cfg(all(
     feature = "host-runtime",
     any(

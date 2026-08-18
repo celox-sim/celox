@@ -2896,33 +2896,6 @@ pub(super) fn eval_expression_in_context(
     }
 }
 
-/// Evaluate an expression in an assignment-like width context and guarantee
-/// that the returned root has exactly `target_width` bits.
-///
-/// Passing the width into [`eval_expression`] is necessary for operations whose
-/// operands inherit the surrounding width (for example an addition connected
-/// to a wider instance port).  The final coercion is still required because
-/// self-determined expressions and folded compound constants do not all consume
-/// that context internally.
-pub fn eval_assignment_expression(
-    module: &Module,
-    store: &SymbolicStore<VarId>,
-    expr: &Expression,
-    arena: &mut SLTNodeArena<VarId>,
-    target_width: usize,
-) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
-    if target_width == 0 {
-        return Err(ParserError::illegal_context(
-            "assignment expression",
-            "target width must be nonzero",
-            Some(&expr.token_range()),
-        ));
-    }
-
-    let value = eval_expression(module, store, expr, arena, Some(target_width))?;
-    finish_assignment_expression(expr, arena, target_width, value)
-}
-
 pub(crate) fn eval_assignment_expression_effectful(
     module: &Module,
     store: &mut SymbolicStore<VarId>,

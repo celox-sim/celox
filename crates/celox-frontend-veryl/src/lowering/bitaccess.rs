@@ -8,7 +8,9 @@ use veryl_analyzer::ir::{
 use veryl_analyzer::value::Value;
 use veryl_parser::token_range::TokenRange;
 
-use crate::{ParserError, types::extend_resolved_dims};
+use crate::ParserError;
+
+use super::types::extend_resolved_dims;
 
 /// Extract a compile-time constant value for Celox 4-state encoding.
 ///
