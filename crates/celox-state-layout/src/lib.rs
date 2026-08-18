@@ -8,6 +8,7 @@ use celox_design::{
     STABLE_REGION,
 };
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 
 pub const RUNTIME_EVENT_CAPACITY: usize = 1024;
@@ -28,20 +29,20 @@ pub const RUNTIME_EVENT_SLOT_SITE_OFFSET: usize = 8;
 pub const RUNTIME_EVENT_SLOT_ARG_COUNT_OFFSET: usize = 16;
 pub const RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET: usize = 24;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeEventArgLayout {
     pub value_word_offset: usize,
     pub mask_word_offset: usize,
     pub word_count: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeEventSiteLayout {
     pub args: Vec<RuntimeEventArgLayout>,
     pub payload_words: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SparseWorkingLayout {
     pub active_index: usize,
     pub chunk_count: usize,
@@ -51,13 +52,13 @@ pub struct SparseWorkingLayout {
     pub summary_word_count: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemoryLayoutMode {
     Packed,
     ElementStrided,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnpackedArrayLayout {
     pub element_width: usize,
     pub element_count: usize,
@@ -132,7 +133,11 @@ pub trait LayoutSource<A> {
     fn layout_input(&self, mode: MemoryLayoutMode) -> LayoutInput<A>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "A: Serialize + Eq + Hash",
+    deserialize = "A: Deserialize<'de> + Eq + Hash"
+))]
 pub struct MemoryLayout<A> {
     pub four_state: bool,
     pub mode: MemoryLayoutMode,

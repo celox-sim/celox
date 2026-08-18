@@ -1294,7 +1294,8 @@ fn drain_runtime_assertions<B: SimBackend>(
                     location: None,
                 });
             }
-            RuntimeEvent::Display { message } => forward_display(&message, false),
+            RuntimeEvent::Display { message } => forward_display(&message, true),
+            RuntimeEvent::Write { message } => forward_display(&message, false),
         }
     }
     DrainedAssertionEvents {

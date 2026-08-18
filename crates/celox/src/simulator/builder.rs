@@ -136,6 +136,7 @@ fn analyze(
     diagnostics: &crate::RuntimeDiagnostics,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     preserve_element_storage_layout: bool,
+    recover_comb_loops: bool,
 ) -> (
     Result<OptimizedSir, ParserError>,
     Vec<AnalyzerError>,
@@ -240,7 +241,14 @@ fn analyze(
     } else {
         celox_frontend_veryl::check_dynamic_for_bounds(&ir)
     };
-    let loop_provenance = loop_sources.match_unrolled(&ir);
+    // Force-capable native images reapply an override after each static store.
+    // Keep analyzer-unrolled loops expanded for that mode so one compiled
+    // entry cannot execute the same store across multiple iterations.
+    let loop_provenance = if recover_comb_loops {
+        loop_sources.match_unrolled(&ir)
+    } else {
+        Default::default()
+    };
 
     let top = veryl_parser::resource_table::insert_str(top);
     let mut build_config = BuildConfig::from(&metadata.build);
@@ -315,6 +323,7 @@ pub fn compile_to_sir(
         &crate::RuntimeDiagnostics::default(),
         &[],
         crate::backend::memory_layout::MemoryLayoutMode::Packed,
+        true,
     )
 }
 
@@ -341,6 +350,7 @@ fn compile_to_sir_with_layout_mode(
     diagnostics: &crate::RuntimeDiagnostics,
     injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
     layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+    recover_comb_loops: bool,
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics) = analyze(
         sources,
@@ -358,6 +368,7 @@ fn compile_to_sir_with_layout_mode(
         diagnostics,
         injected_manifests,
         layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+        recover_comb_loops,
     );
     let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
         errors.into_iter().partition(AnalyzerError::is_error);
@@ -431,6 +442,9 @@ mod host {
         /// When true, JIT-compiled functions emit trigger detection code for
         /// edge-based event discovery. Only needed by [`crate::Simulation`].
         pub emit_triggers: bool,
+        /// Emit the additional combinational entries needed to reapply foreign
+        /// force overrides between procedural store boundaries.
+        pub native_force_support: bool,
         /// Dead store elimination policy.
         pub dead_store_policy: DeadStorePolicy,
     }
@@ -516,6 +530,7 @@ mod host {
                 trace: Default::default(),
                 diagnostics: Default::default(),
                 emit_triggers: false,
+                native_force_support: false,
                 dead_store_policy: DeadStorePolicy::Off,
             }
         }
@@ -607,6 +622,27 @@ mod host {
         pub fn four_state(mut self, enable: bool) -> Self {
             self.options.four_state = enable;
             self
+        }
+
+        /// Enable native-image support for foreign force/release operations.
+        ///
+        /// This emits extra combinational entry points, so ordinary simulator
+        /// builds leave it disabled. Enabling it forces SIR O0 at build time so
+        /// every store boundary needed to reapply a force remains intact.
+        pub fn native_force_support(mut self, enable: bool) -> Self {
+            self.options.native_force_support = enable;
+            self.enforce_native_force_optimizer();
+            self
+        }
+
+        fn enforce_native_force_optimizer(&mut self) {
+            if !self.options.native_force_support {
+                return;
+            }
+            let diagnostics = self.options.optimize_options.diagnostics.clone();
+            self.options.optimize_options = crate::optimizer::OptimizeOptions::none();
+            self.options.optimize_options.diagnostics = diagnostics;
+            self.options.dead_store_policy = DeadStorePolicy::Off;
         }
 
         /// Set the overall optimization level. Sets defaults for SIR passes,
@@ -896,7 +932,7 @@ mod host {
         /// along with the remaining builder state.
         /// Consumes self.
         fn into_laid_out_program(
-            self,
+            mut self,
             layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
         ) -> Result<
             (
@@ -908,6 +944,7 @@ mod host {
             ),
             SimulatorError,
         > {
+            self.enforce_native_force_optimizer();
             let phase_timing = self.options.diagnostics.phase_timing;
             let compile_start = phase_timing.then(crate::timing::now);
             let injected_manifests = self.injected_components.manifests();
@@ -927,6 +964,7 @@ mod host {
                 &self.options.diagnostics,
                 &injected_manifests,
                 layout_mode,
+                !self.options.native_force_support,
             )?;
             if let Some(start) = compile_start {
                 tracing::debug!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
@@ -1129,7 +1167,8 @@ mod host {
 
         /// Compiles the Veryl source and constructs the core logic simulator,
         /// while capturing compilation trace data as configured by TraceOptions.
-        pub fn build_with_trace(self) -> crate::debug::CompilationTraceResult {
+        pub fn build_with_trace(mut self) -> crate::debug::CompilationTraceResult {
+            self.enforce_native_force_optimizer();
             let mut trace = crate::debug::CompilationTrace::default();
             #[cfg(any(
                 target_arch = "x86_64",
@@ -1157,6 +1196,7 @@ mod host {
                 &self.options.diagnostics,
                 &self.injected_components.manifests(),
                 layout_mode,
+                !self.options.native_force_support,
             );
 
             let sim_res = program_res.and_then(|(program, warnings)| {
@@ -1271,6 +1311,7 @@ mod host {
         /// Compiles the Veryl source and constructs the timed simulation wrapper.
         pub fn build(mut self) -> Result<crate::Simulation, SimulatorError> {
             self.options.emit_triggers = true;
+            self.enforce_native_force_optimizer();
             #[cfg(any(
                 target_arch = "x86_64",
                 all(target_arch = "aarch64", feature = "experimental-arm64-backend")
@@ -1297,6 +1338,7 @@ mod host {
                 &self.options.diagnostics,
                 &self.injected_components.manifests(),
                 layout_mode,
+                !self.options.native_force_support,
             )?;
             let mut laid_out =
                 program.into_laid_out_with_mode(self.options.four_state, layout_mode);

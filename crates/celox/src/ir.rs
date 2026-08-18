@@ -12,6 +12,17 @@ pub(crate) use celox_design::{
     InitialStateData, InitialStateWriteRun, RuntimeEventKind, RuntimeEventSite,
 };
 pub use celox_frontend_veryl::{InstancePath, VariableInfo, VerylFrontendLookup};
+#[cfg(all(
+    feature = "host-runtime",
+    any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )
+))]
+use celox_runtime::{
+    DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,
+    SignalDirection,
+};
 #[cfg(test)]
 pub(crate) use celox_sir::{BasicBlock, SIRValue, inline_single_predecessor_jumps};
 pub(crate) use celox_sir::{
@@ -320,6 +331,205 @@ fn rebuild_rtl_writes(program: &mut OptimizedSir) {
 }
 
 impl RuntimeProgram {
+    #[cfg(all(
+        feature = "host-runtime",
+        any(
+            target_arch = "x86_64",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        )
+    ))]
+    pub(crate) fn build_design_reflection(
+        &self,
+        layout: &crate::backend::MemoryLayout,
+    ) -> DesignReflection {
+        struct ScopeSource {
+            instance_id: InstanceId,
+            name: String,
+            full_name: String,
+            parent_name: Option<String>,
+            module_name: String,
+        }
+
+        let root_instance = self
+            .frontend
+            .instance_ids
+            .get(&InstancePath(Vec::new()))
+            .expect("top-level instance exists");
+        let root_module = self.frontend.instance_module[root_instance];
+        let root_name = self
+            .frontend
+            .module_names
+            .get(&root_module)
+            .and_then(|name| veryl_parser::resource_table::get_str_value(*name))
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| root_module.to_string());
+
+        let mut scope_sources = self
+            .frontend
+            .instance_ids
+            .iter()
+            .map(|(path, &instance_id)| {
+                let module_id = self.frontend.instance_module[&instance_id];
+                let module_name = self
+                    .frontend
+                    .module_names
+                    .get(&module_id)
+                    .and_then(|name| veryl_parser::resource_table::get_str_value(*name))
+                    .map(|name| name.to_string())
+                    .unwrap_or_else(|| module_id.to_string());
+                let segments = self.frontend.instance_path_segments(path);
+                let name = segments
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| root_name.clone());
+                let full_name = if segments.is_empty() {
+                    root_name.clone()
+                } else {
+                    format!("{root_name}.{}", segments.join("."))
+                };
+                let parent_name = (!segments.is_empty()).then(|| {
+                    if segments.len() == 1 {
+                        root_name.clone()
+                    } else {
+                        format!("{root_name}.{}", segments[..segments.len() - 1].join("."))
+                    }
+                });
+                ScopeSource {
+                    instance_id,
+                    name,
+                    full_name,
+                    parent_name,
+                    module_name,
+                }
+            })
+            .collect::<Vec<_>>();
+        scope_sources.sort_by(|left, right| left.full_name.cmp(&right.full_name));
+
+        let scope_ids = scope_sources
+            .iter()
+            .enumerate()
+            .map(|(index, scope)| {
+                (
+                    scope.full_name.clone(),
+                    ReflectionScopeId(u32::try_from(index).expect("scope count exceeds u32")),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let instance_scopes = scope_sources
+            .iter()
+            .enumerate()
+            .map(|(index, scope)| {
+                (
+                    scope.instance_id,
+                    ReflectionScopeId(u32::try_from(index).expect("scope count exceeds u32")),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut scopes = scope_sources
+            .iter()
+            .map(|scope| ReflectionScope {
+                name: scope.name.clone(),
+                full_name: scope.full_name.clone(),
+                module_name: scope.module_name.clone(),
+                parent: scope.parent_name.as_ref().map(|parent| scope_ids[parent]),
+                children: Vec::new(),
+                signals: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let child_parents = scopes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, scope)| {
+                scope.parent.map(|parent| {
+                    (
+                        parent,
+                        ReflectionScopeId(u32::try_from(index).expect("scope count exceeds u32")),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        for (parent, child) in child_parents {
+            scopes[parent.0 as usize].children.push(child);
+        }
+
+        let mut signals = Vec::new();
+        for scope in &scope_sources {
+            let module_id = self.frontend.instance_module[&scope.instance_id];
+            let variables = &self.frontend.module_variables[&module_id];
+            let path_index = &self.frontend.module_var_path_index[&module_id];
+            for info in variables.values() {
+                if matches!(
+                    info.var_kind,
+                    veryl_analyzer::ir::VarKind::Param | veryl_analyzer::ir::VarKind::Const
+                ) {
+                    continue;
+                }
+                if path_index.get(&info.path) != Some(&Some(info.id)) {
+                    continue;
+                }
+                let name = info
+                    .path
+                    .0
+                    .iter()
+                    .map(|name| {
+                        veryl_parser::resource_table::get_str_value(*name)
+                            .unwrap()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(".");
+                let state_address = self
+                    .state_address_for_source(scope.instance_id, info.id)
+                    .expect("frontend state projection is complete");
+                let array_layout =
+                    layout
+                        .unpacked_arrays
+                        .get(&state_address)
+                        .map(|array| SignalArrayLayout {
+                            element_width: array.element_width,
+                            element_count: array.element_count,
+                            element_stride: array.element_stride,
+                            plane_size: array.plane_size,
+                        });
+                let direction = match info.var_kind {
+                    veryl_analyzer::ir::VarKind::Input => SignalDirection::Input,
+                    veryl_analyzer::ir::VarKind::Output => SignalDirection::Output,
+                    veryl_analyzer::ir::VarKind::Inout => SignalDirection::Inout,
+                    _ => SignalDirection::Internal,
+                };
+                signals.push(ReflectionSignal {
+                    full_name: format!("{}.{}", scope.full_name, name),
+                    name,
+                    parent: instance_scopes[&scope.instance_id],
+                    state_address,
+                    signal: SignalRef {
+                        offset: layout.offsets[&state_address],
+                        width: layout.widths[&state_address],
+                        is_4state: layout.is_4states[&state_address],
+                        array_layout,
+                    },
+                    direction,
+                    domain_kind: info.kind,
+                    signed: info.signed,
+                    packed_dims: info.packed_dims.clone(),
+                    unpacked_dims: info.array_dims.clone(),
+                    type_kind: info.type_kind,
+                });
+            }
+        }
+        signals.sort_by(|left, right| left.full_name.cmp(&right.full_name));
+        for (index, signal) in signals.iter().enumerate() {
+            scopes[signal.parent.0 as usize]
+                .signals
+                .push(ReflectionSignalId(
+                    u32::try_from(index).expect("signal count exceeds u32"),
+                ));
+        }
+        let reflection = DesignReflection::new(scopes, signals);
+        debug_assert!(reflection.validate().is_ok());
+        reflection
+    }
+
     pub(crate) fn state_address_for_source(
         &self,
         instance_id: InstanceId,

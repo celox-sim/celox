@@ -104,6 +104,7 @@ fn runtime_event_site_for_assert(
             AssertKind::Continue => RuntimeEventKind::AssertContinue,
         },
         template,
+        scope: None,
         arg_widths: value_args.iter().map(assert_arg_width).collect(),
         arg_signed: value_args
             .iter()
@@ -3374,6 +3375,7 @@ mod tests {
             id: var_id,
             path: path.clone(),
             var_kind: VarKind::Variable,
+            signed: false,
             packed_dims: vec![8],
             metadata: VariableMetadata {
                 width: 8,
