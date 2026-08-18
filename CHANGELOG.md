@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.2 (2026-08-18)
+
+## What's Changed
+* fix(release): generate changelog from pull requests by @tignear in https://github.com/celox-sim/celox/pull/584
+* fix(ci): allow ARM64 Cranelift Linux boot to finish by @tignear in https://github.com/celox-sim/celox/pull/587
+* feat(cli): add VPI build and cocotb workflow by @tignear in https://github.com/celox-sim/celox/pull/586
+* perf(slt): reuse scheduler graph relations by @tignear in https://github.com/celox-sim/celox/pull/585
+* chore(deps): update actions/setup-python action to v7 by @renovate[bot] in https://github.com/celox-sim/celox/pull/590
+* chore(deps): update dependency @biomejs/biome to v2.5.8 by @renovate[bot] in https://github.com/celox-sim/celox/pull/593
+* fix(napi): preserve unpacked array port layout by @tignear in https://github.com/celox-sim/celox/pull/592
+* fix(playground): prevent browser freeze during run by @tignear in https://github.com/celox-sim/celox/pull/591
+* perf(slt): bound shared region slice lowering by @tignear in https://github.com/celox-sim/celox/pull/594
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.2.1...v0.2.2
+
 ## [0.2.1](https://github.com/celox-sim/celox/compare/v0.2.0...v0.2.1) (2026-08-18)
 
 
