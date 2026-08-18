@@ -69,12 +69,16 @@ use veryl_parser::resource_table::{self, StrId};
 
 use crate::{
     FrontendDiagnostic, FusedSirOptimizationHints, HashMap, HashSet, ScheduledRtl,
-    bitaccess::eval_var_select,
+    VerylTestbenchSource, bitaccess::eval_var_select,
 };
 
-fn root_source_var(scheduled: &ScheduledRtl, var: VarId) -> Option<crate::SourceVarId> {
+fn root_source_var(
+    scheduled: &ScheduledRtl,
+    source: &VerylTestbenchSource,
+    var: VarId,
+) -> Option<crate::SourceVarId> {
     let (_, module) = scheduled.frontend_lookup.root_instance_and_module()?;
-    scheduled.testbench_source.id_map.source_var(module, var)
+    source.id_map.source_var(module, var)
 }
 
 fn source_name(id: StrId) -> String {
@@ -155,21 +159,29 @@ pub fn check_dynamic_for_bounds(ir: &Ir) -> Vec<FrontendDiagnostic> {
 /// warning or pass cleanly instead of warning about every `clock.next()`.
 pub fn check_elaborated_dynamic_for_bounds(
     scheduled: &ScheduledRtl,
+    source: &VerylTestbenchSource,
     module: &Module,
     hints: &FusedSirOptimizationHints,
 ) -> Vec<FrontendDiagnostic> {
-    let source = &scheduled.testbench_source;
     let Some(statements) = &source.initial_statements else {
         return Vec::new();
     };
     let mut diagnostics = Vec::new();
-    check_elaborated_statements(statements, module, scheduled, hints, &mut diagnostics);
+    check_elaborated_statements(
+        statements,
+        module,
+        scheduled,
+        source,
+        hints,
+        &mut diagnostics,
+    );
     for function in module.functions.values() {
         for body in &function.functions {
             check_elaborated_statements(
                 &body.statements,
                 module,
                 scheduled,
+                source,
                 hints,
                 &mut diagnostics,
             );
@@ -182,6 +194,7 @@ fn check_elaborated_statements(
     statements: &[Statement],
     module: &Module,
     scheduled: &ScheduledRtl,
+    source: &VerylTestbenchSource,
     hints: &FusedSirOptimizationHints,
     diagnostics: &mut Vec<FrontendDiagnostic>,
 ) {
@@ -192,6 +205,7 @@ fn check_elaborated_statements(
                     &statement.true_side,
                     module,
                     scheduled,
+                    source,
                     hints,
                     diagnostics,
                 );
@@ -199,6 +213,7 @@ fn check_elaborated_statements(
                     &statement.false_side,
                     module,
                     scheduled,
+                    source,
                     hints,
                     diagnostics,
                 );
@@ -208,6 +223,7 @@ fn check_elaborated_statements(
                     &statement.true_side,
                     module,
                     scheduled,
+                    source,
                     hints,
                     diagnostics,
                 );
@@ -215,25 +231,41 @@ fn check_elaborated_statements(
                     &statement.false_side,
                     module,
                     scheduled,
+                    source,
                     hints,
                     diagnostics,
                 );
             }
             Statement::Case(statement) => {
                 for arm in &statement.arms {
-                    check_elaborated_statements(&arm.body, module, scheduled, hints, diagnostics);
+                    check_elaborated_statements(
+                        &arm.body,
+                        module,
+                        scheduled,
+                        source,
+                        hints,
+                        diagnostics,
+                    );
                 }
                 check_elaborated_statements(
                     &statement.default,
                     module,
                     scheduled,
+                    source,
                     hints,
                     diagnostics,
                 );
             }
             Statement::For(statement) => {
-                check_elaborated_for(statement, module, scheduled, hints, diagnostics);
-                check_elaborated_statements(&statement.body, module, scheduled, hints, diagnostics);
+                check_elaborated_for(statement, module, scheduled, source, hints, diagnostics);
+                check_elaborated_statements(
+                    &statement.body,
+                    module,
+                    scheduled,
+                    source,
+                    hints,
+                    diagnostics,
+                );
             }
             Statement::Assign(_)
             | Statement::FunctionCall(_)
@@ -250,6 +282,7 @@ fn check_elaborated_for(
     statement: &ForStatement,
     module: &Module,
     scheduled: &ScheduledRtl,
+    source: &VerylTestbenchSource,
     hints: &FusedSirOptimizationHints,
     diagnostics: &mut Vec<FrontendDiagnostic>,
 ) {
@@ -271,7 +304,7 @@ fn check_elaborated_for(
         .clone()
         .or(body_effects.unknown.clone());
     let immediate_writes =
-        collect_immediate_state_writes(&body_effects.writes, scheduled, &mut unknown);
+        collect_immediate_state_writes(&body_effects.writes, scheduled, source, &mut unknown);
     if hierarchical_reads_conflict(
         &bound_effects.hierarchical_reads,
         &immediate_writes,
@@ -306,7 +339,7 @@ fn check_elaborated_for(
         collect_state_change_writes(&body_effects.state_changes, scheduled, hints, &mut unknown);
     let mut conflict = false;
     for read in &bound_effects.reads {
-        let Some(source_id) = root_source_var(scheduled, read.id) else {
+        let Some(source_id) = root_source_var(scheduled, source, read.id) else {
             unknown.get_or_insert_with(|| {
                 format!(
                     "bound variable `{}` could not be mapped after elaboration",
@@ -366,11 +399,12 @@ struct StateWrite {
 fn collect_immediate_state_writes(
     accesses: &[Access],
     scheduled: &ScheduledRtl,
+    source: &VerylTestbenchSource,
     unknown: &mut Option<String>,
 ) -> Vec<StateWrite> {
     let mut writes = Vec::new();
     for access in accesses.iter().filter(|access| !access.deferred) {
-        let Some(source_id) = root_source_var(scheduled, access.id) else {
+        let Some(source_id) = root_source_var(scheduled, source, access.id) else {
             unknown.get_or_insert_with(|| {
                 format!(
                     "body variable `{}` could not be mapped after elaboration",
@@ -407,7 +441,7 @@ fn hierarchical_reads_conflict(
     unknown: &mut Option<String>,
 ) -> bool {
     for reference in references {
-        let (address, info) = match crate::testbench::resolve_hierarchical_reference(
+        let (address, info) = match super::testbench::resolve_hierarchical_reference(
             &scheduled.frontend_lookup,
             reference,
         ) {
@@ -417,7 +451,7 @@ fn hierarchical_reads_conflict(
                 continue;
             }
         };
-        let read_bits = match crate::testbench::hierarchical_reference_bits(info, reference) {
+        let read_bits = match super::testbench::hierarchical_reference_bits(info, reference) {
             Ok(bits) => bits,
             Err(error) => {
                 unknown.get_or_insert_with(|| error.to_string());

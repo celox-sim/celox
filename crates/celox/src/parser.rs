@@ -11,8 +11,8 @@ use crate::ir::{RegionedAbsoluteAddr, RuntimeProgram, STABLE_REGION, SirProgram,
 pub use celox_frontend::ParserError;
 
 #[cfg(test)]
-pub use celox_frontend::parse_ir;
-use celox_frontend::parse_ir_with_loop_provenance;
+pub use celox_frontend::veryl::parse_ir;
+use celox_frontend::veryl::parse_ir_with_loop_provenance;
 
 fn apply_fused_optimization_hints(
     scheduled: &mut celox_frontend::ScheduledRtl,
@@ -289,6 +289,7 @@ fn verify_region_contract(
 
 fn finalize_scheduled_rtl(
     mut scheduled: celox_frontend::ScheduledRtlOutput,
+    mut testbench_source: Option<celox_frontend::veryl::VerylTestbenchSource>,
     four_state: bool,
     trace_opts: &crate::debug::TraceOptions,
     mut trace: Option<&mut crate::debug::CompilationTrace>,
@@ -315,16 +316,17 @@ fn finalize_scheduled_rtl(
 
     apply_fused_optimization_hints(&mut scheduled.scheduled, scheduled.fused_optimization_hints)?;
     scheduled.scheduled.inject_triggers();
-    let (sir, mut runtime, mut testbench_source) =
-        RuntimeProgram::from_scheduled(scheduled.scheduled);
-    testbench_source.component_libraries = component_libraries;
-    testbench_source.component_file_base = component_file_base;
-    crate::testbench_compile::project_observability(&mut runtime, &testbench_source)?;
-    runtime.testbench = crate::testbench_compile::compile_semantic_testbench(
-        &runtime,
-        &testbench_source,
-        testbench_random_seed,
-    )?;
+    let (sir, mut runtime) = RuntimeProgram::from_scheduled(scheduled.scheduled);
+    if let Some(testbench_source) = testbench_source.as_mut() {
+        testbench_source.component_libraries = component_libraries;
+        testbench_source.component_file_base = component_file_base;
+        crate::testbench_compile::project_observability(&mut runtime, testbench_source)?;
+        runtime.testbench = crate::testbench_compile::compile_semantic_testbench(
+            &runtime,
+            testbench_source,
+            testbench_random_seed,
+        )?;
+    }
     dump_addr_map_if_requested(&runtime, diagnostics);
     let mut program = UnoptimizedSir::new(sir, runtime);
     if let Some(t) = trace.as_deref_mut()
@@ -369,7 +371,7 @@ fn finalize_scheduled_rtl(
 }
 
 fn dynamic_for_diagnostics(
-    scheduled: &celox_frontend::ScheduledRtlOutput,
+    scheduled: &celox_frontend::veryl::VerylScheduledRtlOutput,
     ir: &veryl_analyzer::ir::Ir,
 ) -> Vec<celox_frontend::FrontendDiagnostic> {
     scheduled
@@ -396,8 +398,9 @@ fn dynamic_for_diagnostics(
             })
         })
         .map(|module| {
-            celox_frontend::check_elaborated_dynamic_for_bounds(
+            celox_frontend::veryl::check_elaborated_dynamic_for_bounds(
                 &scheduled.scheduled,
+                &scheduled.testbench_source,
                 module,
                 &scheduled.fused_optimization_hints,
             )
@@ -467,7 +470,7 @@ pub fn parse(
     let mut frontend_trace = celox_frontend::FrontendTrace::default();
     let scheduled = timed_phase!(
         "flatten",
-        celox_frontend::schedule_symbolic_rtl(
+        celox_frontend::veryl::schedule_symbolic_rtl(
             result,
             config,
             ignored_loops,
@@ -482,8 +485,17 @@ pub fn parse(
     }
     let scheduled = scheduled?;
     let dynamic_for_diagnostics = dynamic_for_diagnostics(&scheduled, ir);
-    let program = finalize_scheduled_rtl(
+    let celox_frontend::veryl::VerylScheduledRtlOutput {
         scheduled,
+        fused_optimization_hints,
+        testbench_source,
+    } = scheduled;
+    let program = finalize_scheduled_rtl(
+        celox_frontend::ScheduledRtlOutput {
+            scheduled,
+            fused_optimization_hints,
+        },
+        Some(testbench_source),
         four_state,
         trace_opts,
         trace,
@@ -550,6 +562,7 @@ pub fn parse_sv(
     }
     finalize_scheduled_rtl(
         scheduled,
+        None,
         four_state,
         trace_opts,
         trace,
@@ -611,7 +624,7 @@ pub fn parse_mixed(
             None,
         ),
     })?;
-    let symbolic = celox_frontend::parse_ir_with_external_hierarchy(
+    let symbolic = celox_frontend::veryl::parse_ir_with_external_hierarchy(
         ir,
         loop_provenance,
         &external,
@@ -625,7 +638,7 @@ pub fn parse_mixed(
     }
     let frontend_trace_options = trace_opts.frontend(diagnostics);
     let mut frontend_trace = celox_frontend::FrontendTrace::default();
-    let scheduled = celox_frontend::schedule_symbolic_rtl(
+    let scheduled = celox_frontend::veryl::schedule_symbolic_rtl(
         symbolic,
         config,
         ignored_loops,
@@ -638,8 +651,17 @@ pub fn parse_mixed(
         trace.absorb_frontend(frontend_trace);
     }
     let dynamic_for_diagnostics = dynamic_for_diagnostics(&scheduled, ir);
-    let program = finalize_scheduled_rtl(
+    let celox_frontend::veryl::VerylScheduledRtlOutput {
         scheduled,
+        fused_optimization_hints,
+        testbench_source,
+    } = scheduled;
+    let program = finalize_scheduled_rtl(
+        celox_frontend::ScheduledRtlOutput {
+            scheduled,
+            fused_optimization_hints,
+        },
+        Some(testbench_source),
         four_state,
         trace_opts,
         trace,

@@ -6,12 +6,12 @@ mod state;
 pub(crate) mod node {
     pub use celox_slt::{
         NodeId, SLTForEffect, SLTForFoldGroupState, SLTForFoldResult, SLTForUpdate, SLTIndex,
-        SLTIndexKind, SLTLoopBound, SLTNode, SLTNodeArena, SLTNodeArenaEditError, SLTStepOp,
+        SLTIndexKind, SLTLoopBound, SLTNode, SLTNodeArena, SLTStepOp,
     };
 }
 
 pub(crate) mod node_facts {
-    pub use celox_slt::{SLTNodeFacts, SLTNodeFactsError};
+    pub use celox_slt::SLTNodeFactsError;
 }
 
 pub use celox_slt::{LogicPath, LogicPathTarget};
@@ -25,9 +25,8 @@ use crate::{
         PartSelectGeometry, celox_value_from_comptime, eval_constexpr, eval_var_select,
         eval_var_select_with_geometry, select_geometry,
     },
-    function_call_has_arg,
-    loop_provenance::LoopRecoveryCandidate,
-    resolve_total_width,
+    function_call_has_arg, resolve_total_width,
+    veryl::loop_provenance::LoopRecoveryCandidate,
 };
 use celox_design::{BinaryOp, BitAccess, RuntimeEventKind, RuntimeEventSite, UnaryOp, VarAtomBase};
 use celox_slt::{CombObserver, RangeStore, RangeStoreError};
@@ -53,18 +52,17 @@ use expr::{
     eval_array_literal_expression_effectful, eval_case_arm_condition_effectful,
     eval_case_target_effectful, eval_function_body_return, merge_boundaries,
 };
-pub use expr::{eval_assignment_expression, eval_expression, get_width};
 pub(crate) use expr::{eval_assignment_expression_effectful, eval_expression_effectful};
+pub use expr::{eval_expression, get_width};
 use state::{FunctionControlState, LoopControlState};
 
 type ActiveGuard = (NodeId, HashSet<VarAtomBase<VarId>>);
 
-pub use node::SLTNodeArenaEditError;
 pub use node::{
     NodeId, SLTForEffect, SLTForFoldGroupState, SLTForFoldResult, SLTForUpdate, SLTIndex,
     SLTIndexKind, SLTLoopBound, SLTNode, SLTNodeArena, SLTStepOp,
 };
-pub use node_facts::{SLTNodeFacts, SLTNodeFactsError};
+pub use node_facts::SLTNodeFactsError;
 
 pub(super) fn range_store_error(
     context: &'static str,
@@ -1749,7 +1747,7 @@ fn eval_fully_known_constexpr(expression: &Expression) -> Option<BigUint> {
     Some(value)
 }
 
-pub(super) fn collect_written_expression(
+pub(crate) fn collect_written_expression(
     module: &Module,
     expression: &Expression,
     out: &mut HashMap<VarId, Vec<BitAccess>>,
@@ -2508,7 +2506,7 @@ fn eval_assign(
     Ok((store, boundaries))
 }
 
-pub(super) fn apply_assignment_destination(
+pub(crate) fn apply_assignment_destination(
     module: &Module,
     mut store: SymbolicStore<VarId>,
     mut boundaries: BoundaryMap<VarId>,

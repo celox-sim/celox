@@ -11,7 +11,7 @@ pub(crate) use celox_design::{BinaryOp, UnaryOp};
 pub(crate) use celox_design::{
     InitialStateData, InitialStateWriteRun, RuntimeEventKind, RuntimeEventSite,
 };
-pub use celox_frontend::{
+pub use celox_frontend::shared::{
     FrontendLookup, InstancePath, SourceAddr, SourceVarId, VariableInfo, VariableKind,
 };
 #[cfg(all(
@@ -528,9 +528,7 @@ impl RuntimeProgram {
         })
     }
 
-    pub(crate) fn from_scheduled(
-        scheduled: celox_frontend::ScheduledRtl,
-    ) -> (SirProgram, Self, celox_frontend::VerylTestbenchSource) {
+    pub(crate) fn from_scheduled(scheduled: celox_frontend::ScheduledRtl) -> (SirProgram, Self) {
         (
             scheduled.sir,
             Self {
@@ -539,7 +537,6 @@ impl RuntimeProgram {
                 runtime_schema: scheduled.runtime_schema,
                 testbench: None,
             },
-            scheduled.testbench_source,
         )
     }
 
@@ -745,7 +742,7 @@ pub(crate) mod verify {
 }
 pub use celox_slt::{GlueAddrBase, GlueBlockBase};
 
-pub use celox_frontend::SimModule;
+pub use celox_frontend::veryl::SimModule;
 #[cfg(all(
     feature = "host-runtime",
     any(
@@ -819,12 +816,14 @@ mod tests {
 
     #[test]
     fn test_glueaddr_display() {
-        let parent_addr = celox_frontend::GlueAddr::Parent(veryl_analyzer::ir::VarId::default());
+        let parent_addr =
+            celox_frontend::veryl::GlueAddr::Parent(veryl_analyzer::ir::VarId::default());
         let parent_display = format!("{}", parent_addr);
         assert!(parent_display.contains("GlueAddr::Parent"));
         assert!(parent_display.contains("var0"));
 
-        let child_addr = celox_frontend::GlueAddr::Child(veryl_analyzer::ir::VarId::default());
+        let child_addr =
+            celox_frontend::veryl::GlueAddr::Child(veryl_analyzer::ir::VarId::default());
         let child_display = format!("{}", child_addr);
         assert!(child_display.contains("GlueAddr::Child"));
         assert!(child_display.contains("var0"));

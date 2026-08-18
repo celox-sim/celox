@@ -8,10 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::symbolic::artifact::{ExternalHierarchy, ExternalModule, SymbolicRtl};
 use crate::{
-    BuildConfig, ExternalHierarchy, ExternalModule, FrontendTrace, FrontendTraceOptions, GlueAddr,
-    LoweringPhase, ParserError, ScheduledRtlOutput, SimModule, SymbolicRtl,
-    logic_tree::coerce_node_width,
+    BuildConfig, FrontendTrace, FrontendTraceOptions, GlueAddr, LoweringPhase, ParserError,
+    ScheduledRtlOutput, SimModule, logic_tree::coerce_node_width,
 };
 use celox_design::{
     BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue, ModuleId, PortTypeKind,
@@ -453,7 +453,7 @@ fn net_driver_ranges_overlap(left: Option<(i128, i128)>, right: Option<(i128, i1
 
 /// Lower the requested SystemVerilog roots and their reachable children into
 /// an embeddable hierarchy. The module IDs in the returned graph are local and
-/// are remapped by the Veryl frontend.
+/// are remapped during mixed-language symbolic hierarchy assembly.
 pub fn prepare_external_hierarchy(
     sources: &[(&str, &Path)],
     root_names: &HashSet<resource_table::StrId>,
@@ -689,8 +689,9 @@ pub fn schedule_sources(
         modules.insert(module_id, sim_module);
     }
 
-    // The shared scheduler still accepts a Veryl module metadata view. SV
-    // supplies variables only; declarations and functions remain empty.
+    // The private symbolic compatibility vocabulary still carries analyzer-
+    // shaped module metadata. SV supplies variables only; declarations and
+    // functions remain empty.
     let metadata_modules = modules
         .iter()
         .map(|(&module_id, module)| (module_id, metadata_module(module)))
@@ -705,7 +706,7 @@ pub fn schedule_sources(
         module_names,
         root_id,
     };
-    crate::schedule_symbolic_rtl(
+    crate::symbolic::assembly::schedule_symbolic_rtl_without_testbench(
         symbolic,
         config,
         ignored_loops,

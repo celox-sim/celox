@@ -1,18 +1,17 @@
 use std::{collections::BTreeSet, fmt};
 
 use celox_design::{
-    AbsoluteAddrBase, ElaboratedDesign, InitialStateValue, RegionedAbsoluteAddrBase,
-    RegionedStateAddr, RegionedVarAddrBase, RuntimeErrorInfo, RuntimeEventSite, RuntimeSchema,
-    StateAddr, TriggerSet, VarAtomBase,
+    AbsoluteAddrBase, InitialStateValue, ModuleId, RegionedAbsoluteAddrBase, RegionedVarAddrBase,
+    RuntimeErrorInfo, RuntimeEventSite, TriggerSet,
 };
-use celox_sir::{ExecutionUnit, SIRInstruction, SirProgram};
+use celox_sir::ExecutionUnit;
 use celox_slt::{
     CombObserver, FfAccessSummary, GlueBlockBase, LogicPath, NodeId, SLTNodeArena, SymbolicStore,
 };
 use veryl_analyzer::ir::{VarId, VarPath, Variable};
 use veryl_parser::resource_table::StrId;
 
-use crate::{FrontendLookup, HashMap, VerylTestbenchSource};
+use crate::HashMap;
 
 type RegionedVarAddr = RegionedVarAddrBase<VarId>;
 type GlueBlock = GlueBlockBase<VarId>;
@@ -72,6 +71,35 @@ impl SimModule {
     }
 }
 
+/// One source module lowered into the symbolic compatibility vocabulary.
+#[derive(Clone)]
+pub struct ExternalModule {
+    pub metadata: veryl_analyzer::ir::Module,
+    pub sim_module: SimModule,
+    pub port_order: Vec<VarId>,
+    pub unresolved_instances: Vec<StrId>,
+}
+
+/// A source-local module graph ready to be embedded in a mixed-language
+/// symbolic design. Module IDs are remapped during hierarchy assembly.
+#[derive(Clone, Default)]
+pub struct ExternalHierarchy {
+    pub modules: HashMap<ModuleId, ExternalModule>,
+    pub roots: HashMap<StrId, ModuleId>,
+}
+
+/// Modules discovered from the selected top before hierarchy expansion.
+///
+/// This private compatibility artifact may retain analyzer references. It is
+/// consumed before source-independent design and SIR artifacts leave the
+/// frontend boundary.
+pub struct SymbolicRtl<'a> {
+    pub modules: HashMap<ModuleId, SimModule>,
+    pub module_ir: HashMap<ModuleId, &'a veryl_analyzer::ir::Module>,
+    pub module_names: HashMap<ModuleId, StrId>,
+    pub root_id: ModuleId,
+}
+
 /// One module after source identities have been relocated into the flattened
 /// instance namespace, but before the complete design is assembled.
 #[derive(Clone)]
@@ -94,93 +122,4 @@ impl fmt::Debug for RelocationModule {
             .field("comb_observers", &self.comb_observers)
             .finish()
     }
-}
-
-/// Source-independent SIR and design data produced after all SLT nodes have
-/// been scheduled and lowered.
-///
-/// No `NodeId` or SLT arena may cross this boundary. `frontend_lookup` contains
-/// only neutral source IDs and owned strings. Veryl analyzer IDs survive only
-/// in `testbench_source`, which the frontend consumes before constructing the
-/// runtime program.
-#[derive(Clone)]
-pub struct ScheduledRtl {
-    pub sir: SirProgram<StateAddr, RegionedStateAddr>,
-    pub design: ElaboratedDesign<StateAddr>,
-    pub frontend_lookup: FrontendLookup,
-    pub runtime_schema: RuntimeSchema<StateAddr>,
-    pub testbench_source: VerylTestbenchSource,
-}
-
-impl fmt::Debug for ScheduledRtl {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ScheduledRtl")
-            .field("sir", &self.sir)
-            .field("design", &self.design)
-            .field("frontend_lookup", &self.frontend_lookup)
-            .field("runtime_schema", &self.runtime_schema)
-            .field("testbench_source", &self.testbench_source)
-            .finish()
-    }
-}
-
-impl ScheduledRtl {
-    /// Attach runtime event IDs after fused SIR pre-optimization has removed
-    /// disposable state publications.
-    pub fn inject_triggers(&mut self) {
-        let mut trigger_map = HashMap::default();
-        for (id, address) in self.design.events.ordered_events.iter().enumerate() {
-            if let Some(metadata) = self.design.state_objects.get(address) {
-                trigger_map.entry(*address).or_insert_with(Vec::new).push(
-                    celox_design::TriggerIdWithKind {
-                        kind: metadata.kind,
-                        id,
-                    },
-                );
-            }
-        }
-
-        let events = &self.design.events;
-        for unit in self
-            .sir
-            .eval_apply_ffs
-            .values_mut()
-            .flatten()
-            .chain(self.sir.eval_comb_apply_ffs.values_mut().flatten())
-            .chain(self.sir.eval_only_ffs.values_mut().flatten())
-            .chain(self.sir.apply_ffs.values_mut().flatten())
-            .chain(self.sir.eval_comb.iter_mut())
-        {
-            for block in unit.blocks.values_mut() {
-                for instruction in &mut block.instructions {
-                    let (address, triggers) = match instruction {
-                        SIRInstruction::Store(address, _, _, _, triggers, _) => {
-                            (address.absolute_addr(), triggers)
-                        }
-                        SIRInstruction::Commit(_, address, .., triggers) => {
-                            (address.absolute_addr(), triggers)
-                        }
-                        _ => continue,
-                    };
-                    let canonical = events.canonical(address);
-                    if let Some(event_triggers) = trigger_map.get(&canonical) {
-                        *triggers = event_triggers.clone();
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Optimizer inputs derived while fused comb/FF scheduling still has exact
-/// action provenance. These hints are kept beside, not inside, `SirProgram`.
-#[derive(Clone, Debug, Default)]
-pub struct FusedSirOptimizationHints {
-    pub direct_ff_writes: HashMap<StateAddr, Vec<VarAtomBase<RegionedStateAddr>>>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ScheduledRtlOutput {
-    pub scheduled: ScheduledRtl,
-    pub fused_optimization_hints: FusedSirOptimizationHints,
 }

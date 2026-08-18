@@ -23,13 +23,14 @@ use veryl_analyzer::value::Value;
 use veryl_metadata::{ClockType, ResetType};
 use veryl_parser::resource_table::{self, StrId};
 
+use crate::symbolic::artifact::SymbolicRtl;
 use crate::{
     AbsoluteAddr, BuildConfig, FfRuntimeRelocation, FrontendLookup, FrontendTrace,
     FrontendTraceOptions, FusedSirOptimizationHints, GlueAddr, HashMap, HashSet, InstancePath,
     ParserError, RegionedAbsoluteAddr, RegionedVarAddr, RelocationModule, ScheduledRtl,
-    ScheduledRtlOutput, SharedClockLowering, SimModule, SourceLocation, SourceVarId, SymbolicRtl,
-    VariableInfo, VariableKind, VerylComponentBinding, VerylComponentConnectionBinding,
-    VerylComponentEventBinding, VerylComponentInputBinding, VerylIdMap, VerylTestbenchSource,
+    SharedClockLowering, SimModule, SourceLocation, SourceVarId, VariableInfo, VariableKind,
+    VerylComponentBinding, VerylComponentConnectionBinding, VerylComponentEventBinding,
+    VerylComponentInputBinding, VerylIdMap, VerylScheduledRtlOutput, VerylTestbenchSource,
     bitaccess, build_ff_clock_recipes, flattening, resolve_total_width,
 };
 
@@ -453,7 +454,7 @@ fn scheduler_source_locations(
         .collect()
 }
 
-pub fn schedule_symbolic_rtl(
+pub fn schedule_veryl_symbolic_rtl(
     symbolic: SymbolicRtl<'_>,
     config: &BuildConfig,
     ignored_loops: &[(
@@ -468,7 +469,7 @@ pub fn schedule_symbolic_rtl(
     four_state: bool,
     trace_opts: &FrontendTraceOptions,
     mut trace: Option<&mut FrontendTrace>,
-) -> Result<ScheduledRtlOutput, ParserError> {
+) -> Result<VerylScheduledRtlOutput, ParserError> {
     let SymbolicRtl {
         modules,
         module_ir,
@@ -1176,13 +1177,46 @@ pub fn schedule_symbolic_rtl(
             testbench_read_roots: Default::default(),
             rtl_writes,
         },
-        testbench_source,
     };
 
-    Ok(ScheduledRtlOutput {
+    Ok(VerylScheduledRtlOutput {
         scheduled,
         fused_optimization_hints: FusedSirOptimizationHints { direct_ff_writes },
+        testbench_source,
     })
+}
+
+/// Schedule a symbolic design which cannot contain Veryl testbench syntax.
+///
+/// This is the SystemVerilog adapter's boundary into the shared symbolic core:
+/// no Veryl-owned sidecar is exposed to the caller.
+#[cfg(feature = "systemverilog")]
+pub(crate) fn schedule_symbolic_rtl_without_testbench(
+    symbolic: SymbolicRtl<'_>,
+    config: &BuildConfig,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &FrontendTraceOptions,
+    trace: Option<&mut FrontendTrace>,
+) -> Result<crate::ScheduledRtlOutput, ParserError> {
+    schedule_veryl_symbolic_rtl(
+        symbolic,
+        config,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace,
+    )
+    .map(VerylScheduledRtlOutput::into_shared)
 }
 
 fn module_variables(

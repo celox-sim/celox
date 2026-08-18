@@ -777,7 +777,7 @@ fn convert_glue_block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module::ModuleParser;
+    use crate::veryl::module::ModuleParser;
     use celox_design::ModuleId;
     use celox_slt::SLTForFoldGroupState;
     use num_bigint::{BigInt, BigUint};

@@ -7,43 +7,14 @@ use veryl_parser::{
     text_table,
 };
 
+use super::{loop_provenance::LoopProvenance, module::ModuleParser};
 use crate::{
-    BuildConfig, HashMap, HashSet, LoweringPhase, ParserError, SimModule,
-    loop_provenance::LoopProvenance, module::ModuleParser,
+    BuildConfig, HashMap, HashSet, LoweringPhase, ParserError,
+    symbolic::artifact::{ExternalHierarchy, SymbolicRtl},
 };
-
-/// A source-language-neutral module supplied by another frontend for use in a
-/// Veryl hierarchy.
-#[derive(Clone)]
-pub struct ExternalModule {
-    pub metadata: Module,
-    pub sim_module: SimModule,
-    pub port_order: Vec<veryl_analyzer::ir::VarId>,
-    pub unresolved_instances: Vec<StrId>,
-}
-
-/// A module graph owned by another frontend. Module IDs are local to this
-/// graph and are remapped when it is embedded into a Veryl design.
-#[derive(Clone, Default)]
-pub struct ExternalHierarchy {
-    pub modules: HashMap<ModuleId, ExternalModule>,
-    pub roots: HashMap<StrId, ModuleId>,
-}
 
 static EMPTY_EXTERNAL_HIERARCHY: std::sync::LazyLock<ExternalHierarchy> =
     std::sync::LazyLock::new(ExternalHierarchy::default);
-
-/// Veryl modules discovered from the selected top before hierarchy expansion.
-///
-/// This artifact may retain analyzer references while frontend construction is
-/// in progress. It is consumed before source-independent design and SIR
-/// artifacts leave the frontend boundary.
-pub struct SymbolicRtl<'a> {
-    pub modules: HashMap<ModuleId, SimModule>,
-    pub module_ir: HashMap<ModuleId, &'a Module>,
-    pub module_names: HashMap<ModuleId, StrId>,
-    pub root_id: ModuleId,
-}
 
 pub fn parse_ir<'a>(
     ir: &'a veryl_analyzer::ir::Ir,

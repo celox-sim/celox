@@ -43,11 +43,24 @@ a dependency from one language frontend to another. Its SystemVerilog feature
 depends on the independently reusable `celox-sv-analyzer`, then adapts analyzed
 SV into the same symbolic module vocabulary used by Veryl. That internal
 vocabulary still uses Veryl-shaped local IDs and metadata in places; those types
-are confined to frontend construction and the source-lookup sidecar. Scheduled
-design state, SIR, optimization, layout, and backends use `celox-design`
-identities. A future neutralization of the local vocabulary can therefore happen
-inside this crate without recreating a `frontend-sv -> frontend-veryl`
-dependency.
+are confined to the private symbolic compatibility core and Veryl-owned source
+sidecars. They do not enter `FrontendLookup` or `ScheduledRtl`. Scheduled design
+state, SIR, optimization, layout, and backends use `celox-design` identities. A
+future neutralization of the local vocabulary can therefore happen inside this
+crate without recreating a `frontend-sv -> frontend-veryl` dependency.
+
+The frontend crate's internal modules make that ownership explicit:
+
+| Module | Owns | Dependency rule |
+|---|---|---|
+| `shared` | `SourceVarId`, `FrontendLookup`, and scheduled output contracts | Must not import parser or analyzer types |
+| `veryl` | Veryl analysis, module lowering, dynamic-loop diagnostics, and testbench source sidecars | May lower into `symbolic`; must not own SV analysis |
+| `systemverilog` | SV analysis adapter, hierarchy preparation, and SV lowering | May lower into `symbolic`; must not import `veryl` |
+| `symbolic` | Private pre-scheduling compatibility vocabulary and assembly | Must not be exposed as the runtime/frontend public contract |
+
+The crate root is a facade over those areas. Parser-native aliases are exposed
+only through the owning language module; source-independent consumers import
+contracts from `shared`.
 
 `celox-backend-arm64` is wired into native backend selection behind the
 default-off `experimental-arm64-backend` feature and emits complete scalar

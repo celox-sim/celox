@@ -297,7 +297,7 @@ fn analyze(
     let mut frontend_diagnostics = if errors.iter().any(AnalyzerError::is_error) {
         Vec::new()
     } else {
-        celox_frontend::check_dynamic_for_bounds(&ir)
+        celox_frontend::veryl::check_dynamic_for_bounds(&ir)
     };
     // Force-capable native images reapply an override after each static store.
     // Keep analyzer-unrolled loops expanded for that mode so one compiled

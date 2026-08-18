@@ -1,9 +1,10 @@
 use std::collections::BTreeSet;
 use std::time::Instant;
 
+use super::ExternalModule;
 use crate::{
-    BuildConfig, ExternalModule, GlueAddr, GlueBlock, HashMap, HashSet, LoweringPhase,
-    ModuleInitialMemoryValue, ParserError, RegionedVarAddr, SimModule,
+    BuildConfig, GlueAddr, GlueBlock, HashMap, HashSet, LoweringPhase, ModuleInitialMemoryValue,
+    ParserError, RegionedVarAddr, SimModule,
     bitaccess::{
         PartSelectGeometry, SelectGeometry, eval_var_select, eval_var_select_with_geometry,
         is_static_access, select_geometry,
@@ -17,9 +18,9 @@ use crate::{
         expression_contains_runtime_effect, get_width, parse_comb_with_loop_recovery,
         subtract_written_sensitivity,
     },
-    loop_provenance::{LoopProvenance, LoopRecoveryCandidate},
     registry::get_port_type,
     resolve_total_width,
+    veryl::loop_provenance::{LoopProvenance, LoopRecoveryCandidate},
 };
 use celox_design::{
     BinaryOp, BitAccess, InitialStateData as InitialMemoryData,

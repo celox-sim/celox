@@ -1,6 +1,6 @@
 use crate::HashMap;
 use crate::ir::{ModuleId, SimModule};
-use celox_frontend::{
+use celox_frontend::veryl::{
     AbsoluteAddr as FrontendAbsoluteAddr, RegionedAbsoluteAddr as FrontendRegionedAbsoluteAddr,
 };
 use celox_slt::{LogicPath, SLTNodeArena};
