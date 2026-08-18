@@ -1122,6 +1122,7 @@ struct LoweringCostCache {
     owned_costs: Vec<Option<u128>>,
     owned_slice_lower_costs: Vec<Option<u128>>,
     contains_shared_nontrivial: Vec<Option<bool>>,
+    region_materialization_preserves_narrowing: Vec<Option<bool>>,
     is_speculatable_pure: Vec<Option<bool>>,
     traversal_seen: Vec<bool>,
     traversal_work: Vec<NodeId>,
@@ -3222,15 +3223,15 @@ impl SLTToSIRLowerer {
 
         // Region lowering deliberately pushes a slice through bitwise and Mux
         // nodes so a narrow consumer does not compute an unnecessarily wide
-        // value. A small read-modify-write value is better materialized when
-        // shared, however: recursively projecting both references expands a
-        // compact DAG as an exponential tree, while the ordinary lowering
-        // cache keeps its materialization linear. Limit this shortcut to one
-        // backend chunk so narrow projections of wide operations (notably Mul)
-        // do not accidentally pay for the full value.
+        // value. When shared, a cheap read-modify-write value is better
+        // materialized: recursively projecting both references expands
+        // a compact DAG as an exponential tree, while the ordinary lowering
+        // cache keeps its materialization linear. Restrict this shortcut to
+        // trees where it does not bypass narrow arithmetic lowering, so a
+        // narrow projection of a wide operation such as Mul does not
+        // accidentally pay for the full value.
         let shared_compound = allow_cache
             && env.is_none()
-            && Self::chunks(self.get_width(expr, arena)) == 1
             && self
                 .cost_cache
                 .borrow()
@@ -3238,7 +3239,7 @@ impl SLTToSIRLowerer {
                 .get(expr.0)
                 .is_some_and(|fanout| *fanout > 1)
             && Self::is_nontrivial_node(expr, arena);
-        if shared_compound {
+        if shared_compound && self.region_materialization_preserves_narrowing(expr, arena) {
             let full_value = self.lower_inner(builder, expr, arena, cache, env, allow_cache);
             if access.lsb == 0 && access.msb + 1 == self.get_width(expr, arena) {
                 return full_value;
@@ -3890,6 +3891,10 @@ impl SLTToSIRLowerer {
         cache.owned_slice_lower_costs.resize(node_count, None);
         cache.contains_shared_nontrivial.clear();
         cache.contains_shared_nontrivial.resize(node_count, None);
+        cache.region_materialization_preserves_narrowing.clear();
+        cache
+            .region_materialization_preserves_narrowing
+            .resize(node_count, None);
         cache.is_speculatable_pure.clear();
         cache.is_speculatable_pure.resize(node_count, None);
         cache.traversal_seen.clear();
@@ -3965,6 +3970,9 @@ impl SLTToSIRLowerer {
             cache.owned_costs.resize(arena.len(), None);
             cache.owned_slice_lower_costs.resize(arena.len(), None);
             cache.contains_shared_nontrivial.resize(arena.len(), None);
+            cache
+                .region_materialization_preserves_narrowing
+                .resize(arena.len(), None);
             cache.is_speculatable_pure.resize(arena.len(), None);
         }
     }
@@ -4139,6 +4147,57 @@ impl SLTToSIRLowerer {
             arena.get(node),
             SLTNode::Input { .. } | SLTNode::Constant(..)
         )
+    }
+
+    /// Whether full materialization preserves every arithmetic narrowing that
+    /// region lowering would perform. Nodes where region lowering already
+    /// stops may be materialized because doing so introduces no extra wide
+    /// operation; pointwise nodes recurse until reaching such a boundary.
+    fn region_materialization_preserves_narrowing<A: Hash + Eq + Clone>(
+        &self,
+        node: NodeId,
+        arena: &SLTNodeArena<A>,
+    ) -> bool {
+        self.prepare_cost_cache(arena);
+        if let Some(result) = self
+            .cost_cache
+            .borrow()
+            .region_materialization_preserves_narrowing[node.0]
+        {
+            return result;
+        }
+        self.note_analysis_visits(1);
+        let result = match arena.get(node) {
+            SLTNode::Binary(lhs, BinaryOp::And | BinaryOp::Or | BinaryOp::Xor, rhs) => {
+                self.region_materialization_preserves_narrowing(*lhs, arena)
+                    && self.region_materialization_preserves_narrowing(*rhs, arena)
+            }
+            SLTNode::Unary(UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::BitNot, inner)
+            | SLTNode::Slice { expr: inner, .. } => {
+                self.region_materialization_preserves_narrowing(*inner, arena)
+            }
+            SLTNode::Mux {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                self.region_materialization_preserves_narrowing(*then_expr, arena)
+                    && self.region_materialization_preserves_narrowing(*else_expr, arena)
+            }
+            SLTNode::Binary(_, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul, _) => false,
+            SLTNode::Input { .. }
+            | SLTNode::Constant(..)
+            | SLTNode::Binary(..)
+            | SLTNode::Unary(..)
+            | SLTNode::Capture { .. }
+            | SLTNode::Concat(..)
+            | SLTNode::ForFold { .. }
+            | SLTNode::ForFoldGroup { .. } => true,
+        };
+        self.cost_cache
+            .borrow_mut()
+            .region_materialization_preserves_narrowing[node.0] = Some(result);
+        result
     }
 
     /// Cost which is provably owned by this node in the current top-level DAG.
@@ -6401,48 +6460,50 @@ mod tests {
     fn region_slice_materializes_shared_rmw_versions_once() {
         const UPDATES: usize = 18;
 
-        let mut arena = SLTNodeArena::new();
-        let mut previous = input(&mut arena, 10, 8);
-        for update in 0..UPDATES {
-            let condition = input(&mut arena, 100 + update as u32, 1);
-            let payload = constant(&mut arena, 1 << (update % 8), 8);
-            let modified = arena
-                .alloc(SLTNode::Binary(previous, BinaryOp::Or, payload))
-                .unwrap();
-            previous = arena
-                .alloc(SLTNode::Mux {
-                    cond: condition,
-                    then_expr: modified,
-                    else_expr: previous,
+        for width in [8, 65] {
+            let mut arena = SLTNodeArena::new();
+            let mut previous = input(&mut arena, 10, width);
+            for update in 0..UPDATES {
+                let condition = input(&mut arena, 100 + update as u32, 1);
+                let payload = constant(&mut arena, 1 << (update % 8), width);
+                let modified = arena
+                    .alloc(SLTNode::Binary(previous, BinaryOp::Or, payload))
+                    .unwrap();
+                previous = arena
+                    .alloc(SLTNode::Mux {
+                        cond: condition,
+                        then_expr: modified,
+                        else_expr: previous,
+                    })
+                    .unwrap();
+            }
+            let bit = arena
+                .alloc(SLTNode::Slice {
+                    expr: previous,
+                    access: BitAccess::new(0, 0),
                 })
                 .unwrap();
-        }
-        let bit = arena
-            .alloc(SLTNode::Slice {
-                expr: previous,
-                access: BitAccess::new(0, 0),
-            })
-            .unwrap();
 
-        for four_state in [false, true] {
-            let mut builder = SIRBuilder::new();
-            SLTToSIRLowerer::new(four_state).lower(
-                &mut builder,
-                bit,
-                &arena,
-                &mut crate::HashMap::default(),
-            );
-            let eu = finish_lowering(builder);
-            let instructions = eu
-                .blocks
-                .values()
-                .map(|block| block.instructions.len())
-                .sum::<usize>();
+            for four_state in [false, true] {
+                let mut builder = SIRBuilder::new();
+                SLTToSIRLowerer::new(four_state).lower(
+                    &mut builder,
+                    bit,
+                    &arena,
+                    &mut crate::HashMap::default(),
+                );
+                let eu = finish_lowering(builder);
+                let instructions = eu
+                    .blocks
+                    .values()
+                    .map(|block| block.instructions.len())
+                    .sum::<usize>();
 
-            assert!(
-                instructions < 256,
-                "shared RMW DAG expanded to {instructions} instructions in four_state={four_state}"
-            );
+                assert!(
+                    instructions < 256,
+                    "{width}-bit shared RMW DAG expanded to {instructions} instructions in four_state={four_state}"
+                );
+            }
         }
     }
 
