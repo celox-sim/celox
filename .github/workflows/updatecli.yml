@@ -1,0 +1,47 @@
+name: Update Python and cocotb
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/updatecli.yml"
+      - ".updatecli-version"
+      - ".updatecli/**"
+      - "renovate.json"
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: updatecli-python-cocotb
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Updatecli
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Updatecli
+        uses: updatecli/updatecli-action@v3
+        with:
+          version-file: .updatecli-version
+
+      - name: Preview update policy
+        run: updatecli pipeline diff --config .updatecli/updatecli.d
+        env:
+          UPDATECLI_GITHUB_ACTOR: ${{ github.actor }}
+          UPDATECLI_GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Apply update policy
+        if: github.event_name != 'pull_request'
+        run: updatecli pipeline apply --config .updatecli/updatecli.d
+        env:
+          UPDATECLI_GITHUB_ACTOR: ${{ github.actor }}
+          UPDATECLI_GITHUB_TOKEN: ${{ github.token }}
