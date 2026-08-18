@@ -3,6 +3,9 @@ name: Sync Develop
 on:
   push:
     branches: [master]
+  pull_request_target:
+    types: [closed]
+    branches: [develop]
   workflow_dispatch:
 
 concurrency:
@@ -14,6 +17,11 @@ permissions: {}
 jobs:
   sync:
     name: Merge master into develop
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      (github.event.pull_request.merged == true &&
+       github.event.pull_request.head.ref == 'integration/master-to-develop' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     env:
       SYNC_BRANCH: integration/master-to-develop
@@ -87,6 +95,21 @@ jobs:
           # dependency graph before publishing a conflict-free merge.
           git config user.name "celox-release-bot"
           git config user.email "celox-release-bot@users.noreply.github.com"
+
+          # Snapshot the remote head before building a replacement. A raw
+          # master fallback or a synchronization already merged into develop is
+          # disposable. Any other head contains unresolved work, including a
+          # human conflict resolution, and must never be force-pushed away.
+          sync_ref="refs/heads/$SYNC_BRANCH"
+          remote_sync_sha="$(git ls-remote origin "$sync_ref" | cut -f1)"
+          if [ -n "$remote_sync_sha" ]; then
+            git fetch --no-tags origin "$sync_ref"
+            scripts/check-sync-branch-head.sh \
+              "$remote_sync_sha" \
+              "$master_sha" \
+              "$(git rev-parse origin/develop)"
+          fi
+
           git switch --force-create "$SYNC_BRANCH" origin/develop
 
           set +e
@@ -98,7 +121,9 @@ jobs:
             cargo update -p veryl-analyzer
             cargo metadata --locked --format-version 1 --no-deps >/dev/null
             git add Cargo.lock
-            git commit -m "chore(develop): sync master"
+            git commit \
+              -m "chore(develop): sync master" \
+              -m "Celox-Sync-Automation: true"
             sync_sha="$(git rev-parse HEAD)"
           else
             # Keep non-dependency conflicts visible and actionable on the PR.
@@ -107,9 +132,7 @@ jobs:
             sync_sha="$master_sha"
           fi
 
-          # Do not replace a branch that moved after this run inspected it.
-          sync_ref="refs/heads/$SYNC_BRANCH"
-          remote_sync_sha="$(git ls-remote origin "$sync_ref" | cut -f1)"
+          # Also reject a concurrent update made after the snapshot above.
           git push origin \
             --force-with-lease="$sync_ref:$remote_sync_sha" \
             "$sync_sha:$sync_ref"
