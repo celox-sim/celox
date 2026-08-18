@@ -1,8 +1,8 @@
 # SIR Intermediate Representation Reference
 
 SIR (Simulator Intermediate Representation) is Celox's source- and target-independent execution
-IR. The frontend consumes Veryl-owned symbolic structures before producing SIR; native x86-64,
-Cranelift, and Wasm backends all consume the same laid-out representation.
+IR. The frontend consumes source-language-owned symbolic structures before producing SIR; native
+x86-64, Cranelift, and Wasm backends all consume the same laid-out representation.
 
 ## Overview
 
@@ -14,8 +14,10 @@ Cranelift, and Wasm backends all consume the same laid-out representation.
 
 | Type | Purpose | Stage |
 | :--- | :--- | :--- |
-| `VarId` | Veryl module-local variable ID | Frontend `SimModule` only |
+| `VarId` | Frontend-local variable ID used by the current symbolic module representation | Frontend `SimModule` only |
 | `AbsoluteAddrBase<VarId>` | Flattened frontend address before source identities are discarded | Frontend scheduling only |
+| `SourceVarId` | Frontend-neutral variable ID projected from a parser/analyzer ID | Source lookup only |
+| `SourceAddr` | An elaborated instance plus `SourceVarId` | Source lookup ↔ runtime-state projection |
 | `StateAddr` (`AbsoluteAddr` facade alias) | Dense source-independent state-object ID | Design, SIR, optimization, runtime schema |
 | `RegionedStateAddr` (`RegionedAbsoluteAddr` alias) | `StateAddr` qualified by Stable/Working/SparseWorking storage role | SIR and layout |
 | `SignalRef` | Cached physical layout handle | Runtime access |
@@ -25,10 +27,15 @@ Cranelift, and Wasm backends all consume the same laid-out representation.
 ### Phase artifacts
 
 Frontend and compiler state are represented by distinct types. `SymbolicRtl` may contain SLT
-arenas and Veryl analyzer references; `schedule_symbolic_rtl` consumes it and returns
+arenas and source adapter references; `schedule_symbolic_rtl` consumes it and returns
 `ScheduledRtl`, after which no `NodeId` or SLT arena is legal. The facade then uses the following
 source-independent artifacts. There is no general object whose valid fields depend on which
 passes happened to run.
+
+`FrontendLookup` also crosses this boundary, but it contains only `SourceVarId`, owned string
+paths, and their projection to `StateAddr`. Analyzer-native IDs such as Veryl's `VarId` and
+`StrId` remain in frontend compiler inputs used for testbench lowering and are discarded before
+`RuntimeProgram` is returned.
 
 ```rust
 pub struct UnoptimizedSir {
@@ -51,7 +58,7 @@ pub struct LaidOutProgram {
 
 pub struct RuntimeProgram {
     pub design: ElaboratedDesign<AbsoluteAddr>,
-    pub frontend: VerylFrontendLookup,
+    pub frontend: FrontendLookup,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
     pub testbench: Option<TestbenchProgram<AbsoluteAddr>>,
 }

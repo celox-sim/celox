@@ -1,0 +1,21 @@
+[package]
+name = "celox-frontend-core"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Source-neutral symbolic frontend core for Celox"
+edition.workspace = true
+
+[dependencies]
+celox-design = { path = "../celox-design" }
+celox-sir = { path = "../celox-sir" }
+celox-slt = { path = "../celox-slt" }
+fxhash = { workspace = true }
+miette = { workspace = true }
+num-bigint = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

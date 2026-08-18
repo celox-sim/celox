@@ -7,49 +7,24 @@ use veryl_parser::{
     text_table,
 };
 
-use crate::{
-    BuildConfig, HashMap, HashSet, LoweringPhase, ParserError, SimModule,
-    loop_provenance::LoopProvenance, module::ModuleParser,
+use super::{
+    artifact::{VerylSymbolicRtl, project_id_map, project_module_with_ids},
+    loop_provenance::LoopProvenance,
+    module::ModuleParser,
 };
-
-/// A source-language-neutral module supplied by another frontend for use in a
-/// Veryl hierarchy.
-#[derive(Clone)]
-pub struct ExternalModule {
-    pub metadata: Module,
-    pub sim_module: SimModule,
-    pub port_order: Vec<veryl_analyzer::ir::VarId>,
-    pub unresolved_instances: Vec<StrId>,
-}
-
-/// A module graph owned by another frontend. Module IDs are local to this
-/// graph and are remapped when it is embedded into a Veryl design.
-#[derive(Clone, Default)]
-pub struct ExternalHierarchy {
-    pub modules: HashMap<ModuleId, ExternalModule>,
-    pub roots: HashMap<StrId, ModuleId>,
-}
+use crate::{
+    BuildConfig, HashMap, HashSet, LoweringPhase, ParserError,
+    symbolic::artifact::{ExternalHierarchy, SymbolicRtl},
+};
 
 static EMPTY_EXTERNAL_HIERARCHY: std::sync::LazyLock<ExternalHierarchy> =
     std::sync::LazyLock::new(ExternalHierarchy::default);
-
-/// Veryl modules discovered from the selected top before hierarchy expansion.
-///
-/// This artifact may retain analyzer references while frontend construction is
-/// in progress. It is consumed before source-independent design and SIR
-/// artifacts leave the frontend boundary.
-pub struct SymbolicRtl<'a> {
-    pub modules: HashMap<ModuleId, SimModule>,
-    pub module_ir: HashMap<ModuleId, &'a Module>,
-    pub module_names: HashMap<ModuleId, StrId>,
-    pub root_id: ModuleId,
-}
 
 pub fn parse_ir<'a>(
     ir: &'a veryl_analyzer::ir::Ir,
     config: &BuildConfig,
     top: &StrId,
-) -> Result<SymbolicRtl<'a>, ParserError> {
+) -> Result<VerylSymbolicRtl<'a>, ParserError> {
     parse_ir_with_loop_provenance(ir, &LoopProvenance::default(), config, top)
 }
 
@@ -58,7 +33,7 @@ pub fn parse_ir_with_loop_provenance<'a>(
     loop_provenance: &LoopProvenance,
     config: &BuildConfig,
     top: &StrId,
-) -> Result<SymbolicRtl<'a>, ParserError> {
+) -> Result<VerylSymbolicRtl<'a>, ParserError> {
     parse_ir_with_external_hierarchy(ir, loop_provenance, &EMPTY_EXTERNAL_HIERARCHY, config, top)
 }
 
@@ -68,7 +43,7 @@ pub fn parse_ir_with_external_hierarchy<'a>(
     external: &'a ExternalHierarchy,
     config: &BuildConfig,
     top: &StrId,
-) -> Result<SymbolicRtl<'a>, ParserError> {
+) -> Result<VerylSymbolicRtl<'a>, ParserError> {
     // Token-to-scope resolution uses process-global analyzer state and is not
     // safe while independent compilations run on other test threads. Snapshot
     // the thread-local symbols once for hierarchy-bearing designs instead.
@@ -119,7 +94,10 @@ pub fn parse_ir_with_external_hierarchy<'a>(
         });
     }
     name_to_id.insert(*top, root_id);
-    module_names.insert(root_id, *top);
+    module_names.insert(
+        root_id,
+        resource_table::get_str_value(*top).unwrap_or_default(),
+    );
     module_ir.insert(root_id, *root_ir);
 
     let mut external_ids = HashMap::default();
@@ -149,8 +127,7 @@ pub fn parse_ir_with_external_hierarchy<'a>(
                 })?;
             }
         }
-        module_names.insert(global_id, external_module.sim_module.name);
-        module_ir.insert(global_id, &external.modules[&local_id].metadata);
+        module_names.insert(global_id, external_module.sim_module.name.clone());
         modules.insert(global_id, external_module.sim_module.clone());
         external_modules_by_global.insert(global_id, external_module);
     }
@@ -168,7 +145,9 @@ pub fn parse_ir_with_external_hierarchy<'a>(
             if let Declaration::Inst(inst_decl) = declaration {
                 match &*inst_decl.component {
                     Component::SystemVerilog(sv) => {
-                        let local_id = external.roots.get(&sv.name).ok_or_else(|| {
+                        let external_name =
+                            resource_table::get_str_value(sv.name).unwrap_or_default();
+                        let local_id = external.roots.get(&external_name).ok_or_else(|| {
                             ParserError::unsupported(
                                 64,
                                 LoweringPhase::SimulatorParser,
@@ -194,7 +173,10 @@ pub fn parse_ir_with_external_hierarchy<'a>(
                         if generic_names.contains(&child_name) || has_params {
                             let child_id = ModuleId(next_id);
                             next_id += 1;
-                            module_names.insert(child_id, child_name);
+                            module_names.insert(
+                                child_id,
+                                resource_table::get_str_value(child_name).unwrap_or_default(),
+                            );
                             module_ir.insert(child_id, child_module);
                             worklist.push((child_id, child_module));
                             inst_ids.push(child_id);
@@ -205,7 +187,10 @@ pub fn parse_ir_with_external_hierarchy<'a>(
                                 let id = ModuleId(next_id);
                                 next_id += 1;
                                 name_to_id.insert(child_name, id);
-                                module_names.insert(id, child_name);
+                                module_names.insert(
+                                    id,
+                                    resource_table::get_str_value(child_name).unwrap_or_default(),
+                                );
                                 module_ir.insert(id, child_module);
                                 worklist.push((id, child_module));
                                 id
@@ -300,6 +285,21 @@ pub fn parse_ir_with_external_hierarchy<'a>(
             Ok::<_, ParserError>(parsed_modules)
         })?
     };
+    let mut source_id_maps = module_ir
+        .iter()
+        .map(|(&module_id, module)| Ok((module_id, project_id_map(module)?)))
+        .collect::<Result<HashMap<_, _>, ParserError>>()?;
+    for (&module_id, module) in &external_modules_by_global {
+        source_id_maps.insert(
+            module_id,
+            module
+                .sim_module
+                .variables
+                .keys()
+                .map(|id| (veryl_analyzer::ir::VarId::from_raw(id.0), *id))
+                .collect(),
+        );
+    }
     for (module_id, mut sim_module) in parsed_modules {
         let ir_module = module_ir[&module_id];
         if let Some(symbols) = &symbols
@@ -323,14 +323,21 @@ pub fn parse_ir_with_external_hierarchy<'a>(
                 })
                 .collect();
         }
+        let id_map = source_id_maps[&module_id].clone();
+        let (sim_module, id_map) =
+            project_module_with_ids(&sim_module, ir_module, config, id_map, &source_id_maps)?;
         modules.insert(module_id, sim_module);
+        source_id_maps.insert(module_id, id_map);
     }
 
-    Ok(SymbolicRtl {
-        modules,
+    Ok(VerylSymbolicRtl {
+        symbolic: SymbolicRtl {
+            modules,
+            module_names,
+            root_id,
+        },
         module_ir,
-        module_names,
-        root_id,
+        source_id_maps,
     })
 }
 

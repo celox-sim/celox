@@ -5,7 +5,7 @@ use veryl_analyzer::multi_sources::{MultiSources, Source};
 use veryl_parser::token_range::TokenRange;
 
 /// Source location information for rich error diagnostics.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SourceLocation {
     pub source: MultiSources,
     pub span: miette::SourceSpan,
@@ -28,6 +28,30 @@ impl SourceLocation {
             .sources
             .first()
             .map(|source| source.path.as_str())
+    }
+}
+
+impl From<celox_frontend_core::SourceLocation> for SourceLocation {
+    fn from(location: celox_frontend_core::SourceLocation) -> Self {
+        Self {
+            source: MultiSources {
+                sources: vec![Source {
+                    path: location.path,
+                    text: location.text,
+                }],
+            },
+            span: location.span,
+        }
+    }
+}
+
+impl From<celox_frontend_core::LoweringPhase> for LoweringPhase {
+    fn from(phase: celox_frontend_core::LoweringPhase) -> Self {
+        match phase {
+            celox_frontend_core::LoweringPhase::FfLowering => Self::FfLowering,
+            celox_frontend_core::LoweringPhase::CombLowering => Self::CombLowering,
+            celox_frontend_core::LoweringPhase::SimulatorParser => Self::SimulatorParser,
+        }
     }
 }
 
@@ -229,6 +253,59 @@ pub enum ParserError {
 
     #[error("SLT construction failed: {0}")]
     SltConstruction(#[from] SLTNodeFactsError),
+}
+
+impl From<celox_frontend_core::ParserError> for ParserError {
+    fn from(error: celox_frontend_core::ParserError) -> Self {
+        use celox_frontend_core::ParserError as CoreError;
+        match error {
+            CoreError::Scheduler(error) => Self::Scheduler(error),
+            CoreError::SchedulerWithLocation {
+                error,
+                source_locations,
+            } => Self::SchedulerWithLocation {
+                error,
+                source_locations: source_locations.into_iter().map(Into::into).collect(),
+            },
+            CoreError::Unsupported {
+                issue,
+                phase,
+                feature,
+                detail,
+                source_location,
+            } => Self::Unsupported {
+                issue,
+                phase: phase.into(),
+                feature,
+                detail,
+                source_location: source_location.map(Into::into),
+            },
+            CoreError::IllegalContext {
+                feature,
+                detail,
+                source_location,
+            } => Self::IllegalContext {
+                feature,
+                detail,
+                source_location: source_location.map(Into::into),
+            },
+            CoreError::TopNotFound { name } => Self::TopNotFound { name },
+            CoreError::GenericTop { name } => Self::GenericTop { name },
+            CoreError::SirVerify {
+                phase,
+                group,
+                unit,
+                error,
+            } => Self::SirVerify {
+                phase,
+                group,
+                unit,
+                error,
+            },
+            CoreError::SltVerify { phase, error } => Self::SltVerify { phase, error },
+            CoreError::SltConstruction(error) => Self::SltConstruction(error),
+        }
+    }
 }
 
 impl ParserError {

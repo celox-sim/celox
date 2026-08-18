@@ -7,7 +7,6 @@ use crate::ir::{
 use celox_analysis::cfg_order::dominance_order;
 
 use crate::debug::CompilationTrace;
-use veryl_parser::resource_table;
 
 impl CompilationTrace {
     /// Format pre-optimized SIR to string representation
@@ -380,10 +379,7 @@ pub fn format_slt(sim_modules: &HashMap<ModuleId, SimModule>) -> String {
     output.push_str("=== Simulation Logic Tree (SLT) ===\n\n");
 
     for sim_module in sim_modules.values() {
-        output.push_str(&format!(
-            "Module: {}\n",
-            resource_table::get_str_value(sim_module.name).unwrap()
-        ));
+        output.push_str(&format!("Module: {}\n", sim_module.name));
         output.push_str("Combinational Logic Blocks:\n");
 
         for (idx, logic_path) in sim_module.comb_blocks.iter().enumerate() {

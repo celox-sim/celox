@@ -428,6 +428,8 @@ dependencies = [
  "celox-backend-wasm",
  "celox-backend-x86",
  "celox-design",
+ "celox-frontend-core",
+ "celox-frontend-sv",
  "celox-frontend-veryl",
  "celox-macros",
  "celox-runtime",
@@ -435,7 +437,6 @@ dependencies = [
  "celox-sir-opt",
  "celox-slt",
  "celox-state-layout",
- "celox-sv-analyzer",
  "celox-testbench",
  "clap",
  "codspeed-criterion-compat",
@@ -579,11 +580,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "celox-frontend-core"
+version = "0.0.0"
+dependencies = [
+ "celox-design",
+ "celox-sir",
+ "celox-slt",
+ "fxhash",
+ "miette",
+ "num-bigint",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "celox-frontend-sv"
+version = "0.0.0"
+dependencies = [
+ "celox-design",
+ "celox-frontend-core",
+ "celox-sir",
+ "celox-slt",
+ "celox-sv-analyzer",
+ "fxhash",
+ "num-bigint",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "celox-frontend-veryl"
 version = "0.0.0"
 dependencies = [
  "bit-set 0.11.1",
  "celox-design",
+ "celox-frontend-core",
  "celox-sir",
  "celox-slt",
  "celox-testbench",

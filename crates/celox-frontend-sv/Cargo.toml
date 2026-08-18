@@ -1,0 +1,21 @@
+[package]
+name = "celox-frontend-sv"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "SystemVerilog frontend adapter for Celox"
+edition.workspace = true
+
+[dependencies]
+celox-design = { path = "../celox-design" }
+celox-frontend-core = { path = "../celox-frontend-core" }
+celox-sir = { path = "../celox-sir" }
+celox-slt = { path = "../celox-slt" }
+celox-sv-analyzer = { path = "../celox-sv-analyzer" }
+fxhash = { workspace = true }
+num-bigint = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
