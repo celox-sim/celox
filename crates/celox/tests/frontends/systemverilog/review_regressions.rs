@@ -799,29 +799,27 @@ fn uses_the_first_always_ff_event_as_a_negedge_clock() {
 }
 
 #[test]
-fn infers_the_clock_when_reset_precedes_it_in_the_event_list() {
-    let source = r#"
+fn rejects_ambiguous_multi_event_always_ff_roles() {
+    for source in [
+        r#"
         module Top(input logic clk, input logic rst, input logic d, output logic q);
-            always_ff @(posedge rst or posedge clk) begin
-                if (rst) q <= 1'b0;
-                else q <= d;
-            end
+            always_ff @(posedge rst or posedge clk)
+                if (rst) q <= 1'b0; else q <= d;
         endmodule
-    "#;
-    let mut sim = Simulator::from_sv_sources(vec![(source, Path::new("reset_first.sv"))], "Top")
-        .build_cranelift()
-        .unwrap();
-    let clk = sim.event("clk");
-    let rst = sim.signal("rst");
-    let d = sim.signal("d");
-    let q = sim.signal("q");
-    sim.modify(|io| {
-        io.set(rst, 0u8);
-        io.set(d, 1u8);
-    })
-    .unwrap();
-    sim.tick(clk).unwrap();
-    assert_eq!(sim.get(q), 1u8.into());
+        "#,
+        r#"
+        module Top(input logic clk, input logic rst_n, input logic d, output logic q);
+            always_ff @(posedge clk or negedge rst_n)
+                if (clk) q <= d; else q <= 1'b0;
+        endmodule
+        "#,
+    ] {
+        let error = cranelift_build_error(source);
+        assert!(
+            error.contains("always_ff event control"),
+            "unexpected error: {error}"
+        );
+    }
 }
 
 #[test]
@@ -4137,6 +4135,64 @@ fn rejects_default_nettype_changes_inside_modules() {
         let error = cranelift_build_error(source);
         assert!(
             error.contains("`default_nettype change inside module `Top`"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn converts_negative_and_unknown_constant_selects_to_x() {
+    let source = r#"
+        module Top(output logic negative_is_x, output logic x_is_x, output logic z_is_x);
+            localparam logic [7:0] VALUE = 8'hff;
+            localparam NEGATIVE = VALUE[-1];
+            localparam X_INDEX = VALUE[1'bx];
+            localparam Z_INDEX = VALUE[1'bz];
+            assign negative_is_x = (NEGATIVE === 1'bx);
+            assign x_is_x = (X_INDEX === 1'bx);
+            assign z_is_x = (Z_INDEX === 1'bx);
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("unknown_constant_selects.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("negative_is_x")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("x_is_x")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("z_is_x")), 1u8.into());
+}
+
+#[test]
+fn infers_standalone_unbased_parameter_literals_as_one_bit() {
+    let source = r#"
+        module Top(output logic [31:0] one, output logic [31:0] zero);
+            localparam ONE = '1;
+            localparam ZERO = '0;
+            assign one = ONE;
+            assign zero = ZERO;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("unbased_parameter_type.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("one")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("zero")), 0u8.into());
+}
+
+#[test]
+fn rejects_unsupported_default_net_types() {
+    for net_type in ["tri0", "wand", "wor"] {
+        let source = format!(
+            "`default_nettype {net_type}\nmodule Top(output logic y); assign y = 1'b0; endmodule"
+        );
+        let error = cranelift_build_error(&source);
+        assert!(
+            error.contains(&format!("`default_nettype {net_type}`")),
             "unexpected error: {error}"
         );
     }

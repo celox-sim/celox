@@ -246,6 +246,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unsupported_default_net_types() {
+        for net_type in ["tri0", "wand", "wor"] {
+            let source = format!("`default_nettype {net_type}\nmodule Top(); endmodule");
+            let error = source_module_implicit_net_permissions(&source, Path::new("nettype.sv"))
+                .expect_err("unsupported default net type should be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("`default_nettype {net_type}`")),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn records_always_ff_case_branches() {
         let ir = analyze_source(
             r#"

@@ -1186,6 +1186,7 @@ pub struct Parameter {
     declared_width: Option<usize>,
     declared_signed: Option<bool>,
     declared_is_2state: bool,
+    has_declared_type: bool,
     is_local: bool,
 }
 
@@ -1196,6 +1197,7 @@ impl Parameter {
         declared_width: Option<usize>,
         declared_signed: Option<bool>,
         declared_is_2state: bool,
+        has_declared_type: bool,
         is_local: bool,
     ) -> Self {
         Self {
@@ -1204,6 +1206,7 @@ impl Parameter {
             declared_width,
             declared_signed,
             declared_is_2state,
+            has_declared_type,
             is_local,
         }
     }
@@ -1241,9 +1244,9 @@ impl Parameter {
         &self,
         parameter_types: &HashMap<String, ExprType>,
     ) -> Option<ExprType> {
-        let inferred = self
-            .value()
-            .and_then(|value| infer_const_expr_type(value, parameter_types));
+        let inferred = self.value().and_then(|value| {
+            infer_parameter_value_type(value, self.has_declared_type, parameter_types)
+        });
         let width = self
             .declared_width
             .or(inferred.map(|r#type| r#type.width))?;
@@ -2469,6 +2472,12 @@ fn parameters_from_ref_node(
         ));
     }
     let parameter_width = parameter_declared_width(node.clone(), syntax_tree, parameters);
+    let has_declared_type = node.clone().into_iter().any(|child| {
+        matches!(
+            child,
+            RefNode::DataTypeOrImplicit(sv_parser::DataTypeOrImplicit::DataType(_))
+        )
+    });
     let parameter_signed = parameter_width.map(|_| {
         integer_atom_expr_type(node.clone())
             .map(|r#type| r#type.signed)
@@ -2492,6 +2501,7 @@ fn parameters_from_ref_node(
                 parameter_width,
                 parameter_signed,
                 parameter_is_2state,
+                has_declared_type,
                 is_local,
             ));
         }
@@ -2592,9 +2602,9 @@ fn parameter_value_env(
     let mut values = HashMap::default();
     let mut parameter_types = HashMap::default();
     for parameter in parameters {
-        let inferred_type = parameter
-            .value()
-            .and_then(|value| infer_const_expr_type(value, &parameter_types));
+        let inferred_type = parameter.value().and_then(|value| {
+            infer_parameter_value_type(value, parameter.has_declared_type, &parameter_types)
+        });
         let width = parameter
             .declared_width
             .or(inferred_type.map(|r#type| r#type.width));
@@ -2662,10 +2672,14 @@ fn replace_oob_const_selects_with_unknown(
             let expr = replace_oob_const_selects_with_unknown(*expr, const_env);
             let bit = replace_oob_const_selects_with_unknown(*bit, const_env);
             if let ConstExpr::Literal(literal) = &expr
-                && let Some(bit_index) = typecheck::eval_const_expr(&bit.clone().into(), const_env)
-                    .and_then(|bit| usize::try_from(bit).ok())
-                && typecheck::parse_integral_literal(literal)
-                    .is_some_and(|literal| bit_index >= literal.width)
+                && let Some(width) =
+                    typecheck::parse_integral_literal(literal).map(|literal| literal.width)
+                && match typecheck::eval_const_expr(&bit.clone().into(), const_env) {
+                    Some(bit_index) => {
+                        usize::try_from(bit_index).map_or(true, |bit_index| bit_index >= width)
+                    }
+                    None => const_expr_contains_unknown_literal(&bit),
+                }
             {
                 ConstExpr::Literal("1'bx".to_string())
             } else {
@@ -2708,6 +2722,31 @@ fn replace_oob_const_selects_with_unknown(
         },
         ConstExpr::Ident(name) => ConstExpr::Ident(name),
         ConstExpr::Literal(value) => ConstExpr::Literal(value),
+    }
+}
+
+fn const_expr_contains_unknown_literal(expr: &ConstExpr) -> bool {
+    match expr {
+        ConstExpr::Literal(literal) => typecheck::parse_integral_literal(literal)
+            .is_some_and(|literal| literal.mask != Default::default()),
+        ConstExpr::Ident(_) => false,
+        ConstExpr::Select { expr, bit } => {
+            const_expr_contains_unknown_literal(expr) || const_expr_contains_unknown_literal(bit)
+        }
+        ConstExpr::Function { args, .. } => args.iter().any(const_expr_contains_unknown_literal),
+        ConstExpr::Unary { expr, .. } => const_expr_contains_unknown_literal(expr),
+        ConstExpr::Binary { left, right, .. } => {
+            const_expr_contains_unknown_literal(left) || const_expr_contains_unknown_literal(right)
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            const_expr_contains_unknown_literal(condition)
+                || const_expr_contains_unknown_literal(then_expr)
+                || const_expr_contains_unknown_literal(else_expr)
+        }
     }
 }
 
@@ -2928,6 +2967,27 @@ fn infer_const_expr_type(
                 signed: then_type.signed && else_type.signed,
             })
         }
+    }
+}
+
+fn infer_parameter_value_type(
+    value: &ConstExpr,
+    has_declared_type: bool,
+    parameter_types: &HashMap<String, ExprType>,
+) -> Option<ExprType> {
+    if !has_declared_type
+        && let ConstExpr::Literal(literal) = value
+        && matches!(
+            literal.trim(),
+            "'0" | "'1" | "'x" | "'X" | "'z" | "'Z" | "'?"
+        )
+    {
+        Some(ExprType {
+            width: 1,
+            signed: false,
+        })
+    } else {
+        infer_const_expr_type(value, parameter_types)
     }
 }
 

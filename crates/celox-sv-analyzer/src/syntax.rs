@@ -34,6 +34,11 @@ pub fn source_module_implicit_net_permissions(
         match tokens[index].as_str() {
             "`default_nettype" => {
                 if let Some(value) = tokens.get(index + 1) {
+                    if !matches!(value.as_str(), "wire" | "none") {
+                        return Err(AnalyzerError::Unsupported(format!(
+                            "`default_nettype {value}`"
+                        )));
+                    }
                     let next_implicit_nets_allowed = value != "none";
                     if next_implicit_nets_allowed != implicit_nets_allowed
                         && let Some(module) = current_module.as_deref()

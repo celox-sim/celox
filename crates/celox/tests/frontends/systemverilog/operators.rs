@@ -1402,7 +1402,7 @@ sv_backends! {
         @setup {
     let sv = r#"
         module Top(input logic clk, input logic rst, input logic d, output logic q);
-            always_ff @(posedge rst or posedge clk) q <= rst ? 1'b0 : d;
+            always_ff @(posedge clk or posedge rst) q <= rst ? 1'b0 : d;
         endmodule
     "#;
         }

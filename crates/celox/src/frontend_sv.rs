@@ -3269,20 +3269,25 @@ fn insert_or_merge_ff_unit(
 }
 
 fn clock_event_from_ff_process(process: &sv::ir::FfProcess) -> Option<&sv::ir::FfEvent> {
+    let clock = process.events().first()?;
     if process.events().len() == 1 {
-        return process.events().first();
+        return Some(clock);
     }
 
-    let mut candidates = process.events().iter().filter(|event| {
-        !process.assignments().iter().any(|assignment| {
-            assignment
-                .condition()
-                .is_some_and(|condition| expr_references_ident(condition, event.signal()))
-                || expr_uses_ident_as_condition(assignment.assignment().rhs(), event.signal())
-        })
-    });
-    let clock = candidates.next()?;
-    candidates.next().is_none().then_some(clock)
+    (!ff_event_used_as_condition(process, clock)
+        && process.events()[1..]
+            .iter()
+            .all(|event| ff_event_used_as_condition(process, event)))
+    .then_some(clock)
+}
+
+fn ff_event_used_as_condition(process: &sv::ir::FfProcess, event: &sv::ir::FfEvent) -> bool {
+    process.assignments().iter().any(|assignment| {
+        assignment
+            .condition()
+            .is_some_and(|condition| expr_references_ident(condition, event.signal()))
+            || expr_uses_ident_as_condition(assignment.assignment().rhs(), event.signal())
+    })
 }
 
 fn expr_uses_ident_as_condition(expr: &sv::ir::Expr, name: &str) -> bool {
