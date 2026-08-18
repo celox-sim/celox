@@ -5,8 +5,8 @@ use crate::{
     BuildConfig, ExternalModule, GlueAddr, GlueBlock, HashMap, HashSet, LoweringPhase,
     ModuleInitialMemoryValue, ParserError, RegionedVarAddr, SimModule,
     bitaccess::{
-        PartSelectGeometry, SelectGeometry, eval_var_select_with_geometry, is_static_access,
-        select_geometry,
+        PartSelectGeometry, SelectGeometry, eval_var_select, eval_var_select_with_geometry,
+        is_static_access, select_geometry,
     },
     bitslicer::BitSlicer,
     ff::FfParser,
