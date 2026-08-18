@@ -3,6 +3,9 @@ name: Sync Develop
 on:
   push:
     branches: [master]
+  pull_request_target:
+    types: [closed]
+    branches: [develop]
   workflow_dispatch:
 
 concurrency:
@@ -14,6 +17,11 @@ permissions: {}
 jobs:
   sync:
     name: Merge master into develop
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      (github.event.pull_request.merged == true &&
+       github.event.pull_request.head.ref == 'integration/master-to-develop' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     env:
       SYNC_BRANCH: integration/master-to-develop

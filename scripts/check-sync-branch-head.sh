@@ -38,21 +38,24 @@ is_pending_automation_merge() {
       --format='%(trailers:key=Celox-Sync-Automation,valueonly)' \
       "$sync_sha"
   )"
+  if [ -n "$automation_marker" ] && [ "$automation_marker" != "true" ]; then
+    return 1
+  fi
 
   [ "$author_email" = "celox-release-bot@users.noreply.github.com" ] \
     && [ "$committer_email" = "celox-release-bot@users.noreply.github.com" ] \
     && [ "$subject" = "chore(develop): sync master" ] \
-    && [ "$automation_marker" = "true" ] \
     && git merge-base --is-ancestor "$first_parent" "$develop_sha" \
     && git merge-base --is-ancestor "$second_parent" "$master_sha"
 }
 
 # A stale fallback points directly into master, while a completed synchronization
-# is reachable from develop. A marked merge produced by the workflow is also
-# disposable while its PR is pending, provided both of its parents still belong
-# to the expected branch histories. Anything else contains work that has not
-# landed in either branch, including a human conflict resolution, and must be
-# preserved.
+# is reachable from develop. A merge produced by the workflow is also disposable
+# while its PR is pending, provided its identity and both parents match the
+# expected branch histories. Accept an absent automation marker for pending
+# merges created by the workflow version immediately before marker rollout.
+# Anything else contains work that has not landed in either branch, including a
+# human conflict resolution, and must be preserved.
 if git merge-base --is-ancestor "$sync_sha" "$master_sha" \
   || git merge-base --is-ancestor "$sync_sha" "$develop_sha" \
   || is_pending_automation_merge; then

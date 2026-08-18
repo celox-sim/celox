@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +9,25 @@ import { fileURLToPath } from "node:url";
 const guard = fileURLToPath(
   new URL("./check-sync-branch-head.sh", import.meta.url),
 );
+
+test("sync workflow retries after its preserved pull request lands", () => {
+  const workflow = readFileSync(
+    new URL("../.github/workflows/sync-develop.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    workflow,
+    /pull_request_target:\n\s+types: \[closed\]\n\s+branches: \[develop\]/,
+  );
+  assert.match(
+    workflow,
+    /github\.event\.pull_request\.head\.ref == 'integration\/master-to-develop'/,
+  );
+  assert.match(
+    workflow,
+    /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
+  );
+});
 
 test("sync branch guard preserves unresolved branch work", (t) => {
   const repository = mkdtempSync(join(tmpdir(), "celox-sync-branch-head-"));
@@ -57,8 +76,8 @@ test("sync branch guard preserves unresolved branch work", (t) => {
     /Refusing to replace synchronization branch head/,
   );
 
-  // Bot identity and subject alone are insufficient; only this workflow's
-  // explicit marker makes a pending merge disposable.
+  // Accept a pre-marker merge from the previous workflow version during
+  // rollout, provided bot identity, subject, and both parents still match.
   git("switch", "--quiet", "-c", "unmarked-sync", develop);
   git(
     "-c",
@@ -73,7 +92,7 @@ test("sync branch guard preserves unresolved branch work", (t) => {
     "chore(develop): sync master",
   );
   const unmarked = git("rev-parse", "HEAD");
-  assert.equal(check(unmarked, master, develop).status, 1);
+  assert.equal(check(unmarked, master, develop).status, 0);
 
   // A marked merge made by the workflow remains replaceable while its PR is
   // pending, so a newer master push cannot leave synchronization stalled.
