@@ -144,7 +144,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true'
         with:
           python-version: "3.12"
