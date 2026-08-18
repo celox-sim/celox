@@ -2351,9 +2351,9 @@ impl<'a> FfParser<'a> {
         // Backends may give array elements a physical stride different from
         // their logical packed width, so combining both here loses essential
         // source-type information.
-        let (_, strides, total_width) =
-            crate::bitaccess::get_dimensions_and_strides(self.module, var_id)?;
         let geometry = crate::bitaccess::select_geometry(self.module, var_id, index, select)?;
+        let strides = &geometry.strides;
+        let total_width = geometry.total_width;
         let array_dimension_count = self.module.variables[&var_id].r#type.array.iter().count();
         let element_width = if array_dimension_count == 0 {
             total_width

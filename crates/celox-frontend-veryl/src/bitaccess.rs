@@ -248,7 +248,6 @@ pub enum PartSelectGeometry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectGeometry {
-    pub dimensions: Vec<usize>,
     pub strides: Vec<usize>,
     pub total_width: usize,
     /// Number of aggregate indices before the optional part-select anchor.
@@ -269,18 +268,20 @@ pub fn select_geometry(
     index: &VarIndex,
     select: &VarSelect,
 ) -> Result<SelectGeometry, ParserError> {
-    let (dimensions, strides, total_width) = get_dimensions_and_strides(module, var_id)?;
+    let mut strides = collect_dims(module, var_id)?;
+    let dimensions_len = strides.len();
+    let total_width = dimensions_to_strides(&mut strides)?;
     let total_indices = index.0.len().checked_add(select.0.len()).ok_or_else(|| {
         ParserError::illegal_context("variable select", "index count overflows usize", None)
     })?;
 
     let Some((op, range_expr)) = &select.1 else {
-        if total_indices > dimensions.len() {
+        if total_indices > dimensions_len {
             return Err(ParserError::illegal_context(
                 "variable select",
                 format!(
                     "{total_indices} indices exceed the variable's {} dimensions",
-                    dimensions.len()
+                    dimensions_len
                 ),
                 None,
             ));
@@ -297,7 +298,6 @@ pub fn select_geometry(
             })?
         };
         return Ok(SelectGeometry {
-            dimensions,
             strides,
             total_width,
             dimension_count: total_indices,
@@ -320,16 +320,19 @@ pub fn select_geometry(
             Some(&range_expr.token_range()),
         )
     })?;
-    let dimension_width = *dimensions.get(dimension_count).ok_or_else(|| {
-        ParserError::illegal_context(
+    let dimension_width = if dimension_count >= dimensions_len {
+        return Err(ParserError::illegal_context(
             "variable part select",
             format!(
-                "part-select dimension {dimension_count} is outside the {}-dimension variable",
-                dimensions.len()
+                "part-select dimension {dimension_count} is outside the {dimensions_len}-dimension variable"
             ),
             Some(&range_expr.token_range()),
-        )
-    })?;
+        ));
+    } else if dimension_count == 0 {
+        total_width / strides[0]
+    } else {
+        strides[dimension_count - 1] / strides[dimension_count]
+    };
     let stride = *strides.get(dimension_count).ok_or_else(|| {
         ParserError::illegal_context(
             "variable part select",
@@ -442,7 +445,6 @@ pub fn select_geometry(
     })?;
 
     Ok(SelectGeometry {
-        dimensions,
         strides,
         total_width,
         dimension_count,
@@ -674,16 +676,11 @@ pub fn is_static_access(index: &VarIndex, select: &VarSelect) -> bool {
     true
 }
 
-pub fn get_dimensions_and_strides(
-    module: &Module,
-    var_id: VarId,
-) -> Result<(Vec<usize>, Vec<usize>, usize), ParserError> {
-    let dims = collect_dims(module, var_id)?;
-
-    let mut strides = vec![1; dims.len()];
+fn dimensions_to_strides(strides: &mut [usize]) -> Result<usize, ParserError> {
     let mut current_stride = 1usize;
-    for i in (0..dims.len()).rev() {
-        if dims[i] == 0 {
+    for i in (0..strides.len()).rev() {
+        let dimension = strides[i];
+        if dimension == 0 {
             return Err(ParserError::illegal_context(
                 "variable dimensions",
                 format!("dimension {i} has zero width"),
@@ -691,18 +688,27 @@ pub fn get_dimensions_and_strides(
             ));
         }
         strides[i] = current_stride;
-        current_stride = current_stride.checked_mul(dims[i]).ok_or_else(|| {
+        current_stride = current_stride.checked_mul(dimension).ok_or_else(|| {
             ParserError::illegal_context(
                 "variable dimensions",
                 format!(
-                    "dimension {} times accumulated stride {current_stride} overflows usize",
-                    dims[i]
+                    "dimension {dimension} times accumulated stride {current_stride} overflows usize"
                 ),
                 None,
             )
         })?;
     }
-    Ok((dims, strides, current_stride))
+    Ok(current_stride)
+}
+
+pub fn get_dimensions_and_strides(
+    module: &Module,
+    var_id: VarId,
+) -> Result<(Vec<usize>, Vec<usize>, usize), ParserError> {
+    let dims = collect_dims(module, var_id)?;
+    let mut strides = dims.clone();
+    let total_width = dimensions_to_strides(&mut strides)?;
+    Ok((dims, strides, total_width))
 }
 
 pub fn get_access_width(
