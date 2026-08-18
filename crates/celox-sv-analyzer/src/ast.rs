@@ -3490,7 +3490,13 @@ fn functions_from_module_node(
         validate_function_return_type(declaration, syntax_tree, const_env, &type_aliases)?;
         validate_function_formal_types(declaration, syntax_tree, const_env, &type_aliases)?;
         validate_function_local_names(declaration, syntax_tree, const_env, &type_aliases)?;
-        validate_function_declaration_statements(declaration, syntax_tree, packed_dimensions)?;
+        validate_function_declaration_statements(
+            declaration,
+            syntax_tree,
+            const_env,
+            &type_aliases,
+            packed_dimensions,
+        )?;
         if let Some(function) = function_from_declaration(
             declaration,
             syntax_tree,
@@ -3646,12 +3652,71 @@ fn validate_function_formal_types(
 fn validate_function_declaration_statements(
     declaration: &sv_parser::FunctionDeclaration,
     syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+    type_aliases: &HashMap<String, Type>,
     packed_dimensions: &PackedDimensions,
 ) -> Result<(), AnalyzerError> {
-    let statements = match &declaration.nodes.2 {
-        sv_parser::FunctionBodyDeclaration::WithPort(body) => &body.nodes.6,
-        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => &body.nodes.5,
+    let (statements, params, local_types) = match &declaration.nodes.2 {
+        sv_parser::FunctionBodyDeclaration::WithPort(body) => {
+            let params = body
+                .nodes
+                .3
+                .nodes
+                .1
+                .as_ref()
+                .map(|ports| tf_params(ports, syntax_tree, const_env, type_aliases))
+                .unwrap_or_default();
+            let local_types = function_local_types_from_block_items(
+                &body.nodes.5,
+                syntax_tree,
+                const_env,
+                type_aliases,
+            )
+            .ok_or_else(|| {
+                AnalyzerError::Unsupported("unsupported function local data type".to_string())
+            })?;
+            (&body.nodes.6, params, local_types)
+        }
+        sv_parser::FunctionBodyDeclaration::WithoutPort(body) => {
+            let params = tf_item_params(&body.nodes.4, syntax_tree, const_env, type_aliases);
+            let block_items = body.nodes.4.iter().filter_map(|item| match item {
+                sv_parser::TfItemDeclaration::BlockItemDeclaration(item) => Some(&**item),
+                sv_parser::TfItemDeclaration::TfPortDeclaration(_) => None,
+            });
+            let local_types = function_local_types_from_block_item_iter(
+                block_items,
+                syntax_tree,
+                const_env,
+                type_aliases,
+            )
+            .ok_or_else(|| {
+                AnalyzerError::Unsupported("unsupported function local data type".to_string())
+            })?;
+            (&body.nodes.5, params, local_types)
+        }
     };
+    let mut assignment_targets = local_types.into_keys().collect::<HashSet<_>>();
+    assignment_targets.extend(params.into_iter().map(|param| param.name));
+    for node in RefNode::FunctionDeclaration(declaration) {
+        let RefNode::BlockingAssignment(assignment) = node else {
+            continue;
+        };
+        let lhs = match assignment {
+            sv_parser::BlockingAssignment::Variable(assignment) => &assignment.nodes.0,
+            sv_parser::BlockingAssignment::OperatorAssignment(assignment) => &assignment.nodes.0,
+            _ => continue,
+        };
+        let Some(LValue::Ident(name)) =
+            variable_lvalue_from_node(lhs, syntax_tree, packed_dimensions)
+        else {
+            continue;
+        };
+        if !assignment_targets.contains(&name) {
+            return Err(AnalyzerError::Unsupported(format!(
+                "function assignment target outside local scope `{name}`"
+            )));
+        }
+    }
     for statement in statements {
         let sv_parser::FunctionStatementOrNull::Statement(statement) = statement else {
             continue;

@@ -2370,14 +2370,28 @@ impl<'a> ModuleParser<'a> {
                     .iter()
                     .any(|target| target.var_id == *external_id)
             });
-            if overlaps_comb || overlaps_ff {
+            let overlaps_child_output = self
+                .glue_blocks
+                .values()
+                .flatten()
+                .filter(|block| !self.external_modules.contains_key(&block.module_id))
+                .flat_map(|block| &block.output_ports)
+                .any(|(_, path)| {
+                    path.target.var().is_some_and(|target| {
+                        matches!(target.id, GlueAddr::Parent(id) if id == *external_id)
+                            && target.access.overlaps(external_access)
+                    })
+                });
+            if overlaps_comb || overlaps_ff || overlaps_child_output {
                 let variable = &self.module.variables[external_id];
+                let driver = if overlaps_child_output {
+                    "child output driver"
+                } else {
+                    "local driver"
+                };
                 return Err(ParserError::illegal_context(
                     "external module output connections",
-                    format!(
-                        "external output overlaps local driver for {}",
-                        variable.path
-                    ),
+                    format!("external output overlaps {driver} for {}", variable.path,),
                     None,
                 ));
             }

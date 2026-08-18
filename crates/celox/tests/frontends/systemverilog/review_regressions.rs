@@ -3295,6 +3295,34 @@ fn rejects_external_outputs_that_overlap_veryl_local_drivers() {
 }
 
 #[test]
+fn rejects_external_outputs_that_overlap_veryl_child_outputs() {
+    let veryl = r#"
+        module VerylSource (y: output logic) {
+            assign y = 1'b0;
+        }
+        module Top (y: output logic) {
+            inst veryl_child: VerylSource (y);
+            inst sv_child: $sv::SvSource (y);
+        }
+    "#;
+    let sv = "module SvSource(output logic y); assign y = 1'b1; endmodule";
+    let error = match Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("source.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    {
+        Ok(_) => panic!("external and Veryl child outputs unexpectedly shared a target"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("external output overlaps child output driver"),
+        "{error}"
+    );
+}
+
+#[test]
 fn rejects_invalid_systemverilog_hierarchy_when_mixed_design_reaches_it() {
     let veryl = r#"
         module Top (y: output logic) {
@@ -3807,4 +3835,47 @@ fn rejects_shared_resets_associated_with_multiple_clocks() {
         error.contains("shared reset associated with multiple clocks"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn rejects_function_writes_outside_the_inlined_scope() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic a, output logic y, side);
+            function automatic logic f(input logic value);
+                side = value;
+                return value;
+            endfunction
+            assign y = f(a);
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("function assignment target outside local scope `side`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[cfg(any(
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+))]
+#[test]
+fn collapses_unknown_initializers_in_two_state_native_images() {
+    use celox::{NativeProgramInstance, SimBackend};
+
+    let source = "module Top(output logic y); endmodule";
+    let sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("two_state_native_image.sv"))],
+        "Top",
+    )
+    .build_native()
+    .unwrap();
+    let image = sim.shared_code().program_image().clone();
+    drop(sim);
+
+    // Safety: the image was produced in-process by the compiler above.
+    let runtime = unsafe { NativeProgramInstance::from_image(image) }.unwrap();
+    let y = runtime.signal_ref("Top.y").unwrap();
+    assert_eq!(runtime.backend().get_as::<u8>(y), 0);
 }
