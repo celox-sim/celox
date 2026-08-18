@@ -27,14 +27,31 @@ use crate::{
     AbsoluteAddr, BuildConfig, FfRuntimeRelocation, FrontendLookup, FrontendTrace,
     FrontendTraceOptions, FusedSirOptimizationHints, GlueAddr, HashMap, HashSet, InstancePath,
     ParserError, RegionedAbsoluteAddr, RegionedVarAddr, RelocationModule, ScheduledRtl,
-    ScheduledRtlOutput, SharedClockLowering, SimModule, SourceLocation, SymbolicRtl, VariableInfo,
-    VerylComponentBinding, VerylComponentConnectionBinding, VerylComponentEventBinding,
-    VerylComponentInputBinding, VerylTestbenchSource, bitaccess, build_ff_clock_recipes,
-    flattening, resolve_total_width,
+    ScheduledRtlOutput, SharedClockLowering, SimModule, SourceLocation, SourceVarId, SymbolicRtl,
+    VariableInfo, VariableKind, VerylComponentBinding, VerylComponentConnectionBinding,
+    VerylComponentEventBinding, VerylComponentInputBinding, VerylIdMap, VerylTestbenchSource,
+    bitaccess, build_ff_clock_recipes, flattening, resolve_total_width,
 };
 
 fn string_of(id: StrId) -> String {
     resource_table::get_str_value(id).unwrap_or_default()
+}
+
+fn path_strings(path: &VarPath) -> Vec<String> {
+    path.0.iter().map(|part| string_of(*part)).collect()
+}
+
+fn variable_kind(kind: veryl_analyzer::ir::VarKind) -> VariableKind {
+    use veryl_analyzer::ir::VarKind;
+    match kind {
+        VarKind::Param => VariableKind::Parameter,
+        VarKind::Const => VariableKind::Constant,
+        VarKind::Input => VariableKind::Input,
+        VarKind::Output => VariableKind::Output,
+        VarKind::Inout => VariableKind::Inout,
+        VarKind::Variable => VariableKind::Variable,
+        VarKind::Let => VariableKind::Let,
+    }
 }
 
 fn elaborated_scope_name(
@@ -47,16 +64,15 @@ fn elaborated_scope_name(
     let segments = path
         .0
         .iter()
-        .map(|&(name, index)| {
-            prefix.push((name, index));
-            let name = string_of(name);
+        .map(|(name, index)| {
+            prefix.push((name.clone(), *index));
             let indexed = expanded
                 .get(&InstancePath(prefix.clone()))
                 .is_some_and(|id| indexed_instances.contains(id));
             if indexed {
                 format!("{name}[{index}]")
             } else {
-                name
+                name.clone()
             }
         })
         .collect::<Vec<_>>();
@@ -157,13 +173,13 @@ fn collect_testbench_components(
         let prefix = parent_path
             .0
             .iter()
-            .map(|&(name, index)| {
-                path_prefix.push((name, index));
+            .map(|(name, index)| {
+                path_prefix.push((name.clone(), *index));
                 let instance = instance_ids.get(&InstancePath(path_prefix.clone()));
                 if instance.is_some_and(|id| indexed_instances.contains(id)) {
-                    format!("{}[{index}]", string_of(name))
+                    format!("{name}[{index}]")
                 } else {
-                    string_of(name)
+                    name.clone()
                 }
             })
             .collect::<Vec<_>>()
@@ -326,12 +342,7 @@ fn create_absolute_addr(
     modules: &HashMap<ModuleId, SimModule>,
     expanded: &HashMap<InstancePath, InstanceId>,
 ) -> AbsoluteAddr {
-    let instance_path = InstancePath(
-        instance_path
-            .iter()
-            .map(|s| (resource_table::insert_str(&s.0), s.1))
-            .collect(),
-    );
+    let instance_path = InstancePath(instance_path.to_vec());
     let instance_id = expanded[&instance_path];
     let module_id = instance_modules[&instance_id];
     let module = &modules[&module_id];
@@ -742,14 +753,18 @@ pub fn schedule_symbolic_rtl(
     ) {
         Ok(schedule) => schedule,
         Err(error) => {
-            let (err_vars, err_path_idx) = module_variables(&module_ir, config).unwrap_or_default();
+            let (err_vars, err_path_idx, err_id_maps) =
+                module_variables(&module_ir, config).unwrap_or_default();
             let frontend_lookup = FrontendLookup {
                 instance_ids: expanded.clone(),
                 instance_module: instance_modules.clone(),
                 indexed_instances: indexed_instances.clone(),
                 module_variables: err_vars,
                 module_var_path_index: err_path_idx,
-                module_names: module_names.clone(),
+                module_names: module_names
+                    .iter()
+                    .map(|(&module, &name)| (module, string_of(name)))
+                    .collect(),
                 source_to_state: HashMap::default(),
                 state_to_source: HashMap::default(),
                 event_aliases: HashMap::default(),
@@ -758,7 +773,12 @@ pub fn schedule_symbolic_rtl(
                 scheduler_source_locations(&error, &module_ir, &instance_modules);
             let mut target_arena = SLTNodeArena::new();
             let error = error.map_addr(&global_arena, &mut target_arena, &|addr| {
-                frontend_lookup.get_path(addr)
+                let module = instance_modules[&addr.instance_id];
+                let var_id = err_id_maps[&module][&addr.var_id];
+                frontend_lookup.get_path(&crate::SourceAddr {
+                    instance_id: addr.instance_id,
+                    var_id,
+                })
             })?;
             return Err(if source_locations.is_empty() {
                 ParserError::Scheduler(error)
@@ -887,7 +907,7 @@ pub fn schedule_symbolic_rtl(
         if stmts.is_empty() { None } else { Some(stmts) }
     });
 
-    let (mod_vars, mod_path_idx) = module_variables(&module_ir, config)?;
+    let (mod_vars, mod_path_idx, source_id_maps) = module_variables(&module_ir, config)?;
     let initial_memory_values: Vec<InitialStateValue<AbsoluteAddr>> = instance_modules
         .iter()
         .flat_map(|(&instance_id, module_id)| {
@@ -906,15 +926,19 @@ pub fn schedule_symbolic_rtl(
     let state_objects: HashMap<AbsoluteAddr, VariableMetadata> = instance_modules
         .iter()
         .flat_map(|(&instance_id, module_id)| {
-            mod_vars[module_id].values().map(move |info| {
-                (
-                    AbsoluteAddr {
-                        instance_id,
-                        var_id: info.id,
-                    },
-                    info.metadata.clone(),
-                )
-            })
+            let module_vars = &mod_vars[module_id];
+            source_id_maps[module_id]
+                .iter()
+                .map(move |(&var_id, &source_id)| {
+                    let info = &module_vars[&source_id];
+                    (
+                        AbsoluteAddr {
+                            instance_id,
+                            var_id,
+                        },
+                        info.metadata.clone(),
+                    )
+                })
         })
         .collect();
     let runtime_comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>> = comb_observers
@@ -950,6 +974,9 @@ pub fn schedule_symbolic_rtl(
         component_bindings.append(&mut instance_bindings);
     }
     let testbench_source = VerylTestbenchSource {
+        id_map: VerylIdMap {
+            module_variables: source_id_maps.clone(),
+        },
         initial_statements,
         functions: module_ir
             .get(&root_id)
@@ -969,8 +996,7 @@ pub fn schedule_symbolic_rtl(
     };
     let mut source_addresses = state_objects.keys().copied().collect::<Vec<_>>();
     source_addresses.sort_unstable();
-    let mut source_to_state = HashMap::default();
-    let mut state_to_source = HashMap::default();
+    let mut veryl_source_to_state = HashMap::default();
     for (index, source) in source_addresses.into_iter().enumerate() {
         let object = StateObjectId(u32::try_from(index).map_err(|_| {
             ParserError::illegal_context(
@@ -983,14 +1009,13 @@ pub fn schedule_symbolic_rtl(
             instance_id: source.instance_id,
             var_id: object,
         };
-        source_to_state.insert(source, state);
-        state_to_source.insert(state, source);
+        veryl_source_to_state.insert(source, state);
     }
-    let project = |source: AbsoluteAddr| source_to_state[&source];
+    let project = |source: AbsoluteAddr| veryl_source_to_state[&source];
     let project_regioned = |source: RegionedAbsoluteAddr| RegionedStateAddr {
         region: source.region,
         instance_id: source.instance_id,
-        var_id: source_to_state[&source.absolute_addr()].var_id,
+        var_id: veryl_source_to_state[&source.absolute_addr()].var_id,
     };
 
     let sir = source_sir.into_map_addr(project, project_regioned);
@@ -1104,6 +1129,25 @@ pub fn schedule_symbolic_rtl(
         }
     }
 
+    let source_to_state = veryl_source_to_state
+        .iter()
+        .map(|(source, state)| {
+            let module = instance_modules[&source.instance_id];
+            let var_id = source_id_maps[&module][&source.var_id];
+            (
+                crate::SourceAddr {
+                    instance_id: source.instance_id,
+                    var_id,
+                },
+                *state,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let state_to_source = source_to_state
+        .iter()
+        .map(|(source, state)| (*state, *source))
+        .collect();
+
     let scheduled = ScheduledRtl {
         sir,
         design: ElaboratedDesign {
@@ -1117,7 +1161,10 @@ pub fn schedule_symbolic_rtl(
             indexed_instances,
             module_variables: mod_vars,
             module_var_path_index: mod_path_idx,
-            module_names,
+            module_names: module_names
+                .into_iter()
+                .map(|(module, name)| (module, string_of(name)))
+                .collect(),
             source_to_state,
             state_to_source,
             event_aliases,
@@ -1143,24 +1190,38 @@ fn module_variables(
     config: &BuildConfig,
 ) -> Result<
     (
-        HashMap<ModuleId, HashMap<VarId, VariableInfo>>,
-        HashMap<ModuleId, HashMap<VarPath, Option<VarId>>>,
+        HashMap<ModuleId, HashMap<SourceVarId, VariableInfo>>,
+        HashMap<ModuleId, HashMap<Vec<String>, Option<SourceVarId>>>,
+        HashMap<ModuleId, HashMap<VarId, SourceVarId>>,
     ),
     ParserError,
 > {
     let mut res = HashMap::default();
     let mut path_index = HashMap::default();
+    let mut id_maps = HashMap::default();
     for (id, module) in module_ir {
         let mut variables = HashMap::default();
-        let mut paths: HashMap<VarPath, Option<VarId>> = HashMap::default();
-        for (id, varibale) in &module.variables {
+        let mut paths: HashMap<Vec<String>, Option<SourceVarId>> = HashMap::default();
+        let mut ids = HashMap::default();
+        let mut source_variables = module.variables.iter().collect::<Vec<_>>();
+        source_variables.sort_unstable_by_key(|(id, _)| **id);
+        for (index, (id, variable)) in source_variables.into_iter().enumerate() {
+            let source_id = SourceVarId(u32::try_from(index).map_err(|_| {
+                ParserError::illegal_context(
+                    "frontend source identity projection",
+                    format!("module {} has more than u32::MAX variables", module.name),
+                    None,
+                )
+            })?);
+            ids.insert(*id, source_id);
             // Only module-scope variables are externally addressable. Locals
             // may share the same VarPath, but must not make a legal
             // hierarchical or public lookup appear ambiguous.
-            if varibale.affiliation == Affiliation::Module {
-                match paths.entry(varibale.path.clone()) {
+            let path = path_strings(&variable.path);
+            if variable.affiliation == Affiliation::Module {
+                match paths.entry(path.clone()) {
                     std::collections::hash_map::Entry::Vacant(e) => {
-                        e.insert(Some(*id));
+                        e.insert(Some(source_id));
                     }
                     std::collections::hash_map::Entry::Occupied(mut e) => {
                         // Duplicate visible VarPath — mark as ambiguous.
@@ -1171,30 +1232,31 @@ fn module_variables(
             let (dimensions, _, _) = bitaccess::get_dimensions_and_strides(module, *id)?;
             let packed_dims = dimensions
                 .into_iter()
-                .skip(varibale.r#type.array.iter().count())
+                .skip(variable.r#type.array.iter().count())
                 .collect();
             variables.insert(
-                *id,
+                source_id,
                 VariableInfo {
-                    id: *id,
-                    path: varibale.path.clone(),
-                    var_kind: varibale.kind,
-                    signed: varibale.r#type.signed,
+                    id: source_id,
+                    path,
+                    var_kind: variable_kind(variable.kind),
+                    signed: variable.r#type.signed,
                     packed_dims,
                     metadata: VariableMetadata {
-                        width: resolve_total_width(module, varibale)?,
-                        is_4state: is_4state_type(&varibale.r#type.kind),
-                        kind: type_kind_to_domain_kind(&varibale.r#type.kind, config),
-                        type_kind: type_kind_to_port_type_kind(&varibale.r#type.kind, config),
-                        array_dims: varibale.r#type.array.iter().filter_map(|d| *d).collect(),
+                        width: resolve_total_width(module, variable)?,
+                        is_4state: is_4state_type(&variable.r#type.kind),
+                        kind: type_kind_to_domain_kind(&variable.r#type.kind, config),
+                        type_kind: type_kind_to_port_type_kind(&variable.r#type.kind, config),
+                        array_dims: variable.r#type.array.iter().filter_map(|d| *d).collect(),
                     },
                 },
             );
         }
         res.insert(*id, variables);
         path_index.insert(*id, paths);
+        id_maps.insert(*id, ids);
     }
-    Ok((res, path_index))
+    Ok((res, path_index, id_maps))
 }
 
 fn type_kind_to_port_type_kind(
@@ -1339,7 +1401,7 @@ fn propagate_boundaries(
             for (inst_name, glue_blocks) in &sim_module.glue_blocks {
                 for (idx, glue_block) in glue_blocks.iter().enumerate() {
                     let mut child_path = path.0.clone();
-                    child_path.push((*inst_name, idx));
+                    child_path.push((string_of(*inst_name), idx));
                     let child_id = expanded[&InstancePath(child_path)];
 
                     // Propagate from Parent to Child (Input Ports)
@@ -1416,7 +1478,7 @@ fn propagate_boundaries(
 
 fn expand(
     target: &ModuleId,
-    path: Vec<(StrId, usize)>,
+    path: Vec<(String, usize)>,
     modules: &HashMap<ModuleId, SimModule>,
     expanded: &mut HashMap<InstancePath, InstanceId>,
     instance_modules: &mut HashMap<InstanceId, ModuleId>,
@@ -1431,7 +1493,7 @@ fn expand(
         let indexed = module.indexed_instance_names.contains(inst_name) || gbs.len() > 1;
         for (idx, gb) in gbs.iter().enumerate() {
             let mut path = path.clone();
-            path.push((*inst_name, idx));
+            path.push((string_of(*inst_name), idx));
             let id = InstanceId(*instance_id);
             expanded.insert(InstancePath(path.clone()), id);
             instance_modules.insert(id, gb.module_id);
@@ -1552,7 +1614,7 @@ fn unify_clock_domains(
         for (inst_name, glue_blocks) in &sim_module.glue_blocks {
             for (idx, glue_block) in glue_blocks.iter().enumerate() {
                 let mut child_path = path.0.clone();
-                child_path.push((*inst_name, idx));
+                child_path.push((string_of(*inst_name), idx));
                 let child_id = expanded[&InstancePath(child_path)];
 
                 // Inputs: Parent -> Child (Parent drives Child)

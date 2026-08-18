@@ -52,10 +52,10 @@ use celox_design::{InstanceId, ModuleId, StateAddr, VariableMetadata};
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::fmt;
 use veryl_analyzer::ir::{Expression, Function, Statement, VarId, VarPath};
-use veryl_parser::resource_table::StrId;
 
 pub type RegionedVarAddr = celox_design::RegionedVarAddrBase<VarId>;
 pub type AbsoluteAddr = celox_design::AbsoluteAddrBase<VarId>;
+pub type SourceAddr = celox_design::AbsoluteAddrBase<SourceVarId>;
 pub type RegionedAbsoluteAddr = celox_design::RegionedAbsoluteAddrBase<VarId>;
 pub type GlueAddr = celox_slt::GlueAddrBase<VarId>;
 pub type GlueBlock = celox_slt::GlueBlockBase<VarId>;
@@ -70,11 +70,55 @@ pub(crate) fn function_call_has_arg<T>(args: &[(VarPath, T)], path: &VarPath) ->
     args.iter().any(|(candidate, _)| candidate == path)
 }
 
+/// Frontend-local identity of a source variable within one module.
+///
+/// This is deliberately distinct from every parser or analyzer's variable ID.
+/// A frontend projects its native IDs into this namespace before constructing
+/// source lookup metadata retained by the runtime.
+#[derive(Debug, Clone, Copy, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SourceVarId(pub u32);
+
+impl fmt::Display for SourceVarId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "var{}", self.0)
+    }
+}
+
+/// Source-language-independent role of a frontend variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariableKind {
+    Parameter,
+    Constant,
+    Input,
+    Output,
+    Inout,
+    Variable,
+    Let,
+}
+
+impl VariableKind {
+    pub const fn is_port(self) -> bool {
+        matches!(self, Self::Input | Self::Output | Self::Inout)
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Parameter => "parameter",
+            Self::Constant => "constant",
+            Self::Input => "input",
+            Self::Output => "output",
+            Self::Inout => "inout",
+            Self::Variable => "variable",
+            Self::Let => "let-bounded variable",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct VariableInfo {
-    pub id: VarId,
-    pub path: VarPath,
-    pub var_kind: veryl_analyzer::ir::VarKind,
+    pub id: SourceVarId,
+    pub path: Vec<String>,
+    pub var_kind: VariableKind,
     pub signed: bool,
     pub metadata: VariableMetadata,
     /// Per-dimension sizes for the packed shape of the variable.
@@ -108,27 +152,26 @@ impl fmt::Debug for VariableInfo {
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct InstancePath(pub Vec<(StrId, usize)>);
+pub struct InstancePath(pub Vec<(String, usize)>);
 
-/// Frontend-local source identities retained for diagnostics and public path
-/// lookup. The current shared symbolic representation uses Veryl analyzer ID
-/// and path types internally for both adapters; compiler phases after
-/// elaboration consume flattened `celox-design` identities instead.
+/// Source-language-independent lookup retained for diagnostics and public paths.
+/// Parser-native IDs are projected into [`SourceVarId`] before this artifact is
+/// built and do not cross into runtime metadata.
 #[derive(Clone, Default)]
 pub struct FrontendLookup {
     pub instance_ids: HashMap<InstancePath, InstanceId>,
     pub instance_module: HashMap<InstanceId, ModuleId>,
     /// Elaborated children whose source-facing name requires an index.
     pub indexed_instances: HashSet<InstanceId>,
-    pub module_variables: HashMap<ModuleId, HashMap<VarId, VariableInfo>>,
+    pub module_variables: HashMap<ModuleId, HashMap<SourceVarId, VariableInfo>>,
     /// Reverse index from source path to source variable ID. `None` marks a
     /// path that is ambiguous within the module.
-    pub module_var_path_index: HashMap<ModuleId, HashMap<VarPath, Option<VarId>>>,
-    pub module_names: HashMap<ModuleId, StrId>,
+    pub module_var_path_index: HashMap<ModuleId, HashMap<Vec<String>, Option<SourceVarId>>>,
+    pub module_names: HashMap<ModuleId, String>,
     /// Bidirectional boundary map between frontend source identities and the
     /// dense source-independent state identities consumed by later phases.
-    pub source_to_state: HashMap<AbsoluteAddr, StateAddr>,
-    pub state_to_source: HashMap<StateAddr, AbsoluteAddr>,
+    pub source_to_state: HashMap<SourceAddr, StateAddr>,
+    pub state_to_source: HashMap<StateAddr, SourceAddr>,
     /// Event aliases projected to the canonical runtime event domain.
     pub event_aliases: HashMap<StateAddr, StateAddr>,
 }
@@ -148,14 +191,13 @@ impl FrontendLookup {
         let mut prefix = Vec::with_capacity(path.0.len());
         path.0
             .iter()
-            .map(|&(name, index)| {
-                prefix.push((name, index));
-                let name = veryl_parser::resource_table::get_str_value(name).unwrap();
+            .map(|(name, index)| {
+                prefix.push((name.clone(), *index));
                 let instance = self.instance_ids.get(&InstancePath(prefix.clone()));
                 if instance.is_some_and(|id| self.indexed_instances.contains(id)) {
                     format!("{name}[{index}]")
                 } else {
-                    name.to_string()
+                    name.clone()
                 }
             })
             .collect()
@@ -167,7 +209,7 @@ impl FrontendLookup {
         Some((instance_id, module_id))
     }
 
-    pub fn root_variable(&self, var_id: VarId) -> Option<(StateAddr, &VariableInfo)> {
+    pub fn root_variable(&self, var_id: SourceVarId) -> Option<(StateAddr, &VariableInfo)> {
         let (instance_id, _) = self.root_instance_and_module()?;
         self.instance_variable(instance_id, var_id)
     }
@@ -175,29 +217,29 @@ impl FrontendLookup {
     pub fn instance_variable(
         &self,
         instance_id: InstanceId,
-        var_id: VarId,
+        var_id: SourceVarId,
     ) -> Option<(StateAddr, &VariableInfo)> {
         let module_id = *self.instance_module.get(&instance_id)?;
         let info = self.module_variables.get(&module_id)?.get(&var_id)?;
-        let address = self.state_address(&AbsoluteAddr {
+        let address = self.state_address(&SourceAddr {
             instance_id,
             var_id,
         })?;
         Some((address, info))
     }
 
-    pub fn root_named_variable(&self, name: StrId) -> Option<(StateAddr, &VariableInfo)> {
+    pub fn root_named_variable(&self, name: &str) -> Option<(StateAddr, &VariableInfo)> {
         let (_, module_id) = self.root_instance_and_module()?;
         let var_id = self
             .module_var_path_index
             .get(&module_id)?
-            .get(&VarPath(vec![name]))
+            .get(&vec![name.to_string()])
             .copied()
             .flatten()?;
         self.root_variable(var_id)
     }
 
-    pub fn get_path(&self, address: &AbsoluteAddr) -> String {
+    pub fn get_path(&self, address: &SourceAddr) -> String {
         let instance_path = self
             .instance_ids
             .iter()
@@ -215,13 +257,7 @@ impl FrontendLookup {
             result.extend(self.instance_path_segments(instance_path));
         }
         if let Some(variable_path) = variable_path {
-            for part in &variable_path.0 {
-                result.push(
-                    veryl_parser::resource_table::get_str_value(*part)
-                        .unwrap()
-                        .to_string(),
-                );
-            }
+            result.extend(variable_path.iter().cloned());
         }
         result.join(".")
     }
@@ -233,11 +269,11 @@ impl FrontendLookup {
             .unwrap_or_else(|| address.to_string())
     }
 
-    pub fn source_address(&self, address: &StateAddr) -> Option<AbsoluteAddr> {
+    pub fn source_address(&self, address: &StateAddr) -> Option<SourceAddr> {
         self.state_to_source.get(address).copied()
     }
 
-    pub fn state_address(&self, address: &AbsoluteAddr) -> Option<StateAddr> {
+    pub fn state_address(&self, address: &SourceAddr) -> Option<StateAddr> {
         self.source_to_state.get(address).copied()
     }
 }
@@ -246,6 +282,30 @@ impl FrontendLookup {
 /// facade. New code should use [`FrontendLookup`].
 pub type VerylFrontendLookup = FrontendLookup;
 
+/// Compiler-only bridge from Veryl analyzer IDs into neutral frontend IDs.
+/// This is carried by the Veryl testbench source and discarded after frontend
+/// bytecode compilation.
+#[derive(Clone, Default)]
+pub struct VerylIdMap {
+    pub module_variables: HashMap<ModuleId, HashMap<VarId, SourceVarId>>,
+}
+
+impl VerylIdMap {
+    pub fn source_var(&self, module: ModuleId, var: VarId) -> Option<SourceVarId> {
+        self.module_variables.get(&module)?.get(&var).copied()
+    }
+
+    pub fn instance_var(
+        &self,
+        lookup: &FrontendLookup,
+        instance: InstanceId,
+        var: VarId,
+    ) -> Option<SourceVarId> {
+        let module = *lookup.instance_module.get(&instance)?;
+        self.source_var(module, var)
+    }
+}
+
 /// Veryl-owned source input for frontend testbench lowering.
 ///
 /// This artifact is intentionally separate from semantic design/runtime
@@ -253,6 +313,7 @@ pub type VerylFrontendLookup = FrontendLookup;
 /// inspected by SIR optimization, layout, or backend code generation.
 #[derive(Clone, Default)]
 pub struct VerylTestbenchSource {
+    pub id_map: VerylIdMap,
     pub initial_statements: Option<Vec<Statement>>,
     pub functions: HashMap<VarId, Function>,
     pub components: Vec<celox_testbench::TestbenchComponent>,

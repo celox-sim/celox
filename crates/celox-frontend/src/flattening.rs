@@ -49,7 +49,11 @@ pub fn flatten_module(
         for (idx, gb) in gbs.iter().enumerate() {
             let mut glue_cache = HashMap::default();
             let mut child_path = path.0.clone();
-            child_path.push((*child_instance_name, idx));
+            child_path.push((
+                veryl_parser::resource_table::get_str_value(*child_instance_name)
+                    .unwrap_or_default(),
+                idx,
+            ));
             let child_id = instance_ids[&InstancePath(child_path)];
             comb_blocks.extend(convert_glue_block(
                 gb,
@@ -1297,6 +1301,8 @@ module Top (
         let mut instance_ids = HashMap::default();
         let top_path = InstancePath(vec![]);
         let child_instance_name = *top_module_sim.glue_blocks.keys().next().unwrap();
+        let child_instance_name =
+            veryl_parser::resource_table::get_str_value(child_instance_name).unwrap();
         let child_path = InstancePath(vec![(child_instance_name, 0)]);
         assert!(
             instance_ids

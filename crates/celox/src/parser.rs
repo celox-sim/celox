@@ -85,7 +85,7 @@ fn dump_addr_map_if_requested(program: &RuntimeProgram, diagnostics: &crate::Run
             .frontend
             .module_names
             .get(&module_id)
-            .and_then(|name| resource_table::get_str_value(*name))
+            .cloned()
             .unwrap_or_default();
         let Some(addr) = program.state_address_for_source(instance_id, var_id) else {
             continue;
@@ -382,12 +382,13 @@ fn dynamic_for_diagnostics(
                 .frontend_lookup
                 .module_names
                 .get(&module)
-                .copied()
+                .cloned()
         })
         .and_then(|root_module_name| {
             ir.components.iter().find_map(|component| match component {
                 veryl_analyzer::ir::Component::Module(module)
-                    if module.name == root_module_name =>
+                    if resource_table::get_str_value(module.name).as_deref()
+                        == Some(root_module_name.as_str()) =>
                 {
                     Some(module)
                 }

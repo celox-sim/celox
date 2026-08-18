@@ -37,8 +37,8 @@ pub(crate) use fxhash::FxHashMap as HashMap;
 pub(crate) use fxhash::FxHashSet as HashSet;
 pub use ir::{
     AbsoluteAddr, AddrLookupError, FrontendLookup, InstancePath, LaidOutProgram, OptimizedSir,
-    PortTypeKind, RuntimeErrorInfo, RuntimeProgram, SignalRef, SirProgram, UnoptimizedSir,
-    VariableInfo, VerylFrontendLookup,
+    PortTypeKind, RuntimeErrorInfo, RuntimeProgram, SignalRef, SirProgram, SourceAddr, SourceVarId,
+    UnoptimizedSir, VariableInfo, VariableKind, VerylFrontendLookup,
 };
 pub use num_bigint::BigUint;
 pub use optimizer::OptLevel;

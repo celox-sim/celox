@@ -16,6 +16,8 @@ x86-64, Cranelift, and Wasm backends all consume the same laid-out representatio
 | :--- | :--- | :--- |
 | `VarId` | Frontend-local variable ID used by the current symbolic module representation | Frontend `SimModule` only |
 | `AbsoluteAddrBase<VarId>` | Flattened frontend address before source identities are discarded | Frontend scheduling only |
+| `SourceVarId` | Frontend-neutral variable ID projected from a parser/analyzer ID | Source lookup only |
+| `SourceAddr` | An elaborated instance plus `SourceVarId` | Source lookup ↔ runtime-state projection |
 | `StateAddr` (`AbsoluteAddr` facade alias) | Dense source-independent state-object ID | Design, SIR, optimization, runtime schema |
 | `RegionedStateAddr` (`RegionedAbsoluteAddr` alias) | `StateAddr` qualified by Stable/Working/SparseWorking storage role | SIR and layout |
 | `SignalRef` | Cached physical layout handle | Runtime access |
@@ -29,6 +31,11 @@ arenas and source adapter references; `schedule_symbolic_rtl` consumes it and re
 `ScheduledRtl`, after which no `NodeId` or SLT arena is legal. The facade then uses the following
 source-independent artifacts. There is no general object whose valid fields depend on which
 passes happened to run.
+
+`FrontendLookup` also crosses this boundary, but it contains only `SourceVarId`, owned string
+paths, and their projection to `StateAddr`. Analyzer-native IDs such as Veryl's `VarId` and
+`StrId` remain in frontend compiler inputs used for testbench lowering and are discarded before
+`RuntimeProgram` is returned.
 
 ```rust
 pub struct UnoptimizedSir {

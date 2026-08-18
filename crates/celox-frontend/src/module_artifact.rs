@@ -99,8 +99,10 @@ impl fmt::Debug for RelocationModule {
 /// Source-independent SIR and design data produced after all SLT nodes have
 /// been scheduled and lowered.
 ///
-/// No `NodeId` or SLT arena may cross this boundary. Veryl identities retained
-/// for diagnostics and public path lookup live only in `frontend_lookup`.
+/// No `NodeId` or SLT arena may cross this boundary. `frontend_lookup` contains
+/// only neutral source IDs and owned strings. Veryl analyzer IDs survive only
+/// in `testbench_source`, which the frontend consumes before constructing the
+/// runtime program.
 #[derive(Clone)]
 pub struct ScheduledRtl {
     pub sir: SirProgram<StateAddr, RegionedStateAddr>,

@@ -1,11 +1,11 @@
 use crate::HashMap;
-use crate::ir::{InstanceId, InstancePath, ModuleId};
+use crate::ir::{InstanceId, InstancePath, ModuleId, SourceVarId};
 use crate::parser::module::ModuleParser;
 use celox_frontend::AbsoluteAddr as FrontendAbsoluteAddr;
 use celox_slt::SLTNodeArena;
 use veryl_analyzer::{
     Analyzer, Context,
-    ir::{Component, Declaration, Ir, VarId},
+    ir::{Component, Declaration, Ir},
 };
 use veryl_metadata::Metadata;
 use veryl_parser::{Parser, resource_table};
@@ -86,7 +86,7 @@ fn setup_to_flatting(
 
     for (next_instance_id, inst_name) in (1..).zip(sim_module.glue_blocks.keys()) {
         let mut child_path = path.0.clone();
-        child_path.push((*inst_name, 0));
+        child_path.push((resource_table::get_str_value(*inst_name).unwrap(), 0));
         let child_id = InstanceId(next_instance_id);
         instance_ids.insert(InstancePath(child_path), child_id);
         glue_instance_map.insert(*inst_name, child_id);
@@ -364,8 +364,8 @@ fn test_instances_inherit_module_boundaries() {
     let program = setup_and_parse(code, "Top");
 
     // Helper to find instance IDs
-    let c1_path = InstancePath(vec![(resource_table::insert_str("c1"), 0)]);
-    let c2_path = InstancePath(vec![(resource_table::insert_str("c2"), 0)]);
+    let c1_path = InstancePath(vec![("c1".to_string(), 0)]);
+    let c2_path = InstancePath(vec![("c2".to_string(), 0)]);
 
     let c1_id = program
         .frontend
@@ -379,18 +379,17 @@ fn test_instances_inherit_module_boundaries() {
         .expect("c2 instance not found");
 
     // Find VarId for 'x' in Child module
-    let child_name = resource_table::insert_str("Child");
     let child_module_id = program
         .frontend
         .module_names
         .iter()
-        .find(|(_, name)| **name == child_name)
+        .find(|(_, name)| name.as_str() == "Child")
         .map(|(id, _)| *id)
         .expect("Child module not found");
     let child_vars = &program.frontend.module_variables[&child_module_id];
     let x_info = child_vars
         .values()
-        .find(|info| info.path.0.len() == 1 && info.path.0[0] == resource_table::insert_str("x"))
+        .find(|info| info.path.as_slice() == ["x"])
         .unwrap();
     let x_id = x_info.id;
 
@@ -507,7 +506,7 @@ struct StoreInfo {
 fn find_stores_to_var(
     program: &crate::ir::UnoptimizedSir,
     instance_id: crate::ir::InstanceId,
-    var_id: VarId,
+    var_id: SourceVarId,
 ) -> Vec<StoreInfo> {
     let expected = program
         .state_address_for_source(instance_id, var_id)
