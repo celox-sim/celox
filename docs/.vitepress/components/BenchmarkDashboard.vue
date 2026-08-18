@@ -57,15 +57,13 @@ interface Series {
     | "native-tb"
     | "ts"
     | "verilator"
-    | "heliodor-celox-jit"
-    | "heliodor-celox-total"
-    | "heliodor-celox-compile"
-    | "heliodor-veryl"
-    | "heliodor-veryl-compile"
+    | "heliodor-native-x86_64-jit"
     | "heliodor-native-x86_64"
     | "heliodor-cranelift-x86_64"
+    | "heliodor-veryl-x86_64"
     | "heliodor-native-aarch64"
     | "heliodor-cranelift-aarch64"
+    | "heliodor-veryl-aarch64"
     | "unknown";
   points: SeriesPoint[];
 }
@@ -140,6 +138,40 @@ function singleSection(cards: ChartCard[]): TabSection[] {
   return cards.length > 0 ? [{ label: "", cards }] : [];
 }
 
+function heliodorSections(cards: ChartCard[]): TabSection[] {
+  const architectures = [
+    {
+      label: "x86-64 host",
+      runtimes: new Set<Series["runtime"]>([
+        "heliodor-native-x86_64-jit",
+        "heliodor-native-x86_64",
+        "heliodor-cranelift-x86_64",
+        "heliodor-veryl-x86_64",
+      ]),
+    },
+    {
+      label: "AArch64 host",
+      runtimes: new Set<Series["runtime"]>([
+        "heliodor-native-aarch64",
+        "heliodor-cranelift-aarch64",
+        "heliodor-veryl-aarch64",
+      ]),
+    },
+  ];
+
+  return architectures
+    .map(({ label, runtimes }) => ({
+      label,
+      cards: cards
+        .map((card) => ({
+          ...card,
+          series: card.series.filter((series) => runtimes.has(series.runtime)),
+        }))
+        .filter((card) => card.series.length > 0),
+    }))
+    .filter((section) => section.cards.length > 0);
+}
+
 const overviewTabs: TabDef[] = [
   {
     key: "counter",
@@ -157,7 +189,7 @@ const overviewTabs: TabDef[] = [
     key: "heliodor",
     label: "Heliodor Linux",
     match: (n) => n.startsWith("heliodor_linux_boot_"),
-    sections: singleSection,
+    sections: heliodorSections,
   },
 ];
 
@@ -218,15 +250,13 @@ const RUNTIME_COLORS: Record<string, string> = {
   ts: "#22c55e",
   verilator: "#f97316",
   unknown: "#9ca3af",
-  "heliodor-celox-jit": "#3b82f6",
-  "heliodor-celox-total": "#a855f7",
-  "heliodor-celox-compile": "#06b6d4",
-  "heliodor-veryl": "#f97316",
-  "heliodor-veryl-compile": "#eab308",
+  "heliodor-native-x86_64-jit": "#06b6d4",
   "heliodor-native-x86_64": "#2563eb",
   "heliodor-cranelift-x86_64": "#a855f7",
+  "heliodor-veryl-x86_64": "#f97316",
   "heliodor-native-aarch64": "#16a34a",
-  "heliodor-cranelift-aarch64": "#f97316",
+  "heliodor-cranelift-aarch64": "#a855f7",
+  "heliodor-veryl-aarch64": "#f97316",
 };
 
 const RUNTIME_LABELS: Record<string, string> = {
@@ -236,15 +266,13 @@ const RUNTIME_LABELS: Record<string, string> = {
   ts: "Celox (ts)",
   verilator: "Verilator",
   unknown: "Unknown",
-  "heliodor-celox-jit": "Celox JIT code",
-  "heliodor-celox-total": "Celox post-compile total",
-  "heliodor-celox-compile": "Celox compile",
-  "heliodor-veryl": "Veryl-CC execution",
-  "heliodor-veryl-compile": "Veryl-CC compile",
+  "heliodor-native-x86_64-jit": "Native x86-64 (JIT code only)",
   "heliodor-native-x86_64": "Native x86-64",
   "heliodor-cranelift-x86_64": "Cranelift x86-64",
+  "heliodor-veryl-x86_64": "Veryl-CC x86-64",
   "heliodor-native-aarch64": "Native AArch64",
   "heliodor-cranelift-aarch64": "Cranelift AArch64",
+  "heliodor-veryl-aarch64": "Veryl-CC AArch64",
 };
 
 // --- State ---
@@ -258,7 +286,7 @@ const activeTab = ref("counter");
 
 function stripPrefix(name: string): string {
   return name.replace(
-    /^(rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-cranelift-x86_64|heliodor-native-aarch64|heliodor-cranelift-aarch64)\//,
+    /^(rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-cranelift-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-cranelift-aarch64|heliodor-veryl-cc-aarch64)\//,
     "",
   );
 }
@@ -285,15 +313,17 @@ function normalizeBenchName(benchName: string): string {
 }
 
 function runtime(name: string): Series["runtime"] {
-  if (name.startsWith("heliodor-celox-jit/")) return "heliodor-celox-jit";
-  if (name.startsWith("heliodor-celox-total/")) return "heliodor-celox-total";
-  if (name.startsWith("heliodor-celox-compile/")) return "heliodor-celox-compile";
-  if (name.startsWith("heliodor-veryl-compile/")) return "heliodor-veryl-compile";
-  if (name.startsWith("heliodor-veryl/")) return "heliodor-veryl";
+  if (name.startsWith("heliodor-celox-jit/")) return "heliodor-native-x86_64-jit";
+  if (name.startsWith("heliodor-celox-total/")) return "heliodor-native-x86_64";
+  if (name.startsWith("heliodor-celox-compile/")) return "heliodor-native-x86_64";
+  if (name.startsWith("heliodor-veryl-compile/")) return "heliodor-veryl-x86_64";
+  if (name.startsWith("heliodor-veryl/")) return "heliodor-veryl-x86_64";
   if (name.startsWith("heliodor-native-x86_64/")) return "heliodor-native-x86_64";
   if (name.startsWith("heliodor-cranelift-x86_64/")) return "heliodor-cranelift-x86_64";
+  if (name.startsWith("heliodor-veryl-cc-x86_64/")) return "heliodor-veryl-x86_64";
   if (name.startsWith("heliodor-native-aarch64/")) return "heliodor-native-aarch64";
   if (name.startsWith("heliodor-cranelift-aarch64/")) return "heliodor-cranelift-aarch64";
+  if (name.startsWith("heliodor-veryl-cc-aarch64/")) return "heliodor-veryl-aarch64";
   if (name.startsWith("rust-dse/")) return "rust-dse";
   if (name.startsWith("rust/") && stripPrefix(name).startsWith("native_tb_")) return "native-tb";
   if (name.startsWith("rust/")) return "rust";
@@ -381,15 +411,28 @@ function formatChartTitle(benchName: string): string {
 const allSeries = computed<Series[]>(() => {
   if (!rawData.value) return [];
 
-  const result: Series[] = [];
+  const seriesByKey = new Map<
+    string,
+    Omit<Series, "points"> & { pointsByDate: Map<number, SeriesPoint> }
+  >();
 
   for (const [, entries] of Object.entries(rawData.value.entries)) {
-    const map = new Map<string, SeriesPoint[]>();
-
     for (const entry of entries) {
       for (const b of entry.benches) {
-        if (!map.has(b.name)) map.set(b.name, []);
-        map.get(b.name)!.push({
+        const seriesRuntime = runtime(b.name);
+        const benchName = normalizeBenchName(stripPrefix(b.name));
+        const key = `${seriesRuntime}/${benchName}`;
+        let series = seriesByKey.get(key);
+        if (!series) {
+          series = {
+            key,
+            benchName,
+            runtime: seriesRuntime,
+            pointsByDate: new Map(),
+          };
+          seriesByKey.set(key, series);
+        }
+        series.pointsByDate.set(entry.date, {
           date: entry.date,
           commit: entry.commit.id.slice(0, 7),
           commitUrl: entry.commit.url,
@@ -397,18 +440,12 @@ const allSeries = computed<Series[]>(() => {
         });
       }
     }
-
-    for (const [name, points] of map) {
-      result.push({
-        key: name,
-        benchName: normalizeBenchName(stripPrefix(name)),
-        runtime: runtime(name),
-        points: points.sort((a, b) => a.date - b.date),
-      });
-    }
   }
 
-  return result;
+  return [...seriesByKey.values()].map(({ pointsByDate, ...series }) => ({
+    ...series,
+    points: [...pointsByDate.values()].sort((a, b) => a.date - b.date),
+  }));
 });
 
 function isPrimaryBench(benchName: string): boolean {
@@ -530,6 +567,7 @@ function makeChartOptions() {
         grid: { color: "rgba(255,255,255,0.06)" },
       },
       y: {
+        min: 0,
         ticks: {
           color: "#9ca3af",
           font: { size: 10 },
