@@ -3149,6 +3149,14 @@ fn lower_ff_processes(
         let clock_id = *name_to_id
             .get(clock.signal())
             .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
+        if variables
+            .get(&clock_id)
+            .is_some_and(|variable| variable.width != 1)
+        {
+            return Err(sv::AnalyzerError::Unsupported(
+                "multi-bit always_ff event signal".to_string(),
+            ));
+        }
         if reset_edges.contains_key(&clock_id) {
             return Err(sv::AnalyzerError::Unsupported(
                 "mixed clock/reset-edge polarities for one signal".to_string(),
@@ -3170,6 +3178,14 @@ fn lower_ff_processes(
             let reset_id = *name_to_id.get(reset.signal()).ok_or_else(|| {
                 sv::AnalyzerError::Unsupported("always_ff event control".to_string())
             })?;
+            if variables
+                .get(&reset_id)
+                .is_some_and(|variable| variable.width != 1)
+            {
+                return Err(sv::AnalyzerError::Unsupported(
+                    "multi-bit always_ff event signal".to_string(),
+                ));
+            }
             if clock_edges.contains_key(&reset_id) {
                 return Err(sv::AnalyzerError::Unsupported(
                     "mixed clock/reset-edge polarities for one signal".to_string(),
@@ -3187,6 +3203,14 @@ fn lower_ff_processes(
         let trigger_set = trigger_set_from_ff_process(process, name_to_id)
             .ok_or_else(|| sv::AnalyzerError::Unsupported("always_ff event control".to_string()))?;
         for reset in &trigger_set.resets {
+            if reset_clock_map
+                .get(reset)
+                .is_some_and(|clock| *clock != trigger_set.clock)
+            {
+                return Err(sv::AnalyzerError::Unsupported(
+                    "shared reset associated with multiple clocks".to_string(),
+                ));
+            }
             reset_clock_map.insert(*reset, trigger_set.clock);
         }
         let (eval_only, apply, eval_apply) = lower_ff_process(

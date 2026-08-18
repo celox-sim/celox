@@ -762,6 +762,11 @@ fn reject_silently_ignored_constructs(
                     "pull or supply net type".to_string(),
                 ));
             }
+            RefNode::NetType(sv_parser::NetType::Trireg(_)) => {
+                return Err(AnalyzerError::Unsupported(
+                    "trireg charge storage".to_string(),
+                ));
+            }
             RefNode::PackedDimensionRange(range)
                 if const_expr_from_ref_node(
                     RefNode::ConstantExpression(&range.nodes.0.nodes.1.nodes.0),
@@ -2819,7 +2824,17 @@ fn infer_const_expr_type(
             width: 1,
             signed: false,
         }),
-        ConstExpr::Function { .. } => None,
+        ConstExpr::Function { name, .. } => match name.as_str() {
+            "$clog2" => Some(ExprType {
+                width: 32,
+                signed: true,
+            }),
+            "$onehot" | "$onehot0" => Some(ExprType {
+                width: 1,
+                signed: false,
+            }),
+            _ => None,
+        },
         ConstExpr::Unary { op, expr } => {
             let operand = infer_const_expr_type(expr, parameter_types)?;
             if matches!(

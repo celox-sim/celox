@@ -3733,3 +3733,78 @@ fn uses_left_operand_signedness_when_context_sizing_shifts() {
     sim.tick(sim.event("clk")).unwrap();
     assert_eq!(sim.get(sim.signal("ff_y")), 0xfeu8.into());
 }
+
+#[test]
+fn preserves_constant_system_function_result_types() {
+    let source = r#"
+        module Top(output logic y);
+            localparam P = $onehot(1'b1);
+            localparam P0 = $onehot0(1'b0);
+            assign y = (~P == 1'b0) && (~P0 == 1'b0);
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("constant_system_function_types.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn rejects_trireg_charge_storage() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic en, output logic y);
+            trireg q;
+            assign q = en ? 1'b1 : 1'bz;
+            assign y = q;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("trireg charge storage"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_multi_bit_always_ff_event_signals() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic [1:0] clk, input logic d, output logic q);
+            always_ff @(posedge clk) q <= d;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("multi-bit always_ff event signal"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_shared_resets_associated_with_multiple_clocks() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(
+            input logic clk_a,
+            input logic clk_b,
+            input logic rst_n,
+            input logic d,
+            output logic q_a,
+            output logic q_b
+        );
+            always_ff @(posedge clk_a or negedge rst_n)
+                if (!rst_n) q_a <= 1'b0; else q_a <= d;
+            always_ff @(posedge clk_b or negedge rst_n)
+                if (!rst_n) q_b <= 1'b0; else q_b <= d;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("shared reset associated with multiple clocks"),
+        "unexpected error: {error}"
+    );
+}
