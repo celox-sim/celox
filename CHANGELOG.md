@@ -1,5 +1,64 @@
 # Changelog
 
+## [0.2.1](https://github.com/celox-sim/celox/compare/v0.2.0...v0.2.1) (2026-08-18)
+
+
+### Features
+
+* **vpi:** run cocotb on native program images ([c84f7c5](https://github.com/celox-sim/celox/commit/c84f7c54f61a4d777b2b4742ac1ad67f42590eb3))
+
+
+### Bug Fixes
+
+* **ci:** address release queue review ([3f02d10](https://github.com/celox-sim/celox/commit/3f02d10b4f431470665878d3ca9bbc35acc2438e))
+* **ci:** dequeue held release by pull request ([cc37747](https://github.com/celox-sim/celox/commit/cc37747cd999f26f23dc8038dcaf44d3a09e0a4e))
+* **ci:** verify release merge queue entry ([7ce179f](https://github.com/celox-sim/celox/commit/7ce179f7107f1c4c19aaf1a6cdc711380972185e))
+* **ci:** verify release merge queue entry ([fcffaf4](https://github.com/celox-sim/celox/commit/fcffaf4b806b7e1454105ddc5b7ee37bb53685af))
+* **frontend:** scope top parameter overrides ([5efe12e](https://github.com/celox-sim/celox/commit/5efe12e9a091f92dc3fde9abf226e21bc2d33de3))
+* **frontend:** scope top parameter overrides ([a114336](https://github.com/celox-sim/celox/commit/a1143368f681af6a51f6de27e777742dc477caef))
+* **vpi:** address portable runtime edge cases ([6b6d54c](https://github.com/celox-sim/celox/commit/6b6d54c34420b63cc6b27b4babcdbbbed4583b73))
+* **vpi:** enforce native runtime boundaries ([dae4cca](https://github.com/celox-sim/celox/commit/dae4cca20103c7a0208628584d08ef43169d60dd))
+* **vpi:** harden runtime event handling ([660c0f1](https://github.com/celox-sim/celox/commit/660c0f1020833a15255df90af187a70f3ca72d03))
+* **vpi:** honor callback and image requirements ([f92cfdf](https://github.com/celox-sim/celox/commit/f92cfdf12db6ea06011dd4de2427337ccd22ffc9))
+* **vpi:** make force writes transactional ([441d60d](https://github.com/celox-sim/celox/commit/441d60decec34a4c4cbdcc2b6f89594a826dc7ad))
+* **vpi:** own callback records and transitions ([47fd9b9](https://github.com/celox-sim/celox/commit/47fd9b901ba62950aee13e5063a24fba102417be))
+* **vpi:** preserve callback and release values ([8f7171f](https://github.com/celox-sim/celox/commit/8f7171f36b8a4f36b02e7f1f1e9df13ad32f3655))
+* **vpi:** preserve force and hierarchy semantics ([9e3d279](https://github.com/celox-sim/celox/commit/9e3d27923e22aeb1eff5de149d204be171851298))
+* **vpi:** preserve reflected object semantics ([48aaa2c](https://github.com/celox-sim/celox/commit/48aaa2c89b89bf2e2501d23926e6e18ed6c34be9))
+* **vpi:** preserve runtime diagnostic metadata ([b8a3a50](https://github.com/celox-sim/celox/commit/b8a3a505b40893134ef22e2a94a9d9973ea9f7ff))
+* **vpi:** preserve runtime event ordering ([475f676](https://github.com/celox-sim/celox/commit/475f676e2b4790f7d455c33a1d5058238c1fba72))
+* **vpi:** preserve singleton hierarchy names ([92e6980](https://github.com/celox-sim/celox/commit/92e698099fe39547ad036a8cb7bcd452936e2967))
+* **vpi:** preserve termination and output semantics ([a80c1df](https://github.com/celox-sim/celox/commit/a80c1dfda41f18f58b21e2e0e233c8a2464290cb))
+* **vpi:** render fatal ff events before errors ([647d869](https://github.com/celox-sim/celox/commit/647d8698035e9506cf2de4816ede08e528c2456a))
+* **vpi:** retain queued callback writes ([0a8980b](https://github.com/celox-sim/celox/commit/0a8980b497a26992727f246bae096e34f7abef9d))
+* **vpi:** settle pre-time callback writes ([438fd14](https://github.com/celox-sim/celox/commit/438fd148d52fc9b40f6156972862c9545a020969))
+* **wasm:** preserve array layout metadata ([8754e96](https://github.com/celox-sim/celox/commit/8754e96c6f7e08f401e909caad3153c39cc4d869))
+* **wasm:** preserve array layout metadata ([171c62d](https://github.com/celox-sim/celox/commit/171c62dd7be698f6ea41492766dd23b44db18903))
+
+
+### Performance Improvements
+
+* **frontend:** avoid temporary select buffers ([1dd9afa](https://github.com/celox-sim/celox/commit/1dd9afa5a1b286339160575195c191e65bf2744c))
+* **frontend:** borrow symbolic range parts ([286f5aa](https://github.com/celox-sim/celox/commit/286f5aa89e9010049d1ec61d9507add250fc921c))
+* **frontend:** build instance symbolic state lazily ([ce9f67f](https://github.com/celox-sim/celox/commit/ce9f67fac2597b581369a56ec1162249782c9eab))
+* **frontend:** build select strides in place ([bfdd266](https://github.com/celox-sim/celox/commit/bfdd266940c6f467d65c3cb60c9a97fcfc408eed))
+* **frontend:** initialize comb symbolic state lazily ([3983da2](https://github.com/celox-sim/celox/commit/3983da2f470c3d23b262f92e1afbe8dea825a8e0))
+* **frontend:** inline common uncovered windows ([f0eacb3](https://github.com/celox-sim/celox/commit/f0eacb3a920ea454f42e70bd5582f681d3e7756d))
+* **frontend:** limit comb path extraction to writes ([7a6e6d5](https://github.com/celox-sim/celox/commit/7a6e6d51eb2152b8e19d9279c419d4e7117f1d01))
+* **frontend:** merge sparse symbolic ranges linearly ([3a427b4](https://github.com/celox-sim/celox/commit/3a427b4228d99bb026c2071876eaf1d763f56626))
+* **frontend:** move single symbolic part sources ([ef9f3cc](https://github.com/celox-sim/celox/commit/ef9f3cc9ee9116d685f5836cf6f44143a93ef060))
+* **frontend:** propagate boundaries without clones ([bdbeaeb](https://github.com/celox-sim/celox/commit/bdbeaeb591d1150215345420b5974471d93ced9a))
+* **frontend:** reduce symbolic observer scans ([9515311](https://github.com/celox-sim/celox/commit/951531164ae0f6d82926631fb789d3e1fe5860f4))
+* **frontend:** reuse validated select geometry ([3520ddf](https://github.com/celox-sim/celox/commit/3520ddf661972786fff76a5b3fdf40be3b3d5ce9))
+* **slt:** allocate symbolic pages lazily ([7883640](https://github.com/celox-sim/celox/commit/7883640d8c41239be68039307159b00fb926d82b))
+* **slt:** avoid singleton schedule buffers ([1c6e19d](https://github.com/celox-sim/celox/commit/1c6e19dee6e78881f54d0bd2ad308b7b9ae6a70d))
+* **slt:** make symbolic construction sparse ([de431b6](https://github.com/celox-sim/celox/commit/de431b6b1b9d3e98649f16e8584d9ff7b43608c1))
+* **slt:** reduce scheduler construction overhead ([7ad38be](https://github.com/celox-sim/celox/commit/7ad38bea99902cc9ac61682097e194569c55ffb7))
+* **slt:** remove sparse ranges in place ([7d9f050](https://github.com/celox-sim/celox/commit/7d9f0502dfd902c92645e8661bacc64fabd2b408))
+* **slt:** reuse lowering cost buffers ([cf309c6](https://github.com/celox-sim/celox/commit/cf309c61fc7ba997e15703f743d239d385cda47f))
+* **slt:** share symbolic page tables across forks ([cc525db](https://github.com/celox-sim/celox/commit/cc525db89dfaa649092dc2f3b6635b8479ec9018))
+* **slt:** stream sparse symbolic diffs ([2a0642d](https://github.com/celox-sim/celox/commit/2a0642d5c3e7eb6875f6c8c02c84139649ea953c))
+
 ## [0.2.0](https://github.com/celox-sim/celox/compare/v0.1.35...v0.2.0) (2026-08-17)
 
 
