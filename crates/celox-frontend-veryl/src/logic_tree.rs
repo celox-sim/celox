@@ -1019,6 +1019,37 @@ fn merge_control_expr(
     }
 }
 
+fn materialize_aligned_symbolic_part(
+    id: VarId,
+    absolute: BitAccess,
+    value: &Option<(NodeId, HashSet<VarAtomBase<VarId>>)>,
+    relative: BitAccess,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(NodeId, HashSet<VarAtomBase<VarId>>), SLTNodeFactsError> {
+    let Some((expr, sources)) = value else {
+        let input = arena.alloc(SLTNode::Input {
+            variable: id,
+            signed: false,
+            index: Vec::new(),
+            access: absolute,
+        })?;
+        let mut sources = HashSet::default();
+        sources.insert(VarAtomBase::new(id, absolute.lsb, absolute.msb));
+        return Ok((input, sources));
+    };
+
+    let width = get_width(*expr, arena);
+    let expr = if width == 0 || (relative.lsb == 0 && relative.msb == width - 1) {
+        *expr
+    } else {
+        arena.alloc(SLTNode::Slice {
+            expr: *expr,
+            access: relative,
+        })?
+    };
+    Ok((expr, sources.clone()))
+}
+
 fn merge_symbolic_versions(
     module: &Module,
     then_store: &SymbolicStore<VarId>,
@@ -1045,33 +1076,34 @@ fn merge_symbolic_versions(
             continue;
         }
 
+        let var = &module.variables[id];
+        let var_width = resolve_total_width(module, var)?;
+        let aligned_parts = t_range_store
+            .aligned_parts(e_range_store)
+            .map_err(|error| range_store_error("conditional merge", error, None))?;
+        let store_width = aligned_parts
+            .last()
+            .map_or(0, |(access, _, _)| access.msb + 1);
+        if store_width != var_width {
+            return Err(ParserError::illegal_context(
+                "conditional merge",
+                format!(
+                    "symbolic range width {store_width} differs from declared width {var_width}"
+                ),
+                None,
+            ));
+        }
+
         let mut merged_range_store = RangeStore {
             ranges: std::collections::BTreeMap::new(),
         };
-
-        let mut all_lsbs: BTreeSet<usize> = t_range_store.ranges.keys().cloned().collect();
-        all_lsbs.extend(e_range_store.ranges.keys().cloned());
-
-        let var = &module.variables[id];
-        let var_width = resolve_total_width(module, var)?;
-        let mut lsbs_vec: Vec<usize> = all_lsbs.into_iter().collect();
-        lsbs_vec.push(var_width);
-
-        for i in 0..lsbs_vec.len() - 1 {
-            let lsb = lsbs_vec[i];
-            let next_lsb = lsbs_vec[i + 1];
-            let access = BitAccess::new(lsb, next_lsb - 1);
-
-            let then_parts = t_range_store
-                .get_parts(access)
-                .map_err(|error| range_store_error("conditional merge", error, None))?;
-            let else_parts = e_range_store
-                .get_parts(access)
-                .map_err(|error| range_store_error("conditional merge", error, None))?;
-            let t_modified = then_parts.iter().any(|(v, _)| v.is_some());
-            let e_modified = else_parts.iter().any(|(v, _)| v.is_some());
-            let (t_expr, t_sources) = combine_parts_with_default(*id, lsb, then_parts, arena)?;
-            let (e_expr, e_sources) = combine_parts_with_default(*id, lsb, else_parts, arena)?;
+        for (access, (then_value, then_access), (else_value, else_access)) in aligned_parts {
+            let t_modified = then_value.is_some();
+            let e_modified = else_value.is_some();
+            let (t_expr, t_sources) =
+                materialize_aligned_symbolic_part(*id, access, then_value, then_access, arena)?;
+            let (e_expr, e_sources) =
+                materialize_aligned_symbolic_part(*id, access, else_value, else_access, arena)?;
 
             let result_val = if !t_modified && !e_modified {
                 None
@@ -1094,9 +1126,10 @@ fn merge_symbolic_versions(
                 ))
             };
 
-            merged_range_store
-                .ranges
-                .insert(lsb, (result_val, next_lsb - lsb, lsb));
+            merged_range_store.ranges.insert(
+                access.lsb,
+                (result_val, access.msb - access.lsb + 1, access.lsb),
+            );
         }
 
         merged_store.insert(*id, merged_range_store);
@@ -3435,6 +3468,50 @@ mod tests {
         assert!(store.contains_key(&q));
         assert!(store.contains_key(&r));
         assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn conditional_merge_aligns_staggered_sparse_ranges() {
+        let code = r#"
+            module Top (
+                select: input logic,
+                base: input logic<8>,
+                then_value: input logic<4>,
+                else_value: input logic<4>,
+                q: output logic<8>
+            ) {
+                always_comb {
+                    q = base;
+                    if select {
+                        q[5:2] = then_value;
+                    } else {
+                        q[7:4] = else_value;
+                    }
+                }
+            }
+        "#;
+        let module = parse_top_module(code);
+        let comb = module
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .unwrap();
+        let mut arena = SLTNodeArena::new();
+        let (_, store, _, _, _) = parse_comb(&module, comb, &mut arena).unwrap();
+
+        let q = var_id_of(&module, &["q"]);
+        let partition = store[&q]
+            .ranges
+            .iter()
+            .map(|(&lsb, (value, width, origin))| {
+                assert!(value.is_some());
+                (lsb, *width, *origin)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(partition, vec![(0, 2, 0), (2, 2, 2), (4, 2, 4), (6, 2, 6)]);
     }
 
     #[test]
