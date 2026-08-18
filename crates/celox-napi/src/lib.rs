@@ -1682,7 +1682,7 @@ impl NativeSimulatorHandle {
                 .get(addr)
                 .is_some_and(|metadata| metadata.is_4state)
             {
-                regions.push((offset, celox::get_byte_size(layout.widths[addr])));
+                regions.push((offset, layout.plane_size(addr)));
             }
         }
         for (addr, &relative_offset) in &layout.working_offsets {
@@ -1694,7 +1694,7 @@ impl NativeSimulatorHandle {
             {
                 regions.push((
                     layout.working_base_offset + relative_offset,
-                    celox::get_byte_size(layout.widths[addr]),
+                    layout.plane_size(addr),
                 ));
             }
         }

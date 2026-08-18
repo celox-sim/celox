@@ -106,7 +106,7 @@ test("every bundled example runs successfully", async ({ page }) => {
 		counter: 2,
 		counter_sim: 2,
 		counter_vcd: 2,
-		four_state: 5,
+		four_state: 6,
 	})) {
 		await test.step(example, async () => {
 			await page.evaluate((name) => {

@@ -278,9 +278,15 @@ describe("Counter (Waveform)", () => {
 		veryl: `module FourStateDemo (
     a: input logic<8>,
     b: input logic<8>,
+    array_input: input logic<1> [8],
     snapshot: output logic<8>,
+    array_snapshot: output logic<8>,
 ) {
     assign snapshot = a;
+
+    for i in 0..8 :g {
+        assign array_snapshot[i] = array_input[i];
+    }
 }`,
 		testbench: `import { describe, it, expect } from "vitest";
 import { FourState, Simulation, Simulator, X } from "@celox-sim/celox";
@@ -307,6 +313,16 @@ describe("FourStateDemo", () => {
         const sim = Simulation.create(FourStateDemo, { fourState: true });
 
         expect(sim.fourState("a").mask).toBe(0xffn);
+
+        sim.dispose();
+    });
+
+    it("starts every unpacked array element as X", () => {
+        const sim = Simulator.create(FourStateDemo, { fourState: true });
+
+        sim.tick();
+
+        expect(sim.fourState("array_snapshot").mask).toBe(0xffn);
 
         sim.dispose();
     });
