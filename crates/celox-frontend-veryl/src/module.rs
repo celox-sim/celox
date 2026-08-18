@@ -2037,6 +2037,7 @@ impl<'a> ModuleParser<'a> {
             variables: self.module.variables.clone(),
             name: self.module.name,
             glue_blocks: self.glue_blocks,
+            indexed_instance_names: HashSet::default(),
             ff_access_summaries,
             eval_only_ff_blocks,
             apply_ff_blocks,

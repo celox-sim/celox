@@ -1047,6 +1047,8 @@ pub struct EmitResult {
     pub required_state_size: u32,
     /// Machine-code offsets for MIR basic-block entry labels.
     pub block_offsets: Vec<(BlockId, u64)>,
+    /// Host feature bits actually required by instructions in this function.
+    pub required_image_features: u8,
 }
 
 /// Exact intermediate forms captured while emitting one native function.
@@ -2129,6 +2131,36 @@ fn emit_planned(
     tick_loop: bool,
     check_runtime_events: bool,
 ) -> Result<EmitResult, EmitError> {
+    let mut uses_bmi2 = false;
+    let mut uses_avx = false;
+    let mut uses_popcnt = false;
+    for inst in func.blocks.iter().flat_map(|block| &block.insts) {
+        uses_bmi2 |= matches!(inst, MInst::Pext { .. } | MInst::Pdep { .. })
+            || matches!(
+                inst,
+                MInst::Shr { .. } | MInst::Shl { .. } | MInst::Sar { .. }
+            ) && matches!(
+                func.target_features.variable_shift_encoding(),
+                VariableShiftEncoding::Bmi2
+            );
+        uses_avx |= func.target_features.avx()
+            && matches!(
+                inst,
+                MInst::X86Simd(
+                    X86SimdInst::Zero128 { .. }
+                        | X86SimdInst::Load128 { .. }
+                        | X86SimdInst::Binary128 { .. }
+                        | X86SimdInst::Store128 { .. }
+                )
+            );
+        uses_popcnt |= matches!(inst, MInst::Popcnt { .. });
+    }
+    let required_image_features = super::features::emitted_image_feature_bits(
+        func.target_features,
+        uses_bmi2,
+        uses_avx,
+        uses_popcnt,
+    );
     let mut asm = CodeAssembler::new(64)?;
     let block_order = emission_block_order(func);
 
@@ -2640,6 +2672,7 @@ fn emit_planned(
         frame_size: spill_frame_size,
         required_state_size: arena.total_size,
         block_offsets,
+        required_image_features,
     })
 }
 
@@ -5990,10 +6023,58 @@ fn log_sir_width_stats(eu: &crate::ExecutionUnit<crate::RegionedAbsoluteAddr>) {
 #[cfg(test)]
 mod shift_encoding_tests {
     use super::*;
-    use crate::native::features::{StateBaseStrategy, X86Features};
+    use crate::native::features::{
+        IMAGE_FEATURE_AVX, IMAGE_FEATURE_BMI2, IMAGE_FEATURE_POPCNT, StateBaseStrategy, X86Features,
+    };
     use crate::native::jit_mem::JitCode;
     use crate::native::{mir_legalize, mir_opt, regalloc};
     use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, Register};
+
+    #[test]
+    fn empty_function_does_not_require_unused_host_isa_features() {
+        let mut function = MFunction::new(VRegAllocator::new(), Vec::new());
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Return);
+        function.push_block(block);
+
+        let emitted = emit(&function, &AssignmentMap::default(), 0).unwrap();
+
+        assert_eq!(
+            emitted.required_image_features
+                & (IMAGE_FEATURE_BMI2 | IMAGE_FEATURE_AVX | IMAGE_FEATURE_POPCNT),
+            0
+        );
+    }
+
+    #[test]
+    fn popcnt_instruction_records_its_image_requirement() {
+        let mut vregs = VRegAllocator::new();
+        let src = vregs.alloc();
+        let dst = vregs.alloc();
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+        function.target_features = X86Features::for_test(false);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm { dst: src, value: 7 });
+        block.push(MInst::Popcnt { dst, src });
+        block.push(MInst::Store {
+            base: BaseReg::SimState,
+            offset: 0,
+            src: dst,
+            size: OpSize::S64,
+        });
+        block.push(MInst::Return);
+        function.push_block(block);
+
+        let allocation = regalloc::run_regalloc(&mut function).unwrap();
+        let emitted = emit(
+            &function,
+            &allocation.assignment,
+            allocation.spill_frame_size,
+        )
+        .unwrap();
+
+        assert_ne!(emitted.required_image_features & IMAGE_FEATURE_POPCNT, 0);
+    }
 
     #[test]
     fn vector_binary_ops_execute_both_lanes_without_gpr_roundtrips() {
@@ -7365,6 +7446,10 @@ mod shift_encoding_tests {
         );
         let allocation = regalloc::run_regalloc(&mut func).unwrap();
         let emitted = emit(&func, &allocation.assignment, allocation.spill_frame_size).unwrap();
+        assert_eq!(
+            emitted.required_image_features & IMAGE_FEATURE_BMI2,
+            if use_bmi2 { IMAGE_FEATURE_BMI2 } else { 0 }
+        );
         let jit = JitCode::new(&emitted.code).unwrap();
         let lhs_value = 0x8000_0000_0000_0001u64;
 

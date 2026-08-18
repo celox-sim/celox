@@ -37,6 +37,36 @@ fn string_of(id: StrId) -> String {
     resource_table::get_str_value(id).unwrap_or_default()
 }
 
+fn elaborated_scope_name(
+    root_name: &str,
+    path: &InstancePath,
+    expanded: &HashMap<InstancePath, InstanceId>,
+    indexed_instances: &HashSet<InstanceId>,
+) -> String {
+    let mut prefix = Vec::with_capacity(path.0.len());
+    let segments = path
+        .0
+        .iter()
+        .map(|&(name, index)| {
+            prefix.push((name, index));
+            let name = string_of(name);
+            let indexed = expanded
+                .get(&InstancePath(prefix.clone()))
+                .is_some_and(|id| indexed_instances.contains(id));
+            if indexed {
+                format!("{name}[{index}]")
+            } else {
+                name
+            }
+        })
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        root_name.to_string()
+    } else {
+        format!("{root_name}.{}", segments.join("."))
+    }
+}
+
 fn testbench_source_location(
     token: &veryl_parser::token_range::TokenRange,
 ) -> Option<TestbenchSourceLocation> {
@@ -112,6 +142,8 @@ fn collect_testbench_components(
     module: &Module,
     parent_instance: InstanceId,
     parent_path: &InstancePath,
+    instance_ids: &HashMap<InstancePath, InstanceId>,
+    indexed_instances: &HashSet<InstanceId>,
     names: &mut HashSet<String>,
 ) -> Result<(Vec<TestbenchComponent>, Vec<VerylComponentBinding>), ParserError> {
     let mut components = Vec::new();
@@ -121,10 +153,19 @@ fn collect_testbench_components(
             continue;
         };
         let local_name = string_of(external.name);
+        let mut path_prefix = Vec::with_capacity(parent_path.0.len());
         let prefix = parent_path
             .0
             .iter()
-            .map(|(name, index)| format!("{}[{index}]", string_of(*name)))
+            .map(|&(name, index)| {
+                path_prefix.push((name, index));
+                let instance = instance_ids.get(&InstancePath(path_prefix.clone()));
+                if instance.is_some_and(|id| indexed_instances.contains(id)) {
+                    format!("{}[{index}]", string_of(name))
+                } else {
+                    string_of(name)
+                }
+            })
             .collect::<Vec<_>>()
             .join(".");
         let instance = if prefix.is_empty() {
@@ -443,7 +484,7 @@ pub fn schedule_symbolic_rtl(
         t.sim_modules = Some(modules.clone());
     }
 
-    let (expanded, instance_modules) =
+    let (expanded, instance_modules, indexed_instances) =
         timed_sub!("expand_hierarchy", expand_hierarchy(&root_id, &modules));
     let global_boundaries = timed_sub!(
         "propagate_boundaries",
@@ -491,6 +532,8 @@ pub fn schedule_symbolic_rtl(
             &expanded,
             &instance_modules,
             &modules,
+            &string_of(module_names[&root_id]),
+            &indexed_instances,
             &global_boundaries,
             &unpacked_element_widths,
             &clock_domains,
@@ -703,6 +746,7 @@ pub fn schedule_symbolic_rtl(
             let frontend_lookup = VerylFrontendLookup {
                 instance_ids: expanded.clone(),
                 instance_module: instance_modules.clone(),
+                indexed_instances: indexed_instances.clone(),
                 module_variables: err_vars,
                 module_var_path_index: err_path_idx,
                 module_names: module_names.clone(),
@@ -894,8 +938,14 @@ pub fn schedule_symbolic_rtl(
         let Some(module) = module_ir.get(module_id) else {
             continue;
         };
-        let (mut instance_components, mut instance_bindings) =
-            collect_testbench_components(module, instance_id, path, &mut component_names)?;
+        let (mut instance_components, mut instance_bindings) = collect_testbench_components(
+            module,
+            instance_id,
+            path,
+            &expanded,
+            &indexed_instances,
+            &mut component_names,
+        )?;
         components.append(&mut instance_components);
         component_bindings.append(&mut instance_bindings);
     }
@@ -1064,6 +1114,7 @@ pub fn schedule_symbolic_rtl(
         frontend_lookup: VerylFrontendLookup {
             instance_ids: expanded,
             instance_module: instance_modules,
+            indexed_instances,
             module_variables: mod_vars,
             module_var_path_index: mod_path_idx,
             module_names,
@@ -1128,6 +1179,7 @@ fn module_variables(
                     id: *id,
                     path: varibale.path.clone(),
                     var_kind: varibale.kind,
+                    signed: varibale.r#type.signed,
                     packed_dims,
                     metadata: VariableMetadata {
                         width: resolve_total_width(module, varibale)?,
@@ -1216,9 +1268,11 @@ fn expand_hierarchy(
 ) -> (
     HashMap<InstancePath, InstanceId>,
     HashMap<InstanceId, ModuleId>,
+    HashSet<InstanceId>,
 ) {
     let mut expanded = HashMap::default();
     let mut instance_modules = HashMap::default();
+    let mut indexed_instances = HashSet::default();
     let mut instance_id = 0;
     let path = vec![];
     let id = InstanceId(instance_id);
@@ -1231,9 +1285,10 @@ fn expand_hierarchy(
         modules,
         &mut expanded,
         &mut instance_modules,
+        &mut indexed_instances,
         &mut instance_id,
     );
-    (expanded, instance_modules)
+    (expanded, instance_modules, indexed_instances)
 }
 
 fn propagate_boundaries(
@@ -1376,16 +1431,24 @@ fn expand(
     modules: &HashMap<ModuleId, SimModule>,
     expanded: &mut HashMap<InstancePath, InstanceId>,
     instance_modules: &mut HashMap<InstanceId, ModuleId>,
+    indexed_instances: &mut HashSet<InstanceId>,
     instance_id: &mut usize,
 ) {
     let module = &modules[target];
     for (inst_name, gbs) in &module.glue_blocks {
+        // Generate loops can elaborate several scalar declarations under the
+        // same flattened name. Keep those scopes distinct until generate
+        // hierarchy segments become part of InstancePath.
+        let indexed = module.indexed_instance_names.contains(inst_name) || gbs.len() > 1;
         for (idx, gb) in gbs.iter().enumerate() {
             let mut path = path.clone();
             path.push((*inst_name, idx));
             let id = InstanceId(*instance_id);
             expanded.insert(InstancePath(path.clone()), id);
             instance_modules.insert(id, gb.module_id);
+            if indexed {
+                indexed_instances.insert(id);
+            }
             *instance_id += 1;
             expand(
                 &gb.module_id,
@@ -1393,6 +1456,7 @@ fn expand(
                 modules,
                 expanded,
                 instance_modules,
+                indexed_instances,
                 instance_id,
             );
         }
@@ -1591,6 +1655,8 @@ fn relocate_units(
     expanded: &HashMap<InstancePath, InstanceId>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
+    root_name: &str,
+    indexed_instances: &HashSet<InstanceId>,
     global_boundaries: &HashMap<AbsoluteAddr, std::collections::BTreeSet<usize>>,
     unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
     clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
@@ -1726,10 +1792,13 @@ fn relocate_units(
             },
         );
         let mut runtime_event_site_map = HashMap::default();
+        let scope = elaborated_scope_name(root_name, path, expanded, indexed_instances);
         for (local_site, site) in sim_module.runtime_event_sites.iter().enumerate() {
             let global_site = runtime_event_sites.len() as u32;
             runtime_event_site_map.insert(local_site as u32, global_site);
-            runtime_event_sites.push(site.clone());
+            let mut site = site.clone();
+            site.scope = Some(scope.clone());
+            runtime_event_sites.push(site);
         }
 
         let arena_start = global_arena.len();
@@ -2054,7 +2123,7 @@ fn build_comb_observer_capture_paths(
         };
         let emit_on_true = matches!(
             sites[observer.site_id as usize].kind,
-            RuntimeEventKind::Display
+            RuntimeEventKind::Display | RuntimeEventKind::Write
         );
         let fatal_error_code = matches!(
             sites[observer.site_id as usize].kind,
@@ -2107,7 +2176,7 @@ fn build_comb_observer_capture_paths(
                 let member = &observers[member_idx];
                 let member_emit_on_true = matches!(
                     sites[member.site_id as usize].kind,
-                    RuntimeEventKind::Display
+                    RuntimeEventKind::Display | RuntimeEventKind::Write
                 );
                 let member_fatal_error_code = matches!(
                     sites[member.site_id as usize].kind,

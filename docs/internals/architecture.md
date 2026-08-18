@@ -98,6 +98,47 @@ The backend is experimental and disabled by default. Enable the
 `experimental-arm64-backend` feature on the `celox` crate to select it as the
 default backend on AArch64; without the feature, AArch64 uses Cranelift.
 
+### Native program images
+
+The x86-64 and AArch64 compilers first produce a pointer-free
+`NativeProgramImage`. Every generated evaluation function is copied intact into
+one 16-byte-aligned code image; callable entries and event bindings are retained
+as offsets from the image base. Internal branches, jump tables, constant tables,
+and literal data remain inside their originating function blob.
+
+The precompiled host runtime attaches the image by copying it once into
+executable memory and resolving the recorded offsets into process-local function
+pointers. The same artifact can therefore be copied to another address and
+reattached without recompiling the design.
+
+The image also carries a source-independent reflection table. It records the
+elaborated instance tree and name-sorted signals, including their directions,
+signedness, packed and unpacked dimensions, four-state representation, and
+runtime state offsets. A precompiled runtime can therefore implement foreign
+interfaces such as VPI without retaining the Veryl analyzer or compiler IR.
+
+`NativeProgramImage` can also be serialized after a precompiled runtime
+executable. A fixed-size EOF trailer records the container version, target ISA,
+payload length, and checksum, so startup can find the design without parsing ELF
+or another platform executable format. Replacing an attached design preserves
+the runtime prefix and its file permissions. Container versions are validated
+strictly; compatibility between different versions is not implicit.
+
+`NativeProgramInstance` is the runtime-only entry point for the resulting
+artifact. It discovers an image in arbitrary runtime bytes or at the end of the
+current executable, maps the code into executable memory, allocates independent
+state, and exposes reflection plus the native backend to foreign-interface
+adapters. Loading and executing this path does not require source text or a
+compiler artifact.
+
+The `celox-vpi` runtime layer exports the VPI C ABI directly on this instance.
+It supports module/scope/signal handles, hierarchy iteration, common integer
+and string properties, scalar and vector value access, and the callback regions
+used by cocotb. The precompiled runtime loads cocotb's ordinary Icarus VPI
+adapter and drives timers, phase callbacks, value-change callbacks, and native
+clock/reset events without invoking the compiler. Delayed VPI writes and the
+full IEEE object model remain outside the initial compatibility subset.
+
 ### Cranelift
 
 The Cranelift backend translates SIR to Cranelift IR and uses Cranelift's JIT. It

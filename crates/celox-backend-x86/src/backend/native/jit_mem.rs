@@ -7,6 +7,7 @@ use memmap2::{Mmap, MmapMut};
 static PERF_MAP_INITIALIZED: Mutex<bool> = Mutex::new(false);
 
 /// Optional subrange symbol for Linux perf JIT maps.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JitSymbol {
     pub offset: usize,
     pub size: usize,
@@ -100,6 +101,23 @@ impl JitCode {
         let result = unsafe { (self.fn_ptr)(owned_bytes.as_mut_ptr()) };
         state.copy_from_slice(&owned_bytes[..state.len()]);
         result
+    }
+
+    /// Return a pointer to an entry inside this executable image.
+    ///
+    /// Native program images contain several independently emitted functions.
+    /// Every function is position-independent as long as its complete code and
+    /// trailing constant tables are copied together, so the runtime can retain
+    /// entry offsets and resolve them after placing the combined image.
+    pub fn entry_ptr(&self, offset: usize) -> Option<*const u8> {
+        (offset < self._mmap.len()).then(|| unsafe { self._mmap.as_ptr().add(offset) })
+    }
+
+    /// Bytes of the executable image, including alignment padding and constant
+    /// tables. This is the exact image that can later be copied into an AOT
+    /// container.
+    pub fn image(&self) -> &[u8] {
+        &self._mmap
     }
 }
 

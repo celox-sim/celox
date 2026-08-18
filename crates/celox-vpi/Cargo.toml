@@ -1,0 +1,37 @@
+[package]
+name                  = "celox-vpi"
+version.workspace     = true
+publish               = false
+authors.workspace     = true
+repository.workspace  = true
+license.workspace     = true
+description.workspace = true
+edition.workspace     = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "celox-vpi-runtime"
+path = "src/bin/runtime.rs"
+
+[[bin]]
+name = "celox-vpi-compile"
+path = "src/bin/compile.rs"
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+celox = { path = "../celox" }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+celox = { path = "../celox", features = ["experimental-arm64-backend"] }
+
+[dependencies]
+fxhash.workspace = true
+libloading = "0.9"
+veryl-metadata.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
