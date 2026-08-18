@@ -596,6 +596,14 @@ fn reject_silently_ignored_constructs(
             RefNode::FinalConstruct(_) => {
                 return Err(AnalyzerError::Unsupported("final construct".to_string()));
             }
+            RefNode::ElaborationSystemTask(_) => {
+                return Err(AnalyzerError::Unsupported(
+                    "elaboration system task".to_string(),
+                ));
+            }
+            RefNode::BindDirective(_) => {
+                return Err(AnalyzerError::Unsupported("bind directive".to_string()));
+            }
             RefNode::ConcurrentAssertionItem(_) => {
                 return Err(AnalyzerError::Unsupported(
                     "concurrent assertion".to_string(),

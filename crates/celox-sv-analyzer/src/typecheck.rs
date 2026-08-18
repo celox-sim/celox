@@ -576,6 +576,13 @@ fn literal_as_i128(value: &str) -> Option<i128> {
         }
         let value = u128::try_from(literal.value).ok()?;
         if !explicitly_signed || !literal.signed || literal.width == 0 {
+            // Constant values are stored together with their width and signedness
+            // in parallel environments. Preserve all 128 bits of an unsigned
+            // literal in the i128 slot as a bit pattern; typed substitution turns
+            // it back into a sized unsigned literal before evaluation.
+            if !literal.signed && literal.width == 128 {
+                return Some(value as i128);
+            }
             return i128::try_from(value).ok();
         }
         if literal.width > 128 {
@@ -832,6 +839,13 @@ mod literal_tests {
         assert_eq!(lit.width, 12);
         assert!(lit.signed);
         assert_eq!(lit.value, BigUint::from(42u32));
+    }
+
+    #[test]
+    fn preserves_128_bit_unsigned_literals_as_bit_patterns() {
+        let expr = ConstExpr::Literal("128'h80000000000000000000000000000000".to_string());
+
+        assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(i128::MIN));
     }
 
     #[test]

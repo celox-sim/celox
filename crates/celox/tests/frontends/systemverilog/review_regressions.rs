@@ -3798,6 +3798,60 @@ fn rejects_trireg_charge_storage() {
 }
 
 #[test]
+fn rejects_elaboration_system_tasks() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(output logic y);
+            $fatal(1, "invalid configuration");
+            assign y = 1'b1;
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("elaboration system task"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_bind_directives() {
+    let error = cranelift_build_error(
+        r#"
+        module Driver(output logic y);
+            assign y = 1'b1;
+        endmodule
+        module Top(output wire y);
+            bind Top Driver driver(.y(y));
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("bind directive"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn preserves_wide_unsigned_parameters_in_generate_conditions() {
+    let source = r#"
+        module Top(output logic y);
+            parameter logic [127:0] P = 128'h80000000000000000000000000000000;
+            if (P == 128'h80000000000000000000000000000000)
+                assign y = 1'b1;
+            else
+                assign y = 1'b0;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("wide_unsigned_parameter.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
 fn rejects_multi_bit_always_ff_event_signals() {
     let error = cranelift_build_error(
         r#"
