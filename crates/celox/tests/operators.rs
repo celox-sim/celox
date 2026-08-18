@@ -349,6 +349,114 @@ assign o = r;
 
     }
 
+    fn test_pow_operator_runtime_exponent_comb_and_ff(sim) {
+        @setup { let code = r#"
+module Top (
+    clk: input clock,
+    base: input logic<8>,
+    exponent: input logic<4>,
+    comb_o: output logic<8>,
+    ff_o: output logic<8>,
+    comb_seen: output logic<4>,
+    ff_seen: output logic<4>,
+) {
+    function observe_exponent (
+        value: input logic<4>,
+        observed: output logic<4>,
+    ) -> logic<4> {
+        observed = value;
+        return value;
+    }
+    assign comb_o = base ** observe_exponent(exponent, comb_seen);
+    always_ff (clk) {
+        ff_o = base ** observe_exponent(exponent, ff_seen);
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top");
+    let clk = sim.event("clk");
+    let base = sim.signal("base");
+    let exponent = sim.signal("exponent");
+    let comb_o = sim.signal("comb_o");
+    let ff_o = sim.signal("ff_o");
+    let comb_seen = sim.signal("comb_seen");
+    let ff_seen = sim.signal("ff_seen");
+
+    for (base_value, exponent_value, expected) in [
+        (3u8, 4u8, 81u8),
+        (7u8, 0u8, 1u8),
+        (2u8, 8u8, 0u8),
+    ] {
+        sim.modify(|io| {
+            io.set(base, base_value);
+            io.set(exponent, exponent_value);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(comb_o), expected.into());
+        assert_eq!(sim.get(ff_o), expected.into());
+        assert_eq!(sim.get(comb_seen), exponent_value.into());
+        assert_eq!(sim.get(ff_seen), exponent_value.into());
+    }
+
+    }
+
+    fn test_pow_operator_runtime_signed_and_unknown_operands(sim) {
+        @setup { let code = r#"
+module Top (
+    clk: input clock,
+    base: input signed logic<8>,
+    exponent: input signed logic<4>,
+    comb_o: output signed logic<8>,
+    ff_o: output signed logic<8>,
+) {
+    assign comb_o = base ** exponent;
+    always_ff (clk) {
+        ff_o = base ** exponent;
+    }
+}
+"#; }
+        @build Simulator::builder(code, "Top").four_state(true);
+    let clk = sim.event("clk");
+    let base = sim.signal("base");
+    let exponent = sim.signal("exponent");
+    let comb_o = sim.signal("comb_o");
+    let ff_o = sim.signal("ff_o");
+
+    for (base_value, exponent_value, expected) in [
+        (2u8, 0x0fu8, 0u8),  // 2 ** -1
+        (1u8, 0x0du8, 1u8),  // 1 ** -3
+        (0xffu8, 0x0du8, 0xffu8), // -1 ** -3
+        (0xffu8, 0x0eu8, 1u8), // -1 ** -2
+    ] {
+        sim.modify(|io| {
+            io.set(base, base_value);
+            io.set(exponent, exponent_value);
+        })
+        .unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(comb_o), expected.into());
+        assert_eq!(sim.get(ff_o), expected.into());
+    }
+
+    let full_unknown = BigUint::from(0xffu8);
+    sim.modify(|io| {
+        io.set_four_state(base, BigUint::from(0u8), BigUint::from(0u8));
+        io.set_four_state(exponent, BigUint::from(2u8), BigUint::from(1u8));
+    })
+    .unwrap();
+    sim.tick(clk).unwrap();
+    assert_eq!(
+        sim.get_four_state(comb_o),
+        (full_unknown.clone(), full_unknown.clone())
+    );
+    assert_eq!(
+        sim.get_four_state(ff_o),
+        (full_unknown.clone(), full_unknown)
+    );
+
+    }
+
     fn test_signed_comparison_after_as_cast(sim) {
         @ignore_on(veryl);
         @setup { let code = r#"

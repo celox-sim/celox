@@ -602,9 +602,6 @@ fn collect_parent_output_address_sources(
         Expression::Unary(_, inner, _) => {
             collect_parent_output_address_sources(module, store, inner, arena, out)
         }
-        Expression::Binary(lhs, veryl_analyzer::ir::Op::Pow, _, _) => {
-            collect_parent_output_address_sources(module, store, lhs, arena, out)
-        }
         Expression::Binary(lhs, _, rhs, _) => {
             collect_parent_output_address_sources(module, store, lhs, arena, out)?;
             collect_parent_output_address_sources(module, store, rhs, arena, out)
@@ -2550,7 +2547,7 @@ mod tests {
     }
 
     #[test]
-    fn output_address_sources_skip_power_exponent() {
+    fn output_address_sources_include_runtime_power_exponent() {
         let mut module = parse_top_module(
             r#"
 module Top (
@@ -2615,7 +2612,7 @@ module Top (
             &mut sources,
         )
         .unwrap();
-        assert!(!sources.contains_key(&data_id));
+        assert!(sources.contains_key(&data_id));
     }
 
     #[test]
