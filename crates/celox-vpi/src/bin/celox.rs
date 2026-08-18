@@ -232,6 +232,23 @@ fn set_environment(name: &str, value: impl AsRef<OsStr>) {
     unsafe { env::set_var(name, value) };
 }
 
+fn remove_environment(name: &str) {
+    // Safety: an attached image takes this single-threaded path before loading
+    // cocotb or invoking any foreign runtime code.
+    unsafe { env::remove_var(name) };
+}
+
+fn remove_stale_results(results_file: &Path) -> Result<(), String> {
+    match std::fs::remove_file(results_file) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "failed to remove stale cocotb results {}: {error}",
+            results_file.display()
+        )),
+    }
+}
+
 fn run_simulation(image: NativeProgramImage, arguments: SimulationArgs) -> Result<(), String> {
     let test_module = arguments
         .test_module
@@ -265,15 +282,21 @@ fn run_simulation(image: NativeProgramImage, arguments: SimulationArgs) -> Resul
         .map(|scope| scope.full_name.clone())
         .ok_or_else(|| "attached design has no top-level scope".to_string())?;
 
+    // A VPI startup failure can return control without producing a new xUnit
+    // file. Invalidate an earlier run so it cannot make this run look successful.
+    remove_stale_results(&results_file)?;
+
     set_environment("PYGPI_PYTHON_BIN", &python);
     set_environment("LIBPYTHON_LOC", libpython);
     set_environment("COCOTB_TOPLEVEL", top);
     set_environment("COCOTB_TEST_MODULES", test_module);
     set_environment("TOPLEVEL_LANG", "verilog");
     if let Some(testcase) = arguments.testcase {
+        remove_environment("COCOTB_TEST_FILTER");
         set_environment("COCOTB_TESTCASE", testcase);
     }
     if let Some(test_filter) = arguments.test_filter {
+        remove_environment("COCOTB_TESTCASE");
         set_environment("COCOTB_TEST_FILTER", test_filter);
     }
     set_environment("COCOTB_RESULTS_FILE", &results_file);
@@ -342,5 +365,16 @@ mod tests {
             arguments.results_file.as_deref(),
             Some(Path::new("build/results.xml"))
         );
+    }
+
+    #[test]
+    fn stale_results_are_removed_before_a_run() {
+        let temporary = tempfile::tempdir().unwrap();
+        let results = temporary.path().join("results.xml");
+        std::fs::write(&results, "stale passing results").unwrap();
+
+        remove_stale_results(&results).unwrap();
+        assert!(!results.exists());
+        remove_stale_results(&results).unwrap();
     }
 }

@@ -88,10 +88,18 @@ fn cocotb_drives_an_attached_native_flip_flop() {
     );
     let python_path = format!("{}:{site_packages}", fixture.display());
     let runtime = Command::new(&executable)
-        .args(["--test-module", "test_counter", "--python", &python])
+        .args([
+            "--test-module",
+            "test_counter",
+            "--test-filter",
+            "drives_native_flip_flop",
+            "--python",
+            &python,
+        ])
         .arg("--results-file")
         .arg(&results)
         .current_dir(&fixture)
+        .env("COCOTB_TESTCASE", "inherited_selector_must_be_cleared")
         .env("PYTHONPATH", python_path)
         .output()
         .unwrap();
@@ -103,6 +111,24 @@ fn cocotb_drives_an_attached_native_flip_flop() {
     );
 
     assert!(results.is_file());
+
+    let failed_runtime = Command::new(&executable)
+        .args(["--test-module", "missing_test_module", "--python", &python])
+        .arg("--results-file")
+        .arg(&results)
+        .current_dir(&fixture)
+        .output()
+        .unwrap();
+    assert!(
+        !failed_runtime.status.success(),
+        "cocotb startup failure reused stale passing results:\n{}\n{}",
+        String::from_utf8_lossy(&failed_runtime.stdout),
+        String::from_utf8_lossy(&failed_runtime.stderr)
+    );
+    assert!(
+        !results.exists(),
+        "failed cocotb startup left stale results in place"
+    );
 }
 
 #[test]
