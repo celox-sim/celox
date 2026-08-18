@@ -1346,6 +1346,38 @@ fn compile_binary_narrow(
     let l = locals.reg_map[lhs].clone();
     let r = locals.reg_map[rhs].clone();
 
+    if matches!(op, BinaryOp::EqCase | BinaryOp::NeCase) {
+        instrs.push(Instruction::LocalGet(l.value_idx));
+        instrs.push(Instruction::LocalGet(r.value_idx));
+        instrs.push(Instruction::I64Eq);
+        if four_state {
+            if let Some(mask_idx) = l.mask_idx {
+                instrs.push(Instruction::LocalGet(mask_idx));
+            } else {
+                instrs.push(Instruction::I64Const(0));
+            }
+            if let Some(mask_idx) = r.mask_idx {
+                instrs.push(Instruction::LocalGet(mask_idx));
+            } else {
+                instrs.push(Instruction::I64Const(0));
+            }
+            instrs.push(Instruction::I64Eq);
+            instrs.push(Instruction::I32And);
+        }
+        instrs.push(Instruction::I64ExtendI32U);
+        if matches!(op, BinaryOp::NeCase) {
+            instrs.push(Instruction::I64Const(1));
+            instrs.push(Instruction::I64Xor);
+        }
+        emit_mask_to_width(instrs, d_width);
+        instrs.push(Instruction::LocalSet(d.value_idx));
+        if let Some(mask_idx) = d.mask_idx {
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(mask_idx));
+        }
+        return;
+    }
+
     if four_state && matches!(op, BinaryOp::EqWildcard | BinaryOp::NeWildcard) {
         let compare_mask = locals.alloc(1);
         instrs.push(Instruction::LocalGet(
@@ -1562,6 +1594,7 @@ fn compile_binary_narrow(
             }
             instrs.push(Instruction::I64ExtendI32U);
         }
+        BinaryOp::EqCase | BinaryOp::NeCase => unreachable!("handled above"),
     }
 
     // Mask to destination width
@@ -1600,6 +1633,49 @@ fn compile_binary_wide(
     let d_chunks = d.num_chunks;
     let l_width = unit.register_map[lhs].width();
     let r_width = unit.register_map[rhs].width();
+
+    if matches!(op, BinaryOp::EqCase | BinaryOp::NeCase) {
+        let operand_chunks = l.num_chunks.max(r.num_chunks);
+        instrs.push(Instruction::I64Const(1));
+        for c in 0..operand_chunks {
+            emit_wide_get_chunk(instrs, &l, c);
+            emit_wide_get_chunk(instrs, &r, c);
+            instrs.push(Instruction::I64Eq);
+            instrs.push(Instruction::I64ExtendI32U);
+            instrs.push(Instruction::I64And);
+            if four_state {
+                if let Some(mask_idx) = l.mask_idx.filter(|_| c < l.num_chunks) {
+                    instrs.push(Instruction::LocalGet(mask_idx + c as u32));
+                } else {
+                    instrs.push(Instruction::I64Const(0));
+                }
+                if let Some(mask_idx) = r.mask_idx.filter(|_| c < r.num_chunks) {
+                    instrs.push(Instruction::LocalGet(mask_idx + c as u32));
+                } else {
+                    instrs.push(Instruction::I64Const(0));
+                }
+                instrs.push(Instruction::I64Eq);
+                instrs.push(Instruction::I64ExtendI32U);
+                instrs.push(Instruction::I64And);
+            }
+        }
+        if matches!(op, BinaryOp::NeCase) {
+            instrs.push(Instruction::I64Const(1));
+            instrs.push(Instruction::I64Xor);
+        }
+        instrs.push(Instruction::LocalSet(d.value_idx));
+        for c in 1..d_chunks {
+            instrs.push(Instruction::I64Const(0));
+            instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
+        }
+        if let Some(mask_idx) = d.mask_idx {
+            for c in 0..d_chunks {
+                instrs.push(Instruction::I64Const(0));
+                instrs.push(Instruction::LocalSet(mask_idx + c as u32));
+            }
+        }
+        return;
+    }
 
     if four_state && matches!(op, BinaryOp::EqWildcard | BinaryOp::NeWildcard) {
         let operand_width = l_width.max(r_width);
@@ -2182,6 +2258,7 @@ fn compile_binary_wide(
                 instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
             }
         }
+        BinaryOp::EqCase | BinaryOp::NeCase => unreachable!("handled above"),
     }
 
     // Mask top chunk to width
@@ -3164,10 +3241,34 @@ fn compile_unary(
                 instrs.push(Instruction::LocalSet(d.value_idx));
             } else {
                 // Wide negate: two's complement = NOT + 1
-                // TODO: proper wide negate
+                let carry = locals.alloc(1);
+                instrs.push(Instruction::I64Const(1));
+                instrs.push(Instruction::LocalSet(carry));
                 for c in 0..d.num_chunks {
-                    instrs.push(Instruction::I64Const(0));
+                    emit_wide_get_chunk(instrs, &s, c);
+                    instrs.push(Instruction::I64Const(-1));
+                    instrs.push(Instruction::I64Xor);
+                    instrs.push(Instruction::LocalGet(carry));
+                    instrs.push(Instruction::I64Add);
                     instrs.push(Instruction::LocalSet(d.value_idx + c as u32));
+
+                    // Adding the one-bit carry to the complemented chunk
+                    // overflows precisely when the result wraps to zero.
+                    instrs.push(Instruction::LocalGet(carry));
+                    instrs.push(Instruction::LocalGet(d.value_idx + c as u32));
+                    instrs.push(Instruction::I64Eqz);
+                    instrs.push(Instruction::I64ExtendI32U);
+                    instrs.push(Instruction::I64And);
+                    instrs.push(Instruction::LocalSet(carry));
+                }
+                let top_bits = d_width % 64;
+                if top_bits > 0 {
+                    let top = d.num_chunks - 1;
+                    let mask = (1u64 << top_bits) - 1;
+                    instrs.push(Instruction::LocalGet(d.value_idx + top as u32));
+                    instrs.push(Instruction::I64Const(mask as i64));
+                    instrs.push(Instruction::I64And);
+                    instrs.push(Instruction::LocalSet(d.value_idx + top as u32));
                 }
             }
         }
@@ -3306,7 +3407,7 @@ fn compile_unary(
 
     if four_state {
         compile_unary_mask(&d, op, &s, d_width, s_width, locals, instrs);
-        if !matches!(op, UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::BitNot) {
+        if !matches!(op, UnaryOp::Ident | UnaryOp::ToTwoState) {
             normalize_reg_with_mask(&d, d_width, instrs);
         }
     }

@@ -20,6 +20,7 @@ host-runtime = [
     "rand/thread_rng",
     "celox-sir-opt/timing",
 ]
+systemverilog = ["dep:celox-sv-analyzer"]
 experimental-arm64-backend = ["host-runtime", "dep:celox-backend-arm64"]
 
 [dependencies]
@@ -38,6 +39,7 @@ celox-sir             = { path = "../celox-sir" }
 celox-sir-opt         = { path = "../celox-sir-opt", default-features = false }
 celox-slt             = { path = "../celox-slt" }
 celox-state-layout    = { path = "../celox-state-layout" }
+celox-sv-analyzer     = { path = "../celox-sv-analyzer", optional = true }
 celox-runtime         = { path = "../celox-runtime" }
 celox-testbench       = { path = "../celox-testbench" }
 fxhash                = { workspace = true }
@@ -84,6 +86,11 @@ harness = false
 [[bench]]
 name = "overhead"
 harness = false
+
+[[test]]
+name = "systemverilog"
+path = "tests/systemverilog.rs"
+required-features = ["systemverilog"]
 
 [[bench]]
 name = "compilation"

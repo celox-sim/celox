@@ -14,6 +14,7 @@ members = [
     "crates/celox-sir-opt",
     "crates/celox-slt",
     "crates/celox-state-layout",
+    "crates/celox-sv-analyzer",
     "crates/celox-runtime",
     "crates/celox-testbench",
     "crates/celox-bench-sv",
@@ -47,6 +48,7 @@ veryl-parser = { git = "https://github.com/veryl-lang/veryl.git", rev = "35dca1f
 veryl-path = { git = "https://github.com/veryl-lang/veryl.git", rev = "35dca1f2b55d3646eaa3005ee9aaac077d00e087" }
 veryl-simulator = { git = "https://github.com/veryl-lang/veryl.git", rev = "35dca1f2b55d3646eaa3005ee9aaac077d00e087" }
 veryl-std = { git = "https://github.com/veryl-lang/veryl.git", rev = "35dca1f2b55d3646eaa3005ee9aaac077d00e087" }
+sv-parser = "0.13.5"
 
 bit-set         = "0.11"
 clap            = { version = "4.5.60", features = ["derive"] }

@@ -5629,6 +5629,8 @@ fn branchified_instruction_cost(
                 }
                 crate::ir::BinaryOp::Eq
                 | crate::ir::BinaryOp::Ne
+                | crate::ir::BinaryOp::EqCase
+                | crate::ir::BinaryOp::NeCase
                 | crate::ir::BinaryOp::EqWildcard
                 | crate::ir::BinaryOp::NeWildcard
                 | crate::ir::BinaryOp::LtU

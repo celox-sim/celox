@@ -1999,10 +1999,11 @@ impl NativeBackend {
                     let (current_value, current_mask) = self.get_four_state(signal);
                     let value = (current_value & &preserve_mask) | (value & written_mask);
                     let mask = (current_mask & &preserve_mask) | (mask & written_mask);
-                    if signal.is_4state {
+                    if self.compiled.options.four_state && signal.is_4state {
                         self.set_four_state(signal, value, mask);
                     } else {
-                        self.set_wide(signal, value);
+                        let known_mask = &width_mask ^ (&mask & &width_mask);
+                        self.set_wide(signal, value & known_mask);
                     }
                 }
                 InitialStateData::Writes(runs) => self.apply_initial_memory_writes(signal, runs),

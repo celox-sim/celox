@@ -95,6 +95,8 @@ pub(super) fn binary_result_width(op: BinaryOp, lhs_width: usize, rhs_width: usi
         | BinaryOp::NeWildcard
         | BinaryOp::Eq
         | BinaryOp::Ne
+        | BinaryOp::EqCase
+        | BinaryOp::NeCase
         | BinaryOp::LtU
         | BinaryOp::LtS
         | BinaryOp::LeU
