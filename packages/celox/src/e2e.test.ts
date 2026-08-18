@@ -540,13 +540,26 @@ describe("E2E: nested output-array forwarding", () => {
 		sim.dut.rst = 1n;
 
 		const dut = sim.dut as any;
-		const generated = dut.source.source.source.value.at(1);
-		const forwarded = dut.source.source.value.at(1);
+		const generated = Array.from({ length: 14 }, (_, index) =>
+			dut.source.source.source.value.at(index),
+		);
+		const forwardA = Array.from({ length: 14 }, (_, index) =>
+			dut.source.source.value.at(index),
+		);
+		const forwardB = Array.from({ length: 14 }, (_, index) =>
+			dut.source.value.at(index),
+		);
+		const forwarded = Array.from({ length: 14 }, (_, index) =>
+			dut.value.at(index),
+		);
 		sim.dispose();
 
 		const allOnes = (1n << 64n) - 1n;
-		expect(generated).toBe(allOnes);
-		expect(forwarded).toBe(generated);
+		const expected = Array.from({ length: 14 }, () => allOnes);
+		expect(generated).toEqual(expected);
+		expect(forwardA).toEqual(generated);
+		expect(forwardB).toEqual(forwardA);
+		expect(forwarded).toEqual(forwardB);
 	});
 });
 
