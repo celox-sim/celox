@@ -183,13 +183,19 @@ impl<'a> FfParser<'a> {
         index: &VarIndex,
         select: &VarSelect,
     ) -> Option<BitAccess> {
-        let mut dims: Vec<usize> = typ.array.iter().copied().collect::<Option<Vec<_>>>()?;
-        if typ.width().is_empty() {
+        let width = typ.width();
+        let mut dims = Vec::with_capacity(typ.array.as_slice().len() + width.as_slice().len() + 1);
+        for dimension in typ.array.as_slice() {
+            dims.push((*dimension)?);
+        }
+        if width.is_empty() {
             if let Some(kind_width) = typ.kind.width() {
                 dims.push(kind_width);
             }
         } else {
-            dims.extend(typ.width().iter().copied().collect::<Option<Vec<_>>>()?);
+            for dimension in width.iter() {
+                dims.push((*dimension)?);
+            }
         }
 
         let mut strides = vec![1; dims.len()];
@@ -214,18 +220,18 @@ impl<'a> FfParser<'a> {
             BitAccess::new(base, base + width - 1)
         };
 
-        let mut all_indices = index.0.clone();
-        all_indices.extend(select.0.iter().cloned());
-
         let mut base_offset = 0usize;
         let mut processed_count = 0usize;
-        let limit = if select.1.is_some() {
-            all_indices.len().saturating_sub(1)
-        } else {
-            all_indices.len()
-        };
+        let index_count =
+            (index.0.len() + select.0.len()).saturating_sub(usize::from(select.1.is_some()));
 
-        for (i, index_val) in all_indices[..limit].iter().enumerate() {
+        for (i, index_val) in index
+            .0
+            .iter()
+            .chain(&select.0)
+            .take(index_count)
+            .enumerate()
+        {
             let idx = to_u(index_val)?;
             let stride = *strides.get(i)?;
             base_offset += idx * stride;
@@ -233,7 +239,7 @@ impl<'a> FfParser<'a> {
         }
 
         if let Some((op, range_expr)) = &select.1 {
-            let anchor_expr = all_indices.last()?;
+            let anchor_expr = select.0.last()?;
             let anchor = to_u(anchor_expr)?;
             let val = to_u(range_expr)?;
             let weight = *strides.get(processed_count).unwrap_or(&1);
@@ -2345,9 +2351,9 @@ impl<'a> FfParser<'a> {
         // Backends may give array elements a physical stride different from
         // their logical packed width, so combining both here loses essential
         // source-type information.
-        let (_, strides, total_width) =
-            crate::bitaccess::get_dimensions_and_strides(self.module, var_id)?;
         let geometry = crate::bitaccess::select_geometry(self.module, var_id, index, select)?;
+        let strides = &geometry.strides;
+        let total_width = geometry.total_width;
         let array_dimension_count = self.module.variables[&var_id].r#type.array.iter().count();
         let element_width = if array_dimension_count == 0 {
             total_width

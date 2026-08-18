@@ -5,7 +5,8 @@ use crate::{
     BuildConfig, ExternalModule, GlueAddr, GlueBlock, HashMap, HashSet, LoweringPhase,
     ModuleInitialMemoryValue, ParserError, RegionedVarAddr, SimModule,
     bitaccess::{
-        PartSelectGeometry, eval_var_select, get_access_width, is_static_access, select_geometry,
+        PartSelectGeometry, SelectGeometry, eval_var_select_with_geometry, is_static_access,
+        select_geometry,
     },
     bitslicer::BitSlicer,
     ff::FfParser,
@@ -236,6 +237,7 @@ fn find_top_level_connection_colon(text: &str) -> Option<usize> {
 
 fn build_dynamic_output_glue(
     module: &Module,
+    geometry: &SelectGeometry,
     parent_store: &mut SymbolicStore<VarId>,
     parent_arena: &mut SLTNodeArena<VarId>,
     glue_arena: &mut SLTNodeArena<GlueAddr>,
@@ -256,7 +258,6 @@ fn build_dynamic_output_glue(
     ),
     ParserError,
 > {
-    let geometry = select_geometry(module, dst.id, &dst.index, &dst.select)?;
     let mut offset = glue_arena.alloc(SLTNode::Constant(
         BigUint::from(0u8),
         BigUint::from(0u8),
@@ -274,11 +275,16 @@ fn build_dynamic_output_glue(
     let mut address_sources = HashSet::default();
     let mut preview_sources = preview_rhs_sources;
 
-    let mut index_exprs = dst.index.0.clone();
-    index_exprs.extend(dst.select.0.clone());
     let dim_limit = geometry.dimension_count;
 
-    for (dimension, index_expr) in index_exprs[..dim_limit].iter().enumerate() {
+    for (dimension, index_expr) in dst
+        .index
+        .0
+        .iter()
+        .chain(&dst.select.0)
+        .take(dim_limit)
+        .enumerate()
+    {
         let ((index, index_sources), _) = crate::logic_tree::eval_expression_effectful(
             module,
             parent_store,
@@ -335,7 +341,7 @@ fn build_dynamic_output_glue(
     }
 
     if let Some(part) = geometry.part {
-        let anchor_expr = index_exprs.last().ok_or_else(|| {
+        let anchor_expr = dst.select.0.last().ok_or_else(|| {
             ParserError::illegal_context(
                 "dynamic output port destination",
                 "part select is missing its anchor expression",
@@ -503,7 +509,7 @@ fn build_dynamic_output_glue(
         ))?;
     }
 
-    let access_width = get_access_width(module, dst.id, &dst.index, &dst.select)?;
+    let access_width = geometry.selected_width;
     let variable = &module.variables[&dst.id];
     let variable_width = resolve_total_width(module, variable)?;
     if variable_width == 0 || access_width == 0 || access_width > variable_width {
@@ -514,14 +520,13 @@ fn build_dynamic_output_glue(
         ));
     }
     let full_access = BitAccess::new(0, variable_width - 1);
-    let range_store = parent_store.get(&dst.id).ok_or_else(|| {
-        ParserError::illegal_context(
-            "dynamic output port destination",
-            "destination variable is absent from the parent symbolic store",
-            Some(&dst.token),
-        )
-    })?;
-    let parts = range_store.get_parts(full_access).map_err(|error| {
+    // Keep the instance preview sparse. Untracked ranges represent the
+    // unmodified parent input and are materialized only for the destination
+    // touched by this dynamic connection.
+    let range_store = parent_store
+        .entry(dst.id)
+        .or_insert_with(|| RangeStore::new(None, variable_width));
+    let parts = range_store.get_parts_ref(full_access).map_err(|error| {
         ParserError::illegal_context(
             "dynamic output port destination",
             error.to_string(),
@@ -644,7 +649,7 @@ fn build_dynamic_output_glue(
         parent_shifted_rhs,
     ))?;
 
-    let prefix = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
+    let prefix = eval_var_select_with_geometry(&dst.index, &dst.select, geometry)?;
     let result = if prefix == full_access {
         updated_value
     } else {
@@ -661,9 +666,7 @@ fn build_dynamic_output_glue(
             access: prefix,
         })?
     };
-    parent_store
-        .get_mut(&dst.id)
-        .expect("destination store entry checked above")
+    range_store
         .update(prefix, Some((preview_result, preview_sources)))
         .map_err(|error| {
             ParserError::illegal_context(
@@ -861,16 +864,17 @@ fn build_parent_effect_glue(
 
                 let target_access = BitAccess::new(target_lsb, target_msb);
                 if let Some(initial_range_store) = initial_store.get(id) {
-                    let final_parts = range_store.get_parts(target_access).map_err(|error| {
-                        ParserError::illegal_context(
-                            "instance input function output",
-                            error.to_string(),
-                            None,
-                        )
-                    })?;
+                    let final_parts =
+                        range_store.get_parts_ref(target_access).map_err(|error| {
+                            ParserError::illegal_context(
+                                "instance input function output",
+                                error.to_string(),
+                                None,
+                            )
+                        })?;
                     let initial_parts =
                         initial_range_store
-                            .get_parts(target_access)
+                            .get_parts_ref(target_access)
                             .map_err(|error| {
                                 ParserError::illegal_context(
                                     "instance input function output",
@@ -1311,24 +1315,9 @@ impl<'a> ModuleParser<'a> {
         let mut output_ports = Vec::new();
         let mut glue_arena = SLTNodeArena::<GlueAddr>::new();
 
-        // Parent context store
-        let mut parent_store = SymbolicStore::default();
-        for (id, var) in &self.module.variables {
-            let width = resolve_total_width(self.module, var)?;
-            if width == 0 {
-                parent_store.insert(*id, RangeStore::new(None, 0));
-                continue;
-            }
-            let initial_node = self.arena.alloc(SLTNode::Input {
-                variable: *id,
-                signed: var.r#type.signed,
-                index: vec![],
-                access: BitAccess::new(0, width - 1),
-            })?;
-            let mut sources = HashSet::default();
-            sources.insert(VarAtomBase::new(*id, 0, width - 1));
-            parent_store.insert(*id, RangeStore::new(Some((initial_node, sources)), width));
-        }
+        // Parent variables are implicit inputs until a connection expression
+        // writes them, so instance parsing only needs sparse, touched entries.
+        let parent_store = SymbolicStore::default();
 
         for input in &decl.inputs {
             let child_port_id = input.id;
@@ -1343,7 +1332,7 @@ impl<'a> ModuleParser<'a> {
             }
             let mut written_accesses = HashMap::default();
             collect_written_expression(self.module, &input.expr, &mut written_accesses)?;
-            let mut connection_store = parent_store.clone();
+            let mut connection_store = parent_store.fork();
             let ((expr_node, expr_sources), _bounds) = eval_assignment_expression_effectful(
                 self.module,
                 &mut connection_store,
@@ -1365,13 +1354,7 @@ impl<'a> ModuleParser<'a> {
                 let mut effects = CombEffectCollector::with_capture_namespace(
                     self.comb_runtime_event_sites.len() as u32,
                 );
-                let mut effect_store = SymbolicStore::default();
-                for (&id, variable) in &self.module.variables {
-                    effect_store.insert(
-                        id,
-                        RangeStore::new(None, resolve_total_width(self.module, variable)?),
-                    );
-                }
+                let effect_store = SymbolicStore::default();
                 collect_expression_effects(
                     self.module,
                     &effect_store,
@@ -1387,7 +1370,7 @@ impl<'a> ModuleParser<'a> {
                         continue;
                     };
                     for &access in accesses {
-                        for (value, _) in range_store.get_parts(access).map_err(|error| {
+                        for (value, _) in range_store.get_parts_ref(access).map_err(|error| {
                             ParserError::illegal_context(
                                 "instance input function output",
                                 error.to_string(),
@@ -1489,24 +1472,6 @@ impl<'a> ModuleParser<'a> {
             let mut current_offset = 0usize;
             let mut destination_arena = SLTNodeArena::<VarId>::new();
             let mut destination_store = SymbolicStore::default();
-            for (id, var) in &self.module.variables {
-                let parent_width = resolve_total_width(self.module, var)?;
-                if parent_width == 0 {
-                    destination_store.insert(*id, RangeStore::new(None, 0));
-                    continue;
-                }
-                let initial_node = destination_arena.alloc(SLTNode::Input {
-                    variable: *id,
-                    signed: var.r#type.signed,
-                    index: vec![],
-                    access: BitAccess::new(0, parent_width - 1),
-                })?;
-                let sources = std::iter::once(VarAtomBase::new(*id, 0, parent_width - 1)).collect();
-                destination_store.insert(
-                    *id,
-                    RangeStore::new(Some((initial_node, sources)), parent_width),
-                );
-            }
             let preview_rhs_node = destination_arena.alloc(SLTNode::Input {
                 variable: child_port_id,
                 signed: child_port.r#type.signed,
@@ -1521,12 +1486,6 @@ impl<'a> ModuleParser<'a> {
                 self.comb_runtime_event_sites.len() as u32,
             );
             let mut output_effect_store = SymbolicStore::default();
-            for (&id, variable) in &self.module.variables {
-                output_effect_store.insert(
-                    id,
-                    RangeStore::new(None, resolve_total_width(self.module, variable)?),
-                );
-            }
             // Iterate destinations from LSB (last in list for multi-dst assign usually? No wait)
             // `emit_multi_dst_assign` iterates `dsts.iter().rev()`.
             // So we strictly follow `emit_multi_dst_assign` logic.
@@ -1554,8 +1513,10 @@ impl<'a> ModuleParser<'a> {
                         &mut destination_address_sources,
                     )?;
                 }
-                let prefix_access = eval_var_select(self.module, dst.id, &dst.index, &dst.select)?;
-                let part_width = get_access_width(self.module, dst.id, &dst.index, &dst.select)?;
+                let geometry = select_geometry(self.module, dst.id, &dst.index, &dst.select)?;
+                let prefix_access =
+                    eval_var_select_with_geometry(&dst.index, &dst.select, &geometry)?;
+                let part_width = geometry.selected_width;
 
                 // Extract this part from rhs_node
                 let slice_end = current_offset.checked_add(part_width).ok_or_else(|| {
@@ -1622,6 +1583,7 @@ impl<'a> ModuleParser<'a> {
                 } else {
                     build_dynamic_output_glue(
                         self.module,
+                        &geometry,
                         &mut destination_store,
                         &mut destination_arena,
                         &mut glue_arena,
@@ -1688,9 +1650,11 @@ impl<'a> ModuleParser<'a> {
                 })?;
                 let effect_sources =
                     std::iter::once(VarAtomBase::new(dst.id, access.lsb, access.msb)).collect();
+                let parent_width =
+                    resolve_total_width(self.module, &self.module.variables[&dst.id])?;
                 output_effect_store
-                    .get_mut(&dst.id)
-                    .expect("output effect store contains every parent variable")
+                    .entry(dst.id)
+                    .or_insert_with(|| RangeStore::new(None, parent_width))
                     .update(access, Some((effect_preview, effect_sources)))
                     .map_err(|error| {
                         ParserError::illegal_context(

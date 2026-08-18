@@ -469,7 +469,7 @@ pub(super) fn eval_function_body_return(
             )
         })?;
         let ret_parts = range_store
-            .get_parts(ret_access)
+            .get_parts_ref(ret_access)
             .map_err(|error| super::range_store_error("function return value", error, None))?;
         Ok(combine_parts_with_default(ret_id, 0, ret_parts, arena)?)
     }
@@ -492,7 +492,7 @@ pub(super) fn eval_function_body_return(
             }),
             Some(false) => Ok(state),
             None => {
-                let merged_store = merge_symbolic_stores(
+                let merged_store = merge_symbolic_versions(
                     module,
                     &next_store,
                     &state.store,
@@ -528,7 +528,7 @@ pub(super) fn eval_function_body_return(
         context_width: Option<usize>,
         arena: &mut SLTNodeArena<VarId>,
     ) -> Result<(FunctionControlState, NodeId, HashSet<VarAtomBase<VarId>>), ParserError> {
-        let mut next_store = state.store.clone();
+        let mut next_store = state.store.fork();
         let ((node, sources), boundaries) =
             eval_expression_effectful(module, &mut next_store, expression, arena, context_width)?;
         let state = apply_function_guard(
@@ -576,7 +576,7 @@ pub(super) fn eval_function_body_return(
         let then_state = eval_function_statements(
             module,
             FunctionControlState {
-                store: state.store.clone(),
+                store: state.store.fork(),
                 boundaries: state.boundaries.clone(),
                 live_expr: state.live_expr,
                 live_sources: state.live_sources.clone(),
@@ -603,7 +603,7 @@ pub(super) fn eval_function_body_return(
         live_sources.extend(else_state.live_sources);
 
         Ok(FunctionControlState {
-            store: merge_symbolic_stores(
+            store: merge_symbolic_versions(
                 module,
                 &then_state.store,
                 &else_state.store,
@@ -647,7 +647,7 @@ pub(super) fn eval_function_body_return(
                     ..state
                 })
             } else {
-                let merged_store = merge_symbolic_stores(
+                let merged_store = merge_symbolic_versions(
                     module,
                     &next_function.store,
                     &state.function.store,
@@ -701,7 +701,7 @@ pub(super) fn eval_function_body_return(
             let then_state = if_stmt.true_side.iter().try_fold(
                 FunctionLoopControlState {
                     function: FunctionControlState {
-                        store: state.function.store.clone(),
+                        store: state.function.store.fork(),
                         boundaries: state.function.boundaries.clone(),
                         live_expr: state.function.live_expr,
                         live_sources: state.function.live_sources.clone(),
@@ -734,7 +734,7 @@ pub(super) fn eval_function_body_return(
 
             Ok(FunctionLoopControlState {
                 function: FunctionControlState {
-                    store: merge_symbolic_stores(
+                    store: merge_symbolic_versions(
                         module,
                         &then_state.function.store,
                         &else_state.function.store,
@@ -786,7 +786,7 @@ pub(super) fn eval_function_body_return(
                     });
                 };
 
-                let mut next_store = state.function.store.clone();
+                let mut next_store = state.function.store.fork();
                 let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
                     module,
                     &mut next_store,
@@ -838,7 +838,7 @@ pub(super) fn eval_function_body_return(
                 let then_state = arm.body.iter().try_fold(
                     FunctionLoopControlState {
                         function: FunctionControlState {
-                            store: state.function.store.clone(),
+                            store: state.function.store.fork(),
                             boundaries: boundaries.clone(),
                             live_expr: state.function.live_expr,
                             live_sources: state.function.live_sources.clone(),
@@ -876,7 +876,7 @@ pub(super) fn eval_function_body_return(
 
                 Ok(FunctionLoopControlState {
                     function: FunctionControlState {
-                        store: merge_symbolic_stores(
+                        store: merge_symbolic_versions(
                             module,
                             &then_state.function.store,
                             &else_state.function.store,
@@ -995,7 +995,7 @@ pub(super) fn eval_function_body_return(
         }
 
         let guard_state = state.clone();
-        let mut bound_store = state.store.clone();
+        let mut bound_store = state.store.fork();
         let (
             start,
             end,
@@ -1103,7 +1103,7 @@ pub(super) fn eval_function_body_return(
             arena,
         )?;
 
-        let mut symbolic_store = state.store.clone();
+        let mut symbolic_store = state.store.fork();
         let mut written_accesses = HashMap::default();
         collect_written_accesses(module, &for_stmt.body, &mut written_accesses)?;
         for (id, accesses) in &written_accesses {
@@ -1132,7 +1132,7 @@ pub(super) fn eval_function_body_return(
                 }
                 let end = bit - 1;
                 let access = BitAccess::new(start, end);
-                let parts = original.get_parts(access).map_err(|error| {
+                let parts = original.get_parts_ref(access).map_err(|error| {
                     super::range_store_error(
                         "function for-loop state",
                         error,
@@ -1153,7 +1153,7 @@ pub(super) fn eval_function_body_return(
             symbolic_store.insert(*id, loop_store);
         }
         symbolic_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
-        let iter_store_before = symbolic_store.clone();
+        let iter_store_before = symbolic_store.fork();
 
         let iter_state = for_stmt.body.iter().try_fold(
             FunctionLoopControlState {
@@ -1186,22 +1186,19 @@ pub(super) fn eval_function_body_return(
         let initial_updates: Vec<_> = updates
             .iter()
             .map(|(target, _, _)| {
-                let range_store = state.store.get(&target.id).ok_or_else(|| {
-                    ParserError::illegal_context(
-                        "function for-loop initial state",
-                        "state variable is absent from the symbolic store",
-                        Some(&for_stmt.token),
-                    )
-                })?;
-                let parts = range_store.get_parts(target.access).map_err(|error| {
-                    super::range_store_error(
-                        "function for-loop initial state",
-                        error,
-                        Some(&for_stmt.token),
-                    )
-                })?;
-                let (expr, _) =
-                    combine_parts_with_default(target.id, target.access.lsb, parts, arena)?;
+                let parts = super::symbolic_parts_or_default(
+                    &state.store,
+                    target.id,
+                    target.access,
+                    "function for-loop initial state",
+                    Some(&for_stmt.token),
+                )?;
+                let (expr, _) = combine_parts_with_default(
+                    target.id,
+                    target.access.lsb,
+                    parts.iter().map(|(value, access)| (value, *access)),
+                    arena,
+                )?;
                 Ok(SLTForUpdate {
                     target: *target,
                     expr,
@@ -1209,7 +1206,7 @@ pub(super) fn eval_function_body_return(
             })
             .collect::<Result<Vec<_>, ParserError>>()?;
 
-        let mut result_store = state.store.clone();
+        let mut result_store = state.store.fork();
         let loop_effective_continue = arena.alloc(SLTNode::Binary(
             iter_state.continue_expr,
             BinaryOp::And,
@@ -1339,7 +1336,7 @@ pub(super) fn eval_function_body_return(
                 ..state
             })
         } else {
-            let merged_store = merge_symbolic_stores(
+            let merged_store = merge_symbolic_versions(
                 module,
                 &next_function.store,
                 &state.function.store,
@@ -1392,7 +1389,7 @@ pub(super) fn eval_function_body_return(
             let then_state = if_stmt.true_side.iter().try_fold(
                 FunctionLoopControlState {
                     function: FunctionControlState {
-                        store: state.function.store.clone(),
+                        store: state.function.store.fork(),
                         boundaries: state.function.boundaries.clone(),
                         live_expr: state.function.live_expr,
                         live_sources: state.function.live_sources.clone(),
@@ -1425,7 +1422,7 @@ pub(super) fn eval_function_body_return(
 
             FunctionLoopControlState {
                 function: FunctionControlState {
-                    store: merge_symbolic_stores(
+                    store: merge_symbolic_versions(
                         module,
                         &then_state.function.store,
                         &else_state.function.store,
@@ -1505,7 +1502,7 @@ pub(super) fn eval_function_body_return(
                 });
             };
 
-            let mut next_store = state.function.store.clone();
+            let mut next_store = state.function.store.fork();
             let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
                 module,
                 &mut next_store,
@@ -1554,7 +1551,7 @@ pub(super) fn eval_function_body_return(
             let then_state = arm.body.iter().try_fold(
                 FunctionLoopControlState {
                     function: FunctionControlState {
-                        store: state.function.store.clone(),
+                        store: state.function.store.fork(),
                         boundaries: boundaries.clone(),
                         live_expr: state.function.live_expr,
                         live_sources: state.function.live_sources.clone(),
@@ -1592,7 +1589,7 @@ pub(super) fn eval_function_body_return(
 
             Ok(FunctionLoopControlState {
                 function: FunctionControlState {
-                    store: merge_symbolic_stores(
+                    store: merge_symbolic_versions(
                         module,
                         &then_state.function.store,
                         &else_state.function.store,
@@ -1788,7 +1785,7 @@ pub(super) fn eval_function_body_return(
                 return eval_function_statements(module, state, &case_stmt.default, ret_id, arena);
             };
 
-            let mut next_store = state.store.clone();
+            let mut next_store = state.store.fork();
             let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
                 module,
                 &mut next_store,
@@ -1832,7 +1829,7 @@ pub(super) fn eval_function_body_return(
             let then_state = eval_function_statements(
                 module,
                 FunctionControlState {
-                    store: state.store.clone(),
+                    store: state.store.fork(),
                     boundaries: boundaries.clone(),
                     live_expr: state.live_expr,
                     live_sources: state.live_sources.clone(),
@@ -1861,7 +1858,7 @@ pub(super) fn eval_function_body_return(
             live_sources.extend(else_state.live_sources);
 
             Ok(FunctionControlState {
-                store: merge_symbolic_stores(
+                store: merge_symbolic_versions(
                     module,
                     &then_state.store,
                     &else_state.store,
@@ -1981,7 +1978,7 @@ pub(super) fn eval_function_body_return(
         }
     }
 
-    let mut local_store = caller_store.clone();
+    let mut local_store = caller_store.fork();
     let local_bounds = BoundaryMap::default();
     let mut written = HashMap::default();
 
@@ -2116,7 +2113,7 @@ fn eval_function_call_expression(
         }
     }
 
-    let mut local_store = store.current().clone();
+    let mut local_store = store.current().fork();
     for (arg_id, arg_node, sources, arg_width) in evaluated_inputs {
         local_store.insert(
             arg_id,
@@ -2303,11 +2300,11 @@ fn merge_short_circuit_case_condition(
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<((NodeId, HashSet<VarAtomBase<VarId>>), BoundaryMap<VarId>), ParserError> {
     let ((lhs_node, mut sources), lhs_boundaries) = lhs;
-    let base_store = store.clone();
-    let mut rhs_store = base_store.clone();
+    let base_store = store.fork();
+    let mut rhs_store = base_store.fork();
     let ((rhs_node, rhs_sources), rhs_boundaries) = eval_rhs(&mut rhs_store, arena)?;
     let execute_rhs = short_circuit_rhs_guard(arena, lhs_node, is_and)?;
-    *store = super::merge_symbolic_stores(
+    *store = super::merge_symbolic_versions(
         module,
         &rhs_store,
         &base_store,
@@ -2563,8 +2560,8 @@ pub(super) fn eval_expression_in_context(
             let ((r_expr, r_sources), r_bounds) = if store.effectful_mut().is_some()
                 && matches!(op, Op::LogicAnd | Op::LogicOr)
             {
-                let base_store = store.current().clone();
-                let mut rhs_store = base_store.clone();
+                let base_store = store.current().fork();
+                let mut rhs_store = base_store.fork();
                 let mut rhs_state = ExpressionStore::Effectful(&mut rhs_store);
                 let rhs_value = eval_expression_in_context(
                     module,
@@ -2584,7 +2581,7 @@ pub(super) fn eval_expression_in_context(
                 };
                 let shortcut = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, shortcut_truth))?;
                 let execute_rhs = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, shortcut))?;
-                let merged_store = super::merge_symbolic_stores(
+                let merged_store = super::merge_symbolic_versions(
                     module,
                     &rhs_store,
                     &base_store,
@@ -2763,8 +2760,8 @@ pub(super) fn eval_expression_in_context(
                 ((then_expr, then_sources), then_bounds),
                 ((else_expr, else_sources), else_bounds),
             ) = if store.effectful_mut().is_some() {
-                let base_store = store.current().clone();
-                let mut then_store = base_store.clone();
+                let base_store = store.current().fork();
+                let mut then_store = base_store.fork();
                 let mut then_state = ExpressionStore::Effectful(&mut then_store);
                 let then_value = eval_expression_in_context(
                     module,
@@ -2782,7 +2779,7 @@ pub(super) fn eval_expression_in_context(
                 let true_truth = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, not_cond))?;
                 let known_true = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, true_truth))?;
                 let execute_then = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, known_false))?;
-                let after_then = super::merge_symbolic_stores(
+                let after_then = super::merge_symbolic_versions(
                     module,
                     &then_store,
                     &base_store,
@@ -2802,7 +2799,7 @@ pub(super) fn eval_expression_in_context(
                 )?;
 
                 let execute_else = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, known_true))?;
-                let final_store = super::merge_symbolic_stores(
+                let final_store = super::merge_symbolic_versions(
                     module,
                     &else_store,
                     &after_then,
@@ -3062,25 +3059,36 @@ fn eval_factor(
                 var_bounds.insert(access.lsb);
                 var_bounds.insert(access_end);
 
-                let range_store = store.current().get(var_id).ok_or_else(|| {
-                    ParserError::illegal_context(
-                        "static variable read",
-                        "source variable is absent from the symbolic store",
-                        Some(&comptime.token),
-                    )
-                })?;
-                let parts = range_store.get_parts(access).map_err(|error| {
-                    super::range_store_error("static variable read", error, Some(&comptime.token))
-                })?;
-                // Check if any part of the requested access is unassigned (None)
-                // If so, we must depend on the variable's previous value (input).
-                // If all parts are Some(...), we only depend on the sources of those expressions.
-                let has_unassigned = parts.iter().any(|(val, _)| val.is_none());
-                let (expr, mut sources) =
-                    combine_parts_with_default(*var_id, access.lsb, parts, arena)?;
-                if has_unassigned {
+                let (expr, sources) = if let Some(range_store) = store.current().get(var_id) {
+                    let parts = range_store.get_parts_ref(access).map_err(|error| {
+                        super::range_store_error(
+                            "static variable read",
+                            error,
+                            Some(&comptime.token),
+                        )
+                    })?;
+                    // If any requested part is unassigned, the result still
+                    // depends on that range's process input value.
+                    let has_unassigned = parts.iter().any(|(val, _)| val.is_none());
+                    let (expr, mut sources) =
+                        combine_parts_with_default(*var_id, access.lsb, parts, arena)?;
+                    if has_unassigned {
+                        sources.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
+                    }
+                    (expr, sources)
+                } else {
+                    // Read-only variables have no mutable symbolic definition.
+                    // Materialize their input range directly instead.
+                    let expr = arena.alloc(SLTNode::Input {
+                        variable: *var_id,
+                        signed: false,
+                        index: vec![],
+                        access,
+                    })?;
+                    let mut sources = HashSet::default();
                     sources.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
-                }
+                    (expr, sources)
+                };
                 // Symbolic substitution may replace this variable with an
                 // expression whose producer has different signedness. Width
                 // coercion follows the source variable's analyzer context,
@@ -3104,6 +3112,7 @@ fn eval_factor(
                     indices: dynamic_indices,
                     sources: offset_sources,
                     boundaries: all_bounds,
+                    ..
                 } = super::eval_dynamic_select_offset(
                     module,
                     store,
@@ -3116,18 +3125,23 @@ fn eval_factor(
                 all_sources.extend(offset_sources);
 
                 // 2. Check SymbolicStore to determine if "already written"
-                let range_store = store.current().get(var_id).ok_or_else(|| {
-                    ParserError::illegal_context(
-                        "dynamic variable read",
-                        "source variable is absent from the symbolic store",
-                        Some(&comptime.token),
-                    )
-                })?;
                 let access_full = BitAccess::new(0, width - 1);
-                let parts = range_store.get_parts(access_full).map_err(|error| {
-                    super::range_store_error("dynamic variable read", error, Some(&comptime.token))
-                })?;
-                let is_unmodified = parts.iter().all(|(val, _)| val.is_none());
+                let parts = store
+                    .current()
+                    .get(var_id)
+                    .map(|range_store| {
+                        range_store.get_parts_ref(access_full).map_err(|error| {
+                            super::range_store_error(
+                                "dynamic variable read",
+                                error,
+                                Some(&comptime.token),
+                            )
+                        })
+                    })
+                    .transpose()?;
+                let is_unmodified = parts
+                    .as_ref()
+                    .is_none_or(|parts| parts.iter().all(|(val, _)| val.is_none()));
 
                 let element_width =
                     crate::bitaccess::get_access_width(module, *var_id, index, select)?;
@@ -3157,8 +3171,12 @@ fn eval_factor(
                 } else {
                     // --- If already written ---
                     // Combine latest values in register and align with Shr
-                    let (current_expr, current_sources) =
-                        combine_parts_with_default(*var_id, 0, parts, arena)?;
+                    let (current_expr, current_sources) = combine_parts_with_default(
+                        *var_id,
+                        0,
+                        parts.expect("a modified variable has a symbolic range"),
+                        arena,
+                    )?;
                     all_sources.extend(current_sources);
 
                     let shifted =

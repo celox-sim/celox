@@ -20,16 +20,27 @@ pub fn resolve_dims(
     shape: &[Option<usize>],
     kind: &str,
 ) -> Result<Vec<usize>, ParserError> {
-    shape
-        .iter()
-        .map(|dimension| {
-            dimension.ok_or_else(|| {
-                ParserError::unresolved_width(
-                    module,
-                    variable,
-                    format!("{kind} dimension in {}", variable.r#type),
-                )
-            })
-        })
-        .collect()
+    let mut dimensions = Vec::with_capacity(shape.len());
+    extend_resolved_dims(module, variable, shape, kind, &mut dimensions)?;
+    Ok(dimensions)
+}
+
+pub(crate) fn extend_resolved_dims(
+    module: &Module,
+    variable: &Variable,
+    shape: &[Option<usize>],
+    kind: &str,
+    dimensions: &mut Vec<usize>,
+) -> Result<(), ParserError> {
+    dimensions.reserve(shape.len());
+    for dimension in shape {
+        dimensions.push(dimension.ok_or_else(|| {
+            ParserError::unresolved_width(
+                module,
+                variable,
+                format!("{kind} dimension in {}", variable.r#type),
+            )
+        })?);
+    }
+    Ok(())
 }

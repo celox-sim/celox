@@ -512,10 +512,65 @@ fn collect_inputs_with_window<A: Hash + Eq + Clone + Debug>(
     }
 }
 
+enum UncoveredWindows {
+    Empty,
+    One(BitAccess),
+    Multiple(Vec<BitAccess>),
+}
+
+impl UncoveredWindows {
+    fn push(&mut self, window: BitAccess) {
+        match std::mem::replace(self, Self::Empty) {
+            Self::Empty => *self = Self::One(window),
+            Self::One(first) => *self = Self::Multiple(vec![first, window]),
+            Self::Multiple(mut windows) => {
+                windows.push(window);
+                *self = Self::Multiple(windows);
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+}
+
+enum UncoveredWindowsIter {
+    Empty,
+    One(std::option::IntoIter<BitAccess>),
+    Multiple(std::vec::IntoIter<BitAccess>),
+}
+
+impl Iterator for UncoveredWindowsIter {
+    type Item = BitAccess;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Empty => None,
+            Self::One(window) => window.next(),
+            Self::Multiple(windows) => windows.next(),
+        }
+    }
+}
+
+impl IntoIterator for UncoveredWindows {
+    type Item = BitAccess;
+    type IntoIter = UncoveredWindowsIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            Self::Empty => UncoveredWindowsIter::Empty,
+            Self::One(window) => UncoveredWindowsIter::One(Some(window).into_iter()),
+            Self::Multiple(windows) => UncoveredWindowsIter::Multiple(windows.into_iter()),
+        }
+    }
+}
+
 /// Add `requested` to a sorted union of covered intervals and return only the
-/// portions which were not already covered.
-fn claim_uncovered_window(covered: &mut Vec<BitAccess>, requested: BitAccess) -> Vec<BitAccess> {
-    let mut uncovered = Vec::new();
+/// portions which were not already covered. The common zero- and one-window
+/// cases stay inline; only a fragmented result allocates a buffer.
+fn claim_uncovered_window(covered: &mut Vec<BitAccess>, requested: BitAccess) -> UncoveredWindows {
+    let mut uncovered = UncoveredWindows::Empty;
     let mut cursor = requested.lsb;
     for range in covered.iter().copied() {
         if range.msb < cursor {
@@ -729,6 +784,44 @@ mod tests {
     };
     use veryl_metadata::Metadata;
     use veryl_parser::{Parser, resource_table::StrId};
+
+    #[test]
+    fn uncovered_windows_inline_empty_and_single_results() {
+        let mut covered = vec![BitAccess::new(0, 3)];
+
+        assert_eq!(
+            claim_uncovered_window(&mut covered, BitAccess::new(1, 2))
+                .into_iter()
+                .collect::<Vec<_>>(),
+            Vec::<BitAccess>::new()
+        );
+        assert_eq!(covered, vec![BitAccess::new(0, 3)]);
+
+        assert_eq!(
+            claim_uncovered_window(&mut covered, BitAccess::new(2, 6))
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![BitAccess::new(4, 6)]
+        );
+        assert_eq!(covered, vec![BitAccess::new(0, 6)]);
+    }
+
+    #[test]
+    fn uncovered_windows_allocate_only_for_fragmented_results() {
+        let mut covered = vec![BitAccess::new(2, 3), BitAccess::new(6, 7)];
+
+        assert_eq!(
+            claim_uncovered_window(&mut covered, BitAccess::new(0, 9))
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![
+                BitAccess::new(0, 1),
+                BitAccess::new(4, 5),
+                BitAccess::new(8, 9),
+            ]
+        );
+        assert_eq!(covered, vec![BitAccess::new(0, 9)]);
+    }
 
     fn setup(code: &str) -> (HashMap<ModuleId, SimModule>, HashMap<StrId, ModuleId>, Ir) {
         symbol_table::clear();
