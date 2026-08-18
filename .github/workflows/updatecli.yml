@@ -1,0 +1,52 @@
+name: Update Python and cocotb
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: updatecli-python-cocotb
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Updatecli
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create automation app token
+        id: automation-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-workflows: write
+
+      - name: Install Updatecli
+        uses: updatecli/updatecli-action@v3.6.0
+        with:
+          version-file: .updatecli-version
+
+      - name: Test Python compatibility selector
+        run: python3 -m unittest discover -s .updatecli/tests -v
+
+      - name: Preview update policy
+        run: updatecli pipeline diff --config .updatecli/updatecli.d
+        env:
+          UPDATECLI_GITHUB_ACTOR: ${{ github.actor }}
+          UPDATECLI_GITHUB_TOKEN: ${{ steps.automation-token.outputs.token }}
+
+      - name: Apply update policy
+        run: updatecli pipeline apply --config .updatecli/updatecli.d
+        env:
+          UPDATECLI_GITHUB_ACTOR: ${{ github.actor }}
+          UPDATECLI_GITHUB_TOKEN: ${{ steps.automation-token.outputs.token }}

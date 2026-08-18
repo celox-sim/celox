@@ -1,0 +1,72 @@
+name: Keep Python and cocotb compatible
+pipelineid: python-cocotb
+version: v0.120.1
+
+scms:
+  default:
+    kind: github
+    spec:
+      branch: master
+      commitusingapi: true
+      email: "41898282+github-actions[bot]@users.noreply.github.com"
+      owner: celox-sim
+      repository: celox
+      token: '{{ requiredEnv "UPDATECLI_GITHUB_TOKEN" }}'
+      user: "github-actions[bot]"
+      username: '{{ requiredEnv "UPDATECLI_GITHUB_ACTOR" }}'
+
+actions:
+  pull-request:
+    kind: github/pullrequest
+    scmid: default
+    title: "chore(deps): update compatible Python and cocotb versions"
+    spec:
+      description: |
+        Updates the CI Python runtime together with the latest cocotb release.
+        The selected Python minor has a cocotb manylinux x86-64 wheel and an
+        actions/python-versions Linux x64 build.
+
+        - Python: {{ source "python" }}
+        - cocotb: {{ source "cocotb" }}
+      labels:
+        - dependencies
+      mergemethod: squash
+
+sources:
+  cocotb:
+    name: Get the latest stable cocotb release
+    kind: pypi
+    spec:
+      name: cocotb
+      versionfilter:
+        kind: semver
+        pattern: "*"
+
+  python:
+    name: Find the latest Python minor supported by cocotb
+    kind: shell
+    dependson:
+      - source#cocotb
+    spec:
+      command: 'python3 .updatecli/scripts/latest_compatible_python.py {{ source "cocotb" }}'
+
+targets:
+  python:
+    name: Update the CI Python runtime to {{ source "python" }}
+    kind: file
+    scmid: default
+    sourceid: python
+    spec:
+      file: .github/workflows/ci.yml
+      matchpattern: 'python-version: "([0-9]+\.[0-9]+)"'
+      replacepattern: 'python-version: "{{ source "python" }}"'
+
+  cocotb:
+    name: Update the CI cocotb pin to {{ source "cocotb" }}
+    kind: file
+    scmid: default
+    sourceid: cocotb
+    spec:
+      file: .github/workflows/ci.yml
+      matchpattern: 'python -m pip install cocotb==([0-9A-Za-z.+_-]+)'
+      replacepattern: 'python -m pip install cocotb=={{ source "cocotb" }}'
