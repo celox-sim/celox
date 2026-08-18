@@ -4113,6 +4113,36 @@ fn rejects_mintypmax_expressions() {
 }
 
 #[test]
+fn rejects_default_nettype_changes_inside_modules() {
+    for source in [
+        r#"
+        `default_nettype wire
+        module Child(output logic y); assign y = 1'b1; endmodule
+        module Top(output logic y);
+            `default_nettype none
+            Child child(.y(undeclared));
+            assign y = undeclared;
+        endmodule
+        "#,
+        r#"
+        module Child(output logic y); assign y = 1'b1; endmodule
+        `default_nettype none
+        module Top(output logic y);
+            `default_nettype wire
+            Child child(.y(undeclared));
+            assign y = undeclared;
+        endmodule
+        "#,
+    ] {
+        let error = cranelift_build_error(source);
+        assert!(
+            error.contains("`default_nettype change inside module `Top`"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
 fn preserves_wide_unsigned_parameters_in_generate_conditions() {
     let source = r#"
         module Top(output logic y);

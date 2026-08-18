@@ -28,16 +28,32 @@ pub fn source_module_implicit_net_permissions(
     let tokens = systemverilog_tokens(source.text());
     let mut modules = Vec::new();
     let mut implicit_nets_allowed = true;
+    let mut current_module = None;
     let mut index = 0;
     while index < tokens.len() {
         match tokens[index].as_str() {
             "`default_nettype" => {
                 if let Some(value) = tokens.get(index + 1) {
-                    implicit_nets_allowed = value != "none";
+                    let next_implicit_nets_allowed = value != "none";
+                    if next_implicit_nets_allowed != implicit_nets_allowed
+                        && let Some(module) = current_module.as_deref()
+                    {
+                        return Err(AnalyzerError::Unsupported(format!(
+                            "`default_nettype change inside module `{module}`"
+                        )));
+                    }
+                    implicit_nets_allowed = next_implicit_nets_allowed;
                     index += 1;
                 }
             }
-            "`resetall" => implicit_nets_allowed = true,
+            "`resetall" => {
+                if !implicit_nets_allowed && let Some(module) = current_module.as_deref() {
+                    return Err(AnalyzerError::Unsupported(format!(
+                        "`default_nettype change inside module `{module}`"
+                    )));
+                }
+                implicit_nets_allowed = true;
+            }
             "module" => {
                 let mut name_index = index + 1;
                 if tokens
@@ -48,8 +64,10 @@ pub fn source_module_implicit_net_permissions(
                 }
                 if let Some(name) = tokens.get(name_index) {
                     modules.push((name.clone(), implicit_nets_allowed));
+                    current_module = Some(name.clone());
                 }
             }
+            "endmodule" => current_module = None,
             _ => {}
         }
         index += 1;

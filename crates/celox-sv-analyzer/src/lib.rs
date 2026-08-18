@@ -199,6 +199,53 @@ mod tests {
     }
 
     #[test]
+    fn rejects_default_nettype_state_changes_inside_modules() {
+        for source in [
+            r#"
+                `default_nettype wire
+                module Top();
+                    `default_nettype none
+                endmodule
+            "#,
+            r#"
+                `default_nettype none
+                module Top();
+                    `default_nettype wire
+                endmodule
+            "#,
+            r#"
+                `default_nettype none
+                module Top();
+                    `resetall
+                endmodule
+            "#,
+        ] {
+            let error = source_module_implicit_net_permissions(source, Path::new("nettype.sv"))
+                .expect_err("in-module default nettype change should be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("`default_nettype change inside module `Top`"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn permits_redundant_default_nettype_directives_inside_modules() {
+        let source = r#"
+            `default_nettype none
+            module Top();
+                `default_nettype none
+            endmodule
+        "#;
+        assert_eq!(
+            source_module_implicit_net_permissions(source, Path::new("nettype.sv")).unwrap(),
+            vec![("Top".to_string(), false)]
+        );
+    }
+
+    #[test]
     fn records_always_ff_case_branches() {
         let ir = analyze_source(
             r#"
