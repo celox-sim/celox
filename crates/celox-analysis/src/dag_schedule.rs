@@ -153,7 +153,11 @@ impl<'a> MappedUserRows<'a> {
             {
                 return Err(DagScheduleError::InvalidNode);
             }
-            validate_row(&users_by_external_node[external], local_by_external.len())?;
+            validate_mapped_user_row(
+                &users_by_external_node[external],
+                local_by_external,
+                external_by_local.len(),
+            )?;
         }
         Ok(Self {
             users_by_external_node,
@@ -504,6 +508,28 @@ fn validate_row(row: &[usize], node_count: usize) -> Result<(), DagScheduleError
             return Err(DagScheduleError::DuplicateDependency);
         }
         previous = Some(node);
+    }
+    Ok(())
+}
+
+fn validate_mapped_user_row(
+    row: &[usize],
+    local_by_external: &[usize],
+    local_node_count: usize,
+) -> Result<(), DagScheduleError> {
+    let mut previous = None;
+    for &external in row {
+        if external >= local_by_external.len() {
+            return Err(DagScheduleError::InvalidNode);
+        }
+        if previous.is_some_and(|previous| previous >= external) {
+            return Err(DagScheduleError::DuplicateDependency);
+        }
+        let local = local_by_external[external];
+        if local != usize::MAX && local >= local_node_count {
+            return Err(DagScheduleError::InvalidNode);
+        }
+        previous = Some(external);
     }
     Ok(())
 }
@@ -865,6 +891,16 @@ mod tests {
             ),
             Err(DagScheduleError::UsersAreNotReverseDependencies)
         );
+    }
+
+    #[test]
+    fn mapped_rows_reject_an_out_of_range_reverse_map_entry() {
+        let users = vec![vec![1], vec![]];
+
+        assert!(matches!(
+            MappedUserRows::new(&users, &[0], &[0, 1]),
+            Err(DagScheduleError::InvalidNode)
+        ));
     }
 
     #[test]
