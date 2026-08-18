@@ -53,6 +53,10 @@ export default defineConfig({
                   link: "/ja/guide/writing-tests",
                 },
                 {
+                  text: "celox CLIとcocotb",
+                  link: "/ja/guide/cocotb",
+                },
+                {
                   text: "4 値シミュレーション",
                   link: "/ja/guide/four-state",
                 },
@@ -145,6 +149,7 @@ export default defineConfig({
           text: "Testbenches",
           items: [
             { text: "Writing Tests", link: "/guide/writing-tests" },
+            { text: "Celox CLI and cocotb", link: "/guide/cocotb" },
             { text: "4-State Simulation", link: "/guide/four-state" },
             { text: "Parameter Overrides", link: "/guide/parameter-overrides" },
             { text: "Child Instance Access", link: "/guide/hierarchy" },
