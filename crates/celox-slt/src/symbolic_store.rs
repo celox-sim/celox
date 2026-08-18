@@ -12,8 +12,9 @@ type RangeEntry<A, N> = Arc<SymbolicRange<A, N>>;
 type StoreShard<A, N> = HashMap<A, RangeEntry<A, N>>;
 
 // A fixed page table keeps branch snapshots cheap without adding a persistent
-// collection dependency. Cloning a store shares every page; the first write to
-// one key copies only that key's page and then the touched RangeStore.
+// collection dependency. Empty pages allocate nothing. Forking shares every
+// populated page; the first write to one key copies only that key's page and
+// then the touched RangeStore.
 const STORE_SHARDS: usize = 64;
 
 fn shard_index(key: &(impl Hash + ?Sized)) -> usize {
@@ -30,14 +31,14 @@ fn shard_index(key: &(impl Hash + ?Sized)) -> usize {
 /// expected by the frontend.
 #[derive(Clone, Debug)]
 pub struct SymbolicStore<A, N> {
-    entries: [Arc<StoreShard<A, N>>; STORE_SHARDS],
+    entries: [Option<Arc<StoreShard<A, N>>>; STORE_SHARDS],
     len: usize,
 }
 
 impl<A, N> Default for SymbolicStore<A, N> {
     fn default() -> Self {
         Self {
-            entries: std::array::from_fn(|_| Arc::new(HashMap::default())),
+            entries: std::array::from_fn(|_| None),
             len: 0,
         }
     }
@@ -51,7 +52,7 @@ impl<A, N> SymbolicStore<A, N> {
     /// writes their page.
     pub fn fork(&self) -> Self {
         Self {
-            entries: std::array::from_fn(|index| Arc::clone(&self.entries[index])),
+            entries: std::array::from_fn(|index| self.entries[index].as_ref().map(Arc::clone)),
             len: self.len,
         }
     }
@@ -59,7 +60,7 @@ impl<A, N> SymbolicStore<A, N> {
 
 impl<A: Eq + Hash, N> SymbolicStore<A, N> {
     fn entry_arc(&self, key: &A) -> Option<&RangeEntry<A, N>> {
-        self.entries[shard_index(key)].get(key)
+        self.entries[shard_index(key)].as_deref()?.get(key)
     }
 
     pub fn len(&self) -> usize {
@@ -77,7 +78,8 @@ impl<A: Eq + Hash, N> SymbolicStore<A, N> {
     {
         let per_shard = additional.div_ceil(STORE_SHARDS);
         for shard in &mut self.entries {
-            Arc::make_mut(shard).reserve(per_shard);
+            Arc::make_mut(shard.get_or_insert_with(|| Arc::new(HashMap::default())))
+                .reserve(per_shard);
         }
     }
 
@@ -94,7 +96,9 @@ impl<A: Eq + Hash, N> SymbolicStore<A, N> {
         A: Clone,
         N: Clone,
     {
-        let shard = Arc::make_mut(&mut self.entries[shard_index(&key)]);
+        let shard = Arc::make_mut(
+            self.entries[shard_index(&key)].get_or_insert_with(|| Arc::new(HashMap::default())),
+        );
         let previous = shard.insert(key, Arc::new(value));
         if previous.is_none() {
             self.len += 1;
@@ -107,9 +111,17 @@ impl<A: Eq + Hash, N> SymbolicStore<A, N> {
         A: Clone,
         N: Clone,
     {
-        let removed = Arc::make_mut(&mut self.entries[shard_index(key)]).remove(key);
+        let index = shard_index(key);
+        let shard = self.entries[index].as_mut()?;
+        if !shard.contains_key(key) {
+            return None;
+        }
+        let removed = Arc::make_mut(shard).remove(key);
         if removed.is_some() {
             self.len -= 1;
+        }
+        if shard.is_empty() {
+            self.entries[index] = None;
         }
         removed
     }
@@ -182,8 +194,8 @@ impl<A: Eq + Hash, N> SymbolicStore<A, N> {
 }
 
 struct DifferingKeys<'a, A, N> {
-    left_shards: &'a [Arc<StoreShard<A, N>>; STORE_SHARDS],
-    right_shards: &'a [Arc<StoreShard<A, N>>; STORE_SHARDS],
+    left_shards: &'a [Option<Arc<StoreShard<A, N>>>; STORE_SHARDS],
+    right_shards: &'a [Option<Arc<StoreShard<A, N>>>; STORE_SHARDS],
     next_shard: usize,
     left_shard: Option<&'a StoreShard<A, N>>,
     right_shard: Option<&'a StoreShard<A, N>>,
@@ -199,8 +211,7 @@ impl<'a, A: Eq + Hash, N> Iterator for DifferingKeys<'a, A, N> {
             while let Some((key, left)) = self.left_entries.as_mut().and_then(Iterator::next) {
                 if self
                     .right_shard
-                    .expect("a diff iterator has a right shard")
-                    .get(key)
+                    .and_then(|right| right.get(key))
                     .is_none_or(|right| !Arc::ptr_eq(left, right))
                 {
                     return Some(key);
@@ -208,11 +219,7 @@ impl<'a, A: Eq + Hash, N> Iterator for DifferingKeys<'a, A, N> {
             }
 
             while let Some(key) = self.right_keys.as_mut().and_then(Iterator::next) {
-                if !self
-                    .left_shard
-                    .expect("a diff iterator has a left shard")
-                    .contains_key(key)
-                {
+                if self.left_shard.is_none_or(|left| !left.contains_key(key)) {
                     return Some(key);
                 }
             }
@@ -220,14 +227,18 @@ impl<'a, A: Eq + Hash, N> Iterator for DifferingKeys<'a, A, N> {
             let left = self.left_shards.get(self.next_shard)?;
             let right = &self.right_shards[self.next_shard];
             self.next_shard += 1;
-            if Arc::ptr_eq(left, right) {
+            if match (left, right) {
+                (None, None) => true,
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                _ => false,
+            } {
                 continue;
             }
 
-            self.left_shard = Some(left);
-            self.right_shard = Some(right);
-            self.left_entries = Some(left.iter());
-            self.right_keys = Some(right.keys());
+            self.left_shard = left.as_deref();
+            self.right_shard = right.as_deref();
+            self.left_entries = left.as_deref().map(StoreShard::iter);
+            self.right_keys = right.as_deref().map(StoreShard::keys);
         }
     }
 }
@@ -237,7 +248,9 @@ impl<A: Clone + Eq + Hash, N: Clone> SymbolicStore<A, N> {
         let Some(value) = source.entry_arc(key) else {
             return false;
         };
-        let shard = Arc::make_mut(&mut self.entries[shard_index(key)]);
+        let shard = Arc::make_mut(
+            self.entries[shard_index(key)].get_or_insert_with(|| Arc::new(HashMap::default())),
+        );
         if shard.insert(key.clone(), Arc::clone(value)).is_none() {
             self.len += 1;
         }
@@ -247,15 +260,20 @@ impl<A: Clone + Eq + Hash, N: Clone> SymbolicStore<A, N> {
     pub fn entry(&mut self, key: A) -> Entry<'_, A, N> {
         let shard_index = shard_index(&key);
         Entry {
-            inner: Arc::make_mut(&mut self.entries[shard_index]).entry(key),
+            inner: Arc::make_mut(
+                self.entries[shard_index].get_or_insert_with(|| Arc::new(HashMap::default())),
+            )
+            .entry(key),
             len: &mut self.len,
         }
     }
 
     pub fn get_mut(&mut self, key: &A) -> Option<&mut SymbolicRange<A, N>> {
-        Arc::make_mut(&mut self.entries[shard_index(key)])
-            .get_mut(key)
-            .map(Arc::make_mut)
+        let shard = self.entries[shard_index(key)].as_mut()?;
+        if !shard.contains_key(key) {
+            return None;
+        }
+        Arc::make_mut(shard).get_mut(key).map(Arc::make_mut)
     }
 
     pub fn values_mut(&mut self) -> ValuesMut<'_, A, N> {
@@ -297,7 +315,7 @@ impl<A: Eq + Hash, N> Index<&A> for SymbolicStore<A, N> {
 }
 
 pub struct Iter<'a, A, N> {
-    shards: std::slice::Iter<'a, Arc<StoreShard<A, N>>>,
+    shards: std::slice::Iter<'a, Option<Arc<StoreShard<A, N>>>>,
     current: Option<std::collections::hash_map::Iter<'a, A, RangeEntry<A, N>>>,
     remaining: usize,
 }
@@ -311,7 +329,10 @@ impl<'a, A, N> Iterator for Iter<'a, A, N> {
                 self.remaining -= 1;
                 return Some((key, value.as_ref()));
             }
-            self.current = Some(self.shards.next()?.iter());
+            let Some(shard) = self.shards.next()?.as_deref() else {
+                continue;
+            };
+            self.current = Some(shard.iter());
         }
     }
 
@@ -323,7 +344,7 @@ impl<'a, A, N> Iterator for Iter<'a, A, N> {
 impl<A, N> ExactSizeIterator for Iter<'_, A, N> {}
 
 pub struct Values<'a, A, N> {
-    shards: std::slice::Iter<'a, Arc<StoreShard<A, N>>>,
+    shards: std::slice::Iter<'a, Option<Arc<StoreShard<A, N>>>>,
     current: Option<std::collections::hash_map::Values<'a, A, RangeEntry<A, N>>>,
     remaining: usize,
 }
@@ -337,7 +358,10 @@ impl<'a, A, N> Iterator for Values<'a, A, N> {
                 self.remaining -= 1;
                 return Some(value.as_ref());
             }
-            self.current = Some(self.shards.next()?.values());
+            let Some(shard) = self.shards.next()?.as_deref() else {
+                continue;
+            };
+            self.current = Some(shard.values());
         }
     }
 
@@ -349,7 +373,7 @@ impl<'a, A, N> Iterator for Values<'a, A, N> {
 impl<A, N> ExactSizeIterator for Values<'_, A, N> {}
 
 pub struct Keys<'a, A, N> {
-    shards: std::slice::Iter<'a, Arc<StoreShard<A, N>>>,
+    shards: std::slice::Iter<'a, Option<Arc<StoreShard<A, N>>>>,
     current: Option<std::collections::hash_map::Keys<'a, A, RangeEntry<A, N>>>,
     remaining: usize,
 }
@@ -363,7 +387,10 @@ impl<'a, A, N> Iterator for Keys<'a, A, N> {
                 self.remaining -= 1;
                 return Some(key);
             }
-            self.current = Some(self.shards.next()?.keys());
+            let Some(shard) = self.shards.next()?.as_deref() else {
+                continue;
+            };
+            self.current = Some(shard.keys());
         }
     }
 
@@ -375,7 +402,7 @@ impl<'a, A, N> Iterator for Keys<'a, A, N> {
 impl<A, N> ExactSizeIterator for Keys<'_, A, N> {}
 
 pub struct ValuesMut<'a, A: Clone, N: Clone> {
-    shards: std::slice::IterMut<'a, Arc<StoreShard<A, N>>>,
+    shards: std::slice::IterMut<'a, Option<Arc<StoreShard<A, N>>>>,
     current: Option<std::collections::hash_map::ValuesMut<'a, A, RangeEntry<A, N>>>,
     remaining: usize,
 }
@@ -389,7 +416,10 @@ impl<'a, A: Clone, N: Clone> Iterator for ValuesMut<'a, A, N> {
                 self.remaining -= 1;
                 return Some(Arc::make_mut(value));
             }
-            self.current = Some(Arc::make_mut(self.shards.next()?).values_mut());
+            let Some(shard) = self.shards.next()?.as_mut() else {
+                continue;
+            };
+            self.current = Some(Arc::make_mut(shard).values_mut());
         }
     }
 
@@ -434,6 +464,9 @@ impl<A: Clone + Eq + Hash, N: Clone> IntoIterator for SymbolicStore<A, N> {
     fn into_iter(self) -> Self::IntoIter {
         let mut values = Vec::with_capacity(self.len);
         for shard in self.entries {
+            let Some(shard) = shard else {
+                continue;
+            };
             let shard = Arc::try_unwrap(shard).unwrap_or_else(|shared| shared.as_ref().clone());
             values.extend(shard.into_iter().map(|(key, value)| {
                 let value = Arc::try_unwrap(value).unwrap_or_else(|shared| shared.as_ref().clone());
@@ -461,6 +494,29 @@ mod tests {
     use celox_design::BitAccess;
 
     use super::*;
+
+    #[test]
+    fn empty_store_allocates_no_shard_pages() {
+        let mut store = SymbolicStore::<u32, u32>::default();
+        assert!(store.entries.iter().all(Option::is_none));
+        assert!(store.get_mut(&7).is_none());
+        assert!(store.entries.iter().all(Option::is_none));
+
+        let branch = store.fork();
+        assert!(branch.entries.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn removing_a_last_entry_releases_its_shard_page() {
+        let mut store = SymbolicStore::<u32, u32>::default();
+        store.insert(7, RangeStore::new(None, 8));
+        let index = shard_index(&7);
+        assert!(store.entries[index].is_some());
+
+        assert!(store.remove(&7).is_some());
+        assert!(store.entries[index].is_none());
+        assert!(store.is_empty());
+    }
 
     #[test]
     fn cloned_store_copies_a_range_only_when_it_is_mutated() {
@@ -503,7 +559,11 @@ mod tests {
             .entries
             .iter()
             .zip(&branch.entries)
-            .filter(|(left, right)| Arc::ptr_eq(left, right))
+            .filter(|(left, right)| {
+                left.as_ref()
+                    .zip(right.as_ref())
+                    .is_some_and(|(left, right)| Arc::ptr_eq(left, right))
+            })
             .count();
         assert_eq!(shared_pages, STORE_SHARDS - 1);
         assert!(original.shares_entry_with(&branch, &7));
