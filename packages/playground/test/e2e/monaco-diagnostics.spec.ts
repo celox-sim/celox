@@ -1,21 +1,5 @@
-import { expect, type Page, test } from "@playwright/test";
-
-type PlaygroundTestMarker = {
-	code?: string | number;
-	message: string;
-};
-
-declare global {
-	interface Window {
-		__CELOX_PLAYGROUND_TEST_API__?: {
-			loadExample: (name: string) => void;
-			setFileContent: (path: string, content: string) => void;
-			getModelMarkers: (path: string) => PlaygroundTestMarker[];
-			getTypeScriptDiagnostics: (path: string) => Promise<PlaygroundTestMarker[]>;
-			getStatusText: () => string;
-		};
-	}
-}
+import { expect, test } from "@playwright/test";
+import { openPlayground } from "./playground.js";
 
 const bigintTestbench = `import { describe, it, expect } from "vitest";
 
@@ -26,43 +10,6 @@ describe("bigint literals", () => {
 	});
 });
 `;
-
-async function openPlayground(page: Page) {
-	const browserErrors: string[] = [];
-	page.on("console", (message) => {
-		if (message.type() === "error") browserErrors.push(message.text());
-	});
-	const pageError = new Promise<never>((_, reject) => {
-		page.on("pageerror", (error) => {
-			browserErrors.push(error.message);
-			reject(new Error(`Playground browser error: ${error.message}`));
-		});
-	});
-
-	const response = await page.goto("/");
-	expect(response?.headers()["cross-origin-opener-policy"]).toBe("same-origin");
-	expect(response?.headers()["cross-origin-embedder-policy"]).toBe(
-		"credentialless",
-	);
-	expect(await page.evaluate(() => window.crossOriginIsolated)).toBe(true);
-
-	await Promise.race([
-		page.waitForFunction(() => {
-			const api = window.__CELOX_PLAYGROUND_TEST_API__;
-			return api && api.getStatusText() !== "Loading WASM…";
-		}),
-		pageError,
-	]);
-	const status = await page.evaluate(() =>
-		window.__CELOX_PLAYGROUND_TEST_API__?.getStatusText(),
-	);
-	expect(
-		status,
-		`Browser errors: ${browserErrors.join("\n") || "none"}`,
-	).toBe("Ready");
-
-	return browserErrors;
-}
 
 test("playground starts and accepts bigint literals", async ({ page }) => {
 	const browserErrors = await openPlayground(page);
@@ -96,5 +43,5 @@ test("playground starts and accepts bigint literals", async ({ page }) => {
 			{ timeout: 60_000 },
 		)
 		.toBe(true);
-	expect(browserErrors).toEqual([]);
+	browserErrors.assertEmpty();
 });

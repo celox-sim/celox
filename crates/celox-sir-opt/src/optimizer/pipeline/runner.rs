@@ -179,6 +179,36 @@ pub(super) fn optimize_with_options(
     let comb_phase_start = timing.then(crate::timing::now);
     let comb_eu_count = program.sir.eval_comb.len();
     let sir = &mut *program.sir;
+    #[cfg(target_arch = "wasm32")]
+    {
+        for (i, eu) in sir.eval_comb.iter_mut().enumerate() {
+            if timing {
+                let inst_count: usize = eu.blocks.values().map(|b| b.instructions.len()).sum();
+                let block_count = eu.blocks.len();
+                tracing::debug!(
+                    "[phase] eval_comb eu[{i}]: blocks={block_count} insts={inst_count}"
+                );
+            }
+            comb_passes.run(eu, &options);
+        }
+
+        optimize_unit_groups_cached(&mut sir.eval_apply_ffs, &ff_passes, &options);
+        optimize_unit_groups_cached(&mut sir.eval_comb_apply_ffs, &comb_ff_passes, &options);
+        optimize_unit_groups_cached(&mut sir.eval_comb_apply_ffs, &comb_ff_late_passes, &options);
+        optimize_unified_commit_groups(
+            &mut sir.eval_apply_ffs,
+            on(SirPass::CommitSinking),
+            on(SirPass::InlineCommitForwarding),
+        );
+        optimize_unified_commit_groups(
+            &mut sir.eval_comb_apply_ffs,
+            on(SirPass::CommitSinking),
+            on(SirPass::InlineCommitForwarding),
+        );
+        optimize_unit_groups_cached(&mut sir.eval_apply_ffs, &ff_post_passes, &options);
+        optimize_unit_groups_cached(&mut sir.eval_comb_apply_ffs, &ff_post_passes, &options);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     std::thread::scope(|scope| {
         let comb_worker = scope.spawn(|| {
             for (i, eu) in sir.eval_comb.iter_mut().enumerate() {

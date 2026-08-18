@@ -9,8 +9,16 @@ import celoxSimulatorDts from "../../celox/dist/simulator.d.ts?raw";
 // Import real .d.ts files from @celox-sim/celox for Monaco type injection
 import celoxTypesDts from "../../celox/dist/types.d.ts?raw";
 import celoxWasmBridgeDts from "../../celox/dist/wasm-bridge.d.ts?raw";
+import { CeloxCompilerClient } from "./celox-compiler-client.js";
 import { buildMonacoTestbenchCompilerOptions } from "./monaco-testbench-options.js";
-import { FourState, X, Z } from "./playground-runtime-helpers.js";
+import {
+	FourState,
+	initializeFourStateMemory,
+	type PlaygroundSignalValue,
+	writeSignalValue,
+	X,
+	Z,
+} from "./playground-runtime-helpers.js";
 import { transpileTestbench } from "./testbench-transpile.js";
 import {
 	buildVirtualModuleDts,
@@ -270,15 +278,55 @@ describe("Counter (Waveform)", () => {
 		veryl: `module FourStateDemo (
     a: input logic<8>,
     b: input logic<8>,
+    array_input: input logic<1> [8],
     snapshot: output logic<8>,
+    array_snapshot: output logic<8>,
 ) {
     assign snapshot = a;
+
+    for i in 0..8 :g {
+        assign array_snapshot[i] = array_input[i];
+    }
 }`,
 		testbench: `import { describe, it, expect } from "vitest";
-import { FourState, Simulator, X } from "@celox-sim/celox";
+import { FourState, Simulation, Simulator, X } from "@celox-sim/celox";
 import { FourStateDemo } from "../src/FourStateDemo.veryl";
 
 describe("FourStateDemo", () => {
+    it("keeps the default simulator in two-state mode", () => {
+        const sim = Simulator.create(FourStateDemo);
+
+        expect(sim.fourState("a").mask).toBe(0n);
+
+        sim.dispose();
+    });
+
+    it("starts unassigned simulator signals as X", () => {
+        const sim = Simulator.create(FourStateDemo, { fourState: true });
+
+        expect(sim.fourState("a").mask).toBe(0xffn);
+
+        sim.dispose();
+    });
+
+    it("starts unassigned simulation signals as X", () => {
+        const sim = Simulation.create(FourStateDemo, { fourState: true });
+
+        expect(sim.fourState("a").mask).toBe(0xffn);
+
+        sim.dispose();
+    });
+
+    it("starts every unpacked array element as X", () => {
+        const sim = Simulator.create(FourStateDemo, { fourState: true });
+
+        sim.tick();
+
+        expect(sim.fourState("array_snapshot").mask).toBe(0xffn);
+
+        sim.dispose();
+    });
+
     it("writes and reads all-X", () => {
         const sim = Simulator.create(FourStateDemo, { fourState: true });
 
@@ -1109,18 +1157,21 @@ function getVerylModel(): monaco.editor.ITextModel | null {
 	return null;
 }
 
-function getTestModels(): { path: string; model: monaco.editor.ITextModel }[] {
-	const target = runTargetEl.value;
+function snapshotTestSources(
+	target: string,
+): { path: string; source: string }[] {
 	if (target === "*") {
 		// All test files
-		const result: { path: string; model: monaco.editor.ITextModel }[] = [];
+		const result: { path: string; source: string }[] = [];
 		for (const [path, f] of files) {
-			if (isTestFile(path)) result.push({ path, model: f.model });
+			if (isTestFile(path)) {
+				result.push({ path, source: f.model.getValue() });
+			}
 		}
 		return result;
 	}
 	const f = files.get(target);
-	if (f) return [{ path: target, model: f.model }];
+	if (f) return [{ path: target, source: f.model.getValue() }];
 	return [];
 }
 
@@ -1228,18 +1279,23 @@ function parseVerylErrors(errorMsg: string): monaco.editor.IMarkerData[] {
 
 // Update types + diagnostics when Veryl source changes
 let updateTimer: ReturnType<typeof setTimeout>;
+let updateRevision = 0;
 function onVerylChange() {
 	clearTimeout(updateTimer);
-	updateTimer = setTimeout(() => {
+	const revision = ++updateRevision;
+	updateTimer = setTimeout(async () => {
 		const source = getVerylSource();
 		const model = getVerylModel();
 
 		// Try WASM-based analysis (accurate types + diagnostics)
-		if (celox) {
+		if (celoxCompilerReady) {
 			try {
 				const result = JSON.parse(
-					celox.genTsFromSource([{ content: source, path: "main.veryl" }]),
+					await celoxCompiler.genTsFromSourceLatest([
+						{ content: source, path: "main.veryl" },
+					]),
 				);
+				if (revision !== updateRevision) return;
 				if (result.modules?.[0]?.ports) {
 					updateDutTypes(result.modules[0].ports);
 				}
@@ -1277,6 +1333,7 @@ function onVerylChange() {
 				}
 				return;
 			} catch (e: any) {
+				if (revision !== updateRevision) return;
 				// Analysis failed — show diagnostics
 				if (model) {
 					const markers = parseVerylErrors(e.message || String(e));
@@ -1287,6 +1344,7 @@ function onVerylChange() {
 		}
 
 		// Fallback: regex-based port extraction (no WASM needed)
+		if (revision !== updateRevision) return;
 		const ports = extractPortsFromSource(source);
 		if (Object.keys(ports).length > 0) {
 			updateDutTypes(ports);
@@ -1296,11 +1354,13 @@ function onVerylChange() {
 
 // ── WASM loading ────────────────────────────────────────
 
-let celox: any;
+const celoxCompiler = new CeloxCompilerClient();
+let celoxCompilerReady = false;
 
 async function init() {
 	try {
-		celox = await import("./celox-wasm-loader.js");
+		await celoxCompiler.ready;
+		celoxCompilerReady = true;
 		statusEl.textContent = "Ready";
 		runBtn.disabled = false;
 		onVerylChange(); // Initial type generation
@@ -1339,6 +1399,14 @@ async function run() {
 		runBtn.disabled = false;
 		return;
 	}
+	const runArgs = runArgsEl.value.trim();
+	const testSources = snapshotTestSources(targetPath);
+	if (testSources.length === 0) {
+		appendConsole("[error] No test files found", "log-error");
+		statusEl.textContent = "Error";
+		runBtn.disabled = false;
+		return;
+	}
 
 	try {
 		const verylSource = getVerylSource();
@@ -1347,36 +1415,45 @@ async function run() {
 		const topName = topMatch[1];
 
 		const t0 = performance.now();
-		const genTsResult = (() => {
+		const genTsResult = await (async () => {
 			try {
 				return JSON.parse(
-					celox.genTsFromSource([{ content: verylSource, path: "main.veryl" }]),
+					await celoxCompiler.genTsFromSource([
+						{ content: verylSource, path: "main.veryl" },
+					]),
 				);
 			} catch {
 				return null;
 			}
 		})();
 
-		const handle = new celox.NativeSimulatorHandle(
-			[{ content: verylSource, path: "main.veryl" }],
-			topName,
-		);
-		const layout = JSON.parse(handle.layoutJson);
-		const events = JSON.parse(handle.eventsJson);
-		const totalSize = handle.totalSize;
+		const sources = [{ content: verylSource, path: "main.veryl" }];
+		const [twoStateCompiled, fourStateCompiled] = await Promise.all([
+			celoxCompiler.compile(sources, topName, { fourState: false }),
+			celoxCompiler.compile(sources, topName, { fourState: true }),
+		]);
 		const t1 = performance.now();
 		appendConsole(
-			`[compile] ${(t1 - t0).toFixed(0)}ms — ${Object.keys(layout).length} signals, ${Object.keys(events).length} events`,
+			`[compile] ${(t1 - t0).toFixed(0)}ms — ${Object.keys(twoStateCompiled.layout).length} signals, ${Object.keys(twoStateCompiled.events).length} events`,
 			"log-success",
 		);
 
+		type PlaygroundSimulatorOptions = { fourState?: boolean };
+
 		// Build simulation factory (creates fresh instance per call)
-		function createSim() {
+		function createSim(options?: PlaygroundSimulatorOptions) {
+			const fourStateEnabled = options?.fourState === true;
+			const {
+				layout,
+				events,
+				totalSize,
+				combModule,
+				eventModules,
+				fourStateInitRegions,
+			} = fourStateEnabled ? fourStateCompiled : twoStateCompiled;
 			const pages = Math.max(1, Math.ceil(totalSize / 65536));
 			const memory = new WebAssembly.Memory({ initial: pages });
-			const combModule = new WebAssembly.Module(
-				new Uint8Array(handle.combWasmBytes()),
-			);
+			initializeFourStateMemory(memory, fourStateInitRegions);
 			const combInst = new WebAssembly.Instance(combModule, {
 				env: { memory },
 			});
@@ -1386,12 +1463,12 @@ async function run() {
 			const eventInsts: Record<number, WebAssembly.Instance> = {};
 			for (const name of eventNames) {
 				const id: number = events[name];
-				try {
-					const mod = new WebAssembly.Module(
-						new Uint8Array(handle.eventWasmBytes(name)),
-					);
-					eventInsts[id] = new WebAssembly.Instance(mod, { env: { memory } });
-				} catch {}
+				const eventModule = eventModules[name];
+				if (eventModule) {
+					eventInsts[id] = new WebAssembly.Instance(eventModule, {
+						env: { memory },
+					});
+				}
 			}
 			const defaultEventId = eventNames.length > 0 ? events[eventNames[0]] : -1;
 
@@ -1413,14 +1490,10 @@ async function run() {
 					if (sig.width < 64) v &= (1n << BigInt(sig.width)) - 1n;
 					return v;
 				},
-				set(_, prop: string, value: bigint) {
+				set(_, prop: string, value: PlaygroundSignalValue) {
 					const sig = layout[prop];
 					if (!sig) throw new Error(`Signal '${prop}' not found`);
-					let v = BigInt(value);
-					for (let i = 0; i < sig.byte_size; i++) {
-						view.setUint8(sig.offset + i, Number(v & 0xffn));
-						v >>= 8n;
-					}
+					writeSignalValue(view, sig, value, fourStateEnabled);
 					dirty = true;
 					return true;
 				},
@@ -1525,8 +1598,8 @@ async function run() {
 			.filter(Boolean);
 
 		const Simulator = {
-			create(_module: any) {
-				return createSim();
+			create(_module: any, options?: PlaygroundSimulatorOptions) {
+				return createSim(options);
 			},
 		};
 
@@ -1537,12 +1610,19 @@ async function run() {
 		//   3. Detect edges (posedge/negedge) and fire triggered FF handlers
 		//   4. Evaluate combinational logic
 		//   5. Reschedule recurring clocks with toggled value
-		function createSimulation() {
+		function createSimulation(options?: PlaygroundSimulatorOptions) {
+			const fourStateEnabled = options?.fourState === true;
+			const {
+				layout,
+				events,
+				totalSize,
+				combModule,
+				eventModules,
+				fourStateInitRegions,
+			} = fourStateEnabled ? fourStateCompiled : twoStateCompiled;
 			const pages = Math.max(1, Math.ceil(totalSize / 65536));
 			const memory = new WebAssembly.Memory({ initial: pages });
-			const combModule = new WebAssembly.Module(
-				new Uint8Array(handle.combWasmBytes()),
-			);
+			initializeFourStateMemory(memory, fourStateInitRegions);
 			const combInst = new WebAssembly.Instance(combModule, {
 				env: { memory },
 			});
@@ -1551,12 +1631,12 @@ async function run() {
 			const eventInsts: Record<number, WebAssembly.Instance> = {};
 			for (const name of eventNames) {
 				const id: number = events[name];
-				try {
-					const mod = new WebAssembly.Module(
-						new Uint8Array(handle.eventWasmBytes(name)),
-					);
-					eventInsts[id] = new WebAssembly.Instance(mod, { env: { memory } });
-				} catch {}
+				const eventModule = eventModules[name];
+				if (eventModule) {
+					eventInsts[id] = new WebAssembly.Instance(eventModule, {
+						env: { memory },
+					});
+				}
 			}
 
 			const view = new DataView(memory.buffer);
@@ -1602,7 +1682,7 @@ async function run() {
 
 			function writeSignal(name: string, val: number) {
 				const sig = layout[name];
-				if (sig) view.setUint8(sig.offset, val);
+				if (sig) writeSignalValue(view, sig, val, fourStateEnabled);
 			}
 
 			function resolveEvent(name: string): number {
@@ -1682,14 +1762,10 @@ async function run() {
 					if (sig.width < 64) v &= (1n << BigInt(sig.width)) - 1n;
 					return v;
 				},
-				set(_, prop: string, value: bigint) {
+				set(_, prop: string, value: PlaygroundSignalValue) {
 					const sig = layout[prop];
 					if (!sig) throw new Error(`Signal '${prop}' not found`);
-					let v = BigInt(value);
-					for (let i = 0; i < sig.byte_size; i++) {
-						view.setUint8(sig.offset + i, Number(v & 0xffn));
-						v >>= 8n;
-					}
+					writeSignalValue(view, sig, value, fourStateEnabled);
 					simDirty = true;
 					return true;
 				},
@@ -1894,8 +1970,8 @@ async function run() {
 		}
 
 		const Simulation = {
-			create(_module: any) {
-				return createSimulation();
+			create(_module: any, options?: PlaygroundSimulatorOptions) {
+				return createSimulation(options);
 			},
 		};
 
@@ -1916,10 +1992,9 @@ async function run() {
 		};
 
 		// Parse vitest-style args (--grep "pattern")
-		const argsStr = runArgsEl.value.trim();
 		let grepPattern: RegExp | null = null;
-		if (argsStr) {
-			const grepMatch = argsStr.match(
+		if (runArgs) {
+			const grepMatch = runArgs.match(
 				/(?:--grep|-t)\s+(?:"([^"]+)"|'([^']+)'|(\S+))/,
 			);
 			if (grepMatch) {
@@ -1940,14 +2015,9 @@ async function run() {
 		const tests: TestEntry[] = [];
 
 		statusEl.textContent = "Running…";
-		const tsWorker = await monacoTypeScript.getTypeScriptWorker();
-		const testModels = getTestModels();
-		if (testModels.length === 0) throw new Error("No test files found");
 
-		for (const { path: testPath, model: tbMdl } of testModels) {
-			const client = await tsWorker(tbMdl.uri);
-			const output = await client.getEmitOutput(tbMdl.uri.toString());
-			const jsCode = transpileTestbench(tbMdl.getValue(), testPath, output);
+		for (const { path: testPath, source } of testSources) {
+			const jsCode = transpileTestbench(source, testPath);
 
 			const suiteStack: string[] = [];
 			function _describe(name: string, fn: () => void) {

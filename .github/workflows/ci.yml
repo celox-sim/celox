@@ -404,7 +404,7 @@ jobs:
   playground-browser:
     name: Playground Browser Test
     needs: [changes, rust]
-    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true')
+    if: always() && (needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.napi == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
