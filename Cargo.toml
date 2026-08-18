@@ -9,7 +9,7 @@ members = [
     "crates/celox-backend-x86",
     "crates/celox-bench",
     "crates/celox-design",
-    "crates/celox-frontend-veryl",
+    "crates/celox-frontend",
     "crates/celox-sir",
     "crates/celox-sir-opt",
     "crates/celox-slt",

@@ -11,7 +11,7 @@ pub(crate) use celox_design::{BinaryOp, UnaryOp};
 pub(crate) use celox_design::{
     InitialStateData, InitialStateWriteRun, RuntimeEventKind, RuntimeEventSite,
 };
-pub use celox_frontend_veryl::{InstancePath, VariableInfo, VerylFrontendLookup};
+pub use celox_frontend::{FrontendLookup, InstancePath, VariableInfo, VerylFrontendLookup};
 #[cfg(all(
     feature = "host-runtime",
     any(
@@ -58,7 +58,7 @@ pub(crate) enum DesignProjectionError {
     StateObjectCount { design: usize, frontend: usize },
     #[error("missing state projection for {source_address}")]
     MissingStateProjection {
-        source_address: celox_frontend_veryl::AbsoluteAddr,
+        source_address: celox_frontend::AbsoluteAddr,
     },
     #[error("missing flattened state object {address}")]
     MissingStateObject { address: AbsoluteAddr },
@@ -79,7 +79,7 @@ pub type RuntimeErrorInfo<Addr = AbsoluteAddr> = celox_design::RuntimeErrorInfo<
 #[derive(Clone)]
 pub struct RuntimeProgram {
     pub design: celox_design::ElaboratedDesign<AbsoluteAddr>,
-    pub frontend: VerylFrontendLookup,
+    pub frontend: FrontendLookup,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
     pub testbench: Option<TestbenchProgram<AbsoluteAddr>>,
 }
@@ -535,16 +535,15 @@ impl RuntimeProgram {
         instance_id: InstanceId,
         var_id: veryl_analyzer::ir::VarId,
     ) -> Option<AbsoluteAddr> {
-        self.frontend
-            .state_address(&celox_frontend_veryl::AbsoluteAddr {
-                instance_id,
-                var_id,
-            })
+        self.frontend.state_address(&celox_frontend::AbsoluteAddr {
+            instance_id,
+            var_id,
+        })
     }
 
     pub(crate) fn from_scheduled(
-        scheduled: celox_frontend_veryl::ScheduledRtl,
-    ) -> (SirProgram, Self, celox_frontend_veryl::VerylTestbenchSource) {
+        scheduled: celox_frontend::ScheduledRtl,
+    ) -> (SirProgram, Self, celox_frontend::VerylTestbenchSource) {
         (
             scheduled.sir,
             Self {
@@ -593,7 +592,7 @@ impl RuntimeProgram {
                 path: path_str.clone(),
             })?;
         let var_id = entry.ok_or_else(|| AddrLookupError::AmbiguousPath { path: path_str })?;
-        let source_addr = celox_frontend_veryl::AbsoluteAddr {
+        let source_addr = celox_frontend::AbsoluteAddr {
             instance_id,
             var_id,
         };
@@ -638,7 +637,7 @@ impl RuntimeProgram {
 
         for (&instance_id, module_id) in &self.frontend.instance_module {
             for info in self.frontend.module_variables[module_id].values() {
-                let source_address = celox_frontend_veryl::AbsoluteAddr {
+                let source_address = celox_frontend::AbsoluteAddr {
                     instance_id,
                     var_id: info.id,
                 };
@@ -763,7 +762,7 @@ pub(crate) mod verify {
 }
 pub use celox_slt::{GlueAddrBase, GlueBlockBase};
 
-pub use celox_frontend_veryl::SimModule;
+pub use celox_frontend::SimModule;
 #[cfg(all(
     feature = "host-runtime",
     any(
@@ -837,14 +836,12 @@ mod tests {
 
     #[test]
     fn test_glueaddr_display() {
-        let parent_addr =
-            celox_frontend_veryl::GlueAddr::Parent(veryl_analyzer::ir::VarId::default());
+        let parent_addr = celox_frontend::GlueAddr::Parent(veryl_analyzer::ir::VarId::default());
         let parent_display = format!("{}", parent_addr);
         assert!(parent_display.contains("GlueAddr::Parent"));
         assert!(parent_display.contains("var0"));
 
-        let child_addr =
-            celox_frontend_veryl::GlueAddr::Child(veryl_analyzer::ir::VarId::default());
+        let child_addr = celox_frontend::GlueAddr::Child(veryl_analyzer::ir::VarId::default());
         let child_display = format!("{}", child_addr);
         assert!(child_display.contains("GlueAddr::Child"));
         assert!(child_display.contains("var0"));

@@ -1,16 +1,16 @@
 # Simulator Architecture
 
-Celox compiles Veryl RTL into executable simulation kernels and runs them with an
-event-driven runtime. The architecture is optimized for synchronous RTL
-verification rather than gate-level timing or detailed delta-cycle emulation.
+Celox compiles Veryl and supported SystemVerilog RTL into executable simulation
+kernels and runs them with an event-driven runtime. The architecture is
+optimized for synchronous RTL verification rather than gate-level timing or
+detailed delta-cycle emulation.
 
 ## System overview
 
 ```text
-Veryl source
-    │
-    ▼
-frontend analysis and hierarchy elaboration
+Veryl source ──────────┐
+                      ├─► frontend analysis and hierarchy elaboration
+SystemVerilog source ──┘
     │
     ▼
 symbolic logic (SLT) and dependency scheduling
@@ -37,9 +37,12 @@ for the crate and artifact boundaries.
 
 ## Frontend and scheduling
 
-The Veryl frontend analyzes modules, elaborates hierarchy, and records the source
-lookup information needed by diagnostics and public signal paths. Combinational
-expressions are represented as symbolic logic trees (SLT).
+The shared frontend owns language adapters, hierarchy elaboration, and the source
+lookup information needed by diagnostics and public signal paths. The reusable
+SystemVerilog parser and semantic analyzer remain isolated in
+`celox-sv-analyzer`; its Celox lowering adapter lives beside the shared assembly
+instead of depending on the Veryl adapter. Combinational expressions from either
+language are represented as symbolic logic trees (SLT).
 
 The scheduler then:
 

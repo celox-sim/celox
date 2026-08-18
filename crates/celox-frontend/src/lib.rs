@@ -1,8 +1,11 @@
-//! Veryl-owned frontend artifacts.
+//! HDL frontend construction and shared symbolic assembly for Celox.
 //!
-//! Types in this crate may retain Veryl source identities for diagnostics and
-//! public path lookup. Semantic design and backend phases must not depend on
-//! them.
+//! Veryl lowering lives in this crate alongside the shared symbolic assembly
+//! used by every HDL adapter. SystemVerilog syntax and semantic
+//! analysis remain isolated in `celox-sv-analyzer`; the optional
+//! [`systemverilog`] module only adapts analyzed SV into the shared assembly
+//! model. Semantic design and backend phases must not depend on source-language
+//! identities retained here for diagnostics and public path lookup.
 
 pub mod bitaccess;
 pub mod bitslicer;
@@ -21,6 +24,8 @@ pub mod loop_provenance;
 pub mod module;
 mod module_artifact;
 pub mod registry;
+#[cfg(feature = "systemverilog")]
+pub mod systemverilog;
 mod testbench;
 mod trace;
 mod types;
@@ -105,11 +110,12 @@ impl fmt::Debug for VariableInfo {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct InstancePath(pub Vec<(StrId, usize)>);
 
-/// Veryl source identities retained by the facade for diagnostics and public
-/// path lookup. Compiler phases after elaboration should consume flattened
-/// `celox-design` identities instead.
+/// Frontend-local source identities retained for diagnostics and public path
+/// lookup. The current shared symbolic representation uses Veryl analyzer ID
+/// and path types internally for both adapters; compiler phases after
+/// elaboration consume flattened `celox-design` identities instead.
 #[derive(Clone, Default)]
-pub struct VerylFrontendLookup {
+pub struct FrontendLookup {
     pub instance_ids: HashMap<InstancePath, InstanceId>,
     pub instance_module: HashMap<InstanceId, ModuleId>,
     /// Elaborated children whose source-facing name requires an index.
@@ -127,9 +133,9 @@ pub struct VerylFrontendLookup {
     pub event_aliases: HashMap<StateAddr, StateAddr>,
 }
 
-impl fmt::Debug for VerylFrontendLookup {
+impl fmt::Debug for FrontendLookup {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("VerylFrontendLookup")
+        f.debug_struct("FrontendLookup")
             .field("instances", &self.instance_module.len())
             .field("modules", &self.module_variables.len())
             .field("projected_state_objects", &self.source_to_state.len())
@@ -137,7 +143,7 @@ impl fmt::Debug for VerylFrontendLookup {
     }
 }
 
-impl VerylFrontendLookup {
+impl FrontendLookup {
     pub fn instance_path_segments(&self, path: &InstancePath) -> Vec<String> {
         let mut prefix = Vec::with_capacity(path.0.len());
         path.0
@@ -236,6 +242,10 @@ impl VerylFrontendLookup {
     }
 }
 
+/// Compatibility alias for callers compiled against the Veryl-only frontend
+/// facade. New code should use [`FrontendLookup`].
+pub type VerylFrontendLookup = FrontendLookup;
+
 /// Veryl-owned source input for frontend testbench lowering.
 ///
 /// This artifact is intentionally separate from semantic design/runtime
@@ -305,7 +315,7 @@ mod tests {
 
     #[test]
     fn default_lookup_has_no_source_identities() {
-        let lookup = VerylFrontendLookup::default();
+        let lookup = FrontendLookup::default();
         assert!(lookup.instance_ids.is_empty());
         assert!(lookup.instance_module.is_empty());
         assert!(lookup.module_variables.is_empty());

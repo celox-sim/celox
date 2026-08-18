@@ -12,7 +12,7 @@ use celox_slt::{
 use veryl_analyzer::ir::{VarId, VarPath, Variable};
 use veryl_parser::resource_table::StrId;
 
-use crate::{HashMap, VerylFrontendLookup, VerylTestbenchSource};
+use crate::{FrontendLookup, HashMap, VerylTestbenchSource};
 
 type RegionedVarAddr = RegionedVarAddrBase<VarId>;
 type GlueBlock = GlueBlockBase<VarId>;
@@ -105,7 +105,7 @@ impl fmt::Debug for RelocationModule {
 pub struct ScheduledRtl {
     pub sir: SirProgram<StateAddr, RegionedStateAddr>,
     pub design: ElaboratedDesign<StateAddr>,
-    pub frontend_lookup: VerylFrontendLookup,
+    pub frontend_lookup: FrontendLookup,
     pub runtime_schema: RuntimeSchema<StateAddr>,
     pub testbench_source: VerylTestbenchSource,
 }

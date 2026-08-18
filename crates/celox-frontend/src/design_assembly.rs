@@ -24,13 +24,13 @@ use veryl_metadata::{ClockType, ResetType};
 use veryl_parser::resource_table::{self, StrId};
 
 use crate::{
-    AbsoluteAddr, BuildConfig, FfRuntimeRelocation, FrontendTrace, FrontendTraceOptions,
-    FusedSirOptimizationHints, GlueAddr, HashMap, HashSet, InstancePath, ParserError,
-    RegionedAbsoluteAddr, RegionedVarAddr, RelocationModule, ScheduledRtl, ScheduledRtlOutput,
-    SharedClockLowering, SimModule, SourceLocation, SymbolicRtl, VariableInfo,
+    AbsoluteAddr, BuildConfig, FfRuntimeRelocation, FrontendLookup, FrontendTrace,
+    FrontendTraceOptions, FusedSirOptimizationHints, GlueAddr, HashMap, HashSet, InstancePath,
+    ParserError, RegionedAbsoluteAddr, RegionedVarAddr, RelocationModule, ScheduledRtl,
+    ScheduledRtlOutput, SharedClockLowering, SimModule, SourceLocation, SymbolicRtl, VariableInfo,
     VerylComponentBinding, VerylComponentConnectionBinding, VerylComponentEventBinding,
-    VerylComponentInputBinding, VerylFrontendLookup, VerylTestbenchSource, bitaccess,
-    build_ff_clock_recipes, flattening, resolve_total_width,
+    VerylComponentInputBinding, VerylTestbenchSource, bitaccess, build_ff_clock_recipes,
+    flattening, resolve_total_width,
 };
 
 fn string_of(id: StrId) -> String {
@@ -743,7 +743,7 @@ pub fn schedule_symbolic_rtl(
         Ok(schedule) => schedule,
         Err(error) => {
             let (err_vars, err_path_idx) = module_variables(&module_ir, config).unwrap_or_default();
-            let frontend_lookup = VerylFrontendLookup {
+            let frontend_lookup = FrontendLookup {
                 instance_ids: expanded.clone(),
                 instance_module: instance_modules.clone(),
                 indexed_instances: indexed_instances.clone(),
@@ -1111,7 +1111,7 @@ pub fn schedule_symbolic_rtl(
             events,
             initial_state,
         },
-        frontend_lookup: VerylFrontendLookup {
+        frontend_lookup: FrontendLookup {
             instance_ids: expanded,
             instance_module: instance_modules,
             indexed_instances,

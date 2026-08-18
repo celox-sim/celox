@@ -9,8 +9,6 @@ pub use component::{
 };
 mod debug;
 mod diagnostics;
-#[cfg(feature = "systemverilog")]
-mod frontend_sv;
 mod ir;
 mod optimizer;
 mod parser;
@@ -27,7 +25,7 @@ pub use backend::{
     EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, SimBackend, get_byte_size,
 };
 pub use celox_design::{DomainKind, ElaboratedDesign, EventTopology, RuntimeSchema};
-pub use celox_frontend_veryl::{FrontendDiagnostic, LoweringPhase, ParserError};
+pub use celox_frontend::{FrontendDiagnostic, LoweringPhase, ParserError};
 pub use celox_runtime::{
     DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,
     SignalDirection,
@@ -38,9 +36,9 @@ pub use diagnostics::RuntimeDiagnostics;
 pub(crate) use fxhash::FxHashMap as HashMap;
 pub(crate) use fxhash::FxHashSet as HashSet;
 pub use ir::{
-    AbsoluteAddr, AddrLookupError, InstancePath, LaidOutProgram, OptimizedSir, PortTypeKind,
-    RuntimeErrorInfo, RuntimeProgram, SignalRef, SirProgram, UnoptimizedSir, VariableInfo,
-    VerylFrontendLookup,
+    AbsoluteAddr, AddrLookupError, FrontendLookup, InstancePath, LaidOutProgram, OptimizedSir,
+    PortTypeKind, RuntimeErrorInfo, RuntimeProgram, SignalRef, SirProgram, UnoptimizedSir,
+    VariableInfo, VerylFrontendLookup,
 };
 pub use num_bigint::BigUint;
 pub use optimizer::OptLevel;

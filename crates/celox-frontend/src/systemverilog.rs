@@ -1,22 +1,22 @@
-//! SystemVerilog integration adapter.
+//! SystemVerilog lowering adapter for the shared Celox frontend.
 //!
 //! SystemVerilog syntax and semantic analysis belongs in the
-//! `celox-sv-analyzer` crate. The current symbolic assembly pipeline still
-//! uses Veryl-owned module identities and metadata, so the adapter that joins
-//! those two frontends belongs at the top-level `celox` integration boundary,
-//! not in a purportedly independent SystemVerilog frontend crate.
+//! `celox-sv-analyzer` crate. This module converts analyzed SV into the shared
+//! symbolic assembly model. It intentionally lives beside that assembly rather
+//! than in the public `celox` facade or in a misleading frontend-to-frontend
+//! dependency.
 
 use std::path::{Path, PathBuf};
 
+use crate::{
+    BuildConfig, ExternalHierarchy, ExternalModule, FrontendTrace, FrontendTraceOptions, GlueAddr,
+    LoweringPhase, ParserError, ScheduledRtlOutput, SimModule, SymbolicRtl,
+    logic_tree::coerce_node_width,
+};
 use celox_design::{
     BinaryOp, BitAccess, DomainKind, InitialStateData, InitialStateValue, ModuleId, PortTypeKind,
     RegionedVarAddrBase, RuntimeErrorInfo, STABLE_REGION, TriggerSet, UnaryOp, VarAtomBase,
     WORKING_REGION,
-};
-use celox_frontend_veryl::{
-    BuildConfig, ExternalHierarchy, ExternalModule, FrontendTrace, FrontendTraceOptions, GlueAddr,
-    LoweringPhase, ParserError, ScheduledRtlOutput, SimModule, SymbolicRtl,
-    logic_tree::coerce_node_width,
 };
 use celox_sir::{
     BlockId, ExecutionUnit, RegisterType, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
@@ -705,7 +705,7 @@ pub fn schedule_sources(
         module_names,
         root_id,
     };
-    celox_frontend_veryl::schedule_symbolic_rtl(
+    crate::schedule_symbolic_rtl(
         symbolic,
         config,
         ignored_loops,

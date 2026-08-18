@@ -1,1 +1,1 @@
-pub use celox_frontend_veryl::module::*;
+pub use celox_frontend::module::*;

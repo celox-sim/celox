@@ -19,9 +19,8 @@ use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::{self, StrId};
 
 use crate::{
-    AbsoluteAddr, InstancePath, LoweringPhase, ParserError, VariableInfo,
-    VerylComponentEventBinding, VerylComponentInputBinding, VerylFrontendLookup,
-    VerylTestbenchSource,
+    AbsoluteAddr, FrontendLookup, InstancePath, LoweringPhase, ParserError, VariableInfo,
+    VerylComponentEventBinding, VerylComponentInputBinding, VerylTestbenchSource,
     bitaccess::eval_constexpr,
     context_width::{
         ValueContext, binary_semantics, cast_semantics, expression_signed, get_expr_width,
@@ -215,7 +214,7 @@ fn invalid_hierarchical_reference(
 }
 
 pub(crate) fn resolve_hierarchical_reference<'a>(
-    lookup: &'a VerylFrontendLookup,
+    lookup: &'a FrontendLookup,
     reference: &HierVarRef,
 ) -> Result<(StateAddr, &'a VariableInfo), ParserError> {
     let (root_instance, _) = lookup.root_instance_and_module().ok_or_else(|| {
@@ -225,7 +224,7 @@ pub(crate) fn resolve_hierarchical_reference<'a>(
 }
 
 fn resolve_hierarchical_reference_from<'a>(
-    lookup: &'a VerylFrontendLookup,
+    lookup: &'a FrontendLookup,
     base_instance: InstanceId,
     reference: &HierVarRef,
 ) -> Result<(StateAddr, &'a VariableInfo), ParserError> {
@@ -579,7 +578,7 @@ enum TestbenchRead {
 }
 
 pub fn collect_testbench_observability(
-    lookup: &VerylFrontendLookup,
+    lookup: &FrontendLookup,
     source: &VerylTestbenchSource,
 ) -> Result<(Vec<RuntimeEventSite>, FxHashSet<StateAddr>), ParserError> {
     let Some(stmts) = source.initial_statements.as_ref() else {
@@ -998,7 +997,7 @@ fn lower_testbench_operator(op: VerylOp) -> Op {
 }
 
 struct ExprCompiler<'a> {
-    lookup: &'a VerylFrontendLookup,
+    lookup: &'a FrontendLookup,
     functions: &'a HashMap<VarId, Function>,
     base_instance: InstanceId,
 }
@@ -2264,7 +2263,7 @@ impl ExprCompiler<'_> {
 // ── Builder ────────────────────────────────────────────────────────────
 
 struct SemanticTestbenchBuilder<'a> {
-    lookup: &'a VerylFrontendLookup,
+    lookup: &'a FrontendLookup,
     testbench_source: &'a VerylTestbenchSource,
     runtime_event_site_count: usize,
     event_map: HashMap<StrId, StateAddr>,
@@ -2274,7 +2273,7 @@ struct SemanticTestbenchBuilder<'a> {
 
 impl<'a> SemanticTestbenchBuilder<'a> {
     fn new(
-        lookup: &'a VerylFrontendLookup,
+        lookup: &'a FrontendLookup,
         testbench_source: &'a VerylTestbenchSource,
         runtime_event_site_count: usize,
     ) -> Self {
@@ -2921,7 +2920,7 @@ fn reject_selected_destinations_in_expression_function_call(
 
 fn validate_testbench_function_call(
     call: &FunctionCall,
-    lookup: &VerylFrontendLookup,
+    lookup: &FrontendLookup,
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
@@ -2944,7 +2943,7 @@ fn validate_testbench_function_call(
 
 fn validate_testbench_expression(
     expression: &Expression,
-    lookup: &VerylFrontendLookup,
+    lookup: &FrontendLookup,
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
@@ -3068,7 +3067,7 @@ fn validate_testbench_expression(
 
 fn validate_testbench_system_function(
     kind: &SystemFunctionKind,
-    lookup: &VerylFrontendLookup,
+    lookup: &FrontendLookup,
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
@@ -3102,7 +3101,7 @@ fn validate_testbench_system_function(
 
 fn validate_testbench_statements(
     statements: &[Statement],
-    lookup: &VerylFrontendLookup,
+    lookup: &FrontendLookup,
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
@@ -3286,7 +3285,7 @@ fn validate_testbench_statements(
 
 fn validate_testbench_destination(
     destination: &veryl_analyzer::ir::AssignDestination,
-    lookup: &VerylFrontendLookup,
+    lookup: &FrontendLookup,
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
@@ -3309,7 +3308,7 @@ fn validate_testbench_destination(
 }
 
 pub fn compile_semantic_testbench(
-    lookup: &VerylFrontendLookup,
+    lookup: &FrontendLookup,
     source: &VerylTestbenchSource,
     runtime_event_site_count: usize,
     random_seed: Option<u64>,
@@ -3356,7 +3355,7 @@ mod tests {
         }
     }
 
-    fn lookup_with_child(child_name: StrId, variable_name: StrId) -> VerylFrontendLookup {
+    fn lookup_with_child(child_name: StrId, variable_name: StrId) -> FrontendLookup {
         let root_instance = InstanceId(0);
         let child_instance = InstanceId(1);
         let root_module = ModuleId(0);
@@ -3386,7 +3385,7 @@ mod tests {
             },
         };
 
-        let mut lookup = VerylFrontendLookup::default();
+        let mut lookup = FrontendLookup::default();
         lookup
             .instance_ids
             .insert(InstancePath(Vec::new()), root_instance);

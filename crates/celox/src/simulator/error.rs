@@ -41,7 +41,7 @@ fn render_analyzer_error(error: &veryl_analyzer::AnalyzerError) -> String {
 #[derive(Debug)]
 pub enum CompilationWarning {
     Analyzer(veryl_analyzer::AnalyzerError),
-    Frontend(celox_frontend_veryl::FrontendDiagnostic),
+    Frontend(celox_frontend::FrontendDiagnostic),
 }
 
 impl fmt::Display for CompilationWarning {
@@ -104,7 +104,7 @@ impl miette::Diagnostic for CompilationWarning {
 pub enum SimulatorErrorKind {
     SIRParser(crate::ParserError),
     Analyzer(Vec<veryl_analyzer::AnalyzerError>),
-    Frontend(Vec<celox_frontend_veryl::FrontendDiagnostic>),
+    Frontend(Vec<celox_frontend::FrontendDiagnostic>),
     Runtime(crate::RuntimeErrorCode),
     Codegen(CodegenError),
 }

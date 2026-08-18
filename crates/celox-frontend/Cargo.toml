@@ -1,11 +1,14 @@
 [package]
-name                  = "celox-frontend-veryl"
+name                  = "celox-frontend"
 version.workspace     = true
 authors.workspace     = true
 repository.workspace  = true
 license.workspace     = true
-description           = "Veryl frontend artifacts and source lookup for Celox"
+description           = "Shared frontend assembly and HDL source adapters for Celox"
 edition.workspace     = true
+
+[features]
+systemverilog = ["dep:celox-sv-analyzer"]
 
 [dependencies]
 tracing = { workspace = true }
@@ -14,6 +17,7 @@ celox-design   = { path = "../celox-design" }
 celox-sir      = { path = "../celox-sir" }
 celox-slt      = { path = "../celox-slt" }
 celox-testbench = { path = "../celox-testbench" }
+celox-sv-analyzer = { path = "../celox-sv-analyzer", optional = true }
 fxhash         = { workspace = true }
 miette         = { workspace = true }
 num-bigint     = { workspace = true }
