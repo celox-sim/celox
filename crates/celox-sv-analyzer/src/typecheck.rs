@@ -124,13 +124,11 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
             condition,
             then_expr,
             else_expr,
-        } => {
-            if eval_const_expr(condition, constants)? != 0 {
-                eval_const_expr(then_expr, constants)
-            } else {
-                eval_const_expr(else_expr, constants)
-            }
-        }
+        } => match eval_const_truth(condition, constants)? {
+            Some(true) => eval_const_expr(then_expr, constants),
+            Some(false) => eval_const_expr(else_expr, constants),
+            None => merge_unknown_const_mux_arms(then_expr, else_expr, constants),
+        },
     }
 }
 
@@ -233,11 +231,10 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
             integral_literal_from_const_expr(right)?,
         ),
     };
-    if left.mask != BigUint::default() || right.mask != BigUint::default() {
-        return None;
-    }
-
     if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) {
+        if left.mask != BigUint::default() || right.mask != BigUint::default() {
+            return None;
+        }
         let amount = usize::try_from(integral_literal_as_i128(&right, right.signed)?).ok()?;
         let width = left.width;
         let signed = left.signed;
@@ -278,6 +275,8 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
             | BinaryOp::BitAnd
             | BinaryOp::BitOr
             | BinaryOp::BitXor
+            | BinaryOp::LogicAnd
+            | BinaryOp::LogicOr
             | BinaryOp::Eq
             | BinaryOp::Ne
             | BinaryOp::Lt
@@ -296,6 +295,17 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
         signed,
         signed_extension(&right, signed),
     );
+    if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr)
+        || left.mask != BigUint::default()
+        || right.mask != BigUint::default()
+    {
+        if let Some(result) = eval_four_state_binary(&left, op, &right, signed) {
+            return Some(result);
+        }
+        if left.mask != BigUint::default() || right.mask != BigUint::default() {
+            return None;
+        }
+    }
     if matches!(
         op,
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
@@ -365,6 +375,116 @@ fn eval_literal_binary(left: &ConstExpr, op: BinaryOp, right: &ConstExpr) -> Opt
             signed,
             value,
             mask: BigUint::default(),
+        },
+        signed,
+    )
+}
+
+fn eval_four_state_binary(
+    left: &IntegralLiteral,
+    op: BinaryOp,
+    right: &IntegralLiteral,
+    signed: bool,
+) -> Option<i128> {
+    if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) {
+        let left = integral_literal_truth(left);
+        let right = integral_literal_truth(right);
+        return match op {
+            BinaryOp::LogicAnd if left == Some(false) || right == Some(false) => Some(0),
+            BinaryOp::LogicAnd if left == Some(true) && right == Some(true) => Some(1),
+            BinaryOp::LogicOr if left == Some(true) || right == Some(true) => Some(1),
+            BinaryOp::LogicOr if left == Some(false) && right == Some(false) => Some(0),
+            _ => None,
+        };
+    }
+    if !matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor) {
+        return None;
+    }
+
+    let width = left.width;
+    let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+    let left_known = &width_mask ^ &left.mask;
+    let right_known = &width_mask ^ &right.mask;
+    let left_one = &left.value & &left_known;
+    let right_one = &right.value & &right_known;
+    let left_zero = &left_known ^ &left_one;
+    let right_zero = &right_known ^ &right_one;
+    let (known_zero, known_one) = match op {
+        BinaryOp::BitAnd => (left_zero | right_zero, left_one & right_one),
+        BinaryOp::BitOr => (left_zero & right_zero, left_one | right_one),
+        BinaryOp::BitXor => {
+            let known = &left_known & &right_known;
+            let one = (&left.value ^ &right.value) & &known;
+            (&known ^ &one, one)
+        }
+        _ => unreachable!(),
+    };
+    let known = &known_zero | &known_one;
+    let mask = &width_mask ^ known;
+    integral_literal_as_i128(
+        &IntegralLiteral {
+            width,
+            signed,
+            value: known_one | &mask,
+            mask,
+        },
+        signed,
+    )
+}
+
+fn integral_literal_truth(literal: &IntegralLiteral) -> Option<bool> {
+    let width_mask = (BigUint::from(1u8) << literal.width) - BigUint::from(1u8);
+    let known = width_mask ^ &literal.mask;
+    if (&literal.value & known) != BigUint::default() {
+        Some(true)
+    } else if literal.mask == BigUint::default() {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn eval_const_truth(expr: &ConstExpr, constants: &HashMap<String, i128>) -> Option<Option<bool>> {
+    if let Some(literal) = integral_literal_from_const_expr(expr) {
+        return Some(integral_literal_truth(&literal));
+    }
+    eval_const_expr(expr, constants).map(|value| Some(value != 0))
+}
+
+fn merge_unknown_const_mux_arms(
+    then_expr: &ConstExpr,
+    else_expr: &ConstExpr,
+    constants: &HashMap<String, i128>,
+) -> Option<i128> {
+    if let (Some(then_value), Some(else_value)) = (
+        eval_const_expr(then_expr, constants),
+        eval_const_expr(else_expr, constants),
+    ) && then_value == else_value
+    {
+        return Some(then_value);
+    }
+
+    let mut then_literal = integral_literal_from_const_expr(then_expr)?;
+    let mut else_literal = integral_literal_from_const_expr(else_expr)?;
+    let width = then_literal.width.max(else_literal.width);
+    let signed = then_literal.signed && else_literal.signed;
+    let then_extension = signed_extension(&then_literal, signed);
+    let else_extension = signed_extension(&else_literal, signed);
+    then_literal = resize_integral_literal(then_literal, width, signed, then_extension);
+    else_literal = resize_integral_literal(else_literal, width, signed, else_extension);
+
+    let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+    let same_value = &width_mask ^ (&then_literal.value ^ &else_literal.value);
+    let same_mask = &width_mask ^ (&then_literal.mask ^ &else_literal.mask);
+    let matching = same_value & same_mask;
+    let mask = &then_literal.mask | &else_literal.mask | (&width_mask ^ &matching);
+    let value = (&then_literal.value & &matching) | &mask;
+    integral_literal_as_i128(
+        &IntegralLiteral {
+            width,
+            signed,
+            value,
+            mask,
         },
         signed,
     )
@@ -571,13 +691,27 @@ fn eval_const_function(
     let [arg] = args else {
         return None;
     };
-    let value = eval_const_expr(arg, constants)?;
     match name {
-        "$clog2" => clog2(value),
-        "$onehot" => nonnegative_u128(value).map(|value| (value.count_ones() == 1) as i128),
-        "$onehot0" => nonnegative_u128(value).map(|value| (value.count_ones() <= 1) as i128),
+        "$clog2" => clog2(eval_const_expr(arg, constants)?),
+        "$onehot" | "$onehot0" => {
+            let value = const_expr_bit_pattern(arg, constants)?;
+            let ones = value.iter_u64_digits().map(u64::count_ones).sum::<u32>();
+            Some(match name {
+                "$onehot" => (ones == 1) as i128,
+                "$onehot0" => (ones <= 1) as i128,
+                _ => unreachable!(),
+            })
+        }
         _ => None,
     }
+}
+
+fn const_expr_bit_pattern(expr: &ConstExpr, constants: &HashMap<String, i128>) -> Option<BigUint> {
+    if let Some(literal) = integral_literal_from_const_expr(expr) {
+        return (literal.mask == BigUint::default()).then_some(literal.value);
+    }
+    let value = eval_const_expr(expr, constants)?;
+    (value >= 0).then(|| BigUint::from(value as u128))
 }
 
 fn clog2(value: i128) -> Option<i128> {
@@ -589,10 +723,6 @@ fn clog2(value: i128) -> Option<i128> {
         return Some(0);
     }
     Some((u128::BITS - (value - 1).leading_zeros()) as i128)
-}
-
-fn nonnegative_u128(value: i128) -> Option<u128> {
-    (value >= 0).then_some(value as u128)
 }
 
 fn shift_amount(value: i128) -> Option<u32> {

@@ -3895,6 +3895,115 @@ fn collapses_unknowns_for_two_state_parameters() {
 }
 
 #[test]
+fn evaluates_signed_bit_patterns_in_constant_onehot_functions() {
+    let source = r#"
+        module Top(output logic y);
+            localparam O = $onehot(4'sb1000);
+            localparam O0 = $onehot0(4'sb1000);
+            assign y = O && O0;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("signed_constant_onehot.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn folds_dominant_four_state_constant_operators() {
+    let source = r#"
+        module Top(output logic y);
+            localparam BIT_AND = 1'b0 & 1'bx;
+            localparam BIT_OR = 1'b1 | 1'bz;
+            localparam LOGIC_AND = 1'b0 && 1'bx;
+            localparam LOGIC_OR = 1'b1 || 1'bz;
+            if (BIT_AND || LOGIC_AND)
+                assign y = 1'b0;
+            else if (BIT_OR && LOGIC_OR)
+                assign y = 1'b1;
+            else
+                assign y = 1'b0;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("dominant_four_state_constants.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn merges_constant_ternary_arms_for_unknown_conditions() {
+    let source = r#"
+        module Top(output logic y);
+            localparam P = 1'bx ? 1'b1 : 1'b1;
+            if (P)
+                assign y = 1'b1;
+            else
+                assign y = 1'b0;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("unknown_constant_ternary.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 1u8.into());
+}
+
+#[test]
+fn tracks_packed_ranges_for_function_scoped_values() {
+    let source = r#"
+        module Top(
+            input logic [3:0] value,
+            output logic formal_y,
+            output logic local_y,
+            output logic [1:0] formal_slice,
+            output logic [1:0] local_slice
+        );
+            function automatic logic formal_msb(input logic [7:4] v);
+                return v[7];
+            endfunction
+            function automatic logic local_first(input logic [3:0] v);
+                logic [0:3] temp;
+                temp = v;
+                return temp[0];
+            endfunction
+            function automatic logic [1:0] formal_top2(input logic [7:4] v);
+                return v[7:6];
+            endfunction
+            function automatic logic [1:0] local_top2(input logic [3:0] v);
+                logic [0:3] temp;
+                temp = v;
+                return temp[0:1];
+            endfunction
+            assign formal_y = formal_msb(value);
+            assign local_y = local_first(value);
+            assign formal_slice = formal_top2(value);
+            assign local_slice = local_top2(value);
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("function_packed_ranges.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let value = sim.signal("value");
+    sim.modify(|io| io.set(value, 8u8)).unwrap();
+    assert_eq!(sim.get(sim.signal("formal_y")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("local_y")), 1u8.into());
+    assert_eq!(sim.get(sim.signal("formal_slice")), 2u8.into());
+    assert_eq!(sim.get(sim.signal("local_slice")), 2u8.into());
+}
+
+#[test]
 fn preserves_wide_unsigned_parameters_in_generate_conditions() {
     let source = r#"
         module Top(output logic y);

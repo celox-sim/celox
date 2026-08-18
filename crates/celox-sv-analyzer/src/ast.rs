@@ -1749,6 +1749,7 @@ struct FunctionParam {
     width: Option<usize>,
     signed: bool,
     is_2state: bool,
+    packed_dimensions: Vec<PackedDimension>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2924,11 +2925,12 @@ fn infer_const_expr_type(
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PackedDimension {
     left: ConstExpr,
     right: ConstExpr,
     width: ConstExpr,
+    normalize_single: bool,
 }
 
 type PackedDimensions = HashMap<String, Vec<PackedDimension>>;
@@ -2977,9 +2979,36 @@ fn packed_dimension_widths(ranges: &[PackedRange]) -> Vec<PackedDimension> {
                 then_expr: Box::new(width(left.clone(), right.clone())),
                 else_expr: Box::new(width(right.clone(), left.clone())),
             };
-            PackedDimension { left, right, width }
+            PackedDimension {
+                left,
+                right,
+                width,
+                normalize_single: false,
+            }
         })
         .collect()
+}
+
+fn function_packed_dimension_widths(ranges: &[PackedRange]) -> Vec<PackedDimension> {
+    packed_dimension_widths(ranges)
+        .into_iter()
+        .map(|mut dimension| {
+            dimension.normalize_single = true;
+            dimension
+        })
+        .collect()
+}
+
+fn packed_dimensions_from_ref_node(
+    node: RefNode<'_>,
+    syntax_tree: &SyntaxTree,
+    type_aliases: &HashMap<String, Type>,
+) -> Vec<PackedDimension> {
+    if let Some(alias) = type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases) {
+        function_packed_dimension_widths(alias.packed_ranges())
+    } else {
+        function_packed_dimension_widths(&packed_ranges_from_ref_node(node, syntax_tree))
+    }
 }
 
 fn parameter_marker(name: &str) -> String {
@@ -3911,12 +3940,23 @@ fn function_from_declaration(
                 const_env,
                 type_aliases,
             )?;
+            let mut function_packed_dimensions = packed_dimensions.clone();
+            function_packed_dimensions.extend(
+                params
+                    .iter()
+                    .map(|param| (param.name.clone(), param.packed_dimensions.clone())),
+            );
+            function_packed_dimensions.extend(function_local_packed_dimensions_from_block_items(
+                &body.nodes.5,
+                syntax_tree,
+                type_aliases,
+            )?);
             let local_names = local_types.keys().cloned().collect::<HashSet<_>>();
             insert_function_param_types(&params, &mut local_types);
             let expr = function_body_expr(
                 &body.nodes.6,
                 syntax_tree,
-                packed_dimensions,
+                &function_packed_dimensions,
                 &local_types,
                 &local_names,
             )?;
@@ -3936,22 +3976,40 @@ fn function_from_declaration(
         sv_parser::FunctionBodyDeclaration::WithoutPort(body) => {
             let name = identifier_text(RefNode::FunctionIdentifier(&body.nodes.2), syntax_tree)?;
             let params = tf_item_params(&body.nodes.4, syntax_tree, const_env, type_aliases);
-            let block_items = body.nodes.4.iter().filter_map(|item| match item {
-                sv_parser::TfItemDeclaration::BlockItemDeclaration(item) => Some(&**item),
-                sv_parser::TfItemDeclaration::TfPortDeclaration(_) => None,
-            });
+            let block_items = body
+                .nodes
+                .4
+                .iter()
+                .filter_map(|item| match item {
+                    sv_parser::TfItemDeclaration::BlockItemDeclaration(item) => Some(&**item),
+                    sv_parser::TfItemDeclaration::TfPortDeclaration(_) => None,
+                })
+                .collect::<Vec<_>>();
             let mut local_types = function_local_types_from_block_item_iter(
-                block_items,
+                block_items.iter().copied(),
                 syntax_tree,
                 const_env,
                 type_aliases,
             )?;
+            let mut function_packed_dimensions = packed_dimensions.clone();
+            function_packed_dimensions.extend(
+                params
+                    .iter()
+                    .map(|param| (param.name.clone(), param.packed_dimensions.clone())),
+            );
+            function_packed_dimensions.extend(
+                function_local_packed_dimensions_from_block_item_iter(
+                    block_items.iter().copied(),
+                    syntax_tree,
+                    type_aliases,
+                )?,
+            );
             let local_names = local_types.keys().cloned().collect::<HashSet<_>>();
             insert_function_param_types(&params, &mut local_types);
             let expr = function_body_expr(
                 &body.nodes.5,
                 syntax_tree,
-                packed_dimensions,
+                &function_packed_dimensions,
                 &local_types,
                 &local_names,
             )?;
@@ -3996,6 +4054,36 @@ fn function_local_types_from_block_items(
     type_aliases: &HashMap<String, Type>,
 ) -> Option<HashMap<String, FunctionLocalType>> {
     function_local_types_from_block_item_iter(items.iter(), syntax_tree, const_env, type_aliases)
+}
+
+fn function_local_packed_dimensions_from_block_items(
+    items: &[sv_parser::BlockItemDeclaration],
+    syntax_tree: &SyntaxTree,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<PackedDimensions> {
+    function_local_packed_dimensions_from_block_item_iter(items.iter(), syntax_tree, type_aliases)
+}
+
+fn function_local_packed_dimensions_from_block_item_iter<'a>(
+    items: impl IntoIterator<Item = &'a sv_parser::BlockItemDeclaration>,
+    syntax_tree: &SyntaxTree,
+    type_aliases: &HashMap<String, Type>,
+) -> Option<PackedDimensions> {
+    let mut dimensions = HashMap::default();
+    for item in items {
+        let sv_parser::BlockItemDeclaration::Data(item) = item else {
+            continue;
+        };
+        let signals =
+            signals_from_data_declaration(&item.nodes.1, syntax_tree, type_aliases).ok()?;
+        dimensions.extend(signals.into_iter().map(|signal| {
+            (
+                signal.name().to_string(),
+                function_packed_dimension_widths(signal.r#type().packed_ranges()),
+            )
+        }));
+    }
+    Some(dimensions)
 }
 
 fn function_local_types_from_block_item_iter<'a>(
@@ -4097,6 +4185,7 @@ fn tf_params(
     let mut params = Vec::new();
     let mut previous_type = None;
     let mut previous_is_2state = false;
+    let mut previous_packed_dimensions = Vec::new();
     for port in list.nodes.0.contents() {
         let type_node = RefNode::DataTypeOrImplicit(&port.nodes.3);
         let inferred_type = value_type_from_data_type_or_implicit(
@@ -4108,58 +4197,73 @@ fn tf_params(
         let inferred_is_2state = type_from_ref_node(type_node.clone(), syntax_tree)
             .or_else(|| type_alias_from_ref_node(type_node.clone(), syntax_tree, type_aliases))
             .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
+        let inferred_packed_dimensions =
+            packed_dimensions_from_ref_node(type_node.clone(), syntax_tree, type_aliases);
         let omitted_type = matches!(
             port.nodes.3,
             sv_parser::DataTypeOrImplicit::ImplicitDataType(_)
         ) && is_signed_from_ref_node(type_node.clone()).is_none()
             && packed_ranges_from_ref_node(type_node.clone(), syntax_tree).is_empty();
-        let (name, r#type, is_2state) = if let Some((identifier, _, _)) = port.nodes.4.as_ref() {
-            let Some(name) = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
-            else {
-                continue;
-            };
-            let r#type = if port.nodes.1.is_none() && omitted_type {
-                previous_type.or(inferred_type)
+        let (name, r#type, is_2state, packed_dimensions) =
+            if let Some((identifier, _, _)) = port.nodes.4.as_ref() {
+                let Some(name) = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
+                else {
+                    continue;
+                };
+                let r#type = if port.nodes.1.is_none() && omitted_type {
+                    previous_type.or(inferred_type)
+                } else {
+                    inferred_type
+                };
+                let is_2state = if port.nodes.1.is_none() && omitted_type {
+                    previous_is_2state
+                } else {
+                    inferred_is_2state
+                };
+                let packed_dimensions = if port.nodes.1.is_none() && omitted_type {
+                    previous_packed_dimensions.clone()
+                } else {
+                    inferred_packed_dimensions
+                };
+                (name, r#type, is_2state, packed_dimensions)
             } else {
-                inferred_type
+                // An identifier following a comma is syntactically ambiguous with a
+                // user-defined type. sv-parser represents the shorthand `a, b` as a
+                // type-only item, so reinterpret an unknown type name as the next
+                // parameter and inherit the preceding item's type.
+                if type_alias_from_data_type_or_implicit(&port.nodes.3, syntax_tree, type_aliases)
+                    .is_some()
+                {
+                    continue;
+                }
+                let Some(name) = identifier_text(type_node, syntax_tree) else {
+                    continue;
+                };
+                let r#type = if port.nodes.1.is_none() {
+                    previous_type
+                } else {
+                    Some(ExprType {
+                        width: 1,
+                        signed: false,
+                    })
+                };
+                let is_2state = port.nodes.1.is_none() && previous_is_2state;
+                let packed_dimensions = if port.nodes.1.is_none() {
+                    previous_packed_dimensions.clone()
+                } else {
+                    inferred_packed_dimensions
+                };
+                (name, r#type, is_2state, packed_dimensions)
             };
-            let is_2state = if port.nodes.1.is_none() && omitted_type {
-                previous_is_2state
-            } else {
-                inferred_is_2state
-            };
-            (name, r#type, is_2state)
-        } else {
-            // An identifier following a comma is syntactically ambiguous with a
-            // user-defined type. sv-parser represents the shorthand `a, b` as a
-            // type-only item, so reinterpret an unknown type name as the next
-            // parameter and inherit the preceding item's type.
-            if type_alias_from_data_type_or_implicit(&port.nodes.3, syntax_tree, type_aliases)
-                .is_some()
-            {
-                continue;
-            }
-            let Some(name) = identifier_text(type_node, syntax_tree) else {
-                continue;
-            };
-            let r#type = if port.nodes.1.is_none() {
-                previous_type
-            } else {
-                Some(ExprType {
-                    width: 1,
-                    signed: false,
-                })
-            };
-            let is_2state = port.nodes.1.is_none() && previous_is_2state;
-            (name, r#type, is_2state)
-        };
         previous_type = r#type;
         previous_is_2state = is_2state;
+        previous_packed_dimensions = packed_dimensions.clone();
         params.push(FunctionParam {
             name,
             width: r#type.map(|r#type| r#type.width),
             signed: r#type.is_some_and(|r#type| r#type.signed),
             is_2state,
+            packed_dimensions,
         });
     }
     params
@@ -4194,6 +4298,11 @@ fn tf_item_params(
             )
         })
         .is_some_and(|r#type| r#type.kind() == TypeKind::Bit);
+        let packed_dimensions = packed_dimensions_from_ref_node(
+            RefNode::DataTypeOrImplicit(&declaration.nodes.3),
+            syntax_tree,
+            type_aliases,
+        );
         for (identifier, _, _) in declaration.nodes.4.nodes.0.contents() {
             let Some(name) = identifier_text(RefNode::PortIdentifier(identifier), syntax_tree)
             else {
@@ -4204,6 +4313,7 @@ fn tf_item_params(
                 width: r#type.map(|r#type| r#type.width),
                 signed: r#type.is_some_and(|r#type| r#type.signed),
                 is_2state,
+                packed_dimensions: packed_dimensions.clone(),
             });
         }
     }
@@ -6895,6 +7005,13 @@ fn lvalue_from_select(
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
         let mut lsb =
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
+        if indices.is_empty()
+            && let Some([dimension]) = packed_dimensions.get(&name).map(Vec::as_slice)
+            && dimension.normalize_single
+        {
+            msb = packed_index_offset(dimension, msb);
+            lsb = packed_index_offset(dimension, lsb);
+        }
         if !indices.is_empty() {
             let (_, prefix_offset) = flatten_packed_select(&name, &indices, packed_dimensions)?;
             msb = add_expr(prefix_offset.clone(), msb);
@@ -6942,6 +7059,13 @@ fn lvalue_from_constant_select(
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
         let mut lsb =
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
+        if indices.is_empty()
+            && let Some([dimension]) = packed_dimensions.get(&name).map(Vec::as_slice)
+            && dimension.normalize_single
+        {
+            msb = packed_index_offset(dimension, msb);
+            lsb = packed_index_offset(dimension, lsb);
+        }
         if !indices.is_empty() {
             let (_, prefix_offset) = flatten_packed_select(&name, &indices, packed_dimensions)?;
             msb = add_expr(prefix_offset.clone(), msb);
@@ -7267,6 +7391,14 @@ fn expr_select_from_select(
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
         let mut lsb =
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
+        if indices.is_empty()
+            && let Expr::Ident(name) = &base
+            && let Some([dimension]) = packed_dimensions.get(name).map(Vec::as_slice)
+            && dimension.normalize_single
+        {
+            msb = packed_index_offset(dimension, msb);
+            lsb = packed_index_offset(dimension, lsb);
+        }
         if !indices.is_empty() {
             let Expr::Ident(name) = &base else {
                 return None;
@@ -7339,7 +7471,10 @@ fn flatten_packed_select(
     packed_dimensions: &PackedDimensions,
 ) -> Option<(ConstExpr, ConstExpr)> {
     let dimensions = packed_dimensions.get(name)?;
-    if indices.is_empty() || indices.len() > dimensions.len() || dimensions.len() <= 1 {
+    if indices.is_empty()
+        || indices.len() > dimensions.len()
+        || (dimensions.len() == 1 && !dimensions[0].normalize_single)
+    {
         return None;
     }
 
