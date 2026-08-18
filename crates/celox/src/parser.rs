@@ -4,8 +4,6 @@ use veryl_parser::resource_table::{self, StrId};
 
 pub(crate) use celox_frontend::BuildConfig;
 pub(crate) mod loop_provenance;
-#[cfg(test)]
-pub mod module;
 use crate::ir::{RegionedAbsoluteAddr, RuntimeProgram, STABLE_REGION, SirProgram, UnoptimizedSir};
 
 pub use celox_frontend::ParserError;
@@ -514,7 +512,7 @@ pub fn parse_sv(
     sources: &[(&str, &std::path::Path)],
     top: &str,
     parameter_overrides: &[(String, u64)],
-    config: &BuildConfig,
+    _config: &BuildConfig,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
         (Vec<(String, usize)>, Vec<String>),
@@ -540,7 +538,6 @@ pub fn parse_sv(
         sources,
         top,
         parameter_overrides,
-        config,
         ignored_loops,
         true_loops,
         four_state,
@@ -548,7 +545,7 @@ pub fn parse_sv(
         trace.is_some().then_some(&mut frontend_trace),
     )
     .map_err(|error| match error {
-        celox_frontend::systemverilog::FrontendError::Lowering(error) => error,
+        celox_frontend::systemverilog::FrontendError::Lowering(error) => error.into(),
         celox_frontend::systemverilog::FrontendError::Analyzer(error) => ParserError::unsupported(
             64,
             celox_frontend::LoweringPhase::SimulatorParser,
@@ -609,13 +606,17 @@ pub fn parse_mixed(
     ParserError,
 > {
     let external_roots = reachable_external_sv_roots(ir, top);
+    let external_roots = external_roots
+        .into_iter()
+        .map(|name| resource_table::get_str_value(name).unwrap_or_default())
+        .collect();
     let external = celox_frontend::systemverilog::prepare_external_hierarchy(
         sv_sources,
         &external_roots,
         four_state,
     )
     .map_err(|error| match error {
-        celox_frontend::systemverilog::FrontendError::Lowering(error) => error,
+        celox_frontend::systemverilog::FrontendError::Lowering(error) => error.into(),
         celox_frontend::systemverilog::FrontendError::Analyzer(error) => ParserError::unsupported(
             64,
             celox_frontend::LoweringPhase::SimulatorParser,

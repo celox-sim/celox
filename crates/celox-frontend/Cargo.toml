@@ -8,16 +8,17 @@ description           = "Shared frontend assembly and HDL source adapters for Ce
 edition.workspace     = true
 
 [features]
-systemverilog = ["dep:celox-sv-analyzer"]
+systemverilog = ["dep:celox-systemverilog-frontend"]
 
 [dependencies]
 tracing = { workspace = true }
 bit-set        = { workspace = true }
 celox-design   = { path = "../celox-design" }
+celox-frontend-core = { path = "../celox-frontend-core" }
 celox-sir      = { path = "../celox-sir" }
 celox-slt      = { path = "../celox-slt" }
 celox-testbench = { path = "../celox-testbench" }
-celox-sv-analyzer = { path = "../celox-sv-analyzer", optional = true }
+celox-systemverilog-frontend = { path = "../celox-systemverilog-frontend", optional = true }
 fxhash         = { workspace = true }
 miette         = { workspace = true }
 num-bigint     = { workspace = true }

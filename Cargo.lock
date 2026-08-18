@@ -583,9 +583,10 @@ version = "0.0.0"
 dependencies = [
  "bit-set 0.11.1",
  "celox-design",
+ "celox-frontend-core",
  "celox-sir",
  "celox-slt",
- "celox-sv-analyzer",
+ "celox-systemverilog-frontend",
  "celox-testbench",
  "fxhash",
  "miette",
@@ -597,6 +598,20 @@ dependencies = [
  "veryl-analyzer",
  "veryl-metadata",
  "veryl-parser",
+]
+
+[[package]]
+name = "celox-frontend-core"
+version = "0.0.0"
+dependencies = [
+ "celox-design",
+ "celox-sir",
+ "celox-slt",
+ "fxhash",
+ "miette",
+ "num-bigint",
+ "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
@@ -714,6 +729,20 @@ dependencies = [
  "miette",
  "num-bigint",
  "sv-parser",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "celox-systemverilog-frontend"
+version = "0.0.0"
+dependencies = [
+ "celox-design",
+ "celox-frontend-core",
+ "celox-sir",
+ "celox-slt",
+ "celox-sv-analyzer",
+ "fxhash",
+ "num-bigint",
  "thiserror 2.0.20",
 ]
 

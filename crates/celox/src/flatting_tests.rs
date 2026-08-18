@@ -1,12 +1,7 @@
 use crate::HashMap;
-use crate::ir::{InstanceId, InstancePath, ModuleId, SourceVarId};
-use crate::parser::module::ModuleParser;
-use celox_frontend::veryl::AbsoluteAddr as FrontendAbsoluteAddr;
+use crate::ir::{InstanceId, InstancePath, ModuleId, SourceAddr, SourceVarId};
 use celox_slt::SLTNodeArena;
-use veryl_analyzer::{
-    Analyzer, Context,
-    ir::{Component, Declaration, Ir},
-};
+use veryl_analyzer::{Analyzer, Context, ir::Ir};
 use veryl_metadata::Metadata;
 use veryl_parser::{Parser, resource_table};
 
@@ -14,9 +9,9 @@ fn setup_to_flatting(
     code: &str,
     top_name: &str,
 ) -> (
-    celox_frontend::veryl::RelocationModule,
+    Vec<celox_slt::LogicPath<SourceAddr>>,
     HashMap<ModuleId, crate::ir::SimModule>,
-    SLTNodeArena<FrontendAbsoluteAddr>,
+    SLTNodeArena<SourceAddr>,
 ) {
     let metadata = Metadata::create_default("prj").unwrap();
     let parser = Parser::parse(code, &"").unwrap();
@@ -35,43 +30,11 @@ fn setup_to_flatting(
 
     let top_id = resource_table::insert_str(top_name);
 
-    // Mock parse_ir logic with ModuleId
-    let mut name_to_id: HashMap<resource_table::StrId, ModuleId> = HashMap::default();
-    let mut ir_modules: HashMap<ModuleId, &veryl_analyzer::ir::Module> = HashMap::default();
-    let mut next_module_id = 0usize;
-    for component in &ir.components {
-        if let Component::Module(module) = component {
-            let id = ModuleId(next_module_id);
-            next_module_id += 1;
-            name_to_id.insert(module.name, id);
-            ir_modules.insert(id, module);
-        }
-    }
-
-    // Parse each module with proper inst_ids
-    let mut modules: HashMap<ModuleId, crate::ir::SimModule> = HashMap::default();
-    for (&mid, &module) in &ir_modules {
-        let inst_ids: Vec<ModuleId> = module
-            .declarations
-            .iter()
-            .filter_map(|d| match d {
-                Declaration::Inst(inst) => {
-                    let child_name = match &*inst.component {
-                        Component::Module(m) => m.name,
-                        Component::SystemVerilog(sv) => sv.name,
-                        Component::Interface(_) => unreachable!(),
-                    };
-                    Some(name_to_id[&child_name])
-                }
-                _ => None,
-            })
-            .collect();
-        let m = ModuleParser::parse(module, &crate::parser::BuildConfig::default(), &inst_ids)
-            .expect("module parse failed");
-        modules.insert(mid, m);
-    }
-
-    let top_module_id = name_to_id[&top_id];
+    let parsed =
+        celox_frontend::veryl::parse_ir(&ir, &crate::parser::BuildConfig::default(), &top_id)
+            .expect("hierarchy parse failed");
+    let top_module_id = parsed.symbolic.root_id;
+    let modules = parsed.symbolic.modules;
 
     // Prepare for flatting
     let instance_id = InstanceId(0);
@@ -86,10 +49,10 @@ fn setup_to_flatting(
 
     for (next_instance_id, inst_name) in (1..).zip(sim_module.glue_blocks.keys()) {
         let mut child_path = path.0.clone();
-        child_path.push((resource_table::get_str_value(*inst_name).unwrap(), 0));
+        child_path.push((inst_name.clone(), 0));
         let child_id = InstanceId(next_instance_id);
         instance_ids.insert(InstancePath(child_path), child_id);
-        glue_instance_map.insert(*inst_name, child_id);
+        glue_instance_map.insert(inst_name.clone(), child_id);
     }
 
     // Calculate global boundaries for the top module
@@ -97,7 +60,7 @@ fn setup_to_flatting(
 
     // 1. Local boundaries of Top
     for (var_id, boundaries) in &sim_module.comb_boundaries {
-        let addr = FrontendAbsoluteAddr {
+        let addr = SourceAddr {
             instance_id,
             var_id: *var_id,
         };
@@ -114,20 +77,19 @@ fn setup_to_flatting(
             for (_, logic_path) in &glue.input_ports {
                 // logic_path.target is GlueAddr::Child
                 let target_glue_addr = logic_path.target.var().unwrap().id;
-                let target_addr =
-                    if let celox_frontend::veryl::GlueAddr::Child(v) = target_glue_addr {
-                        FrontendAbsoluteAddr {
-                            instance_id: child_id,
-                            var_id: v,
-                        }
-                    } else {
-                        continue;
-                    };
+                let target_addr = if let celox_slt::GlueAddrBase::Child(v) = target_glue_addr {
+                    SourceAddr {
+                        instance_id: child_id,
+                        var_id: v,
+                    }
+                } else {
+                    continue;
+                };
 
                 for source in &logic_path.sources {
                     // source.id is GlueAddr::Parent usually
-                    if let celox_frontend::veryl::GlueAddr::Parent(parent_var) = source.id {
-                        let parent_addr = FrontendAbsoluteAddr {
+                    if let celox_slt::GlueAddrBase::Parent(parent_var) = source.id {
+                        let parent_addr = SourceAddr {
                             instance_id,
                             var_id: parent_var,
                         };
@@ -160,7 +122,7 @@ fn setup_to_flatting(
     }
 
     // Call flatting
-    let mut arena = SLTNodeArena::<FrontendAbsoluteAddr>::new();
+    let mut arena = SLTNodeArena::<SourceAddr>::new();
     let r = celox_frontend::veryl::flattening::flatten_module(
         sim_module,
         &path,
@@ -169,7 +131,7 @@ fn setup_to_flatting(
         &HashMap::default(),
         &mut arena,
     );
-    (r.unwrap().relocation, modules, arena)
+    (r.unwrap().relocation.comb_blocks, modules, arena)
 }
 
 #[test]
@@ -188,12 +150,12 @@ fn test_split_by_boundaries() {
     }
     "#;
 
-    let (relocation_module, modules, _arena) = setup_to_flatting(code, "Top");
+    let (comb_blocks, modules, _arena) = setup_to_flatting(code, "Top");
 
     // Find x logic paths
     let top_vars = &modules
         .values()
-        .find(|module| module.name == resource_table::insert_str("Top"))
+        .find(|module| module.name == "Top")
         .expect("Top module not found")
         .variables;
     // We can filter by seeing if var path implies "x"
@@ -205,12 +167,11 @@ fn test_split_by_boundaries() {
 
     let x_id = top_vars
         .iter()
-        .find(|(_, v)| v.path.0.len() == 1 && v.path.0[0] == resource_table::insert_str("x"))
+        .find(|(_, v)| v.path.len() == 1 && v.path[0] == "x")
         .map(|(id, _)| *id)
         .expect("Variable x not found");
 
-    let x_targets: Vec<_> = relocation_module
-        .comb_blocks
+    let x_targets: Vec<_> = comb_blocks
         .iter()
         .filter(|path| path.target.var().unwrap().id.var_id == x_id)
         .collect();
@@ -254,20 +215,19 @@ fn test_mixed_boundaries() {
     }
     "#;
 
-    let (relocation_module, modules, _arena) = setup_to_flatting(code, "Top");
+    let (comb_blocks, modules, _arena) = setup_to_flatting(code, "Top");
 
     let x_id = modules
         .values()
-        .find(|module| module.name == resource_table::insert_str("Top"))
+        .find(|module| module.name == "Top")
         .expect("Top module not found")
         .variables
         .iter()
-        .find(|(_, v)| v.path.0.len() == 1 && v.path.0[0] == resource_table::insert_str("x"))
+        .find(|(_, v)| v.path.len() == 1 && v.path[0] == "x")
         .map(|(id, _)| *id)
         .expect("Variable x not found");
 
-    let x_targets: Vec<_> = relocation_module
-        .comb_blocks
+    let x_targets: Vec<_> = comb_blocks
         .iter()
         .filter(|path| path.target.var().unwrap().id.var_id == x_id)
         .collect();
@@ -462,20 +422,19 @@ fn test_boundary_propagation() {
     }
     "#;
 
-    let (relocation_module, modules, _arena) = setup_to_flatting(code, "Top");
+    let (comb_blocks, modules, _arena) = setup_to_flatting(code, "Top");
 
     let b_id = modules
         .values()
-        .find(|m| m.name == resource_table::insert_str("Child"))
+        .find(|m| m.name == "Child")
         .expect("Child module not found")
         .variables
         .iter()
-        .find(|(_, v)| v.path.0.len() == 1 && v.path.0[0] == resource_table::insert_str("b"))
+        .find(|(_, v)| v.path.len() == 1 && v.path[0] == "b")
         .map(|(id, _)| *id)
         .expect("Variable b not found");
 
-    let b_targets: Vec<_> = relocation_module
-        .comb_blocks
+    let b_targets: Vec<_> = comb_blocks
         .iter()
         .filter(|path| path.target.var().unwrap().id.var_id == b_id)
         .collect();

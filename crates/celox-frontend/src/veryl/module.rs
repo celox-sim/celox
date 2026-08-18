@@ -1863,7 +1863,7 @@ impl<'a> ModuleParser<'a> {
                     )
                 })?;
             let parent_dst = if uses_named_associations {
-                let formal_name = child_var.path.to_string();
+                let formal_name = child_var.path.join(".");
                 connections.get(formal_name.as_str()).ok_or_else(|| {
                     ParserError::illegal_context(
                         "external module port connections",
@@ -1876,7 +1876,7 @@ impl<'a> ModuleParser<'a> {
             } else {
                 &system_verilog.connects[port_index]
             };
-            let child_width = resolve_total_width(&child.metadata, child_var)?;
+            let child_width = child_var.metadata.width;
             if child_width == 0 {
                 return Err(ParserError::illegal_context(
                     "external module port connections",
@@ -1896,8 +1896,9 @@ impl<'a> ModuleParser<'a> {
                 && parent_dst.select.is_empty()
                 && parent_dst.select.1.is_none();
 
+            let projected_child_id = VarId::from_raw(child_port_id.0);
             match child_var.kind {
-                veryl_analyzer::ir::VarKind::Input => {
+                crate::VariableKind::Input => {
                     let parent_node = glue_arena.alloc(SLTNode::Input {
                         variable: GlueAddr::Parent(parent_dst.id),
                         signed: parent_expr_signed,
@@ -1910,7 +1911,7 @@ impl<'a> ModuleParser<'a> {
                         Some(child_width),
                         parent_expr_signed,
                     )?;
-                    if child_var.r#type.is_2state() {
+                    if !child_var.metadata.is_4state {
                         expr = glue_arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
                     }
                     let mut sources = HashSet::default();
@@ -1923,7 +1924,7 @@ impl<'a> ModuleParser<'a> {
                         vec![parent_dst.id],
                         LogicPath {
                             target: LogicPathTarget::Var(VarAtomBase::new(
-                                GlueAddr::Child(*child_port_id),
+                                GlueAddr::Child(projected_child_id),
                                 0,
                                 child_width - 1,
                             )),
@@ -1939,7 +1940,7 @@ impl<'a> ModuleParser<'a> {
                         },
                     ));
                 }
-                veryl_analyzer::ir::VarKind::Output => {
+                crate::VariableKind::Output => {
                     if parent_var.kind == veryl_analyzer::ir::VarKind::Input {
                         return Err(ParserError::illegal_context(
                             "external module output connections",
@@ -1964,8 +1965,8 @@ impl<'a> ModuleParser<'a> {
                     self.external_output_targets
                         .push((parent_dst.id, parent_access));
                     let child_node = glue_arena.alloc(SLTNode::Input {
-                        variable: GlueAddr::Child(*child_port_id),
-                        signed: child_var.r#type.signed,
+                        variable: GlueAddr::Child(projected_child_id),
+                        signed: child_var.signed,
                         index: Vec::new(),
                         access: BitAccess::new(0, child_width - 1),
                     })?;
@@ -1973,14 +1974,14 @@ impl<'a> ModuleParser<'a> {
                         &mut glue_arena,
                         child_node,
                         Some(parent_width),
-                        child_var.r#type.signed,
+                        child_var.signed,
                     )?;
                     if parent_var.r#type.is_2state() {
                         expr = glue_arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, expr))?;
                     }
                     let mut sources = HashSet::default();
                     sources.insert(VarAtomBase::new(
-                        GlueAddr::Child(*child_port_id),
+                        GlueAddr::Child(projected_child_id),
                         0,
                         child_width - 1,
                     ));
@@ -2004,19 +2005,22 @@ impl<'a> ModuleParser<'a> {
                         },
                     ));
                 }
-                veryl_analyzer::ir::VarKind::Inout => {
+                crate::VariableKind::Inout => {
                     return Err(ParserError::unsupported(
                         64,
                         LoweringPhase::SimulatorParser,
                         "external inout port",
-                        child_var.path.to_string(),
+                        child_var.path.join("."),
                         Some(&parent_dst.token),
                     ));
                 }
                 _ => {
                     return Err(ParserError::illegal_context(
                         "external module port connections",
-                        format!("port {} has no input/output direction", child_var.path),
+                        format!(
+                            "port {} has no input/output direction",
+                            child_var.path.join(".")
+                        ),
                         Some(&parent_dst.token),
                     ));
                 }
@@ -2036,10 +2040,10 @@ impl<'a> ModuleParser<'a> {
                 resolve_total_width(self.module, variable)?,
             );
         }
-        for (id, variable) in &child.metadata.variables {
+        for (id, variable) in &child.sim_module.variables {
             glue_widths.insert(
-                GlueAddr::Child(*id),
-                resolve_total_width(&child.metadata, variable)?,
+                GlueAddr::Child(VarId::from_raw(id.0)),
+                variable.metadata.width,
             );
         }
         verify_glue_block(&block, &glue_widths)?;

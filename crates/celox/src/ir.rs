@@ -742,7 +742,7 @@ pub(crate) mod verify {
 }
 pub use celox_slt::{GlueAddrBase, GlueBlockBase};
 
-pub use celox_frontend::veryl::SimModule;
+pub use celox_frontend::TraceSimModule as SimModule;
 #[cfg(all(
     feature = "host-runtime",
     any(

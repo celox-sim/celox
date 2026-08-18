@@ -1,3 +1,5 @@
+#![deny(clippy::disallowed_methods, clippy::disallowed_types)]
+
 //! Source-language-independent frontend contracts.
 
 mod artifact;

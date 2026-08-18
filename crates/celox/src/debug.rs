@@ -1,8 +1,6 @@
 use crate::HashMap;
-use crate::ir::{ModuleId, SimModule};
-use celox_frontend::veryl::{
-    AbsoluteAddr as FrontendAbsoluteAddr, RegionedAbsoluteAddr as FrontendRegionedAbsoluteAddr,
-};
+use crate::ir::{ModuleId, SimModule, SourceAddr, SourceVarId};
+use celox_design::RegionedAbsoluteAddrBase;
 use celox_slt::{LogicPath, SLTNodeArena};
 mod output;
 
@@ -39,19 +37,11 @@ pub struct TraceOptions {
 #[derive(Debug, Clone, Default)]
 pub struct CompilationTrace {
     pub sim_modules: Option<HashMap<ModuleId, SimModule>>,
-    pub pre_atomized_comb_blocks: Option<(
-        Vec<LogicPath<FrontendAbsoluteAddr>>,
-        SLTNodeArena<FrontendAbsoluteAddr>,
-    )>,
-    pub atomized_comb_blocks: Option<(
-        Vec<LogicPath<FrontendAbsoluteAddr>>,
-        SLTNodeArena<FrontendAbsoluteAddr>,
-    )>,
-    pub flattened_comb_blocks: Option<(
-        Vec<LogicPath<FrontendAbsoluteAddr>>,
-        SLTNodeArena<FrontendAbsoluteAddr>,
-    )>,
-    pub scheduled_units: Option<Vec<celox_sir::ExecutionUnit<FrontendRegionedAbsoluteAddr>>>,
+    pub pre_atomized_comb_blocks: Option<(Vec<LogicPath<SourceAddr>>, SLTNodeArena<SourceAddr>)>,
+    pub atomized_comb_blocks: Option<(Vec<LogicPath<SourceAddr>>, SLTNodeArena<SourceAddr>)>,
+    pub flattened_comb_blocks: Option<(Vec<LogicPath<SourceAddr>>, SLTNodeArena<SourceAddr>)>,
+    pub scheduled_units:
+        Option<Vec<celox_sir::ExecutionUnit<RegionedAbsoluteAddrBase<SourceVarId>>>>,
     pub pre_optimized_sir: Option<crate::ir::UnoptimizedSir>,
     pub post_optimized_sir: Option<crate::ir::OptimizedSir>,
     /// SIR after native EU merging, StateSSA promotion, and merged-chain

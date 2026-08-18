@@ -2,9 +2,9 @@
 //!
 //! The public surface of this module is deliberately limited to source
 //! analysis and scheduling.  Analyzer-native syntax and identities stay in
-//! [`lowering`]; scheduled output crosses the frontend boundary through the
-//! source-independent types in [`crate::shared`].
+//! [`lowering`]; lowering uses [`crate::shared::SourceVarId`] directly and
+//! scheduled output crosses the frontend boundary through [`crate::shared`].
 
-mod lowering;
-
-pub use lowering::{FrontendError, prepare_external_hierarchy, schedule_sources};
+pub use celox_systemverilog_frontend::{
+    FrontendError, prepare_external_hierarchy, schedule_sources,
+};
