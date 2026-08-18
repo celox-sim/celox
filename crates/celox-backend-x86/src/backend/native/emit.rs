@@ -3083,11 +3083,11 @@ fn emit_inst(
                                 )?;
                                 let source =
                                     xmmword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
-                                if func.target_features.avx() {
-                                    asm.vmovdqu(destination, source)?;
-                                } else {
-                                    asm.movdqu(destination, source)?;
-                                }
+                                // Pack128 otherwise uses legacy scalar/SSE
+                                // instructions. Keep this rare spill reload
+                                // baseline as well, so it cannot introduce an
+                                // untracked AVX requirement into the image.
+                                asm.movdqu(destination, source)?;
                             }
                         }
                     }
@@ -6082,6 +6082,59 @@ mod shift_encoding_tests {
             emitted.required_image_features
                 & (IMAGE_FEATURE_BMI2 | IMAGE_FEATURE_AVX | IMAGE_FEATURE_POPCNT),
             0
+        );
+    }
+
+    #[test]
+    fn spilled_pack_scratch_uses_baseline_move_without_avx_requirement() {
+        let mut vregs = VRegAllocator::new();
+        let low = vregs.alloc();
+        let high = vregs.alloc();
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 2]);
+        function.target_features = X86Features::for_test_with_avx(false, true);
+        let scratch = function.alloc_x86_vec();
+        let destination = function.alloc_x86_vec();
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm { dst: low, value: 1 });
+        block.push(MInst::LoadImm {
+            dst: high,
+            value: 2,
+        });
+        block.push(MInst::X86Simd(X86SimdInst::Scratch128 { dst: scratch }));
+        block.push(MInst::X86Simd(X86SimdInst::Pack128 {
+            dst: destination,
+            low,
+            high,
+            scratch: Some(scratch),
+        }));
+        block.push(MInst::Return);
+        function.push_block(block);
+        function.verify();
+
+        let mut assignment = AssignmentMap::default();
+        assignment.set(low, PhysReg::RAX);
+        assignment.set(high, PhysReg::RBX);
+        assignment.set_x86_vector(scratch, X86VectorLocation::Stack(0));
+        assignment.set_x86_vector(destination, X86VectorLocation::Register(X86PhysVec(0)));
+
+        let emitted = emit(&function, &assignment, 16).unwrap();
+        assert_eq!(emitted.required_image_features & IMAGE_FEATURE_AVX, 0);
+
+        let mut decoder =
+            Decoder::new(64, &emitted.code[..emitted.text_size], DecoderOptions::NONE);
+        let mut instructions = Vec::new();
+        while decoder.can_decode() {
+            instructions.push(decoder.decode());
+        }
+        assert!(
+            instructions
+                .iter()
+                .any(|instruction| instruction.mnemonic() == Mnemonic::Movdqu)
+        );
+        assert!(
+            !instructions
+                .iter()
+                .any(|instruction| instruction.mnemonic() == Mnemonic::Vmovdqu)
         );
     }
 
