@@ -91,13 +91,17 @@ impl ExecutionUnitPassManager {
         units: &mut Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
         options: &PassOptions,
     ) {
+        #[cfg(not(target_arch = "wasm32"))]
         const MAX_PARALLEL_UNITS: usize = 4;
 
+        #[cfg(not(target_arch = "wasm32"))]
         let worker_count = units.len().min(
             std::thread::available_parallelism()
                 .map_or(1, usize::from)
                 .min(MAX_PARALLEL_UNITS),
         );
+        #[cfg(target_arch = "wasm32")]
+        let worker_count = 1;
         if worker_count <= 1 {
             for unit in units {
                 self.run(unit, options);

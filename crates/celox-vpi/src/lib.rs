@@ -26,6 +26,7 @@ use celox::{
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 mod callbacks;
+pub mod driver;
 pub use callbacks::{
     CB_AFTER_DELAY, CB_END_OF_SIMULATION, CB_NEXT_SIM_TIME, CB_READ_ONLY_SYNCH,
     CB_READ_WRITE_SYNCH, CB_START_OF_SIMULATION, CB_VALUE_CHANGE, VPI_SCALED_REAL_TIME,

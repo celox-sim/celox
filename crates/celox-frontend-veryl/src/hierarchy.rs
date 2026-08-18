@@ -239,44 +239,67 @@ pub fn parse_ir_with_external_hierarchy<'a>(
             (module_id, ir_module, inst_ids)
         })
         .collect::<Vec<_>>();
+    #[cfg(not(target_arch = "wasm32"))]
     let worker_count = tasks
         .len()
         .min(std::thread::available_parallelism().map_or(1, usize::from));
+    // Browser WASI cannot synchronously join the scoped threads used below.
+    // The whole frontend already runs in a dedicated browser worker, so keep
+    // module lowering serial inside the wasm module.
+    #[cfg(target_arch = "wasm32")]
+    let worker_count = 1;
     let next_task = AtomicUsize::new(0);
-    let parsed_modules = std::thread::scope(|scope| {
-        let handles = (0..worker_count)
-            .map(|_| {
-                scope.spawn(|| {
-                    resource_table::import_tables(&resource_snapshot);
-                    text_table::import_tables(&text_snapshot);
-                    let mut parsed = Vec::new();
-                    loop {
-                        let task = next_task.fetch_add(1, Ordering::Relaxed);
-                        let Some(&(module_id, ir_module, inst_ids)) = tasks.get(task) else {
-                            break;
-                        };
-                        let module = ModuleParser::parse_with_loop_provenance_and_external_modules(
-                            ir_module,
-                            loop_provenance,
-                            config,
-                            inst_ids,
-                            &external_modules_by_global,
-                        )?;
-                        parsed.push((module_id, module));
-                    }
-                    Ok::<_, ParserError>(parsed)
-                })
+    let parsed_modules = if worker_count <= 1 {
+        tasks
+            .iter()
+            .map(|&(module_id, ir_module, inst_ids)| {
+                ModuleParser::parse_with_loop_provenance_and_external_modules(
+                    ir_module,
+                    loop_provenance,
+                    config,
+                    inst_ids,
+                    &external_modules_by_global,
+                )
+                .map(|module| (module_id, module))
             })
-            .collect::<Vec<_>>();
-        let mut parsed_modules = Vec::with_capacity(tasks.len());
-        for handle in handles {
-            let parsed = handle
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
-            parsed_modules.extend(parsed);
-        }
-        Ok::<_, ParserError>(parsed_modules)
-    })?;
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        std::thread::scope(|scope| {
+            let handles = (0..worker_count)
+                .map(|_| {
+                    scope.spawn(|| {
+                        resource_table::import_tables(&resource_snapshot);
+                        text_table::import_tables(&text_snapshot);
+                        let mut parsed = Vec::new();
+                        loop {
+                            let task = next_task.fetch_add(1, Ordering::Relaxed);
+                            let Some(&(module_id, ir_module, inst_ids)) = tasks.get(task) else {
+                                break;
+                            };
+                            let module =
+                                ModuleParser::parse_with_loop_provenance_and_external_modules(
+                                    ir_module,
+                                    loop_provenance,
+                                    config,
+                                    inst_ids,
+                                    &external_modules_by_global,
+                                )?;
+                            parsed.push((module_id, module));
+                        }
+                        Ok::<_, ParserError>(parsed)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut parsed_modules = Vec::with_capacity(tasks.len());
+            for handle in handles {
+                let parsed = handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+                parsed_modules.extend(parsed);
+            }
+            Ok::<_, ParserError>(parsed_modules)
+        })?
+    };
     for (module_id, mut sim_module) in parsed_modules {
         let ir_module = module_ir[&module_id];
         if let Some(symbols) = &symbols

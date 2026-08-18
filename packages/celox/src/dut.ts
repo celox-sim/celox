@@ -76,7 +76,7 @@ function writeNumber(
 	}
 }
 
-/** Read a wide value (≥ 54 bits) as BigInt, little-endian. */
+/** Read a value as BigInt, little-endian, using exactly byteSize bytes. */
 function readBigInt(view: DataView, offset: number, byteSize: number): bigint {
 	let result = 0n;
 	// Read 8 bytes at a time, then remaining bytes
@@ -96,7 +96,7 @@ function readBigInt(view: DataView, offset: number, byteSize: number): bigint {
 	return result;
 }
 
-/** Write a wide value (≥ 54 bits) as BigInt, little-endian. */
+/** Write a value as BigInt, little-endian, using exactly byteSize bytes. */
 function writeBigInt(
 	view: DataView,
 	offset: number,
@@ -627,6 +627,75 @@ function createArrayDut(
 	// 4-state mask region starts immediately after the value region.
 	const totalValueBytes = Math.ceil((totalElements * elementWidth) / 8);
 	const maskBase = baseOffset + totalValueBytes;
+
+	if (
+		baseSig.arrayElementStride !== undefined &&
+		baseSig.arrayPlaneSize !== undefined
+	) {
+		const elementStride = baseSig.arrayElementStride;
+		const elementByteSize = Math.ceil(elementWidth / 8);
+		const planeSize = baseSig.arrayPlaneSize;
+		const elementMask = (1n << BigInt(elementWidth)) - 1n;
+		const elementOffset = (i: number, mask: boolean): number =>
+			baseOffset + (mask ? planeSize : 0) + i * elementStride;
+		const readElement = (i: number, mask: boolean): bigint =>
+			readBigInt(view, elementOffset(i, mask), elementByteSize) & elementMask;
+		const writeElement = (i: number, mask: boolean, value: bigint): void =>
+			writeBigInt(
+				view,
+				elementOffset(i, mask),
+				elementByteSize,
+				value & elementMask,
+			);
+
+		return {
+			length: totalElements,
+
+			at(i: number): bigint {
+				if (state.disposed) throw new Error("Simulator has been disposed");
+				if (state.dirty && !isInput) {
+					handle.evalComb();
+					state.dirty = false;
+				}
+				return readElement(i, false);
+			},
+
+			set(i: number, value: bigint | number | symbol | FourStateValue): void {
+				if (state.disposed) throw new Error("Simulator has been disposed");
+				if (isOutput) {
+					throw new Error("Cannot write to output array port");
+				}
+
+				if (value === Symbol.for("veryl:X")) {
+					if (!is4state) {
+						throw new Error("Array port is not 4-state; cannot assign X");
+					}
+					writeElement(i, false, elementMask);
+					writeElement(i, true, elementMask);
+				} else if (value === Symbol.for("veryl:Z")) {
+					if (!is4state) {
+						throw new Error("Array port is not 4-state; cannot assign Z");
+					}
+					writeElement(i, false, 0n);
+					writeElement(i, true, elementMask);
+				} else if (isFourStateValue(value)) {
+					if (!is4state) {
+						throw new Error(
+							"Array port is not 4-state; cannot assign FourState",
+						);
+					}
+					writeElement(i, false, value.value);
+					writeElement(i, true, value.mask);
+				} else {
+					const bigVal =
+						typeof value === "bigint" ? value : BigInt(value as number);
+					writeElement(i, false, bigVal);
+					if (is4state) writeElement(i, true, 0n);
+				}
+				state.dirty = true;
+			},
+		};
+	}
 
 	if (elementWidth < 8) {
 		// Sub-byte elements: use optimised number-based bit-packed I/O.

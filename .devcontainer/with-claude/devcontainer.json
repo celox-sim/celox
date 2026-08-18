@@ -1,6 +1,9 @@
 {
     "name": "Celox (with Claude)",
-    "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+    "build": {
+        "dockerfile": "../Dockerfile",
+        "context": "../.."
+    },
     "remoteUser": "vscode",
     "features": {
         "ghcr.io/devcontainers/features/rust:1": {},

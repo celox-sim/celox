@@ -43,6 +43,7 @@ compiler demo: the result can run real RTL tests, in Node.js or in a browser.
 - Enable four-state simulation and drive or inspect `X` and `Z` values.
 - Override top-level parameters and include test-only Veryl sources.
 - Inspect child instances and emit VCD waveforms.
+- Compile a Veryl design into a native executable and run cocotb tests through VPI.
 - Run through the custom x86-64 backend, the Cranelift fallback, or WebAssembly.
   A custom AArch64 backend is also available behind an experimental feature.
 
@@ -190,6 +191,7 @@ and API changes while the design is still evolving.
 
 - [Getting Started](https://celox-sim.github.io/celox/guide/getting-started)
 - [Writing Tests](https://celox-sim.github.io/celox/guide/writing-tests)
+- [Celox CLI and cocotb](https://celox-sim.github.io/celox/guide/cocotb)
 - [Four-State Simulation](https://celox-sim.github.io/celox/guide/four-state)
 - [VCD Waveforms](https://celox-sim.github.io/celox/guide/vcd)
 - [TypeScript API](https://celox-sim.github.io/celox/api/)
@@ -210,6 +212,9 @@ pnpm test
 
 Architecture discussions, bug reports, and focused experiments are welcome in
 [GitHub Issues](https://github.com/celox-sim/celox/issues).
+
+The repository dev container includes cocotb 2.0.1 and Verilator for native
+VPI integration tests and SystemVerilog benchmarks.
 
 ## License
 

@@ -1,29 +1,46 @@
 #![allow(clippy::disallowed_methods)] // Cargo target configuration is build-script input.
 
 fn main() {
+    println!("cargo:rerun-if-changed=../../VERSION");
+    let version = std::fs::read_to_string("../../VERSION")
+        .expect("VERSION must be readable")
+        .trim()
+        .to_string();
+    println!("cargo:rustc-env=CELOX_VERSION={version}");
+
     let target_os = std::env::var_os("CARGO_CFG_TARGET_OS")
         .and_then(|value| value.into_string().ok())
         .unwrap_or_default();
     match target_os.as_str() {
         "linux" | "freebsd" => {
-            println!("cargo:rustc-link-arg-bin=celox-vpi-runtime=-Wl,--export-dynamic");
+            for binary in RUNTIME_BINARIES {
+                println!("cargo:rustc-link-arg-bin={binary}=-Wl,--export-dynamic");
+            }
         }
         "macos" => {
-            println!("cargo:rustc-link-arg-bin=celox-vpi-runtime=-Wl,-export_dynamic");
+            for binary in RUNTIME_BINARIES {
+                println!("cargo:rustc-link-arg-bin={binary}=-Wl,-export_dynamic");
+            }
         }
         "windows" => {
             let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
             if target_env == "msvc" {
-                for symbol in VPI_HOST_EXPORTS {
-                    println!("cargo:rustc-link-arg-bin=celox-vpi-runtime=/EXPORT:{symbol}");
+                for binary in RUNTIME_BINARIES {
+                    for symbol in VPI_HOST_EXPORTS {
+                        println!("cargo:rustc-link-arg-bin={binary}=/EXPORT:{symbol}");
+                    }
                 }
             } else {
-                println!("cargo:rustc-link-arg-bin=celox-vpi-runtime=-Wl,--export-all-symbols");
+                for binary in RUNTIME_BINARIES {
+                    println!("cargo:rustc-link-arg-bin={binary}=-Wl,--export-all-symbols");
+                }
             }
         }
         _ => {}
     }
 }
+
+const RUNTIME_BINARIES: &[&str] = &["celox-vpi-runtime", "celox"];
 
 const VPI_HOST_EXPORTS: &[&str] = &[
     "vpi_chk_error",

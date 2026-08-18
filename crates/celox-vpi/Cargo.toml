@@ -19,6 +19,10 @@ path = "src/bin/runtime.rs"
 name = "celox-vpi-compile"
 path = "src/bin/compile.rs"
 
+[[bin]]
+name = "celox"
+path = "src/bin/celox.rs"
+
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 celox = { path = "../celox" }
 
@@ -26,6 +30,7 @@ celox = { path = "../celox" }
 celox = { path = "../celox", features = ["experimental-arm64-backend"] }
 
 [dependencies]
+clap.workspace = true
 fxhash.workspace = true
 libloading = "0.9"
 veryl-metadata.workspace = true
