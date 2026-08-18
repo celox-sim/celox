@@ -3220,6 +3220,31 @@ impl SLTToSIRLowerer {
             return self.slice_reg(builder, full_value, access);
         }
 
+        // Region lowering deliberately pushes a slice through bitwise and Mux
+        // nodes so a narrow consumer does not compute an unnecessarily wide
+        // value.  Do not do that through a shared compound node, however: a
+        // read-modify-write chain commonly references its previous version in
+        // both Mux arms, and recursively projecting both references expands a
+        // compact DAG as an exponential tree.  Materializing the shared value
+        // once preserves the ordinary lowering cache's linear-DAG behavior;
+        // later projections reuse that snapshot and only emit their slice.
+        let shared_compound = allow_cache
+            && env.is_none()
+            && self
+                .cost_cache
+                .borrow()
+                .fanout
+                .get(expr.0)
+                .is_some_and(|fanout| *fanout > 1)
+            && Self::is_nontrivial_node(expr, arena);
+        if shared_compound {
+            let full_value = self.lower_inner(builder, expr, arena, cache, env, allow_cache);
+            if access.lsb == 0 && access.msb + 1 == self.get_width(expr, arena) {
+                return full_value;
+            }
+            return self.slice_reg(builder, full_value, access);
+        }
+
         match arena.get(expr) {
             SLTNode::Binary(lhs, BinaryOp::And, rhs)
                 if slt_const_u64(*lhs, arena) == Some(0)
@@ -6369,6 +6394,55 @@ mod tests {
             instruction,
             SIRInstruction::Binary(_, source, BinaryOp::Shr, _) if *source == snapshot
         )));
+    }
+
+    #[test]
+    fn region_slice_materializes_shared_rmw_versions_once() {
+        const UPDATES: usize = 18;
+
+        let mut arena = SLTNodeArena::new();
+        let mut previous = input(&mut arena, 10, 8);
+        for update in 0..UPDATES {
+            let condition = input(&mut arena, 100 + update as u32, 1);
+            let payload = constant(&mut arena, 1 << (update % 8), 8);
+            let modified = arena
+                .alloc(SLTNode::Binary(previous, BinaryOp::Or, payload))
+                .unwrap();
+            previous = arena
+                .alloc(SLTNode::Mux {
+                    cond: condition,
+                    then_expr: modified,
+                    else_expr: previous,
+                })
+                .unwrap();
+        }
+        let bit = arena
+            .alloc(SLTNode::Slice {
+                expr: previous,
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+
+        for four_state in [false, true] {
+            let mut builder = SIRBuilder::new();
+            SLTToSIRLowerer::new(four_state).lower(
+                &mut builder,
+                bit,
+                &arena,
+                &mut crate::HashMap::default(),
+            );
+            let eu = finish_lowering(builder);
+            let instructions = eu
+                .blocks
+                .values()
+                .map(|block| block.instructions.len())
+                .sum::<usize>();
+
+            assert!(
+                instructions < 256,
+                "shared RMW DAG expanded to {instructions} instructions in four_state={four_state}"
+            );
+        }
     }
 
     #[test]
