@@ -24,8 +24,12 @@ pub use backend::SimulatorErrorCode as RuntimeErrorCode;
 pub use backend::{
     EventHandle, LayoutRequirements, MemoryLayout, MemoryLayoutMode, SimBackend, get_byte_size,
 };
-pub use celox_design::{ElaboratedDesign, EventTopology, RuntimeSchema};
+pub use celox_design::{DomainKind, ElaboratedDesign, EventTopology, RuntimeSchema};
 pub use celox_frontend_veryl::{FrontendDiagnostic, LoweringPhase, ParserError};
+pub use celox_runtime::{
+    DesignReflection, ReflectionScope, ReflectionScopeId, ReflectionSignal, ReflectionSignalId,
+    SignalDirection,
+};
 pub use celox_slt::scheduler::SchedulerError;
 pub use debug::{CompilationTrace, NativeProfileBlock, TraceOptions};
 pub use diagnostics::RuntimeDiagnostics;
@@ -110,7 +114,11 @@ mod host_api {
         target_arch = "x86_64",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
-    pub use crate::backend::native::{NativeBackend, SharedNativeCode};
+    pub use crate::backend::native::{
+        AppendedNativeImage, NativeBackend, NativeCodeEntry, NativeImageArchitecture,
+        NativeImageContainerError, NativeProgramImage, NativeProgramInstance,
+        NativeProgramLoadError, NativeSignalIdentity, SharedNativeCode,
+    };
     #[cfg(any(
         target_arch = "x86_64",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")

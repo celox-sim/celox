@@ -92,6 +92,7 @@ mod host {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum RuntimeEvent {
         Display { message: String },
+        Write { message: String },
         AssertContinue { message: String },
         AssertFatal { message: String },
         Missed { count: u64 },
@@ -279,7 +280,7 @@ mod host {
     ) -> String {
         let Some(template) = site.template.as_deref() else {
             let default_spec = match site.kind {
-                RuntimeEventKind::Display => 'd',
+                RuntimeEventKind::Display | RuntimeEventKind::Write => 'd',
                 RuntimeEventKind::AssertContinue | RuntimeEventKind::AssertFatal => {
                     if args.is_empty() {
                         return "assertion failed".to_string();
@@ -328,7 +329,9 @@ mod host {
                     arg_idx += 1;
                 }
                 't' | 'T' => out.push_str(&ctx.tb_time.unwrap_or(0).to_string()),
-                'm' | 'M' => out.push_str(ctx.scope.unwrap_or("<hierarchy>")),
+                'm' | 'M' => {
+                    out.push_str(ctx.scope.or(site.scope.as_deref()).unwrap_or("<hierarchy>"))
+                }
                 other => {
                     out.push('%');
                     out.push(other);
@@ -350,6 +353,7 @@ mod host {
                 let message = render_runtime_event_message(site, &args, ctx);
                 Some(match site.kind {
                     RuntimeEventKind::Display => RuntimeEvent::Display { message },
+                    RuntimeEventKind::Write => RuntimeEvent::Write { message },
                     RuntimeEventKind::AssertContinue => RuntimeEvent::AssertContinue { message },
                     RuntimeEventKind::AssertFatal => RuntimeEvent::AssertFatal { message },
                 })
@@ -474,6 +478,56 @@ mod host {
             |offset| buffer.read_u64(offset),
             |offset| buffer.load_atomic_u64(offset, Ordering::Acquire),
         )
+    }
+
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
+    pub(crate) fn runtime_event_write_seq_for_backend<B: SimBackend>(backend: &B) -> u64 {
+        if let Some(buffer) = backend.runtime_event_buffer() {
+            buffer.load_atomic_u64(0, std::sync::atomic::Ordering::Acquire)
+        } else {
+            let (pointer, size) = backend.runtime_event_buffer_as_ptr();
+            if size < std::mem::size_of::<u64>() {
+                return 0;
+            }
+            // Safety: the backend contract exposes `size` readable bytes.
+            unsafe { std::ptr::read_volatile(pointer.cast::<u64>()) }
+        }
+    }
+
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
+    pub(crate) fn collect_runtime_events_for_backend<B: SimBackend>(
+        backend: &B,
+        sites: &[RuntimeEventSite],
+        read_seq: &mut u64,
+        context: RuntimeFormatContext<'_>,
+    ) -> Vec<RuntimeEvent> {
+        let layout = backend.layout();
+        let raw = if let Some(buffer) = backend.runtime_event_buffer() {
+            collect_runtime_events(
+                layout,
+                sites,
+                read_seq,
+                buffer.byte_size(),
+                |offset| buffer.read_u64(offset),
+                |offset| buffer.load_atomic_u64(offset, std::sync::atomic::Ordering::Acquire),
+            )
+        } else {
+            let (pointer, size) = backend.runtime_event_buffer_as_ptr();
+            let read_u64 = |offset: usize| -> u64 {
+                // Safety: `collect_runtime_events` bounds every access by `size`.
+                unsafe { std::ptr::read_volatile(pointer.add(offset).cast::<u64>()) }
+            };
+            collect_runtime_events(layout, sites, read_seq, size, read_u64, read_u64)
+        };
+        raw.into_iter()
+            .filter_map(|event| render_raw_runtime_event(event, sites, context))
+            .collect()
     }
 
     // ── Generic methods available for any backend ────────────────────────
