@@ -627,10 +627,7 @@ fn compile_sv_to_sir_forwards_parameter_overrides() {
     )
     .unwrap_err()
     .to_string();
-    assert!(
-        error.contains("unsupported statement inside always_ff"),
-        "{error}"
-    );
+    assert!(error.contains("procedural assertion statement"), "{error}");
 }
 
 #[test]
@@ -2030,11 +2027,13 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "unsupported statement inside always_ff",
+            "procedural assertion statement",
             r#"
-            module Top(input logic clk, d, output logic q);
-                always_ff @(posedge clk)
-                    assert (d) q <= 1'b1; else q <= 1'b0;
+            module Top(input logic a, output logic y);
+                always_comb begin
+                    y = a;
+                    assert (a);
+                end
             endmodule
         "#,
         ),

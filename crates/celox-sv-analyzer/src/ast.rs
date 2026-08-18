@@ -609,6 +609,11 @@ fn reject_silently_ignored_constructs(
                     "concurrent assertion".to_string(),
                 ));
             }
+            RefNode::ProceduralAssertionStatement(_) => {
+                return Err(AnalyzerError::Unsupported(
+                    "procedural assertion statement".to_string(),
+                ));
+            }
             RefNode::ConditionalGenerateConstruct(
                 sv_parser::ConditionalGenerateConstruct::Case(_),
             ) => {
