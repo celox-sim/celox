@@ -3656,3 +3656,80 @@ fn evaluates_part_select_bounds_with_typed_parameter_widths() {
     sim.tick(sim.event("clk")).unwrap();
     assert_eq!(sim.get(sim.signal("ff_value")), 0xabcdu16.into());
 }
+
+#[test]
+fn remaps_trailing_part_select_bounds_in_ascending_packed_dimensions() {
+    let source = r#"
+        module Top(input logic [1:0][0:7] a, output logic [3:0] y);
+            assign y = a[1][0:3];
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("ascending_packed_part_select.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    sim.modify(|io| io.set(a, 0xabcdu16)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xau8.into());
+}
+
+#[test]
+fn appends_use_site_packed_dimensions_to_typedefs() {
+    let source = r#"
+        module Top(input logic [7:0] value, output logic [7:0] y);
+            typedef logic [3:0] nibble_t;
+            nibble_t [1:0] a;
+            assign a = value;
+            assign y = a;
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("typedef_use_site_dimension.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let value = sim.signal("value");
+    sim.modify(|io| io.set(value, 0xabu8)).unwrap();
+    assert_eq!(sim.get(sim.signal("y")), 0xabu8.into());
+}
+
+#[test]
+fn uses_left_operand_signedness_when_context_sizing_shifts() {
+    let source = r#"
+        module Child(input logic [7:0] value, output logic [7:0] y);
+            assign y = value;
+        endmodule
+        module Top(
+            input logic clk,
+            input logic signed [3:0] a,
+            input logic [1:0] sh,
+            output logic [7:0] comb_y,
+            output logic [7:0] ff_y,
+            output logic [7:0] glue_y
+        );
+            assign comb_y = a << sh;
+            always_ff @(posedge clk) ff_y <= a << sh;
+            Child child(.value(a << sh), .y(glue_y));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("shift_left_operand_signedness.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let a = sim.signal("a");
+    let sh = sim.signal("sh");
+    sim.modify(|io| {
+        io.set(a, 0x0fu8);
+        io.set(sh, 1u8);
+    })
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("comb_y")), 0xfeu8.into());
+    assert_eq!(sim.get(sim.signal("glue_y")), 0xfeu8.into());
+    sim.tick(sim.event("clk")).unwrap();
+    assert_eq!(sim.get(sim.signal("ff_y")), 0xfeu8.into());
+}

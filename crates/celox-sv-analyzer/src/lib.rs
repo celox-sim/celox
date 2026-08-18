@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use fxhash::FxHashMap as HashMap;
 use thiserror::Error;
 
 pub mod analyze;
@@ -53,7 +54,7 @@ pub fn analyze_source_with_module_parameter_overrides(
     code: &str,
     path: &Path,
     module_name: &str,
-    parameter_overrides: &std::collections::HashMap<String, i128>,
+    parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
     let syntax_tree = syntax::parse_source(code, path)?;
     let source = ast::Source::from_syntax_with_module_parameter_overrides(
@@ -86,7 +87,7 @@ pub fn analyze_source_module_with_parameter_overrides(
     code: &str,
     path: &Path,
     module_name: &str,
-    parameter_overrides: &std::collections::HashMap<String, i128>,
+    parameter_overrides: &HashMap<String, i128>,
 ) -> Result<Ir, AnalyzerError> {
     let syntax_tree = syntax::parse_source(code, path)?;
     let source = ast::Source::from_syntax_module_with_parameter_overrides(
@@ -103,7 +104,7 @@ pub fn analyze_source_module_with_parameter_expr_overrides(
     code: &str,
     path: &Path,
     module_name: &str,
-    parameter_overrides: &std::collections::HashMap<String, ir::ConstExpr>,
+    parameter_overrides: &HashMap<String, ir::ConstExpr>,
 ) -> Result<Ir, AnalyzerError> {
     let syntax_tree = syntax::parse_source(code, path)?;
     let parameter_overrides = parameter_overrides
@@ -399,12 +400,14 @@ mod tests {
             assignment.lhs_value(),
             ir::LValue::Select { name, msb, lsb }
                 if name == "val_next"
-                    && typecheck::eval_const_expr(msb, &std::collections::HashMap::from([
-                        ("SIZE".to_string(), 32),
-                    ])) == Some(31)
-                    && typecheck::eval_const_expr(lsb, &std::collections::HashMap::from([
-                        ("SIZE".to_string(), 32),
-                    ])) == Some(31)
+                    && typecheck::eval_const_expr(
+                        msb,
+                        &[("SIZE".to_string(), 32)].into_iter().collect(),
+                    ) == Some(31)
+                    && typecheck::eval_const_expr(
+                        lsb,
+                        &[("SIZE".to_string(), 32)].into_iter().collect(),
+                    ) == Some(31)
         )));
     }
 
@@ -414,7 +417,7 @@ mod tests {
             include_str!("../../../benches/verilator/Lfsr.sv"),
             Path::new("Lfsr.sv"),
             "lfsr_galois",
-            &std::collections::HashMap::from([("SIZE".to_string(), 32)]),
+            &[("SIZE".to_string(), 32)].into_iter().collect(),
         )
         .expect("SV analysis should succeed");
         let lfsr = ir
@@ -422,7 +425,7 @@ mod tests {
             .iter()
             .find(|module| module.name() == "lfsr_galois")
             .expect("lfsr_galois module should exist");
-        let constants = std::collections::HashMap::from([("SIZE".to_string(), 32)]);
+        let constants: HashMap<_, _> = [("SIZE".to_string(), 32)].into_iter().collect();
 
         let assignments = lfsr
             .comb_processes()
@@ -464,9 +467,9 @@ mod tests {
             assignments[0].rhs(),
             ir::Expr::Select { expr, msb, lsb }
                 if matches!(&**expr, ir::Expr::Ident(name) if name == "o_val")
-                    && typecheck::eval_const_expr(msb, &std::collections::HashMap::new())
+                    && typecheck::eval_const_expr(msb, &HashMap::default())
                         == Some(0)
-                    && typecheck::eval_const_expr(lsb, &std::collections::HashMap::new())
+                    && typecheck::eval_const_expr(lsb, &HashMap::default())
                         == Some(0)
         ));
         assert!(

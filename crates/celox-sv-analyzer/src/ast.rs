@@ -4,7 +4,7 @@
 //! `sv-parser` CST, but it is still a language frontend structure rather than
 //! Celox runtime IR.
 
-use std::collections::{HashMap, HashSet};
+use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use sv_parser::{Locate, RefNode, SyntaxTree, unwrap_node};
 
@@ -17,7 +17,7 @@ pub struct Source {
 
 impl Source {
     pub fn from_syntax(syntax_tree: &SyntaxTree) -> Result<Self, AnalyzerError> {
-        Self::from_syntax_with_module_parameter_overrides(syntax_tree, "", &HashMap::new())
+        Self::from_syntax_with_module_parameter_overrides(syntax_tree, "", &HashMap::default())
     }
 
     pub fn from_syntax_with_module_parameter_overrides(
@@ -149,7 +149,7 @@ impl Module {
         let node = node.into();
         let name = module_name_from_node(node.clone(), syntax_tree)?;
         let mut parameters = parameters_from_module_node(node.clone(), syntax_tree)?;
-        let mut parameter_names = HashSet::new();
+        let mut parameter_names = HashSet::default();
         if let Some(parameter) = parameters
             .iter()
             .find(|parameter| !parameter_names.insert(parameter.name()))
@@ -165,7 +165,7 @@ impl Module {
         let const_env = const_env_from_parameters(&parameters);
         reject_silently_ignored_constructs(node.clone(), syntax_tree, &const_env)?;
         let ports = ports_from_module_node(node.clone(), syntax_tree)?;
-        let mut port_names = HashSet::new();
+        let mut port_names = HashSet::default();
         if let Some(port) = ports.iter().find(|port| !port_names.insert(port.name())) {
             return Err(AnalyzerError::DuplicatePort {
                 module: name,
@@ -193,7 +193,7 @@ impl Module {
         let packed_dimensions = packed_dimensions_from_ports_and_signals(&ports, &signals);
         let mut instances =
             instances_from_module_node(node.clone(), syntax_tree, &const_env, &packed_dimensions)?;
-        let mut instance_names = HashSet::new();
+        let mut instance_names = HashSet::default();
         if let Some(instance) = instances
             .iter()
             .filter(|instance| {
@@ -1801,6 +1801,7 @@ fn ports_from_module_node(
                     r#type,
                     RefNode::AnsiPortDeclarationNet(port),
                     syntax_tree,
+                    &type_aliases,
                 );
                 let name = port_name(RefNode::PortIdentifier(&port.nodes.1), syntax_tree)?;
                 inherited_direction = direction;
@@ -1825,6 +1826,7 @@ fn ports_from_module_node(
                     r#type,
                     RefNode::AnsiPortDeclarationVariable(port),
                     syntax_tree,
+                    &type_aliases,
                 );
                 let name = port_name(RefNode::PortIdentifier(&port.nodes.1), syntax_tree)?;
                 inherited_direction = direction;
@@ -2123,6 +2125,7 @@ fn signals_from_net_declaration(
                 r#type,
                 RefNode::DataTypeOrImplicit(&net.nodes.3),
                 syntax_tree,
+                type_aliases,
             );
             (r#type, net.nodes.5.nodes.0.contents(), true)
         }
@@ -2188,7 +2191,7 @@ fn type_aliases_from_module_node(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
 ) -> HashMap<String, Type> {
-    let mut aliases = HashMap::new();
+    let mut aliases = HashMap::default();
     if let Some(parameter_port_list) = module_parameter_port_list(node.clone()) {
         if let RefNode::ParameterPortList(parameter_port_list) = parameter_port_list {
             add_type_aliases_from_parameter_port_list(
@@ -2371,6 +2374,7 @@ fn signals_from_data_declaration(
         r#type,
         RefNode::DataTypeOrImplicit(&variable.nodes.3),
         syntax_tree,
+        type_aliases,
     );
     let mut signals = Vec::new();
     for assignment in variable.nodes.4.nodes.0.contents() {
@@ -2509,8 +2513,8 @@ fn normalize_unbased_unsized_parameter_value(
 }
 
 fn const_env_from_parameters(parameters: &[Parameter]) -> HashMap<String, i128> {
-    let mut env = HashMap::new();
-    let mut parameter_types = HashMap::new();
+    let mut env = HashMap::default();
+    let mut parameter_types = HashMap::default();
     for parameter in parameters {
         let Some(value) = parameter.resolved_value(&env, &parameter_types) else {
             continue;
@@ -2545,8 +2549,8 @@ fn parameter_value_env(
     parameters: &[Parameter],
     const_env: &HashMap<String, i128>,
 ) -> HashMap<String, Expr> {
-    let mut values = HashMap::new();
-    let mut parameter_types = HashMap::new();
+    let mut values = HashMap::default();
+    let mut parameter_types = HashMap::default();
     for parameter in parameters {
         let inferred_type = parameter
             .value()
@@ -2884,7 +2888,7 @@ fn packed_dimensions_from_ports_and_signals(
     ports: &[Port],
     signals: &[Signal],
 ) -> PackedDimensions {
-    let mut dimensions = HashMap::new();
+    let mut dimensions = HashMap::default();
     for port in ports {
         dimensions.insert(
             port.name().to_string(),
@@ -3311,7 +3315,11 @@ fn instances_from_module_instantiation(
             port_connections_from_hierarchical_instance(instance, syntax_tree, packed_dimensions)?;
         for connection in &mut port_connections {
             connection.actual_expr = connection.actual_expr.take().map(|expr| {
-                substitute_expr_constants_with_parameter_literals(expr, const_env, &HashMap::new())
+                substitute_expr_constants_with_parameter_literals(
+                    expr,
+                    const_env,
+                    &HashMap::default(),
+                )
             });
         }
         let port_names = port_connections
@@ -3347,7 +3355,7 @@ fn parameter_overrides_from_value_assignment(
         ));
     };
     let mut overrides = Vec::new();
-    let mut names = HashSet::new();
+    let mut names = HashSet::default();
     for assignment in assignments.nodes.0.contents() {
         let name = identifier_text(
             RefNode::ParameterIdentifier(&assignment.nodes.1),
@@ -3454,7 +3462,7 @@ fn functions_from_module_node(
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
 ) -> Result<HashMap<String, Function>, AnalyzerError> {
-    let mut functions = HashMap::new();
+    let mut functions = HashMap::default();
     let type_aliases = type_aliases_from_module_node(node.clone(), syntax_tree);
     let inactive_nodes = inactive_conditional_generate_nodes(node.clone(), syntax_tree, const_env);
     for child in node {
@@ -3476,7 +3484,7 @@ fn functions_from_module_node(
             packed_dimensions,
         ) {
             let name = function.name.clone();
-            let mut parameter_names = HashSet::new();
+            let mut parameter_names = HashSet::default();
             if let Some(parameter) = function
                 .params
                 .iter()
@@ -3884,7 +3892,7 @@ fn function_local_types_from_block_item_iter<'a>(
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Option<HashMap<String, FunctionLocalType>> {
-    let mut local_types = HashMap::new();
+    let mut local_types = HashMap::default();
     for item in items {
         let sv_parser::BlockItemDeclaration::Data(item) = item else {
             continue;
@@ -4951,8 +4959,8 @@ fn reject_duplicate_conditional_generate_locals(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
 ) -> Result<(), AnalyzerError> {
-    let mut signal_names = HashSet::new();
-    let mut parameter_names = HashSet::new();
+    let mut signal_names = HashSet::default();
+    let mut parameter_names = HashSet::default();
     for child in node {
         let RefNode::ConditionalGenerateConstruct(sv_parser::ConditionalGenerateConstruct::If(
             generate,
@@ -5042,7 +5050,7 @@ fn generate_block_direct_data_declaration_names(
     block: &sv_parser::GenerateBlock,
     syntax_tree: &SyntaxTree,
 ) -> Vec<String> {
-    let aliases = HashMap::new();
+    let aliases = HashMap::default();
     let mut names = Vec::new();
     visit_direct_generate_items(block, |item| {
         let Some(sv_parser::PackageOrGenerateItemDeclaration::DataDeclaration(data)) =
@@ -5310,7 +5318,7 @@ fn substitute_process_constants(
     process: CombProcess,
     const_env: &HashMap<String, i128>,
 ) -> CombProcess {
-    substitute_process_constants_with_parameter_literals(process, const_env, &HashMap::new())
+    substitute_process_constants_with_parameter_literals(process, const_env, &HashMap::default())
 }
 
 fn substitute_process_constants_with_parameter_literals(
@@ -5341,7 +5349,11 @@ fn substitute_assignment_constants(
     assignment: Assignment,
     const_env: &HashMap<String, i128>,
 ) -> Assignment {
-    substitute_assignment_constants_with_parameter_literals(assignment, const_env, &HashMap::new())
+    substitute_assignment_constants_with_parameter_literals(
+        assignment,
+        const_env,
+        &HashMap::default(),
+    )
 }
 
 fn substitute_assignment_constants_with_parameter_literals(
@@ -6842,7 +6854,7 @@ fn lvalue_from_constant_select(
 }
 
 fn expr_from_expression(expr: &sv_parser::Expression, syntax_tree: &SyntaxTree) -> Option<Expr> {
-    expr_from_expression_with_types(expr, syntax_tree, &HashMap::new())
+    expr_from_expression_with_types(expr, syntax_tree, &HashMap::default())
 }
 
 fn expr_from_expression_with_types(
@@ -6958,7 +6970,7 @@ fn guard_zero_divisions(expr: Expr) -> Expr {
 }
 
 fn expr_from_primary(primary: &sv_parser::Primary, syntax_tree: &SyntaxTree) -> Option<Expr> {
-    expr_from_primary_with_types(primary, syntax_tree, &HashMap::new())
+    expr_from_primary_with_types(primary, syntax_tree, &HashMap::default())
 }
 
 fn expr_from_primary_with_types(
@@ -7147,6 +7159,36 @@ fn expr_select_from_select(
             let Expr::Ident(name) = &base else {
                 return None;
             };
+            let dimensions = packed_dimensions.get(name)?;
+            let dimension = dimensions.get(indices.len())?;
+            msb = packed_index_offset(dimension, msb);
+            lsb = packed_index_offset(dimension, lsb);
+
+            let stride = product_expr(
+                &dimensions[indices.len() + 1..]
+                    .iter()
+                    .map(|dimension| dimension.width.clone())
+                    .collect::<Vec<_>>(),
+            );
+            if !is_one(&stride) {
+                msb = add_expr(
+                    ConstExpr::Binary {
+                        left: Box::new(msb),
+                        op: BinaryOp::Mul,
+                        right: Box::new(stride.clone()),
+                    },
+                    ConstExpr::Binary {
+                        left: Box::new(stride.clone()),
+                        op: BinaryOp::Sub,
+                        right: Box::new(ConstExpr::Literal("1".to_string())),
+                    },
+                );
+                lsb = ConstExpr::Binary {
+                    left: Box::new(lsb),
+                    op: BinaryOp::Mul,
+                    right: Box::new(stride),
+                };
+            }
             let (_, prefix_offset) = flatten_packed_select(name, &indices, packed_dimensions)?;
             msb = add_expr(prefix_offset.clone(), msb);
             lsb = add_expr(prefix_offset, lsb);
@@ -7198,23 +7240,7 @@ fn flatten_packed_select(
                 .collect::<Vec<_>>(),
         );
         let dimension = &dimensions[idx];
-        let index = ConstExpr::Mux {
-            condition: Box::new(ConstExpr::Binary {
-                left: Box::new(dimension.left.clone()),
-                op: BinaryOp::Ge,
-                right: Box::new(dimension.right.clone()),
-            }),
-            then_expr: Box::new(ConstExpr::Binary {
-                left: Box::new(index.clone()),
-                op: BinaryOp::Sub,
-                right: Box::new(dimension.right.clone()),
-            }),
-            else_expr: Box::new(ConstExpr::Binary {
-                left: Box::new(dimension.right.clone()),
-                op: BinaryOp::Sub,
-                right: Box::new(index.clone()),
-            }),
-        };
+        let index = packed_index_offset(dimension, index.clone());
         let term = if is_one(&stride) {
             index
         } else {
@@ -7246,6 +7272,26 @@ fn flatten_packed_select(
         }),
     };
     Some((msb, offset))
+}
+
+fn packed_index_offset(dimension: &PackedDimension, index: ConstExpr) -> ConstExpr {
+    ConstExpr::Mux {
+        condition: Box::new(ConstExpr::Binary {
+            left: Box::new(dimension.left.clone()),
+            op: BinaryOp::Ge,
+            right: Box::new(dimension.right.clone()),
+        }),
+        then_expr: Box::new(ConstExpr::Binary {
+            left: Box::new(index.clone()),
+            op: BinaryOp::Sub,
+            right: Box::new(dimension.right.clone()),
+        }),
+        else_expr: Box::new(ConstExpr::Binary {
+            left: Box::new(dimension.right.clone()),
+            op: BinaryOp::Sub,
+            right: Box::new(index),
+        }),
+    }
 }
 
 fn product_expr(parts: &[ConstExpr]) -> ConstExpr {
@@ -7617,9 +7663,13 @@ fn type_with_fallback_ranges(
     mut r#type: Type,
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
+    type_aliases: &HashMap<String, Type>,
 ) -> Type {
-    if r#type.packed_ranges.is_empty() {
-        r#type.packed_ranges = packed_ranges_from_ref_node(node.clone(), syntax_tree);
+    let direct_ranges = packed_ranges_from_ref_node(node.clone(), syntax_tree);
+    if type_alias_from_ref_node(node.clone(), syntax_tree, type_aliases).is_some() {
+        r#type.packed_ranges.extend(direct_ranges);
+    } else if r#type.packed_ranges.is_empty() {
+        r#type.packed_ranges = direct_ranges;
     }
     if !r#type.is_signed {
         r#type.is_signed = is_signed_from_ref_node(node).unwrap_or(false);

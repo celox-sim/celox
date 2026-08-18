@@ -96,7 +96,7 @@ pub(crate) struct LoweredSvModule {
     variables: HashMap<VarId, SvVariable>,
     pub port_order: Vec<VarId>,
     pub signal_names: HashMap<String, VarId>,
-    constants: std::collections::HashMap<String, i128>,
+    constants: HashMap<String, i128>,
     parameter_types: HashMap<String, (usize, bool)>,
     pub instances: Vec<LoweredSvInstance>,
 }
@@ -334,7 +334,7 @@ fn validate_net_driver_ranges(
 
 fn validate_variable_driver_ranges(
     module: &sv::ir::Module,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Result<(), sv::AnalyzerError> {
     for port in module
@@ -381,7 +381,7 @@ fn validate_variable_driver_ranges(
 fn local_driver_ranges(
     module: &sv::ir::Module,
     signal_name: &str,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Vec<(usize, Option<(i128, i128)>)> {
     let mut drivers = Vec::new();
@@ -431,7 +431,7 @@ fn local_driver_ranges(
 
 fn net_lvalue_range(
     lvalue: &sv::ir::LValue,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<(i128, i128)> {
     let sv::ir::LValue::Select { msb, lsb, .. } = lvalue else {
@@ -966,6 +966,7 @@ fn lower_module_with_overrides(
             apply_ff_blocks,
             eval_apply_ff_blocks,
             glue_blocks: HashMap::default(),
+            indexed_instance_names: HashSet::default(),
             comb_blocks: Vec::new(),
             comb_observers: Vec::<CombObserver<VarId>>::new(),
             runtime_errors: HashMap::<i64, RuntimeErrorInfo<VarId>>::default(),
@@ -1026,9 +1027,9 @@ fn mark_ff_event_domains(
 
 fn evaluated_parameter_overrides(
     parameter_overrides: &[LoweredSvParameterOverride],
-) -> Result<std::collections::HashMap<String, sv::ir::ConstExpr>, sv::AnalyzerError> {
-    let constants = std::collections::HashMap::new();
-    let mut evaluated = std::collections::HashMap::new();
+) -> Result<HashMap<String, sv::ir::ConstExpr>, sv::AnalyzerError> {
+    let constants = HashMap::default();
+    let mut evaluated = HashMap::default();
     for parameter in parameter_overrides {
         let Some(value) = parameter.value.as_ref() else {
             continue;
@@ -1046,7 +1047,7 @@ fn evaluated_parameter_overrides(
 
 fn lower_parameter_overrides(
     instance: &sv::ir::Instance,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Vec<LoweredSvParameterOverride> {
     instance
@@ -1309,7 +1310,7 @@ fn lower_comb_processes(
     module: &sv::ir::Module,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     four_state: bool,
 ) -> Result<(Vec<LogicPath<VarId>>, SLTNodeArena<VarId>), sv::AnalyzerError> {
@@ -1348,7 +1349,7 @@ fn ensure_parent_output_signals(
     implicit_output_signals: &mut HashSet<String>,
     implicit_nets_allowed: bool,
     parent_source: &sv::ir::Module,
-    parent_constants: &std::collections::HashMap<String, i128>,
+    parent_constants: &HashMap<String, i128>,
     parent_parameter_types: &HashMap<String, (usize, bool)>,
     child: &LoweredSvModule,
     connections: &[LoweredSvPortConnection],
@@ -1445,7 +1446,7 @@ type SvGlue = (
 fn build_instance_glue(
     parent_variables: &HashMap<VarId, SvVariable>,
     parent_signal_names: &HashMap<String, VarId>,
-    parent_constants: &std::collections::HashMap<String, i128>,
+    parent_constants: &HashMap<String, i128>,
     parent_parameter_types: &HashMap<String, (usize, bool)>,
     child: &LoweredSvModule,
     connections: &[LoweredSvPortConnection],
@@ -1650,7 +1651,7 @@ fn lower_glue_parent_expr(
     expr: &sv::ir::Expr,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     arena: &mut SLTNodeArena<GlueAddr>,
     context_width: Option<usize>,
@@ -1910,11 +1911,11 @@ fn lower_glue_parent_expr(
             ))
         }
         sv::ir::Expr::Binary { left, op, right } => {
-            let operands_signed =
-                sv_glue_expr_is_signed(left, variables, name_to_id, parameter_types)
-                    && sv_glue_expr_is_signed(right, variables, name_to_id, parameter_types);
+            let left_signed = sv_glue_expr_is_signed(left, variables, name_to_id, parameter_types);
+            let operands_signed = left_signed
+                && sv_glue_expr_is_signed(right, variables, name_to_id, parameter_types);
             let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
-                sv_glue_expr_is_signed(left, variables, name_to_id, parameter_types)
+                left_signed
             } else {
                 operands_signed
             };
@@ -1967,7 +1968,8 @@ fn lower_glue_parent_expr(
                     .then_some(operation_context)
                     .flatten()
             };
-            let operand_context_signed = Some(operands_signed);
+            let left_context_signed = Some(if shift { left_signed } else { operands_signed });
+            let right_context_signed = Some(operands_signed);
             let context_sized_comparison = comparison;
             let left_fill = (context_sized_comparison || shift)
                 .then(|| expr_unbased_fill_literal(left))
@@ -2003,7 +2005,7 @@ fn lower_glue_parent_expr(
                         parameter_types,
                         arena,
                         right_context,
-                        operand_context_signed,
+                        right_context_signed,
                     )?;
                     let width = if shift {
                         left_context.unwrap_or(1)
@@ -2028,7 +2030,7 @@ fn lower_glue_parent_expr(
                         parameter_types,
                         arena,
                         left_context,
-                        operand_context_signed,
+                        left_context_signed,
                     )?;
                     let width = if shift {
                         1
@@ -2053,7 +2055,7 @@ fn lower_glue_parent_expr(
                         parameter_types,
                         arena,
                         left_context,
-                        operand_context_signed,
+                        left_context_signed,
                     )?,
                     lower_glue_parent_expr(
                         right,
@@ -2063,7 +2065,7 @@ fn lower_glue_parent_expr(
                         parameter_types,
                         arena,
                         right_context,
-                        operand_context_signed,
+                        right_context_signed,
                     )?,
                 ),
             };
@@ -2192,7 +2194,7 @@ struct SvSignalType {
 
 fn signal_type_from_sv(
     typ: &sv::ir::Type,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Result<SvSignalType, sv::AnalyzerError> {
     let width = if typ.packed_ranges().is_empty() {
@@ -2257,7 +2259,7 @@ fn lower_comb_process(
     process: &sv::ir::CombProcess,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     arena: &mut SLTNodeArena<VarId>,
     four_state: bool,
@@ -2463,7 +2465,7 @@ fn lower_assignment(
     assignment: &sv::ir::Assignment,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     arena: &mut SLTNodeArena<VarId>,
     four_state: bool,
@@ -2567,7 +2569,7 @@ fn lower_lvalue_target(
     lvalue: &sv::ir::LValue,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<LogicPathTarget<VarId>> {
     let target_id = *name_to_id.get(lvalue.name())?;
@@ -2591,7 +2593,7 @@ fn lower_expr(
     expr: &sv::ir::Expr,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Option<(celox_slt::NodeId, HashSet<VarAtomBase<VarId>>)> {
@@ -2611,7 +2613,7 @@ fn lower_expr_with_context(
     expr: &sv::ir::Expr,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     arena: &mut SLTNodeArena<VarId>,
     context_width: Option<usize>,
@@ -2822,16 +2824,12 @@ fn lower_expr_with_context(
             ))
         }
         sv::ir::Expr::Binary { left, op, right } => {
-            let operands_signed =
-                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types)
-                    && sv_expr_is_signed_with_parameters(
-                        right,
-                        variables,
-                        name_to_id,
-                        parameter_types,
-                    );
+            let left_signed =
+                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types);
+            let operands_signed = left_signed
+                && sv_expr_is_signed_with_parameters(right, variables, name_to_id, parameter_types);
             let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
-                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types)
+                left_signed
             } else {
                 operands_signed
             };
@@ -2938,7 +2936,7 @@ fn lower_expr_with_context(
                             parameter_types,
                             arena,
                             left_context,
-                            Some(operands_signed),
+                            Some(if shift { left_signed } else { operands_signed }),
                         )?;
                         let width = if shift {
                             1
@@ -2962,7 +2960,7 @@ fn lower_expr_with_context(
                             parameter_types,
                             arena,
                             left_context,
-                            Some(operands_signed),
+                            Some(if shift { left_signed } else { operands_signed }),
                         )?,
                         lower_expr_with_context(
                             right,
@@ -3134,7 +3132,7 @@ fn lower_ff_processes(
     module: &sv::ir::Module,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     four_state: bool,
 ) -> Result<SvFfBlocks, sv::AnalyzerError> {
@@ -3295,7 +3293,7 @@ fn lower_ff_process(
     trigger_set: &TriggerSet<VarId>,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     four_state: bool,
 ) -> Option<(
@@ -3357,7 +3355,7 @@ fn ff_targets(
     process: &sv::ir::FfProcess,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<Vec<VarAtomBase<VarId>>> {
     let mut targets = Vec::new();
@@ -3418,7 +3416,7 @@ fn emit_ff_assignment_stores(
     targets: &[VarAtomBase<VarId>],
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     four_state: bool,
 ) -> Option<()> {
@@ -3581,7 +3579,7 @@ fn lower_procedural_condition(
     condition: &sv::ir::Expr,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<celox_sir::RegisterId> {
     let condition = lower_expr_to_sir(
@@ -3646,7 +3644,7 @@ fn lvalue_atom(
     lvalue: &sv::ir::LValue,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<VarAtomBase<VarId>> {
     let id = *name_to_id.get(lvalue.name())?;
@@ -3898,7 +3896,7 @@ fn lower_expr_to_sir(
     expr: &sv::ir::Expr,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<celox_sir::RegisterId> {
     lower_expr_to_sir_with_context(
@@ -3917,7 +3915,7 @@ fn sv_expr_natural_width(
     expr: &sv::ir::Expr,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<usize> {
     match expr {
@@ -4037,7 +4035,7 @@ fn sv_comparison_operand_width(
     right: &sv::ir::Expr,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<usize> {
     Some(
@@ -4052,7 +4050,7 @@ fn lower_expr_to_sir_with_context(
     expr: &sv::ir::Expr,
     variables: &HashMap<VarId, SvVariable>,
     name_to_id: &HashMap<String, VarId>,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
     context_width: Option<usize>,
     context_signed: Option<bool>,
@@ -4198,16 +4196,12 @@ fn lower_expr_to_sir_with_context(
             Some(reg)
         }
         sv::ir::Expr::Binary { left, op, right } => {
-            let operands_signed =
-                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types)
-                    && sv_expr_is_signed_with_parameters(
-                        right,
-                        variables,
-                        name_to_id,
-                        parameter_types,
-                    );
+            let left_signed =
+                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types);
+            let operands_signed = left_signed
+                && sv_expr_is_signed_with_parameters(right, variables, name_to_id, parameter_types);
             let operator_signed = if matches!(op, sv::ir::BinaryOp::Sar) {
-                sv_expr_is_signed_with_parameters(left, variables, name_to_id, parameter_types)
+                left_signed
             } else {
                 operands_signed
             };
@@ -4277,7 +4271,7 @@ fn lower_expr_to_sir_with_context(
                     constants,
                     parameter_types,
                     left_context,
-                    Some(operands_signed),
+                    Some(if shift { left_signed } else { operands_signed }),
                 )?;
                 let width = if shift {
                     1
@@ -4308,7 +4302,7 @@ fn lower_expr_to_sir_with_context(
                         constants,
                         parameter_types,
                         left_context,
-                        Some(operands_signed),
+                        Some(if shift { left_signed } else { operands_signed }),
                     )?,
                     lower_expr_to_sir_with_context(
                         builder,
@@ -4482,8 +4476,8 @@ fn lower_expr_to_sir_with_context(
 fn module_constants_with_overrides(
     module: &sv::ir::Module,
     parameter_overrides: &[LoweredSvParameterOverride],
-) -> std::collections::HashMap<String, i128> {
-    let override_values: std::collections::HashMap<&str, &sv::ir::ConstExpr> = parameter_overrides
+) -> HashMap<String, i128> {
+    let override_values: HashMap<&str, &sv::ir::ConstExpr> = parameter_overrides
         .iter()
         .filter_map(|parameter| {
             parameter
@@ -4492,7 +4486,7 @@ fn module_constants_with_overrides(
                 .map(|value| (parameter.name.as_str(), value))
         })
         .collect();
-    let mut constants = std::collections::HashMap::new();
+    let mut constants = HashMap::default();
     for parameter in module.parameters() {
         let value = if let Some(override_value) = override_values.get(parameter.name()) {
             sv::typecheck::eval_const_expr(override_value, &constants)

@@ -383,10 +383,7 @@ pub enum TypeKind {
 }
 
 impl Type {
-    pub(crate) fn from_ast(
-        r#type: ast::Type,
-        constants: &std::collections::HashMap<String, i128>,
-    ) -> Self {
+    pub(crate) fn from_ast(r#type: ast::Type, constants: &fxhash::FxHashMap<String, i128>) -> Self {
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
         let (packed_ranges, resolved_width) = convert_type(r#type, constants);
@@ -401,7 +398,7 @@ impl Type {
 
 fn convert_type(
     r#type: ast::Type,
-    constants: &std::collections::HashMap<String, i128>,
+    constants: &fxhash::FxHashMap<String, i128>,
 ) -> (Vec<PackedRange>, Option<usize>) {
     let packed_ranges: Vec<_> = r#type
         .packed_ranges()

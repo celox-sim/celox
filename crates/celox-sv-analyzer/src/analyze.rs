@@ -1,6 +1,6 @@
 //! Semantic analysis and elaboration entry points.
 
-use std::collections::HashMap;
+use fxhash::FxHashMap as HashMap;
 
 use crate::{
     AnalyzerError, ast, ir,
@@ -12,8 +12,8 @@ pub fn analyze_source(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
     let mut modules = Vec::new();
     for module in source.modules() {
         let id = module_table.insert(module)?;
-        let mut constants = HashMap::new();
-        let mut parameter_types = HashMap::new();
+        let mut constants = HashMap::default();
+        let mut parameter_types = HashMap::default();
         let mut parameter_table = ParameterTable::default();
         let mut parameters = Vec::new();
         for parameter in module.parameters() {

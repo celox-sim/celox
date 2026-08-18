@@ -1,6 +1,6 @@
 //! Type and width resolution helpers.
 
-use std::{collections::HashMap, hash::BuildHasher};
+use fxhash::FxHashMap as HashMap;
 
 use num_bigint::BigUint;
 
@@ -15,7 +15,7 @@ pub struct IntegralLiteral {
 }
 
 pub fn resolve_packed_width(ranges: &[PackedRange]) -> Option<usize> {
-    resolve_packed_width_with_env(ranges, &HashMap::new())
+    resolve_packed_width_with_env(ranges, &HashMap::default())
 }
 
 pub fn resolve_packed_width_with_env(
@@ -139,19 +139,19 @@ pub fn eval_const_expr(expr: &ConstExpr, constants: &HashMap<String, i128>) -> O
 /// The plain constant environment stores only mathematical values. Replacing
 /// typed identifiers with sized literals before evaluation preserves the
 /// SystemVerilog width and signedness rules for mixed-type operations.
-pub fn eval_const_expr_with_types<S: BuildHasher>(
+pub fn eval_const_expr_with_types(
     expr: &ConstExpr,
     constants: &HashMap<String, i128>,
-    types: &HashMap<String, (usize, bool), S>,
+    types: &HashMap<String, (usize, bool)>,
 ) -> Option<i128> {
     let expr = substitute_typed_constants(expr.clone(), constants, types);
     eval_const_expr(&expr, constants)
 }
 
-pub fn substitute_typed_constants<S: BuildHasher>(
+pub fn substitute_typed_constants(
     expr: ConstExpr,
     constants: &HashMap<String, i128>,
-    types: &HashMap<String, (usize, bool), S>,
+    types: &HashMap<String, (usize, bool)>,
 ) -> ConstExpr {
     match expr {
         ConstExpr::Ident(name) => match (constants.get(&name), types.get(&name)) {
@@ -861,8 +861,8 @@ mod literal_tests {
             right: Box::new(ConstExpr::Literal("1'bz".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&eq, &HashMap::new()), Some(1));
-        assert_eq!(eval_const_expr(&ne, &HashMap::new()), Some(1));
+        assert_eq!(eval_const_expr(&eq, &HashMap::default()), Some(1));
+        assert_eq!(eval_const_expr(&ne, &HashMap::default()), Some(1));
     }
 
     #[test]
@@ -878,8 +878,8 @@ mod literal_tests {
             right: Box::new(ConstExpr::Literal("'x".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&eq, &HashMap::new()), Some(1));
-        assert_eq!(eval_const_expr(&ne, &HashMap::new()), Some(0));
+        assert_eq!(eval_const_expr(&eq, &HashMap::default()), Some(1));
+        assert_eq!(eval_const_expr(&ne, &HashMap::default()), Some(0));
     }
 
     #[test]
@@ -900,9 +900,9 @@ mod literal_tests {
             right: Box::new(ConstExpr::Literal("2'b10".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&eq, &HashMap::new()), Some(1));
-        assert_eq!(eval_const_expr(&ne, &HashMap::new()), Some(1));
-        assert_eq!(eval_const_expr(&indeterminate, &HashMap::new()), None);
+        assert_eq!(eval_const_expr(&eq, &HashMap::default()), Some(1));
+        assert_eq!(eval_const_expr(&ne, &HashMap::default()), Some(1));
+        assert_eq!(eval_const_expr(&indeterminate, &HashMap::default()), None);
     }
 
     #[test]
@@ -917,7 +917,7 @@ mod literal_tests {
                 }),
             };
 
-            assert_eq!(eval_const_expr(&expr, &HashMap::new()), None);
+            assert_eq!(eval_const_expr(&expr, &HashMap::default()), None);
         }
     }
 
@@ -932,8 +932,8 @@ mod literal_tests {
             expr: Box::new(ConstExpr::Literal("8'sh00".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&minus, &HashMap::new()), Some(1));
-        assert_eq!(eval_const_expr(&bit_not, &HashMap::new()), Some(-1));
+        assert_eq!(eval_const_expr(&minus, &HashMap::default()), Some(1));
+        assert_eq!(eval_const_expr(&bit_not, &HashMap::default()), Some(-1));
     }
 
     #[test]
@@ -943,7 +943,7 @@ mod literal_tests {
             expr: Box::new(ConstExpr::Literal("8'd1".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&expr, &HashMap::new()), Some(0xff));
+        assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(0xff));
     }
 
     #[test]
@@ -954,7 +954,7 @@ mod literal_tests {
             right: Box::new(ConstExpr::Literal("8'h01".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&expr, &HashMap::new()), Some(0));
+        assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(0));
     }
 
     #[test]
@@ -965,7 +965,7 @@ mod literal_tests {
             right: Box::new(ConstExpr::Literal("1".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&expr, &HashMap::new()), Some(0x7f));
+        assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(0x7f));
     }
 
     #[test]
@@ -976,7 +976,7 @@ mod literal_tests {
             right: Box::new(ConstExpr::Literal("8'h01".to_string())),
         };
 
-        assert_eq!(eval_const_expr(&expr, &HashMap::new()), Some(0));
+        assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(0));
     }
 
     #[test]
@@ -988,7 +988,7 @@ mod literal_tests {
                 right: Box::new(ConstExpr::Literal("8'h02".to_string())),
             };
 
-            assert_eq!(eval_const_expr(&expr, &HashMap::new()), Some(expected));
+            assert_eq!(eval_const_expr(&expr, &HashMap::default()), Some(expected));
         }
     }
 }

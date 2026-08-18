@@ -10,5 +10,6 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["test/*-wasm.test.ts"],
+    setupFiles: ["test/wasm.setup.ts"],
   },
 });

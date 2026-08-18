@@ -1,6 +1,6 @@
 //! Symbol tables built during SystemVerilog analysis.
 
-use std::collections::HashMap;
+use fxhash::FxHashMap as HashMap;
 
 use crate::{AnalyzerError, ast};
 

@@ -16,7 +16,10 @@ module FourStateDemo (
 }
 `;
 
-const isWasm = !!process.env.NAPI_RS_FORCE_WASI;
+const isWasm =
+	!!process.env.NAPI_RS_WASI_FLAVOR ||
+	process.env.NAPI_RS_FORCE_WASI === "true" ||
+	process.env.NAPI_RS_FORCE_WASI === "error";
 
 describe.skipIf(!isWasm)("FourState (WASM bridge)", () => {
 	test("writes and reads all-X", () => {

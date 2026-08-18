@@ -552,3 +552,64 @@ fn test_param_override_child_propagation_wide() {
     sim.modify(|io| io.set(a, 0xABCDu16)).unwrap();
     assert_eq!(sim.get(b), 0xABCDu16.into());
 }
+
+#[test]
+fn test_top_param_override_does_not_change_child_default() {
+    let code = r#"
+        module Child #(
+            param WIDTH: u32 = 3,
+        )(
+            value: output logic<32>,
+        ) {
+            assign value = WIDTH;
+        }
+
+        module Top #(
+            param WIDTH: u32 = 8,
+        )(
+            top_value:   output logic<32>,
+            child_value: output logic<32>,
+        ) {
+            assign top_value = WIDTH;
+            inst child: Child (
+                value: child_value,
+            );
+        }
+    "#;
+
+    let mut sim = Simulator::builder(code, "Top")
+        .param("WIDTH", 16)
+        .build()
+        .unwrap();
+
+    assert_eq!(sim.get(sim.signal("top_value")), 16u32.into());
+    assert_eq!(sim.get(sim.signal("child_value")), 3u32.into());
+}
+
+#[test]
+fn test_unknown_top_param_does_not_override_child_param() {
+    let code = r#"
+        module Child #(
+            param WIDTH: u32 = 3,
+        )(
+            value: output logic<32>,
+        ) {
+            assign value = WIDTH;
+        }
+
+        module Top (
+            value: output logic<32>,
+        ) {
+            inst child: Child (
+                value: value,
+            );
+        }
+    "#;
+
+    let mut sim = Simulator::builder(code, "Top")
+        .param("WIDTH", 16)
+        .build()
+        .unwrap();
+
+    assert_eq!(sim.get(sim.signal("value")), 3u32.into());
+}

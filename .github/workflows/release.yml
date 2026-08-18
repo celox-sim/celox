@@ -89,32 +89,24 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: write
-    env:
-      # Enqueuing an existing PR does not need to trigger another workflow, so
-      # the job-scoped token is sufficient and avoids minting a second app token.
-      GH_TOKEN: ${{ github.token }}
+      contents: read
     steps:
-      - name: Enable auto-merge for the release pull request
-        shell: bash
-        run: |
-          release_pr="$(
-            gh pr list \
-              --repo "$GITHUB_REPOSITORY" \
-              --state open \
-              --base master \
-              --limit 1000 \
-              --json number,headRefName,isCrossRepository,labels \
-              --jq '[.[] | select(.isCrossRepository == false) | select(.headRefName == "release-please--branches--master--components--celox") | select((.labels | map(.name) | index("release:hold")) | not)][0].number // empty'
-          )"
+      - uses: actions/checkout@v7
 
-          if [ -z "$release_pr" ]; then
-            echo "No unheld release pull request is ready to queue."
-            exit 0
-          fi
+      # An enqueue event created with GITHUB_TOKEN would not start the required
+      # merge_group workflows. Use the release App so queue checks run normally.
+      - name: Create release app token
+        id: release-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
 
-          gh pr merge "$release_pr" \
-            --repo "$GITHUB_REPOSITORY" \
-            --auto \
-            --merge
+      - name: Queue the release pull request
+        timeout-minutes: 65
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+        run: node scripts/queue-release-pr.mjs

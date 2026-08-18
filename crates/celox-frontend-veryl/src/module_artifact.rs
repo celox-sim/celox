@@ -28,6 +28,8 @@ pub struct SimModule {
     pub apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
     pub eval_apply_ff_blocks: HashMap<TriggerSet<VarId>, ExecutionUnit<RegionedVarAddr>>,
     pub glue_blocks: HashMap<StrId, Vec<GlueBlock>>,
+    /// Source instance declarations that explicitly have an array dimension.
+    pub indexed_instance_names: crate::HashSet<StrId>,
     pub comb_blocks: Vec<LogicPath<VarId>>,
     pub comb_observers: Vec<CombObserver<VarId>>,
     pub runtime_errors: HashMap<i64, RuntimeErrorInfo<VarId>>,
@@ -50,6 +52,7 @@ impl fmt::Debug for SimModule {
             .field("apply_ff_blocks", &self.apply_ff_blocks)
             .field("eval_apply_ff_blocks", &self.eval_apply_ff_blocks)
             .field("glue_blocks", &self.glue_blocks)
+            .field("indexed_instance_names", &self.indexed_instance_names)
             .field("comb_blocks", &self.comb_blocks)
             .field("comb_boundaries", &self.comb_boundaries)
             .field("arena", &self.arena)
