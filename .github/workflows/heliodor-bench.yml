@@ -297,7 +297,7 @@ jobs:
         shell: bash
         env:
           HELIODOR_RUNNERS: celox-cranelift
-          HELIODOR_TIMEOUT_SEC: "1800"
+          HELIODOR_TIMEOUT_SEC: "3600"
           HELIODOR_BUILD_CELOX_RUNNER: "0"
         run: set -o pipefail && bash scripts/run-heliodor-bench.sh run 2>&1 | tee heliodor-arm64-cranelift-output.txt
 

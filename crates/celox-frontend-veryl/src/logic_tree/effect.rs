@@ -163,7 +163,7 @@ fn collect_system_function_effect(
     // retroactively rebind inputs in an earlier operand or in the assertion
     // condition.  Reads after an operand write are already substituted by
     // `eval_expression_effectful` as that operand is lowered.
-    let observer_store = store.clone();
+    let observer_store = store.fork();
     let mut boundaries = BoundaryMap::default();
     let mut observer_args = Vec::new();
     let mut observed_inputs = HashSet::default();
@@ -244,24 +244,25 @@ fn collect_system_function_effect(
         });
     let observed_ids: HashSet<_> = observed_inputs.iter().map(|atom| atom.id).collect();
     let position_ids: HashSet<_> = position_inputs.iter().map(|atom| atom.id).collect();
-    let preceding_writes: Vec<_> = store
-        .iter()
-        .flat_map(|(id, range_store)| {
-            range_store
-                .ranges
-                .iter()
-                .filter_map(move |(&lsb, (value, width, _))| {
-                    value
-                        .is_some()
-                        .then_some(VarAtomBase::new(*id, lsb, lsb + width - 1))
-                })
-        })
-        .collect();
-    let mut local_inputs = Vec::new();
-    for (id, range_store) in observer_store.iter() {
-        if !observed_ids.contains(id) {
-            continue;
+    let mut preceding_writes = Vec::new();
+    let mut written_before = Vec::new();
+    for (id, range_store) in store.iter() {
+        for (&lsb, (value, width, _)) in &range_store.ranges {
+            if value.is_none() {
+                continue;
+            }
+            let atom = VarAtomBase::new(*id, lsb, lsb + width - 1);
+            preceding_writes.push(atom);
+            if position_ids.contains(id) {
+                written_before.push(atom);
+            }
         }
+    }
+    let mut local_inputs = Vec::new();
+    for id in &observed_ids {
+        let Some(range_store) = observer_store.get(id) else {
+            continue;
+        };
         if guard.is_none() {
             let overlaps_observed_input =
                 range_store.ranges.iter().any(|(&lsb, (value, width, _))| {
@@ -293,7 +294,7 @@ fn collect_system_function_effect(
             continue;
         }
         let parts = range_store
-            .get_parts(BitAccess::new(0, width - 1))
+            .get_parts_ref(BitAccess::new(0, width - 1))
             .map_err(|error| {
                 super::range_store_error(
                     "combinational observer capture",
@@ -317,21 +318,8 @@ fn collect_system_function_effect(
         local_inputs,
         observed_inputs: observed_inputs.into_iter().collect(),
         position_inputs: position_inputs.into_iter().collect(),
-        preceding_writes: preceding_writes.clone(),
-        written_before: store
-            .iter()
-            .filter(|(id, _)| position_ids.contains(id))
-            .flat_map(|(id, range_store)| {
-                range_store
-                    .ranges
-                    .iter()
-                    .filter_map(move |(&lsb, (value, width, _))| {
-                        value
-                            .is_some()
-                            .then_some(VarAtomBase::new(*id, lsb, lsb + width - 1))
-                    })
-            })
-            .collect(),
+        preceding_writes,
+        written_before,
         written_input_atoms: Vec::new(),
         written_inputs: Vec::new(),
         captured_in_loop: loop_effect.is_some(),
@@ -400,7 +388,7 @@ fn collect_function_call_effects(
         ));
     };
 
-    let mut actual_store = store.clone();
+    let mut actual_store = store.fork();
     let mut formal_bindings = Vec::new();
     let ordered_inputs = super::ordered_function_inputs(function, &function_body, call)?;
     let mut later_input_writes = vec![HashMap::default(); ordered_inputs.len()];
@@ -456,7 +444,7 @@ fn collect_function_call_effects(
     // variables through nested output arguments.  Callee runtime effects must
     // therefore start from that advanced caller state, just like value
     // evaluation does, before formal bindings shadow their module entries.
-    let mut local_store = actual_store.clone();
+    let mut local_store = actual_store.fork();
     local_store.extend(formal_bindings);
 
     let final_local_store = if let Some(ret_id) = function_body.ret {
@@ -483,7 +471,7 @@ fn collect_function_call_effects(
     // the real collector-local caller store so later outputs observe earlier
     // writebacks without evaluating a destination effect twice.
     for (arg_id, destinations) in super::ordered_function_outputs(function, &function_body, call)? {
-        let mut destination_store = actual_store.clone();
+        let mut destination_store = actual_store.fork();
         let destination_width = checked_destination_width(
             module,
             destinations,
@@ -497,7 +485,7 @@ fn collect_function_call_effects(
             coerce_node_width(arena, output_expr, Some(destination_width), output_signed)?;
         let mut current_offset = 0;
         for destination in destinations.iter().rev() {
-            let mut collection_store = destination_store.clone();
+            let mut collection_store = destination_store.fork();
             for expression in destination
                 .index
                 .0
@@ -757,7 +745,7 @@ pub(crate) fn collect_expression_effects(
         }
         Expression::Binary(lhs, op, rhs, _) if matches!(op, Op::LogicAnd | Op::LogicOr) => {
             collect_expression_effects(module, store, lhs, arena, collector)?;
-            let mut rhs_store = store.clone();
+            let mut rhs_store = store.fork();
             let ((lhs_node, lhs_sources), _) =
                 eval_expression_effectful(module, &mut rhs_store, lhs, arena, None)?;
             let execute_rhs =
@@ -777,13 +765,13 @@ pub(crate) fn collect_expression_effects(
         }
         Expression::Binary(lhs, _, rhs, _) => {
             collect_expression_effects(module, store, lhs, arena, collector)?;
-            let mut rhs_store = store.clone();
+            let mut rhs_store = store.fork();
             let _ = eval_expression_effectful(module, &mut rhs_store, lhs, arena, None)?;
             collect_expression_effects(module, &rhs_store, rhs, arena, collector)
         }
         Expression::Ternary(cond, then_expr, else_expr, _) => {
             collect_expression_effects(module, store, cond, arena, collector)?;
-            let mut branch_store = store.clone();
+            let mut branch_store = store.fork();
             let ((cond_node, cond_sources), _) =
                 eval_expression_effectful(module, &mut branch_store, cond, arena, None)?;
 
@@ -804,9 +792,9 @@ pub(crate) fn collect_expression_effects(
                     collect_expression_effects(module, &branch_store, then_expr, arena, collector)
                 },
             )?;
-            let mut then_store = branch_store.clone();
+            let mut then_store = branch_store.fork();
             let _ = eval_expression_effectful(module, &mut then_store, then_expr, arena, None)?;
-            let after_then = merge_symbolic_stores(
+            let after_then = merge_symbolic_versions(
                 module,
                 &then_store,
                 &branch_store,
@@ -827,7 +815,7 @@ pub(crate) fn collect_expression_effects(
             )
         }
         Expression::Concatenation(items, _) => {
-            let mut item_store = store.clone();
+            let mut item_store = store.fork();
             for (item_expr, _) in items {
                 collect_and_advance_expression(
                     module,
@@ -840,7 +828,7 @@ pub(crate) fn collect_expression_effects(
             Ok(())
         }
         Expression::ArrayLiteral(items, _) => {
-            let mut item_store = store.clone();
+            let mut item_store = store.fork();
             for item in items {
                 match item {
                     ArrayLiteralItem::Value(item_expr, _) => {
@@ -866,7 +854,7 @@ pub(crate) fn collect_expression_effects(
             Ok(())
         }
         Expression::StructConstructor(_, fields, _) => {
-            let mut field_store = store.clone();
+            let mut field_store = store.fork();
             for (_, field_expr) in fields {
                 collect_and_advance_expression(
                     module,
@@ -905,7 +893,7 @@ fn collect_assignment_effects(
     // eval_assign evaluates the RHS before resolving dynamic destinations.
     // Mirror that order in a collector-local store so observers in an index
     // see RHS output writes and later destination expressions see earlier ones.
-    let mut destination_store = store.clone();
+    let mut destination_store = store.fork();
     let ((rhs_expr, rhs_sources), _) =
         eval_assignment_rhs_effectful(module, &mut destination_store, assign, arena)?;
     let rhs_expected_width = checked_destination_width(
@@ -917,7 +905,7 @@ fn collect_assignment_effects(
     let rhs_is_2state = assign.expr.comptime().r#type.is_2state();
     let mut current_offset = 0;
     for destination in assign.dst.iter().rev() {
-        let mut collection_store = destination_store.clone();
+        let mut collection_store = destination_store.fork();
         for expression in destination
             .index
             .0
@@ -988,7 +976,7 @@ fn collect_case_pattern_effects(
             }
             CasePattern::Range { lo, hi, .. } => {
                 collect_expression_effects(module, store, lo, arena, collector)?;
-                let mut hi_store = store.clone();
+                let mut hi_store = store.fork();
                 let ((lo_matches, lo_sources), _) = {
                     let mut expression_store = expr::ExpressionStore::Effectful(&mut hi_store);
                     expr::eval_case_comparison(
@@ -1016,7 +1004,7 @@ fn collect_case_pattern_effects(
         }
     }
 
-    let mut pattern_store = store.clone();
+    let mut pattern_store = store.fork();
     let mut matched: Option<(NodeId, HashSet<VarAtomBase<VarId>>)> = None;
     for pattern in patterns {
         let execute_pattern = matched
@@ -1057,8 +1045,8 @@ fn collect_case_pattern_effects(
             )?;
         }
 
-        let base_store = pattern_store.clone();
-        let mut evaluated_store = base_store.clone();
+        let base_store = pattern_store.fork();
+        let mut evaluated_store = base_store.fork();
         let ((pattern_condition, pattern_sources), _) = eval_case_arm_condition_effectful(
             module,
             &mut evaluated_store,
@@ -1073,7 +1061,7 @@ fn collect_case_pattern_effects(
                 .map(|(_, sources)| sources)
                 .cloned()
                 .unwrap_or_default();
-            merge_symbolic_stores(
+            merge_symbolic_versions(
                 module,
                 &evaluated_store,
                 &base_store,
@@ -1110,7 +1098,7 @@ fn collect_factor_effects(
 ) -> Result<(), ParserError> {
     match factor {
         Factor::Variable(_, index, select, _) => {
-            let mut position_store = store.clone();
+            let mut position_store = store.fork();
             for expr in index.0.iter().chain(select.0.iter()) {
                 collect_and_advance_expression(
                     module,
@@ -1155,7 +1143,7 @@ fn collect_function_body_effects(
     arena: &mut SLTNodeArena<VarId>,
     collector: &mut CombEffectCollector,
 ) -> Result<SymbolicStore<VarId>, ParserError> {
-    let initial_local_store = local_store.clone();
+    let initial_local_store = local_store.fork();
     fn collect_statements(
         module: &Module,
         mut state: FunctionControlState,
@@ -1187,7 +1175,7 @@ fn collect_function_body_effects(
             return collect_statements(module, state, &case_stmt.default, ret_id, arena, collector);
         };
 
-        let store = state.store.clone();
+        let store = state.store.fork();
         let live = state.live_expr;
         let live_sources = state.live_sources.clone();
         with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
@@ -1202,7 +1190,7 @@ fn collect_function_body_effects(
             )
         })?;
 
-        let mut next_store = state.store.clone();
+        let mut next_store = state.store.fork();
         let ((cond_node, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
             module,
             &mut next_store,
@@ -1260,7 +1248,7 @@ fn collect_function_body_effects(
                 collect_statements(
                     module,
                     FunctionControlState {
-                        store: state.store.clone(),
+                        store: state.store.fork(),
                         boundaries: boundaries.clone(),
                         live_expr: state.live_expr,
                         live_sources: state.live_sources.clone(),
@@ -1310,7 +1298,7 @@ fn collect_function_body_effects(
         live_sources.extend(else_state.live_sources);
 
         Ok(FunctionControlState {
-            store: merge_symbolic_stores(
+            store: merge_symbolic_versions(
                 module,
                 &then_state.store,
                 &else_state.store,
@@ -1347,7 +1335,7 @@ fn collect_function_body_effects(
             }),
             Some(false) => Ok(state),
             None => {
-                let store = merge_symbolic_stores(
+                let store = merge_symbolic_versions(
                     module,
                     &next_store,
                     &state.store,
@@ -1383,7 +1371,7 @@ fn collect_function_body_effects(
         context_width: Option<usize>,
         arena: &mut SLTNodeArena<VarId>,
     ) -> Result<(FunctionControlState, NodeId, HashSet<VarAtomBase<VarId>>), ParserError> {
-        let mut next_store = state.store.clone();
+        let mut next_store = state.store.fork();
         let ((node, sources), boundaries) =
             eval_expression_effectful(module, &mut next_store, expression, arena, context_width)?;
         let state = apply_function_guard(
@@ -1448,7 +1436,7 @@ fn collect_function_body_effects(
             });
         }
 
-        let store = merge_symbolic_stores(
+        let store = merge_symbolic_versions(
             module,
             &next_function.store,
             &state.function.store,
@@ -1505,7 +1493,7 @@ fn collect_function_body_effects(
         collector: &mut CombEffectCollector,
     ) -> Result<FunctionLoopControlState, ParserError> {
         let guard_state = state.clone();
-        let store = state.function.store.clone();
+        let store = state.function.store.fork();
         with_collector_guard(
             collector,
             arena,
@@ -1619,7 +1607,7 @@ fn collect_function_body_effects(
         live_sources.extend(else_state.function.live_sources);
         Ok(FunctionLoopControlState {
             function: FunctionControlState {
-                store: merge_symbolic_stores(
+                store: merge_symbolic_versions(
                     module,
                     &then_state.function.store,
                     &else_state.function.store,
@@ -1678,7 +1666,7 @@ fn collect_function_body_effects(
                 );
             };
 
-            let store = state.function.store.clone();
+            let store = state.function.store.fork();
             with_collector_guard(
                 collector,
                 arena,
@@ -1704,7 +1692,7 @@ fn collect_function_body_effects(
                     )
                 },
             )?;
-            let mut next_store = state.function.store.clone();
+            let mut next_store = state.function.store.fork();
             let ((cond_node, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
                 module,
                 &mut next_store,
@@ -1816,7 +1804,7 @@ fn collect_function_body_effects(
             live_sources.extend(else_state.function.live_sources);
             Ok(FunctionLoopControlState {
                 function: FunctionControlState {
-                    store: merge_symbolic_stores(
+                    store: merge_symbolic_versions(
                         module,
                         &then_state.function.store,
                         &else_state.function.store,
@@ -1847,7 +1835,7 @@ fn collect_function_body_effects(
         }
 
         let guard_state = state.clone();
-        let store = state.function.store.clone();
+        let store = state.function.store.fork();
         with_collector_guard(
             collector,
             arena,
@@ -1952,13 +1940,13 @@ fn collect_function_body_effects(
         // Return-aware loops use this collector instead of
         // collect_comb_effects_for. Mirror bound evaluation here so bound
         // events are retained and the body sees output writes from both bounds.
-        let mut iter_store = state.store.clone();
+        let mut iter_store = state.store.fork();
         let (start_bound, end_bound) = for_range_bounds(&for_stmt.range);
         for bound in [start_bound, end_bound] {
             let ForBound::Expression(expression) = bound else {
                 continue;
             };
-            let store = iter_store.clone();
+            let store = iter_store.fork();
             with_collector_guard(
                 collector,
                 arena,
@@ -1997,7 +1985,7 @@ fn collect_function_body_effects(
                     bit += 1;
                 }
                 let access = BitAccess::new(start, bit - 1);
-                let parts = original.get_parts(access).map_err(|error| {
+                let parts = original.get_parts_ref(access).map_err(|error| {
                     super::range_store_error(
                         "function observer for-loop state",
                         error,
@@ -2018,7 +2006,7 @@ fn collect_function_body_effects(
             iter_store.insert(id, loop_store);
         }
         iter_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
-        let iter_store_before = iter_store.clone();
+        let iter_store_before = iter_store.fork();
 
         let observer_start = collector.observers.len();
         let saved_loop_effects = collector.loop_effects.take();
@@ -2056,7 +2044,7 @@ fn collect_function_body_effects(
         // iteration state collected for function execution.
         let (mut result_store, boundaries) = eval_for(
             module,
-            state.store.clone(),
+            state.store.fork(),
             state.boundaries.clone(),
             for_stmt,
             arena,
@@ -2243,7 +2231,7 @@ fn collect_function_body_effects(
         match stmt {
             Statement::Assign(assign) => {
                 let guard_state = state.clone();
-                let store = state.store.clone();
+                let store = state.store.fork();
                 let live = state.live_expr;
                 let live_sources = state.live_sources.clone();
                 with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
@@ -2268,7 +2256,7 @@ fn collect_function_body_effects(
             }
             Statement::SystemFunctionCall(call) => {
                 let guard_state = state.clone();
-                let mut next_store = state.store.clone();
+                let mut next_store = state.store.fork();
                 let live = state.live_expr;
                 let live_sources = state.live_sources.clone();
                 let effect_boundaries = with_collector_guard(
@@ -2298,7 +2286,7 @@ fn collect_function_body_effects(
             }
             Statement::FunctionCall(call) => {
                 let guard_state = state.clone();
-                let store = state.store.clone();
+                let store = state.store.fork();
                 let live = state.live_expr;
                 let live_sources = state.live_sources.clone();
                 with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
@@ -2323,7 +2311,7 @@ fn collect_function_body_effects(
                 )
             }
             Statement::If(if_stmt) => {
-                let store = state.store.clone();
+                let store = state.store.fork();
                 let live = state.live_expr;
                 let live_sources = state.live_sources.clone();
                 with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
@@ -2351,7 +2339,7 @@ fn collect_function_body_effects(
                         collect_statements(
                             module,
                             FunctionControlState {
-                                store: state.store.clone(),
+                                store: state.store.fork(),
                                 boundaries: boundaries.clone(),
                                 live_expr: state.live_expr,
                                 live_sources: state.live_sources.clone(),
@@ -2399,7 +2387,7 @@ fn collect_function_body_effects(
                 live_sources.extend(false_state.live_sources.iter().copied());
 
                 Ok(FunctionControlState {
-                    store: merge_symbolic_stores(
+                    store: merge_symbolic_versions(
                         module,
                         &true_state.store,
                         &false_state.store,
@@ -2418,7 +2406,7 @@ fn collect_function_body_effects(
                 })
             }
             Statement::Case(case_stmt) => {
-                let store = state.store.clone();
+                let store = state.store.fork();
                 let live = state.live_expr;
                 let live_sources = state.live_sources.clone();
                 with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
@@ -2450,7 +2438,7 @@ fn collect_function_body_effects(
                     return collect_function_for(module, state, for_stmt, ret_id, arena, collector);
                 }
                 let guard_state = state.clone();
-                let store = state.store.clone();
+                let store = state.store.fork();
                 let live = state.live_expr;
                 let live_sources = state.live_sources.clone();
                 with_collector_guard(collector, arena, live, live_sources, |collector, arena| {
@@ -2651,7 +2639,7 @@ pub(super) fn collect_comb_effects_statements(
                 collector.active_guard_sources = true_sources;
                 let side_store = collect_comb_effects_statements(
                     module,
-                    store.clone(),
+                    store.fork(),
                     &if_stmt.true_side,
                     arena,
                     collector,
@@ -2675,7 +2663,7 @@ pub(super) fn collect_comb_effects_statements(
                 )?;
                 collector.active_guard = saved_guard;
                 collector.active_guard_sources = saved_guard_sources;
-                store = merge_symbolic_stores(
+                store = merge_symbolic_versions(
                     module,
                     &side_store,
                     &else_store,
@@ -2755,7 +2743,7 @@ fn collect_comb_effects_case(
         collector.active_guard = Some(true_guard);
         collector.active_guard_sources = true_sources;
         let side_store =
-            collect_comb_effects_statements(module, store.clone(), &arm.body, arena, collector)?;
+            collect_comb_effects_statements(module, store.fork(), &arm.body, arena, collector)?;
 
         let false_cond = arena.alloc(SLTNode::Unary(UnaryOp::LogicNot, cond_node))?;
         let false_guard = if let Some(active) = saved_guard {
@@ -2779,7 +2767,7 @@ fn collect_comb_effects_case(
 
         collector.active_guard = saved_guard;
         collector.active_guard_sources = saved_guard_sources;
-        merge_symbolic_stores(module, &side_store, &else_store, cond_node, &sources, arena)
+        merge_symbolic_versions(module, &side_store, &else_store, cond_node, &sources, arena)
     }
 
     collect_expression_effects(module, &store, &case_stmt.case_target, arena, collector)?;
@@ -2796,7 +2784,7 @@ fn collect_comb_effects_for(
     collector: &mut CombEffectCollector,
 ) -> Result<SymbolicStore<VarId>, ParserError> {
     let loop_width = for_stmt.var_type.total_width().unwrap_or(32);
-    let original_store = store.clone();
+    let original_store = store.fork();
     let (start_bound, end_bound) = for_range_bounds(&for_stmt.range);
     for bound in [start_bound, end_bound] {
         let ForBound::Expression(expression) = bound else {
@@ -2818,7 +2806,7 @@ fn collect_comb_effects_for(
             collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
         let (store, _, runner) = eval_for_with_effects(
             module,
-            original_store.clone(),
+            original_store.fork(),
             BoundaryMap::default(),
             for_stmt,
             arena,
@@ -2832,7 +2820,7 @@ fn collect_comb_effects_for(
             collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
         let (store, _, runner) = eval_for_with_effects(
             module,
-            original_store.clone(),
+            original_store.fork(),
             BoundaryMap::default(),
             for_stmt,
             arena,
@@ -2846,7 +2834,7 @@ fn collect_comb_effects_for(
             collect_dynamic_for_effects(module, &store, for_stmt, arena, collector)?;
         let (store, _, runner) = eval_for_with_effects(
             module,
-            original_store.clone(),
+            original_store.fork(),
             BoundaryMap::default(),
             for_stmt,
             arena,
@@ -2857,7 +2845,7 @@ fn collect_comb_effects_for(
     };
     let final_end = if *inclusive { end + 1 } else { end };
     for i in start..final_end {
-        let mut iter_store = store.clone();
+        let mut iter_store = store.fork();
         let node = arena.alloc(SLTNode::Constant(
             BigUint::from(i as u64),
             BigUint::from(0u8),
@@ -2892,7 +2880,7 @@ fn collect_dynamic_for_effects(
     let Some(loop_width) = for_stmt.var_type.total_width() else {
         return Ok((Vec::new(), collector.observers.len()));
     };
-    let mut iter_store = store.clone();
+    let mut iter_store = store.fork();
     let mut written_accesses = HashMap::default();
     collect_written_accesses(module, &for_stmt.body, &mut written_accesses)?;
     for (id, accesses) in written_accesses {
@@ -2920,7 +2908,7 @@ fn collect_dynamic_for_effects(
             }
             let end = bit - 1;
             let access = BitAccess::new(start, end);
-            let parts = original.get_parts(access).map_err(|error| {
+            let parts = original.get_parts_ref(access).map_err(|error| {
                 super::range_store_error("observer for-loop state", error, Some(&for_stmt.token))
             })?;
             let (expr, sources) = combine_parts_with_default(id, access.lsb, parts, arena)?;

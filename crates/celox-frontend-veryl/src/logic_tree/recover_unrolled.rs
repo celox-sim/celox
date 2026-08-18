@@ -37,7 +37,7 @@ pub(super) fn eval_statements(
             let guarded_matches = matching_candidates(module, &if_stmt.true_side, candidates);
             if guarded_matches.len() == 1 {
                 let candidate = guarded_matches[0];
-                let store_before_probe = store.clone();
+                let store_before_probe = store.fork();
                 let ((guard, guard_sources), guard_boundaries) =
                     eval_expression_effectful(module, &mut store, &if_stmt.cond, arena, None)?;
                 let guard = procedural_condition(arena, guard)?;
@@ -1455,7 +1455,7 @@ fn recover_group(
             )
         })?;
         let parts = range_store
-            .get_parts(target.access)
+            .get_parts_ref(target.access)
             .map_err(|error| range_store_error("recovered loop initial state", error, None))?;
         if parts.iter().any(|(value, _)| value.is_none()) {
             return Ok(None);
@@ -1491,7 +1491,7 @@ fn recover_group(
 
     let total_width = get_width(group, arena);
     let mut next_msb = total_width;
-    let mut result_store = initial_store.clone();
+    let mut result_store = initial_store.fork();
     for target in &proof.targets {
         let width = target.access.msb - target.access.lsb + 1;
         next_msb -= width;
@@ -1529,7 +1529,7 @@ fn expanded_outputs_are_count_idioms(
     let (store, _) = statements
         .iter()
         .try_fold(
-            (initial_store.clone(), BoundaryMap::default()),
+            (initial_store.fork(), BoundaryMap::default()),
             |(store, boundaries), statement| {
                 eval_statement(module, store, boundaries, statement, &mut scratch)
             },
@@ -1539,7 +1539,7 @@ fn expanded_outputs_are_count_idioms(
     targets
         .iter()
         .map(|target| {
-            let parts = store.get(&target.id)?.get_parts(target.access).ok()?;
+            let parts = store.get(&target.id)?.get_parts_ref(target.access).ok()?;
             let (output, _) =
                 combine_parts_with_default(target.id, target.access.lsb, parts, &mut scratch)
                     .ok()?;
@@ -1591,7 +1591,7 @@ fn prove_group(
     for target in &targets {
         let parts = initial_store
             .get(&target.id)?
-            .get_parts(target.access)
+            .get_parts_ref(target.access)
             .ok()?;
         if parts.iter().any(|(value, _)| value.is_none()) {
             return None;
@@ -1745,10 +1745,10 @@ fn prove_group(
         if source.id == first_iteration.loop_var || target_ids.contains(&source.id) {
             continue;
         }
-        let parts = initial_store
-            .get(&source.id)?
-            .get_parts(source.access)
-            .ok()?;
+        let Some(ranges) = initial_store.get(&source.id) else {
+            continue;
+        };
+        let parts = ranges.get_parts_ref(source.access).ok()?;
         if parts.iter().any(|(value, _)| value.is_some()) {
             return None;
         }
@@ -1913,7 +1913,7 @@ fn eval_chunk_outputs_with_facts(
     let mut outputs = Vec::with_capacity(targets.len());
     let mut sources = HashSet::default();
     for target in targets {
-        let parts = store.get(&target.id)?.get_parts(target.access).ok()?;
+        let parts = store.get(&target.id)?.get_parts_ref(target.access).ok()?;
         let (output, output_sources) =
             combine_parts_with_default(target.id, target.access.lsb, parts, arena).ok()?;
         outputs.push(output);
@@ -1941,7 +1941,9 @@ fn eval_chunk_outputs_with_initial_store(
         .iter()
         .filter(|variable| !rebound_ids.contains(variable))
     {
-        let ranges = initial_store.get(variable)?;
+        let Some(ranges) = initial_store.get(variable) else {
+            continue;
+        };
         for (value, _, _) in ranges.ranges.values() {
             let Some((root, sources)) = value else {
                 continue;
@@ -1960,7 +1962,8 @@ fn eval_chunk_outputs_with_initial_store(
             }
         }
     }
-    let mut store = map_symbolic_store_roots(initial_store, &variables, source_arena, arena)?;
+    let mut store =
+        map_symbolic_store_roots(module, initial_store, &variables, source_arena, arena)?;
     for target in targets {
         let width = resolve_total_width(module, module.variables.get(&target.id)?).ok()?;
         store.insert(target.id, RangeStore::new(None, width));
@@ -1980,7 +1983,7 @@ fn eval_chunk_outputs_with_initial_store(
     let mut outputs = Vec::with_capacity(targets.len());
     let mut sources = HashSet::default();
     for target in targets {
-        let parts = store.get(&target.id)?.get_parts(target.access).ok()?;
+        let parts = store.get(&target.id)?.get_parts_ref(target.access).ok()?;
         let (output, output_sources) =
             combine_parts_with_default(target.id, target.access.lsb, parts, arena).ok()?;
         outputs.push(output);
@@ -2090,6 +2093,7 @@ fn whole_fold_matches_expansion(
     let variables = proof_variable_ids(statements, targets)?;
     let mut proof_arena = SLTNodeArena::new();
     let mapped_initial = map_symbolic_store_roots(
+        module,
         initial_store,
         &variables,
         production_arena,
@@ -2099,7 +2103,7 @@ fn whole_fold_matches_expansion(
     let (expanded_store, _) = statements
         .iter()
         .try_fold(
-            (mapped_initial.clone(), BoundaryMap::default()),
+            (mapped_initial.fork(), BoundaryMap::default()),
             |(store, boundaries), statement| {
                 eval_statement(module, store, boundaries, statement, &mut proof_arena)
             },
@@ -2137,7 +2141,7 @@ fn whole_fold_matches_expansion(
             return None;
         }
         let access = BitAccess::new(0, width - 1);
-        let parts = mapped_initial.get(variable)?.get_parts(access).ok()?;
+        let parts = mapped_initial.get(variable)?.get_parts_ref(access).ok()?;
         if parts.iter().any(|(value, _)| value.is_none()) {
             continue;
         }
@@ -2200,6 +2204,7 @@ fn whole_fold_matches_expansion(
 }
 
 fn map_symbolic_store_roots(
+    module: &Module,
     store: &SymbolicStore<VarId>,
     variables: &HashSet<VarId>,
     source_arena: &SLTNodeArena<VarId>,
@@ -2208,7 +2213,13 @@ fn map_symbolic_store_roots(
     let mut mapped = SymbolicStore::default();
     let mut cache = HashMap::default();
     for id in variables {
-        let mut range_store = store.get(id)?.clone();
+        let mut range_store = if let Some(range_store) = store.get(id) {
+            range_store.clone()
+        } else {
+            let variable = module.variables.get(id)?;
+            let width = resolve_total_width(module, variable).ok()?;
+            RangeStore::new(None, width)
+        };
         for (value, _, _) in range_store.ranges.values_mut() {
             let Some((node, _)) = value else {
                 continue;
@@ -2231,7 +2242,7 @@ fn read_target_outputs(
     targets
         .iter()
         .map(|target| {
-            let parts = store.get(&target.id)?.get_parts(target.access).ok()?;
+            let parts = store.get(&target.id)?.get_parts_ref(target.access).ok()?;
             combine_parts_with_default(target.id, target.access.lsb, parts, arena)
                 .ok()
                 .map(|(output, _)| output)

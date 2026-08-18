@@ -1581,6 +1581,16 @@ impl NativeSimulatorHandle {
         self.events_json.clone()
     }
 
+    /// Byte ranges whose value and mask planes must start as unknown (X).
+    #[napi(getter)]
+    pub fn four_state_init_regions_json(&self) -> String {
+        Self::build_four_state_init_regions_json(
+            &self.program,
+            self.program.layout(),
+            self.four_state,
+        )
+    }
+
     /// Returns the instance hierarchy as a JSON string.
     #[napi(getter)]
     pub fn hierarchy_json(&self) -> String {
@@ -1655,6 +1665,44 @@ impl NativeSimulatorHandle {
 
 #[cfg(target_arch = "wasm32")]
 impl NativeSimulatorHandle {
+    fn build_four_state_init_regions_json(
+        program: &celox::LaidOutProgram,
+        layout: &celox::MemoryLayout,
+        four_state: bool,
+    ) -> String {
+        if !four_state {
+            return "[]".to_string();
+        }
+
+        let mut regions = Vec::new();
+        for (addr, &offset) in &layout.offsets {
+            if program
+                .design
+                .state_objects
+                .get(addr)
+                .is_some_and(|metadata| metadata.is_4state)
+            {
+                regions.push((offset, layout.plane_size(addr)));
+            }
+        }
+        for (addr, &relative_offset) in &layout.working_offsets {
+            if program
+                .design
+                .state_objects
+                .get(addr)
+                .is_some_and(|metadata| metadata.is_4state)
+            {
+                regions.push((
+                    layout.working_base_offset + relative_offset,
+                    layout.plane_size(addr),
+                ));
+            }
+        }
+        regions.sort_unstable();
+
+        serde_json::to_string(&regions).unwrap_or_else(|_| "[]".to_string())
+    }
+
     /// Build signal layout JSON from finalized SIR and MemoryLayout.
     /// Mirrors the layout format from celox-wasm.
     fn build_layout_json(
@@ -1682,19 +1730,26 @@ impl NativeSimulatorHandle {
                 continue;
             };
             let name = program.get_path(addr);
-            let width = layout.widths.get(addr).copied().unwrap_or(0);
+            let total_width = layout.widths.get(addr).copied().unwrap_or(0);
+            let (width, array_dims) = if info.array_dims.is_empty() {
+                (total_width, None)
+            } else {
+                let element_count = info.array_dims.iter().product::<usize>();
+                (total_width / element_count, Some(&info.array_dims))
+            };
             let byte_size = celox::get_byte_size(width);
-            layout_map.insert(
-                name,
-                serde_json::json!({
-                    "offset": offset,
-                    "width": width,
-                    "byte_size": byte_size,
-                    "is_4state": four_state && info.is_4state,
-                    "direction": layout::direction_str(info.var_kind),
-                    "type_kind": layout::type_kind_str(info.type_kind),
-                }),
-            );
+            let mut entry = serde_json::json!({
+                "offset": offset,
+                "width": width,
+                "byte_size": byte_size,
+                "is_4state": four_state && info.is_4state,
+                "direction": layout::direction_str(info.var_kind),
+                "type_kind": layout::type_kind_str(info.type_kind),
+            });
+            if let Some(array_dims) = array_dims {
+                entry["array_dims"] = serde_json::json!(array_dims);
+            }
+            layout_map.insert(name, entry);
         }
 
         serde_json::to_string(&layout_map).unwrap_or_else(|_| "{}".to_string())

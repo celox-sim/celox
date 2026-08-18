@@ -1123,6 +1123,8 @@ struct LoweringCostCache {
     owned_slice_lower_costs: Vec<Option<u128>>,
     contains_shared_nontrivial: Vec<Option<bool>>,
     is_speculatable_pure: Vec<Option<bool>>,
+    traversal_seen: Vec<bool>,
+    traversal_work: Vec<NodeId>,
     #[cfg(test)]
     analysis_node_visits: usize,
 }
@@ -1232,7 +1234,15 @@ pub struct SLTToSIRLowerer {
     unpacked_input_element_widths: crate::HashMap<NodeId, usize>,
     cost_cache: RefCell<LoweringCostCache>,
     cache_insert_log: RefCell<Vec<NodeId>>,
+    region_slice_cache: RefCell<crate::HashMap<(NodeId, BitAccess), RegisterId>>,
+    region_slice_cache_insert_log: RefCell<Vec<(NodeId, BitAccess)>>,
     mux_stats: Option<RefCell<MuxLowerStats>>,
+}
+
+#[derive(Clone, Copy)]
+struct LowerCacheTransaction {
+    node_insertions: usize,
+    region_slice_insertions: usize,
 }
 
 struct LowerEnv<'parent, A: Hash + Eq + Clone> {
@@ -1877,6 +1887,8 @@ impl SLTToSIRLowerer {
             unpacked_input_element_widths: crate::HashMap::default(),
             cost_cache: RefCell::new(LoweringCostCache::default()),
             cache_insert_log: RefCell::new(Vec::new()),
+            region_slice_cache: RefCell::new(crate::HashMap::default()),
+            region_slice_cache_insert_log: RefCell::new(Vec::new()),
             mux_stats: tracing::enabled!(tracing::Level::DEBUG)
                 .then(|| RefCell::new(MuxLowerStats::default())),
         }
@@ -3218,21 +3230,39 @@ impl SLTToSIRLowerer {
             return self.slice_reg(builder, full_value, access);
         }
 
-        match arena.get(expr) {
-            SLTNode::Binary(lhs, BinaryOp::And, rhs)
-                if slt_const_u64(*lhs, arena) == Some(0)
-                    || slt_const_u64(*rhs, arena) == Some(0) =>
-            {
-                // Do this before recursively lowering either operand. In a
-                // loop-carried environment an otherwise dead Input would be
-                // rebuilt as a dynamic read from the current state version,
-                // preserving a dependency and a large amount of address/RMW
-                // code which bitwise zero annihilates in four-state logic too.
-                let width = access.msb - access.lsb + 1;
-                let result = builder.alloc_bit(width, false);
-                builder.emit(SIRInstruction::Imm(result, SIRValue::new(0u8)));
-                result
-            }
+        // Eliminate an annihilated expression before consulting the shared
+        // projection cache. Neither operand may be visited: it can contain a
+        // dead wide division or a loop-carried Input which would otherwise be
+        // rebuilt as a dynamic read from the current state version.
+        if let SLTNode::Binary(lhs, BinaryOp::And, rhs) = arena.get(expr)
+            && (slt_const_u64(*lhs, arena) == Some(0) || slt_const_u64(*rhs, arena) == Some(0))
+        {
+            let width = access.msb - access.lsb + 1;
+            let result = builder.alloc_bit(width, false);
+            builder.emit(SIRInstruction::Imm(result, SIRValue::new(0u8)));
+            return result;
+        }
+
+        // Cache the projection rather than materializing the full expression.
+        // Repeated references in a read-modify-write DAG then stay linear while
+        // wide arithmetic continues to operate on only the requested region.
+        let cache_projection = allow_cache
+            && env.is_none()
+            && self
+                .cost_cache
+                .borrow()
+                .fanout
+                .get(expr.0)
+                .is_some_and(|fanout| *fanout > 1)
+            && Self::is_nontrivial_node(expr, arena);
+        let projection_key = (expr, *access);
+        if cache_projection
+            && let Some(&projected) = self.region_slice_cache.borrow().get(&projection_key)
+        {
+            return projected;
+        }
+
+        let result = match arena.get(expr) {
             SLTNode::Input {
                 variable,
                 index,
@@ -3366,7 +3396,21 @@ impl SLTToSIRLowerer {
                 let inner = self.lower_inner(builder, expr, arena, cache, env, allow_cache);
                 self.slice_reg(builder, inner, access)
             }
+        };
+
+        if cache_projection {
+            let previous = self
+                .region_slice_cache
+                .borrow_mut()
+                .insert(projection_key, result);
+            debug_assert!(previous.is_none());
+            if previous.is_none() {
+                self.region_slice_cache_insert_log
+                    .borrow_mut()
+                    .push(projection_key);
+            }
         }
+        result
     }
 
     fn zero_required_from_both(
@@ -3847,40 +3891,60 @@ impl SLTToSIRLowerer {
         honor_materialized: bool,
     ) {
         let node_count = arena.len();
-        let mut fanout = vec![0usize; node_count];
-        let mut initially_materialized = vec![false; node_count];
-        let mut visited = crate::HashSet::default();
-        let mut work = roots.to_vec();
-        while let Some(node) = work.pop() {
-            if !visited.insert(node) {
+        let mut cache = self.cost_cache.borrow_mut();
+        cache.tree_costs.clear();
+        cache.tree_costs.resize(node_count, None);
+        cache.contains_div_rem.clear();
+        cache.contains_div_rem.resize(node_count, None);
+        cache.fanout.clear();
+        cache.fanout.resize(node_count, 0);
+        cache.initially_materialized.clear();
+        cache.initially_materialized.resize(node_count, false);
+        cache.owned_costs.clear();
+        cache.owned_costs.resize(node_count, None);
+        cache.owned_slice_lower_costs.clear();
+        cache.owned_slice_lower_costs.resize(node_count, None);
+        cache.contains_shared_nontrivial.clear();
+        cache.contains_shared_nontrivial.resize(node_count, None);
+        cache.is_speculatable_pure.clear();
+        cache.is_speculatable_pure.resize(node_count, None);
+        cache.traversal_seen.clear();
+        cache.traversal_seen.resize(node_count, false);
+        cache.traversal_work.clear();
+        cache.traversal_work.extend_from_slice(roots);
+        #[cfg(test)]
+        {
+            cache.analysis_node_visits = 0;
+        }
+
+        while let Some(node) = cache.traversal_work.pop() {
+            if cache.traversal_seen[node.0] {
                 continue;
             }
+            cache.traversal_seen[node.0] = true;
+            #[cfg(test)]
+            {
+                cache.analysis_node_visits += 1;
+            }
             if honor_materialized && materialized.contains_key(&node) {
-                initially_materialized[node.0] = true;
+                cache.initially_materialized[node.0] = true;
                 continue;
             }
             for child in Self::node_children(node, arena) {
-                fanout[child.0] = fanout[child.0].saturating_add(1);
-                work.push(child);
+                cache.fanout[child.0] = cache.fanout[child.0].saturating_add(1);
+                cache.traversal_work.push(child);
             }
         }
-        *self.cost_cache.borrow_mut() = LoweringCostCache {
-            tree_costs: vec![None; node_count],
-            contains_div_rem: vec![None; node_count],
-            fanout,
-            initially_materialized,
-            owned_costs: vec![None; node_count],
-            owned_slice_lower_costs: vec![None; node_count],
-            contains_shared_nontrivial: vec![None; node_count],
-            is_speculatable_pure: vec![None; node_count],
-            #[cfg(test)]
-            analysis_node_visits: visited.len(),
-        };
         self.cache_insert_log.borrow_mut().clear();
+        self.region_slice_cache.borrow_mut().clear();
+        self.region_slice_cache_insert_log.borrow_mut().clear();
     }
 
-    fn cache_transaction(&self) -> usize {
-        self.cache_insert_log.borrow().len()
+    fn cache_transaction(&self) -> LowerCacheTransaction {
+        LowerCacheTransaction {
+            node_insertions: self.cache_insert_log.borrow().len(),
+            region_slice_insertions: self.region_slice_cache_insert_log.borrow().len(),
+        }
     }
 
     #[cfg(test)]
@@ -3898,10 +3962,19 @@ impl SLTToSIRLowerer {
         self.cost_cache.borrow().analysis_node_visits
     }
 
-    fn rollback_cache(&self, cache: &mut crate::HashMap<NodeId, RegisterId>, transaction: usize) {
+    fn rollback_cache(
+        &self,
+        cache: &mut crate::HashMap<NodeId, RegisterId>,
+        transaction: LowerCacheTransaction,
+    ) {
         let mut log = self.cache_insert_log.borrow_mut();
-        for node in log.drain(transaction..) {
+        for node in log.drain(transaction.node_insertions..) {
             cache.remove(&node);
+        }
+        let mut region_log = self.region_slice_cache_insert_log.borrow_mut();
+        let mut region_cache = self.region_slice_cache.borrow_mut();
+        for key in region_log.drain(transaction.region_slice_insertions..) {
+            region_cache.remove(&key);
         }
     }
 
@@ -5488,7 +5561,10 @@ impl SLTToSIRLowerer {
         // records before returning to the caller's global cache transaction.
         self.cache_insert_log
             .borrow_mut()
-            .truncate(local_cache_transaction);
+            .truncate(local_cache_transaction.node_insertions);
+        self.region_slice_cache_insert_log
+            .borrow_mut()
+            .truncate(local_cache_transaction.region_slice_insertions);
 
         let next_remaining = builder.alloc_bit(remaining_width, false);
         builder.emit(SIRInstruction::Binary(
@@ -6352,6 +6428,302 @@ mod tests {
             instruction,
             SIRInstruction::Binary(_, source, BinaryOp::Shr, _) if *source == snapshot
         )));
+    }
+
+    #[test]
+    fn region_slice_caches_shared_rmw_projections_once() {
+        const UPDATES: usize = 18;
+
+        for width in [8, 65] {
+            let mut arena = SLTNodeArena::new();
+            let mut previous = input(&mut arena, 10, width);
+            for update in 0..UPDATES {
+                let condition = input(&mut arena, 100 + update as u32, 1);
+                let payload = constant(&mut arena, 1 << (update % 8), width);
+                let modified = arena
+                    .alloc(SLTNode::Binary(previous, BinaryOp::Or, payload))
+                    .unwrap();
+                previous = arena
+                    .alloc(SLTNode::Mux {
+                        cond: condition,
+                        then_expr: modified,
+                        else_expr: previous,
+                    })
+                    .unwrap();
+            }
+            let bit = arena
+                .alloc(SLTNode::Slice {
+                    expr: previous,
+                    access: BitAccess::new(0, 0),
+                })
+                .unwrap();
+
+            for four_state in [false, true] {
+                let mut builder = SIRBuilder::new();
+                SLTToSIRLowerer::new(four_state).lower(
+                    &mut builder,
+                    bit,
+                    &arena,
+                    &mut crate::HashMap::default(),
+                );
+                let eu = finish_lowering(builder);
+                let instructions = eu
+                    .blocks
+                    .values()
+                    .map(|block| block.instructions.len())
+                    .sum::<usize>();
+
+                assert!(
+                    instructions < 256,
+                    "{width}-bit shared RMW DAG expanded to {instructions} instructions in four_state={four_state}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn region_slice_keeps_wide_shared_multiply_narrow() {
+        const WIDTH: usize = 4096;
+
+        let mut arena = SLTNodeArena::new();
+        let lhs = input(&mut arena, 10, WIDTH);
+        let rhs = input(&mut arena, 20, WIDTH);
+        let shared = arena
+            .alloc(SLTNode::Binary(lhs, BinaryOp::Mul, rhs))
+            .unwrap();
+        let ones = constant(&mut arena, 1, WIDTH);
+        let first_user = arena
+            .alloc(SLTNode::Binary(shared, BinaryOp::And, ones))
+            .unwrap();
+        let second_user = arena
+            .alloc(SLTNode::Binary(shared, BinaryOp::Xor, ones))
+            .unwrap();
+        let first_bit = arena
+            .alloc(SLTNode::Slice {
+                expr: first_user,
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let second_bit = arena
+            .alloc(SLTNode::Slice {
+                expr: second_user,
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let root = arena
+            .alloc(SLTNode::Concat(vec![(first_bit, 1), (second_bit, 1)]))
+            .unwrap();
+
+        for four_state in [false, true] {
+            let mut builder = SIRBuilder::new();
+            SLTToSIRLowerer::new(four_state).lower(
+                &mut builder,
+                root,
+                &arena,
+                &mut crate::HashMap::default(),
+            );
+            let eu = finish_lowering(builder);
+
+            let multiply_widths = eu
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .filter_map(|instruction| match instruction {
+                    SIRInstruction::Binary(dst, _, BinaryOp::Mul, _) => {
+                        Some(eu.register_map[dst].width())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                multiply_widths,
+                [1],
+                "wide multiply was materialized in four_state={four_state}"
+            );
+        }
+    }
+
+    #[test]
+    fn region_slice_caches_shared_rmw_with_arithmetic_payloads() {
+        const UPDATES: usize = 18;
+        const WIDTH: usize = 4096;
+
+        let mut arena = SLTNodeArena::new();
+        let mut previous = input(&mut arena, 10, WIDTH);
+        let one = constant(&mut arena, 1, WIDTH);
+        for update in 0..UPDATES {
+            let condition = input(&mut arena, 100 + update as u32, 1);
+            let payload_input = input(&mut arena, 200 + update as u32, WIDTH);
+            let payload = arena
+                .alloc(SLTNode::Binary(payload_input, BinaryOp::Add, one))
+                .unwrap();
+            let modified = arena
+                .alloc(SLTNode::Binary(previous, BinaryOp::Or, payload))
+                .unwrap();
+            previous = arena
+                .alloc(SLTNode::Mux {
+                    cond: condition,
+                    then_expr: modified,
+                    else_expr: previous,
+                })
+                .unwrap();
+        }
+        let bit = arena
+            .alloc(SLTNode::Slice {
+                expr: previous,
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+
+        for four_state in [false, true] {
+            let mut builder = SIRBuilder::new();
+            SLTToSIRLowerer::new(four_state).lower(
+                &mut builder,
+                bit,
+                &arena,
+                &mut crate::HashMap::default(),
+            );
+            let eu = finish_lowering(builder);
+            let instructions = eu
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .collect::<Vec<_>>();
+
+            assert!(
+                instructions.len() < 512,
+                "arithmetic RMW DAG expanded to {} instructions in four_state={four_state}",
+                instructions.len()
+            );
+            assert!(instructions.iter().all(|instruction| !matches!(
+                instruction,
+                SIRInstruction::Binary(dst, _, BinaryOp::Add, _)
+                    if eu.register_map[dst].width() != 1
+            )));
+        }
+    }
+
+    #[test]
+    fn region_slice_annihilates_shared_zero_before_expensive_operands() {
+        const WIDTH: usize = 4096;
+
+        let mut arena = SLTNodeArena::new();
+        let dividend = input(&mut arena, 10, WIDTH);
+        let divisor = input(&mut arena, 20, WIDTH);
+        let division = arena
+            .alloc(SLTNode::Binary(dividend, BinaryOp::DivU, divisor))
+            .unwrap();
+        let zero = constant(&mut arena, 0, WIDTH);
+        let dead = arena
+            .alloc(SLTNode::Binary(division, BinaryOp::And, zero))
+            .unwrap();
+        let one = constant(&mut arena, 1, WIDTH);
+        let first_user = arena
+            .alloc(SLTNode::Binary(dead, BinaryOp::Or, one))
+            .unwrap();
+        let second_user = arena
+            .alloc(SLTNode::Binary(dead, BinaryOp::Xor, one))
+            .unwrap();
+        let first_bit = arena
+            .alloc(SLTNode::Slice {
+                expr: first_user,
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let second_bit = arena
+            .alloc(SLTNode::Slice {
+                expr: second_user,
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let root = arena
+            .alloc(SLTNode::Concat(vec![(first_bit, 1), (second_bit, 1)]))
+            .unwrap();
+
+        for four_state in [false, true] {
+            let mut builder = SIRBuilder::new();
+            SLTToSIRLowerer::new(four_state).lower(
+                &mut builder,
+                root,
+                &arena,
+                &mut crate::HashMap::default(),
+            );
+            let eu = finish_lowering(builder);
+
+            assert!(
+                eu.blocks
+                    .values()
+                    .all(
+                        |block| block.instructions.iter().all(|instruction| !matches!(
+                            instruction,
+                            SIRInstruction::Binary(_, _, BinaryOp::DivU, _)
+                                | SIRInstruction::Load(_, 10 | 20, _, _)
+                        ))
+                    )
+            );
+        }
+    }
+
+    #[test]
+    fn region_slice_skips_deep_dead_constant_mux_arm() {
+        const DEPTH: usize = 20_000;
+        const WIDTH: usize = 65;
+
+        let mut arena = SLTNodeArena::new();
+        let condition = constant(&mut arena, 0, 1);
+        let live = input(&mut arena, 10, WIDTH);
+        let dead_input = input(&mut arena, 20, WIDTH);
+        let dead = operation_chain(&mut arena, dead_input, BinaryOp::Xor, DEPTH, 100, WIDTH);
+        let shared = arena
+            .alloc(SLTNode::Mux {
+                cond: condition,
+                then_expr: dead,
+                else_expr: live,
+            })
+            .unwrap();
+        let one = constant(&mut arena, 1, WIDTH);
+        let first_user = arena
+            .alloc(SLTNode::Binary(shared, BinaryOp::And, one))
+            .unwrap();
+        let second_user = arena
+            .alloc(SLTNode::Binary(shared, BinaryOp::Xor, one))
+            .unwrap();
+        let first_bit = arena
+            .alloc(SLTNode::Slice {
+                expr: first_user,
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let second_bit = arena
+            .alloc(SLTNode::Slice {
+                expr: second_user,
+                access: BitAccess::new(0, 0),
+            })
+            .unwrap();
+        let root = arena
+            .alloc(SLTNode::Concat(vec![(first_bit, 1), (second_bit, 1)]))
+            .unwrap();
+
+        let mut builder = SIRBuilder::new();
+        SLTToSIRLowerer::new(false).lower(
+            &mut builder,
+            root,
+            &arena,
+            &mut crate::HashMap::default(),
+        );
+        let eu = finish_lowering(builder);
+        let instructions = eu
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .collect::<Vec<_>>();
+
+        assert!(instructions.len() < 32);
+        assert!(
+            instructions
+                .iter()
+                .all(|instruction| !matches!(instruction, SIRInstruction::Load(_, 20, _, _)))
+        );
     }
 
     #[test]

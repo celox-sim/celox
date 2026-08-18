@@ -23,7 +23,7 @@ use crate::{
     HashMap, HashSet, LoweringPhase, ParserError,
     bitaccess::{
         PartSelectGeometry, celox_value_from_comptime, eval_constexpr, eval_var_select,
-        select_geometry,
+        eval_var_select_with_geometry, select_geometry,
     },
     function_call_has_arg,
     loop_provenance::LoopRecoveryCandidate,
@@ -72,6 +72,21 @@ pub(super) fn range_store_error(
     token: Option<&TokenRange>,
 ) -> ParserError {
     ParserError::illegal_context(context, error.to_string(), token)
+}
+
+pub(super) fn symbolic_parts_or_default(
+    store: &SymbolicStore<VarId>,
+    id: VarId,
+    access: BitAccess,
+    context: &'static str,
+    token: Option<&TokenRange>,
+) -> Result<Vec<(Option<(NodeId, HashSet<VarAtomBase<VarId>>)>, BitAccess)>, ParserError> {
+    match store.get(&id) {
+        Some(range_store) => range_store
+            .get_parts(access)
+            .map_err(|error| range_store_error(context, error, token)),
+        None => Ok(vec![(None, access)]),
+    }
 }
 
 /// Veryl validates function arity before producing usable IR. A formal argument
@@ -224,16 +239,19 @@ pub fn parse_comb_with_loop_recovery(
     ),
     ParserError,
 > {
-    // 1. Initialization: Create a RangeStore for each variable in the module.
-    // Variables start in an 'unassigned' state (None), representing their initial input values.
+    let mut written_accesses = HashMap::default();
+    collect_written_accesses(module, &decl.statements, &mut written_accesses)?;
+
+    // 1. Initialization: only definitions this process can write need mutable
+    // symbolic ranges. Reads of every other variable lower directly to Input,
+    // keeping setup proportional to the block instead of the whole module.
     let mut current_store = SymbolicStore::default();
-    for (id, var) in &module.variables {
+    for id in written_accesses.keys() {
+        let var = &module.variables[id];
         let width = resolve_total_width(module, var)?;
         current_store.insert(*id, RangeStore::new(None, width));
     }
 
-    let mut written_accesses = HashMap::default();
-    collect_written_accesses(module, &decl.statements, &mut written_accesses)?;
     let written_atoms: Vec<_> = written_accesses
         .iter()
         .flat_map(|(&id, accesses)| {
@@ -245,7 +263,7 @@ pub fn parse_comb_with_loop_recovery(
 
     // 2. Symbolic Execution: Evaluate statements sequentially to update the symbolic state.
     let effect_initial_store =
-        statements_contain_runtime_effect(module, &decl.statements).then(|| current_store.clone());
+        statements_contain_runtime_effect(module, &decl.statements).then(|| current_store.fork());
     let (final_store, boundaries) = recover_unrolled::eval_statements(
         module,
         current_store,
@@ -266,10 +284,14 @@ pub fn parse_comb_with_loop_recovery(
         )?;
     }
 
-    // 3. Path Extraction: Convert the final symbolic store into a list of LogicPaths.
-    // Each LogicPath represents a modified bit-range and the logic required to compute it.
+    // 3. Path Extraction: Convert written definitions into LogicPaths. The
+    // statement scan already found every possible write, so avoid revisiting
+    // unrelated module variables in the final symbolic store.
     let mut paths = Vec::new();
-    for (id, range_store) in &final_store {
+    for id in written_accesses.keys() {
+        let Some(range_store) = final_store.get(id) else {
+            continue;
+        };
         if module.variables[id].affiliation == veryl_analyzer::symbol::Affiliation::AlwaysComb {
             continue;
         }
@@ -772,7 +794,7 @@ fn eval_case_with_recovery(
 
         let (then_store, then_boundaries) = eval_statements_with_recovery(
             module,
-            store.clone(),
+            store.fork(),
             boundaries.clone(),
             &arm.body,
             arena,
@@ -792,7 +814,7 @@ fn eval_case_with_recovery(
         )?;
 
         Ok((
-            merge_symbolic_stores(
+            merge_symbolic_versions(
                 module,
                 &then_store,
                 &else_store,
@@ -868,7 +890,7 @@ fn eval_case(
         }
 
         let (then_store, then_boundaries) =
-            eval_statements(module, store.clone(), boundaries.clone(), &arm.body, arena)?;
+            eval_statements(module, store.fork(), boundaries.clone(), &arm.body, arena)?;
         let (else_store, else_boundaries) = eval_from_arm(
             module,
             store,
@@ -880,7 +902,7 @@ fn eval_case(
         )?;
 
         Ok((
-            merge_symbolic_stores(
+            merge_symbolic_versions(
                 module,
                 &then_store,
                 &else_store,
@@ -997,7 +1019,38 @@ fn merge_control_expr(
     }
 }
 
-fn merge_symbolic_stores(
+fn materialize_aligned_symbolic_part(
+    id: VarId,
+    absolute: BitAccess,
+    value: &Option<(NodeId, HashSet<VarAtomBase<VarId>>)>,
+    relative: BitAccess,
+    arena: &mut SLTNodeArena<VarId>,
+) -> Result<(NodeId, HashSet<VarAtomBase<VarId>>), SLTNodeFactsError> {
+    let Some((expr, sources)) = value else {
+        let input = arena.alloc(SLTNode::Input {
+            variable: id,
+            signed: false,
+            index: Vec::new(),
+            access: absolute,
+        })?;
+        let mut sources = HashSet::default();
+        sources.insert(VarAtomBase::new(id, absolute.lsb, absolute.msb));
+        return Ok((input, sources));
+    };
+
+    let width = get_width(*expr, arena);
+    let expr = if width == 0 || (relative.lsb == 0 && relative.msb == width - 1) {
+        *expr
+    } else {
+        arena.alloc(SLTNode::Slice {
+            expr: *expr,
+            access: relative,
+        })?
+    };
+    Ok((expr, sources.clone()))
+}
+
+fn merge_symbolic_versions(
     module: &Module,
     then_store: &SymbolicStore<VarId>,
     else_store: &SymbolicStore<VarId>,
@@ -1005,45 +1058,52 @@ fn merge_symbolic_stores(
     cond_sources: &HashSet<VarAtomBase<VarId>>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<SymbolicStore<VarId>, ParserError> {
-    let mut merged_store = SymbolicStore::default();
-    merged_store.reserve(then_store.len());
-    for id in then_store.keys() {
-        let t_range_store = &then_store[id];
-        let e_range_store = &else_store[id];
+    // A branch clone is a symbolic version. Start with one version and only
+    // visit definitions whose copy-on-write entries diverged; shared pages and
+    // shared entries cannot need a phi.
+    let mut merged_store = then_store.fork();
+    for id in then_store.differing_keys(else_store) {
+        // Function-local state can be introduced while evaluating only one
+        // branch. It is scoped to that branch and must not escape the merge.
+        let Some(t_range_store) = then_store.get(id) else {
+            continue;
+        };
+        let Some(e_range_store) = else_store.get(id) else {
+            continue;
+        };
 
         if t_range_store == e_range_store {
-            let inserted = merged_store.clone_entry_from(id, then_store);
-            debug_assert!(inserted);
             continue;
+        }
+
+        let var = &module.variables[id];
+        let var_width = resolve_total_width(module, var)?;
+        let aligned_parts = t_range_store
+            .aligned_parts(e_range_store)
+            .map_err(|error| range_store_error("conditional merge", error, None))?;
+        let store_width = aligned_parts
+            .last()
+            .map_or(0, |(access, _, _)| access.msb + 1);
+        if store_width != var_width {
+            return Err(ParserError::illegal_context(
+                "conditional merge",
+                format!(
+                    "symbolic range width {store_width} differs from declared width {var_width}"
+                ),
+                None,
+            ));
         }
 
         let mut merged_range_store = RangeStore {
             ranges: std::collections::BTreeMap::new(),
         };
-
-        let mut all_lsbs: BTreeSet<usize> = t_range_store.ranges.keys().cloned().collect();
-        all_lsbs.extend(e_range_store.ranges.keys().cloned());
-
-        let var = &module.variables[id];
-        let var_width = resolve_total_width(module, var)?;
-        let mut lsbs_vec: Vec<usize> = all_lsbs.into_iter().collect();
-        lsbs_vec.push(var_width);
-
-        for i in 0..lsbs_vec.len() - 1 {
-            let lsb = lsbs_vec[i];
-            let next_lsb = lsbs_vec[i + 1];
-            let access = BitAccess::new(lsb, next_lsb - 1);
-
-            let then_parts = t_range_store
-                .get_parts(access)
-                .map_err(|error| range_store_error("conditional merge", error, None))?;
-            let else_parts = e_range_store
-                .get_parts(access)
-                .map_err(|error| range_store_error("conditional merge", error, None))?;
-            let t_modified = then_parts.iter().any(|(v, _)| v.is_some());
-            let e_modified = else_parts.iter().any(|(v, _)| v.is_some());
-            let (t_expr, t_sources) = combine_parts_with_default(*id, lsb, then_parts, arena)?;
-            let (e_expr, e_sources) = combine_parts_with_default(*id, lsb, else_parts, arena)?;
+        for (access, (then_value, then_access), (else_value, else_access)) in aligned_parts {
+            let t_modified = then_value.is_some();
+            let e_modified = else_value.is_some();
+            let (t_expr, t_sources) =
+                materialize_aligned_symbolic_part(*id, access, then_value, then_access, arena)?;
+            let (e_expr, e_sources) =
+                materialize_aligned_symbolic_part(*id, access, else_value, else_access, arena)?;
 
             let result_val = if !t_modified && !e_modified {
                 None
@@ -1066,9 +1126,10 @@ fn merge_symbolic_stores(
                 ))
             };
 
-            merged_range_store
-                .ranges
-                .insert(lsb, (result_val, next_lsb - lsb, lsb));
+            merged_range_store.ranges.insert(
+                access.lsb,
+                (result_val, access.msb - access.lsb + 1, access.lsb),
+            );
         }
 
         merged_store.insert(*id, merged_range_store);
@@ -1084,7 +1145,7 @@ fn apply_loop_continue_guard(
     next_boundaries: BoundaryMap<VarId>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<LoopControlState, ParserError> {
-    let base_store = state.store.clone();
+    let base_store = state.store.fork();
     let boundaries = merge_boundaries(state.boundaries, next_boundaries);
 
     if matches!(constant_bool(arena, state.continue_expr), Some(true)) {
@@ -1094,7 +1155,7 @@ fn apply_loop_continue_guard(
             ..state
         })
     } else {
-        let merged_store = merge_symbolic_stores(
+        let merged_store = merge_symbolic_versions(
             module,
             &next_store,
             &base_store,
@@ -1244,7 +1305,7 @@ fn eval_loop_case(
                 .try_fold(state, |s, step| eval_loop_statement(module, s, step, arena));
         };
 
-        let mut cond_store = state.store.clone();
+        let mut cond_store = state.store.fork();
         let ((cond_expr, cond_sources), cond_bounds) = eval_case_arm_condition_effectful(
             module,
             &mut cond_store,
@@ -1273,7 +1334,7 @@ fn eval_loop_case(
 
         let then_state = arm.body.iter().try_fold(
             LoopControlState {
-                store: state.store.clone(),
+                store: state.store.fork(),
                 boundaries: boundaries.clone(),
                 continue_expr: state.continue_expr,
                 continue_sources: state.continue_sources.clone(),
@@ -1299,7 +1360,7 @@ fn eval_loop_case(
         merged_sources.extend(else_state.continue_sources);
 
         Ok(LoopControlState {
-            store: merge_symbolic_stores(
+            store: merge_symbolic_versions(
                 module,
                 &then_state.store,
                 &else_state.store,
@@ -1318,7 +1379,7 @@ fn eval_loop_case(
         })
     }
 
-    let mut target_store = state.store.clone();
+    let mut target_store = state.store.fork();
     let (target, target_boundaries) =
         eval_case_target_effectful(module, &mut target_store, &case_stmt.case_target, arena)?;
     state = apply_loop_continue_guard(module, state, target_store, target_boundaries, arena)?;
@@ -1331,7 +1392,7 @@ fn eval_loop_if(
     stmt: &IfStatement,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<LoopControlState, ParserError> {
-    let mut cond_store = state.store.clone();
+    let mut cond_store = state.store.fork();
     let ((cond_expr, cond_sources), cond_bounds) =
         eval_expression_effectful(module, &mut cond_store, &stmt.cond, arena, None)?;
     state = apply_loop_continue_guard(module, state, cond_store, cond_bounds, arena)?;
@@ -1355,7 +1416,7 @@ fn eval_loop_if(
 
     let then_state = stmt.true_side.iter().try_fold(
         LoopControlState {
-            store: state.store.clone(),
+            store: state.store.fork(),
             boundaries: boundaries.clone(),
             continue_expr: state.continue_expr,
             continue_sources: state.continue_sources.clone(),
@@ -1377,7 +1438,7 @@ fn eval_loop_if(
     merged_sources.extend(else_state.continue_sources);
 
     Ok(LoopControlState {
-        store: merge_symbolic_stores(
+        store: merge_symbolic_versions(
             module,
             &then_state.store,
             &else_state.store,
@@ -1403,7 +1464,10 @@ fn extract_store_updates(
 ) -> Result<Vec<(VarAtomBase<VarId>, NodeId, HashSet<VarAtomBase<VarId>>)>, SLTNodeFactsError> {
     let mut updates = Vec::new();
 
-    for (id, range_store_after) in store_after {
+    for id in store_before.differing_keys(store_after) {
+        let Some(range_store_after) = store_after.get(id) else {
+            continue;
+        };
         let Some(range_store_before) = store_before.get(id) else {
             continue;
         };
@@ -1970,7 +2034,7 @@ fn eval_for_with_effects(
             }
         };
 
-    let mut symbolic_store = store.clone();
+    let mut symbolic_store = store.fork();
     let mut written_accesses = HashMap::default();
     collect_written_accesses(module, &for_stmt.body, &mut written_accesses)?;
     for (id, accesses) in written_accesses {
@@ -1999,7 +2063,7 @@ fn eval_for_with_effects(
             let end = bit - 1;
             let access = BitAccess::new(start, end);
             let parts = original
-                .get_parts(access)
+                .get_parts_ref(access)
                 .map_err(|error| range_store_error("for-loop state", error, None))?;
             let (expr, sources) = combine_parts_with_default(id, access.lsb, parts, arena)?;
             loop_store
@@ -2009,7 +2073,7 @@ fn eval_for_with_effects(
         symbolic_store.insert(id, loop_store);
     }
     symbolic_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
-    let iter_store_before = symbolic_store.clone();
+    let iter_store_before = symbolic_store.fork();
 
     let loop_state = for_stmt.body.iter().try_fold(
         LoopControlState {
@@ -2063,18 +2127,19 @@ fn eval_for_with_effects(
         let initial_updates = updates
             .iter()
             .map(|(target, _, _)| {
-                let range_store = store.get(&target.id).ok_or_else(|| {
-                    ParserError::illegal_context(
-                        "for-loop initial state",
-                        "state variable is absent from the symbolic store",
-                        Some(&for_stmt.token),
-                    )
-                })?;
-                let parts = range_store.get_parts(target.access).map_err(|error| {
-                    range_store_error("for-loop initial state", error, Some(&for_stmt.token))
-                })?;
-                let (expr, sources) =
-                    combine_parts_with_default(target.id, target.access.lsb, parts, arena)?;
+                let parts = symbolic_parts_or_default(
+                    &store,
+                    target.id,
+                    target.access,
+                    "for-loop initial state",
+                    Some(&for_stmt.token),
+                )?;
+                let (expr, sources) = combine_parts_with_default(
+                    target.id,
+                    target.access.lsb,
+                    parts.iter().map(|(value, access)| (value, *access)),
+                    arena,
+                )?;
                 initial_sources.extend(sources);
                 Ok(SLTForUpdate {
                     target: *target,
@@ -2290,13 +2355,9 @@ fn update_assignment_range(
     if variable.r#type.is_2state() && !source_is_2state {
         value.0 = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, value.0))?;
     }
-    let range_store = store.get_mut(&destination.id).ok_or_else(|| {
-        ParserError::illegal_context(
-            "assignment destination",
-            "destination variable is absent from the symbolic store",
-            Some(&destination.token),
-        )
-    })?;
+    let range_store = store
+        .entry(destination.id)
+        .or_insert_with(|| RangeStore::new(None, variable_width));
     range_store.update(access, Some(value)).map_err(|error| {
         range_store_error("assignment destination", error, Some(&destination.token))
     })?;
@@ -2671,7 +2732,7 @@ fn eval_statement_form_function_call(
         }
     }
 
-    let mut local_store = store.clone();
+    let mut local_store = store.fork();
     for (arg_id, arg_node, arg_sources, arg_width) in evaluated_inputs {
         local_store.insert(
             arg_id,
@@ -2785,7 +2846,7 @@ pub(super) fn function_output_value(
             Some(&call.comptime.token),
         )
     })?;
-    let parts = range_store.get_parts(access).map_err(|error| {
+    let parts = range_store.get_parts_ref(access).map_err(|error| {
         range_store_error("function output value", error, Some(&call.comptime.token))
     })?;
     let (output_expr, output_sources) = combine_parts_with_default(arg_id, 0, parts, arena)?;
@@ -2795,6 +2856,8 @@ pub(super) fn function_output_value(
 struct DynamicSelectOffset {
     node: NodeId,
     indices: Vec<SLTIndex>,
+    prefix_access: BitAccess,
+    selected_width: usize,
     sources: HashSet<VarAtomBase<VarId>>,
     boundaries: BoundaryMap<VarId>,
 }
@@ -2824,13 +2887,18 @@ fn eval_dynamic_select_offset(
         64,
         false,
     ))?;
-    let mut indices = Vec::new();
+    let mut indices =
+        Vec::with_capacity(geometry.dimension_count + usize::from(geometry.part.is_some()));
     let mut sources = HashSet::default();
     let mut boundaries = BoundaryMap::default();
 
-    let mut expressions = index.0.clone();
-    expressions.extend(select.0.clone());
-    for (dimension, expression) in expressions[..geometry.dimension_count].iter().enumerate() {
+    for (dimension, expression) in index
+        .0
+        .iter()
+        .chain(&select.0)
+        .take(geometry.dimension_count)
+        .enumerate()
+    {
         let ((node, node_sources), node_boundaries) =
             expr::eval_expression_in_context(module, store, expression, arena, None)?;
         sources.extend(node_sources);
@@ -2958,9 +3026,12 @@ fn eval_dynamic_select_offset(
         offset = arena.alloc(SLTNode::Binary(offset, BinaryOp::Add, term))?;
     }
 
+    let prefix_access = eval_var_select_with_geometry(index, select, &geometry)?;
     Ok(DynamicSelectOffset {
         node: offset,
         indices,
+        prefix_access,
+        selected_width: geometry.selected_width,
         sources,
         boundaries,
     })
@@ -2989,11 +3060,12 @@ fn eval_dynamic_assign(
             Some(&dst.token),
         )?
     };
+    let access_width = select_offset.selected_width;
+    let prefix_access = select_offset.prefix_access;
     boundaries = merge_boundaries(boundaries, select_offset.boundaries);
     all_sources.extend(select_offset.sources);
     let offset_node = select_offset.node;
 
-    let access_width = crate::bitaccess::get_access_width(module, dst.id, &dst.index, &dst.select)?;
     let var = &module.variables[&dst.id];
     let width = resolve_total_width(module, var)?;
     if width == 0 || access_width == 0 || access_width > width {
@@ -3012,7 +3084,7 @@ fn eval_dynamic_assign(
     // Evaluate the variable's current state.
     // Sub-ranges that haven't been assigned yet will fall back to their initial input state.
     let old_parts = range_store
-        .get_parts(access_full)
+        .get_parts_ref(access_full)
         .map_err(|error| range_store_error("dynamic assignment", error, Some(&dst.token)))?;
     let (old_val, old_sources) = combine_parts_with_default(dst.id, 0, old_parts, arena)?;
     // Note: Partial dynamic updates are not treated as self-dependencies (latches)
@@ -3068,7 +3140,6 @@ fn eval_dynamic_assign(
     let new_val_masked = arena.alloc(SLTNode::Binary(old_val, BinaryOp::And, mask_node))?;
     let final_val = arena.alloc(SLTNode::Binary(new_val_masked, BinaryOp::Or, new_val_term))?;
 
-    let prefix_access = eval_var_select(module, dst.id, &dst.index, &dst.select)?;
     let stored_expr = if prefix_access.lsb == 0 && prefix_access.msb == width - 1 {
         final_val
     } else {
@@ -3121,7 +3192,7 @@ fn eval_if_with_recovery(
     let else_guard = combine_active_guard(arena, active_guard, false_condition, &cond_sources)?;
     let (then_store, b_then) = eval_statements_with_recovery(
         module,
-        initial_store.clone(),
+        initial_store.fork(),
         boundaries.clone(),
         &stmt.true_side,
         arena,
@@ -3139,7 +3210,7 @@ fn eval_if_with_recovery(
     )?;
 
     Ok((
-        merge_symbolic_stores(
+        merge_symbolic_versions(
             module,
             &then_store,
             &else_store,
@@ -3177,7 +3248,7 @@ fn eval_if(
     }
 
     let (then_store, b_then) = stmt.true_side.iter().try_fold(
-        (initial_store.clone(), boundaries.clone()),
+        (initial_store.fork(), boundaries.clone()),
         |(s, b), step| eval_statement(module, s, b, step, arena),
     )?;
     let (else_store, b_else) = stmt
@@ -3188,7 +3259,7 @@ fn eval_if(
         })?;
 
     Ok((
-        merge_symbolic_stores(
+        merge_symbolic_versions(
             module,
             &then_store,
             &else_store,
@@ -3200,19 +3271,25 @@ fn eval_if(
     ))
 }
 
-pub(crate) fn combine_parts_with_default<A: Clone + PartialEq + Eq + Hash>(
+pub(crate) fn combine_parts_with_default<'a, A, I>(
     var_id: A,
     start_lsb: usize,
-    parts: Vec<(Option<(NodeId, HashSet<VarAtomBase<A>>)>, BitAccess)>,
+    parts: I,
     arena: &mut SLTNodeArena<A>,
-) -> Result<(NodeId, HashSet<VarAtomBase<A>>), SLTNodeFactsError> {
+) -> Result<(NodeId, HashSet<VarAtomBase<A>>), SLTNodeFactsError>
+where
+    A: Clone + PartialEq + Eq + Hash + 'a,
+    I: IntoIterator<Item = (&'a Option<(NodeId, HashSet<VarAtomBase<A>>)>, BitAccess)>,
+{
     let mut fixed_parts = Vec::new();
+    let mut total_sources = HashSet::default();
     let mut current_lsb = start_lsb;
     for (val_opt, access) in parts {
         let width = access.msb - access.lsb + 1;
         match val_opt {
             Some((expr, s)) => {
-                fixed_parts.push(((expr, s), access));
+                total_sources.extend(s.iter().cloned());
+                fixed_parts.push((*expr, access));
             }
             None => {
                 let input_node = arena.alloc(SLTNode::Input {
@@ -3221,25 +3298,17 @@ pub(crate) fn combine_parts_with_default<A: Clone + PartialEq + Eq + Hash>(
                     index: vec![],
                     access: BitAccess::new(current_lsb, current_lsb + width - 1),
                 })?;
-                let mut sources = HashSet::default();
-                sources.insert(VarAtomBase::new(
+                total_sources.insert(VarAtomBase::new(
                     var_id.clone(),
                     current_lsb,
                     current_lsb + width - 1,
                 ));
-                fixed_parts.push(((input_node, sources), BitAccess::new(0, width - 1)));
+                fixed_parts.push((input_node, BitAccess::new(0, width - 1)));
             }
         }
         current_lsb += width;
     }
-    combine_parts(fixed_parts, arena)
-}
-
-fn combine_parts<A: Clone + PartialEq + Eq + Hash>(
-    parts: Vec<((NodeId, HashSet<VarAtomBase<A>>), BitAccess)>,
-    arena: &mut SLTNodeArena<A>,
-) -> Result<(NodeId, HashSet<VarAtomBase<A>>), SLTNodeFactsError> {
-    if parts.is_empty() {
+    if fixed_parts.is_empty() {
         return Ok((
             arena.alloc(SLTNode::Constant(
                 BigUint::from(0u32),
@@ -3250,30 +3319,24 @@ fn combine_parts<A: Clone + PartialEq + Eq + Hash>(
             HashSet::default(),
         ));
     }
-    if parts.len() == 1 {
-        let ((expr, sources), access) = &parts[0];
-        let w = get_width(*expr, arena);
+    if fixed_parts.len() == 1 {
+        let (expr, access) = fixed_parts
+            .into_iter()
+            .next()
+            .expect("the single symbolic part exists");
+        let w = get_width(expr, arena);
         if w == 0 {
-            return Ok((*expr, sources.clone()));
+            return Ok((expr, total_sources));
         }
         if access.lsb == 0 && access.msb == w - 1 {
-            return Ok((*expr, sources.clone()));
+            return Ok((expr, total_sources));
         } else {
-            return Ok((
-                arena.alloc(SLTNode::Slice {
-                    expr: *expr,
-                    access: *access,
-                })?,
-                sources.clone(),
-            ));
+            return Ok((arena.alloc(SLTNode::Slice { expr, access })?, total_sources));
         }
     }
 
     let mut concat_parts = Vec::new();
-    let mut total_sources = HashSet::default();
-
-    for ((expr, sources), access) in parts {
-        total_sources.extend(sources);
+    for (expr, access) in fixed_parts {
         let w = access.msb - access.lsb + 1;
         let slice = arena.alloc(SLTNode::Slice { expr, access })?;
         concat_parts.push((slice, w));
@@ -3373,6 +3436,90 @@ mod tests {
             .unwrap()
             .id
     }
+
+    #[test]
+    fn comb_symbolic_store_tracks_only_written_definitions() {
+        let code = r#"
+            module Top (
+                a: input logic<32>,
+                idx: input logic<5>,
+                q: output logic<1>,
+                r: output logic<4>
+            ) {
+                always_comb {
+                    q = a[idx];
+                    r = a[7:4];
+                }
+            }
+        "#;
+        let module = parse_top_module(code);
+        let comb = module
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .unwrap();
+        let mut arena = SLTNodeArena::new();
+        let (paths, store, _, _, _) = parse_comb(&module, comb, &mut arena).unwrap();
+
+        let a = var_id_of(&module, &["a"]);
+        let idx = var_id_of(&module, &["idx"]);
+        let q = var_id_of(&module, &["q"]);
+        let r = var_id_of(&module, &["r"]);
+        assert_eq!(store.len(), 2);
+        assert!(!store.contains_key(&a));
+        assert!(!store.contains_key(&idx));
+        assert!(store.contains_key(&q));
+        assert!(store.contains_key(&r));
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn conditional_merge_aligns_staggered_sparse_ranges() {
+        let code = r#"
+            module Top (
+                select: input logic,
+                base: input logic<8>,
+                then_value: input logic<4>,
+                else_value: input logic<4>,
+                q: output logic<8>
+            ) {
+                always_comb {
+                    q = base;
+                    if select {
+                        q[5:2] = then_value;
+                    } else {
+                        q[7:4] = else_value;
+                    }
+                }
+            }
+        "#;
+        let module = parse_top_module(code);
+        let comb = module
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .unwrap();
+        let mut arena = SLTNodeArena::new();
+        let (_, store, _, _, _) = parse_comb(&module, comb, &mut arena).unwrap();
+
+        let q = var_id_of(&module, &["q"]);
+        let partition = store[&q]
+            .ranges
+            .iter()
+            .map(|(&lsb, (value, width, origin))| {
+                assert!(value.is_some());
+                (lsb, *width, *origin)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(partition, vec![(0, 2, 0), (2, 2, 2), (4, 2, 4), (6, 2, 6)]);
+    }
+
     #[test]
     fn test_parse_comb_boundary_collection() {
         let code = r#"

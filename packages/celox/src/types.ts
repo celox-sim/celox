@@ -63,9 +63,13 @@ export interface SignalLayout {
 	readonly width: number;
 	/** Number of bytes occupied (ceil(width/8)). */
 	readonly byteSize: number;
-	/** If true, an equal-sized mask follows immediately after the value. */
+	/** If true, a mask plane follows the value plane. */
 	readonly is4state: boolean;
 	readonly direction: "input" | "output" | "inout" | "internal";
+	/** Byte stride between unpacked-array elements in native memory. */
+	readonly arrayElementStride?: number;
+	/** Byte size of one unpacked-array value or mask plane. */
+	readonly arrayPlaneSize?: number;
 	/** The Veryl type kind (e.g. "clock", "reset_async_high", "logic"). */
 	readonly typeKind?: string;
 	/** For reset signals, the name of the associated clock (from FfDeclaration). */

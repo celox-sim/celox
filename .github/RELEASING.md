@@ -19,6 +19,12 @@ Pull request titles are the input to release automation:
 After 1.0, normal Semantic Versioning applies: fixes are patch releases,
 features are minor releases, and breaking changes are major releases.
 
+Changelog entries come from GitHub's merged pull requests, not from the raw
+commits reachable through a merge. A pull request therefore appears once under
+**What's Changed**, even when its branch contains multiple Conventional Commits.
+The pull request title is the release-note text and links back to the pull
+request.
+
 ## Automated release train
 
 Release Please maintains one release pull request against `master`. Every Monday
@@ -96,7 +102,7 @@ distribution in every channel.
 
 ## Repository configuration
 
-Release automation uses the `celox-release-please` GitHub App, installed for this
+Release automation uses the `celox-automation` GitHub App, installed for this
 repository with repository contents and pull request write access. Store its
 numeric App ID as the `RELEASE_APP_ID` Actions variable and its complete PEM
 private key as the `RELEASE_APP_PRIVATE_KEY` Actions secret. Each job mints a

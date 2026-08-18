@@ -36,6 +36,8 @@ whole-design performance.
 
 Heliodor uses an additional fixed-input acceptance workload. Its methodology is
 described in [Heliodor Linux Benchmark](./heliodor.md).
+Heliodor charts are separated by CPU architecture because results from different
+runner types are not directly comparable. Every chart uses a zero baseline.
 
 ## Run locally
 
