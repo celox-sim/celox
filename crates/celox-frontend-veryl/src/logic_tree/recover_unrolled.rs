@@ -1745,10 +1745,10 @@ fn prove_group(
         if source.id == first_iteration.loop_var || target_ids.contains(&source.id) {
             continue;
         }
-        let parts = initial_store
-            .get(&source.id)?
-            .get_parts(source.access)
-            .ok()?;
+        let Some(ranges) = initial_store.get(&source.id) else {
+            continue;
+        };
+        let parts = ranges.get_parts(source.access).ok()?;
         if parts.iter().any(|(value, _)| value.is_some()) {
             return None;
         }
@@ -1941,7 +1941,9 @@ fn eval_chunk_outputs_with_initial_store(
         .iter()
         .filter(|variable| !rebound_ids.contains(variable))
     {
-        let ranges = initial_store.get(variable)?;
+        let Some(ranges) = initial_store.get(variable) else {
+            continue;
+        };
         for (value, _, _) in ranges.ranges.values() {
             let Some((root, sources)) = value else {
                 continue;
@@ -1960,7 +1962,8 @@ fn eval_chunk_outputs_with_initial_store(
             }
         }
     }
-    let mut store = map_symbolic_store_roots(initial_store, &variables, source_arena, arena)?;
+    let mut store =
+        map_symbolic_store_roots(module, initial_store, &variables, source_arena, arena)?;
     for target in targets {
         let width = resolve_total_width(module, module.variables.get(&target.id)?).ok()?;
         store.insert(target.id, RangeStore::new(None, width));
@@ -2090,6 +2093,7 @@ fn whole_fold_matches_expansion(
     let variables = proof_variable_ids(statements, targets)?;
     let mut proof_arena = SLTNodeArena::new();
     let mapped_initial = map_symbolic_store_roots(
+        module,
         initial_store,
         &variables,
         production_arena,
@@ -2099,7 +2103,7 @@ fn whole_fold_matches_expansion(
     let (expanded_store, _) = statements
         .iter()
         .try_fold(
-            (mapped_initial.clone(), BoundaryMap::default()),
+            (mapped_initial.fork(), BoundaryMap::default()),
             |(store, boundaries), statement| {
                 eval_statement(module, store, boundaries, statement, &mut proof_arena)
             },
@@ -2200,6 +2204,7 @@ fn whole_fold_matches_expansion(
 }
 
 fn map_symbolic_store_roots(
+    module: &Module,
     store: &SymbolicStore<VarId>,
     variables: &HashSet<VarId>,
     source_arena: &SLTNodeArena<VarId>,
@@ -2208,7 +2213,13 @@ fn map_symbolic_store_roots(
     let mut mapped = SymbolicStore::default();
     let mut cache = HashMap::default();
     for id in variables {
-        let mut range_store = store.get(id)?.clone();
+        let mut range_store = if let Some(range_store) = store.get(id) {
+            range_store.clone()
+        } else {
+            let variable = module.variables.get(id)?;
+            let width = resolve_total_width(module, variable).ok()?;
+            RangeStore::new(None, width)
+        };
         for (value, _, _) in range_store.ranges.values_mut() {
             let Some((node, _)) = value else {
                 continue;

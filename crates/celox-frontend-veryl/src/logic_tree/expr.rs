@@ -1186,20 +1186,13 @@ pub(super) fn eval_function_body_return(
         let initial_updates: Vec<_> = updates
             .iter()
             .map(|(target, _, _)| {
-                let range_store = state.store.get(&target.id).ok_or_else(|| {
-                    ParserError::illegal_context(
-                        "function for-loop initial state",
-                        "state variable is absent from the symbolic store",
-                        Some(&for_stmt.token),
-                    )
-                })?;
-                let parts = range_store.get_parts(target.access).map_err(|error| {
-                    super::range_store_error(
-                        "function for-loop initial state",
-                        error,
-                        Some(&for_stmt.token),
-                    )
-                })?;
+                let parts = super::symbolic_parts_or_default(
+                    &state.store,
+                    target.id,
+                    target.access,
+                    "function for-loop initial state",
+                    Some(&for_stmt.token),
+                )?;
                 let (expr, _) =
                     combine_parts_with_default(target.id, target.access.lsb, parts, arena)?;
                 Ok(SLTForUpdate {
@@ -3062,25 +3055,36 @@ fn eval_factor(
                 var_bounds.insert(access.lsb);
                 var_bounds.insert(access_end);
 
-                let range_store = store.current().get(var_id).ok_or_else(|| {
-                    ParserError::illegal_context(
-                        "static variable read",
-                        "source variable is absent from the symbolic store",
-                        Some(&comptime.token),
-                    )
-                })?;
-                let parts = range_store.get_parts(access).map_err(|error| {
-                    super::range_store_error("static variable read", error, Some(&comptime.token))
-                })?;
-                // Check if any part of the requested access is unassigned (None)
-                // If so, we must depend on the variable's previous value (input).
-                // If all parts are Some(...), we only depend on the sources of those expressions.
-                let has_unassigned = parts.iter().any(|(val, _)| val.is_none());
-                let (expr, mut sources) =
-                    combine_parts_with_default(*var_id, access.lsb, parts, arena)?;
-                if has_unassigned {
+                let (expr, sources) = if let Some(range_store) = store.current().get(var_id) {
+                    let parts = range_store.get_parts(access).map_err(|error| {
+                        super::range_store_error(
+                            "static variable read",
+                            error,
+                            Some(&comptime.token),
+                        )
+                    })?;
+                    // If any requested part is unassigned, the result still
+                    // depends on that range's process input value.
+                    let has_unassigned = parts.iter().any(|(val, _)| val.is_none());
+                    let (expr, mut sources) =
+                        combine_parts_with_default(*var_id, access.lsb, parts, arena)?;
+                    if has_unassigned {
+                        sources.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
+                    }
+                    (expr, sources)
+                } else {
+                    // Read-only variables have no mutable symbolic definition.
+                    // Materialize their input range directly instead.
+                    let expr = arena.alloc(SLTNode::Input {
+                        variable: *var_id,
+                        signed: false,
+                        index: vec![],
+                        access,
+                    })?;
+                    let mut sources = HashSet::default();
                     sources.insert(VarAtomBase::new(*var_id, access.lsb, access.msb));
-                }
+                    (expr, sources)
+                };
                 // Symbolic substitution may replace this variable with an
                 // expression whose producer has different signedness. Width
                 // coercion follows the source variable's analyzer context,
@@ -3116,18 +3120,23 @@ fn eval_factor(
                 all_sources.extend(offset_sources);
 
                 // 2. Check SymbolicStore to determine if "already written"
-                let range_store = store.current().get(var_id).ok_or_else(|| {
-                    ParserError::illegal_context(
-                        "dynamic variable read",
-                        "source variable is absent from the symbolic store",
-                        Some(&comptime.token),
-                    )
-                })?;
                 let access_full = BitAccess::new(0, width - 1);
-                let parts = range_store.get_parts(access_full).map_err(|error| {
-                    super::range_store_error("dynamic variable read", error, Some(&comptime.token))
-                })?;
-                let is_unmodified = parts.iter().all(|(val, _)| val.is_none());
+                let parts = store
+                    .current()
+                    .get(var_id)
+                    .map(|range_store| {
+                        range_store.get_parts(access_full).map_err(|error| {
+                            super::range_store_error(
+                                "dynamic variable read",
+                                error,
+                                Some(&comptime.token),
+                            )
+                        })
+                    })
+                    .transpose()?;
+                let is_unmodified = parts
+                    .as_ref()
+                    .is_none_or(|parts| parts.iter().all(|(val, _)| val.is_none()));
 
                 let element_width =
                     crate::bitaccess::get_access_width(module, *var_id, index, select)?;
@@ -3157,8 +3166,12 @@ fn eval_factor(
                 } else {
                     // --- If already written ---
                     // Combine latest values in register and align with Shr
-                    let (current_expr, current_sources) =
-                        combine_parts_with_default(*var_id, 0, parts, arena)?;
+                    let (current_expr, current_sources) = combine_parts_with_default(
+                        *var_id,
+                        0,
+                        parts.expect("a modified variable has a symbolic range"),
+                        arena,
+                    )?;
                     all_sources.extend(current_sources);
 
                     let shifted =

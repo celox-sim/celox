@@ -74,6 +74,21 @@ pub(super) fn range_store_error(
     ParserError::illegal_context(context, error.to_string(), token)
 }
 
+pub(super) fn symbolic_parts_or_default(
+    store: &SymbolicStore<VarId>,
+    id: VarId,
+    access: BitAccess,
+    context: &'static str,
+    token: Option<&TokenRange>,
+) -> Result<Vec<(Option<(NodeId, HashSet<VarAtomBase<VarId>>)>, BitAccess)>, ParserError> {
+    match store.get(&id) {
+        Some(range_store) => range_store
+            .get_parts(access)
+            .map_err(|error| range_store_error(context, error, token)),
+        None => Ok(vec![(None, access)]),
+    }
+}
+
 /// Veryl validates function arity before producing usable IR. A formal argument
 /// absent from both connection maps is therefore invalid IR, not an unsupported
 /// lowering shape.
@@ -224,16 +239,19 @@ pub fn parse_comb_with_loop_recovery(
     ),
     ParserError,
 > {
-    // 1. Initialization: Create a RangeStore for each variable in the module.
-    // Variables start in an 'unassigned' state (None), representing their initial input values.
+    let mut written_accesses = HashMap::default();
+    collect_written_accesses(module, &decl.statements, &mut written_accesses)?;
+
+    // 1. Initialization: only definitions this process can write need mutable
+    // symbolic ranges. Reads of every other variable lower directly to Input,
+    // keeping setup proportional to the block instead of the whole module.
     let mut current_store = SymbolicStore::default();
-    for (id, var) in &module.variables {
+    for id in written_accesses.keys() {
+        let var = &module.variables[id];
         let width = resolve_total_width(module, var)?;
         current_store.insert(*id, RangeStore::new(None, width));
     }
 
-    let mut written_accesses = HashMap::default();
-    collect_written_accesses(module, &decl.statements, &mut written_accesses)?;
     let written_atoms: Vec<_> = written_accesses
         .iter()
         .flat_map(|(&id, accesses)| {
@@ -1014,13 +1032,14 @@ fn merge_symbolic_versions(
     // shared entries cannot need a phi.
     let mut merged_store = then_store.fork();
     for id in then_store.differing_keys(else_store) {
-        // Function-local state can be introduced while evaluating only the
-        // else branch. It is scoped to that branch and must not escape through
-        // this merge; the previous implementation likewise iterated then keys.
+        // Function-local state can be introduced while evaluating only one
+        // branch. It is scoped to that branch and must not escape the merge.
         let Some(t_range_store) = then_store.get(id) else {
             continue;
         };
-        let e_range_store = &else_store[id];
+        let Some(e_range_store) = else_store.get(id) else {
+            continue;
+        };
 
         if t_range_store == e_range_store {
             continue;
@@ -2075,16 +2094,13 @@ fn eval_for_with_effects(
         let initial_updates = updates
             .iter()
             .map(|(target, _, _)| {
-                let range_store = store.get(&target.id).ok_or_else(|| {
-                    ParserError::illegal_context(
-                        "for-loop initial state",
-                        "state variable is absent from the symbolic store",
-                        Some(&for_stmt.token),
-                    )
-                })?;
-                let parts = range_store.get_parts(target.access).map_err(|error| {
-                    range_store_error("for-loop initial state", error, Some(&for_stmt.token))
-                })?;
+                let parts = symbolic_parts_or_default(
+                    &store,
+                    target.id,
+                    target.access,
+                    "for-loop initial state",
+                    Some(&for_stmt.token),
+                )?;
                 let (expr, sources) =
                     combine_parts_with_default(target.id, target.access.lsb, parts, arena)?;
                 initial_sources.extend(sources);
@@ -2302,13 +2318,9 @@ fn update_assignment_range(
     if variable.r#type.is_2state() && !source_is_2state {
         value.0 = arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, value.0))?;
     }
-    let range_store = store.get_mut(&destination.id).ok_or_else(|| {
-        ParserError::illegal_context(
-            "assignment destination",
-            "destination variable is absent from the symbolic store",
-            Some(&destination.token),
-        )
-    })?;
+    let range_store = store
+        .entry(destination.id)
+        .or_insert_with(|| RangeStore::new(None, variable_width));
     range_store.update(access, Some(value)).map_err(|error| {
         range_store_error("assignment destination", error, Some(&destination.token))
     })?;
@@ -3385,6 +3397,46 @@ mod tests {
             .unwrap()
             .id
     }
+
+    #[test]
+    fn comb_symbolic_store_tracks_only_written_definitions() {
+        let code = r#"
+            module Top (
+                a: input logic<32>,
+                idx: input logic<5>,
+                q: output logic<1>,
+                r: output logic<4>
+            ) {
+                always_comb {
+                    q = a[idx];
+                    r = a[7:4];
+                }
+            }
+        "#;
+        let module = parse_top_module(code);
+        let comb = module
+            .declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                Declaration::Comb(comb) => Some(comb),
+                _ => None,
+            })
+            .unwrap();
+        let mut arena = SLTNodeArena::new();
+        let (paths, store, _, _, _) = parse_comb(&module, comb, &mut arena).unwrap();
+
+        let a = var_id_of(&module, &["a"]);
+        let idx = var_id_of(&module, &["idx"]);
+        let q = var_id_of(&module, &["q"]);
+        let r = var_id_of(&module, &["r"]);
+        assert_eq!(store.len(), 2);
+        assert!(!store.contains_key(&a));
+        assert!(!store.contains_key(&idx));
+        assert!(store.contains_key(&q));
+        assert!(store.contains_key(&r));
+        assert_eq!(paths.len(), 2);
+    }
+
     #[test]
     fn test_parse_comb_boundary_collection() {
         let code = r#"
