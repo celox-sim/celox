@@ -1744,7 +1744,7 @@ fn root_testbench_name<B: SimBackend>(sim: &Simulator<B>) -> String {
         .frontend
         .root_instance_and_module()
         .and_then(|(_, module)| sim.program.frontend.module_names.get(&module))
-        .and_then(|name| veryl_parser::resource_table::get_str_value(*name))
+        .cloned()
         .unwrap_or_else(|| "testbench".to_string())
 }
 

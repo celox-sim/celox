@@ -4,13 +4,14 @@ version.workspace     = true
 authors.workspace     = true
 repository.workspace  = true
 license.workspace     = true
-description           = "Veryl frontend artifacts and source lookup for Celox"
+description           = "Veryl frontend adapter for Celox"
 edition.workspace     = true
 
 [dependencies]
 tracing = { workspace = true }
 bit-set        = { workspace = true }
 celox-design   = { path = "../celox-design" }
+celox-frontend-core = { path = "../celox-frontend-core" }
 celox-sir      = { path = "../celox-sir" }
 celox-slt      = { path = "../celox-slt" }
 celox-testbench = { path = "../celox-testbench" }

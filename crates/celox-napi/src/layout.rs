@@ -1,6 +1,6 @@
-use celox::PortTypeKind;
 #[cfg(not(target_arch = "wasm32"))]
 use celox::{DefaultBackend, InstanceHierarchy, NamedSignal, get_byte_size};
+use celox::{PortTypeKind, VariableKind};
 #[cfg(not(target_arch = "wasm32"))]
 type NamedEvent = celox::NamedEvent<DefaultBackend>;
 #[cfg(not(target_arch = "wasm32"))]
@@ -37,11 +37,11 @@ pub struct HierarchyNode {
     pub children: HashMap<String, Vec<HierarchyNode>>,
 }
 
-pub fn direction_str(var_kind: veryl_analyzer::ir::VarKind) -> &'static str {
+pub fn direction_str(var_kind: VariableKind) -> &'static str {
     match var_kind {
-        veryl_analyzer::ir::VarKind::Input => "input",
-        veryl_analyzer::ir::VarKind::Output => "output",
-        veryl_analyzer::ir::VarKind::Inout => "inout",
+        VariableKind::Input => "input",
+        VariableKind::Output => "output",
+        VariableKind::Inout => "inout",
         _ => "internal",
     }
 }

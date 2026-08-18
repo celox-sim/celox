@@ -4,39 +4,38 @@ use celox_design::{
     BitAccess, InstanceId, ModuleId, SPARSE_WORKING_REGION, STABLE_REGION, TriggerSet, VarAtomBase,
     WORKING_REGION,
 };
+use celox_frontend_core::{
+    ParserError as CoreParserError, SourceVarId,
+    symbolic::assembly::{FfRuntimeRelocation, FusedFfAction, FusedFfLoweringFactory},
+};
 use celox_sir::{SIRBuilder, SIRInstruction, SIROffset};
 use celox_slt::{FfAccessSummary, scheduler};
 use veryl_analyzer::ir::{Declaration, FfDeclaration, Module, VarId};
 
-use crate::{
-    AbsoluteAddr, BuildConfig, HashMap, HashSet, ParserError, RegionedAbsoluteAddr,
-    RegionedVarAddr, SimModule, ff,
-};
+use crate::{BuildConfig, HashMap, HashSet, ff};
+
+type FusedAbsoluteAddr = celox_design::AbsoluteAddrBase<SourceVarId>;
+type FusedRegionedAddr = celox_design::RegionedAbsoluteAddrBase<SourceVarId>;
 
 #[derive(Clone)]
-pub struct FfRuntimeRelocation {
-    pub error_codes: HashMap<i64, i64>,
-    pub event_site_base: u32,
-}
-
-#[derive(Clone)]
-pub struct FfClockRecipe<'a> {
-    pub id: usize,
+struct FfClockRecipe<'a> {
     instance_id: InstanceId,
     module: &'a Module,
     declarations: Vec<&'a FfDeclaration>,
-    summary: FfAccessSummary<RegionedAbsoluteAddr>,
+    summary: FfAccessSummary<FusedRegionedAddr>,
     runtime: FfRuntimeRelocation,
+    veryl_to_source: &'a HashMap<VarId, SourceVarId>,
+    source_to_veryl: HashMap<SourceVarId, VarId>,
 }
 
-pub struct SharedClockLowering<'a> {
+struct SharedClockLowering<'a> {
     recipes: Vec<FfClockRecipe<'a>>,
-    summaries: Vec<FfAccessSummary<RegionedAbsoluteAddr>>,
+    summaries: Vec<FfAccessSummary<FusedRegionedAddr>>,
     config: BuildConfig,
 }
 
 impl<'a> SharedClockLowering<'a> {
-    pub fn new(recipes: Vec<FfClockRecipe<'a>>, config: BuildConfig) -> Self {
+    fn new(recipes: Vec<FfClockRecipe<'a>>, config: BuildConfig) -> Self {
         let summaries = recipes
             .iter()
             .map(|recipe| recipe.summary.clone())
@@ -49,16 +48,16 @@ impl<'a> SharedClockLowering<'a> {
     }
 
     fn direct_write(
-        direct_writes: &[VarAtomBase<RegionedAbsoluteAddr>],
-        write: &VarAtomBase<RegionedAbsoluteAddr>,
+        direct_writes: &[VarAtomBase<FusedRegionedAddr>],
+        write: &VarAtomBase<FusedRegionedAddr>,
     ) -> bool {
         direct_writes.contains(write)
     }
 
     fn direct_dynamic_var(
-        summary: &FfAccessSummary<RegionedAbsoluteAddr>,
-        direct_writes: &[VarAtomBase<RegionedAbsoluteAddr>],
-        address: AbsoluteAddr,
+        summary: &FfAccessSummary<FusedRegionedAddr>,
+        direct_writes: &[VarAtomBase<FusedRegionedAddr>],
+        address: FusedAbsoluteAddr,
     ) -> bool {
         let mut writes = summary
             .writes
@@ -69,9 +68,9 @@ impl<'a> SharedClockLowering<'a> {
     }
 
     fn emit_region_copies(
-        builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
-        summaries: &[FfAccessSummary<RegionedAbsoluteAddr>],
-        direct_writes: &[Vec<VarAtomBase<RegionedAbsoluteAddr>>],
+        builder: &mut SIRBuilder<FusedRegionedAddr>,
+        summaries: &[FfAccessSummary<FusedRegionedAddr>],
+        direct_writes: &[Vec<VarAtomBase<FusedRegionedAddr>>],
         src_region: u32,
         dst_region: u32,
     ) {
@@ -84,9 +83,9 @@ impl<'a> SharedClockLowering<'a> {
                     !Self::direct_dynamic_var(summary, direct_writes, address.absolute_addr())
                 })
             })
-            .map(RegionedAbsoluteAddr::absolute_addr)
+            .map(FusedRegionedAddr::absolute_addr)
             .collect::<HashSet<_>>();
-        let mut ranges = BTreeMap::<AbsoluteAddr, Vec<BitAccess>>::new();
+        let mut ranges = BTreeMap::<FusedAbsoluteAddr, Vec<BitAccess>>::new();
         for target in summaries.iter().enumerate().flat_map(|(index, summary)| {
             let direct_writes = direct_writes.get(index).map_or(&[][..], Vec::as_slice);
             summary
@@ -113,8 +112,8 @@ impl<'a> SharedClockLowering<'a> {
             }
             for range in merged {
                 builder.emit(SIRInstruction::Commit(
-                    RegionedAbsoluteAddr::from_absolute_addr(src_region, addr),
-                    RegionedAbsoluteAddr::from_absolute_addr(dst_region, addr),
+                    FusedRegionedAddr::from_absolute_addr(src_region, addr),
+                    FusedRegionedAddr::from_absolute_addr(dst_region, addr),
                     SIROffset::Static(range.lsb),
                     range.msb - range.lsb + 1,
                     Vec::new(),
@@ -124,9 +123,9 @@ impl<'a> SharedClockLowering<'a> {
     }
 
     fn emit_sparse_commits(
-        builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
-        summaries: &[FfAccessSummary<RegionedAbsoluteAddr>],
-        direct_writes: &[Vec<VarAtomBase<RegionedAbsoluteAddr>>],
+        builder: &mut SIRBuilder<FusedRegionedAddr>,
+        summaries: &[FfAccessSummary<FusedRegionedAddr>],
+        direct_writes: &[Vec<VarAtomBase<FusedRegionedAddr>>],
     ) {
         let dynamic = summaries
             .iter()
@@ -137,9 +136,9 @@ impl<'a> SharedClockLowering<'a> {
                     !Self::direct_dynamic_var(summary, direct_writes, address.absolute_addr())
                 })
             })
-            .map(RegionedAbsoluteAddr::absolute_addr)
+            .map(FusedRegionedAddr::absolute_addr)
             .collect::<HashSet<_>>();
-        let mut widths = BTreeMap::<AbsoluteAddr, usize>::new();
+        let mut widths = BTreeMap::<FusedAbsoluteAddr, usize>::new();
         for target in summaries.iter().enumerate().flat_map(|(index, summary)| {
             let direct_writes = direct_writes.get(index).map_or(&[][..], Vec::as_slice);
             summary
@@ -157,8 +156,8 @@ impl<'a> SharedClockLowering<'a> {
         }
         for (addr, width) in widths {
             builder.emit(SIRInstruction::Commit(
-                RegionedAbsoluteAddr::from_absolute_addr(SPARSE_WORKING_REGION, addr),
-                RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addr),
+                FusedRegionedAddr::from_absolute_addr(SPARSE_WORKING_REGION, addr),
+                FusedRegionedAddr::from_absolute_addr(STABLE_REGION, addr),
                 SIROffset::Static(0),
                 width,
                 Vec::new(),
@@ -167,18 +166,18 @@ impl<'a> SharedClockLowering<'a> {
     }
 }
 
-impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_> {
-    type Error = ParserError;
+impl scheduler::ClockFfLowering<FusedRegionedAddr> for SharedClockLowering<'_> {
+    type Error = CoreParserError;
 
-    fn summaries(&self) -> &[FfAccessSummary<RegionedAbsoluteAddr>] {
+    fn summaries(&self) -> &[FfAccessSummary<FusedRegionedAddr>] {
         &self.summaries
     }
 
     fn begin(
         &mut self,
-        builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
-        direct_writes: &[Vec<VarAtomBase<RegionedAbsoluteAddr>>],
-    ) -> Result<(), ParserError> {
+        builder: &mut SIRBuilder<FusedRegionedAddr>,
+        direct_writes: &[Vec<VarAtomBase<FusedRegionedAddr>>],
+    ) -> Result<(), CoreParserError> {
         // Only ranges whose old-state anti-dependencies could not be ordered
         // need a private snapshot.
         Self::emit_region_copies(
@@ -194,11 +193,11 @@ impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_
     fn lower(
         &mut self,
         index: usize,
-        direct_writes: &[VarAtomBase<RegionedAbsoluteAddr>],
-        builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
-    ) -> Result<(), ParserError> {
+        direct_writes: &[VarAtomBase<FusedRegionedAddr>],
+        builder: &mut SIRBuilder<FusedRegionedAddr>,
+    ) -> Result<(), CoreParserError> {
         let recipe = self.recipes.get(index).ok_or_else(|| {
-            ParserError::illegal_context(
+            CoreParserError::illegal_context(
                 "shared comb/FF scheduling",
                 format!("FF action {index} is outside the recipe table"),
                 None,
@@ -208,7 +207,7 @@ impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_
             .summary
             .dynamic_writes
             .iter()
-            .map(|address| address.var_id)
+            .map(|address| recipe.source_to_veryl[&address.var_id])
             .collect();
         let direct_static_ranges = recipe
             .summary
@@ -219,7 +218,7 @@ impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_
                 HashMap::<VarId, Vec<BitAccess>>::default(),
                 |mut ranges, write| {
                     ranges
-                        .entry(write.id.var_id)
+                        .entry(recipe.source_to_veryl[&write.id.var_id])
                         .or_default()
                         .push(write.access);
                     ranges
@@ -231,7 +230,7 @@ impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_
             .iter()
             .filter_map(|address| {
                 Self::direct_dynamic_var(&recipe.summary, direct_writes, address.absolute_addr())
-                    .then_some(address.var_id)
+                    .then_some(recipe.source_to_veryl[&address.var_id])
             })
             .collect::<HashSet<_>>();
         let mut parser = ff::FfParser::new(recipe.module, self.config)
@@ -241,23 +240,27 @@ impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_
             )
             .with_sparse_write_vars(sparse_write_vars)
             .with_direct_write_ranges(direct_static_ranges, direct_dynamic_vars);
-        parser.parse_ff_group_into(
-            &recipe.declarations,
-            &|var_id, region| RegionedAbsoluteAddr {
-                region,
-                instance_id: recipe.instance_id,
-                var_id,
-            },
-            builder,
-        )?;
+        parser
+            .parse_ff_group_into(
+                &recipe.declarations,
+                &|var_id, region| FusedRegionedAddr {
+                    region,
+                    instance_id: recipe.instance_id,
+                    var_id: recipe.veryl_to_source[&var_id],
+                },
+                builder,
+            )
+            .map_err(|error| {
+                CoreParserError::illegal_context("Veryl fused FF lowering", error.to_string(), None)
+            })?;
         Ok(())
     }
 
     fn finish(
         &mut self,
-        builder: &mut SIRBuilder<RegionedAbsoluteAddr>,
-        direct_writes: &[Vec<VarAtomBase<RegionedAbsoluteAddr>>],
-    ) -> Result<(), ParserError> {
+        builder: &mut SIRBuilder<FusedRegionedAddr>,
+        direct_writes: &[Vec<VarAtomBase<FusedRegionedAddr>>],
+    ) -> Result<(), CoreParserError> {
         // Staged ranges publish together. Proven direct ranges have already
         // published at their scheduled placement.
         Self::emit_region_copies(
@@ -272,101 +275,81 @@ impl scheduler::ClockFfLowering<RegionedAbsoluteAddr> for SharedClockLowering<'_
     }
 }
 
-pub fn build_ff_clock_recipes<'a>(
+pub(crate) struct VerylFusedFfFactory<'a> {
     module_ir: &'a HashMap<ModuleId, &'a Module>,
-    modules: &HashMap<ModuleId, SimModule>,
-    instance_modules: &HashMap<InstanceId, ModuleId>,
-    clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
-    runtime_relocations: &HashMap<InstanceId, FfRuntimeRelocation>,
+    source_id_maps: &'a HashMap<ModuleId, HashMap<VarId, SourceVarId>>,
     config: BuildConfig,
-) -> HashMap<AbsoluteAddr, Vec<FfClockRecipe<'a>>> {
-    let mut instances = instance_modules.iter().collect::<Vec<_>>();
-    instances.sort_unstable_by_key(|(instance, _)| instance.0);
-    let mut result = HashMap::<AbsoluteAddr, Vec<FfClockRecipe<'a>>>::default();
-    let mut next_recipe_id = 0usize;
+}
 
-    for (&instance_id, &module_id) in instances {
-        let module = module_ir[&module_id];
-        let sim_module = &modules[&module_id];
-        let detector = ff::FfParser::new(module, config);
-        let mut groups = BTreeMap::<TriggerSet<VarId>, Vec<&FfDeclaration>>::new();
-        for declaration in &module.declarations {
-            if let Declaration::Ff(ff) = declaration {
-                groups
-                    .entry(detector.detect_trigger_set(ff))
-                    .or_default()
-                    .push(ff);
-            }
-        }
-        for (trigger, declarations) in groups {
-            let Some(summary) = sim_module.ff_access_summaries.get(&trigger) else {
-                continue;
-            };
-            let relocate_addr = |addr: RegionedVarAddr| RegionedAbsoluteAddr {
-                region: addr.region,
-                instance_id,
-                var_id: addr.var_id,
-            };
-            let summary = FfAccessSummary {
-                reads: summary
-                    .reads
-                    .iter()
-                    .map(|read| VarAtomBase {
-                        id: relocate_addr(read.id),
-                        access: read.access,
-                    })
-                    .collect(),
-                writes: summary
-                    .writes
-                    .iter()
-                    .map(|write| VarAtomBase {
-                        // Scheduler summaries describe the persistent state
-                        // object, not the temporary region chosen by FF
-                        // lowering.  Reads and comb definitions use STABLE;
-                        // normalize writes to the same identity so old-state
-                        // anti-dependencies are visible.
-                        id: RegionedAbsoluteAddr {
-                            region: STABLE_REGION,
-                            instance_id,
-                            var_id: write.id.var_id,
-                        },
-                        access: write.access,
-                    })
-                    .collect(),
-                dynamic_writes: summary
-                    .dynamic_writes
-                    .iter()
-                    .map(|address| RegionedAbsoluteAddr {
-                        region: STABLE_REGION,
-                        instance_id,
-                        var_id: address.var_id,
-                    })
-                    .collect(),
-            };
-            let recipe = FfClockRecipe {
-                id: next_recipe_id,
-                instance_id,
-                module,
-                declarations,
-                summary,
-                runtime: runtime_relocations[&instance_id].clone(),
-            };
-            next_recipe_id += 1;
-            let clock = AbsoluteAddr {
-                instance_id,
-                var_id: trigger.clock,
-            };
-            let clock = clock_domains.get(&clock).copied().unwrap_or(clock);
-            result.entry(clock).or_default().push(recipe.clone());
-            for reset in trigger.resets {
-                let reset = AbsoluteAddr {
-                    instance_id,
-                    var_id: reset,
-                };
-                let reset = clock_domains.get(&reset).copied().unwrap_or(reset);
-                result.entry(reset).or_default().push(recipe.clone());
-            }
+impl<'a> VerylFusedFfFactory<'a> {
+    pub(crate) fn new(
+        module_ir: &'a HashMap<ModuleId, &'a Module>,
+        source_id_maps: &'a HashMap<ModuleId, HashMap<VarId, SourceVarId>>,
+        config: BuildConfig,
+    ) -> Self {
+        Self {
+            module_ir,
+            source_id_maps,
+            config,
         }
     }
-    result
+}
+
+impl FusedFfLoweringFactory for VerylFusedFfFactory<'_> {
+    fn create(
+        &self,
+        actions: Vec<FusedFfAction>,
+    ) -> Result<
+        Box<dyn scheduler::ClockFfLowering<FusedRegionedAddr, Error = CoreParserError> + '_>,
+        CoreParserError,
+    > {
+        let mut recipes = Vec::with_capacity(actions.len());
+        for action in actions {
+            let module = self.module_ir[&action.module_id];
+            let veryl_to_source = &self.source_id_maps[&action.module_id];
+            let source_to_veryl = veryl_to_source
+                .iter()
+                .map(|(&veryl, &source)| (source, veryl))
+                .collect::<HashMap<_, _>>();
+            let trigger = TriggerSet {
+                clock: source_to_veryl[&action.trigger.clock],
+                resets: action
+                    .trigger
+                    .resets
+                    .iter()
+                    .map(|reset| source_to_veryl[reset])
+                    .collect(),
+            };
+            let detector = ff::FfParser::new(module, self.config);
+            let mut groups = BTreeMap::<TriggerSet<VarId>, Vec<&FfDeclaration>>::new();
+            for declaration in &module.declarations {
+                if let Declaration::Ff(ff) = declaration {
+                    groups
+                        .entry(detector.detect_trigger_set(ff))
+                        .or_default()
+                        .push(ff);
+                }
+            }
+            let declarations = groups.remove(&trigger).ok_or_else(|| {
+                CoreParserError::illegal_context(
+                    "Veryl fused FF lowering",
+                    format!(
+                        "module {:?} has no FF declaration group for the projected trigger",
+                        action.module_id
+                    ),
+                    None,
+                )
+            })?;
+            recipes.push(FfClockRecipe {
+                instance_id: action.instance_id,
+                module,
+                declarations,
+                summary: action.summary,
+                runtime: action.runtime,
+                veryl_to_source,
+                source_to_veryl,
+            });
+        }
+        Ok(Box::new(SharedClockLowering::new(recipes, self.config)))
+    }
 }

@@ -1252,23 +1252,13 @@ mod host {
                     .filter(|info| path_index.get(&info.path) != Some(&None))
                     .collect();
                 sorted_vars.sort_by(|a, b| {
-                    let name_a = a.path.to_string();
-                    let name_b = b.path.to_string();
+                    let name_a = a.path.join(".");
+                    let name_b = b.path.join(".");
                     name_a.cmp(&name_b)
                 });
 
                 for info in sorted_vars {
-                    let name = info
-                        .path
-                        .0
-                        .iter()
-                        .map(|s| {
-                            veryl_parser::resource_table::get_str_value(*s)
-                                .unwrap()
-                                .to_string()
-                        })
-                        .collect::<Vec<_>>()
-                        .join(".");
+                    let name = info.path.join(".");
 
                     let addr = self
                         .program
@@ -1304,16 +1294,11 @@ mod host {
         /// The path is specified as a slice of `(instance_name, index)` pairs.
         /// Returns an empty `Vec` if the path does not exist.
         pub fn instance_signals(&self, instance_path: &[(&str, usize)]) -> Vec<NamedSignal> {
-            let path_str_ids: Vec<_> = instance_path
+            let path: Vec<_> = instance_path
                 .iter()
-                .map(|(name, idx)| (veryl_parser::resource_table::insert_str(name), *idx))
+                .map(|(name, idx)| ((*name).to_string(), *idx))
                 .collect();
-            match self
-                .program
-                .frontend
-                .instance_ids
-                .get(&InstancePath(path_str_ids))
-            {
+            match self.program.frontend.instance_ids.get(&InstancePath(path)) {
                 Some(&instance_id) => self.build_signals_for_instance(instance_id),
                 None => Vec::new(),
             }
@@ -1338,17 +1323,7 @@ mod host {
                 if path_index.get(&info.path) == Some(&None) {
                     continue;
                 }
-                let name = info
-                    .path
-                    .0
-                    .iter()
-                    .map(|s| {
-                        veryl_parser::resource_table::get_str_value(*s)
-                            .unwrap()
-                            .to_string()
-                    })
-                    .collect::<Vec<_>>()
-                    .join(".");
+                let name = info.path.join(".");
                 let addr = self
                     .program
                     .state_address_for_source(instance_id, info.id)
@@ -1431,10 +1406,7 @@ mod host {
             self.build_hierarchy(&[])
         }
 
-        fn build_hierarchy(
-            &self,
-            current_path: &[(veryl_parser::resource_table::StrId, usize)],
-        ) -> InstanceHierarchy {
+        fn build_hierarchy(&self, current_path: &[(String, usize)]) -> InstanceHierarchy {
             let instance_id = self
                 .program
                 .frontend
@@ -1447,8 +1419,7 @@ mod host {
                 .frontend
                 .module_names
                 .get(module_id)
-                .and_then(|name| veryl_parser::resource_table::get_str_value(*name))
-                .map(|s| s.to_string())
+                .cloned()
                 .unwrap_or_else(|| format!("{}", module_id));
 
             let signals = self.build_signals_for_instance(*instance_id);
@@ -1460,15 +1431,12 @@ mod host {
 
             for path in self.program.frontend.instance_ids.keys() {
                 if path.0.len() == current_len + 1 && path.0.starts_with(current_path) {
-                    let (child_name_id, child_index) = path.0[current_len];
-                    let child_name = veryl_parser::resource_table::get_str_value(child_name_id)
-                        .unwrap()
-                        .to_string();
+                    let (child_name, child_index) = &path.0[current_len];
                     let child_hierarchy = self.build_hierarchy(&path.0);
                     children_map
-                        .entry(child_name)
+                        .entry(child_name.clone())
                         .or_default()
-                        .push((child_index, child_hierarchy));
+                        .push((*child_index, child_hierarchy));
                 }
             }
 

@@ -1,40 +1,66 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::symbolic::artifact::{
+    RelocationModule, SimModule, SymbolicGlueAddr as GlueAddr, SymbolicRtl,
+};
+use crate::{
+    FrontendLookup, FrontendTrace, FrontendTraceOptions, FusedSirOptimizationHints, HashMap,
+    HashSet, InstancePath, ParserError, ScheduledRtl, ScheduledRtlOutput, SourceAddr,
+    SourceLocation, SourceVarId, VariableInfo, flattening,
+};
 use celox_design::{
     BitAccess, DomainKind, ElaboratedDesign, EventTopology, InitialStateValue, InstanceId,
-    ModuleId, PortTypeKind, RegionedStateAddr, RuntimeCombObserver, RuntimeErrorInfo,
+    ModuleId, RegionedAbsoluteAddrBase, RegionedStateAddr, RuntimeCombObserver, RuntimeErrorInfo,
     RuntimeEventKind, RuntimeEventSite, RuntimeSchema, STABLE_REGION, StateAddr, StateObjectId,
-    VarAtomBase, VariableMetadata,
+    TriggerSet, VarAtomBase, VariableMetadata,
 };
 use celox_sir::{BasicBlock, ExecutionUnit, SIRInstruction, SIRTerminator, SirProgram};
 use celox_slt::{
     CombObserver, FfAccessSummary, LogicPath, LogicPathId, LogicPathTarget, NodeId, SLTNodeArena,
     scheduler::{self, SchedulerError},
 };
-use celox_testbench::{
-    ComponentConnection, ComponentParameterValue, SourceLocation as TestbenchSourceLocation,
-    TestbenchComponent,
-};
-use veryl_analyzer::ir::ExternalParamValue;
-use veryl_analyzer::ir::TypeKind;
-use veryl_analyzer::ir::{Declaration, Module, VarId, VarPath};
-use veryl_analyzer::symbol::Affiliation;
-use veryl_analyzer::value::Value;
-use veryl_metadata::{ClockType, ResetType};
-use veryl_parser::resource_table::{self, StrId};
 
-use crate::{
-    AbsoluteAddr, BuildConfig, FfRuntimeRelocation, FrontendTrace, FrontendTraceOptions,
-    FusedSirOptimizationHints, GlueAddr, HashMap, HashSet, InstancePath, ParserError,
-    RegionedAbsoluteAddr, RegionedVarAddr, RelocationModule, ScheduledRtl, ScheduledRtlOutput,
-    SharedClockLowering, SimModule, SourceLocation, SymbolicRtl, VariableInfo,
-    VerylComponentBinding, VerylComponentConnectionBinding, VerylComponentEventBinding,
-    VerylComponentInputBinding, VerylFrontendLookup, VerylTestbenchSource, bitaccess,
-    build_ff_clock_recipes, flattening, resolve_total_width,
-};
+type AbsoluteAddr = SourceAddr;
+type RegionedAbsoluteAddr = RegionedAbsoluteAddrBase<SourceVarId>;
+type RegionedVarAddr = celox_design::RegionedVarAddrBase<SourceVarId>;
 
-fn string_of(id: StrId) -> String {
-    resource_table::get_str_value(id).unwrap_or_default()
+/// Runtime IDs assigned while a module instance is relocated into the global
+/// design. Source adapters use these IDs only when rebuilding an optimized FF
+/// action inside the shared comb/FF scheduler.
+#[derive(Clone, Debug)]
+pub struct FfRuntimeRelocation {
+    pub error_codes: HashMap<i64, i64>,
+    pub event_site_base: u32,
+}
+
+/// Source-neutral description of one FF action offered to an adapter-specific
+/// lowering implementation.
+#[derive(Clone)]
+pub struct FusedFfAction {
+    pub id: usize,
+    pub instance_id: InstanceId,
+    pub module_id: ModuleId,
+    pub trigger: TriggerSet<SourceVarId>,
+    pub summary: FfAccessSummary<RegionedAbsoluteAddrBase<SourceVarId>>,
+    pub runtime: FfRuntimeRelocation,
+}
+
+/// Adapter hook for source-aware FF lowering used by the optional fused
+/// comb/FF optimization. The scheduler and all identities crossing this trait
+/// remain source neutral.
+pub trait FusedFfLoweringFactory {
+    fn create(
+        &self,
+        actions: Vec<FusedFfAction>,
+    ) -> Result<
+        Box<
+            dyn scheduler::ClockFfLowering<
+                    RegionedAbsoluteAddrBase<SourceVarId>,
+                    Error = ParserError,
+                > + '_,
+        >,
+        ParserError,
+    >;
 }
 
 fn elaborated_scope_name(
@@ -47,16 +73,15 @@ fn elaborated_scope_name(
     let segments = path
         .0
         .iter()
-        .map(|&(name, index)| {
-            prefix.push((name, index));
-            let name = string_of(name);
+        .map(|(name, index)| {
+            prefix.push((name.clone(), *index));
             let indexed = expanded
                 .get(&InstancePath(prefix.clone()))
                 .is_some_and(|id| indexed_instances.contains(id));
             if indexed {
                 format!("{name}[{index}]")
             } else {
-                name
+                name.clone()
             }
         })
         .collect::<Vec<_>>();
@@ -65,187 +90,6 @@ fn elaborated_scope_name(
     } else {
         format!("{root_name}.{}", segments.join("."))
     }
-}
-
-fn testbench_source_location(
-    token: &veryl_parser::token_range::TokenRange,
-) -> Option<TestbenchSourceLocation> {
-    let file = token
-        .beg
-        .source
-        .get_path()
-        .and_then(resource_table::get_path_value)?;
-    Some(TestbenchSourceLocation {
-        file: file.to_string_lossy().into_owned(),
-        line: token.beg.line,
-        column: token.beg.column,
-    })
-}
-
-fn component_parameter(value: &ExternalParamValue) -> ComponentParameterValue {
-    match value {
-        ExternalParamValue::Str(value) => ComponentParameterValue::String(value.clone()),
-        ExternalParamValue::Value(value) => {
-            let mut words = match value {
-                Value::U64(value) => vec![value.payload],
-                Value::BigUint(value) => value.payload().iter_u64_digits().collect(),
-            };
-            words.resize(value.width().div_ceil(64).max(1), 0);
-            ComponentParameterValue::Bits {
-                words,
-                width: value.width() as u32,
-            }
-        }
-    }
-}
-
-fn component_input_target(
-    expression: &veryl_analyzer::ir::Expression,
-) -> Option<VerylComponentInputBinding> {
-    use veryl_analyzer::ir::{Expression, Factor, Op};
-
-    match expression {
-        Expression::Term(term) => match term.as_ref() {
-            Factor::Variable(id, index, select, _) => Some(VerylComponentInputBinding::Root {
-                id: *id,
-                index: index.clone(),
-                select: select.clone(),
-            }),
-            Factor::HierVariable(reference) => {
-                Some(VerylComponentInputBinding::Hierarchical(reference.clone()))
-            }
-            _ => None,
-        },
-        Expression::Unary(Op::BitNot, inner, _) => component_input_target(inner),
-        _ => None,
-    }
-}
-
-fn component_event_target(
-    expression: &veryl_analyzer::ir::Expression,
-) -> Option<VerylComponentEventBinding> {
-    use veryl_analyzer::ir::{Expression, Factor};
-
-    let Expression::Term(term) = expression else {
-        return None;
-    };
-    match term.as_ref() {
-        Factor::Variable(id, _, _, _) => Some(VerylComponentEventBinding::Root(*id)),
-        Factor::HierVariable(reference) => {
-            Some(VerylComponentEventBinding::Hierarchical(reference.clone()))
-        }
-        _ => None,
-    }
-}
-
-fn collect_testbench_components(
-    module: &Module,
-    parent_instance: InstanceId,
-    parent_path: &InstancePath,
-    instance_ids: &HashMap<InstancePath, InstanceId>,
-    indexed_instances: &HashSet<InstanceId>,
-    names: &mut HashSet<String>,
-) -> Result<(Vec<TestbenchComponent>, Vec<VerylComponentBinding>), ParserError> {
-    let mut components = Vec::new();
-    let mut bindings = Vec::new();
-    for declaration in &module.declarations {
-        let Declaration::External(external) = declaration else {
-            continue;
-        };
-        let local_name = string_of(external.name);
-        let mut path_prefix = Vec::with_capacity(parent_path.0.len());
-        let prefix = parent_path
-            .0
-            .iter()
-            .map(|&(name, index)| {
-                path_prefix.push((name, index));
-                let instance = instance_ids.get(&InstancePath(path_prefix.clone()));
-                if instance.is_some_and(|id| indexed_instances.contains(id)) {
-                    format!("{}[{index}]", string_of(name))
-                } else {
-                    string_of(name)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(".");
-        let instance = if prefix.is_empty() {
-            local_name
-        } else {
-            format!("{prefix}.{local_name}")
-        };
-        if !names.insert(instance.clone()) {
-            return Err(ParserError::illegal_context(
-                "testbench component elaboration",
-                format!("duplicate component instance `{instance}`"),
-                Some(&external.token),
-            ));
-        }
-        let connections = external
-            .connects
-            .iter()
-            .map(|connection| ComponentConnection {
-                port: string_of(connection.port),
-                group: connection.group.map(string_of),
-                member: connection.member.map(string_of),
-                input: connection.input,
-                has_output: connection.output.is_some(),
-                is_clock: connection.is_clock,
-                is_reset: connection.is_reset,
-                width: connection.width,
-            })
-            .collect();
-        let connection_bindings = external
-            .connects
-            .iter()
-            .map(|connection| {
-                let output = connection.output.clone();
-                let input_target = if connection.input {
-                    component_input_target(&connection.expr)
-                } else {
-                    None
-                };
-                let sync_reset = connection.is_reset
-                    && matches!(
-                        connection.expr.comptime().r#type.kind,
-                        TypeKind::ResetSyncHigh | TypeKind::ResetSyncLow
-                    );
-                let event = if (connection.is_clock || connection.is_reset) && !sync_reset {
-                    output
-                        .as_ref()
-                        .map(|output| VerylComponentEventBinding::Root(output.id))
-                        .or_else(|| component_event_target(&connection.expr))
-                } else {
-                    None
-                };
-                VerylComponentConnectionBinding {
-                    port: string_of(connection.port),
-                    input: connection.input.then(|| connection.expr.clone()),
-                    input_target,
-                    output,
-                    event,
-                }
-            })
-            .collect();
-        components.push(TestbenchComponent {
-            instance: instance.clone(),
-            component: string_of(external.component),
-            params: external
-                .params
-                .iter()
-                .map(|(name, value)| (string_of(*name), component_parameter(value)))
-                .collect(),
-            connections,
-            is_var_form: external.is_var_form,
-            source: testbench_source_location(&external.token),
-        });
-        bindings.push(VerylComponentBinding {
-            instance,
-            parent_instance,
-            functions: module.functions.clone(),
-            connections: connection_bindings,
-        });
-    }
-    Ok((components, bindings))
 }
 
 fn flatten_with_trace(
@@ -326,25 +170,14 @@ fn create_absolute_addr(
     modules: &HashMap<ModuleId, SimModule>,
     expanded: &HashMap<InstancePath, InstanceId>,
 ) -> AbsoluteAddr {
-    let instance_path = InstancePath(
-        instance_path
-            .iter()
-            .map(|s| (resource_table::insert_str(&s.0), s.1))
-            .collect(),
-    );
+    let instance_path = InstancePath(instance_path.to_vec());
     let instance_id = expanded[&instance_path];
     let module_id = instance_modules[&instance_id];
     let module = &modules[&module_id];
-    let var_path = VarPath(
-        var_path
-            .iter()
-            .map(|s| resource_table::insert_str(s))
-            .collect(),
-    );
     let var_id = *module
         .variables
         .iter()
-        .find(|v| v.1.path == var_path)
+        .find(|(_, variable)| variable.path == var_path)
         .unwrap()
         .0;
     AbsoluteAddr {
@@ -418,7 +251,7 @@ fn parse_true_loops(
 
 fn scheduler_source_locations(
     error: &SchedulerError<AbsoluteAddr>,
-    module_ir: &HashMap<ModuleId, &Module>,
+    modules: &HashMap<ModuleId, SimModule>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
 ) -> Vec<SourceLocation> {
     let blocks = match error {
@@ -435,16 +268,16 @@ fn scheduler_source_locations(
                 return None;
             }
             let module_id = instance_modules.get(&addr.instance_id)?;
-            let module = module_ir.get(module_id)?;
+            let module = modules.get(module_id)?;
             let var = module.variables.get(&addr.var_id)?;
-            Some(SourceLocation::from_token(&var.token))
+            var.source.clone()
         })
         .collect()
 }
 
 pub fn schedule_symbolic_rtl(
-    symbolic: SymbolicRtl<'_>,
-    config: &BuildConfig,
+    symbolic: SymbolicRtl,
+    fused_ff_factory: Option<&dyn FusedFfLoweringFactory>,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
         (Vec<(String, usize)>, Vec<String>),
@@ -460,7 +293,6 @@ pub fn schedule_symbolic_rtl(
 ) -> Result<ScheduledRtlOutput, ParserError> {
     let SymbolicRtl {
         modules,
-        module_ir,
         module_names,
         root_id,
     } = symbolic;
@@ -493,12 +325,16 @@ pub fn schedule_symbolic_rtl(
     let unpacked_element_widths = instance_modules
         .iter()
         .flat_map(|(&instance_id, &module_id)| {
-            module_ir[&module_id]
+            modules[&module_id]
                 .variables
                 .iter()
                 .filter_map(move |(&var_id, variable)| {
-                    let element_count = variable.r#type.total_array()?;
-                    let element_width = variable.total_width()?;
+                    let element_count = variable
+                        .metadata
+                        .array_dims
+                        .iter()
+                        .try_fold(1usize, |total, &dim| total.checked_mul(dim))?;
+                    let element_width = variable.metadata.width.checked_div(element_count)?;
                     (element_count > 1 && element_width > 0).then_some((
                         AbsoluteAddr {
                             instance_id,
@@ -532,7 +368,7 @@ pub fn schedule_symbolic_rtl(
             &expanded,
             &instance_modules,
             &modules,
-            &string_of(module_names[&root_id]),
+            &module_names[&root_id],
             &indexed_instances,
             &global_boundaries,
             &unpacked_element_widths,
@@ -583,7 +419,6 @@ pub fn schedule_symbolic_rtl(
             &expanded,
             &instance_modules,
             &modules,
-            config,
         )
     );
 
@@ -603,35 +438,29 @@ pub fn schedule_symbolic_rtl(
     let var_widths: HashMap<AbsoluteAddr, usize> = instance_modules
         .iter()
         .flat_map(|(&inst_id, &mod_id)| {
-            let module = module_ir[&mod_id];
-            module.variables.iter().filter_map(move |(var_id, var)| {
-                resolve_total_width(module, var).ok().map(|w| {
-                    (
-                        AbsoluteAddr {
-                            instance_id: inst_id,
-                            var_id: *var_id,
-                        },
-                        w,
-                    )
-                })
+            modules[&mod_id].variables.iter().map(move |(var_id, var)| {
+                (
+                    AbsoluteAddr {
+                        instance_id: inst_id,
+                        var_id: *var_id,
+                    },
+                    var.metadata.width,
+                )
             })
         })
         .collect();
     let var_signedness: HashMap<AbsoluteAddr, bool> = instance_modules
         .iter()
         .flat_map(|(&inst_id, &mod_id)| {
-            module_ir[&mod_id]
-                .variables
-                .iter()
-                .map(move |(var_id, var)| {
-                    (
-                        AbsoluteAddr {
-                            instance_id: inst_id,
-                            var_id: *var_id,
-                        },
-                        var.r#type.signed,
-                    )
-                })
+            modules[&mod_id].variables.iter().map(move |(var_id, var)| {
+                (
+                    AbsoluteAddr {
+                        instance_id: inst_id,
+                        var_id: *var_id,
+                    },
+                    var.signed,
+                )
+            })
         })
         .collect();
 
@@ -668,66 +497,77 @@ pub fn schedule_symbolic_rtl(
         error,
     })?;
 
-    let ff_clock_recipes = build_ff_clock_recipes(
-        &module_ir,
-        &modules,
-        &instance_modules,
-        &clock_domains,
-        &ff_runtime_relocations,
-        *config,
-    );
-    let mut clock_arena = SLTNodeArena::<RegionedAbsoluteAddr>::new();
-    let mut clock_node_cache = HashMap::default();
-    let clock_comb_blocks = comb_blocks
-        .iter()
-        .map(|path| {
-            path.map_addr(
-                &global_arena,
-                &mut clock_arena,
-                &mut clock_node_cache,
-                &|addr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, *addr),
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let clock_var_widths = var_widths
-        .iter()
-        .map(|(&addr, &width)| {
-            (
-                RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addr),
-                width,
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    let clock_unpacked_element_widths = unpacked_element_widths
-        .iter()
-        .map(|(&addr, &element_width)| {
-            (
-                RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addr),
-                element_width,
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    let clock_ignored_loops = ignored_loops
-        .iter()
-        .map(|&(from, to)| {
-            (
-                RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, from),
-                RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, to),
-            )
-        })
-        .collect::<HashSet<_>>();
-    let clock_true_loops = true_loops
-        .iter()
-        .map(|(&(from, to), &limit)| {
-            (
+    let fused_inputs = if fused_ff_factory.is_some() {
+        let actions = build_fused_ff_actions(
+            &modules,
+            &instance_modules,
+            &clock_domains,
+            &ff_runtime_relocations,
+        );
+        let mut clock_arena = SLTNodeArena::<RegionedAbsoluteAddr>::new();
+        let mut clock_node_cache = HashMap::default();
+        let clock_comb_blocks = comb_blocks
+            .iter()
+            .map(|path| {
+                path.map_addr(
+                    &global_arena,
+                    &mut clock_arena,
+                    &mut clock_node_cache,
+                    &|addr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, *addr),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let clock_var_widths = var_widths
+            .iter()
+            .map(|(&addr, &width)| {
+                (
+                    RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addr),
+                    width,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let clock_unpacked_element_widths = unpacked_element_widths
+            .iter()
+            .map(|(&addr, &element_width)| {
+                (
+                    RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, addr),
+                    element_width,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let clock_ignored_loops = ignored_loops
+            .iter()
+            .map(|&(from, to)| {
                 (
                     RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, from),
                     RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, to),
-                ),
-                limit,
-            )
-        })
-        .collect::<HashMap<_, _>>();
+                )
+            })
+            .collect::<HashSet<_>>();
+        let clock_true_loops = true_loops
+            .iter()
+            .map(|(&(from, to), &limit)| {
+                (
+                    (
+                        RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, from),
+                        RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, to),
+                    ),
+                    limit,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        Some((
+            actions,
+            clock_arena,
+            clock_comb_blocks,
+            clock_var_widths,
+            clock_unpacked_element_widths,
+            clock_ignored_loops,
+            clock_true_loops,
+        ))
+    } else {
+        None
+    };
 
     let sched_start = flatten_timing.then(std::time::Instant::now);
     let schedule = match scheduler::sort_with_unpacked_element_widths(
@@ -742,8 +582,8 @@ pub fn schedule_symbolic_rtl(
     ) {
         Ok(schedule) => schedule,
         Err(error) => {
-            let (err_vars, err_path_idx) = module_variables(&module_ir, config).unwrap_or_default();
-            let frontend_lookup = VerylFrontendLookup {
+            let (err_vars, err_path_idx) = module_variables(&modules);
+            let frontend_lookup = FrontendLookup {
                 instance_ids: expanded.clone(),
                 instance_module: instance_modules.clone(),
                 indexed_instances: indexed_instances.clone(),
@@ -754,8 +594,7 @@ pub fn schedule_symbolic_rtl(
                 state_to_source: HashMap::default(),
                 event_aliases: HashMap::default(),
             };
-            let source_locations =
-                scheduler_source_locations(&error, &module_ir, &instance_modules);
+            let source_locations = scheduler_source_locations(&error, &modules, &instance_modules);
             let mut target_arena = SLTNodeArena::new();
             let error = error.map_addr(&global_arena, &mut target_arena, &|addr| {
                 frontend_lookup.get_path(addr)
@@ -810,50 +649,64 @@ pub fn schedule_symbolic_rtl(
     let eval_comb = schduled.clone();
     let mut eval_comb_apply_ffs = HashMap::default();
     let mut fused_direct_ff_writes = HashMap::default();
-    let mut fused_schedule_cache = HashMap::<
-        Vec<usize>,
-        (
-            Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
-            Vec<VarAtomBase<RegionedAbsoluteAddr>>,
-        ),
-    >::default();
-    for (trigger, recipes) in ff_clock_recipes {
-        let recipe_ids = recipes.iter().map(|recipe| recipe.id).collect::<Vec<_>>();
-        if let Some((units, direct_ff_writes)) = fused_schedule_cache.get(&recipe_ids) {
-            eval_comb_apply_ffs.insert(trigger, units.clone());
-            fused_direct_ff_writes.insert(trigger, direct_ff_writes.clone());
-            continue;
-        }
-        let mut ff_lowering = SharedClockLowering::new(recipes, *config);
-        let fused_start = flatten_timing.then(std::time::Instant::now);
-        let fused = match scheduler::sort_clock(
-            clock_comb_blocks.clone(),
-            &clock_arena,
-            &clock_ignored_loops,
-            &clock_true_loops,
-            four_state,
-            &clock_var_widths,
-            &clock_unpacked_element_widths,
-            next_runtime_error_code,
-            &mut ff_lowering,
-        ) {
-            Ok(schedule) => schedule,
-            Err(scheduler::ClockSortError::Lowering(error)) => return Err(error),
-            Err(scheduler::ClockSortError::Scheduler(error)) => {
-                let mut error_arena = SLTNodeArena::new();
-                let error =
-                    error.map_addr(&clock_arena, &mut error_arena, &|addr| addr.to_string())?;
-                return Err(ParserError::Scheduler(error));
+    if let (
+        Some(factory),
+        Some((
+            actions,
+            clock_arena,
+            clock_comb_blocks,
+            clock_var_widths,
+            clock_unpacked_element_widths,
+            clock_ignored_loops,
+            clock_true_loops,
+        )),
+    ) = (fused_ff_factory, fused_inputs)
+    {
+        let mut fused_schedule_cache = HashMap::<
+            Vec<usize>,
+            (
+                Vec<ExecutionUnit<RegionedAbsoluteAddr>>,
+                Vec<VarAtomBase<RegionedAbsoluteAddr>>,
+            ),
+        >::default();
+        for (trigger, actions) in actions {
+            let action_ids = actions.iter().map(|action| action.id).collect::<Vec<_>>();
+            if let Some((units, direct_ff_writes)) = fused_schedule_cache.get(&action_ids) {
+                eval_comb_apply_ffs.insert(trigger, units.clone());
+                fused_direct_ff_writes.insert(trigger, direct_ff_writes.clone());
+                continue;
             }
-        };
-        if let Some(start) = fused_start {
-            tracing::debug!("[flatten] scheduler::sort_clock: {:?}", start.elapsed());
+            let mut ff_lowering = factory.create(actions)?;
+            let fused_start = flatten_timing.then(std::time::Instant::now);
+            let fused = match scheduler::sort_clock(
+                clock_comb_blocks.clone(),
+                &clock_arena,
+                &clock_ignored_loops,
+                &clock_true_loops,
+                four_state,
+                &clock_var_widths,
+                &clock_unpacked_element_widths,
+                next_runtime_error_code,
+                ff_lowering.as_mut(),
+            ) {
+                Ok(schedule) => schedule,
+                Err(scheduler::ClockSortError::Lowering(error)) => return Err(error),
+                Err(scheduler::ClockSortError::Scheduler(error)) => {
+                    let mut error_arena = SLTNodeArena::new();
+                    let error =
+                        error.map_addr(&clock_arena, &mut error_arena, &|addr| addr.to_string())?;
+                    return Err(ParserError::Scheduler(error));
+                }
+            };
+            if let Some(start) = fused_start {
+                tracing::debug!("[flatten] scheduler::sort_clock: {:?}", start.elapsed());
+            }
+            let direct_ff_writes = fused.direct_ff_writes;
+            let units = fused.execution_units;
+            fused_schedule_cache.insert(action_ids, (units.clone(), direct_ff_writes.clone()));
+            eval_comb_apply_ffs.insert(trigger, units);
+            fused_direct_ff_writes.insert(trigger, direct_ff_writes);
         }
-        let direct_ff_writes = fused.direct_ff_writes;
-        let units = fused.execution_units;
-        fused_schedule_cache.insert(recipe_ids, (units.clone(), direct_ff_writes.clone()));
-        eval_comb_apply_ffs.insert(trigger, units);
-        fused_direct_ff_writes.insert(trigger, direct_ff_writes);
     }
 
     if let Some(t) = trace
@@ -876,18 +729,7 @@ pub fn schedule_symbolic_rtl(
         (HashMap::default(), HashMap::default())
     };
 
-    // Extract initial block statements from root module (for native testbenches)
-    let initial_statements = module_ir.get(&root_id).and_then(|root_module| {
-        let mut stmts = Vec::new();
-        for decl in &root_module.declarations {
-            if let Declaration::Initial(init_decl) = decl {
-                stmts.extend(init_decl.statements.iter().cloned());
-            }
-        }
-        if stmts.is_empty() { None } else { Some(stmts) }
-    });
-
-    let (mod_vars, mod_path_idx) = module_variables(&module_ir, config)?;
+    let (mod_vars, mod_path_idx) = module_variables(&modules);
     let initial_memory_values: Vec<InitialStateValue<AbsoluteAddr>> = instance_modules
         .iter()
         .flat_map(|(&instance_id, module_id)| {
@@ -906,15 +748,18 @@ pub fn schedule_symbolic_rtl(
     let state_objects: HashMap<AbsoluteAddr, VariableMetadata> = instance_modules
         .iter()
         .flat_map(|(&instance_id, module_id)| {
-            mod_vars[module_id].values().map(move |info| {
-                (
-                    AbsoluteAddr {
-                        instance_id,
-                        var_id: info.id,
-                    },
-                    info.metadata.clone(),
-                )
-            })
+            modules[module_id]
+                .variables
+                .iter()
+                .map(move |(&var_id, variable)| {
+                    (
+                        AbsoluteAddr {
+                            instance_id,
+                            var_id,
+                        },
+                        variable.metadata.clone(),
+                    )
+                })
         })
         .collect();
     let runtime_comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>> = comb_observers
@@ -926,40 +771,6 @@ pub fn schedule_symbolic_rtl(
             written_inputs: observer.written_inputs.clone(),
         })
         .collect();
-    let mut components = Vec::new();
-    let mut component_bindings = Vec::new();
-    let mut component_names = HashSet::default();
-    let mut elaborated_instances = expanded.iter().collect::<Vec<_>>();
-    elaborated_instances.sort_by_key(|(path, _)| path.0.clone());
-    for (path, &instance_id) in elaborated_instances {
-        let Some(module_id) = instance_modules.get(&instance_id) else {
-            continue;
-        };
-        let Some(module) = module_ir.get(module_id) else {
-            continue;
-        };
-        let (mut instance_components, mut instance_bindings) = collect_testbench_components(
-            module,
-            instance_id,
-            path,
-            &expanded,
-            &indexed_instances,
-            &mut component_names,
-        )?;
-        components.append(&mut instance_components);
-        component_bindings.append(&mut instance_bindings);
-    }
-    let testbench_source = VerylTestbenchSource {
-        initial_statements,
-        functions: module_ir
-            .get(&root_id)
-            .map(|m| m.functions.clone())
-            .unwrap_or_default(),
-        components,
-        component_bindings,
-        component_libraries: Vec::new(),
-        component_file_base: None,
-    };
     let source_sir = SirProgram {
         eval_apply_ffs,
         eval_comb_apply_ffs,
@@ -970,7 +781,6 @@ pub fn schedule_symbolic_rtl(
     let mut source_addresses = state_objects.keys().copied().collect::<Vec<_>>();
     source_addresses.sort_unstable();
     let mut source_to_state = HashMap::default();
-    let mut state_to_source = HashMap::default();
     for (index, source) in source_addresses.into_iter().enumerate() {
         let object = StateObjectId(u32::try_from(index).map_err(|_| {
             ParserError::illegal_context(
@@ -984,7 +794,6 @@ pub fn schedule_symbolic_rtl(
             var_id: object,
         };
         source_to_state.insert(source, state);
-        state_to_source.insert(state, source);
     }
     let project = |source: AbsoluteAddr| source_to_state[&source];
     let project_regioned = |source: RegionedAbsoluteAddr| RegionedStateAddr {
@@ -1048,14 +857,14 @@ pub fn schedule_symbolic_rtl(
         .collect();
     let direct_ff_writes = fused_direct_ff_writes
         .into_iter()
-        .map(|(event, writes)| {
+        .map(|(source, writes)| {
             (
-                project(event),
+                project(source),
                 writes
                     .into_iter()
-                    .map(|atom| VarAtomBase {
-                        id: project_regioned(atom.id),
-                        access: atom.access,
+                    .map(|write| VarAtomBase {
+                        id: project_regioned(write.id),
+                        access: write.access,
                     })
                     .collect(),
             )
@@ -1104,6 +913,11 @@ pub fn schedule_symbolic_rtl(
         }
     }
 
+    let state_to_source = source_to_state
+        .iter()
+        .map(|(source, state)| (*state, *source))
+        .collect();
+
     let scheduled = ScheduledRtl {
         sir,
         design: ElaboratedDesign {
@@ -1111,7 +925,7 @@ pub fn schedule_symbolic_rtl(
             events,
             initial_state,
         },
-        frontend_lookup: VerylFrontendLookup {
+        frontend_lookup: FrontendLookup {
             instance_ids: expanded,
             instance_module: instance_modules,
             indexed_instances,
@@ -1129,7 +943,6 @@ pub fn schedule_symbolic_rtl(
             testbench_read_roots: Default::default(),
             rtl_writes,
         },
-        testbench_source,
     };
 
     Ok(ScheduledRtlOutput {
@@ -1139,28 +952,24 @@ pub fn schedule_symbolic_rtl(
 }
 
 fn module_variables(
-    module_ir: &HashMap<ModuleId, &Module>,
-    config: &BuildConfig,
-) -> Result<
-    (
-        HashMap<ModuleId, HashMap<VarId, VariableInfo>>,
-        HashMap<ModuleId, HashMap<VarPath, Option<VarId>>>,
-    ),
-    ParserError,
-> {
+    modules: &HashMap<ModuleId, SimModule>,
+) -> (
+    HashMap<ModuleId, HashMap<SourceVarId, VariableInfo>>,
+    HashMap<ModuleId, HashMap<Vec<String>, Option<SourceVarId>>>,
+) {
     let mut res = HashMap::default();
     let mut path_index = HashMap::default();
-    for (id, module) in module_ir {
+    for (id, module) in modules {
         let mut variables = HashMap::default();
-        let mut paths: HashMap<VarPath, Option<VarId>> = HashMap::default();
-        for (id, varibale) in &module.variables {
+        let mut paths: HashMap<Vec<String>, Option<SourceVarId>> = HashMap::default();
+        for (&source_id, variable) in &module.variables {
             // Only module-scope variables are externally addressable. Locals
             // may share the same VarPath, but must not make a legal
             // hierarchical or public lookup appear ambiguous.
-            if varibale.affiliation == Affiliation::Module {
-                match paths.entry(varibale.path.clone()) {
+            if variable.module_affiliated {
+                match paths.entry(variable.path.clone()) {
                     std::collections::hash_map::Entry::Vacant(e) => {
-                        e.insert(Some(*id));
+                        e.insert(Some(source_id));
                     }
                     std::collections::hash_map::Entry::Occupied(mut e) => {
                         // Duplicate visible VarPath — mark as ambiguous.
@@ -1168,98 +977,22 @@ fn module_variables(
                     }
                 }
             }
-            let (dimensions, _, _) = bitaccess::get_dimensions_and_strides(module, *id)?;
-            let packed_dims = dimensions
-                .into_iter()
-                .skip(varibale.r#type.array.iter().count())
-                .collect();
             variables.insert(
-                *id,
+                source_id,
                 VariableInfo {
-                    id: *id,
-                    path: varibale.path.clone(),
-                    var_kind: varibale.kind,
-                    signed: varibale.r#type.signed,
-                    packed_dims,
-                    metadata: VariableMetadata {
-                        width: resolve_total_width(module, varibale)?,
-                        is_4state: is_4state_type(&varibale.r#type.kind),
-                        kind: type_kind_to_domain_kind(&varibale.r#type.kind, config),
-                        type_kind: type_kind_to_port_type_kind(&varibale.r#type.kind, config),
-                        array_dims: varibale.r#type.array.iter().filter_map(|d| *d).collect(),
-                    },
+                    id: source_id,
+                    path: variable.path.clone(),
+                    var_kind: variable.kind,
+                    signed: variable.signed,
+                    packed_dims: variable.packed_dims.clone(),
+                    metadata: variable.metadata.clone(),
                 },
             );
         }
         res.insert(*id, variables);
         path_index.insert(*id, paths);
     }
-    Ok((res, path_index))
-}
-
-fn type_kind_to_port_type_kind(
-    kind: &veryl_analyzer::ir::TypeKind,
-    config: &BuildConfig,
-) -> PortTypeKind {
-    use veryl_analyzer::ir::TypeKind;
-    match kind {
-        TypeKind::Clock | TypeKind::ClockPosedge | TypeKind::ClockNegedge => PortTypeKind::Clock,
-        TypeKind::Reset => match config.reset_type {
-            ResetType::AsyncHigh => PortTypeKind::ResetAsyncHigh,
-            ResetType::AsyncLow => PortTypeKind::ResetAsyncLow,
-            ResetType::SyncHigh => PortTypeKind::ResetSyncHigh,
-            ResetType::SyncLow => PortTypeKind::ResetSyncLow,
-        },
-        TypeKind::ResetAsyncHigh => PortTypeKind::ResetAsyncHigh,
-        TypeKind::ResetAsyncLow => PortTypeKind::ResetAsyncLow,
-        TypeKind::ResetSyncHigh => PortTypeKind::ResetSyncHigh,
-        TypeKind::ResetSyncLow => PortTypeKind::ResetSyncLow,
-        TypeKind::Logic => PortTypeKind::Logic,
-        TypeKind::Bit => PortTypeKind::Bit,
-        _ => PortTypeKind::Other,
-    }
-}
-
-fn type_kind_to_domain_kind(
-    kind: &veryl_analyzer::ir::TypeKind,
-    config: &BuildConfig,
-) -> DomainKind {
-    use veryl_analyzer::ir::TypeKind;
-    match kind {
-        TypeKind::Clock => match config.clock_type {
-            ClockType::PosEdge => DomainKind::ClockPosedge,
-            ClockType::NegEdge => DomainKind::ClockNegedge,
-        },
-        TypeKind::ClockPosedge => DomainKind::ClockPosedge,
-        TypeKind::ClockNegedge => DomainKind::ClockNegedge,
-        TypeKind::Reset => match config.reset_type {
-            ResetType::AsyncHigh => DomainKind::ResetAsyncHigh,
-            ResetType::AsyncLow => DomainKind::ResetAsyncLow,
-            ResetType::SyncHigh | ResetType::SyncLow => DomainKind::Other,
-        },
-        TypeKind::ResetAsyncHigh => DomainKind::ResetAsyncHigh,
-        TypeKind::ResetAsyncLow => DomainKind::ResetAsyncLow,
-        _ => DomainKind::Other,
-    }
-}
-
-fn is_4state_type(kind: &veryl_analyzer::ir::TypeKind) -> bool {
-    use veryl_analyzer::ir::TypeKind;
-    match kind {
-        TypeKind::Clock
-        | TypeKind::ClockPosedge
-        | TypeKind::ClockNegedge
-        | TypeKind::Reset
-        | TypeKind::ResetAsyncHigh
-        | TypeKind::ResetAsyncLow
-        | TypeKind::ResetSyncHigh
-        | TypeKind::ResetSyncLow
-        | TypeKind::Logic => true,
-        TypeKind::Struct(x) => x.members.iter().any(|m| is_4state_type(&m.r#type.kind)),
-        TypeKind::Union(x) => x.members.iter().any(|m| is_4state_type(&m.r#type.kind)),
-        TypeKind::Enum(x) => is_4state_type(&x.r#type.kind),
-        _ => false,
-    }
+    (res, path_index)
 }
 
 fn expand_hierarchy(
@@ -1339,7 +1072,7 @@ fn propagate_boundaries(
             for (inst_name, glue_blocks) in &sim_module.glue_blocks {
                 for (idx, glue_block) in glue_blocks.iter().enumerate() {
                     let mut child_path = path.0.clone();
-                    child_path.push((*inst_name, idx));
+                    child_path.push((inst_name.clone(), idx));
                     let child_id = expanded[&InstancePath(child_path)];
 
                     // Propagate from Parent to Child (Input Ports)
@@ -1416,7 +1149,7 @@ fn propagate_boundaries(
 
 fn expand(
     target: &ModuleId,
-    path: Vec<(StrId, usize)>,
+    path: Vec<(String, usize)>,
     modules: &HashMap<ModuleId, SimModule>,
     expanded: &mut HashMap<InstancePath, InstanceId>,
     instance_modules: &mut HashMap<InstanceId, ModuleId>,
@@ -1431,7 +1164,7 @@ fn expand(
         let indexed = module.indexed_instance_names.contains(inst_name) || gbs.len() > 1;
         for (idx, gb) in gbs.iter().enumerate() {
             let mut path = path.clone();
-            path.push((*inst_name, idx));
+            path.push((inst_name.clone(), idx));
             let id = InstanceId(*instance_id);
             expanded.insert(InstancePath(path.clone()), id);
             instance_modules.insert(id, gb.module_id);
@@ -1552,7 +1285,7 @@ fn unify_clock_domains(
         for (inst_name, glue_blocks) in &sim_module.glue_blocks {
             for (idx, glue_block) in glue_blocks.iter().enumerate() {
                 let mut child_path = path.0.clone();
-                child_path.push((*inst_name, idx));
+                child_path.push((inst_name.clone(), idx));
                 let child_id = expanded[&InstancePath(child_path)];
 
                 // Inputs: Parent -> Child (Parent drives Child)
@@ -1638,6 +1371,86 @@ fn unify_clock_domains(
         clock_domains.insert(addr, current);
     }
     clock_domains
+}
+
+fn build_fused_ff_actions(
+    modules: &HashMap<ModuleId, SimModule>,
+    instance_modules: &HashMap<InstanceId, ModuleId>,
+    clock_domains: &HashMap<AbsoluteAddr, AbsoluteAddr>,
+    runtime_relocations: &HashMap<InstanceId, FfRuntimeRelocation>,
+) -> HashMap<AbsoluteAddr, Vec<FusedFfAction>> {
+    let mut instances = instance_modules.iter().collect::<Vec<_>>();
+    instances.sort_unstable_by_key(|(instance, _)| instance.0);
+    let mut result = HashMap::<AbsoluteAddr, Vec<FusedFfAction>>::default();
+    let mut next_action_id = 0usize;
+
+    for (&instance_id, &module_id) in instances {
+        let module = &modules[&module_id];
+        let mut summaries = module.ff_access_summaries.iter().collect::<Vec<_>>();
+        summaries.sort_unstable_by_key(|(trigger, _)| (*trigger).clone());
+        for (trigger, summary) in summaries {
+            let relocate = |address: RegionedVarAddr| RegionedAbsoluteAddr {
+                region: address.region,
+                instance_id,
+                var_id: address.var_id,
+            };
+            let summary = FfAccessSummary {
+                reads: summary
+                    .reads
+                    .iter()
+                    .map(|read| VarAtomBase {
+                        id: relocate(read.id),
+                        access: read.access,
+                    })
+                    .collect(),
+                writes: summary
+                    .writes
+                    .iter()
+                    .map(|write| VarAtomBase {
+                        id: RegionedAbsoluteAddr {
+                            region: STABLE_REGION,
+                            instance_id,
+                            var_id: write.id.var_id,
+                        },
+                        access: write.access,
+                    })
+                    .collect(),
+                dynamic_writes: summary
+                    .dynamic_writes
+                    .iter()
+                    .map(|address| RegionedAbsoluteAddr {
+                        region: STABLE_REGION,
+                        instance_id,
+                        var_id: address.var_id,
+                    })
+                    .collect(),
+            };
+            let action = FusedFfAction {
+                id: next_action_id,
+                instance_id,
+                module_id,
+                trigger: trigger.clone(),
+                summary,
+                runtime: runtime_relocations[&instance_id].clone(),
+            };
+            next_action_id += 1;
+            let clock = AbsoluteAddr {
+                instance_id,
+                var_id: trigger.clock,
+            };
+            let clock = clock_domains.get(&clock).copied().unwrap_or(clock);
+            result.entry(clock).or_default().push(action.clone());
+            for &reset_id in &trigger.resets {
+                let reset = AbsoluteAddr {
+                    instance_id,
+                    var_id: reset_id,
+                };
+                let reset = clock_domains.get(&reset).copied().unwrap_or(reset);
+                result.entry(reset).or_default().push(action.clone());
+            }
+        }
+    }
+    result
 }
 
 fn relocate_units(
@@ -2583,7 +2396,6 @@ fn analyze_clock_dependencies(
     expanded: &HashMap<InstancePath, InstanceId>,
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
-    config: &BuildConfig,
 ) -> (Vec<AbsoluteAddr>, BTreeSet<AbsoluteAddr>) {
     // Build static clock dependency graph & Topo Sort
     let mut clock_deps: BTreeMap<AbsoluteAddr, BTreeSet<AbsoluteAddr>> = BTreeMap::new();
@@ -2600,7 +2412,7 @@ fn analyze_clock_dependencies(
         let module_id = &instance_modules[id];
         let sim_module = &modules[module_id];
         for (var_id, var) in &sim_module.variables {
-            let kind = type_kind_to_domain_kind(&var.r#type.kind, config);
+            let kind = var.metadata.kind;
             if !matches!(
                 kind,
                 DomainKind::ClockPosedge
@@ -2807,7 +2619,7 @@ fn analyze_clock_dependencies(
         let module_id = &instance_modules[id];
         let sim_module = &modules[module_id];
         for (var_id, var) in &sim_module.variables {
-            let kind = type_kind_to_domain_kind(&var.r#type.kind, config);
+            let kind = var.metadata.kind;
             let is_trigger = matches!(
                 kind,
                 DomainKind::ClockPosedge

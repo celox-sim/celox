@@ -1,8 +1,6 @@
 use crate::HashMap;
-use crate::ir::{ModuleId, SimModule};
-use celox_frontend_veryl::{
-    AbsoluteAddr as FrontendAbsoluteAddr, RegionedAbsoluteAddr as FrontendRegionedAbsoluteAddr,
-};
+use crate::ir::{ModuleId, SimModule, SourceAddr, SourceVarId};
+use celox_design::RegionedAbsoluteAddrBase;
 use celox_slt::{LogicPath, SLTNodeArena};
 mod output;
 
@@ -39,19 +37,11 @@ pub struct TraceOptions {
 #[derive(Debug, Clone, Default)]
 pub struct CompilationTrace {
     pub sim_modules: Option<HashMap<ModuleId, SimModule>>,
-    pub pre_atomized_comb_blocks: Option<(
-        Vec<LogicPath<FrontendAbsoluteAddr>>,
-        SLTNodeArena<FrontendAbsoluteAddr>,
-    )>,
-    pub atomized_comb_blocks: Option<(
-        Vec<LogicPath<FrontendAbsoluteAddr>>,
-        SLTNodeArena<FrontendAbsoluteAddr>,
-    )>,
-    pub flattened_comb_blocks: Option<(
-        Vec<LogicPath<FrontendAbsoluteAddr>>,
-        SLTNodeArena<FrontendAbsoluteAddr>,
-    )>,
-    pub scheduled_units: Option<Vec<celox_sir::ExecutionUnit<FrontendRegionedAbsoluteAddr>>>,
+    pub pre_atomized_comb_blocks: Option<(Vec<LogicPath<SourceAddr>>, SLTNodeArena<SourceAddr>)>,
+    pub atomized_comb_blocks: Option<(Vec<LogicPath<SourceAddr>>, SLTNodeArena<SourceAddr>)>,
+    pub flattened_comb_blocks: Option<(Vec<LogicPath<SourceAddr>>, SLTNodeArena<SourceAddr>)>,
+    pub scheduled_units:
+        Option<Vec<celox_sir::ExecutionUnit<RegionedAbsoluteAddrBase<SourceVarId>>>>,
     pub pre_optimized_sir: Option<crate::ir::UnoptimizedSir>,
     pub post_optimized_sir: Option<crate::ir::OptimizedSir>,
     /// SIR after native EU merging, StateSSA promotion, and merged-chain
@@ -75,8 +65,8 @@ impl TraceOptions {
     pub(crate) fn frontend(
         &self,
         diagnostics: &crate::RuntimeDiagnostics,
-    ) -> celox_frontend_veryl::FrontendTraceOptions {
-        celox_frontend_veryl::FrontendTraceOptions {
+    ) -> celox_frontend_core::FrontendTraceOptions {
+        celox_frontend_core::FrontendTraceOptions {
             phase_timing: diagnostics.phase_timing,
             sim_modules: self.sim_modules,
             pre_atomized_comb_blocks: self.pre_atomized_comb_blocks,
@@ -88,7 +78,7 @@ impl TraceOptions {
 }
 
 impl CompilationTrace {
-    pub(crate) fn absorb_frontend(&mut self, trace: celox_frontend_veryl::FrontendTrace) {
+    pub(crate) fn absorb_frontend(&mut self, trace: celox_frontend_core::FrontendTrace) {
         self.sim_modules = trace.sim_modules;
         self.pre_atomized_comb_blocks = trace.pre_atomized_comb_blocks;
         self.atomized_comb_blocks = trace.atomized_comb_blocks;

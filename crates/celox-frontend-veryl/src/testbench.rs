@@ -19,9 +19,8 @@ use veryl_analyzer::value::byte_value_to_string;
 use veryl_parser::resource_table::{self, StrId};
 
 use crate::{
-    AbsoluteAddr, InstancePath, LoweringPhase, ParserError, VariableInfo,
-    VerylComponentEventBinding, VerylComponentInputBinding, VerylFrontendLookup,
-    VerylTestbenchSource,
+    FrontendLookup, InstancePath, LoweringPhase, ParserError, SourceAddr, VariableInfo,
+    VerylComponentEventBinding, VerylComponentInputBinding, VerylIdMap, VerylTestbenchSource,
     bitaccess::eval_constexpr,
     context_width::{
         ValueContext, binary_semantics, cast_semantics, expression_signed, get_expr_width,
@@ -188,6 +187,10 @@ fn source_name(id: StrId) -> String {
     resource_table::get_str_value(id).unwrap_or_else(|| format!("{id}"))
 }
 
+fn source_path(path: &veryl_analyzer::ir::VarPath) -> Vec<String> {
+    path.0.iter().copied().map(source_name).collect()
+}
+
 fn hierarchical_reference_name(reference: &HierVarRef) -> String {
     reference
         .inst_path
@@ -215,7 +218,7 @@ fn invalid_hierarchical_reference(
 }
 
 pub(crate) fn resolve_hierarchical_reference<'a>(
-    lookup: &'a VerylFrontendLookup,
+    lookup: &'a FrontendLookup,
     reference: &HierVarRef,
 ) -> Result<(StateAddr, &'a VariableInfo), ParserError> {
     let (root_instance, _) = lookup.root_instance_and_module().ok_or_else(|| {
@@ -225,7 +228,7 @@ pub(crate) fn resolve_hierarchical_reference<'a>(
 }
 
 fn resolve_hierarchical_reference_from<'a>(
-    lookup: &'a VerylFrontendLookup,
+    lookup: &'a FrontendLookup,
     base_instance: InstanceId,
     reference: &HierVarRef,
 ) -> Result<(StateAddr, &'a VariableInfo), ParserError> {
@@ -238,18 +241,19 @@ fn resolve_hierarchical_reference_from<'a>(
         })?;
     resolved_path.reserve(reference.inst_path.len());
     for &segment in &reference.inst_path {
+        let segment_name = source_name(segment);
         let candidates = lookup
             .instance_ids
             .keys()
             .filter(|candidate| {
                 candidate.0.len() == resolved_path.len() + 1
                     && candidate.0.starts_with(&resolved_path)
-                    && candidate.0[resolved_path.len()].0 == segment
+                    && candidate.0[resolved_path.len()].0 == segment_name
             })
-            .map(|candidate| candidate.0[resolved_path.len()])
+            .map(|candidate| candidate.0[resolved_path.len()].clone())
             .collect::<Vec<_>>();
         match candidates.as_slice() {
-            [part] => resolved_path.push(*part),
+            [part] => resolved_path.push(part.clone()),
             [] => {
                 return Err(invalid_hierarchical_reference(
                     reference,
@@ -285,7 +289,7 @@ fn resolve_hierarchical_reference_from<'a>(
     let var_id = match lookup
         .module_var_path_index
         .get(&module_id)
-        .and_then(|variables| variables.get(&reference.var_path))
+        .and_then(|variables| variables.get(&source_path(&reference.var_path)))
     {
         Some(Some(var_id)) => *var_id,
         Some(None) => {
@@ -309,7 +313,7 @@ fn resolve_hierarchical_reference_from<'a>(
             invalid_hierarchical_reference(reference, "the target variable has no metadata")
         })?;
     let address = lookup
-        .state_address(&AbsoluteAddr {
+        .state_address(&SourceAddr {
             instance_id,
             var_id,
         })
@@ -579,7 +583,7 @@ enum TestbenchRead {
 }
 
 pub fn collect_testbench_observability(
-    lookup: &VerylFrontendLookup,
+    lookup: &FrontendLookup,
     source: &VerylTestbenchSource,
 ) -> Result<(Vec<RuntimeEventSite>, FxHashSet<StateAddr>), ParserError> {
     let Some(stmts) = source.initial_statements.as_ref() else {
@@ -599,7 +603,10 @@ pub fn collect_testbench_observability(
     for reference in read_references {
         match reference {
             TestbenchRead::Root(var_id) => {
-                if let Some((address, _)) = lookup.root_variable(var_id) {
+                let (root_instance, _) = lookup.root_instance_and_module().unwrap();
+                if let Some(source_id) = source.id_map.instance_var(lookup, root_instance, var_id)
+                    && let Some((address, _)) = lookup.root_variable(source_id)
+                {
                     reads.insert(address);
                 }
             }
@@ -631,9 +638,14 @@ pub fn collect_testbench_observability(
         }
         for reference in component_reads {
             let address = match reference {
-                TestbenchRead::Root(var_id) => lookup
-                    .instance_variable(component.parent_instance, var_id)
-                    .map(|(address, _)| address),
+                TestbenchRead::Root(var_id) => source
+                    .id_map
+                    .instance_var(lookup, component.parent_instance, var_id)
+                    .and_then(|source_id| {
+                        lookup
+                            .instance_variable(component.parent_instance, source_id)
+                            .map(|(address, _)| address)
+                    }),
                 TestbenchRead::Hierarchical(reference) => resolve_hierarchical_reference_from(
                     lookup,
                     component.parent_instance,
@@ -998,14 +1010,18 @@ fn lower_testbench_operator(op: VerylOp) -> Op {
 }
 
 struct ExprCompiler<'a> {
-    lookup: &'a VerylFrontendLookup,
+    lookup: &'a FrontendLookup,
+    id_map: &'a VerylIdMap,
     functions: &'a HashMap<VarId, Function>,
     base_instance: InstanceId,
 }
 
 impl ExprCompiler<'_> {
     fn local_variable(&self, var_id: VarId) -> Option<(StateAddr, &VariableInfo)> {
-        self.lookup.instance_variable(self.base_instance, var_id)
+        let source_id = self
+            .id_map
+            .instance_var(self.lookup, self.base_instance, var_id)?;
+        self.lookup.instance_variable(self.base_instance, source_id)
     }
 
     fn hierarchical_variable(
@@ -2264,7 +2280,7 @@ impl ExprCompiler<'_> {
 // ── Builder ────────────────────────────────────────────────────────────
 
 struct SemanticTestbenchBuilder<'a> {
-    lookup: &'a VerylFrontendLookup,
+    lookup: &'a FrontendLookup,
     testbench_source: &'a VerylTestbenchSource,
     runtime_event_site_count: usize,
     event_map: HashMap<StrId, StateAddr>,
@@ -2274,7 +2290,7 @@ struct SemanticTestbenchBuilder<'a> {
 
 impl<'a> SemanticTestbenchBuilder<'a> {
     fn new(
-        lookup: &'a VerylFrontendLookup,
+        lookup: &'a FrontendLookup,
         testbench_source: &'a VerylTestbenchSource,
         runtime_event_site_count: usize,
     ) -> Self {
@@ -2299,7 +2315,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
             &mut active_functions,
         );
         for inst in clock_insts.iter().chain(reset_insts.iter()) {
-            if let Some((addr, info)) = self.lookup.root_named_variable(*inst) {
+            if let Some((addr, info)) = self.lookup.root_named_variable(&source_name(*inst)) {
                 self.event_map.insert(*inst, addr);
                 self.signal_map.insert(
                     *inst,
@@ -2367,6 +2383,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
         let base_instance = self.lookup.root_instance_and_module().unwrap().0;
         let ec = ExprCompiler {
             lookup: self.lookup,
+            id_map: &self.testbench_source.id_map,
             functions: &self.testbench_source.functions,
             base_instance,
         };
@@ -2389,6 +2406,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
             .map(|component| {
                 let ec = ExprCompiler {
                     lookup: self.lookup,
+                    id_map: &self.testbench_source.id_map,
                     functions: &component.functions,
                     base_instance: component.parent_instance,
                 };
@@ -2413,9 +2431,21 @@ impl<'a> SemanticTestbenchBuilder<'a> {
                             Some(reference) => Some({
                                 let address = match reference {
                                     VerylComponentEventBinding::Root(id) => self
-                                        .lookup
-                                        .instance_variable(component.parent_instance, *id)
-                                        .map(|(address, _)| address),
+                                        .testbench_source
+                                        .id_map
+                                        .instance_var(
+                                            self.lookup,
+                                            component.parent_instance,
+                                            *id,
+                                        )
+                                        .and_then(|source_id| {
+                                            self.lookup
+                                                .instance_variable(
+                                                    component.parent_instance,
+                                                    source_id,
+                                                )
+                                                .map(|(address, _)| address)
+                                        }),
                                     VerylComponentEventBinding::Hierarchical(reference) => {
                                         resolve_hierarchical_reference_from(
                                             self.lookup,
@@ -2782,7 +2812,7 @@ impl<'a> SemanticTestbenchBuilder<'a> {
     /// PortTypeKind covers all four reset types (async/sync × high/low),
     /// unlike DomainKind which maps sync resets to Other.
     fn resolve_reset_polarity(&self, inst: &StrId) -> (u8, u8) {
-        if let Some((_, info)) = self.lookup.root_named_variable(*inst) {
+        if let Some((_, info)) = self.lookup.root_named_variable(&source_name(*inst)) {
             return match info.type_kind {
                 PortTypeKind::ResetAsyncHigh | PortTypeKind::ResetSyncHigh => (1, 0),
                 PortTypeKind::ResetAsyncLow | PortTypeKind::ResetSyncLow => (0, 1),
@@ -2793,7 +2823,12 @@ impl<'a> SemanticTestbenchBuilder<'a> {
     }
 
     fn resolve_loop_var(&self, var_id: &VarId) -> Option<(SemanticSignal<StateAddr>, usize)> {
-        let (addr, info) = self.lookup.root_variable(*var_id)?;
+        let root_instance = self.lookup.root_instance_and_module()?.0;
+        let source_id =
+            self.testbench_source
+                .id_map
+                .instance_var(self.lookup, root_instance, *var_id)?;
+        let (addr, info) = self.lookup.root_variable(source_id)?;
         Some((
             SemanticSignal {
                 address: addr,
@@ -2921,7 +2956,7 @@ fn reject_selected_destinations_in_expression_function_call(
 
 fn validate_testbench_function_call(
     call: &FunctionCall,
-    lookup: &VerylFrontendLookup,
+    lookup: &FrontendLookup,
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
@@ -2944,7 +2979,7 @@ fn validate_testbench_function_call(
 
 fn validate_testbench_expression(
     expression: &Expression,
-    lookup: &VerylFrontendLookup,
+    lookup: &FrontendLookup,
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
@@ -3068,7 +3103,7 @@ fn validate_testbench_expression(
 
 fn validate_testbench_system_function(
     kind: &SystemFunctionKind,
-    lookup: &VerylFrontendLookup,
+    lookup: &FrontendLookup,
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
@@ -3102,7 +3137,7 @@ fn validate_testbench_system_function(
 
 fn validate_testbench_statements(
     statements: &[Statement],
-    lookup: &VerylFrontendLookup,
+    lookup: &FrontendLookup,
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
@@ -3286,7 +3321,7 @@ fn validate_testbench_statements(
 
 fn validate_testbench_destination(
     destination: &veryl_analyzer::ir::AssignDestination,
-    lookup: &VerylFrontendLookup,
+    lookup: &FrontendLookup,
     source: &VerylTestbenchSource,
     active_functions: &mut FxHashSet<(VarId, Option<Vec<usize>>)>,
 ) -> Result<(), ParserError> {
@@ -3301,6 +3336,7 @@ fn validate_testbench_destination(
     }
     ExprCompiler {
         lookup,
+        id_map: &source.id_map,
         functions: &source.functions,
         base_instance: lookup.root_instance_and_module().unwrap().0,
     }
@@ -3309,7 +3345,7 @@ fn validate_testbench_destination(
 }
 
 pub fn compile_semantic_testbench(
-    lookup: &VerylFrontendLookup,
+    lookup: &FrontendLookup,
     source: &VerylTestbenchSource,
     runtime_event_site_count: usize,
     random_seed: Option<u64>,
@@ -3341,10 +3377,11 @@ pub fn compile_semantic_testbench(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{SourceVarId, VariableKind};
     use celox_design::{
         DomainKind, InstanceId, ModuleId, PortTypeKind, StateObjectId, VariableMetadata,
     };
-    use veryl_analyzer::ir::{Comptime, VarIndex, VarKind, VarPath, VarSelect};
+    use veryl_analyzer::ir::{Comptime, VarIndex, VarPath, VarSelect};
 
     fn reference(inst_path: Vec<StrId>, var_path: VarPath) -> HierVarRef {
         HierVarRef {
@@ -3356,13 +3393,13 @@ mod tests {
         }
     }
 
-    fn lookup_with_child(child_name: StrId, variable_name: StrId) -> VerylFrontendLookup {
+    fn lookup_with_child(child_name: StrId, variable_name: StrId) -> FrontendLookup {
         let root_instance = InstanceId(0);
         let child_instance = InstanceId(1);
         let root_module = ModuleId(0);
         let child_module = ModuleId(1);
-        let var_id = VarId::from_raw(0);
-        let source_address = AbsoluteAddr {
+        let var_id = SourceVarId(0);
+        let source_address = SourceAddr {
             instance_id: child_instance,
             var_id,
         };
@@ -3370,11 +3407,11 @@ mod tests {
             instance_id: child_instance,
             var_id: StateObjectId(0),
         };
-        let path = VarPath(vec![variable_name]);
+        let path = vec![source_name(variable_name)];
         let info = VariableInfo {
             id: var_id,
             path: path.clone(),
-            var_kind: VarKind::Variable,
+            var_kind: VariableKind::Variable,
             signed: false,
             packed_dims: vec![8],
             metadata: VariableMetadata {
@@ -3386,13 +3423,14 @@ mod tests {
             },
         };
 
-        let mut lookup = VerylFrontendLookup::default();
+        let mut lookup = FrontendLookup::default();
         lookup
             .instance_ids
             .insert(InstancePath(Vec::new()), root_instance);
-        lookup
-            .instance_ids
-            .insert(InstancePath(vec![(child_name, 0)]), child_instance);
+        lookup.instance_ids.insert(
+            InstancePath(vec![(source_name(child_name), 0)]),
+            child_instance,
+        );
         lookup.instance_module.insert(root_instance, root_module);
         lookup.instance_module.insert(child_instance, child_module);
         lookup
@@ -3456,6 +3494,7 @@ mod tests {
         let source = VerylTestbenchSource::default();
         let compiler = ExprCompiler {
             lookup: &lookup,
+            id_map: &source.id_map,
             functions: &source.functions,
             base_instance: lookup.root_instance_and_module().unwrap().0,
         };
@@ -3474,6 +3513,7 @@ mod tests {
         let source = VerylTestbenchSource::default();
         let compiler = ExprCompiler {
             lookup: &lookup,
+            id_map: &source.id_map,
             functions: &source.functions,
             base_instance: lookup.root_instance_and_module().unwrap().0,
         };
