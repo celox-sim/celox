@@ -32,6 +32,9 @@ try {
 			try {
 				const layout = JSON.parse(handle.layoutJson);
 				const events = JSON.parse(handle.eventsJson) as Record<string, number>;
+				const fourStateInitRegions = JSON.parse(
+					handle.fourStateInitRegionsJson,
+				) as Array<[number, number]>;
 				const combModule = new WebAssembly.Module(
 					new Uint8Array(handle.combWasmBytes()),
 				);
@@ -46,6 +49,8 @@ try {
 					}
 				}
 				const value: CompiledSimulator = {
+					fourState: request.fourState,
+					fourStateInitRegions,
 					layout,
 					events,
 					totalSize: handle.totalSize,

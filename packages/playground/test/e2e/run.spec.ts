@@ -101,20 +101,20 @@ test("every bundled example runs successfully", async ({ page }) => {
 	test.setTimeout(90_000);
 	const browserErrors = await openPlayground(page);
 
-	for (const example of [
-		"adder",
-		"counter",
-		"counter_sim",
-		"counter_vcd",
-		"four_state",
-	]) {
+	for (const [example, expectedPassed] of Object.entries({
+		adder: 2,
+		counter: 2,
+		counter_sim: 2,
+		counter_vcd: 2,
+		four_state: 5,
+	})) {
 		await test.step(example, async () => {
 			await page.evaluate((name) => {
 				const api = window.__CELOX_PLAYGROUND_TEST_API__;
 				if (!api) throw new Error("Missing playground test API");
 				api.loadExample(name);
 			}, example);
-			await runAndExpectPass(page);
+			await runAndExpectPass(page, expectedPassed);
 		});
 	}
 

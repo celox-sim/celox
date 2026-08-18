@@ -1581,6 +1581,16 @@ impl NativeSimulatorHandle {
         self.events_json.clone()
     }
 
+    /// Byte ranges whose value and mask planes must start as unknown (X).
+    #[napi(getter)]
+    pub fn four_state_init_regions_json(&self) -> String {
+        Self::build_four_state_init_regions_json(
+            &self.program,
+            self.program.layout(),
+            self.four_state,
+        )
+    }
+
     /// Returns the instance hierarchy as a JSON string.
     #[napi(getter)]
     pub fn hierarchy_json(&self) -> String {
@@ -1655,6 +1665,44 @@ impl NativeSimulatorHandle {
 
 #[cfg(target_arch = "wasm32")]
 impl NativeSimulatorHandle {
+    fn build_four_state_init_regions_json(
+        program: &celox::LaidOutProgram,
+        layout: &celox::MemoryLayout,
+        four_state: bool,
+    ) -> String {
+        if !four_state {
+            return "[]".to_string();
+        }
+
+        let mut regions = Vec::new();
+        for (addr, &offset) in &layout.offsets {
+            if program
+                .design
+                .state_objects
+                .get(addr)
+                .is_some_and(|metadata| metadata.is_4state)
+            {
+                regions.push((offset, celox::get_byte_size(layout.widths[addr])));
+            }
+        }
+        for (addr, &relative_offset) in &layout.working_offsets {
+            if program
+                .design
+                .state_objects
+                .get(addr)
+                .is_some_and(|metadata| metadata.is_4state)
+            {
+                regions.push((
+                    layout.working_base_offset + relative_offset,
+                    celox::get_byte_size(layout.widths[addr]),
+                ));
+            }
+        }
+        regions.sort_unstable();
+
+        serde_json::to_string(&regions).unwrap_or_else(|_| "[]".to_string())
+    }
+
     /// Build signal layout JSON from finalized SIR and MemoryLayout.
     /// Mirrors the layout format from celox-wasm.
     fn build_layout_json(

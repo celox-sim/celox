@@ -10,6 +10,7 @@ export class NativeSimulatorHandle {
 	);
 	readonly layoutJson: string;
 	readonly eventsJson: string;
+	readonly fourStateInitRegionsJson: string;
 	readonly totalSize: number;
 	combWasmBytes(): Uint8Array;
 	eventWasmBytes(name: string): Uint8Array;

@@ -11,7 +11,14 @@ import celoxTypesDts from "../../celox/dist/types.d.ts?raw";
 import celoxWasmBridgeDts from "../../celox/dist/wasm-bridge.d.ts?raw";
 import { CeloxCompilerClient } from "./celox-compiler-client.js";
 import { buildMonacoTestbenchCompilerOptions } from "./monaco-testbench-options.js";
-import { FourState, X, Z } from "./playground-runtime-helpers.js";
+import {
+	FourState,
+	initializeFourStateMemory,
+	type PlaygroundSignalValue,
+	writeSignalValue,
+	X,
+	Z,
+} from "./playground-runtime-helpers.js";
 import { transpileTestbench } from "./testbench-transpile.js";
 import {
 	buildVirtualModuleDts,
@@ -276,10 +283,34 @@ describe("Counter (Waveform)", () => {
     assign snapshot = a;
 }`,
 		testbench: `import { describe, it, expect } from "vitest";
-import { FourState, Simulator, X } from "@celox-sim/celox";
+import { FourState, Simulation, Simulator, X } from "@celox-sim/celox";
 import { FourStateDemo } from "../src/FourStateDemo.veryl";
 
 describe("FourStateDemo", () => {
+    it("keeps the default simulator in two-state mode", () => {
+        const sim = Simulator.create(FourStateDemo);
+
+        expect(sim.fourState("a").mask).toBe(0n);
+
+        sim.dispose();
+    });
+
+    it("starts unassigned simulator signals as X", () => {
+        const sim = Simulator.create(FourStateDemo, { fourState: true });
+
+        expect(sim.fourState("a").mask).toBe(0xffn);
+
+        sim.dispose();
+    });
+
+    it("starts unassigned simulation signals as X", () => {
+        const sim = Simulation.create(FourStateDemo, { fourState: true });
+
+        expect(sim.fourState("a").mask).toBe(0xffn);
+
+        sim.dispose();
+    });
+
     it("writes and reads all-X", () => {
         const sim = Simulator.create(FourStateDemo, { fourState: true });
 
@@ -1241,7 +1272,7 @@ function onVerylChange() {
 		if (celoxCompilerReady) {
 			try {
 				const result = JSON.parse(
-					await celoxCompiler.genTsFromSource([
+					await celoxCompiler.genTsFromSourceLatest([
 						{ content: source, path: "main.veryl" },
 					]),
 				);
@@ -1369,79 +1400,33 @@ async function run() {
 			}
 		})();
 
-		const compiled = await celoxCompiler.compile(
-			[{ content: verylSource, path: "main.veryl" }],
-			topName,
-			// One Run may create both 2-state and 4-state simulators. Compile the
-			// superset layout once; each factory still enforces its requested mode.
-			{ fourState: true },
-		);
-		const { layout, events, totalSize, combModule, eventModules } = compiled;
+		const sources = [{ content: verylSource, path: "main.veryl" }];
+		const [twoStateCompiled, fourStateCompiled] = await Promise.all([
+			celoxCompiler.compile(sources, topName, { fourState: false }),
+			celoxCompiler.compile(sources, topName, { fourState: true }),
+		]);
 		const t1 = performance.now();
 		appendConsole(
-			`[compile] ${(t1 - t0).toFixed(0)}ms — ${Object.keys(layout).length} signals, ${Object.keys(events).length} events`,
+			`[compile] ${(t1 - t0).toFixed(0)}ms — ${Object.keys(twoStateCompiled.layout).length} signals, ${Object.keys(twoStateCompiled.events).length} events`,
 			"log-success",
 		);
 
 		type PlaygroundSimulatorOptions = { fourState?: boolean };
-		type PlaygroundSignalValue =
-			| bigint
-			| number
-			| symbol
-			| { __fourState: true; value: bigint; mask: bigint };
-
-		function writeSignalValue(
-			view: DataView,
-			sig: any,
-			value: PlaygroundSignalValue,
-			fourStateEnabled: boolean,
-		) {
-			const isX = value === X;
-			const isZ = value === Z;
-			const isExplicitFourState =
-				typeof value === "object" &&
-				value !== null &&
-				value.__fourState === true;
-			if (
-				(isX || isZ || isExplicitFourState) &&
-				(!fourStateEnabled || !sig.is_4state)
-			) {
-				throw new Error("Cannot assign a 4-state value in 2-state mode");
-			}
-
-			const widthMask = (1n << BigInt(sig.width)) - 1n;
-			let data: bigint;
-			let mask: bigint;
-			if (isX) {
-				data = widthMask;
-				mask = widthMask;
-			} else if (isZ) {
-				data = 0n;
-				mask = widthMask;
-			} else if (isExplicitFourState) {
-				data = value.value & widthMask;
-				mask = value.mask & widthMask;
-			} else {
-				data = BigInt(value as bigint | number) & widthMask;
-				mask = 0n;
-			}
-
-			for (let i = 0; i < sig.byte_size; i++) {
-				view.setUint8(sig.offset + i, Number(data & 0xffn));
-				data >>= 8n;
-			}
-			if (sig.is_4state) {
-				for (let i = 0; i < sig.byte_size; i++) {
-					view.setUint8(sig.offset + sig.byte_size + i, Number(mask & 0xffn));
-					mask >>= 8n;
-				}
-			}
-		}
 
 		// Build simulation factory (creates fresh instance per call)
 		function createSim(options?: PlaygroundSimulatorOptions) {
+			const fourStateEnabled = options?.fourState === true;
+			const {
+				layout,
+				events,
+				totalSize,
+				combModule,
+				eventModules,
+				fourStateInitRegions,
+			} = fourStateEnabled ? fourStateCompiled : twoStateCompiled;
 			const pages = Math.max(1, Math.ceil(totalSize / 65536));
 			const memory = new WebAssembly.Memory({ initial: pages });
+			initializeFourStateMemory(memory, fourStateInitRegions);
 			const combInst = new WebAssembly.Instance(combModule, {
 				env: { memory },
 			});
@@ -1481,7 +1466,7 @@ async function run() {
 				set(_, prop: string, value: PlaygroundSignalValue) {
 					const sig = layout[prop];
 					if (!sig) throw new Error(`Signal '${prop}' not found`);
-					writeSignalValue(view, sig, value, options?.fourState === true);
+					writeSignalValue(view, sig, value, fourStateEnabled);
 					dirty = true;
 					return true;
 				},
@@ -1599,8 +1584,18 @@ async function run() {
 		//   4. Evaluate combinational logic
 		//   5. Reschedule recurring clocks with toggled value
 		function createSimulation(options?: PlaygroundSimulatorOptions) {
+			const fourStateEnabled = options?.fourState === true;
+			const {
+				layout,
+				events,
+				totalSize,
+				combModule,
+				eventModules,
+				fourStateInitRegions,
+			} = fourStateEnabled ? fourStateCompiled : twoStateCompiled;
 			const pages = Math.max(1, Math.ceil(totalSize / 65536));
 			const memory = new WebAssembly.Memory({ initial: pages });
+			initializeFourStateMemory(memory, fourStateInitRegions);
 			const combInst = new WebAssembly.Instance(combModule, {
 				env: { memory },
 			});
@@ -1660,7 +1655,7 @@ async function run() {
 
 			function writeSignal(name: string, val: number) {
 				const sig = layout[name];
-				if (sig) view.setUint8(sig.offset, val);
+				if (sig) writeSignalValue(view, sig, val, fourStateEnabled);
 			}
 
 			function resolveEvent(name: string): number {
@@ -1743,7 +1738,7 @@ async function run() {
 				set(_, prop: string, value: PlaygroundSignalValue) {
 					const sig = layout[prop];
 					if (!sig) throw new Error(`Signal '${prop}' not found`);
-					writeSignalValue(view, sig, value, options?.fourState === true);
+					writeSignalValue(view, sig, value, fourStateEnabled);
 					simDirty = true;
 					return true;
 				},

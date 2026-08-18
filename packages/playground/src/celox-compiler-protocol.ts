@@ -4,6 +4,8 @@ export type CeloxSourceFile = {
 };
 
 export type CompiledSimulator = {
+	fourState: boolean;
+	fourStateInitRegions: Array<[offset: number, byteSize: number]>;
 	layout: Record<string, any>;
 	events: Record<string, number>;
 	totalSize: number;
