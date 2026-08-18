@@ -762,6 +762,83 @@ describe("createDut — array ports", () => {
 		expect(dut.data.at(1)).toBe(0b111n);
 	});
 
+	test.each([
+		[20, 3, 0xabcden, 0x54321n],
+		[34, 5, 0x1_12345678n, 0x2_abcdef01n],
+	])(
+		"native element-strided %i-bit writes do not overwrite the next element",
+		(elementWidth, elementStride, value, nextValue) => {
+			const buffer = makeBuffer(64);
+			const layout: Record<string, SignalLayout> = {
+				data: {
+					offset: 2,
+					width: elementWidth,
+					byteSize: elementStride,
+					is4state: false,
+					direction: "input",
+					arrayElementStride: elementStride,
+					arrayPlaneSize: elementStride * 3,
+				},
+			};
+			const ports: Record<string, PortInfo> = {
+				data: {
+					direction: "input",
+					type: "logic",
+					width: elementWidth,
+					arrayDims: [3],
+				},
+			};
+			const dut = createDut<{
+				data: { at(i: number): bigint; set(i: number, v: bigint): void };
+			}>(buffer, layout, ports, mockHandle(), { dirty: false });
+
+			dut.data.set(2, nextValue);
+			dut.data.set(1, value);
+
+			expect(dut.data.at(1)).toBe(value);
+			expect(dut.data.at(2)).toBe(nextValue);
+		},
+	);
+
+	test("native element-strided wide 4-state writes stay within each plane slot", () => {
+		const buffer = makeBuffer(64);
+		const layout: Record<string, SignalLayout> = {
+			data: {
+				offset: 2,
+				width: 34,
+				byteSize: 5,
+				is4state: true,
+				direction: "input",
+				arrayElementStride: 5,
+				arrayPlaneSize: 15,
+			},
+		};
+		const ports: Record<string, PortInfo> = {
+			data: {
+				direction: "input",
+				type: "logic",
+				width: 34,
+				arrayDims: [3],
+				is4state: true,
+			},
+		};
+		const dut = createDut<{
+			data: {
+				at(i: number): bigint;
+				set(i: number, v: FourStateSignalValue): void;
+			};
+		}>(buffer, layout, ports, mockHandle(), { dirty: false });
+		const view = new DataView(buffer);
+
+		dut.data.set(2, FourState(0x2_abcdef01n, 0x1_23456789n));
+		dut.data.set(1, FourState(0x1_12345678n, 0x2_3456789an));
+
+		expect(dut.data.at(2)).toBe(0x2_abcdef01n);
+		expect(
+			Array.from({ length: 5 }, (_, i) => view.getUint8(2 + 15 + 2 * 5 + i)),
+		).toEqual([0x89, 0x67, 0x45, 0x23, 0x01]);
+	});
+
 	test("1-bit elements (logic [N]): bit-packed read/write", () => {
 		// logic[4]: 4 elements of 1 bit each = 1 byte total in native memory
 		const buffer = makeBuffer(64);

@@ -76,7 +76,7 @@ function writeNumber(
 	}
 }
 
-/** Read a wide value (≥ 54 bits) as BigInt, little-endian. */
+/** Read a value as BigInt, little-endian, using exactly byteSize bytes. */
 function readBigInt(view: DataView, offset: number, byteSize: number): bigint {
 	let result = 0n;
 	// Read 8 bytes at a time, then remaining bytes
@@ -96,7 +96,7 @@ function readBigInt(view: DataView, offset: number, byteSize: number): bigint {
 	return result;
 }
 
-/** Write a wide value (≥ 54 bits) as BigInt, little-endian. */
+/** Write a value as BigInt, little-endian, using exactly byteSize bytes. */
 function writeBigInt(
 	view: DataView,
 	offset: number,
@@ -635,13 +635,18 @@ function createArrayDut(
 		const elementStride = baseSig.arrayElementStride;
 		const elementByteSize = Math.ceil(elementWidth / 8);
 		const planeSize = baseSig.arrayPlaneSize;
-		const elementSignal = (i: number, mask: boolean): SignalLayout => ({
-			offset: baseOffset + (mask ? planeSize : 0) + i * elementStride,
-			width: elementWidth,
-			byteSize: elementByteSize,
-			is4state: false,
-			direction: baseSig.direction,
-		});
+		const elementMask = (1n << BigInt(elementWidth)) - 1n;
+		const elementOffset = (i: number, mask: boolean): number =>
+			baseOffset + (mask ? planeSize : 0) + i * elementStride;
+		const readElement = (i: number, mask: boolean): bigint =>
+			readBigInt(view, elementOffset(i, mask), elementByteSize) & elementMask;
+		const writeElement = (i: number, mask: boolean, value: bigint): void =>
+			writeBigInt(
+				view,
+				elementOffset(i, mask),
+				elementByteSize,
+				value & elementMask,
+			);
 
 		return {
 			length: totalElements,
@@ -652,7 +657,7 @@ function createArrayDut(
 					handle.evalComb();
 					state.dirty = false;
 				}
-				return readSignal(view, elementSignal(i, false));
+				return readElement(i, false);
 			},
 
 			set(i: number, value: bigint | number | symbol | FourStateValue): void {
@@ -661,34 +666,31 @@ function createArrayDut(
 					throw new Error("Cannot write to output array port");
 				}
 
-				const valueSignal = elementSignal(i, false);
-				const maskSignal = elementSignal(i, true);
-				const allOnes = (1n << BigInt(elementWidth)) - 1n;
 				if (value === Symbol.for("veryl:X")) {
 					if (!is4state) {
 						throw new Error("Array port is not 4-state; cannot assign X");
 					}
-					writeSignal(view, valueSignal, allOnes);
-					writeSignal(view, maskSignal, allOnes);
+					writeElement(i, false, elementMask);
+					writeElement(i, true, elementMask);
 				} else if (value === Symbol.for("veryl:Z")) {
 					if (!is4state) {
 						throw new Error("Array port is not 4-state; cannot assign Z");
 					}
-					writeSignal(view, valueSignal, 0n);
-					writeSignal(view, maskSignal, allOnes);
+					writeElement(i, false, 0n);
+					writeElement(i, true, elementMask);
 				} else if (isFourStateValue(value)) {
 					if (!is4state) {
 						throw new Error(
 							"Array port is not 4-state; cannot assign FourState",
 						);
 					}
-					writeSignal(view, valueSignal, value.value);
-					writeSignal(view, maskSignal, value.mask);
+					writeElement(i, false, value.value);
+					writeElement(i, true, value.mask);
 				} else {
 					const bigVal =
 						typeof value === "bigint" ? value : BigInt(value as number);
-					writeSignal(view, valueSignal, bigVal);
-					if (is4state) writeSignal(view, maskSignal, 0n);
+					writeElement(i, false, bigVal);
+					if (is4state) writeElement(i, true, 0n);
 				}
 				state.dirty = true;
 			},
