@@ -245,14 +245,9 @@ impl<T: Clone + PartialEq + Eq> RangeStore<T> {
         self.split_at(access.lsb)?;
         self.split_at(end)?;
 
-        let keys_to_remove: Vec<usize> = self
-            .ranges
-            .range(access.lsb..=access.msb)
-            .map(|(&k, _)| k)
-            .collect();
-        for k in keys_to_remove {
-            self.ranges.remove(&k);
-        }
+        self.ranges
+            .extract_if(access.lsb..=access.msb, |_, _| true)
+            .for_each(drop);
 
         // When inserting a new range, record access.lsb as the origin
         self.ranges.insert(access.lsb, (value, width, access.lsb));
@@ -356,6 +351,26 @@ mod tests {
                 (60, BitAccess::new(0, 0)),
                 (61, BitAccess::new(0, 0)),
                 (62, BitAccess::new(0, 0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn wide_update_replaces_all_covered_sparse_ranges() {
+        let mut store = RangeStore::new(0u8, 64);
+        for bit in 0..64 {
+            store.update(BitAccess::new(bit, bit), bit as u8).unwrap();
+        }
+
+        store.update(BitAccess::new(16, 47), 99).unwrap();
+
+        assert_eq!(store.ranges.len(), 33);
+        assert_eq!(
+            store.get_parts(BitAccess::new(15, 48)).unwrap(),
+            vec![
+                (15, BitAccess::new(0, 0)),
+                (99, BitAccess::new(0, 31)),
+                (48, BitAccess::new(0, 0)),
             ]
         );
     }
