@@ -747,28 +747,17 @@ pub(crate) struct X86VectorAllocation {
 /// emitted body. The fused native tick loop owns XMM0..XMM14; a
 /// standalone body keeps XMM9..XMM14 available for ABI-boundary GPR saves.
 ///
-/// If an interval must spill, allocation is repeated with XMM5 reserved as an
-/// explicit emission scratch. This lets pressure use every register when it
-/// fits while retaining a finite executable fallback when it does not.
+/// XMM5 is reserved as an explicit emission scratch. SIMD recipes use it for
+/// the second lane of a pack and for stack operands, so assigning it to a live
+/// vector would silently clobber that vector while another recipe is emitted.
 pub(crate) fn allocate(
     func: &MFunction,
     scalar_spill_bytes: u32,
     tick_loop: bool,
 ) -> X86VectorAllocation {
     let register_limit = if tick_loop { 15u8 } else { 9u8 };
-    let registers = (0..register_limit).map(X86PhysVec).collect::<Vec<_>>();
-    let first = allocate_from_registers(func, scalar_spill_bytes, &registers);
-    if first.spilled_values == 0
-        || !first
-            .assignments
-            .iter()
-            .any(|(_, location)| matches!(location, X86VectorLocation::Register(X86PhysVec(5))))
-    {
-        return first;
-    }
-
-    let registers = registers
-        .into_iter()
+    let registers = (0..register_limit)
+        .map(X86PhysVec)
         .filter(|register| register.0 != 5)
         .collect::<Vec<_>>();
     allocate_from_registers(func, scalar_spill_bytes, &registers)
@@ -1250,8 +1239,8 @@ mod tests {
         let assignment = allocate(&func, 24, true);
 
         assert_eq!(assignment.assignments.len(), 16);
-        // One register is reserved for executable stack-to-stack vector
-        // recipes once pressure exceeds all fifteen architectural registers.
+        // XMM5 is reserved for executable vector recipes, leaving fourteen
+        // allocatable registers in the fused tick loop.
         assert_eq!(assignment.spilled_values, 2);
         assert_eq!(assignment.spill_bytes, 32);
         assert!(
@@ -1263,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn fused_vector_pressure_can_use_xmm6_through_xmm14() {
+    fn fused_vector_pressure_reserves_xmm5_for_emission_scratch() {
         let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
         let vectors = (0..15).map(|_| func.alloc_x86_vec()).collect::<Vec<_>>();
         let mut block = MBlock::new(BlockId(0));
@@ -1286,7 +1275,7 @@ mod tests {
 
         let assignment = allocate(&func, 0, true);
 
-        assert_eq!(assignment.spilled_values, 0);
+        assert_eq!(assignment.spilled_values, 1);
         assert_eq!(
             assignment
                 .assignments
@@ -1296,8 +1285,12 @@ mod tests {
                     X86VectorLocation::Stack(_) => None,
                 })
                 .collect::<HashSet<_>>(),
-            (0..15).collect()
+            (0..15).filter(|register| *register != 5).collect()
         );
+        assert!(matches!(
+            assignment.assignments.last(),
+            Some((_, X86VectorLocation::Stack(0)))
+        ));
     }
 
     #[test]

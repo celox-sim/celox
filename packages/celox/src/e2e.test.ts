@@ -81,6 +81,76 @@ module Counter (
 }
 `;
 
+// Regression: preserve every lane when a wide SIMD store forwards an unpacked
+// output array through multiple module instances. Fourteen 64-bit elements
+// exercise the native SLP path that previously aliased its scratch XMM register
+// with a live forwarding vector.
+const NESTED_OUTPUT_ARRAY_SOURCE = `
+module Element (
+    clk:   input  clock,
+    rst:   input  reset,
+    value: output logic<64>,
+) {
+    var value_r: logic<64>;
+    assign value = value_r;
+    always_ff {
+        if_reset {
+            value_r = -1;
+        }
+    }
+}
+
+module GeneratedArray (
+    clk:   input  clock,
+    rst:   input  reset,
+    value: output logic<64> [14],
+) {
+    for i in 0..14: elements {
+        inst element: Element (
+            clk,
+            rst,
+            value: value[i],
+        );
+    }
+}
+
+module ForwardA (
+    clk:   input  clock,
+    rst:   input  reset,
+    value: output logic<64> [14],
+) {
+    inst source: GeneratedArray (
+        clk,
+        rst,
+        value,
+    );
+}
+
+module ForwardB (
+    clk:   input  clock,
+    rst:   input  reset,
+    value: output logic<64> [14],
+) {
+    inst source: ForwardA (
+        clk,
+        rst,
+        value,
+    );
+}
+
+module NestedOutputArrayMre (
+    clk:   input  clock,
+    rst:   input  reset,
+    value: output logic<64> [14],
+) {
+    inst source: ForwardB (
+        clk,
+        rst,
+        value,
+    );
+}
+`;
+
 const MULTIPLEXER_SOURCE = `
 module Mux4 (
     sel: input logic<2>,
@@ -438,6 +508,45 @@ describe("E2E: Simulator.create (backward compat)", () => {
 		expect(sim.dut.sum).toBe(300n);
 
 		sim.dispose();
+	});
+});
+
+describe("E2E: nested output-array forwarding", () => {
+	test("forwards every generated 64-bit output-array element", () => {
+		const addon = loadNativeAddon();
+		const sim = Simulator.create<{ rst: bigint }>(
+			{
+				__celox_module: true,
+				name: "NestedOutputArrayMre",
+				sources: [{ path: "", content: NESTED_OUTPUT_ARRAY_SOURCE }],
+				ports: {
+					clk: { direction: "input", type: "clock", width: 1 },
+					rst: { direction: "input", type: "reset", width: 1 },
+					value: {
+						direction: "output",
+						type: "logic",
+						width: 64,
+						arrayDims: [14],
+					},
+				},
+				events: ["clk"],
+			},
+			{ __nativeCreate: createSimulatorBridge(addon) },
+		);
+
+		sim.dut.rst = 0n;
+		sim.tick();
+		sim.tick();
+		sim.dut.rst = 1n;
+
+		const dut = sim.dut as any;
+		const generated = dut.source.source.source.value.at(1);
+		const forwarded = dut.source.source.value.at(1);
+		sim.dispose();
+
+		const allOnes = (1n << 64n) - 1n;
+		expect(generated).toBe(allOnes);
+		expect(forwarded).toBe(generated);
 	});
 });
 
