@@ -19,6 +19,12 @@ Pull request titles are the input to release automation:
 After 1.0, normal Semantic Versioning applies: fixes are patch releases,
 features are minor releases, and breaking changes are major releases.
 
+Changelog entries come from GitHub's merged pull requests, not from the raw
+commits reachable through a merge. A pull request therefore appears once under
+**What's Changed**, even when its branch contains multiple Conventional Commits.
+The pull request title is the release-note text and links back to the pull
+request.
+
 ## Automated release train
 
 Release Please maintains one release pull request against `master`. Every Monday
