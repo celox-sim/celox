@@ -9,6 +9,7 @@ import celoxSimulatorDts from "../../celox/dist/simulator.d.ts?raw";
 // Import real .d.ts files from @celox-sim/celox for Monaco type injection
 import celoxTypesDts from "../../celox/dist/types.d.ts?raw";
 import celoxWasmBridgeDts from "../../celox/dist/wasm-bridge.d.ts?raw";
+import { CeloxCompilerClient } from "./celox-compiler-client.js";
 import { buildMonacoTestbenchCompilerOptions } from "./monaco-testbench-options.js";
 import { FourState, X, Z } from "./playground-runtime-helpers.js";
 import { transpileTestbench } from "./testbench-transpile.js";
@@ -1228,18 +1229,23 @@ function parseVerylErrors(errorMsg: string): monaco.editor.IMarkerData[] {
 
 // Update types + diagnostics when Veryl source changes
 let updateTimer: ReturnType<typeof setTimeout>;
+let updateRevision = 0;
 function onVerylChange() {
 	clearTimeout(updateTimer);
-	updateTimer = setTimeout(() => {
+	const revision = ++updateRevision;
+	updateTimer = setTimeout(async () => {
 		const source = getVerylSource();
 		const model = getVerylModel();
 
 		// Try WASM-based analysis (accurate types + diagnostics)
-		if (celox) {
+		if (celoxCompilerReady) {
 			try {
 				const result = JSON.parse(
-					celox.genTsFromSource([{ content: source, path: "main.veryl" }]),
+					await celoxCompiler.genTsFromSource([
+						{ content: source, path: "main.veryl" },
+					]),
 				);
+				if (revision !== updateRevision) return;
 				if (result.modules?.[0]?.ports) {
 					updateDutTypes(result.modules[0].ports);
 				}
@@ -1277,6 +1283,7 @@ function onVerylChange() {
 				}
 				return;
 			} catch (e: any) {
+				if (revision !== updateRevision) return;
 				// Analysis failed — show diagnostics
 				if (model) {
 					const markers = parseVerylErrors(e.message || String(e));
@@ -1287,6 +1294,7 @@ function onVerylChange() {
 		}
 
 		// Fallback: regex-based port extraction (no WASM needed)
+		if (revision !== updateRevision) return;
 		const ports = extractPortsFromSource(source);
 		if (Object.keys(ports).length > 0) {
 			updateDutTypes(ports);
@@ -1296,11 +1304,13 @@ function onVerylChange() {
 
 // ── WASM loading ────────────────────────────────────────
 
-let celox: any;
+const celoxCompiler = new CeloxCompilerClient();
+let celoxCompilerReady = false;
 
 async function init() {
 	try {
-		celox = await import("./celox-wasm-loader.js");
+		await celoxCompiler.ready;
+		celoxCompilerReady = true;
 		statusEl.textContent = "Ready";
 		runBtn.disabled = false;
 		onVerylChange(); // Initial type generation
@@ -1347,36 +1357,91 @@ async function run() {
 		const topName = topMatch[1];
 
 		const t0 = performance.now();
-		const genTsResult = (() => {
+		const genTsResult = await (async () => {
 			try {
 				return JSON.parse(
-					celox.genTsFromSource([{ content: verylSource, path: "main.veryl" }]),
+					await celoxCompiler.genTsFromSource([
+						{ content: verylSource, path: "main.veryl" },
+					]),
 				);
 			} catch {
 				return null;
 			}
 		})();
 
-		const handle = new celox.NativeSimulatorHandle(
+		const compiled = await celoxCompiler.compile(
 			[{ content: verylSource, path: "main.veryl" }],
 			topName,
+			// One Run may create both 2-state and 4-state simulators. Compile the
+			// superset layout once; each factory still enforces its requested mode.
+			{ fourState: true },
 		);
-		const layout = JSON.parse(handle.layoutJson);
-		const events = JSON.parse(handle.eventsJson);
-		const totalSize = handle.totalSize;
+		const { layout, events, totalSize, combModule, eventModules } = compiled;
 		const t1 = performance.now();
 		appendConsole(
 			`[compile] ${(t1 - t0).toFixed(0)}ms — ${Object.keys(layout).length} signals, ${Object.keys(events).length} events`,
 			"log-success",
 		);
 
+		type PlaygroundSimulatorOptions = { fourState?: boolean };
+		type PlaygroundSignalValue =
+			| bigint
+			| number
+			| symbol
+			| { __fourState: true; value: bigint; mask: bigint };
+
+		function writeSignalValue(
+			view: DataView,
+			sig: any,
+			value: PlaygroundSignalValue,
+			fourStateEnabled: boolean,
+		) {
+			const isX = value === X;
+			const isZ = value === Z;
+			const isExplicitFourState =
+				typeof value === "object" &&
+				value !== null &&
+				value.__fourState === true;
+			if (
+				(isX || isZ || isExplicitFourState) &&
+				(!fourStateEnabled || !sig.is_4state)
+			) {
+				throw new Error("Cannot assign a 4-state value in 2-state mode");
+			}
+
+			const widthMask = (1n << BigInt(sig.width)) - 1n;
+			let data: bigint;
+			let mask: bigint;
+			if (isX) {
+				data = widthMask;
+				mask = widthMask;
+			} else if (isZ) {
+				data = 0n;
+				mask = widthMask;
+			} else if (isExplicitFourState) {
+				data = value.value & widthMask;
+				mask = value.mask & widthMask;
+			} else {
+				data = BigInt(value as bigint | number) & widthMask;
+				mask = 0n;
+			}
+
+			for (let i = 0; i < sig.byte_size; i++) {
+				view.setUint8(sig.offset + i, Number(data & 0xffn));
+				data >>= 8n;
+			}
+			if (sig.is_4state) {
+				for (let i = 0; i < sig.byte_size; i++) {
+					view.setUint8(sig.offset + sig.byte_size + i, Number(mask & 0xffn));
+					mask >>= 8n;
+				}
+			}
+		}
+
 		// Build simulation factory (creates fresh instance per call)
-		function createSim() {
+		function createSim(options?: PlaygroundSimulatorOptions) {
 			const pages = Math.max(1, Math.ceil(totalSize / 65536));
 			const memory = new WebAssembly.Memory({ initial: pages });
-			const combModule = new WebAssembly.Module(
-				new Uint8Array(handle.combWasmBytes()),
-			);
 			const combInst = new WebAssembly.Instance(combModule, {
 				env: { memory },
 			});
@@ -1386,12 +1451,12 @@ async function run() {
 			const eventInsts: Record<number, WebAssembly.Instance> = {};
 			for (const name of eventNames) {
 				const id: number = events[name];
-				try {
-					const mod = new WebAssembly.Module(
-						new Uint8Array(handle.eventWasmBytes(name)),
-					);
-					eventInsts[id] = new WebAssembly.Instance(mod, { env: { memory } });
-				} catch {}
+				const eventModule = eventModules[name];
+				if (eventModule) {
+					eventInsts[id] = new WebAssembly.Instance(eventModule, {
+						env: { memory },
+					});
+				}
 			}
 			const defaultEventId = eventNames.length > 0 ? events[eventNames[0]] : -1;
 
@@ -1413,14 +1478,10 @@ async function run() {
 					if (sig.width < 64) v &= (1n << BigInt(sig.width)) - 1n;
 					return v;
 				},
-				set(_, prop: string, value: bigint) {
+				set(_, prop: string, value: PlaygroundSignalValue) {
 					const sig = layout[prop];
 					if (!sig) throw new Error(`Signal '${prop}' not found`);
-					let v = BigInt(value);
-					for (let i = 0; i < sig.byte_size; i++) {
-						view.setUint8(sig.offset + i, Number(v & 0xffn));
-						v >>= 8n;
-					}
+					writeSignalValue(view, sig, value, options?.fourState === true);
 					dirty = true;
 					return true;
 				},
@@ -1525,8 +1586,8 @@ async function run() {
 			.filter(Boolean);
 
 		const Simulator = {
-			create(_module: any) {
-				return createSim();
+			create(_module: any, options?: PlaygroundSimulatorOptions) {
+				return createSim(options);
 			},
 		};
 
@@ -1537,12 +1598,9 @@ async function run() {
 		//   3. Detect edges (posedge/negedge) and fire triggered FF handlers
 		//   4. Evaluate combinational logic
 		//   5. Reschedule recurring clocks with toggled value
-		function createSimulation() {
+		function createSimulation(options?: PlaygroundSimulatorOptions) {
 			const pages = Math.max(1, Math.ceil(totalSize / 65536));
 			const memory = new WebAssembly.Memory({ initial: pages });
-			const combModule = new WebAssembly.Module(
-				new Uint8Array(handle.combWasmBytes()),
-			);
 			const combInst = new WebAssembly.Instance(combModule, {
 				env: { memory },
 			});
@@ -1551,12 +1609,12 @@ async function run() {
 			const eventInsts: Record<number, WebAssembly.Instance> = {};
 			for (const name of eventNames) {
 				const id: number = events[name];
-				try {
-					const mod = new WebAssembly.Module(
-						new Uint8Array(handle.eventWasmBytes(name)),
-					);
-					eventInsts[id] = new WebAssembly.Instance(mod, { env: { memory } });
-				} catch {}
+				const eventModule = eventModules[name];
+				if (eventModule) {
+					eventInsts[id] = new WebAssembly.Instance(eventModule, {
+						env: { memory },
+					});
+				}
 			}
 
 			const view = new DataView(memory.buffer);
@@ -1682,14 +1740,10 @@ async function run() {
 					if (sig.width < 64) v &= (1n << BigInt(sig.width)) - 1n;
 					return v;
 				},
-				set(_, prop: string, value: bigint) {
+				set(_, prop: string, value: PlaygroundSignalValue) {
 					const sig = layout[prop];
 					if (!sig) throw new Error(`Signal '${prop}' not found`);
-					let v = BigInt(value);
-					for (let i = 0; i < sig.byte_size; i++) {
-						view.setUint8(sig.offset + i, Number(v & 0xffn));
-						v >>= 8n;
-					}
+					writeSignalValue(view, sig, value, options?.fourState === true);
 					simDirty = true;
 					return true;
 				},
@@ -1894,8 +1948,8 @@ async function run() {
 		}
 
 		const Simulation = {
-			create(_module: any) {
-				return createSimulation();
+			create(_module: any, options?: PlaygroundSimulatorOptions) {
+				return createSimulation(options);
 			},
 		};
 
