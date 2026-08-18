@@ -1157,18 +1157,21 @@ function getVerylModel(): monaco.editor.ITextModel | null {
 	return null;
 }
 
-function getTestModels(): { path: string; model: monaco.editor.ITextModel }[] {
-	const target = runTargetEl.value;
+function snapshotTestSources(
+	target: string,
+): { path: string; source: string }[] {
 	if (target === "*") {
 		// All test files
-		const result: { path: string; model: monaco.editor.ITextModel }[] = [];
+		const result: { path: string; source: string }[] = [];
 		for (const [path, f] of files) {
-			if (isTestFile(path)) result.push({ path, model: f.model });
+			if (isTestFile(path)) {
+				result.push({ path, source: f.model.getValue() });
+			}
 		}
 		return result;
 	}
 	const f = files.get(target);
-	if (f) return [{ path: target, model: f.model }];
+	if (f) return [{ path: target, source: f.model.getValue() }];
 	return [];
 }
 
@@ -1392,6 +1395,14 @@ async function run() {
 	const targetPath = runTargetEl.value;
 	if (!targetPath) {
 		appendConsole("[error] No test file selected", "log-error");
+		statusEl.textContent = "Error";
+		runBtn.disabled = false;
+		return;
+	}
+	const runArgs = runArgsEl.value.trim();
+	const testSources = snapshotTestSources(targetPath);
+	if (testSources.length === 0) {
+		appendConsole("[error] No test files found", "log-error");
 		statusEl.textContent = "Error";
 		runBtn.disabled = false;
 		return;
@@ -1981,10 +1992,9 @@ async function run() {
 		};
 
 		// Parse vitest-style args (--grep "pattern")
-		const argsStr = runArgsEl.value.trim();
 		let grepPattern: RegExp | null = null;
-		if (argsStr) {
-			const grepMatch = argsStr.match(
+		if (runArgs) {
+			const grepMatch = runArgs.match(
 				/(?:--grep|-t)\s+(?:"([^"]+)"|'([^']+)'|(\S+))/,
 			);
 			if (grepMatch) {
@@ -2005,14 +2015,9 @@ async function run() {
 		const tests: TestEntry[] = [];
 
 		statusEl.textContent = "Running…";
-		const tsWorker = await monacoTypeScript.getTypeScriptWorker();
-		const testModels = getTestModels();
-		if (testModels.length === 0) throw new Error("No test files found");
 
-		for (const { path: testPath, model: tbMdl } of testModels) {
-			const client = await tsWorker(tbMdl.uri);
-			const output = await client.getEmitOutput(tbMdl.uri.toString());
-			const jsCode = transpileTestbench(tbMdl.getValue(), testPath, output);
+		for (const { path: testPath, source } of testSources) {
+			const jsCode = transpileTestbench(source, testPath);
 
 			const suiteStack: string[] = [];
 			function _describe(name: string, fn: () => void) {

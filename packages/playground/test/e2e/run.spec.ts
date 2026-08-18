@@ -29,7 +29,10 @@ module AddLeaf (
 
 async function runAndExpectPass(page: Page, expectedPassed = 2) {
 	await page.locator("#run").click();
+	await expectRunToPass(page, expectedPassed);
+}
 
+async function expectRunToPass(page: Page, expectedPassed = 2) {
 	try {
 		await page.waitForFunction(
 			() => {
@@ -130,5 +133,30 @@ test("a hierarchical design compiles and runs in the browser", async ({ page }) 
 	}, HIERARCHICAL_ADDER);
 
 	await runAndExpectPass(page);
+	browserErrors.assertEmpty();
+});
+
+test("Run uses the testbench snapshot from when it started", async ({ page }) => {
+	const browserErrors = await openPlayground(page);
+
+	await page.locator("#run").click();
+	await page.evaluate(() => {
+		const api = window.__CELOX_PLAYGROUND_TEST_API__;
+		if (!api) throw new Error("Missing playground test API");
+		api.setFileContent(
+			"test/adder.test.ts",
+			`import { describe, it, expect } from "vitest";
+describe("edited testbench", () => {
+    it("must not enter the active run", () => {
+        expect(1).toBe(2);
+    });
+});`,
+		);
+	});
+
+	await expectRunToPass(page);
+	expect(await page.locator("#console").textContent()).not.toContain(
+		"edited testbench",
+	);
 	browserErrors.assertEmpty();
 });
