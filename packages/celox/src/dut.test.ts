@@ -694,6 +694,151 @@ describe("createDut — array ports", () => {
 		expect(dut.data.length).toBe(4);
 	});
 
+	test("native element-strided sub-byte elements use separate slots", () => {
+		const buffer = makeBuffer(64);
+		const layout: Record<string, SignalLayout> = {
+			bits: {
+				offset: 4,
+				width: 1,
+				byteSize: 1,
+				is4state: false,
+				direction: "input",
+				arrayElementStride: 1,
+				arrayPlaneSize: 4,
+			},
+		};
+		const ports: Record<string, PortInfo> = {
+			bits: { direction: "input", type: "logic", width: 1, arrayDims: [4] },
+		};
+		const dut = createDut<{
+			bits: { at(i: number): bigint; set(i: number, v: bigint): void };
+		}>(buffer, layout, ports, mockHandle(), { dirty: false });
+
+		dut.bits.set(1, 1n);
+		dut.bits.set(3, 1n);
+
+		const view = new DataView(buffer);
+		expect(view.getUint8(4)).toBe(0);
+		expect(view.getUint8(5)).toBe(1);
+		expect(view.getUint8(6)).toBe(0);
+		expect(view.getUint8(7)).toBe(1);
+		expect(dut.bits.at(1)).toBe(1n);
+		expect(dut.bits.at(3)).toBe(1n);
+	});
+
+	test("native element-strided 4-state arrays use the reported mask plane", () => {
+		const buffer = makeBuffer(64);
+		const layout: Record<string, SignalLayout> = {
+			data: {
+				offset: 2,
+				width: 3,
+				byteSize: 1,
+				is4state: true,
+				direction: "input",
+				arrayElementStride: 1,
+				arrayPlaneSize: 3,
+			},
+		};
+		const ports: Record<string, PortInfo> = {
+			data: {
+				direction: "input",
+				type: "logic",
+				width: 3,
+				arrayDims: [3],
+				is4state: true,
+			},
+		};
+		const dut = createDut<{
+			data: { at(i: number): bigint; set(i: number, v: unknown): void };
+		}>(buffer, layout, ports, mockHandle(), { dirty: false });
+
+		dut.data.set(1, X);
+
+		const view = new DataView(buffer);
+		expect(view.getUint8(3)).toBe(0b111);
+		expect(view.getUint8(6)).toBe(0b111);
+		expect(view.getUint8(2)).toBe(0);
+		expect(view.getUint8(5)).toBe(0);
+		expect(dut.data.at(1)).toBe(0b111n);
+	});
+
+	test.each([
+		[20, 3, 0xabcden, 0x54321n],
+		[34, 5, 0x1_12345678n, 0x2_abcdef01n],
+	])(
+		"native element-strided %i-bit writes do not overwrite the next element",
+		(elementWidth, elementStride, value, nextValue) => {
+			const buffer = makeBuffer(64);
+			const layout: Record<string, SignalLayout> = {
+				data: {
+					offset: 2,
+					width: elementWidth,
+					byteSize: elementStride,
+					is4state: false,
+					direction: "input",
+					arrayElementStride: elementStride,
+					arrayPlaneSize: elementStride * 3,
+				},
+			};
+			const ports: Record<string, PortInfo> = {
+				data: {
+					direction: "input",
+					type: "logic",
+					width: elementWidth,
+					arrayDims: [3],
+				},
+			};
+			const dut = createDut<{
+				data: { at(i: number): bigint; set(i: number, v: bigint): void };
+			}>(buffer, layout, ports, mockHandle(), { dirty: false });
+
+			dut.data.set(2, nextValue);
+			dut.data.set(1, value);
+
+			expect(dut.data.at(1)).toBe(value);
+			expect(dut.data.at(2)).toBe(nextValue);
+		},
+	);
+
+	test("native element-strided wide 4-state writes stay within each plane slot", () => {
+		const buffer = makeBuffer(64);
+		const layout: Record<string, SignalLayout> = {
+			data: {
+				offset: 2,
+				width: 34,
+				byteSize: 5,
+				is4state: true,
+				direction: "input",
+				arrayElementStride: 5,
+				arrayPlaneSize: 15,
+			},
+		};
+		const ports: Record<string, PortInfo> = {
+			data: {
+				direction: "input",
+				type: "logic",
+				width: 34,
+				arrayDims: [3],
+				is4state: true,
+			},
+		};
+		const dut = createDut<{
+			data: {
+				at(i: number): bigint;
+				set(i: number, v: FourStateSignalValue): void;
+			};
+		}>(buffer, layout, ports, mockHandle(), { dirty: false });
+		const view = new DataView(buffer);
+
+		dut.data.set(2, FourState(0x2_abcdef01n, 0x1_23456789n));
+		dut.data.set(1, FourState(0x1_12345678n, 0x2_3456789an));
+
+		expect(dut.data.at(2)).toBe(0x2_abcdef01n);
+		expect(
+			Array.from({ length: 5 }, (_, i) => view.getUint8(2 + 15 + 2 * 5 + i)),
+		).toEqual([0x89, 0x67, 0x45, 0x23, 0x01]);
+	});
+
 	test("1-bit elements (logic [N]): bit-packed read/write", () => {
 		// logic[4]: 4 elements of 1 bit each = 1 byte total in native memory
 		const buffer = makeBuffer(64);
