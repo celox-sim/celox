@@ -1123,6 +1123,8 @@ struct LoweringCostCache {
     owned_slice_lower_costs: Vec<Option<u128>>,
     contains_shared_nontrivial: Vec<Option<bool>>,
     is_speculatable_pure: Vec<Option<bool>>,
+    traversal_seen: Vec<bool>,
+    traversal_work: Vec<NodeId>,
     #[cfg(test)]
     analysis_node_visits: usize,
 }
@@ -3847,35 +3849,50 @@ impl SLTToSIRLowerer {
         honor_materialized: bool,
     ) {
         let node_count = arena.len();
-        let mut fanout = vec![0usize; node_count];
-        let mut initially_materialized = vec![false; node_count];
-        let mut visited = crate::HashSet::default();
-        let mut work = roots.to_vec();
-        while let Some(node) = work.pop() {
-            if !visited.insert(node) {
+        let mut cache = self.cost_cache.borrow_mut();
+        cache.tree_costs.clear();
+        cache.tree_costs.resize(node_count, None);
+        cache.contains_div_rem.clear();
+        cache.contains_div_rem.resize(node_count, None);
+        cache.fanout.clear();
+        cache.fanout.resize(node_count, 0);
+        cache.initially_materialized.clear();
+        cache.initially_materialized.resize(node_count, false);
+        cache.owned_costs.clear();
+        cache.owned_costs.resize(node_count, None);
+        cache.owned_slice_lower_costs.clear();
+        cache.owned_slice_lower_costs.resize(node_count, None);
+        cache.contains_shared_nontrivial.clear();
+        cache.contains_shared_nontrivial.resize(node_count, None);
+        cache.is_speculatable_pure.clear();
+        cache.is_speculatable_pure.resize(node_count, None);
+        cache.traversal_seen.clear();
+        cache.traversal_seen.resize(node_count, false);
+        cache.traversal_work.clear();
+        cache.traversal_work.extend_from_slice(roots);
+        #[cfg(test)]
+        {
+            cache.analysis_node_visits = 0;
+        }
+
+        while let Some(node) = cache.traversal_work.pop() {
+            if cache.traversal_seen[node.0] {
                 continue;
             }
+            cache.traversal_seen[node.0] = true;
+            #[cfg(test)]
+            {
+                cache.analysis_node_visits += 1;
+            }
             if honor_materialized && materialized.contains_key(&node) {
-                initially_materialized[node.0] = true;
+                cache.initially_materialized[node.0] = true;
                 continue;
             }
             for child in Self::node_children(node, arena) {
-                fanout[child.0] = fanout[child.0].saturating_add(1);
-                work.push(child);
+                cache.fanout[child.0] = cache.fanout[child.0].saturating_add(1);
+                cache.traversal_work.push(child);
             }
         }
-        *self.cost_cache.borrow_mut() = LoweringCostCache {
-            tree_costs: vec![None; node_count],
-            contains_div_rem: vec![None; node_count],
-            fanout,
-            initially_materialized,
-            owned_costs: vec![None; node_count],
-            owned_slice_lower_costs: vec![None; node_count],
-            contains_shared_nontrivial: vec![None; node_count],
-            is_speculatable_pure: vec![None; node_count],
-            #[cfg(test)]
-            analysis_node_visits: visited.len(),
-        };
         self.cache_insert_log.borrow_mut().clear();
     }
 
