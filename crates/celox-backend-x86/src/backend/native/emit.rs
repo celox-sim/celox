@@ -3012,6 +3012,7 @@ fn emit_inst(
 ) -> Result<bool, IcedError> {
     let mut bound_continuation = false;
     match inst {
+        MInst::X86Simd(X86SimdInst::Scratch128 { .. }) => {}
         MInst::X86Simd(X86SimdInst::Zero128 { dst }) => {
             match assignment
                 .x86_vector(*dst)
@@ -3037,7 +3038,12 @@ fn emit_inst(
                 }
             }
         }
-        MInst::X86Simd(X86SimdInst::Pack128 { dst, low, high }) => {
+        MInst::X86Simd(X86SimdInst::Pack128 {
+            dst,
+            low,
+            high,
+            scratch,
+        }) => {
             let low = preg_to_reg64(resolve(assignment, *low));
             let high = preg_to_reg64(resolve(assignment, *high));
             match assignment
@@ -3050,8 +3056,40 @@ fn emit_inst(
                     if low == high {
                         asm.punpcklqdq(destination, destination)?;
                     } else {
-                        asm.movq(xmm5, high)?;
-                        asm.punpcklqdq(destination, xmm5)?;
+                        let scratch = scratch.expect("verified pack scratch vector");
+                        match assignment
+                            .x86_vector(scratch)
+                            .expect("verified x86 vector scratch assignment")
+                        {
+                            X86VectorLocation::Register(register) => {
+                                let scratch = x86_vec_to_xmm(register);
+                                debug_assert_ne!(destination, scratch);
+                                asm.movq(scratch, high)?;
+                                asm.punpcklqdq(destination, scratch)?;
+                            }
+                            X86VectorLocation::Stack(stack_offset) => {
+                                asm.mov(
+                                    qword_ptr(mem_operand(BaseReg::StackFrame, stack_offset)),
+                                    low,
+                                )?;
+                                asm.mov(
+                                    qword_ptr(mem_operand(
+                                        BaseReg::StackFrame,
+                                        stack_offset
+                                            .checked_add(8)
+                                            .expect("verified vector spill offset fits i32"),
+                                    )),
+                                    high,
+                                )?;
+                                let source =
+                                    xmmword_ptr(mem_operand(BaseReg::StackFrame, stack_offset));
+                                if func.target_features.avx() {
+                                    asm.vmovdqu(destination, source)?;
+                                } else {
+                                    asm.movdqu(destination, source)?;
+                                }
+                            }
+                        }
                     }
                 }
                 X86VectorLocation::Stack(stack_offset) => {
@@ -5508,6 +5546,7 @@ fn log_mir_stats(label: &str, stage: &str, func: &super::mir::MFunction) {
                 MInst::X86Simd(X86SimdInst::Zero128 { .. })
                 | MInst::X86Simd(X86SimdInst::Pack128 { .. })
                 | MInst::X86Simd(X86SimdInst::Binary128 { .. }) => alu += 1,
+                MInst::X86Simd(X86SimdInst::Scratch128 { .. }) => {}
                 MInst::X86Simd(X86SimdInst::Load128 { base, .. }) => match base {
                     BaseReg::SimState => load_sim += 1,
                     BaseReg::StackFrame => load_stack += 1,

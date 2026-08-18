@@ -676,15 +676,19 @@ fn select_store_fanout_packs(func: &mut MFunction, stats: &mut SlpStats) {
         }
     }
 
-    let mut by_block = BTreeMap::<usize, Vec<(X86VecReg, PackPairPlan)>>::new();
+    let mut by_block = BTreeMap::<usize, Vec<(X86VecReg, Option<X86VecReg>, PackPairPlan)>>::new();
     for plan in pack_plans {
         let vector = func.alloc_x86_vec();
-        by_block.entry(plan.block).or_default().push((vector, plan));
+        let scratch = (!plan.zero && plan.low != plan.high).then(|| func.alloc_x86_vec());
+        by_block
+            .entry(plan.block)
+            .or_default()
+            .push((vector, scratch, plan));
     }
     let mut replacements_by_block = BTreeMap::<usize, HashMap<usize, Vec<MInst>>>::new();
     for (block_index, plans) in by_block {
         let replacements = replacements_by_block.entry(block_index).or_default();
-        for (vector, plan) in plans {
+        for (vector, scratch, plan) in plans {
             let store_pair_count = plan.store_pairs.len();
             let pack_cost = if plan.zero {
                 1
@@ -702,10 +706,14 @@ fn select_store_fanout_packs(func: &mut MFunction, stats: &mut SlpStats) {
                         replacement.push(MInst::X86Simd(X86SimdInst::Zero128 { dst: vector }));
                         stats.vector_zeroes += 1;
                     } else {
+                        let scratch =
+                            scratch.expect("non-zero pack with distinct lanes has vector scratch");
+                        replacement.push(MInst::X86Simd(X86SimdInst::Scratch128 { dst: scratch }));
                         replacement.push(MInst::X86Simd(X86SimdInst::Pack128 {
                             dst: vector,
                             low: plan.low,
                             high: plan.high,
+                            scratch: Some(scratch),
                         }));
                         stats.vector_packs += 1;
                     }
@@ -747,17 +755,30 @@ pub(crate) struct X86VectorAllocation {
 /// emitted body. The fused native tick loop owns XMM0..XMM14; a
 /// standalone body keeps XMM9..XMM14 available for ABI-boundary GPR saves.
 ///
-/// XMM5 is reserved as an explicit emission scratch. SIMD recipes use it for
-/// the second lane of a pack and for stack operands, so assigning it to a live
-/// vector would silently clobber that vector while another recipe is emitted.
+/// SIMD recipes model their short-lived vector temporaries explicitly, so the
+/// allocator can use every physical register without hiding a post-RA clobber.
+/// The older stack recipes still use XMM5 as an emission scratch; reserve it
+/// only when a first coloring both spills a vector and assigns a live vector to
+/// that register.
 pub(crate) fn allocate(
     func: &MFunction,
     scalar_spill_bytes: u32,
     tick_loop: bool,
 ) -> X86VectorAllocation {
     let register_limit = if tick_loop { 15u8 } else { 9u8 };
-    let registers = (0..register_limit)
-        .map(X86PhysVec)
+    let registers = (0..register_limit).map(X86PhysVec).collect::<Vec<_>>();
+    let first = allocate_from_registers(func, scalar_spill_bytes, &registers);
+    if first.spilled_values == 0
+        || !first
+            .assignments
+            .iter()
+            .any(|(_, location)| matches!(location, X86VectorLocation::Register(X86PhysVec(5))))
+    {
+        return first;
+    }
+
+    let registers = registers
+        .into_iter()
         .filter(|register| register.0 != 5)
         .collect::<Vec<_>>();
     allocate_from_registers(func, scalar_spill_bytes, &registers)
@@ -1239,8 +1260,8 @@ mod tests {
         let assignment = allocate(&func, 24, true);
 
         assert_eq!(assignment.assignments.len(), 16);
-        // XMM5 is reserved for executable vector recipes, leaving fourteen
-        // allocatable registers in the fused tick loop.
+        // Once vector stack recipes are needed, XMM5 is reserved for their
+        // emission scratch and the remaining pressure spills two values.
         assert_eq!(assignment.spilled_values, 2);
         assert_eq!(assignment.spill_bytes, 32);
         assert!(
@@ -1252,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn fused_vector_pressure_reserves_xmm5_for_emission_scratch() {
+    fn fused_vector_pressure_uses_all_registers_without_a_temporary() {
         let mut func = MFunction::new(VRegAllocator::new(), Vec::new());
         let vectors = (0..15).map(|_| func.alloc_x86_vec()).collect::<Vec<_>>();
         let mut block = MBlock::new(BlockId(0));
@@ -1275,7 +1296,7 @@ mod tests {
 
         let assignment = allocate(&func, 0, true);
 
-        assert_eq!(assignment.spilled_values, 1);
+        assert_eq!(assignment.spilled_values, 0);
         assert_eq!(
             assignment
                 .assignments
@@ -1285,12 +1306,59 @@ mod tests {
                     X86VectorLocation::Stack(_) => None,
                 })
                 .collect::<HashSet<_>>(),
-            (0..15).filter(|register| *register != 5).collect()
+            (0..15).collect()
         );
-        assert!(matches!(
-            assignment.assignments.last(),
-            Some((_, X86VectorLocation::Stack(0)))
-        ));
+    }
+
+    #[test]
+    fn pack_scratch_is_colored_separately_from_the_packed_destination() {
+        let mut scalar = VRegAllocator::new();
+        let low = scalar.alloc();
+        let high = scalar.alloc();
+        let mut func = MFunction::new(scalar, vec![SpillDesc::transient(); 2]);
+        let scratch_value = func.alloc_x86_vec();
+        let destination_value = func.alloc_x86_vec();
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::LoadImm { dst: low, value: 1 });
+        block.push(MInst::LoadImm {
+            dst: high,
+            value: 2,
+        });
+        block.push(MInst::X86Simd(X86SimdInst::Scratch128 {
+            dst: scratch_value,
+        }));
+        block.push(MInst::X86Simd(X86SimdInst::Pack128 {
+            dst: destination_value,
+            low,
+            high,
+            scratch: Some(scratch_value),
+        }));
+        block.push(MInst::X86Simd(X86SimdInst::Store128 {
+            base: BaseReg::SimState,
+            offset: 32,
+            src: destination_value,
+        }));
+        block.push(MInst::Return);
+        func.blocks.push(block);
+
+        func.verify();
+        let assignment = allocate(&func, 0, true);
+        let scratch = assignment
+            .assignments
+            .iter()
+            .find(|(value, _)| *value == scratch_value)
+            .map(|(_, location)| *location)
+            .expect("scratch assignment");
+        let destination = assignment
+            .assignments
+            .iter()
+            .find(|(value, _)| *value == destination_value)
+            .map(|(_, location)| *location)
+            .expect("destination assignment");
+
+        assert!(matches!(scratch, X86VectorLocation::Register(_)));
+        assert!(matches!(destination, X86VectorLocation::Register(_)));
+        assert_ne!(scratch, destination);
     }
 
     #[test]
@@ -1332,6 +1400,14 @@ mod tests {
                 .insts
                 .iter()
                 .filter(|inst| matches!(inst, MInst::X86Simd(X86SimdInst::Pack128 { .. })))
+                .count(),
+            1
+        );
+        assert_eq!(
+            func.blocks[0]
+                .insts
+                .iter()
+                .filter(|inst| matches!(inst, MInst::X86Simd(X86SimdInst::Scratch128 { .. })))
                 .count(),
             1
         );
