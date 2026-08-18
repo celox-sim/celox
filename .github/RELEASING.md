@@ -102,7 +102,7 @@ distribution in every channel.
 
 ## Repository configuration
 
-Release automation uses the `celox-release-please` GitHub App, installed for this
+Release automation uses the `celox-automation` GitHub App, installed for this
 repository with repository contents and pull request write access. Store its
 numeric App ID as the `RELEASE_APP_ID` Actions variable and its complete PEM
 private key as the `RELEASE_APP_PRIVATE_KEY` Actions secret. Each job mints a
