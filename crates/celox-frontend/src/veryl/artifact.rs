@@ -155,6 +155,7 @@ fn is_4state(kind: &veryl_analyzer::ir::TypeKind) -> bool {
             .members
             .iter()
             .any(|member| is_4state(&member.r#type.kind)),
+        TypeKind::Enum(value) => is_4state(&value.r#type.kind),
         _ => false,
     }
 }
@@ -462,4 +463,29 @@ pub(crate) fn project_module_with_ids(
         },
         ids,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use veryl_analyzer::{
+        ir::{Type, TypeKind, TypeKindEnum},
+        symbol::SymbolId,
+    };
+
+    use super::is_4state;
+
+    fn enum_with_backing(kind: TypeKind) -> TypeKind {
+        TypeKind::Enum(Arc::new(TypeKindEnum {
+            id: SymbolId::default(),
+            r#type: Box::new(Type::new(kind)),
+        }))
+    }
+
+    #[test]
+    fn enum_state_kind_follows_its_backing_type() {
+        assert!(is_4state(&enum_with_backing(TypeKind::Logic)));
+        assert!(!is_4state(&enum_with_backing(TypeKind::Bit)));
+    }
 }
