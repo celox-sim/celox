@@ -1,0 +1,40 @@
+name: Validate Python and cocotb update policy
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/updatecli.yml"
+      - ".github/workflows/updatecli-check.yml"
+      - ".updatecli-version"
+      - ".updatecli/**"
+      - "renovate.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: updatecli-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Updatecli
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Updatecli
+        uses: updatecli/updatecli-action@v3.6.0
+        with:
+          version-file: .updatecli-version
+
+      - name: Test Python compatibility selector
+        run: python3 -m unittest discover -s .updatecli/tests -v
+
+      - name: Preview update policy
+        run: updatecli pipeline diff --config .updatecli/updatecli.d
+        env:
+          UPDATECLI_GITHUB_ACTOR: ${{ github.actor }}
+          UPDATECLI_GITHUB_TOKEN: ${{ github.token }}
