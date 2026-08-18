@@ -57,6 +57,42 @@ test("sync branch guard preserves unresolved branch work", (t) => {
     /Refusing to replace synchronization branch head/,
   );
 
+  // Bot identity and subject alone are insufficient; only this workflow's
+  // explicit marker makes a pending merge disposable.
+  git("switch", "--quiet", "-c", "unmarked-sync", develop);
+  git(
+    "-c",
+    "user.name=celox-release-bot",
+    "-c",
+    "user.email=celox-release-bot@users.noreply.github.com",
+    "merge",
+    "--quiet",
+    "--no-ff",
+    oldMaster,
+    "-m",
+    "chore(develop): sync master",
+  );
+  const unmarked = git("rev-parse", "HEAD");
+  assert.equal(check(unmarked, master, develop).status, 1);
+
+  // A marked merge made by the workflow remains replaceable while its PR is
+  // pending, so a newer master push cannot leave synchronization stalled.
+  git("switch", "--quiet", "-c", "automated-sync", develop);
+  git(
+    "-c",
+    "user.name=celox-release-bot",
+    "-c",
+    "user.email=celox-release-bot@users.noreply.github.com",
+    "merge",
+    "--quiet",
+    "--no-ff",
+    oldMaster,
+    "-m",
+    "chore(develop): sync master\n\nCelox-Sync-Automation: true",
+  );
+  const automated = git("rev-parse", "HEAD");
+  assert.equal(check(automated, master, develop).status, 0);
+
   // Once the synchronization head has landed in develop, it is disposable.
   git("branch", "--force", "develop", resolved);
   assert.equal(check(resolved, master, resolved).status, 0);

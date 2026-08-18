@@ -113,7 +113,9 @@ jobs:
             cargo update -p veryl-analyzer
             cargo metadata --locked --format-version 1 --no-deps >/dev/null
             git add Cargo.lock
-            git commit -m "chore(develop): sync master"
+            git commit \
+              -m "chore(develop): sync master" \
+              -m "Celox-Sync-Automation: true"
             sync_sha="$(git rev-parse HEAD)"
           else
             # Keep non-dependency conflicts visible and actionable on the PR.

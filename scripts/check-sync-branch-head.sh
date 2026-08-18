@@ -18,11 +18,44 @@ for sha in "$sync_sha" "$master_sha" "$develop_sha"; do
   fi
 done
 
+is_pending_automation_merge() {
+  local _commit first_parent second_parent extra_parent
+  local author_email committer_email subject automation_marker
+
+  read -r _commit first_parent second_parent extra_parent \
+    < <(git rev-list --parents -n 1 "$sync_sha")
+  if [ -z "${first_parent:-}" ] \
+    || [ -z "${second_parent:-}" ] \
+    || [ -n "${extra_parent:-}" ]; then
+    return 1
+  fi
+
+  author_email="$(git show -s --format=%ae "$sync_sha")"
+  committer_email="$(git show -s --format=%ce "$sync_sha")"
+  subject="$(git show -s --format=%s "$sync_sha")"
+  automation_marker="$(
+    git show -s \
+      --format='%(trailers:key=Celox-Sync-Automation,valueonly)' \
+      "$sync_sha"
+  )"
+
+  [ "$author_email" = "celox-release-bot@users.noreply.github.com" ] \
+    && [ "$committer_email" = "celox-release-bot@users.noreply.github.com" ] \
+    && [ "$subject" = "chore(develop): sync master" ] \
+    && [ "$automation_marker" = "true" ] \
+    && git merge-base --is-ancestor "$first_parent" "$develop_sha" \
+    && git merge-base --is-ancestor "$second_parent" "$master_sha"
+}
+
 # A stale fallback points directly into master, while a completed synchronization
-# is reachable from develop. Anything else contains work that has not landed in
-# either branch, including a human conflict resolution, and must be preserved.
+# is reachable from develop. A marked merge produced by the workflow is also
+# disposable while its PR is pending, provided both of its parents still belong
+# to the expected branch histories. Anything else contains work that has not
+# landed in either branch, including a human conflict resolution, and must be
+# preserved.
 if git merge-base --is-ancestor "$sync_sha" "$master_sha" \
-  || git merge-base --is-ancestor "$sync_sha" "$develop_sha"; then
+  || git merge-base --is-ancestor "$sync_sha" "$develop_sha" \
+  || is_pending_automation_merge; then
   exit 0
 fi
 
