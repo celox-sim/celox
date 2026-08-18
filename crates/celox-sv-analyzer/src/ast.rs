@@ -607,6 +607,12 @@ fn reject_silently_ignored_constructs(
             RefNode::SpecifyBlock(_) => {
                 return Err(AnalyzerError::Unsupported("specify block".to_string()));
             }
+            RefNode::MintypmaxExpressionTernary(_)
+            | RefNode::ConstantMintypmaxExpressionTernary(_) => {
+                return Err(AnalyzerError::Unsupported(
+                    "mintypmax expression".to_string(),
+                ));
+            }
             RefNode::ConcurrentAssertionItem(_) => {
                 return Err(AnalyzerError::Unsupported(
                     "concurrent assertion".to_string(),
@@ -7117,6 +7123,7 @@ fn expr_from_expression_with_types_raw(
             unary_expr_from_symbol(&unary.nodes.0.nodes.0.nodes.0, expr, syntax_tree)
         }
         sv_parser::Expression::Binary(binary) => {
+            let right_is_grouped = expression_is_grouped(&binary.nodes.3);
             let left = expr_from_expression_with_types_raw(
                 &binary.nodes.0,
                 syntax_tree,
@@ -7128,11 +7135,16 @@ fn expr_from_expression_with_types_raw(
                 syntax_tree,
                 packed_dimensions,
             )?;
-            Some(left_associate_expr_binary(Expr::Binary {
+            let expr = Expr::Binary {
                 left: Box::new(left),
                 op,
                 right: Box::new(right),
-            }))
+            };
+            Some(if right_is_grouped {
+                expr
+            } else {
+                left_associate_expr_binary(expr)
+            })
         }
         sv_parser::Expression::ConditionalExpression(expr) => {
             expr_from_conditional_expression(expr, syntax_tree, packed_dimensions)
@@ -7266,36 +7278,18 @@ fn expr_from_primary_with_types(
             sv_parser::MintypmaxExpression::Expression(expr) => {
                 expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
             }
-            sv_parser::MintypmaxExpression::Ternary(expr) => {
-                expr_from_mintypmax_ternary(expr, syntax_tree, packed_dimensions)
-            }
+            sv_parser::MintypmaxExpression::Ternary(_) => None,
         },
         _ => None,
     }
 }
 
-fn expr_from_mintypmax_ternary(
-    expr: &sv_parser::MintypmaxExpressionTernary,
-    syntax_tree: &SyntaxTree,
-    packed_dimensions: &PackedDimensions,
-) -> Option<Expr> {
-    Some(Expr::Mux {
-        condition: Box::new(expr_from_expression_with_types(
-            &expr.nodes.0,
-            syntax_tree,
-            packed_dimensions,
-        )?),
-        then_expr: Box::new(expr_from_expression_with_types(
-            &expr.nodes.2,
-            syntax_tree,
-            packed_dimensions,
-        )?),
-        else_expr: Box::new(expr_from_expression_with_types(
-            &expr.nodes.4,
-            syntax_tree,
-            packed_dimensions,
-        )?),
-    })
+fn expression_is_grouped(expr: &sv_parser::Expression) -> bool {
+    matches!(
+        expr,
+        sv_parser::Expression::Primary(primary)
+            if matches!(&**primary, sv_parser::Primary::MintypmaxExpression(_))
+    )
 }
 
 fn expr_from_conditional_expression(
@@ -7590,14 +7584,20 @@ fn const_expr_from_expr(
             })
         }
         sv_parser::Expression::Binary(binary) => {
+            let right_is_grouped = expression_is_grouped(&binary.nodes.3);
             let left = const_expr_from_expr(&binary.nodes.0, syntax_tree)?;
             let op = binary_op_from_symbol(&binary.nodes.1.nodes.0.nodes.0, syntax_tree)?;
             let right = const_expr_from_expr(&binary.nodes.3, syntax_tree)?;
-            Some(left_associate_const_binary(ConstExpr::Binary {
+            let expr = ConstExpr::Binary {
                 left: Box::new(left),
                 op,
                 right: Box::new(right),
-            }))
+            };
+            Some(if right_is_grouped {
+                expr
+            } else {
+                left_associate_const_binary(expr)
+            })
         }
         _ => None,
     }
@@ -7736,9 +7736,7 @@ fn const_expr_from_constant_param(
             sv_parser::ConstantMintypmaxExpression::Unary(expr) => {
                 const_expr_from_ref_node(RefNode::ConstantExpression(expr), syntax_tree)
             }
-            sv_parser::ConstantMintypmaxExpression::Ternary(expr) => {
-                const_expr_from_constant_mintypmax_ternary(expr, syntax_tree)
-            }
+            sv_parser::ConstantMintypmaxExpression::Ternary(_) => None,
         },
         _ => None,
     }
@@ -7753,11 +7751,7 @@ fn const_expr_from_param_expression(
             sv_parser::MintypmaxExpression::Expression(expr) => {
                 const_expr_from_expr(expr.as_ref(), syntax_tree)
             }
-            sv_parser::MintypmaxExpression::Ternary(expr) => Some(ConstExpr::Mux {
-                condition: Box::new(const_expr_from_expr(&expr.nodes.0, syntax_tree)?),
-                then_expr: Box::new(const_expr_from_expr(&expr.nodes.2, syntax_tree)?),
-                else_expr: Box::new(const_expr_from_expr(&expr.nodes.4, syntax_tree)?),
-            }),
+            sv_parser::MintypmaxExpression::Ternary(_) => None,
         },
         sv_parser::ParamExpression::DataType(_) | sv_parser::ParamExpression::Dollar(_) => None,
     }
@@ -7973,6 +7967,7 @@ fn const_expr_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opti
                 })
             }
             sv_parser::ConstantExpression::Binary(binary) => {
+                let right_is_grouped = constant_expression_is_grouped(&binary.nodes.3);
                 let left = const_expr_from_ref_node(
                     RefNode::ConstantExpression(&binary.nodes.0),
                     syntax_tree,
@@ -7982,11 +7977,16 @@ fn const_expr_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opti
                     RefNode::ConstantExpression(&binary.nodes.3),
                     syntax_tree,
                 )?;
-                Some(left_associate_const_binary(ConstExpr::Binary {
+                let expr = ConstExpr::Binary {
                     left: Box::new(left),
                     op,
                     right: Box::new(right),
-                }))
+                };
+                Some(if right_is_grouped {
+                    expr
+                } else {
+                    left_associate_const_binary(expr)
+                })
             }
             sv_parser::ConstantExpression::Ternary(expr) => {
                 const_expr_from_constant_expression_ternary(expr, syntax_tree)
@@ -8030,9 +8030,7 @@ fn const_expr_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opti
                 sv_parser::ConstantMintypmaxExpression::Unary(expr) => {
                     const_expr_from_ref_node(RefNode::ConstantExpression(expr), syntax_tree)
                 }
-                sv_parser::ConstantMintypmaxExpression::Ternary(expr) => {
-                    const_expr_from_constant_mintypmax_ternary(expr, syntax_tree)
-                }
+                sv_parser::ConstantMintypmaxExpression::Ternary(_) => None,
             },
             _ => None,
         },
@@ -8051,6 +8049,17 @@ fn const_expr_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opti
     }
 }
 
+fn constant_expression_is_grouped(expr: &sv_parser::ConstantExpression) -> bool {
+    matches!(
+        expr,
+        sv_parser::ConstantExpression::ConstantPrimary(primary)
+            if matches!(
+                &**primary,
+                sv_parser::ConstantPrimary::MintypmaxExpression(_)
+            )
+    )
+}
+
 fn const_expr_from_constant_expression_ternary(
     expr: &sv_parser::ConstantExpressionTernary,
     syntax_tree: &SyntaxTree,
@@ -8066,26 +8075,6 @@ fn const_expr_from_constant_expression_ternary(
         )?),
         else_expr: Box::new(const_expr_from_ref_node(
             RefNode::ConstantExpression(&expr.nodes.5),
-            syntax_tree,
-        )?),
-    })
-}
-
-fn const_expr_from_constant_mintypmax_ternary(
-    expr: &sv_parser::ConstantMintypmaxExpressionTernary,
-    syntax_tree: &SyntaxTree,
-) -> Option<ConstExpr> {
-    Some(ConstExpr::Mux {
-        condition: Box::new(const_expr_from_ref_node(
-            RefNode::ConstantExpression(&expr.nodes.0),
-            syntax_tree,
-        )?),
-        then_expr: Box::new(const_expr_from_ref_node(
-            RefNode::ConstantExpression(&expr.nodes.2),
-            syntax_tree,
-        )?),
-        else_expr: Box::new(const_expr_from_ref_node(
-            RefNode::ConstantExpression(&expr.nodes.4),
             syntax_tree,
         )?),
     })

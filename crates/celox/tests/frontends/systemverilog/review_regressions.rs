@@ -4055,6 +4055,64 @@ fn rejects_four_state_always_ff_event_signals_in_four_state_mode() {
 }
 
 #[test]
+fn preserves_parenthesized_binary_grouping() {
+    let source = r#"
+        module Child #(parameter P = 0) (output logic [7:0] y);
+            assign y = P;
+        endmodule
+        module Top(
+            output logic [7:0] runtime_mul,
+            output logic [7:0] runtime_sub,
+            output logic [7:0] constant_mul,
+            output logic [7:0] constant_sub,
+            output logic [7:0] override_mul
+        );
+            localparam MUL = 2 * (3 + 4);
+            localparam SUB = 10 - (7 - 2);
+            assign runtime_mul = 2 * (3 + 4);
+            assign runtime_sub = 10 - (7 - 2);
+            assign constant_mul = MUL;
+            assign constant_sub = SUB;
+            Child #(.P(2 * (3 + 4))) child(.y(override_mul));
+        endmodule
+    "#;
+    let mut sim = Simulator::from_sv_sources(
+        vec![(source, Path::new("parenthesized_binary_grouping.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    assert_eq!(sim.get(sim.signal("runtime_mul")), 14u8.into());
+    assert_eq!(sim.get(sim.signal("runtime_sub")), 5u8.into());
+    assert_eq!(sim.get(sim.signal("constant_mul")), 14u8.into());
+    assert_eq!(sim.get(sim.signal("constant_sub")), 5u8.into());
+    assert_eq!(sim.get(sim.signal("override_mul")), 14u8.into());
+}
+
+#[test]
+fn rejects_mintypmax_expressions() {
+    for source in [
+        r#"
+        module Top(output logic y);
+            assign y = (1'b0 : 1'b1 : 1'b0);
+        endmodule
+        "#,
+        r#"
+        module Top(output logic y);
+            localparam P = 1'b0 : 1'b1 : 1'b0;
+            assign y = P;
+        endmodule
+        "#,
+    ] {
+        let error = cranelift_build_error(source);
+        assert!(
+            error.contains("mintypmax expression"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
 fn preserves_wide_unsigned_parameters_in_generate_conditions() {
     let source = r#"
         module Top(output logic y);
