@@ -131,7 +131,6 @@ impl GraphRows for LocalGraphRows<'_> {
 struct MappedGraphRowsIter<'a> {
     external_nodes: std::slice::Iter<'a, usize>,
     local_by_external: &'a [usize],
-    row: usize,
 }
 
 impl Iterator for MappedGraphRowsIter<'_> {
@@ -140,7 +139,7 @@ impl Iterator for MappedGraphRowsIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         self.external_nodes.find_map(|external| {
             let local = self.local_by_external[*external];
-            (local != usize::MAX && local != self.row).then_some(local)
+            (local != usize::MAX).then_some(local)
         })
     }
 }
@@ -195,15 +194,13 @@ impl GraphRows for MappedGraphRows<'_> {
         MappedGraphRowsIter {
             external_nodes: self.rows_by_external_node[self.external_by_local[row]].iter(),
             local_by_external: self.local_by_external,
-            row,
         }
     }
 
     fn contains(&self, row: usize, node: usize) -> bool {
-        row != node
-            && self.rows_by_external_node[self.external_by_local[row]]
-                .binary_search(&self.external_by_local[node])
-                .is_ok()
+        self.rows_by_external_node[self.external_by_local[row]]
+            .binary_search(&self.external_by_local[node])
+            .is_ok()
     }
 }
 
@@ -953,6 +950,35 @@ mod tests {
             MappedGraphRows::new(&users, &[0], &[0, 0]),
             Err(DagScheduleError::InvalidNode)
         ));
+    }
+
+    #[test]
+    fn mapped_rows_preserve_self_edges_for_cycle_detection() {
+        let dependencies = vec![vec![0]];
+        let values = vec![vec![]];
+        let tokens = vec![vec![]];
+        let external_by_local = [0];
+        let local_by_external = [0];
+        let mapped_dependencies =
+            MappedGraphRows::new(&dependencies, &external_by_local, &local_by_external).unwrap();
+        let mapped_values =
+            MappedGraphRows::new(&values, &external_by_local, &local_by_external).unwrap();
+
+        assert_eq!(
+            schedule_min_live_values_and_tokens(&dependencies, &values, &tokens, &[]),
+            Err(DagScheduleError::Cycle)
+        );
+        assert_eq!(
+            schedule_min_live_values_and_tokens_with_mapped_rows(
+                mapped_dependencies,
+                mapped_values,
+                MappedNodeRows::new(&tokens, &external_by_local).unwrap(),
+                &[],
+                mapped_dependencies,
+                mapped_values,
+            ),
+            Err(DagScheduleError::Cycle)
+        );
     }
 
     #[test]
