@@ -105,9 +105,14 @@ impl X86Features {
 
     #[cfg(test)]
     pub(crate) const fn for_test(bmi2: bool) -> Self {
+        Self::for_test_with_avx(bmi2, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test_with_avx(bmi2: bool, avx: bool) -> Self {
         Self {
             bmi2,
-            avx: false,
+            avx,
             popcnt: false,
             state_base: StateBaseStrategy::R15,
         }
