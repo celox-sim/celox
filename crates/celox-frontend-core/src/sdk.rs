@@ -70,6 +70,21 @@ fn signal_atom(slice: SignalSlice) -> VarAtomBase<SourceVarId> {
     )
 }
 
+fn signal_slice_type(
+    artifact: &FrontendArtifact,
+    slice: SignalSlice,
+) -> Result<ValueType, FrontendArtifactError> {
+    let signal_type = artifact
+        .signal(slice.signal())
+        .ok_or(FrontendArtifactError::UnknownSignal(slice.signal().index()))?
+        .value_type();
+    Ok(ValueType::new(
+        slice.width(),
+        signal_type.is_signed() && slice.width() == signal_type.width(),
+        signal_type.is_four_state(),
+    )?)
+}
+
 fn binary_op(op: celox_frontend_sdk::BinaryOp) -> Result<BinaryOp, FrontendArtifactError> {
     Ok(match op {
         celox_frontend_sdk::BinaryOp::Add => BinaryOp::Add,
@@ -180,6 +195,25 @@ fn coerce_slt_expression(
         Some(target_width),
         value_type.is_signed(),
     )?)
+}
+
+fn coerce_slt_expression_to_type(
+    artifact: &FrontendArtifact,
+    id: ExprId,
+    target_type: ValueType,
+    arena: &mut SLTNodeArena<SourceVarId>,
+    cache: &mut HashMap<ExprId, NodeId>,
+) -> Result<NodeId, FrontendArtifactError> {
+    let value_type = artifact
+        .expression(id)
+        .ok_or(FrontendArtifactError::UnknownExpression(id.index()))?
+        .value_type();
+    let node = lower_slt_expression(artifact, id, arena, cache)?;
+    if value_type == target_type {
+        Ok(node)
+    } else {
+        finish_slt_expression(arena, node, target_type)
+    }
 }
 
 fn finish_slt_expression(
@@ -1082,6 +1116,7 @@ pub fn lower_frontend_artifact(
     let mut node_cache = HashMap::default();
     let mut comb_blocks = Vec::new();
     for assignment in artifact.assignments() {
+        let target_type = signal_slice_type(artifact, assignment.target())?;
         let mut sources = HashSet::default();
         let mut visited = HashSet::default();
         expression_sources(artifact, assignment.value(), &mut sources, &mut visited)?;
@@ -1095,7 +1130,13 @@ pub fn lower_frontend_artifact(
             comb_capture_enable_sites: Vec::new(),
             comb_capture_enable_always: false,
             pre_lower_nodes: Vec::new(),
-            expr: lower_slt_expression(artifact, assignment.value(), &mut arena, &mut node_cache)?,
+            expr: coerce_slt_expression_to_type(
+                artifact,
+                assignment.value(),
+                target_type,
+                &mut arena,
+                &mut node_cache,
+            )?,
         });
     }
 

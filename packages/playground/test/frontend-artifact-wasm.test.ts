@@ -77,6 +77,41 @@ const INITIALIZED_ARTIFACT = JSON.stringify({
   port_order: [0],
 });
 
+const CONSTANT_OUTPUT_ARTIFACT = JSON.stringify({
+  format_version: 1,
+  module_name: "ConstantOutput",
+  signals: [
+    {
+      id: 0,
+      name: "y",
+      direction: "Output",
+      value_type: { width: 8, signed: false, four_state: false },
+      initial: null,
+    },
+  ],
+  expressions: [
+    {
+      id: 0,
+      node: {
+        Constant: {
+          payload: [0x2a],
+          mask: [],
+          value_type: { width: 8, signed: false, four_state: false },
+        },
+      },
+      value_type: { width: 8, signed: false, four_state: false },
+    },
+  ],
+  assignments: [
+    {
+      target: { signal: 0, lsb: 0, width: 8 },
+      value: 0,
+    },
+  ],
+  registers: [],
+  port_order: [0],
+});
+
 const TWO_STATE_RESET_ARTIFACT = JSON.stringify({
   format_version: 1,
   module_name: "TwoStateReset",
@@ -170,6 +205,15 @@ describe.skipIf(!isWasm)("External frontend artifact (WASM bridge)", () => {
     );
 
     expect(sim.dut.q).toBe(0xa5n);
+    sim.dispose();
+  });
+
+  test("evaluates combinational outputs before the first WASM read", () => {
+    const sim = Simulator.fromFrontendArtifact<{ readonly y: bigint }>(
+      CONSTANT_OUTPUT_ARTIFACT,
+    );
+
+    expect(sim.dut.y).toBe(0x2an);
     sim.dispose();
   });
 

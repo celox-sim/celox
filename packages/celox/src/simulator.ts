@@ -295,7 +295,7 @@ export class Simulator<P = Record<string, unknown>> {
 			buffer = raw.sharedMemory!().buffer;
 			handle = wrapDirectSimulatorHandle(raw);
 		}
-		const state: DirtyState = { dirty: false };
+		const state: DirtyState = { dirty: isWasm };
 		const dut = createDut<P>(
 			buffer,
 			layout.forDut,

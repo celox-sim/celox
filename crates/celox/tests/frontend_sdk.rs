@@ -286,6 +286,28 @@ fn frontend_register_inputs_are_coerced_to_target_state_kind() {
 }
 
 #[test]
+fn frontend_assignments_are_coerced_to_target_state_kind() {
+    let bit = ValueType::bits(1).unwrap();
+    let logic = ValueType::logic(1).unwrap();
+    let mut module = ModuleBuilder::new("AssignmentStateCoercion").unwrap();
+    let d = module.input("d", logic).unwrap();
+    let q = module.output("q", bit).unwrap();
+    let d_expr = module.read(d).unwrap();
+    let q_target = module.whole(q).unwrap();
+    module.assign(q_target, d_expr).unwrap();
+
+    let mut sim = Simulator::from_frontend(module.finish())
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+    sim.modify(|io| io.set_four_state(d, 1u8.into(), 1u8.into()))
+        .unwrap();
+    assert_eq!(sim.get(q), 0u8.into());
+}
+
+#[test]
 fn frontend_mux_infers_four_state_from_its_condition() {
     let logic = ValueType::logic(1).unwrap();
     let mut module = ModuleBuilder::new("MuxConditionState").unwrap();
