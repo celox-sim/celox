@@ -1397,21 +1397,26 @@ fn emit_packed_lane_compare(
             .checked_mul(i32::from(element_stride))
             .and_then(|delta| offset.checked_add(delta))
             .ok_or(EmitError::Range("packed lane offset overflow"))?;
-        emit_address(ops, STATE_REG, i64::from(lane_delta));
-        emit_load(ops, SCRATCH0, SCRATCH0, size);
+        emit_load_at(ops, SCRATCH0, STATE_REG, i64::from(lane_delta), size);
         match rhs {
             PackedLaneCompareRhs::Scalar(_) => {
                 dynasm!(ops ; .arch aarch64 ; mov x17, X(scalar_rhs.unwrap()));
             }
             PackedLaneCompareRhs::Memory { offset, .. } => {
-                dynasm!(ops ; .arch aarch64 ; fmov d7, x16);
                 let rhs_offset = i32::from(lane)
                     .checked_mul(i32::from(element_stride))
                     .and_then(|delta| offset.checked_add(delta))
                     .ok_or(EmitError::Range("packed lane RHS offset overflow"))?;
-                emit_address(ops, STATE_REG, i64::from(rhs_offset));
-                emit_load(ops, SCRATCH1, SCRATCH0, size);
-                dynasm!(ops ; .arch aarch64 ; fmov x16, d7);
+                let direct =
+                    memory_access_encoding(SCRATCH1, STATE_REG, i64::from(rhs_offset), size, false)
+                        .is_some();
+                if !direct {
+                    dynasm!(ops ; .arch aarch64 ; fmov d7, x16);
+                }
+                emit_load_at(ops, SCRATCH1, STATE_REG, i64::from(rhs_offset), size);
+                if !direct {
+                    dynasm!(ops ; .arch aarch64 ; fmov x16, d7);
+                }
             }
         }
         if bit_offset != 0 {
