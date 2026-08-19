@@ -4080,6 +4080,64 @@ mod tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
+    fn executes_split_address_immediates() {
+        let function = arm_mir::MFunction::new(
+            vec![arm_mir::MBlock {
+                id: arm_mir::BlockId(0),
+                phis: Vec::new(),
+                insts: vec![
+                    arm_mir::MInst::LoadImm {
+                        dst: arm_mir::VReg(0),
+                        value: 0x1234_5678_9abc_def0,
+                    },
+                    arm_mir::MInst::Store {
+                        base: arm_mir::BaseReg::SimState,
+                        offset: 0x123456,
+                        src: arm_mir::VReg(0),
+                        size: arm_mir::OpSize::S64,
+                    },
+                    arm_mir::MInst::Load {
+                        dst: arm_mir::VReg(1),
+                        base: arm_mir::BaseReg::SimState,
+                        offset: 0x123456,
+                        size: arm_mir::OpSize::S64,
+                    },
+                    arm_mir::MInst::Store {
+                        base: arm_mir::BaseReg::SimState,
+                        offset: 0x123460,
+                        src: arm_mir::VReg(1),
+                        size: arm_mir::OpSize::S64,
+                    },
+                    arm_mir::MInst::Return,
+                ],
+            }],
+            Vec::new(),
+        );
+        let mut assignment = Assignment::default();
+        assignment.set(arm_mir::VReg(0), Arm64Reg::new(9));
+        assignment.set(arm_mir::VReg(1), Arm64Reg::new(10));
+        let emitted = emit_function(
+            &function,
+            &assignment,
+            0,
+            0,
+            &EdgeCopyPlan::default(),
+            false,
+            false,
+        )
+        .unwrap();
+        let code = crate::jit_mem::JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0_u8; 0x123500];
+
+        assert_eq!(unsafe { code.call(&mut state) }, 0);
+        assert_eq!(
+            u64::from_le_bytes(state[0x123460..0x123468].try_into().unwrap()),
+            0x1234_5678_9abc_def0
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
     fn executes_guarded_compare_select() {
         let (function, assignment) = guarded_select();
         let result = emit(&function, &assignment, 0).unwrap();
