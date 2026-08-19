@@ -31,7 +31,14 @@ const SCRATCH1: u8 = 17;
 const SPILL_REG: u8 = 28;
 const STATE_PAGE_REG: u8 = 29;
 const STATE_PAGE_BYTES: i64 = 4096;
+const MAX_SECONDARY_STATE_PAGES: usize = 4;
 const TEMPORARY_BYTES: usize = 16;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct StatePageBases {
+    primary: Option<i64>,
+    secondary: [Option<(u8, i64)>; MAX_SECONDARY_STATE_PAGES],
+}
 
 /// Result of scalar AArch64 emission.
 pub struct EmitResult {
@@ -256,11 +263,18 @@ fn emit_function(
         .collect::<HashMap<_, _>>();
     // Use x29 for the most frequently accessed state page so large state
     // offsets can use ordinary AArch64 memory immediates without reducing the
-    // allocator's general-purpose register file.  The tick loop normally uses
-    // x29 for its counter; when a page base is profitable, keep that counter
-    // in an otherwise-unused SIMD scalar register instead.
-    let state_base_page = select_state_base_page(function);
-    let tick_counter_in_fp = tick_loop && state_base_page.is_some();
+    // allocator's general-purpose register file.  If a preserved register is
+    // unused by this function, cache a second hot page there as well.  The
+    // tick loop normally uses x29 for its counter; when a page base is
+    // profitable, keep that counter in an otherwise-unused SIMD scalar
+    // register instead.
+    let secondary_page_registers = (19..=27).rev().filter(|register| {
+        !assignment
+            .iter()
+            .any(|(_, value)| value.number() == *register)
+    });
+    let state_pages = select_state_base_pages(function, secondary_page_registers);
+    let tick_counter_in_fp = tick_loop && state_pages.primary.is_some();
     let table_labels = function
         .constant_tables()
         .iter()
@@ -275,10 +289,13 @@ fn emit_function(
         .map(|(_, register)| register.number())
         .filter(|register| (19..=27).contains(register))
         .collect::<Vec<_>>();
-    if tick_loop || state_base_page.is_some() {
+    if tick_loop || state_pages.primary.is_some() {
         // x29 is reserved for either the native-loop counter or the cached
         // state-page base, so preserve the host value across the JIT call.
         callee_saved.push(STATE_PAGE_REG);
+    }
+    for &(register, _) in state_pages.secondary.iter().flatten() {
+        callee_saved.push(register);
     }
     // x28 is the fixed base for the spill/cycle-break arena, including the
     // temporary slot used by parallel-copy resolution even when no value was
@@ -350,8 +367,11 @@ fn emit_function(
         }
     }
     emit_address_to(&mut ops, SPILL_REG, STATE_REG, spill_base as i64);
-    if let Some(page) = state_base_page {
+    if let Some(page) = state_pages.primary {
         emit_address_to(&mut ops, STATE_PAGE_REG, STATE_REG, page);
+    }
+    for &(register, page) in state_pages.secondary.iter().flatten() {
+        emit_address_to(&mut ops, register, STATE_REG, page);
     }
     for block in &function.blocks {
         let label = block_labels[&block.id];
@@ -376,7 +396,7 @@ fn emit_function(
                 tick_entry,
                 tick_success,
                 check_runtime_events,
-                state_base_page,
+                state_pages,
                 tick_counter_in_fp,
             )?;
         }
@@ -461,7 +481,7 @@ fn emit_instruction(
     tick_entry: Option<DynamicLabel>,
     tick_success: Option<DynamicLabel>,
     check_runtime_events: bool,
-    state_base_page: Option<i64>,
+    state_pages: StatePageBases,
     tick_counter_in_fp: bool,
 ) -> Result<(), EmitError> {
     match instruction {
@@ -491,7 +511,7 @@ fn emit_instruction(
             let offset = base_offset(*base, *offset);
             let destination = resolve(assignment, *dst)?;
             let (base_register, offset) =
-                select_memory_base(*base, offset, destination, *size, false, state_base_page);
+                select_memory_base(*base, offset, destination, *size, false, state_pages);
             emit_load_at(ops, destination, base_register, offset, *size);
         }
         MInst::Store {
@@ -503,7 +523,7 @@ fn emit_instruction(
             let offset = base_offset(*base, *offset);
             let source = resolve(assignment, *src)?;
             let (base_register, offset) =
-                select_memory_base(*base, offset, source, *size, true, state_base_page);
+                select_memory_base(*base, offset, source, *size, true, state_pages);
             emit_store_at(ops, source, base_register, offset, *size);
         }
         MInst::LoadPtr {
@@ -552,17 +572,17 @@ fn emit_instruction(
             size,
             ..
         } => {
-            let base = base_register(*base);
             let index = resolve(assignment, *index)?;
-            let shift = scale.trailing_zeros();
-            dynasm!(ops ; .arch aarch64 ; add x16, X(base), X(index), LSL #shift);
-            emit_load_at(
-                ops,
-                resolve(assignment, *dst)?,
-                SCRATCH0,
+            let destination = resolve(assignment, *dst)?;
+            let (base, offset) = select_indexed_memory_base(
+                *base,
                 i64::from(*offset),
+                destination,
                 *size,
+                false,
+                state_pages,
             );
+            emit_load_indexed_at(ops, destination, base, index, offset, *scale, *size);
         }
         MInst::StoreIndexed {
             base,
@@ -580,31 +600,39 @@ fn emit_instruction(
             size,
             ..
         } => {
-            let base = base_register(*base);
             let index = resolve(assignment, *index)?;
-            dynasm!(ops ; .arch aarch64 ; add x16, X(base), X(index));
             if matches!(instruction, MInst::OrStoreIndexed { .. }) {
                 let src = resolve(assignment, *src)?;
-                if memory_access_encoding(SCRATCH1, SCRATCH0, i64::from(*offset), *size, false)
-                    .is_some()
-                {
-                    emit_load_at(ops, SCRATCH1, SCRATCH0, i64::from(*offset), *size);
+                let (base, offset) = select_indexed_memory_base(
+                    *base,
+                    i64::from(*offset),
+                    SCRATCH1,
+                    *size,
+                    false,
+                    state_pages,
+                );
+                if offset == 0 {
+                    emit_load_indexed_at(ops, SCRATCH1, base, index, 0, 1, *size);
                     dynasm!(ops ; .arch aarch64 ; orr x17, x17, X(src));
-                    emit_store_at(ops, SCRATCH1, SCRATCH0, i64::from(*offset), *size);
+                    emit_store_indexed_at(ops, SCRATCH1, base, index, 0, 1, *size);
                 } else {
-                    emit_add_offset(ops, i64::from(*offset));
+                    dynasm!(ops ; .arch aarch64 ; add x16, X(base), X(index));
+                    emit_add_offset(ops, offset);
                     emit_load(ops, SCRATCH1, SCRATCH0, *size);
                     dynasm!(ops ; .arch aarch64 ; orr x17, x17, X(src));
                     emit_store(ops, SCRATCH1, SCRATCH0, *size);
                 }
             } else {
-                emit_store_at(
-                    ops,
-                    resolve(assignment, *src)?,
-                    SCRATCH0,
+                let src = resolve(assignment, *src)?;
+                let (base, offset) = select_indexed_memory_base(
+                    *base,
                     i64::from(*offset),
+                    src,
                     *size,
+                    true,
+                    state_pages,
                 );
+                emit_store_indexed_at(ops, src, base, index, offset, 1, *size);
             }
         }
         MInst::LoadPtrIndexed {
@@ -615,12 +643,13 @@ fn emit_instruction(
             size,
         } => {
             let (ptr, index) = (resolve(assignment, *ptr)?, resolve(assignment, *index)?);
-            dynasm!(ops ; .arch aarch64 ; add x16, X(ptr), X(index));
-            emit_load_at(
+            emit_load_indexed_at(
                 ops,
                 resolve(assignment, *dst)?,
-                SCRATCH0,
+                ptr,
+                index,
                 i64::from(*offset),
+                1,
                 *size,
             );
         }
@@ -639,13 +668,13 @@ fn emit_instruction(
             size,
         } => {
             let (ptr, index) = (resolve(assignment, *ptr)?, resolve(assignment, *index)?);
-            dynasm!(ops ; .arch aarch64 ; add x16, X(ptr), X(index));
             let src = resolve(assignment, *src)?;
             if matches!(instruction, MInst::ReleaseStorePtrIndexed { .. }) {
+                dynasm!(ops ; .arch aarch64 ; add x16, X(ptr), X(index));
                 emit_add_offset(ops, i64::from(*offset));
                 emit_release_store(ops, src, SCRATCH0, *size);
             } else {
-                emit_store_at(ops, src, SCRATCH0, i64::from(*offset), *size);
+                emit_store_indexed_at(ops, src, ptr, index, i64::from(*offset), 1, *size);
             }
         }
         MInst::AndStoreImm {
@@ -661,14 +690,8 @@ fn emit_instruction(
             imm,
         } => {
             let address_offset = base_offset(*base, *offset);
-            let (base_register, address_offset) = select_memory_base(
-                *base,
-                address_offset,
-                SCRATCH1,
-                *size,
-                false,
-                state_base_page,
-            );
+            let (base_register, address_offset) =
+                select_memory_base(*base, address_offset, SCRATCH1, *size, false, state_pages);
             if memory_access_encoding(SCRATCH1, base_register, address_offset, *size, false)
                 .is_some()
             {
@@ -986,7 +1009,7 @@ fn emit_instruction(
             true_bb,
             false_bb,
         } => {
-            emit_branch_predicate(ops, *predicate, assignment, state_base_page)?;
+            emit_branch_predicate(ops, *predicate, assignment, state_pages)?;
             let true_path = ops.new_dynamic_label();
             emit_conditional_branch(ops, true_path, predicate_kind(*predicate));
             emit_edge_copies(ops, plan, block, *false_bb, spill_base, temporary_offset)?;
@@ -1080,6 +1103,7 @@ fn emit_instruction(
             *bit_offset,
             *field_width,
             assignment,
+            state_pages,
         )?,
         MInst::PackedByteAffineCompare {
             dst,
@@ -1097,12 +1121,12 @@ fn emit_instruction(
             src_offset,
             dst_offset,
             byte_len,
-        } => emit_mem_copy(ops, *src_offset, *dst_offset, *byte_len),
+        } => emit_mem_copy(ops, *src_offset, *dst_offset, *byte_len, state_pages),
         MInst::MemFill {
             dst_offset,
             byte_len,
             value,
-        } => emit_mem_fill(ops, *dst_offset, *byte_len, *value),
+        } => emit_mem_fill(ops, *dst_offset, *byte_len, *value, state_pages),
         MInst::SparseCommit {
             src_offset,
             dst_offset,
@@ -1140,7 +1164,7 @@ fn emit_instruction(
                 SCRATCH1,
                 OpSize::S64,
                 false,
-                state_base_page,
+                state_pages,
             );
             emit_load_at(ops, SCRATCH1, base, offset, OpSize::S64);
             emit_load_imm(ops, SCRATCH0, 1_u64 << (*active_index % 64));
@@ -1151,7 +1175,7 @@ fn emit_instruction(
                 30,
                 OpSize::S64,
                 true,
-                state_base_page,
+                state_pages,
             );
             emit_store_at(ops, 30, base, offset, OpSize::S64);
         }
@@ -1214,6 +1238,7 @@ fn emit_mem_copy(
     src_offset: i32,
     dst_offset: i32,
     byte_len: usize,
+    state_pages: StatePageBases,
 ) {
     if byte_len == 0 || src_offset == dst_offset {
         return;
@@ -1223,6 +1248,10 @@ fn emit_mem_copy(
     let copy_backward = src_end > i64::from(dst_offset)
         && dst_end > i64::from(src_offset)
         && dst_offset > src_offset;
+    if !copy_backward && (16..=256).contains(&byte_len) {
+        emit_mem_copy_forward_vectors(ops, src_offset, dst_offset, byte_len, state_pages);
+        return;
+    }
     let qwords = byte_len / 8;
     let remainder = byte_len % 8;
 
@@ -1296,6 +1325,43 @@ fn emit_mem_copy(
         );
     }
     if remainder >= 4 {
+        dynasm!(ops ; .arch aarch64 ; ldr w30, [x16], #4 ; str w30, [x17], #4);
+    }
+    if remainder % 4 >= 2 {
+        dynasm!(ops ; .arch aarch64 ; ldrh w30, [x16], #2 ; strh w30, [x17], #2);
+    }
+    if remainder % 2 == 1 {
+        dynasm!(ops ; .arch aarch64 ; ldrb w30, [x16] ; strb w30, [x17]);
+    }
+}
+
+fn emit_mem_copy_forward_vectors(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    src_offset: i32,
+    dst_offset: i32,
+    byte_len: usize,
+    state_pages: StatePageBases,
+) {
+    let (src_base, src_relative) =
+        select_vector_memory_base(BaseReg::SimState, i64::from(src_offset), state_pages);
+    emit_address_to(ops, SCRATCH0, src_base, src_relative);
+    let (dst_base, dst_relative) =
+        select_vector_memory_base(BaseReg::SimState, i64::from(dst_offset), state_pages);
+    emit_address_to(ops, SCRATCH1, dst_base, dst_relative);
+
+    let vector_chunks = byte_len / 16;
+    for _ in 0..vector_chunks {
+        dynasm!(ops
+            ; .arch aarch64
+            ; ldr q0, [x16], #16
+            ; str q0, [x17], #16
+        );
+    }
+    let remainder = byte_len % 16;
+    if remainder >= 8 {
+        dynasm!(ops ; .arch aarch64 ; ldr x30, [x16], #8 ; str x30, [x17], #8);
+    }
+    if remainder % 8 >= 4 {
         dynasm!(ops ; .arch aarch64 ; ldr w30, [x16], #4 ; str w30, [x17], #4);
     }
     if remainder % 4 >= 2 {
@@ -1444,6 +1510,7 @@ fn emit_packed_lane_compare(
     bit_offset: u8,
     field_width: u8,
     assignment: &Assignment<VReg>,
+    state_pages: StatePageBases,
 ) -> Result<(), EmitError> {
     let size = match element_stride {
         1 => OpSize::S8,
@@ -1451,6 +1518,22 @@ fn emit_packed_lane_compare(
         4 => OpSize::S32,
         _ => return Err(EmitError::Range("packed lane stride must be 1, 2, or 4")),
     };
+    if usize::from(lane_count) * usize::from(element_stride) % 16 == 0 {
+        emit_packed_lane_compare_vector(
+            ops,
+            destination,
+            rhs,
+            kind,
+            offset,
+            lane_count,
+            element_stride,
+            bit_offset,
+            field_width,
+            assignment,
+            state_pages,
+        )?;
+        return Ok(());
+    }
     let scalar_rhs = match rhs {
         PackedLaneCompareRhs::Scalar(value) => Some(resolve(assignment, value)?),
         PackedLaneCompareRhs::Memory { .. } => None,
@@ -1466,7 +1549,15 @@ fn emit_packed_lane_compare(
             .checked_mul(i32::from(element_stride))
             .and_then(|delta| offset.checked_add(delta))
             .ok_or(EmitError::Range("packed lane offset overflow"))?;
-        emit_load_at(ops, SCRATCH0, STATE_REG, i64::from(lane_delta), size);
+        let (base, offset) = select_memory_base(
+            BaseReg::SimState,
+            i64::from(lane_delta),
+            SCRATCH0,
+            size,
+            false,
+            state_pages,
+        );
+        emit_load_at(ops, SCRATCH0, base, offset, size);
         match rhs {
             PackedLaneCompareRhs::Scalar(_) => {
                 dynasm!(ops ; .arch aarch64 ; mov x17, X(scalar_rhs.unwrap()));
@@ -1476,13 +1567,19 @@ fn emit_packed_lane_compare(
                     .checked_mul(i32::from(element_stride))
                     .and_then(|delta| offset.checked_add(delta))
                     .ok_or(EmitError::Range("packed lane RHS offset overflow"))?;
-                let direct =
-                    memory_access_encoding(SCRATCH1, STATE_REG, i64::from(rhs_offset), size, false)
-                        .is_some();
+                let (base, offset) = select_memory_base(
+                    BaseReg::SimState,
+                    i64::from(rhs_offset),
+                    SCRATCH1,
+                    size,
+                    false,
+                    state_pages,
+                );
+                let direct = memory_access_encoding(SCRATCH1, base, offset, size, false).is_some();
                 if !direct {
                     dynasm!(ops ; .arch aarch64 ; fmov d7, x16);
                 }
-                emit_load_at(ops, SCRATCH1, STATE_REG, i64::from(rhs_offset), size);
+                emit_load_at(ops, SCRATCH1, base, offset, size);
                 if !direct {
                     dynasm!(ops ; .arch aarch64 ; fmov x16, d7);
                 }
@@ -1533,6 +1630,303 @@ fn emit_packed_lane_compare(
     }
     dynasm!(ops ; .arch aarch64 ; mov X(destination), x30);
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_packed_lane_compare_vector(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    destination: u8,
+    rhs: PackedLaneCompareRhs,
+    kind: CmpKind,
+    offset: i32,
+    lane_count: u8,
+    element_stride: u8,
+    bit_offset: u8,
+    field_width: u8,
+    assignment: &Assignment<VReg>,
+    state_pages: StatePageBases,
+) -> Result<(), EmitError> {
+    let lanes_per_vector = 16 / usize::from(element_stride);
+    let storage_width = element_stride * 8;
+    let scalar_rhs = match rhs {
+        PackedLaneCompareRhs::Scalar(value) => Some(resolve(assignment, value)?),
+        PackedLaneCompareRhs::Memory { .. } => None,
+    };
+    let needs_mask = field_width != storage_width;
+    let field_mask = if field_width == 64 {
+        u64::MAX
+    } else {
+        (1_u64 << field_width) - 1
+    };
+
+    if let Some(rhs) = scalar_rhs {
+        match element_stride {
+            1 => dynasm!(ops ; .arch aarch64 ; dup v1.b16, W(rhs)),
+            2 => dynasm!(ops ; .arch aarch64 ; dup v1.h8, W(rhs)),
+            4 => dynasm!(ops ; .arch aarch64 ; dup v1.s4, W(rhs)),
+            _ => unreachable!(),
+        }
+    }
+    if needs_mask {
+        emit_load_imm(ops, SCRATCH1, field_mask);
+        match element_stride {
+            1 => dynasm!(ops ; .arch aarch64 ; dup v4.b16, W(SCRATCH1)),
+            2 => dynasm!(ops ; .arch aarch64 ; dup v4.h8, W(SCRATCH1)),
+            4 => dynasm!(ops ; .arch aarch64 ; dup v4.s4, W(SCRATCH1)),
+            _ => unreachable!(),
+        }
+    }
+    dynasm!(ops ; .arch aarch64 ; mov x30, xzr);
+
+    for lane_base in (0..usize::from(lane_count)).step_by(lanes_per_vector) {
+        let chunk_delta = i32::try_from(lane_base * usize::from(element_stride))
+            .map_err(|_| EmitError::Range("packed lane offset overflow"))?;
+        let lhs_offset = offset
+            .checked_add(chunk_delta)
+            .ok_or(EmitError::Range("packed lane offset overflow"))?;
+        let (lhs_base, lhs_offset) =
+            select_vector_memory_base(BaseReg::SimState, i64::from(lhs_offset), state_pages);
+        emit_vector_load(ops, 0, lhs_base, lhs_offset);
+
+        if let PackedLaneCompareRhs::Memory { offset: rhs_offset } = rhs {
+            let rhs_offset = rhs_offset
+                .checked_add(chunk_delta)
+                .ok_or(EmitError::Range("packed lane RHS offset overflow"))?;
+            let (rhs_base, rhs_offset) =
+                select_vector_memory_base(BaseReg::SimState, i64::from(rhs_offset), state_pages);
+            emit_vector_load(ops, 1, rhs_base, rhs_offset);
+        }
+
+        if bit_offset != 0 {
+            let shift = u32::from(bit_offset);
+            match element_stride {
+                1 => dynasm!(ops ; .arch aarch64 ; ushr v0.b16, v0.b16, #shift),
+                2 => dynasm!(ops ; .arch aarch64 ; ushr v0.h8, v0.h8, #shift),
+                4 => dynasm!(ops ; .arch aarch64 ; ushr v0.s4, v0.s4, #shift),
+                _ => unreachable!(),
+            }
+            if matches!(rhs, PackedLaneCompareRhs::Memory { .. }) {
+                match element_stride {
+                    1 => dynasm!(ops ; .arch aarch64 ; ushr v1.b16, v1.b16, #shift),
+                    2 => dynasm!(ops ; .arch aarch64 ; ushr v1.h8, v1.h8, #shift),
+                    4 => dynasm!(ops ; .arch aarch64 ; ushr v1.s4, v1.s4, #shift),
+                    _ => unreachable!(),
+                }
+            } else if let Some(rhs) = scalar_rhs {
+                let _ = rhs;
+                match element_stride {
+                    1 => dynasm!(ops ; .arch aarch64 ; ushr v1.b16, v1.b16, #shift),
+                    2 => dynasm!(ops ; .arch aarch64 ; ushr v1.h8, v1.h8, #shift),
+                    4 => dynasm!(ops ; .arch aarch64 ; ushr v1.s4, v1.s4, #shift),
+                    _ => unreachable!(),
+                }
+            }
+        }
+        if needs_mask {
+            match element_stride {
+                1 => dynasm!(ops
+                    ; .arch aarch64
+                    ; and v0.b16, v0.b16, v4.b16
+                    ; and v1.b16, v1.b16, v4.b16
+                ),
+                2 => dynasm!(ops
+                    ; .arch aarch64
+                    ; and v0.b16, v0.b16, v4.b16
+                    ; and v1.b16, v1.b16, v4.b16
+                ),
+                4 => dynasm!(ops
+                    ; .arch aarch64
+                    ; and v0.b16, v0.b16, v4.b16
+                    ; and v1.b16, v1.b16, v4.b16
+                ),
+                _ => unreachable!(),
+            }
+        }
+
+        emit_packed_vector_compare(ops, element_stride, kind);
+        emit_packed_vector_mask(ops, element_stride);
+        if lane_base != 0 {
+            let shift = u32::try_from(lane_base)
+                .map_err(|_| EmitError::Range("packed lane result shift overflow"))?;
+            dynasm!(ops ; .arch aarch64 ; lsl x16, x16, #shift);
+        }
+        dynasm!(ops ; .arch aarch64 ; orr x30, x30, x16);
+    }
+    dynasm!(ops ; .arch aarch64 ; mov X(destination), x30);
+    Ok(())
+}
+
+fn emit_vector_load(ops: &mut VecAssembler<Aarch64Relocation>, vector: u8, base: u8, offset: i64) {
+    emit_address_to(ops, SCRATCH0, base, offset);
+    match vector {
+        0 => dynasm!(ops ; .arch aarch64 ; ldr q0, [x16]),
+        1 => dynasm!(ops ; .arch aarch64 ; ldr q1, [x16]),
+        _ => unreachable!(),
+    }
+}
+
+fn emit_packed_vector_compare(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    element_stride: u8,
+    kind: CmpKind,
+) {
+    macro_rules! compare {
+        ($instruction:ident, $shape:ident) => {
+            dynasm!(ops ; .arch aarch64 ; $instruction v0.$shape, v0.$shape, v1.$shape)
+        };
+    }
+    macro_rules! compare_swapped {
+        ($instruction:ident, $shape:ident) => {
+            dynasm!(ops ; .arch aarch64 ; $instruction v0.$shape, v1.$shape, v0.$shape)
+        };
+    }
+    macro_rules! invert {
+        ($shape:ident) => {
+            dynasm!(ops ; .arch aarch64 ; mvn v0.b16, v0.b16)
+        };
+    }
+
+    match (element_stride, kind) {
+        (1, CmpKind::Eq) => compare!(cmeq, b16),
+        (2, CmpKind::Eq) => compare!(cmeq, h8),
+        (4, CmpKind::Eq) => compare!(cmeq, s4),
+        (1, CmpKind::Ne) => {
+            compare!(cmeq, b16);
+            invert!(b16);
+        }
+        (2, CmpKind::Ne) => {
+            compare!(cmeq, h8);
+            invert!(h8);
+        }
+        (4, CmpKind::Ne) => {
+            compare!(cmeq, s4);
+            invert!(s4);
+        }
+        (1, CmpKind::LtU | CmpKind::GeU) => {
+            compare_swapped!(cmhi, b16);
+            if matches!(kind, CmpKind::GeU) {
+                invert!(b16);
+            }
+        }
+        (2, CmpKind::LtU | CmpKind::GeU) => {
+            compare_swapped!(cmhi, h8);
+            if matches!(kind, CmpKind::GeU) {
+                invert!(h8);
+            }
+        }
+        (4, CmpKind::LtU | CmpKind::GeU) => {
+            compare_swapped!(cmhi, s4);
+            if matches!(kind, CmpKind::GeU) {
+                invert!(s4);
+            }
+        }
+        (1, CmpKind::GtU | CmpKind::LeU) => {
+            compare!(cmhi, b16);
+            if matches!(kind, CmpKind::LeU) {
+                invert!(b16);
+            }
+        }
+        (2, CmpKind::GtU | CmpKind::LeU) => {
+            compare!(cmhi, h8);
+            if matches!(kind, CmpKind::LeU) {
+                invert!(h8);
+            }
+        }
+        (4, CmpKind::GtU | CmpKind::LeU) => {
+            compare!(cmhi, s4);
+            if matches!(kind, CmpKind::LeU) {
+                invert!(s4);
+            }
+        }
+        (1, CmpKind::LtS | CmpKind::GeS) => {
+            compare_swapped!(cmgt, b16);
+            if matches!(kind, CmpKind::GeS) {
+                invert!(b16);
+            }
+        }
+        (2, CmpKind::LtS | CmpKind::GeS) => {
+            compare_swapped!(cmgt, h8);
+            if matches!(kind, CmpKind::GeS) {
+                invert!(h8);
+            }
+        }
+        (4, CmpKind::LtS | CmpKind::GeS) => {
+            compare_swapped!(cmgt, s4);
+            if matches!(kind, CmpKind::GeS) {
+                invert!(s4);
+            }
+        }
+        (1, CmpKind::GtS | CmpKind::LeS) => {
+            compare!(cmgt, b16);
+            if matches!(kind, CmpKind::LeS) {
+                invert!(b16);
+            }
+        }
+        (2, CmpKind::GtS | CmpKind::LeS) => {
+            compare!(cmgt, h8);
+            if matches!(kind, CmpKind::LeS) {
+                invert!(h8);
+            }
+        }
+        (4, CmpKind::GtS | CmpKind::LeS) => {
+            compare!(cmgt, s4);
+            if matches!(kind, CmpKind::LeS) {
+                invert!(s4);
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn emit_packed_vector_mask(ops: &mut VecAssembler<Aarch64Relocation>, element_stride: u8) {
+    match element_stride {
+        1 => {
+            emit_load_imm(ops, SCRATCH1, 0x8040_2010_0804_0201);
+            dynasm!(ops
+                ; .arch aarch64
+                ; ushr v0.b16, v0.b16, #7
+                ; fmov d6, x17
+                ; dup v6.d2, v6.d[0]
+                ; mul v0.b16, v0.b16, v6.b16
+                ; addv b5, v0.b8
+                ; umov W(SCRATCH0), v5.b[0]
+                ; ext v7.b16, v0.b16, v0.b16, #8
+                ; addv b5, v7.b8
+                ; umov W(SCRATCH1), v5.b[0]
+                ; lsl x17, x17, #8
+                ; orr x16, x16, x17
+            );
+        }
+        2 => {
+            emit_load_imm(ops, SCRATCH1, 0x0008_0004_0002_0001);
+            dynasm!(ops ; .arch aarch64 ; fmov d6, x17);
+            emit_load_imm(ops, SCRATCH1, 0x0080_0040_0020_0010);
+            dynasm!(ops
+                ; .arch aarch64
+                ; fmov d7, x17
+                ; ins v6.d[1], v7.d[0]
+                ; ushr v0.h8, v0.h8, #15
+                ; mul v0.h8, v0.h8, v6.h8
+                ; addv h5, v0.h8
+                ; umov W(SCRATCH0), v5.h[0]
+            );
+        }
+        4 => {
+            emit_load_imm(ops, SCRATCH1, 0x0000_0002_0000_0001);
+            dynasm!(ops ; .arch aarch64 ; fmov d6, x17);
+            emit_load_imm(ops, SCRATCH1, 0x0000_0008_0000_0004);
+            dynasm!(ops
+                ; .arch aarch64
+                ; fmov d7, x17
+                ; ins v6.d[1], v7.d[0]
+                ; ushr v0.s4, v0.s4, #31
+                ; mul v0.s4, v0.s4, v6.s4
+                ; addv s5, v0.s4
+                ; umov W(SCRATCH0), v5.s[0]
+            );
+        }
+        _ => unreachable!(),
+    }
 }
 
 fn emit_packed_byte_affine_compare(
@@ -1825,36 +2219,47 @@ fn emit_mem_fill(
     dst_offset: i32,
     byte_len: usize,
     value: u8,
+    state_pages: StatePageBases,
 ) {
     if byte_len == 0 {
         return;
     }
-    let qwords = byte_len / 8;
-    let remainder = byte_len % 8;
     let pattern = u64::from(value) * 0x0101_0101_0101_0101;
-    emit_load_imm(ops, SCRATCH0, dst_offset as i64 as u64);
-    dynasm!(ops ; .arch aarch64 ; add x16, x0, x16);
+    let (base, offset) =
+        select_vector_memory_base(BaseReg::SimState, i64::from(dst_offset), state_pages);
+    emit_address_to(ops, SCRATCH0, base, offset);
     emit_load_imm(ops, 30, pattern);
-    if qwords != 0 {
-        let loop_label = ops.new_dynamic_label();
-        let done = ops.new_dynamic_label();
-        emit_load_imm(
-            ops,
-            SCRATCH1,
-            (i64::from(dst_offset) + (qwords * 8) as i64) as u64,
-        );
+    let vector_chunks = byte_len / 16;
+    if vector_chunks != 0 {
         dynasm!(ops
             ; .arch aarch64
-            ; add x17, x0, x17
-            ; =>loop_label
-            ; cmp x16, x17
-            ; b.hs =>done
-            ; str x30, [x16], #8
-            ; b =>loop_label
-            ; =>done
+            ; fmov d0, x30
+            ; dup v0.d2, v0.d[0]
         );
+        if vector_chunks <= 32 {
+            for _ in 0..vector_chunks {
+                dynasm!(ops ; .arch aarch64 ; str q0, [x16], #16);
+            }
+        } else {
+            let loop_label = ops.new_dynamic_label();
+            let done = ops.new_dynamic_label();
+            emit_load_imm(ops, SCRATCH1, vector_chunks as u64);
+            dynasm!(ops
+                ; .arch aarch64
+                ; =>loop_label
+                ; cbz x17, =>done
+                ; str q0, [x16], #16
+                ; sub x17, x17, #1
+                ; b =>loop_label
+                ; =>done
+            );
+        }
     }
-    if remainder >= 4 {
+    let remainder = byte_len % 16;
+    if remainder >= 8 {
+        dynasm!(ops ; .arch aarch64 ; str x30, [x16], #8);
+    }
+    if remainder % 8 >= 4 {
         dynasm!(ops ; .arch aarch64 ; str w30, [x16], #4);
     }
     if remainder % 4 >= 2 {
@@ -1865,11 +2270,14 @@ fn emit_mem_fill(
     }
 }
 
-fn select_state_base_page(function: &MFunction) -> Option<i64> {
+fn select_state_base_pages(
+    function: &MFunction,
+    secondary_registers: impl IntoIterator<Item = u8>,
+) -> StatePageBases {
     let mut page_counts = BTreeMap::<i64, usize>::new();
     for block in &function.blocks {
         for instruction in &block.insts {
-            let Some(offset) = (match instruction {
+            match instruction {
                 MInst::Load {
                     base: BaseReg::SimState,
                     offset,
@@ -1889,7 +2297,33 @@ fn select_state_base_page(function: &MFunction) -> Option<i64> {
                     base: BaseReg::SimState,
                     offset,
                     ..
-                } => Some(i64::from(*offset)),
+                } => count_state_page_access(&mut page_counts, i64::from(*offset)),
+                MInst::LoadIndexed {
+                    base: BaseReg::SimState,
+                    offset,
+                    ..
+                }
+                | MInst::StoreIndexed {
+                    base: BaseReg::SimState,
+                    offset,
+                    ..
+                }
+                | MInst::OrStoreIndexed {
+                    base: BaseReg::SimState,
+                    offset,
+                    ..
+                } => count_state_page_access(&mut page_counts, i64::from(*offset)),
+                MInst::MemCopy {
+                    src_offset,
+                    dst_offset,
+                    ..
+                } => {
+                    count_state_page_access(&mut page_counts, i64::from(*src_offset));
+                    count_state_page_access(&mut page_counts, i64::from(*dst_offset));
+                }
+                MInst::MemFill { dst_offset, .. } => {
+                    count_state_page_access(&mut page_counts, i64::from(*dst_offset));
+                }
                 MInst::BranchPred {
                     predicate:
                         BranchPredicate::MemoryNonZero {
@@ -1898,25 +2332,68 @@ fn select_state_base_page(function: &MFunction) -> Option<i64> {
                             ..
                         },
                     ..
-                } => Some(i64::from(*offset)),
+                } => count_state_page_access(&mut page_counts, i64::from(*offset)),
                 MInst::SparseMarkActive {
                     active_index,
                     active_bits_offset,
                     ..
-                } => Some(i64::from(*active_bits_offset) + i64::from(*active_index / 64) * 8),
-                _ => None,
-            }) else {
-                continue;
-            };
-            let page = offset.div_euclid(STATE_PAGE_BYTES) * STATE_PAGE_BYTES;
-            *page_counts.entry(page).or_default() += 1;
+                } => count_state_page_access(
+                    &mut page_counts,
+                    i64::from(*active_bits_offset) + i64::from(*active_index / 64) * 8,
+                ),
+                MInst::PackedLaneCompare {
+                    offset,
+                    lane_count,
+                    element_stride,
+                    rhs,
+                    ..
+                } => {
+                    for lane in 0..*lane_count {
+                        let delta = i64::from(lane) * i64::from(*element_stride);
+                        count_state_page_access(&mut page_counts, i64::from(*offset) + delta);
+                        if let PackedLaneCompareRhs::Memory {
+                            offset: rhs_offset, ..
+                        } = rhs
+                        {
+                            count_state_page_access(
+                                &mut page_counts,
+                                i64::from(*rhs_offset) + delta,
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
-    page_counts
+    let mut pages = page_counts
         .into_iter()
         .filter(|(_, count)| *count >= 8)
-        .max_by_key(|(page, count)| (*count, -*page))
-        .map(|(page, _)| page)
+        .collect::<Vec<_>>();
+    pages.sort_unstable_by(|(left_page, left_count), (right_page, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_page.cmp(right_page))
+    });
+    let secondary = secondary_registers
+        .into_iter()
+        .zip(pages.iter().skip(1))
+        .take(MAX_SECONDARY_STATE_PAGES)
+        .map(|(register, (page, _))| Some((register, *page)))
+        .chain(std::iter::repeat(None))
+        .take(MAX_SECONDARY_STATE_PAGES)
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("secondary state page count is fixed");
+    StatePageBases {
+        primary: pages.first().map(|(page, _)| *page),
+        secondary,
+    }
+}
+
+fn count_state_page_access(page_counts: &mut BTreeMap<i64, usize>, offset: i64) {
+    let page = offset.div_euclid(STATE_PAGE_BYTES) * STATE_PAGE_BYTES;
+    *page_counts.entry(page).or_default() += 1;
 }
 
 fn select_memory_base(
@@ -1925,20 +2402,89 @@ fn select_memory_base(
     register: u8,
     size: OpSize,
     store: bool,
-    state_base_page: Option<i64>,
+    state_pages: StatePageBases,
 ) -> (u8, i64) {
     let normal = (base_register(base), offset);
     if base != BaseReg::SimState {
         return normal;
     }
-    let Some(page) = state_base_page else {
+    if let Some(page) = state_pages.primary {
+        let relative = offset - page;
+        if memory_access_encoding(register, STATE_PAGE_REG, relative, size, store).is_some() {
+            return (STATE_PAGE_REG, relative);
+        }
+    }
+    for &(page_register, page) in state_pages.secondary.iter().flatten() {
+        let relative = offset - page;
+        if memory_access_encoding(register, page_register, relative, size, store).is_some() {
+            return (page_register, relative);
+        }
+    }
+    normal
+}
+
+fn select_indexed_memory_base(
+    base: BaseReg,
+    offset: i64,
+    register: u8,
+    size: OpSize,
+    store: bool,
+    state_pages: StatePageBases,
+) -> (u8, i64) {
+    let normal = (base_register(base), offset);
+    if base != BaseReg::SimState {
         return normal;
-    };
-    let relative = offset - page;
-    if memory_access_encoding(register, STATE_PAGE_REG, relative, size, store).is_some() {
-        (STATE_PAGE_REG, relative)
+    }
+    if let Some(page) = state_pages.primary {
+        let relative = offset - page;
+        if indexed_offset_encoding(relative, register, size, store) {
+            return (STATE_PAGE_REG, relative);
+        }
+    }
+    for &(page_register, page) in state_pages.secondary.iter().flatten() {
+        let relative = offset - page;
+        if indexed_offset_encoding(relative, register, size, store) {
+            return (page_register, relative);
+        }
+    }
+    normal
+}
+
+fn indexed_offset_encoding(offset: i64, register: u8, size: OpSize, store: bool) -> bool {
+    add_sub_immediate(offset).is_some()
+        || memory_access_encoding(register, STATE_PAGE_REG, offset, size, store).is_some()
+}
+
+fn select_vector_memory_base(base: BaseReg, offset: i64, state_pages: StatePageBases) -> (u8, i64) {
+    let normal = (base_register(base), offset);
+    if base != BaseReg::SimState {
+        return normal;
+    }
+    let candidates = state_pages
+        .primary
+        .into_iter()
+        .map(|page| (STATE_PAGE_REG, page))
+        .chain(state_pages.secondary.iter().flatten().copied());
+    candidates
+        .map(|(page_register, page)| {
+            let relative = offset - page;
+            (
+                address_materialization_cost(relative),
+                (page_register, relative),
+            )
+        })
+        .min_by_key(|(cost, _)| *cost)
+        .map(|(_, base)| base)
+        .unwrap_or(normal)
+}
+
+fn address_materialization_cost(offset: i64) -> usize {
+    if offset == 0 {
+        0
+    } else if add_sub_immediate(offset).is_some() {
+        1
     } else {
-        normal
+        move_wide_plan(offset as u64).instruction_count + 1
     }
 }
 
@@ -2032,6 +2578,39 @@ fn emit_load_at(
     }
 }
 
+fn emit_load_indexed_at(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    destination: u8,
+    base: u8,
+    index: u8,
+    offset: i64,
+    scale: u8,
+    size: OpSize,
+) {
+    if offset == 0
+        && let Some(shift) = indexed_address_shift(scale, size)
+    {
+        match size {
+            OpSize::S8 => {
+                dynasm!(ops ; .arch aarch64 ; ldrb W(destination), [X(base), X(index), LSL #shift])
+            }
+            OpSize::S16 => {
+                dynasm!(ops ; .arch aarch64 ; ldrh W(destination), [X(base), X(index), LSL #shift])
+            }
+            OpSize::S32 => {
+                dynasm!(ops ; .arch aarch64 ; ldr W(destination), [X(base), X(index), LSL #shift])
+            }
+            OpSize::S64 => {
+                dynasm!(ops ; .arch aarch64 ; ldr X(destination), [X(base), X(index), LSL #shift])
+            }
+        }
+    } else {
+        let shift = scale.trailing_zeros();
+        dynasm!(ops ; .arch aarch64 ; add x16, X(base), X(index), LSL #shift);
+        emit_load_at(ops, destination, SCRATCH0, offset, size);
+    }
+}
+
 fn emit_store_at(
     ops: &mut VecAssembler<Aarch64Relocation>,
     source: u8,
@@ -2044,6 +2623,55 @@ fn emit_store_at(
     } else {
         emit_address(ops, base, offset);
         emit_store(ops, source, SCRATCH0, size);
+    }
+}
+
+fn emit_store_indexed_at(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    source: u8,
+    base: u8,
+    index: u8,
+    offset: i64,
+    scale: u8,
+    size: OpSize,
+) {
+    if offset == 0
+        && let Some(shift) = indexed_address_shift(scale, size)
+    {
+        match size {
+            OpSize::S8 => {
+                dynasm!(ops ; .arch aarch64 ; strb W(source), [X(base), X(index), LSL #shift])
+            }
+            OpSize::S16 => {
+                dynasm!(ops ; .arch aarch64 ; strh W(source), [X(base), X(index), LSL #shift])
+            }
+            OpSize::S32 => {
+                dynasm!(ops ; .arch aarch64 ; str W(source), [X(base), X(index), LSL #shift])
+            }
+            OpSize::S64 => {
+                dynasm!(ops ; .arch aarch64 ; str X(source), [X(base), X(index), LSL #shift])
+            }
+        }
+    } else {
+        let shift = scale.trailing_zeros();
+        dynasm!(ops ; .arch aarch64 ; add x16, X(base), X(index), LSL #shift);
+        emit_store_at(ops, source, SCRATCH0, offset, size);
+    }
+}
+
+fn indexed_address_shift(scale: u8, size: OpSize) -> Option<u32> {
+    let natural_scale = match size {
+        OpSize::S8 => 1,
+        OpSize::S16 => 2,
+        OpSize::S32 => 4,
+        OpSize::S64 => 8,
+    };
+    if scale == 1 {
+        Some(0)
+    } else if scale == natural_scale {
+        Some(scale.trailing_zeros())
+    } else {
+        None
     }
 }
 
@@ -2397,7 +3025,7 @@ fn emit_branch_predicate(
     ops: &mut VecAssembler<Aarch64Relocation>,
     predicate: BranchPredicate,
     assignment: &Assignment<VReg>,
-    state_base_page: Option<i64>,
+    state_pages: StatePageBases,
 ) -> Result<(), EmitError> {
     match predicate {
         BranchPredicate::Compare { lhs, rhs, .. } => {
@@ -2414,7 +3042,7 @@ fn emit_branch_predicate(
         BranchPredicate::MemoryNonZero { base, offset, size } => {
             let offset = base_offset(base, offset);
             let (base_register, offset) =
-                select_memory_base(base, offset, SCRATCH0, size, false, state_base_page);
+                select_memory_base(base, offset, SCRATCH0, size, false, state_pages);
             emit_load_at(ops, SCRATCH0, base_register, offset, size);
             dynasm!(ops ; .arch aarch64 ; cmp x16, #0);
         }
@@ -2660,7 +3288,10 @@ mod tests {
             Vec::new(),
         );
 
-        assert_eq!(select_state_base_page(&function), Some(4096));
+        assert_eq!(
+            select_state_base_pages(&function, std::iter::empty::<u8>()).primary,
+            Some(4096)
+        );
         assert_eq!(
             select_memory_base(
                 crate::mir::BaseReg::SimState,
@@ -2668,9 +3299,73 @@ mod tests {
                 SCRATCH0,
                 crate::mir::OpSize::S64,
                 false,
-                Some(4096),
+                StatePageBases {
+                    primary: Some(4096),
+                    ..StatePageBases::default()
+                },
             ),
             (STATE_PAGE_REG, 16)
+        );
+
+        let multi_page = crate::mir::MFunction::new(
+            vec![crate::mir::MBlock {
+                id: crate::mir::BlockId(0),
+                phis: Vec::new(),
+                insts: (0..16)
+                    .map(|index| crate::mir::MInst::Load {
+                        dst: crate::mir::VReg(index),
+                        base: crate::mir::BaseReg::SimState,
+                        offset: 4096 + (index % 8) as i32 * 8 + (index / 8) as i32 * 36864,
+                        size: crate::mir::OpSize::S64,
+                    })
+                    .chain(std::iter::once(crate::mir::MInst::Return))
+                    .collect(),
+            }],
+            Vec::new(),
+        );
+        let multi_page_bases = select_state_base_pages(&multi_page, [27, 26, 25, 24]);
+        assert_eq!(multi_page_bases.primary, Some(4096));
+        assert_eq!(multi_page_bases.secondary[0], Some((27, 40960)));
+        assert_eq!(multi_page_bases.secondary[1], None);
+        assert_eq!(
+            select_memory_base(
+                crate::mir::BaseReg::SimState,
+                40976,
+                SCRATCH0,
+                crate::mir::OpSize::S64,
+                false,
+                multi_page_bases,
+            ),
+            (27, 16)
+        );
+        assert_eq!(
+            select_vector_memory_base(crate::mir::BaseReg::SimState, 40960, multi_page_bases),
+            (27, 0)
+        );
+
+        let packed = crate::mir::MFunction::new(
+            vec![crate::mir::MBlock {
+                id: crate::mir::BlockId(0),
+                phis: Vec::new(),
+                insts: vec![
+                    crate::mir::MInst::PackedLaneCompare {
+                        dst: crate::mir::VReg(0),
+                        rhs: crate::mir::PackedLaneCompareRhs::Memory { offset: 4160 },
+                        kind: crate::mir::CmpKind::Eq,
+                        offset: 4096,
+                        lane_count: 8,
+                        element_stride: 1,
+                        bit_offset: 0,
+                        field_width: 8,
+                    },
+                    crate::mir::MInst::Return,
+                ],
+            }],
+            Vec::new(),
+        );
+        assert_eq!(
+            select_state_base_pages(&packed, std::iter::empty::<u8>()).primary,
+            Some(4096)
         );
     }
 
@@ -2746,6 +3441,16 @@ mod tests {
             byte_len: 13,
             value: 0xa5,
         });
+        block.push(MInst::MemCopy {
+            src_offset: 64,
+            dst_offset: 96,
+            byte_len: 32,
+        });
+        block.push(MInst::MemFill {
+            dst_offset: 128,
+            byte_len: 32,
+            value: 0x3c,
+        });
         block.push(MInst::Return);
         function.push_block(block);
         (function, AssignmentMap::default())
@@ -2779,6 +3484,14 @@ mod tests {
             add_sub_immediate_encoding(31, 1, -4096, true),
             Some(0xf140_043f)
         );
+    }
+
+    #[test]
+    fn selects_only_architecturally_encodable_index_scales() {
+        assert_eq!(indexed_address_shift(1, crate::mir::OpSize::S64), Some(0));
+        assert_eq!(indexed_address_shift(8, crate::mir::OpSize::S64), Some(3));
+        assert_eq!(indexed_address_shift(2, crate::mir::OpSize::S16), Some(1));
+        assert_eq!(indexed_address_shift(8, crate::mir::OpSize::S16), None);
     }
 
     #[test]
@@ -2987,6 +3700,83 @@ mod tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
+    fn executes_indexed_memory_operands() {
+        let function = arm_mir::MFunction::new(
+            vec![arm_mir::MBlock {
+                id: arm_mir::BlockId(0),
+                phis: Vec::new(),
+                insts: vec![
+                    arm_mir::MInst::Load {
+                        dst: arm_mir::VReg(0),
+                        base: arm_mir::BaseReg::SimState,
+                        offset: 0,
+                        size: arm_mir::OpSize::S64,
+                    },
+                    arm_mir::MInst::LoadIndexed {
+                        dst: arm_mir::VReg(1),
+                        base: arm_mir::BaseReg::SimState,
+                        offset: 0,
+                        index: arm_mir::VReg(0),
+                        scale: 8,
+                        size: arm_mir::OpSize::S64,
+                    },
+                    arm_mir::MInst::LoadImm {
+                        dst: arm_mir::VReg(2),
+                        value: 24,
+                    },
+                    arm_mir::MInst::StoreIndexed {
+                        base: arm_mir::BaseReg::SimState,
+                        offset: 8,
+                        index: arm_mir::VReg(2),
+                        src: arm_mir::VReg(1),
+                        size: arm_mir::OpSize::S64,
+                    },
+                    arm_mir::MInst::OrStoreIndexed {
+                        base: arm_mir::BaseReg::SimState,
+                        offset: 100_000,
+                        index: arm_mir::VReg(2),
+                        src: arm_mir::VReg(1),
+                        size: arm_mir::OpSize::S64,
+                    },
+                    arm_mir::MInst::Return,
+                ],
+            }],
+            Vec::new(),
+        );
+        let mut assignment = Assignment::default();
+        assignment.set(arm_mir::VReg(0), Arm64Reg::new(9));
+        assignment.set(arm_mir::VReg(1), Arm64Reg::new(10));
+        assignment.set(arm_mir::VReg(2), Arm64Reg::new(11));
+        let emitted = emit_function(
+            &function,
+            &assignment,
+            0,
+            64,
+            &EdgeCopyPlan::default(),
+            false,
+            false,
+        )
+        .unwrap();
+        let code = crate::jit_mem::JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0_u8; 100_064];
+        state[..8].copy_from_slice(&3_u64.to_le_bytes());
+        let payload = 0x1234_5678_9abc_def0_u64;
+        state[24..32].copy_from_slice(&payload.to_le_bytes());
+        state[100_024..100_032].copy_from_slice(&0x0f_u64.to_le_bytes());
+
+        assert_eq!(unsafe { code.call(&mut state) }, 0);
+        assert_eq!(
+            u64::from_le_bytes(state[32..40].try_into().unwrap()),
+            payload
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[100_024..100_032].try_into().unwrap()),
+            payload | 0x0f
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
     fn executes_guarded_compare_select() {
         let (function, assignment) = guarded_select();
         let result = emit(&function, &assignment, 0).unwrap();
@@ -3009,13 +3799,18 @@ mod tests {
         let (function, assignment) = bulk_memory_ops();
         let result = emit(&function, &assignment, 0).unwrap();
         let code = crate::jit_mem::JitCode::new(&result.code).unwrap();
-        let mut state = vec![0_u8; 40];
+        let mut state = vec![0_u8; 200];
         for (index, byte) in state[..16].iter_mut().enumerate() {
             *byte = index as u8;
+        }
+        for (index, byte) in state[64..96].iter_mut().enumerate() {
+            *byte = (index as u8).wrapping_mul(3);
         }
         assert_eq!(unsafe { code.call(&mut state) }, 0);
         assert_eq!(&state[4..16], &(0_u8..12).collect::<Vec<_>>());
         assert_eq!(&state[20..33], &[0xa5; 13]);
+        assert_eq!(&state[96..128], &state[64..96]);
+        assert_eq!(&state[128..160], &[0x3c; 32]);
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -3417,6 +4212,144 @@ mod tests {
                 expected,
                 "packed affine kind index {index}"
             );
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn executes_vector_packed_lane_comparisons() {
+        let kinds = [
+            CmpKind::Eq,
+            CmpKind::Ne,
+            CmpKind::LtU,
+            CmpKind::LeU,
+            CmpKind::GtU,
+            CmpKind::GeU,
+            CmpKind::LtS,
+            CmpKind::LeS,
+            CmpKind::GtS,
+            CmpKind::GeS,
+        ];
+        let cases = [
+            (
+                1_usize,
+                vec![
+                    0, 1, 5, 6, 7, 8, 0x7f, 0x80, 0xfe, 0xff, 3, 5, 128, 1, 42, 200,
+                ],
+                vec![
+                    0, 1, 6, 5, 7, 9, 0x7f, 0x81, 0xfd, 0xff, 4, 5, 127, 2, 40, 201,
+                ],
+            ),
+            (
+                2,
+                vec![0, 1, 5, 6, 7, 0x7fff, 0x8000, 0xffff],
+                vec![0, 2, 6, 5, 7, 0x7ffe, 0x8001, 0xfffe],
+            ),
+            (
+                4,
+                vec![0, 1, 5, 0x8000_0000],
+                vec![1, 5, 0x8000_0000, 0x7fff_ffff],
+            ),
+        ];
+        let write_lanes = |state: &mut [u8], offset: usize, stride: usize, values: &[u64]| {
+            for (index, value) in values.iter().copied().enumerate() {
+                let start = offset + index * stride;
+                state[start..start + stride].copy_from_slice(&value.to_le_bytes()[..stride]);
+            }
+        };
+        let matches = |kind: CmpKind, lhs: u64, rhs: u64, bits: usize| {
+            let mask = (1_u64 << bits) - 1;
+            let lhs = lhs & mask;
+            let rhs = rhs & mask;
+            let signed = |value: u64| {
+                if value & (1_u64 << (bits - 1)) != 0 {
+                    (value | !mask) as i64
+                } else {
+                    value as i64
+                }
+            };
+            match kind {
+                CmpKind::Eq => lhs == rhs,
+                CmpKind::Ne => lhs != rhs,
+                CmpKind::LtU => lhs < rhs,
+                CmpKind::LeU => lhs <= rhs,
+                CmpKind::GtU => lhs > rhs,
+                CmpKind::GeU => lhs >= rhs,
+                CmpKind::LtS => signed(lhs) < signed(rhs),
+                CmpKind::LeS => signed(lhs) <= signed(rhs),
+                CmpKind::GtS => signed(lhs) > signed(rhs),
+                CmpKind::GeS => signed(lhs) >= signed(rhs),
+            }
+        };
+
+        for (stride, lhs_values, rhs_values) in cases {
+            for use_memory_rhs in [false, true] {
+                for kind in kinds {
+                    let mut vregs = VRegAllocator::new();
+                    let result = vregs.alloc();
+                    let scalar_rhs = (!use_memory_rhs).then(|| vregs.alloc());
+                    let mut function = MFunction::new(
+                        vregs,
+                        vec![SpillDesc::transient(); usize::from(!use_memory_rhs)],
+                    );
+                    let mut block = MBlock::new(BlockId(0));
+                    if let Some(rhs) = scalar_rhs {
+                        block.push(MInst::LoadImm { dst: rhs, value: 5 });
+                    }
+                    block.push(MInst::PackedLaneCompare {
+                        dst: result,
+                        rhs: if let Some(rhs) = scalar_rhs {
+                            PackedLaneCompareRhs::Scalar(rhs)
+                        } else {
+                            PackedLaneCompareRhs::Memory {
+                                offset: 128,
+                                alias_range: None,
+                            }
+                        },
+                        kind,
+                        offset: 0,
+                        lane_count: u8::try_from(lhs_values.len()).unwrap(),
+                        element_stride: u8::try_from(stride).unwrap(),
+                        bit_offset: 0,
+                        field_width: u8::try_from(stride * 8).unwrap(),
+                        alias_range: None,
+                    });
+                    block.push(MInst::Store {
+                        base: BaseReg::SimState,
+                        offset: 256,
+                        src: result,
+                        size: OpSize::S64,
+                    });
+                    block.push(MInst::Return);
+                    function.push_block(block);
+                    let mut assignment = AssignmentMap::default();
+                    assignment.set(result, PhysReg::RDX);
+                    if let Some(rhs) = scalar_rhs {
+                        assignment.set(rhs, PhysReg::RAX);
+                    }
+                    let emitted = emit(&function, &assignment, 0).unwrap();
+                    let code = crate::jit_mem::JitCode::new(&emitted.code).unwrap();
+                    let mut state = vec![0_u8; 272];
+                    write_lanes(&mut state, 0, stride, &lhs_values);
+                    if use_memory_rhs {
+                        write_lanes(&mut state, 128, stride, &rhs_values);
+                    }
+                    assert_eq!(unsafe { code.call(&mut state) }, 0);
+                    let actual = u64::from_le_bytes(state[256..264].try_into().unwrap());
+                    let expected =
+                        lhs_values
+                            .iter()
+                            .enumerate()
+                            .fold(0_u64, |mask, (index, &lhs)| {
+                                let rhs = if use_memory_rhs { rhs_values[index] } else { 5 };
+                                mask | u64::from(matches(kind, lhs, rhs, stride * 8)) << index
+                            });
+                    assert_eq!(
+                        actual, expected,
+                        "stride={stride} memory_rhs={use_memory_rhs} kind={kind:?}"
+                    );
+                }
+            }
         }
     }
 
