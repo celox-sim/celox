@@ -30,6 +30,33 @@ fn native_compilation_can_be_initialized_later() {
     assert_eq!(sim.get(sim.signal("o")), 0x5au64.into());
 }
 
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn native_image_restores_runtime_without_source_compilation() {
+    let code = r#"
+        module Top (o: output logic<8>) {
+            assign o = 8'ha5;
+        }
+    "#;
+
+    let image = Simulator::builder(code, "Top")
+        .compile_native()
+        .unwrap()
+        .into_program_image();
+    let output = image
+        .reflection()
+        .signals()
+        .iter()
+        .find(|signal| signal.full_name == "Top.o")
+        .expect("compiled image should retain output reflection")
+        .signal;
+
+    let mut sim = Simulator::from_sources(Vec::new(), "Top")
+        .build_native_from_image(image)
+        .unwrap();
+    assert_eq!(sim.get(output), 0xa5u64.into());
+}
+
 fn run_single_block_mir(insts: Vec<celox::native_backend::mir::MInst>, vreg_count: usize) -> u64 {
     use celox::native_backend::emit;
     use celox::native_backend::jit_mem;

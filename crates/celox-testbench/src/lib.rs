@@ -5,6 +5,7 @@
 //! part of the bytecode representation.
 
 use num_bigint::BigUint;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 mod format;
@@ -12,13 +13,13 @@ mod vm;
 pub use format::{DisplayFormatArg, format_display_arg};
 pub use vm::{CompiledExpr, TestbenchValue};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StateLocation<A> {
     pub address: A,
     pub byte_offset: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TestbenchOperator {
     Add,
     Sub,
@@ -50,14 +51,14 @@ pub enum TestbenchOperator {
     BitNot,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceLocation {
     pub file: String,
     pub line: u32,
     pub column: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AssertMessage<Argument> {
     Formatted {
         template: String,
@@ -66,13 +67,13 @@ pub enum AssertMessage<Argument> {
     DynamicArgs(Vec<Argument>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClockCount<Expression> {
     Static(u64),
     Dynamic(Expression),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoopBound<Expression> {
     Static(usize),
     Dynamic {
@@ -82,13 +83,13 @@ pub enum LoopBound<Expression> {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ComponentParameterValue {
     Bits { words: Vec<u64>, width: u32 },
     String(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComponentConnection {
     pub port: String,
     pub group: Option<String>,
@@ -100,7 +101,7 @@ pub struct ComponentConnection {
     pub width: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestbenchComponent {
     pub instance: String,
     pub component: String,
@@ -110,14 +111,14 @@ pub struct TestbenchComponent {
     pub source: Option<SourceLocation>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComponentLibrary {
     pub export: String,
     pub type_name: String,
     pub path: PathBuf,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComponentConnectionBinding<Event, Signal, Expression> {
     pub port: String,
     pub input: Option<Expression>,
@@ -130,7 +131,7 @@ pub struct ComponentConnectionBinding<Event, Signal, Expression> {
     pub event: Option<Event>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComponentBinding<Event, Signal, Expression> {
     pub instance: String,
     pub connections: Vec<ComponentConnectionBinding<Event, Signal, Expression>>,
@@ -141,7 +142,7 @@ pub struct ComponentBinding<Event, Signal, Expression> {
 /// Frontends instantiate this with semantic state/event identities and
 /// unbound expressions. Runtime binding instantiates the same contract with
 /// backend event/signal handles and executable expressions.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TestbenchStatement<Event, Signal, Expression, Argument, Target = Signal> {
     ClockNext {
         clock_event: Event,
@@ -220,26 +221,26 @@ pub enum TestbenchStatement<Event, Signal, Expression, Argument, Target = Signal
     Finish,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SemanticSignal<A> {
     pub address: A,
     pub width: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestbenchSelection<Expression> {
     pub offset: Expression,
     pub width: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestbenchTarget<Signal, Expression> {
     pub signal: Signal,
     pub selection: Option<TestbenchSelection<Expression>>,
     pub width: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SemanticArgument<A> {
     pub expr: ExprBytecode<StateLocation<A>>,
     pub width: usize,
@@ -257,7 +258,7 @@ pub type SemanticStatement<A> = TestbenchStatement<
 pub type SemanticComponentBinding<A> =
     ComponentBinding<A, SemanticSignal<A>, ExprBytecode<StateLocation<A>>>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestbenchProgram<A> {
     statements: Vec<SemanticStatement<A>>,
     random_seed: Option<u64>,
@@ -356,7 +357,7 @@ impl<A> TestbenchProgram<A> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExprOpcode<L = usize> {
     ConstU64(u64),
     ConstWide(BigUint),
@@ -414,7 +415,7 @@ pub enum ExprOpcode<L = usize> {
     },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExprBytecode<L = usize> {
     ops: Vec<ExprOpcode<L>>,
 }

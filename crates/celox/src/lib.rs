@@ -62,6 +62,7 @@ mod host_api {
     pub use crate::simulation::Simulation;
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub use crate::simulator::NativeCompilation;
@@ -98,6 +99,7 @@ mod host_api {
 
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub mod native_backend {
@@ -107,11 +109,13 @@ mod host_api {
 
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub use crate::backend::native::backend::NativeEventRef;
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub use crate::backend::native::{
@@ -121,6 +125,7 @@ mod host_api {
     };
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub use crate::backend::{NativeDiagnostics, NativeDumpOptions};
@@ -129,11 +134,13 @@ mod host_api {
     /// Cranelift elsewhere.
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub type DefaultBackend = NativeBackend;
     #[cfg(not(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     )))]
     pub type DefaultBackend = JitBackend;

@@ -6,7 +6,7 @@ use std::{fmt, path::Path};
 use super::backend::NativeProgramImage;
 
 const TRAILER_MAGIC: &[u8; 8] = b"CELOXNPI";
-const CONTAINER_VERSION: u16 = 1;
+const CONTAINER_VERSION: u16 = 2;
 const TRAILER_SIZE: usize = 32;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -20,12 +20,12 @@ pub enum NativeImageArchitecture {
 }
 
 impl NativeImageArchitecture {
-    fn current() -> Self {
-        #[cfg(target_arch = "x86_64")]
+    pub fn current() -> Self {
+        #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
         {
             Self::X86_64
         }
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(any(feature = "arm64-codegen", target_arch = "aarch64"))]
         {
             Self::Aarch64
         }

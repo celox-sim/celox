@@ -5,6 +5,7 @@ mod error;
     feature = "host-runtime",
     any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     )
 ))]
@@ -26,6 +27,7 @@ mod host {
     use crate::backend::RuntimeEventBuffer;
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     use crate::backend::native::{NativeBackend, SharedNativeCode};
@@ -484,6 +486,7 @@ mod host {
 
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub(crate) fn runtime_event_write_seq_for_backend<B: SimBackend>(backend: &B) -> u64 {
@@ -501,6 +504,7 @@ mod host {
 
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub(crate) fn collect_runtime_events_for_backend<B: SimBackend>(
@@ -1514,6 +1518,7 @@ mod host {
 
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     impl Simulator<NativeBackend> {

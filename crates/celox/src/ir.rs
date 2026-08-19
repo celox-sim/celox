@@ -18,6 +18,7 @@ pub use celox_frontend_core::shared::{
     feature = "host-runtime",
     any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     )
 ))]
@@ -143,6 +144,7 @@ impl OptimizedSir {
         feature = "host-runtime",
         any(
             target_arch = "x86_64",
+            feature = "arm64-codegen",
             all(target_arch = "aarch64", feature = "experimental-arm64-backend")
         )
     ))]
@@ -334,6 +336,7 @@ impl RuntimeProgram {
         feature = "host-runtime",
         any(
             target_arch = "x86_64",
+            feature = "arm64-codegen",
             all(target_arch = "aarch64", feature = "experimental-arm64-backend")
         )
     ))]
@@ -749,6 +752,7 @@ pub use celox_frontend_core::TraceSimModule as SimModule;
     feature = "host-runtime",
     any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     )
 ))]

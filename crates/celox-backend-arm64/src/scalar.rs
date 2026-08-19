@@ -653,12 +653,18 @@ fn emit_instruction(
         }
         MInst::AddImm { dst, src, imm } | MInst::SubImm { dst, src, imm } => {
             let (dst, src) = (resolve(assignment, *dst)?, resolve(assignment, *src)?);
-            emit_load_imm(ops, SCRATCH0, i64::from(*imm).unsigned_abs());
-            let subtract = matches!(instruction, MInst::SubImm { .. }) ^ (*imm < 0);
-            if subtract {
-                dynasm!(ops ; .arch aarch64 ; sub X(dst), X(src), x16);
+            let offset = if matches!(instruction, MInst::SubImm { .. }) {
+                -i64::from(*imm)
             } else {
-                dynasm!(ops ; .arch aarch64 ; add X(dst), X(src), x16);
+                i64::from(*imm)
+            };
+            if !emit_add_sub_immediate(ops, dst, src, offset) {
+                emit_load_imm(ops, SCRATCH0, offset.unsigned_abs());
+                if offset < 0 {
+                    dynasm!(ops ; .arch aarch64 ; sub X(dst), X(src), x16);
+                } else {
+                    dynasm!(ops ; .arch aarch64 ; add X(dst), X(src), x16);
+                }
             }
         }
         MInst::Cmp {
@@ -1583,16 +1589,100 @@ fn emit_base_address(
 fn emit_address(ops: &mut VecAssembler<Aarch64Relocation>, base: u8, offset: i64) {
     if offset == 0 {
         dynasm!(ops ; .arch aarch64 ; mov x16, X(base));
-    } else {
+    } else if !emit_add_sub_immediate(ops, SCRATCH0, base, offset) {
         emit_load_imm(ops, SCRATCH1, offset as u64);
         dynasm!(ops ; .arch aarch64 ; add x16, X(base), x17);
+    } else {
+        // The address was formed directly by ADD/SUB immediate.
     }
 }
 
 fn emit_add_offset(ops: &mut VecAssembler<Aarch64Relocation>, offset: i64) {
     if offset != 0 {
-        emit_load_imm(ops, SCRATCH1, offset as u64);
-        dynasm!(ops ; .arch aarch64 ; add x16, x16, x17);
+        if !emit_add_sub_immediate(ops, SCRATCH0, SCRATCH0, offset) {
+            emit_load_imm(ops, SCRATCH1, offset as u64);
+            dynasm!(ops ; .arch aarch64 ; add x16, x16, x17);
+        }
+    }
+}
+
+fn add_sub_immediate(offset: i64) -> Option<(bool, u32, bool)> {
+    let (subtract, magnitude) = if offset < 0 {
+        (true, offset.unsigned_abs())
+    } else {
+        (false, offset as u64)
+    };
+    if magnitude <= 0xfff {
+        return Some((subtract, magnitude as u32, false));
+    }
+    if magnitude.is_multiple_of(0x1000) && magnitude / 0x1000 <= 0xfff {
+        return Some((subtract, (magnitude / 0x1000) as u32, true));
+    }
+    None
+}
+
+fn emit_add_sub_immediate(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    destination: u8,
+    base: u8,
+    offset: i64,
+) -> bool {
+    let Some((subtract, immediate, shifted)) = add_sub_immediate(offset) else {
+        return false;
+    };
+    // ADD/SUB (immediate): sf=1, op selects SUB, sh selects <<12, and the
+    // 12-bit immediate is encoded between Rn and Rd.  Encoding this one
+    // instruction directly keeps both registers dynamic without forcing a
+    // large dynasm register match table.
+    let instruction = 0x9100_0000
+        | (u32::from(subtract) << 30)
+        | (u32::from(shifted) << 22)
+        | (immediate << 10)
+        | (u32::from(base) << 5)
+        | u32::from(destination);
+    debug_assert!(immediate <= 0xfff);
+    ops.push_u32(instruction);
+    true
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MoveWidePlan {
+    inverted: bool,
+    first: usize,
+    instruction_count: usize,
+}
+
+fn move_wide_plan(value: u64) -> MoveWidePlan {
+    let halves = [
+        value as u16,
+        (value >> 16) as u16,
+        (value >> 32) as u16,
+        (value >> 48) as u16,
+    ];
+    let movz_candidates = halves
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &half)| (half != 0).then_some(index))
+        .collect::<Vec<_>>();
+    let movn_candidates = halves
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &half)| (half != u16::MAX).then_some(index))
+        .collect::<Vec<_>>();
+    let movz = MoveWidePlan {
+        inverted: false,
+        first: movz_candidates.first().copied().unwrap_or(0),
+        instruction_count: movz_candidates.len().max(1),
+    };
+    let movn = MoveWidePlan {
+        inverted: true,
+        first: movn_candidates.first().copied().unwrap_or(0),
+        instruction_count: movn_candidates.len().max(1),
+    };
+    if movn.instruction_count < movz.instruction_count {
+        movn
+    } else {
+        movz
     }
 }
 
@@ -1603,17 +1693,27 @@ fn emit_load_imm(ops: &mut VecAssembler<Aarch64Relocation>, register: u8, value:
         (value >> 32) as u16,
         (value >> 48) as u16,
     ];
-    let first = halves.iter().position(|half| *half != 0).unwrap_or(0);
-    let half = u32::from(halves[first]);
-    match first {
-        0 => dynasm!(ops ; .arch aarch64 ; movz X(register), half),
-        1 => dynasm!(ops ; .arch aarch64 ; movz X(register), half, LSL #16),
-        2 => dynasm!(ops ; .arch aarch64 ; movz X(register), half, LSL #32),
-        3 => dynasm!(ops ; .arch aarch64 ; movz X(register), half, LSL #48),
+    let plan = move_wide_plan(value);
+    let first = plan.first;
+    let fill = if plan.inverted { u16::MAX } else { 0 };
+    let half = if plan.inverted {
+        u32::from(!halves[first])
+    } else {
+        u32::from(halves[first])
+    };
+    match (plan.inverted, first) {
+        (false, 0) => dynasm!(ops ; .arch aarch64 ; movz X(register), half),
+        (false, 1) => dynasm!(ops ; .arch aarch64 ; movz X(register), half, LSL #16),
+        (false, 2) => dynasm!(ops ; .arch aarch64 ; movz X(register), half, LSL #32),
+        (false, 3) => dynasm!(ops ; .arch aarch64 ; movz X(register), half, LSL #48),
+        (true, 0) => dynasm!(ops ; .arch aarch64 ; movn X(register), half),
+        (true, 1) => dynasm!(ops ; .arch aarch64 ; movn X(register), half, LSL #16),
+        (true, 2) => dynasm!(ops ; .arch aarch64 ; movn X(register), half, LSL #32),
+        (true, 3) => dynasm!(ops ; .arch aarch64 ; movn X(register), half, LSL #48),
         _ => unreachable!(),
     }
     for (index, half) in halves.into_iter().enumerate() {
-        if index == first || half == 0 {
+        if index == first || half == fill {
             continue;
         }
         let half = u32::from(half);
@@ -2033,6 +2133,23 @@ mod tests {
         assert!(!result.code.is_empty());
         assert!(result.text_size <= result.code.len());
         assert_eq!(result.block_offsets, vec![(crate::mir::BlockId(0), 4)]);
+    }
+
+    #[test]
+    fn selects_short_aarch64_immediates() {
+        assert_eq!(add_sub_immediate(4095), Some((false, 4095, false)));
+        assert_eq!(add_sub_immediate(-4095), Some((true, 4095, false)));
+        assert_eq!(add_sub_immediate(4096), Some((false, 1, true)));
+        assert_eq!(add_sub_immediate(-4096), Some((true, 1, true)));
+        assert_eq!(add_sub_immediate(4097), None);
+    }
+
+    #[test]
+    fn uses_movn_for_constants_close_to_all_ones() {
+        assert_eq!(move_wide_plan(0).instruction_count, 1);
+        assert!(move_wide_plan(u64::MAX).inverted);
+        assert_eq!(move_wide_plan(u64::MAX).instruction_count, 1);
+        assert_eq!(move_wide_plan(0xffff_ffff_ffff_0000).instruction_count, 1);
     }
 
     #[cfg(target_arch = "aarch64")]
