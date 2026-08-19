@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787111142097,
+  "lastUpdate": 1787115684759,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -181788,6 +181788,113 @@ window.BENCHMARK_DATA = {
           {
             "name": "heliodor-veryl-cc-aarch64/heliodor_linux_boot_execution",
             "value": 176251.502597,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "tig",
+            "username": "tignear",
+            "email": "tignear+s@gmail.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "50fc21ab5896ad67e61c6d371f1f409f0bb1486b",
+          "message": "Merge pull request #611 from celox-sim/renovate/napi-rs-emnapi-compatibility\n\nchore(deps): update napi-rs and emnapi compatibility",
+          "timestamp": "2026-08-19T04:11:48Z",
+          "url": "https://github.com/celox-sim/celox/commit/50fc21ab5896ad67e61c6d371f1f409f0bb1486b"
+        },
+        "date": 1787115646932,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-jit/heliodor_linux_boot_execution",
+            "value": 192720.416715,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-total/heliodor_linux_boot_execution",
+            "value": 192761.395654,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl/heliodor_linux_boot_execution",
+            "value": 225804.877244,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-celox-compile/heliodor_linux_boot_compilation",
+            "value": 51292.316533,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-compile/heliodor_linux_boot_compilation",
+            "value": 66063.582908,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-native-x86_64/heliodor_linux_boot_compilation",
+            "value": 51292.316533,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-native-x86_64/heliodor_linux_boot_execution",
+            "value": 192761.395654,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-cranelift-x86_64/heliodor_linux_boot_compilation",
+            "value": 45326.468616,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-cranelift-x86_64/heliodor_linux_boot_execution",
+            "value": 628718.973003,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-cc-x86_64/heliodor_linux_boot_compilation",
+            "value": 66063.582908,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-cc-x86_64/heliodor_linux_boot_execution",
+            "value": 225804.877244,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-native-aarch64/heliodor_linux_boot_compilation",
+            "value": 136034.44644,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-native-aarch64/heliodor_linux_boot_execution",
+            "value": 800542.838212,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-cranelift-aarch64/heliodor_linux_boot_compilation",
+            "value": 50023.579659,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-cranelift-aarch64/heliodor_linux_boot_execution",
+            "value": 2224780.337182,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_linux_boot_compilation",
+            "value": 86154.477205,
+            "unit": "ms"
+          },
+          {
+            "name": "heliodor-veryl-cc-aarch64/heliodor_linux_boot_execution",
+            "value": 166487.550978,
             "unit": "ms"
           }
         ]
