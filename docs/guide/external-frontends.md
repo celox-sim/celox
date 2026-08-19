@@ -26,7 +26,9 @@ The first SDK release represents one flattened module. It supports typed signals
 constants, combinational expressions and assignments, edge-triggered registers,
 asynchronous reset, synchronous enable, and initial values. Hierarchical netlists,
 memories, latches, and custom primitives should be flattened or lowered by the
-external frontend before emitting an artifact.
+external frontend before emitting an artifact. Bidirectional (`inout`) signals
+are also unsupported in artifact format version 1; lower them to separate input,
+output, and output-enable signals.
 
 ## TypeScript testbenches
 

@@ -40,6 +40,7 @@ impl ExprId {
 pub enum Direction {
     Input,
     Output,
+    /// Reserved for a future artifact version; version 1 validation rejects it.
     Inout,
     Internal,
 }
@@ -450,6 +451,11 @@ impl FrontendArtifact {
             if signal.name.is_empty() {
                 return Err(BuildError::EmptySignalName);
             }
+            if matches!(signal.direction, Direction::Inout) {
+                return Err(BuildError::UnsupportedInout {
+                    name: signal.name.clone(),
+                });
+            }
             if names.insert(signal.name.clone(), signal.id).is_some() {
                 return Err(BuildError::DuplicateSignal(signal.name.clone()));
             }
@@ -507,8 +513,30 @@ impl FrontendArtifact {
                     }
                 }
                 ExprNode::Binary { lhs, rhs, .. } => references.extend([*lhs, *rhs]),
-                ExprNode::Unary { input, .. } | ExprNode::Slice { input, .. } => {
+                ExprNode::Unary { input, .. } => {
                     references.push(*input);
+                }
+                ExprNode::Slice { input, lsb } => {
+                    if input.index() as usize >= index {
+                        return Err(BuildError::ForwardExpressionReference {
+                            expression: expression.id.index(),
+                            referenced: input.index(),
+                        });
+                    }
+                    let input_type = self
+                        .expression(*input)
+                        .ok_or(BuildError::UnknownExpression(input.index()))?
+                        .value_type();
+                    if lsb
+                        .checked_add(expression.value_type().width())
+                        .is_none_or(|end| end > input_type.width())
+                    {
+                        return Err(BuildError::InvalidSlice {
+                            lsb: *lsb,
+                            width: expression.value_type().width(),
+                            signal_width: input_type.width(),
+                        });
+                    }
                 }
                 ExprNode::Mux {
                     condition,
@@ -664,6 +692,8 @@ pub enum BuildError {
     ForwardExpressionReference { expression: u32, referenced: u32 },
     #[error("internal signal `{name}` appears in the module port order")]
     InternalSignalInPortOrder { name: String },
+    #[error("inout signal `{name}` is not supported by frontend artifact format version 1")]
+    UnsupportedInout { name: String },
 }
 
 /// JSON interchange failures for frontend artifacts.
@@ -714,6 +744,9 @@ impl ModuleBuilder {
         let name = name.into();
         if name.is_empty() {
             return Err(BuildError::EmptySignalName);
+        }
+        if matches!(direction, Direction::Inout) {
+            return Err(BuildError::UnsupportedInout { name });
         }
         if self.signal_names.contains_key(&name) {
             return Err(BuildError::DuplicateSignal(name));
@@ -1100,5 +1133,44 @@ mod tests {
             .register(partial, q_expr, clock, Edge::Posedge, None, None)
             .unwrap_err();
         assert!(matches!(error, BuildError::PartialRegisterTarget { .. }));
+    }
+
+    #[test]
+    fn rejects_inout_in_builder_and_json_artifacts() {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("InoutBuilder").unwrap();
+        let error = module.signal("bus", Direction::Inout, bit).unwrap_err();
+        assert!(matches!(error, BuildError::UnsupportedInout { .. }));
+
+        let mut module = ModuleBuilder::new("InoutJson").unwrap();
+        module.input("bus", bit).unwrap();
+        let json = module.finish().to_json().unwrap().replace("Input", "Inout");
+        let error = FrontendArtifact::from_json(&json).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::UnsupportedInout { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_expression_slice_from_json() {
+        let byte = ValueType::bits(8).unwrap();
+        let mut module = ModuleBuilder::new("InvalidSlice").unwrap();
+        let input = module.input("input", byte).unwrap();
+        let input = module.read(input).unwrap();
+        module.expr_slice(input, 0, 4).unwrap();
+        let artifact = module.finish();
+        let mut json = serde_json::to_value(&artifact).unwrap();
+        json["expressions"][1]["node"]["Slice"]["lsb"] = 7.into();
+
+        let error = FrontendArtifact::from_json(&json.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::InvalidSlice {
+                lsb: 7,
+                width: 4,
+                signal_width: 8,
+            })
+        ));
     }
 }

@@ -34,3 +34,7 @@ equivalent is `runTestWithFrontendArtifact`.
 The versioned JSON representation is checked at decode time. Consumers should
 produce it through `to_json` instead of relying on its field spelling as a
 hand-authored format.
+
+Artifact format version 1 models one flattened module and does not support
+bidirectional (`inout`) signals. External frontends must lower them to separate
+input, output, and output-enable signals before building the artifact.

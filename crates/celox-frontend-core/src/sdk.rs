@@ -7,6 +7,7 @@ use celox_design::{
 };
 use celox_frontend_sdk::{
     ActiveLevel, Direction, Edge, ExprId, ExprNode, FrontendArtifact, SignalId, SignalSlice,
+    ValueType,
 };
 use celox_sir::{
     BlockId, ExecutionUnit, RegisterId, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator,
@@ -18,6 +19,7 @@ use thiserror::Error;
 use crate::symbolic::artifact::{
     ExternalHierarchy, ExternalModule, SimModule, SymbolicRtl, SymbolicVariable,
 };
+use crate::symbolic::width::coerce_node_width;
 use crate::{HashMap, HashSet, SourceVarId, VariableKind};
 
 type RegionedSourceAddr = RegionedVarAddrBase<SourceVarId>;
@@ -44,6 +46,14 @@ pub enum FrontendArtifactError {
     UnsupportedOperation,
     #[error("signal `{signal}` is used with conflicting clock/reset roles")]
     ConflictingSignalRole { signal: String },
+    #[error(
+        "async reset `{reset}` is shared by distinct clock domains `{first_clock}` and `{second_clock}`"
+    )]
+    SharedResetAcrossClocks {
+        reset: String,
+        first_clock: String,
+        second_clock: String,
+    },
     #[error("frontend SDK expression is invalid: {0}")]
     InvalidExpression(#[from] celox_slt::SLTNodeFactsError),
 }
@@ -113,7 +123,11 @@ fn expression_sources(
     artifact: &FrontendArtifact,
     id: ExprId,
     sources: &mut HashSet<VarAtomBase<SourceVarId>>,
+    visited: &mut HashSet<ExprId>,
 ) -> Result<(), FrontendArtifactError> {
+    if !visited.insert(id) {
+        return Ok(());
+    }
     let expression = artifact
         .expression(id)
         .ok_or(FrontendArtifactError::UnknownExpression(id.index()))?;
@@ -123,29 +137,67 @@ fn expression_sources(
         }
         ExprNode::Constant(_) => {}
         ExprNode::Binary { lhs, rhs, .. } => {
-            expression_sources(artifact, *lhs, sources)?;
-            expression_sources(artifact, *rhs, sources)?;
+            expression_sources(artifact, *lhs, sources, visited)?;
+            expression_sources(artifact, *rhs, sources, visited)?;
         }
         ExprNode::Unary { input, .. } | ExprNode::Slice { input, .. } => {
-            expression_sources(artifact, *input, sources)?;
+            expression_sources(artifact, *input, sources, visited)?;
         }
         ExprNode::Mux {
             condition,
             then_expr,
             else_expr,
         } => {
-            expression_sources(artifact, *condition, sources)?;
-            expression_sources(artifact, *then_expr, sources)?;
-            expression_sources(artifact, *else_expr, sources)?;
+            expression_sources(artifact, *condition, sources, visited)?;
+            expression_sources(artifact, *then_expr, sources, visited)?;
+            expression_sources(artifact, *else_expr, sources, visited)?;
         }
         ExprNode::Concat(parts) => {
             for part in parts {
-                expression_sources(artifact, *part, sources)?;
+                expression_sources(artifact, *part, sources, visited)?;
             }
         }
         _ => return Err(FrontendArtifactError::UnsupportedOperation),
     }
     Ok(())
+}
+
+fn coerce_slt_expression(
+    artifact: &FrontendArtifact,
+    id: ExprId,
+    target_width: usize,
+    arena: &mut SLTNodeArena<SourceVarId>,
+    cache: &mut HashMap<ExprId, NodeId>,
+) -> Result<NodeId, FrontendArtifactError> {
+    let value_type = artifact
+        .expression(id)
+        .ok_or(FrontendArtifactError::UnknownExpression(id.index()))?
+        .value_type();
+    let node = lower_slt_expression(artifact, id, arena, cache)?;
+    Ok(coerce_node_width(
+        arena,
+        node,
+        Some(target_width),
+        value_type.is_signed(),
+    )?)
+}
+
+fn finish_slt_expression(
+    arena: &mut SLTNodeArena<SourceVarId>,
+    node: NodeId,
+    value_type: ValueType,
+) -> Result<NodeId, FrontendArtifactError> {
+    let node = coerce_node_width(
+        arena,
+        node,
+        Some(value_type.width()),
+        value_type.is_signed(),
+    )?;
+    if value_type.is_four_state() {
+        Ok(node)
+    } else {
+        Ok(arena.alloc(SLTNode::Unary(UnaryOp::ToTwoState, node))?)
+    }
 }
 
 fn lower_slt_expression(
@@ -163,11 +215,7 @@ fn lower_slt_expression(
     let node = match expression.node() {
         ExprNode::Signal(slice) => SLTNode::Input {
             variable: source_id(slice.signal()),
-            signed: artifact
-                .signal(slice.signal())
-                .ok_or(FrontendArtifactError::UnknownSignal(slice.signal().index()))?
-                .value_type()
-                .is_signed(),
+            signed: expression.value_type().is_signed(),
             index: Vec::new(),
             access: BitAccess::new(slice.lsb(), slice.lsb() + slice.width() - 1),
         },
@@ -177,23 +225,106 @@ fn lower_slt_expression(
             value.value_type().width(),
             value.value_type().is_signed(),
         ),
-        ExprNode::Binary { op, lhs, rhs } => SLTNode::Binary(
-            lower_slt_expression(artifact, *lhs, arena, cache)?,
-            binary_op(*op)?,
-            lower_slt_expression(artifact, *rhs, arena, cache)?,
-        ),
-        ExprNode::Unary { op, input } => SLTNode::Unary(
-            unary_op(*op)?,
-            lower_slt_expression(artifact, *input, arena, cache)?,
-        ),
+        ExprNode::Binary { op, lhs, rhs } => {
+            use celox_frontend_sdk::BinaryOp as SdkBinaryOp;
+
+            let lhs_type = artifact
+                .expression(*lhs)
+                .ok_or(FrontendArtifactError::UnknownExpression(lhs.index()))?
+                .value_type();
+            let rhs_type = artifact
+                .expression(*rhs)
+                .ok_or(FrontendArtifactError::UnknownExpression(rhs.index()))?
+                .value_type();
+            let (lhs, rhs) = match op {
+                SdkBinaryOp::ShiftLeft
+                | SdkBinaryOp::ShiftRight
+                | SdkBinaryOp::ArithmeticShiftRight => (
+                    coerce_slt_expression(
+                        artifact,
+                        *lhs,
+                        expression.value_type().width(),
+                        arena,
+                        cache,
+                    )?,
+                    lower_slt_expression(artifact, *rhs, arena, cache)?,
+                ),
+                SdkBinaryOp::Equal
+                | SdkBinaryOp::NotEqual
+                | SdkBinaryOp::CaseEqual
+                | SdkBinaryOp::CaseNotEqual
+                | SdkBinaryOp::LessUnsigned
+                | SdkBinaryOp::LessSigned
+                | SdkBinaryOp::LessEqualUnsigned
+                | SdkBinaryOp::LessEqualSigned
+                | SdkBinaryOp::GreaterUnsigned
+                | SdkBinaryOp::GreaterSigned
+                | SdkBinaryOp::GreaterEqualUnsigned
+                | SdkBinaryOp::GreaterEqualSigned => {
+                    let operand_width = lhs_type.width().max(rhs_type.width());
+                    (
+                        coerce_slt_expression(artifact, *lhs, operand_width, arena, cache)?,
+                        coerce_slt_expression(artifact, *rhs, operand_width, arena, cache)?,
+                    )
+                }
+                SdkBinaryOp::LogicAnd | SdkBinaryOp::LogicOr => (
+                    lower_slt_expression(artifact, *lhs, arena, cache)?,
+                    lower_slt_expression(artifact, *rhs, arena, cache)?,
+                ),
+                _ => (
+                    coerce_slt_expression(
+                        artifact,
+                        *lhs,
+                        expression.value_type().width(),
+                        arena,
+                        cache,
+                    )?,
+                    coerce_slt_expression(
+                        artifact,
+                        *rhs,
+                        expression.value_type().width(),
+                        arena,
+                        cache,
+                    )?,
+                ),
+            };
+            SLTNode::Binary(lhs, binary_op(*op)?, rhs)
+        }
+        ExprNode::Unary { op, input } => {
+            let input = match op {
+                celox_frontend_sdk::UnaryOp::Negate | celox_frontend_sdk::UnaryOp::BitNot => {
+                    coerce_slt_expression(
+                        artifact,
+                        *input,
+                        expression.value_type().width(),
+                        arena,
+                        cache,
+                    )?
+                }
+                _ => lower_slt_expression(artifact, *input, arena, cache)?,
+            };
+            SLTNode::Unary(unary_op(*op)?, input)
+        }
         ExprNode::Mux {
             condition,
             then_expr,
             else_expr,
         } => SLTNode::Mux {
             cond: lower_slt_expression(artifact, *condition, arena, cache)?,
-            then_expr: lower_slt_expression(artifact, *then_expr, arena, cache)?,
-            else_expr: lower_slt_expression(artifact, *else_expr, arena, cache)?,
+            then_expr: coerce_slt_expression(
+                artifact,
+                *then_expr,
+                expression.value_type().width(),
+                arena,
+                cache,
+            )?,
+            else_expr: coerce_slt_expression(
+                artifact,
+                *else_expr,
+                expression.value_type().width(),
+                arena,
+                cache,
+            )?,
         },
         ExprNode::Concat(parts) => SLTNode::Concat(
             parts
@@ -216,6 +347,7 @@ fn lower_slt_expression(
         _ => return Err(FrontendArtifactError::UnsupportedOperation),
     };
     let node = arena.alloc(node)?;
+    let node = finish_slt_expression(arena, node, expression.value_type())?;
     cache.insert(id, node);
     Ok(node)
 }
@@ -378,7 +510,28 @@ fn lower_registers(
                 .collect(),
         };
         if let Some(reset) = register.async_reset() {
-            reset_clock_map.insert(source_id(reset.signal()), source_id(register.clock()));
+            let reset_id = source_id(reset.signal());
+            let clock_id = source_id(register.clock());
+            if let Some(first_clock_id) = reset_clock_map.get(&reset_id)
+                && *first_clock_id != clock_id
+            {
+                let signal_name = |id: SignalId| {
+                    artifact
+                        .signal(id)
+                        .map(|signal| signal.name().to_string())
+                        .ok_or(FrontendArtifactError::UnknownSignal(id.index()))
+                };
+                let first_clock = artifact
+                    .signals()
+                    .get(first_clock_id.0 as usize)
+                    .ok_or(FrontendArtifactError::UnknownSignal(first_clock_id.0))?;
+                return Err(FrontendArtifactError::SharedResetAcrossClocks {
+                    reset: signal_name(reset.signal())?,
+                    first_clock: first_clock.name().to_string(),
+                    second_clock: signal_name(register.clock())?,
+                });
+            }
+            reset_clock_map.insert(reset_id, clock_id);
         }
 
         let build_eval =
@@ -577,7 +730,8 @@ pub fn lower_frontend_artifact(
     let mut comb_blocks = Vec::new();
     for assignment in artifact.assignments() {
         let mut sources = HashSet::default();
-        expression_sources(artifact, assignment.value(), &mut sources)?;
+        let mut visited = HashSet::default();
+        expression_sources(artifact, assignment.value(), &mut sources, &mut visited)?;
         comb_blocks.push(LogicPath {
             target: LogicPathTarget::Var(signal_atom(assignment.target())),
             sources,
