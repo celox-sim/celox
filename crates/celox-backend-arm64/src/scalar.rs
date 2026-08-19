@@ -24,6 +24,11 @@ use crate::{Arm64Reg, HashMap};
 const STATE_REG: u8 = 0;
 const SCRATCH0: u8 = 16;
 const SCRATCH1: u8 = 17;
+// x28 is reserved as the base of the target-owned spill frame.  Keeping the
+// frame base live avoids materializing `state + spill_base` for every reload
+// and spill store when the simulator state is larger than AArch64's immediate
+// addressing range.
+const SPILL_REG: u8 = 28;
 const TEMPORARY_BYTES: usize = 16;
 
 /// Result of scalar AArch64 emission.
@@ -259,7 +264,7 @@ fn emit_function(
     let mut callee_saved = assignment
         .iter()
         .map(|(_, register)| register.number())
-        .filter(|register| (19..=28).contains(register))
+        .filter(|register| (19..=27).contains(register))
         .collect::<Vec<_>>();
     if tick_loop {
         // x29 is not allocated to MIR values and carries the native-loop
@@ -267,6 +272,10 @@ fn emit_function(
         // prologue avoids two FP/GPR transfers on every loop iteration.
         callee_saved.push(29);
     }
+    // x28 is the fixed base for the spill/cycle-break arena, including the
+    // temporary slot used by parallel-copy resolution even when no value was
+    // spilled.
+    callee_saved.push(SPILL_REG);
     callee_saved.sort_unstable();
     callee_saved.dedup();
 
@@ -321,6 +330,7 @@ fn emit_function(
             emit_store(&mut ops, 30, SCRATCH0, OpSize::S64);
         }
     }
+    emit_address_to(&mut ops, SPILL_REG, STATE_REG, spill_base as i64);
     for block in &function.blocks {
         let label = block_labels[&block.id];
         block_offsets.push((block.id, ops.offset().0 as u64));
@@ -453,7 +463,7 @@ fn emit_instruction(
             size,
         } => {
             let base_register = base_register(*base);
-            let offset = base_offset(*base, *offset, spill_base)?;
+            let offset = base_offset(*base, *offset);
             emit_load_at(
                 ops,
                 resolve(assignment, *dst)?,
@@ -469,7 +479,7 @@ fn emit_instruction(
             size,
         } => {
             let base_register = base_register(*base);
-            let offset = base_offset(*base, *offset, spill_base)?;
+            let offset = base_offset(*base, *offset);
             emit_store_at(
                 ops,
                 resolve(assignment, *src)?,
@@ -633,7 +643,7 @@ fn emit_instruction(
             imm,
         } => {
             let base_register = base_register(*base);
-            let address_offset = base_offset(*base, *offset, spill_base)?;
+            let address_offset = base_offset(*base, *offset);
             if memory_access_encoding(SCRATCH1, base_register, address_offset, *size, false)
                 .is_some()
             {
@@ -646,7 +656,7 @@ fn emit_instruction(
                 }
                 emit_store_at(ops, 30, base_register, address_offset, *size);
             } else {
-                emit_base_address(ops, *base, *offset, spill_base)?;
+                emit_base_address(ops, *base, *offset)?;
                 emit_load(ops, SCRATCH1, SCRATCH0, *size);
                 emit_load_imm(ops, SCRATCH0, *imm);
                 if matches!(instruction, MInst::AndStoreImm { .. }) {
@@ -654,7 +664,7 @@ fn emit_instruction(
                 } else {
                     dynasm!(ops ; .arch aarch64 ; orr x30, x17, x16);
                 }
-                emit_base_address(ops, *base, *offset, spill_base)?;
+                emit_base_address(ops, *base, *offset)?;
                 emit_store(ops, 30, SCRATCH0, *size);
             }
         }
@@ -951,7 +961,7 @@ fn emit_instruction(
             true_bb,
             false_bb,
         } => {
-            emit_branch_predicate(ops, *predicate, assignment, spill_base)?;
+            emit_branch_predicate(ops, *predicate, assignment)?;
             let true_path = ops.new_dynamic_label();
             emit_conditional_branch(ops, true_path, predicate_kind(*predicate));
             emit_edge_copies(ops, plan, block, *false_bb, spill_base, temporary_offset)?;
@@ -1079,11 +1089,11 @@ fn emit_instruction(
             let offset = active_bits_offset
                 .checked_add(word_offset)
                 .ok_or(EmitError::Range("sparse active bitmap offset overflow"))?;
-            emit_base_address(ops, BaseReg::SimState, offset, spill_base)?;
+            emit_base_address(ops, BaseReg::SimState, offset)?;
             emit_load(ops, SCRATCH1, SCRATCH0, OpSize::S64);
             emit_load_imm(ops, SCRATCH0, 1_u64 << (*active_index % 64));
             dynasm!(ops ; .arch aarch64 ; orr x30, x17, x16);
-            emit_base_address(ops, BaseReg::SimState, offset, spill_base)?;
+            emit_base_address(ops, BaseReg::SimState, offset)?;
             emit_store(ops, 30, SCRATCH0, OpSize::S64);
         }
         MInst::SparseCommitWorklist {
@@ -1799,7 +1809,7 @@ fn emit_mem_fill(
 fn base_register(base: BaseReg) -> u8 {
     match base {
         BaseReg::SimState => STATE_REG,
-        BaseReg::StackFrame => STATE_REG,
+        BaseReg::StackFrame => SPILL_REG,
     }
 }
 
@@ -1807,31 +1817,33 @@ fn emit_base_address(
     ops: &mut VecAssembler<Aarch64Relocation>,
     base: BaseReg,
     offset: i32,
-    spill_base: usize,
 ) -> Result<(), EmitError> {
-    let offset = base_offset(base, offset, spill_base)?;
-    emit_address(ops, STATE_REG, offset);
+    let offset = base_offset(base, offset);
+    emit_address(ops, base_register(base), offset);
     Ok(())
 }
 
-fn base_offset(base: BaseReg, offset: i32, spill_base: usize) -> Result<i64, EmitError> {
+fn base_offset(base: BaseReg, offset: i32) -> i64 {
     match base {
-        BaseReg::SimState => Ok(i64::from(offset)),
-        BaseReg::StackFrame => i64::try_from(spill_base)
-            .ok()
-            .and_then(|base| base.checked_add(i64::from(offset)))
-            .ok_or(EmitError::Range("stack-frame address overflow")),
+        BaseReg::SimState | BaseReg::StackFrame => i64::from(offset),
     }
 }
 
 fn emit_address(ops: &mut VecAssembler<Aarch64Relocation>, base: u8, offset: i64) {
+    emit_address_to(ops, SCRATCH0, base, offset);
+}
+
+fn emit_address_to(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    destination: u8,
+    base: u8,
+    offset: i64,
+) {
     if offset == 0 {
-        dynasm!(ops ; .arch aarch64 ; mov x16, X(base));
-    } else if !emit_add_sub_immediate(ops, SCRATCH0, base, offset) {
+        dynasm!(ops ; .arch aarch64 ; mov X(destination), X(base));
+    } else if !emit_add_sub_immediate(ops, destination, base, offset) {
         emit_load_imm(ops, SCRATCH1, offset as u64);
-        dynasm!(ops ; .arch aarch64 ; add x16, X(base), x17);
-    } else {
-        // The address was formed directly by ADD/SUB immediate.
+        dynasm!(ops ; .arch aarch64 ; add X(destination), X(base), x17);
     }
 }
 
@@ -2249,7 +2261,6 @@ fn emit_branch_predicate(
     ops: &mut VecAssembler<Aarch64Relocation>,
     predicate: BranchPredicate,
     assignment: &Assignment<VReg>,
-    spill_base: usize,
 ) -> Result<(), EmitError> {
     match predicate {
         BranchPredicate::Compare { lhs, rhs, .. } => {
@@ -2265,7 +2276,7 @@ fn emit_branch_predicate(
         }
         BranchPredicate::MemoryNonZero { base, offset, size } => {
             let base_register = base_register(base);
-            let offset = base_offset(base, offset, spill_base)?;
+            let offset = base_offset(base, offset);
             emit_load_at(ops, SCRATCH0, base_register, offset, size);
             dynasm!(ops ; .arch aarch64 ; cmp x16, #0);
         }
@@ -2315,7 +2326,7 @@ fn emit_edge_copies(
             CopyOperation::Move {
                 destination,
                 source,
-            } => emit_copy(ops, destination, source, spill_base)?,
+            } => emit_copy(ops, destination, source)?,
             CopyOperation::SwapRegisters { left, right } => {
                 let (left, right) = (left.number(), right.number());
                 dynasm!(ops
@@ -2326,17 +2337,35 @@ fn emit_edge_copies(
                 );
             }
             CopyOperation::SaveTemporary(destination) => {
-                read_copy_destination(ops, destination, spill_base, SCRATCH1)?;
+                read_copy_destination(ops, destination, SCRATCH1)?;
                 // Address materialization uses x17 for the offset. Preserve
                 // the value being saved before computing the temporary slot.
                 dynasm!(ops ; .arch aarch64 ; mov x30, x17);
-                emit_address(ops, STATE_REG, temporary_offset as i64);
-                emit_store(ops, 30, SCRATCH0, OpSize::S64);
+                let temporary = temporary_offset
+                    .checked_sub(spill_base)
+                    .ok_or(EmitError::Range("temporary spill offset underflow"))?;
+                emit_store_at(
+                    ops,
+                    30,
+                    SPILL_REG,
+                    i64::try_from(temporary)
+                        .map_err(|_| EmitError::Range("temporary spill offset overflow"))?,
+                    OpSize::S64,
+                );
             }
             CopyOperation::RestoreTemporary(destination) => {
-                emit_address(ops, STATE_REG, temporary_offset as i64);
-                emit_load(ops, SCRATCH1, SCRATCH0, OpSize::S64);
-                write_copy_destination(ops, destination, spill_base, SCRATCH1)?;
+                let temporary = temporary_offset
+                    .checked_sub(spill_base)
+                    .ok_or(EmitError::Range("temporary spill offset underflow"))?;
+                emit_load_at(
+                    ops,
+                    SCRATCH1,
+                    SPILL_REG,
+                    i64::try_from(temporary)
+                        .map_err(|_| EmitError::Range("temporary spill offset overflow"))?,
+                    OpSize::S64,
+                );
+                write_copy_destination(ops, destination, SCRATCH1)?;
             }
         }
     }
@@ -2347,20 +2376,18 @@ fn emit_copy(
     ops: &mut VecAssembler<Aarch64Relocation>,
     destination: CopyDestination,
     source: CopySource,
-    spill_base: usize,
 ) -> Result<(), EmitError> {
     match source {
         CopySource::Register(register) => {
-            write_copy_destination(ops, destination, spill_base, register.number())
+            write_copy_destination(ops, destination, register.number())
         }
         CopySource::Stack(offset) => {
-            emit_address(ops, STATE_REG, spill_base as i64 + i64::from(offset));
-            emit_load(ops, SCRATCH1, SCRATCH0, OpSize::S64);
-            write_copy_destination(ops, destination, spill_base, SCRATCH1)
+            emit_load_at(ops, SCRATCH1, SPILL_REG, i64::from(offset), OpSize::S64);
+            write_copy_destination(ops, destination, SCRATCH1)
         }
         CopySource::Immediate(value) => {
             emit_load_imm(ops, SCRATCH1, value);
-            write_copy_destination(ops, destination, spill_base, SCRATCH1)
+            write_copy_destination(ops, destination, SCRATCH1)
         }
     }
 }
@@ -2368,7 +2395,6 @@ fn emit_copy(
 fn read_copy_destination(
     ops: &mut VecAssembler<Aarch64Relocation>,
     destination: CopyDestination,
-    spill_base: usize,
     output: u8,
 ) -> Result<(), EmitError> {
     match destination {
@@ -2377,8 +2403,7 @@ fn read_copy_destination(
             dynasm!(ops ; .arch aarch64 ; mov X(output), X(register));
         }
         CopyDestination::Stack(offset) => {
-            emit_address(ops, STATE_REG, spill_base as i64 + i64::from(offset));
-            emit_load(ops, output, SCRATCH0, OpSize::S64);
+            emit_load_at(ops, output, SPILL_REG, i64::from(offset), OpSize::S64);
         }
     }
     Ok(())
@@ -2387,7 +2412,6 @@ fn read_copy_destination(
 fn write_copy_destination(
     ops: &mut VecAssembler<Aarch64Relocation>,
     destination: CopyDestination,
-    spill_base: usize,
     source: u8,
 ) -> Result<(), EmitError> {
     match destination {
@@ -2405,8 +2429,7 @@ fn write_copy_destination(
             } else {
                 source
             };
-            emit_address(ops, STATE_REG, spill_base as i64 + i64::from(offset));
-            emit_store(ops, source, SCRATCH0, OpSize::S64);
+            emit_store_at(ops, source, SPILL_REG, i64::from(offset), OpSize::S64);
         }
     }
     Ok(())
@@ -2560,7 +2583,7 @@ mod tests {
         let result = emit(&function, &assignment, 0).unwrap();
         assert!(!result.code.is_empty());
         assert!(result.text_size <= result.code.len());
-        assert_eq!(result.block_offsets, vec![(crate::mir::BlockId(0), 4)]);
+        assert_eq!(result.block_offsets, vec![(crate::mir::BlockId(0), 8)]);
     }
 
     #[test]

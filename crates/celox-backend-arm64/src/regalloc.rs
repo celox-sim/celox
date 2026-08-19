@@ -213,7 +213,7 @@ pub(crate) fn verify_allocated(function: &AllocatedFunction) -> Result<(), Targe
                         value,
                     });
                 };
-                if !(1..=15).contains(&register.number()) && !(19..=28).contains(&register.number())
+                if !(1..=15).contains(&register.number()) && !(19..=27).contains(&register.number())
                 {
                     return Err(TargetRegallocError::ReservedAssignment {
                         block: block.id,
@@ -228,7 +228,7 @@ pub(crate) fn verify_allocated(function: &AllocatedFunction) -> Result<(), Targe
     verify_interval_registers(function, &intervals)
 }
 
-const ALLOCATABLE_REGISTERS: [Arm64Reg; 25] = [
+const ALLOCATABLE_REGISTERS: [Arm64Reg; 24] = [
     Arm64Reg::new(1),
     Arm64Reg::new(2),
     Arm64Reg::new(3),
@@ -253,7 +253,6 @@ const ALLOCATABLE_REGISTERS: [Arm64Reg; 25] = [
     Arm64Reg::new(25),
     Arm64Reg::new(26),
     Arm64Reg::new(27),
-    Arm64Reg::new(28),
 ];
 
 pub(crate) struct TargetAllocation {
@@ -1085,7 +1084,7 @@ mod tests {
         for value in [VReg(0), VReg(1), VReg(2), VReg(3)] {
             let register = allocated.assignment.get(&value).unwrap();
             assert!(
-                (1..=15).contains(&register.number()) || (19..=28).contains(&register.number())
+                (1..=15).contains(&register.number()) || (19..=27).contains(&register.number())
             );
         }
         verify_allocated(&allocated).unwrap();
@@ -1408,7 +1407,7 @@ mod tests {
             allocated
                 .assignment
                 .iter()
-                .any(|(_, register)| (19..=28).contains(&register.number()))
+                .any(|(_, register)| (19..=27).contains(&register.number()))
         );
     }
 }
