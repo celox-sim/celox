@@ -261,6 +261,12 @@ fn emit_function(
         .map(|(_, register)| register.number())
         .filter(|register| (19..=28).contains(register))
         .collect::<Vec<_>>();
+    if tick_loop {
+        // x29 is not allocated to MIR values and carries the native-loop
+        // counter across repeated body entries. Saving it once in the
+        // prologue avoids two FP/GPR transfers on every loop iteration.
+        callee_saved.push(29);
+    }
     callee_saved.sort_unstable();
     callee_saved.dedup();
 
@@ -282,7 +288,7 @@ fn emit_function(
     }
     if tick_loop {
         // d29 retains the simulator-state pointer across success/error return
-        // values. d31 carries the remaining tick count between body entries.
+        // values. x29 carries the remaining tick count between body entries.
         dynasm!(ops ; .arch aarch64 ; fmov d29, x0);
         emit_address(
             &mut ops,
@@ -296,7 +302,7 @@ fn emit_function(
             ; cbnz x16, =>count_ready
             ; mov x16, #1
             ; =>count_ready
-            ; fmov d31, x16
+            ; mov x29, x16
         );
         if check_runtime_events {
             emit_address(
@@ -352,7 +358,7 @@ fn emit_function(
     if tick_loop {
         dynasm!(ops
             ; .arch aarch64
-            ; fmov x16, d31
+            ; mov x16, x29
             ; fmov x17, d29
         );
         emit_load_imm(
@@ -710,17 +716,22 @@ fn emit_instruction(
         }
         MInst::AndImm { dst, src, imm } | MInst::OrImm { dst, src, imm } => {
             let (dst, src) = (resolve(assignment, *dst)?, resolve(assignment, *src)?);
-            emit_load_imm(ops, SCRATCH0, *imm);
-            if matches!(instruction, MInst::AndImm { .. }) {
-                dynasm!(ops ; .arch aarch64 ; and X(dst), X(src), x16);
-            } else {
-                dynasm!(ops ; .arch aarch64 ; orr X(dst), X(src), x16);
+            let is_and = matches!(instruction, MInst::AndImm { .. });
+            if !emit_logical_immediate(ops, dst, src, *imm, 64, is_and) {
+                emit_load_imm(ops, SCRATCH0, *imm);
+                if is_and {
+                    dynasm!(ops ; .arch aarch64 ; and X(dst), X(src), x16);
+                } else {
+                    dynasm!(ops ; .arch aarch64 ; orr X(dst), X(src), x16);
+                }
             }
         }
         MInst::AndImm32 { dst, src, imm } => {
             let (dst, src) = (resolve(assignment, *dst)?, resolve(assignment, *src)?);
-            emit_load_imm(ops, SCRATCH0, u64::from(*imm));
-            dynasm!(ops ; .arch aarch64 ; and W(dst), W(src), w16);
+            if !emit_logical_immediate(ops, dst, src, u64::from(*imm), 32, true) {
+                emit_load_imm(ops, SCRATCH0, u64::from(*imm));
+                dynasm!(ops ; .arch aarch64 ; and W(dst), W(src), w16);
+            }
         }
         MInst::ShrImm { dst, src, imm }
         | MInst::ShlImm { dst, src, imm }
@@ -774,8 +785,10 @@ fn emit_instruction(
             kind,
         } => {
             let (dst, lhs) = (resolve(assignment, *dst)?, resolve(assignment, *lhs)?);
-            emit_load_imm(ops, SCRATCH0, *imm as i64 as u64);
-            dynasm!(ops ; .arch aarch64 ; cmp X(lhs), x16);
+            if !emit_cmp_immediate(ops, lhs, *imm) {
+                emit_load_imm(ops, SCRATCH0, *imm as i64 as u64);
+                dynasm!(ops ; .arch aarch64 ; cmp X(lhs), x16);
+            }
             emit_cset(ops, dst, *kind);
         }
         MInst::UDiv { dst, lhs, rhs }
@@ -882,8 +895,10 @@ fn emit_instruction(
                 resolve(assignment, *true_val)?,
                 resolve(assignment, *false_val)?,
             );
-            emit_load_imm(ops, SCRATCH0, *imm as i64 as u64);
-            dynasm!(ops ; .arch aarch64 ; cmp X(lhs), x16);
+            if !emit_cmp_immediate(ops, lhs, *imm) {
+                emit_load_imm(ops, SCRATCH0, *imm as i64 as u64);
+                dynasm!(ops ; .arch aarch64 ; cmp X(lhs), x16);
+            }
             emit_csel(ops, dst, true_val, false_val, *kind);
         }
         MInst::JumpTable { index, targets, .. } => {
@@ -955,9 +970,7 @@ fn emit_instruction(
             if let (Some(entry), Some(success)) = (tick_entry, tick_success) {
                 dynasm!(ops
                     ; .arch aarch64
-                    ; fmov x16, d31
-                    ; subs x16, x16, #1
-                    ; fmov d31, x16
+                    ; subs x29, x29, #1
                     ; b.eq =>success
                 );
                 if check_runtime_events {
@@ -986,9 +999,7 @@ fn emit_instruction(
             if tick_entry.is_some() {
                 dynasm!(ops
                     ; .arch aarch64
-                    ; fmov x16, d31
-                    ; sub x16, x16, #1
-                    ; fmov d31, x16
+                    ; sub x29, x29, #1
                 );
             }
             emit_load_imm(ops, STATE_REG, *code as u64);
@@ -1371,10 +1382,10 @@ fn emit_packed_lane_compare(
         4 => OpSize::S32,
         _ => return Err(EmitError::Range("packed lane stride must be 1, 2, or 4")),
     };
-    if let PackedLaneCompareRhs::Scalar(value) = rhs {
-        let register = resolve(assignment, value)?;
-        dynasm!(ops ; .arch aarch64 ; fmov d6, X(register));
-    }
+    let scalar_rhs = match rhs {
+        PackedLaneCompareRhs::Scalar(value) => Some(resolve(assignment, value)?),
+        PackedLaneCompareRhs::Memory { .. } => None,
+    };
     dynasm!(ops ; .arch aarch64 ; mov x30, xzr);
     let field_mask = if field_width == 64 {
         u64::MAX
@@ -1390,7 +1401,7 @@ fn emit_packed_lane_compare(
         emit_load(ops, SCRATCH0, SCRATCH0, size);
         match rhs {
             PackedLaneCompareRhs::Scalar(_) => {
-                dynasm!(ops ; .arch aarch64 ; fmov x17, d6);
+                dynasm!(ops ; .arch aarch64 ; mov x17, X(scalar_rhs.unwrap()));
             }
             PackedLaneCompareRhs::Memory { offset, .. } => {
                 dynasm!(ops ; .arch aarch64 ; fmov d7, x16);
@@ -1413,14 +1424,19 @@ fn emit_packed_lane_compare(
         }
         let storage_width = element_stride * 8;
         if field_width != storage_width {
-            dynasm!(ops ; .arch aarch64 ; fmov d5, x30);
-            emit_load_imm(ops, 30, field_mask);
-            dynasm!(ops
-                ; .arch aarch64
-                ; and x16, x16, x30
-                ; and x17, x17, x30
-                ; fmov x30, d5
-            );
+            if logical_immediate_encoding(field_mask, 64, SCRATCH0, SCRATCH0, true).is_some() {
+                emit_logical_immediate(ops, SCRATCH0, SCRATCH0, field_mask, 64, true);
+                emit_logical_immediate(ops, SCRATCH1, SCRATCH1, field_mask, 64, true);
+            } else {
+                dynasm!(ops ; .arch aarch64 ; fmov d5, x30);
+                emit_load_imm(ops, 30, field_mask);
+                dynasm!(ops
+                    ; .arch aarch64
+                    ; and x16, x16, x30
+                    ; and x17, x17, x30
+                    ; fmov x30, d5
+                );
+            }
         }
         if matches!(
             kind,
@@ -1452,26 +1468,17 @@ fn emit_packed_byte_affine_compare(
     rhs: u8,
     kind: CmpKind,
 ) {
-    dynasm!(ops
-        ; .arch aarch64
-        ; fmov d6, X(base)
-        ; fmov d7, X(rhs)
-        ; mov x30, xzr
-    );
+    dynasm!(ops ; .arch aarch64 ; mov x30, xzr);
     for lane in 0..16_u32 {
-        dynasm!(ops ; .arch aarch64 ; fmov x16, d6);
-        if lane != 0 {
+        if lane == 0 {
+            dynasm!(ops ; .arch aarch64 ; mov x16, X(base));
+        } else if !emit_add_sub_immediate(ops, SCRATCH0, base, i64::from(lane)) {
             emit_load_imm(ops, SCRATCH1, u64::from(lane));
-            dynasm!(ops ; .arch aarch64 ; add x16, x16, x17);
+            dynasm!(ops ; .arch aarch64 ; add x16, X(base), x17);
         }
-        dynasm!(ops ; .arch aarch64 ; fmov x17, d7 ; fmov d5, x30);
-        emit_load_imm(ops, 30, 0xff);
-        dynasm!(ops
-            ; .arch aarch64
-            ; and x16, x16, x30
-            ; and x17, x17, x30
-            ; fmov x30, d5
-        );
+        dynasm!(ops ; .arch aarch64 ; mov x17, X(rhs));
+        emit_logical_immediate(ops, SCRATCH0, SCRATCH0, 0xff, 64, true);
+        emit_logical_immediate(ops, SCRATCH1, SCRATCH1, 0xff, 64, true);
         if matches!(
             kind,
             CmpKind::LtS | CmpKind::LeS | CmpKind::GtS | CmpKind::GeS
@@ -1860,26 +1867,149 @@ fn add_sub_immediate(offset: i64) -> Option<(bool, u32, bool)> {
     None
 }
 
-fn emit_add_sub_immediate(
-    ops: &mut VecAssembler<Aarch64Relocation>,
+fn add_sub_immediate_encoding(
     destination: u8,
     base: u8,
     offset: i64,
-) -> bool {
-    let Some((subtract, immediate, shifted)) = add_sub_immediate(offset) else {
-        return false;
-    };
-    // ADD/SUB (immediate): sf=1, op selects SUB, sh selects <<12, and the
-    // 12-bit immediate is encoded between Rn and Rd.  Encoding this one
-    // instruction directly keeps both registers dynamic without forcing a
-    // large dynasm register match table.
-    let instruction = 0x9100_0000
+    set_flags: bool,
+) -> Option<u32> {
+    let (subtract, immediate, shifted) = add_sub_immediate(offset)?;
+    // ADD/SUB (immediate): sf=1, op selects SUB, S selects flag-setting,
+    // and sh selects an optional <<12 immediate.  Using the same encoder for
+    // arithmetic and CMP keeps the immediate selection identical.
+    let opcode = if set_flags { 0xb100_0000 } else { 0x9100_0000 };
+    let instruction = opcode
         | (u32::from(subtract) << 30)
         | (u32::from(shifted) << 22)
         | (immediate << 10)
         | (u32::from(base) << 5)
         | u32::from(destination);
     debug_assert!(immediate <= 0xfff);
+    Some(instruction)
+}
+
+fn emit_add_sub_immediate(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    destination: u8,
+    base: u8,
+    offset: i64,
+) -> bool {
+    let Some(instruction) = add_sub_immediate_encoding(destination, base, offset, false) else {
+        return false;
+    };
+    ops.push_u32(instruction);
+    true
+}
+
+fn emit_cmp_immediate(ops: &mut VecAssembler<Aarch64Relocation>, lhs: u8, immediate: i32) -> bool {
+    // CMP lhs, #imm is SUBS lhs, #imm.  A negative immediate is therefore
+    // represented by ADDS with its positive magnitude.  The immediate is
+    // sign-extended to 64 bits by the MIR contract.
+    let Some(instruction) = add_sub_immediate_encoding(31, lhs, -i64::from(immediate), true) else {
+        return false;
+    };
+    ops.push_u32(instruction);
+    true
+}
+
+fn logical_immediate_encoding(
+    value: u64,
+    width: u32,
+    destination: u8,
+    source: u8,
+    is_and: bool,
+) -> Option<u32> {
+    debug_assert!(matches!(width, 32 | 64));
+    let width_mask = if width == 32 {
+        u64::from(u32::MAX)
+    } else {
+        u64::MAX
+    };
+    let value = value & width_mask;
+    let opcode = match (width, is_and) {
+        (32, true) => 0x1200_0000,
+        (32, false) => 0x3200_0000,
+        (64, true) => 0x9200_0000,
+        (64, false) => 0xb200_0000,
+        _ => unreachable!(),
+    };
+
+    // AArch64 represents a logical immediate as a rotated run of ones in a
+    // power-of-two element, replicated to the operand width.  Try the
+    // smallest element first; this also selects N=0 for repeated masks and
+    // N=1 only for a full 64-bit element.
+    for element_size in [2_u32, 4, 8, 16, 32, 64] {
+        if element_size > width {
+            continue;
+        }
+        let element_mask = if element_size == 64 {
+            u64::MAX
+        } else {
+            (1_u64 << element_size) - 1
+        };
+        let pattern = value & element_mask;
+        if pattern == 0 || pattern == element_mask {
+            continue;
+        }
+        let mut repeated = 0_u64;
+        let mut offset = 0_u32;
+        while offset < width {
+            repeated |= pattern << offset;
+            offset += element_size;
+        }
+        if repeated != value {
+            continue;
+        }
+
+        let ones = pattern.count_ones();
+        let length = element_size.trailing_zeros();
+        let imms_prefix = (!((1_u32 << (length + 1)) - 1)) & 0x3f;
+        let imms = imms_prefix | (ones - 1);
+        let run = (1_u64 << ones) - 1;
+        for rotation in 0..element_size {
+            if rotate_right(run, rotation, element_size) != pattern {
+                continue;
+            }
+            let n = u32::from(width == 64 && element_size == 64);
+            return Some(
+                opcode
+                    | (n << 22)
+                    | (rotation << 16)
+                    | (imms << 10)
+                    | (u32::from(source) << 5)
+                    | u32::from(destination),
+            );
+        }
+    }
+    None
+}
+
+fn rotate_right(value: u64, amount: u32, width: u32) -> u64 {
+    let amount = amount % width;
+    let mask = if width == 64 {
+        u64::MAX
+    } else {
+        (1_u64 << width) - 1
+    };
+    if amount == 0 {
+        value & mask
+    } else {
+        ((value >> amount) | (value << (width - amount))) & mask
+    }
+}
+
+fn emit_logical_immediate(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    destination: u8,
+    source: u8,
+    value: u64,
+    width: u32,
+    is_and: bool,
+) -> bool {
+    let Some(instruction) = logical_immediate_encoding(value, width, destination, source, is_and)
+    else {
+        return false;
+    };
     ops.push_u32(instruction);
     true
 }
@@ -2072,8 +2202,10 @@ fn emit_branch_predicate(
         }
         BranchPredicate::CompareImm { lhs, imm, .. } => {
             let lhs = resolve(assignment, lhs)?;
-            emit_load_imm(ops, SCRATCH0, imm as i64 as u64);
-            dynasm!(ops ; .arch aarch64 ; cmp X(lhs), x16);
+            if !emit_cmp_immediate(ops, lhs, imm) {
+                emit_load_imm(ops, SCRATCH0, imm as i64 as u64);
+                dynasm!(ops ; .arch aarch64 ; cmp X(lhs), x16);
+            }
         }
         BranchPredicate::MemoryNonZero { base, offset, size } => {
             let base_register = base_register(base);
@@ -2382,6 +2514,40 @@ mod tests {
         assert_eq!(add_sub_immediate(4096), Some((false, 1, true)));
         assert_eq!(add_sub_immediate(-4096), Some((true, 1, true)));
         assert_eq!(add_sub_immediate(4097), None);
+        assert_eq!(
+            add_sub_immediate_encoding(31, 1, -4095, true),
+            Some(0xf13f_fc3f)
+        );
+        assert_eq!(
+            add_sub_immediate_encoding(31, 1, 4095, true),
+            Some(0xb13f_fc3f)
+        );
+        assert_eq!(
+            add_sub_immediate_encoding(31, 1, -4096, true),
+            Some(0xf140_043f)
+        );
+    }
+
+    #[test]
+    fn selects_aarch64_logical_immediates() {
+        assert_eq!(
+            logical_immediate_encoding(0xff, 64, 0, 1, true),
+            Some(0x9240_1c20)
+        );
+        assert_eq!(
+            logical_immediate_encoding(0x5555_5555_5555_5555, 64, 0, 1, true),
+            Some(0x9200_f020)
+        );
+        assert_eq!(
+            logical_immediate_encoding(0xff00_ff00_ff00_ff00, 64, 0, 1, false),
+            Some(0xb208_9c20)
+        );
+        assert_eq!(
+            logical_immediate_encoding(0xff, 32, 0, 1, true),
+            Some(0x1200_1c20)
+        );
+        assert_eq!(logical_immediate_encoding(0, 64, 0, 1, true), None);
+        assert_eq!(logical_immediate_encoding(u64::MAX, 64, 0, 1, true), None);
     }
 
     #[test]
@@ -2423,6 +2589,99 @@ mod tests {
         state[..8].copy_from_slice(&37_u64.to_le_bytes());
         assert_eq!(unsafe { code.call(&mut state) }, 0);
         assert_eq!(u64::from_le_bytes(state[8..].try_into().unwrap()), 42);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn executes_logical_and_compare_immediates() {
+        let mut vregs = VRegAllocator::new();
+        let input = vregs.alloc();
+        let anded = vregs.alloc();
+        let ored = vregs.alloc();
+        let unsigned = vregs.alloc();
+        let signed = vregs.alloc();
+        let fallback = vregs.alloc();
+        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 6]);
+        let mut block = MBlock::new(BlockId(0));
+        block.push(MInst::Load {
+            dst: input,
+            base: BaseReg::SimState,
+            offset: 0,
+            size: OpSize::S64,
+        });
+        block.push(MInst::AndImm {
+            dst: anded,
+            src: input,
+            imm: 0xff,
+        });
+        block.push(MInst::OrImm {
+            dst: ored,
+            src: input,
+            imm: 0xff00_ff00_ff00_ff00,
+        });
+        block.push(MInst::CmpImm {
+            dst: unsigned,
+            lhs: input,
+            imm: 4095,
+            kind: CmpKind::LtU,
+        });
+        block.push(MInst::CmpImm {
+            dst: signed,
+            lhs: input,
+            imm: -4095,
+            kind: CmpKind::GtS,
+        });
+        block.push(MInst::CmpImm {
+            dst: fallback,
+            lhs: input,
+            imm: 0x12345,
+            kind: CmpKind::Eq,
+        });
+        for (offset, source) in [
+            (8, anded),
+            (16, ored),
+            (24, unsigned),
+            (32, signed),
+            (40, fallback),
+        ] {
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset,
+                src: source,
+                size: OpSize::S64,
+            });
+        }
+        block.push(MInst::Return);
+        function.push_block(block);
+        let mut assignment = AssignmentMap::default();
+        for (value, register) in [
+            (input, PhysReg::RAX),
+            (anded, PhysReg::RDX),
+            (ored, PhysReg::RSI),
+            (unsigned, PhysReg::RDI),
+            (signed, PhysReg::R8),
+            (fallback, PhysReg::R9),
+        ] {
+            assignment.set(value, register);
+        }
+
+        let emitted = emit(&function, &assignment, 0).unwrap();
+        let code = crate::jit_mem::JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0_u8; 48];
+        let input_value = 0x1234_5678_9abc_def0_u64;
+        state[..8].copy_from_slice(&input_value.to_le_bytes());
+        assert_eq!(unsafe { code.call(&mut state) }, 0);
+        assert_eq!(
+            u64::from_le_bytes(state[8..16].try_into().unwrap()),
+            input_value & 0xff
+        );
+        assert_eq!(
+            u64::from_le_bytes(state[16..24].try_into().unwrap()),
+            input_value | 0xff00_ff00_ff00_ff00
+        );
+        assert_eq!(u64::from_le_bytes(state[24..32].try_into().unwrap()), 0);
+        assert_eq!(u64::from_le_bytes(state[32..40].try_into().unwrap()), 1);
+        assert_eq!(u64::from_le_bytes(state[40..48].try_into().unwrap()), 0);
     }
 
     #[cfg(target_arch = "aarch64")]
