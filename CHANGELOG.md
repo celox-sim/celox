@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 (2026-08-19)
+
+## What's Changed
+* feat(sv): support case statements in always_ff by @tignear in https://github.com/celox-sim/celox/pull/403
+* fix(docs): categorize benchmark charts by architecture by @tignear in https://github.com/celox-sim/celox/pull/597
+* chore(deps): coordinate Python and cocotb updates by @tignear in https://github.com/celox-sim/celox/pull/595
+* fix(ci): preserve develop sync conflict resolutions by @tignear in https://github.com/celox-sim/celox/pull/596
+* feat(veryl): support runtime power exponents by @tignear in https://github.com/celox-sim/celox/pull/600
+* feat(sv): add experimental SystemVerilog frontend by @tignear in https://github.com/celox-sim/celox/pull/398
+* refactor(frontend)!: split source-specific frontend crates by @tignear in https://github.com/celox-sim/celox/pull/602
+* fix(x86): preserve nested output-array forwarding by @tignear in https://github.com/celox-sim/celox/pull/603
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.2.2...v0.3.0
+
 ## 0.2.2 (2026-08-18)
 
 ## What's Changed
