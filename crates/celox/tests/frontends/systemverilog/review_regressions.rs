@@ -2120,14 +2120,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "unpacked array dimension",
-            r#"
-            module Top(input logic [7:0] mem [0:1], output logic [7:0] y);
-                assign y = mem[0];
-            endmodule
-        "#,
-        ),
-        (
             "local data declaration inside loop-generate",
             r#"
             module Top(input logic [1:0] a, output logic [1:0] y);
@@ -2277,14 +2269,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             module Top(output logic [7:0] y);
                 struct packed { logic [3:0] a; logic [3:0] b; } value;
                 assign y = value;
-            endmodule
-        "#,
-        ),
-        (
-            "cast expression",
-            r#"
-            module Top(input logic a, b, output logic [1:0] y);
-                assign y = {logic'(a), b};
             endmodule
         "#,
         ),

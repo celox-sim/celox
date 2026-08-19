@@ -353,6 +353,7 @@ pub struct Type {
     kind: TypeKind,
     is_signed: bool,
     packed_ranges: Vec<PackedRange>,
+    unpacked_ranges: Vec<UnpackedRange>,
     resolved_width: Option<usize>,
 }
 
@@ -367,6 +368,10 @@ impl Type {
 
     pub fn packed_ranges(&self) -> &[PackedRange] {
         &self.packed_ranges
+    }
+
+    pub fn unpacked_ranges(&self) -> &[UnpackedRange] {
+        &self.unpacked_ranges
     }
 
     pub fn resolved_width(&self) -> Option<usize> {
@@ -386,11 +391,12 @@ impl Type {
     pub(crate) fn from_ast(r#type: ast::Type, constants: &fxhash::FxHashMap<String, i128>) -> Self {
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
-        let (packed_ranges, resolved_width) = convert_type(r#type, constants);
+        let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
             kind,
             is_signed,
             packed_ranges,
+            unpacked_ranges,
             resolved_width,
         }
     }
@@ -399,14 +405,25 @@ impl Type {
 fn convert_type(
     r#type: ast::Type,
     constants: &fxhash::FxHashMap<String, i128>,
-) -> (Vec<PackedRange>, Option<usize>) {
+) -> (Vec<PackedRange>, Vec<UnpackedRange>, Option<usize>) {
     let packed_ranges: Vec<_> = r#type
         .packed_ranges()
         .iter()
         .map(|range| PackedRange::new(range.left().clone().into(), range.right().clone().into()))
         .collect();
-    let resolved_width = typecheck::resolve_packed_width_with_env(&packed_ranges, constants);
-    (packed_ranges, resolved_width)
+    let unpacked_ranges: Vec<_> = r#type
+        .unpacked_ranges()
+        .iter()
+        .map(|range| UnpackedRange::new(range.left().clone().into(), range.right().clone().into()))
+        .collect();
+    let packed_width = typecheck::resolve_packed_width_with_env(&packed_ranges, constants);
+    let unpacked_width = unpacked_ranges.iter().try_fold(1usize, |acc, range| {
+        let left = typecheck::eval_const_expr(range.left(), constants)?;
+        let right = typecheck::eval_const_expr(range.right(), constants)?;
+        acc.checked_mul(left.abs_diff(right) as usize + 1)
+    });
+    let resolved_width = packed_width.and_then(|width| width.checked_mul(unpacked_width?));
+    (packed_ranges, unpacked_ranges, resolved_width)
 }
 
 impl From<ast::TypeKind> for TypeKind {
@@ -424,6 +441,26 @@ impl From<ast::TypeKind> for TypeKind {
 pub struct PackedRange {
     left: ConstExpr,
     right: ConstExpr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnpackedRange {
+    left: ConstExpr,
+    right: ConstExpr,
+}
+
+impl UnpackedRange {
+    pub(crate) fn new(left: ConstExpr, right: ConstExpr) -> Self {
+        Self { left, right }
+    }
+
+    pub fn left(&self) -> &ConstExpr {
+        &self.left
+    }
+
+    pub fn right(&self) -> &ConstExpr {
+        &self.right
+    }
 }
 
 impl PackedRange {

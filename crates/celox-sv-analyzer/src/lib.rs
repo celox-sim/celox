@@ -704,6 +704,35 @@ mod tests {
     }
 
     #[test]
+    fn analyzes_fixed_unpacked_array_dimensions() {
+        let ir = analyze_source(
+            r#"
+                module Top #(parameter N = 2) (
+                    input logic [7:0] data,
+                    output logic [7:0] out
+                );
+                    logic [7:0] values [N];
+                    assign values[0] = data;
+                    assign values[1] = data;
+                    assign out = values[1];
+                endmodule
+            "#,
+            Path::new("fixed_array.sv"),
+        )
+        .expect("fixed unpacked arrays should be analyzed");
+
+        let top = &ir.modules()[0];
+        let values = top
+            .signals()
+            .iter()
+            .find(|signal| signal.name() == "values")
+            .expect("array signal should be present");
+        assert_eq!(values.r#type().unpacked_ranges().len(), 1);
+        assert_eq!(values.r#type().resolved_width(), Some(16));
+        assert_eq!(top.ports()[1].r#type().resolved_width(), Some(8));
+    }
+
+    #[test]
     fn rejects_duplicate_parameters() {
         let err = analyze_source(
             r#"
@@ -966,10 +995,7 @@ mod tests {
         ] {
             let error = analyze_source(source, Path::new(name))
                 .expect_err("unlowered constructs must not be silently ignored");
-            assert!(matches!(
-                error,
-                AnalyzerError::Unsupported(detail) if detail == "unpacked array dimension"
-            ));
+            assert!(matches!(error, AnalyzerError::Unsupported(_)));
         }
 
         let error = analyze_source(

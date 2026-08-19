@@ -391,6 +391,114 @@ fn reject_unsupported_multidimensional_packed_bounds(
     }
 }
 
+fn static_for_loop_iterations(
+    loop_statement: &sv_parser::LoopStatement,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+) -> Option<(String, Vec<i128>)> {
+    let sv_parser::LoopStatement::For(loop_statement) = loop_statement else {
+        return None;
+    };
+    let (initialization, _, condition, _, step) = &loop_statement.nodes.1.nodes.1;
+    let (name, initial_value) = for_loop_initialization(initialization.as_ref()?, syntax_tree)
+        .and_then(|(name, value)| Some((name, eval_ast_const_expr(&value, const_env)?)))?;
+    let condition = const_expr_from_expr(condition.as_ref()?, syntax_tree)?;
+    let step = step.as_ref()?.nodes.0.contents().into_iter().next()?;
+
+    let mut values = Vec::new();
+    let mut value = initial_value;
+    for _ in 0..10_000 {
+        let mut loop_env = const_env.clone();
+        loop_env.insert(name.clone(), value);
+        if eval_ast_const_expr(&condition, &loop_env)? == 0 {
+            return Some((name, values));
+        }
+        values.push(value);
+        value = next_for_loop_value(step, &name, value, syntax_tree, &loop_env)?;
+    }
+
+    let mut loop_env = const_env.clone();
+    loop_env.insert(name.clone(), value);
+    (eval_ast_const_expr(&condition, &loop_env) == Some(0)).then_some((name, values))
+}
+
+fn for_loop_initialization(
+    initialization: &sv_parser::ForInitialization,
+    syntax_tree: &SyntaxTree,
+) -> Option<(String, ConstExpr)> {
+    match initialization {
+        sv_parser::ForInitialization::Declaration(declaration) => {
+            let declaration = declaration.nodes.0.contents().into_iter().next()?;
+            let assignment = declaration.nodes.2.contents().into_iter().next()?;
+            let name = identifier_text(RefNode::VariableIdentifier(&assignment.0), syntax_tree)?;
+            let value = const_expr_from_expr(&assignment.2, syntax_tree)?;
+            Some((name, value))
+        }
+        sv_parser::ForInitialization::ListOfVariableAssignments(assignments) => {
+            let assignment = assignments.nodes.0.contents().into_iter().next()?;
+            let name = for_loop_variable_lvalue_name(&assignment.nodes.0, syntax_tree)?;
+            let value = const_expr_from_expr(&assignment.nodes.2, syntax_tree)?;
+            Some((name, value))
+        }
+    }
+}
+
+fn for_loop_variable_lvalue_name(
+    lvalue: &sv_parser::VariableLvalue,
+    syntax_tree: &SyntaxTree,
+) -> Option<String> {
+    let sv_parser::VariableLvalue::Identifier(identifier) = lvalue else {
+        return None;
+    };
+    identifier_text(
+        RefNode::HierarchicalVariableIdentifier(&identifier.nodes.1),
+        syntax_tree,
+    )
+}
+
+fn next_for_loop_value(
+    step: &sv_parser::ForStepAssignment,
+    name: &str,
+    value: i128,
+    syntax_tree: &SyntaxTree,
+    const_env: &HashMap<String, i128>,
+) -> Option<i128> {
+    match step {
+        sv_parser::ForStepAssignment::OperatorAssignment(step) => {
+            if for_loop_variable_lvalue_name(&step.nodes.0, syntax_tree)? != name {
+                return None;
+            }
+            let operator = syntax_tree.get_str(&step.nodes.1.nodes.0)?;
+            let rhs = const_expr_from_expr(&step.nodes.2, syntax_tree)?;
+            let rhs = eval_ast_const_expr(&rhs, const_env)?;
+            match operator {
+                "=" => Some(rhs),
+                "+=" => value.checked_add(rhs),
+                "-=" => value.checked_sub(rhs),
+                "*=" => value.checked_mul(rhs),
+                "/=" => (rhs != 0).then(|| value / rhs),
+                "%=" => (rhs != 0).then(|| value % rhs),
+                _ => None,
+            }
+        }
+        sv_parser::ForStepAssignment::IncOrDecExpression(step) => {
+            let (lvalue, operator) = match &**step {
+                sv_parser::IncOrDecExpression::Prefix(step) => (&step.nodes.2, &step.nodes.0),
+                sv_parser::IncOrDecExpression::Suffix(step) => (&step.nodes.0, &step.nodes.2),
+            };
+            if for_loop_variable_lvalue_name(lvalue, syntax_tree)? != name {
+                return None;
+            }
+            match syntax_tree.get_str(&operator.nodes.0)? {
+                "++" => value.checked_add(1),
+                "--" => value.checked_sub(1),
+                _ => None,
+            }
+        }
+        sv_parser::ForStepAssignment::FunctionSubroutineCall(_) => None,
+    }
+}
+
 fn reject_silently_ignored_constructs(
     node: RefNode<'_>,
     syntax_tree: &SyntaxTree,
@@ -400,15 +508,6 @@ fn reject_silently_ignored_constructs(
     let has_leaking_conditional_generate_local =
         conditional_generate_has_leaking_local(node.clone(), syntax_tree);
     reject_duplicate_conditional_generate_locals(node.clone(), syntax_tree)?;
-    if node
-        .clone()
-        .into_iter()
-        .any(|child| matches!(child, RefNode::UnpackedDimension(_)))
-    {
-        return Err(AnalyzerError::Unsupported(
-            "unpacked array dimension".to_string(),
-        ));
-    }
     for child in node {
         if inactive_nodes.iter().any(|inactive| inactive == &child) {
             continue;
@@ -487,26 +586,28 @@ fn reject_silently_ignored_constructs(
                         "casez, casex, or pattern case inside always_ff".to_string(),
                     ));
                 }
-                if matches!(
-                    always.nodes.0,
-                    sv_parser::AlwaysKeyword::AlwaysFf(_)
-                        | sv_parser::AlwaysKeyword::AlwaysComb(_)
-                )
+                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_))
                     && body
                         .clone()
                         .into_iter()
                         .any(|node| matches!(node, RefNode::LoopStatement(_)))
                 {
-                    let kind = if matches!(
-                        always.nodes.0,
-                        sv_parser::AlwaysKeyword::AlwaysComb(_)
-                    ) {
-                        "always_comb"
-                    } else {
-                        "always_ff"
-                    };
                     return Err(AnalyzerError::Unsupported(
-                        format!("procedural loop inside {kind}"),
+                        "procedural loop inside always_comb".to_string(),
+                    ));
+                }
+                if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysFf(_))
+                    && body.clone().into_iter().any(|node| {
+                        matches!(
+                            node,
+                            RefNode::LoopStatement(loop_statement)
+                                if static_for_loop_iterations(loop_statement, syntax_tree, const_env)
+                                    .is_none()
+                        )
+                    })
+                {
+                    return Err(AnalyzerError::Unsupported(
+                        "procedural loop inside always_ff".to_string(),
                     ));
                 }
                 if matches!(always.nodes.0, sv_parser::AlwaysKeyword::AlwaysComb(_))
@@ -584,11 +685,6 @@ fn reject_silently_ignored_constructs(
                         "always_ff inside loop-generate".to_string(),
                     ));
                 }
-            }
-            RefNode::UnpackedDimension(_) => {
-                return Err(AnalyzerError::Unsupported(
-                    "unpacked array dimension".to_string(),
-                ));
             }
             RefNode::InitialConstruct(_) => {
                 return Err(AnalyzerError::Unsupported("initial construct".to_string()));
@@ -669,9 +765,6 @@ fn reject_silently_ignored_constructs(
                 return Err(AnalyzerError::Unsupported(
                     "packed struct or union type".to_string(),
                 ));
-            }
-            RefNode::Cast(_) | RefNode::ConstantCast(_) => {
-                return Err(AnalyzerError::Unsupported("cast expression".to_string()));
             }
             RefNode::ConstantFunctionCall(call)
                 if matches!(
@@ -1462,6 +1555,7 @@ pub struct Type {
     kind: TypeKind,
     is_signed: bool,
     packed_ranges: Vec<PackedRange>,
+    unpacked_ranges: Vec<UnpackedRange>,
 }
 
 impl Type {
@@ -1470,6 +1564,7 @@ impl Type {
             kind: TypeKind::Implicit,
             is_signed: false,
             packed_ranges: Vec::new(),
+            unpacked_ranges: Vec::new(),
         }
     }
 
@@ -1478,6 +1573,7 @@ impl Type {
             kind,
             is_signed: false,
             packed_ranges: Vec::new(),
+            unpacked_ranges: Vec::new(),
         }
     }
 
@@ -1491,6 +1587,10 @@ impl Type {
 
     pub fn packed_ranges(&self) -> &[PackedRange] {
         &self.packed_ranges
+    }
+
+    pub fn unpacked_ranges(&self) -> &[UnpackedRange] {
+        &self.unpacked_ranges
     }
 }
 
@@ -1509,6 +1609,26 @@ pub struct PackedRange {
 }
 
 impl PackedRange {
+    fn new(left: ConstExpr, right: ConstExpr) -> Self {
+        Self { left, right }
+    }
+
+    pub fn left(&self) -> &ConstExpr {
+        &self.left
+    }
+
+    pub fn right(&self) -> &ConstExpr {
+        &self.right
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnpackedRange {
+    left: ConstExpr,
+    right: ConstExpr,
+}
+
+impl UnpackedRange {
     fn new(left: ConstExpr, right: ConstExpr) -> Self {
         Self { left, right }
     }
@@ -1843,9 +1963,14 @@ fn ports_from_module_node(
                     syntax_tree,
                     &type_aliases,
                 );
+                let inherited_type_base = r#type.clone();
+                let r#type = type_with_unpacked_ranges(
+                    r#type,
+                    unpacked_ranges_from_dimensions(&port.nodes.2, syntax_tree)?,
+                );
                 let name = port_name(RefNode::PortIdentifier(&port.nodes.1), syntax_tree)?;
                 inherited_direction = direction;
-                inherited_type = r#type.clone();
+                inherited_type = inherited_type_base;
                 ports.push(Port::new(name, direction, r#type, true));
             }
             RefNode::AnsiPortDeclarationVariable(port) => {
@@ -1868,9 +1993,14 @@ fn ports_from_module_node(
                     syntax_tree,
                     &type_aliases,
                 );
+                let inherited_type_base = r#type.clone();
+                let r#type = type_with_unpacked_ranges(
+                    r#type,
+                    unpacked_ranges_from_variable_dimensions(&port.nodes.2, syntax_tree)?,
+                );
                 let name = port_name(RefNode::PortIdentifier(&port.nodes.1), syntax_tree)?;
                 inherited_direction = direction;
-                inherited_type = r#type.clone();
+                inherited_type = inherited_type_base;
                 ports.push(Port::new(name, direction, r#type, false));
             }
             RefNode::AnsiPortDeclarationParen(port) => {
@@ -2134,6 +2264,10 @@ fn substitute_signal_local_constants(signals: &mut [Signal], const_env: &HashMap
             range.left = substitute_const_expr_constants(range.left.clone(), const_env);
             range.right = substitute_const_expr_constants(range.right.clone(), const_env);
         }
+        for range in &mut signal.r#type.unpacked_ranges {
+            range.left = substitute_const_expr_constants(range.left.clone(), const_env);
+            range.right = substitute_const_expr_constants(range.right.clone(), const_env);
+        }
     }
 }
 
@@ -2191,10 +2325,14 @@ fn signals_from_net_declaration(
             .ok_or_else(|| {
                 AnalyzerError::Unsupported("unsupported signal identifier".to_string())
             })?;
+        let signal_type = type_with_unpacked_ranges(
+            r#type.clone(),
+            unpacked_ranges_from_dimensions(&assignment.nodes.1, syntax_tree)?,
+        );
         signals.push(if is_net {
-            Signal::new_net(name, r#type.clone())
+            Signal::new_net(name, signal_type)
         } else {
-            Signal::new(name, r#type.clone())
+            Signal::new(name, signal_type)
         });
     }
     Ok(signals)
@@ -2426,7 +2564,11 @@ fn signals_from_data_declaration(
             syntax_tree,
         )
         .ok_or_else(|| AnalyzerError::Unsupported("unsupported signal identifier".to_string()))?;
-        signals.push(Signal::new(name, r#type.clone()));
+        let signal_type = type_with_unpacked_ranges(
+            r#type.clone(),
+            unpacked_ranges_from_variable_dimensions(&assignment.nodes.1, syntax_tree)?,
+        );
+        signals.push(Signal::new(name, signal_type));
     }
     Ok(signals)
 }
@@ -2999,7 +3141,20 @@ struct PackedDimension {
     normalize_single: bool,
 }
 
-type PackedDimensions = HashMap<String, Vec<PackedDimension>>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnpackedDimension {
+    left: ConstExpr,
+    right: ConstExpr,
+    width: ConstExpr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VariableDimensions {
+    packed: Vec<PackedDimension>,
+    unpacked: Vec<UnpackedDimension>,
+}
+
+type PackedDimensions = HashMap<String, VariableDimensions>;
 
 fn packed_dimensions_from_ports_and_signals(
     ports: &[Port],
@@ -3009,13 +3164,19 @@ fn packed_dimensions_from_ports_and_signals(
     for port in ports {
         dimensions.insert(
             port.name().to_string(),
-            packed_dimension_widths(port.r#type().packed_ranges()),
+            VariableDimensions {
+                packed: packed_dimension_widths(port.r#type().packed_ranges()),
+                unpacked: unpacked_dimension_widths(port.r#type().unpacked_ranges()),
+            },
         );
     }
     for signal in signals {
         dimensions.insert(
             signal.name().to_string(),
-            packed_dimension_widths(signal.r#type().packed_ranges()),
+            VariableDimensions {
+                packed: packed_dimension_widths(signal.r#type().packed_ranges()),
+                unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
+            },
         );
     }
     dimensions
@@ -3050,6 +3211,38 @@ fn packed_dimension_widths(ranges: &[PackedRange]) -> Vec<PackedDimension> {
                 right,
                 width,
                 normalize_single: false,
+            }
+        })
+        .collect()
+}
+
+fn unpacked_dimension_widths(ranges: &[UnpackedRange]) -> Vec<UnpackedDimension> {
+    ranges
+        .iter()
+        .map(|range| {
+            let left = range.left().clone();
+            let right = range.right().clone();
+            let width = ConstExpr::Mux {
+                condition: Box::new(ConstExpr::Binary {
+                    left: Box::new(left.clone()),
+                    op: BinaryOp::Ge,
+                    right: Box::new(right.clone()),
+                }),
+                then_expr: Box::new(ConstExpr::Binary {
+                    left: Box::new(left.clone()),
+                    op: BinaryOp::Sub,
+                    right: Box::new(right.clone()),
+                }),
+                else_expr: Box::new(ConstExpr::Binary {
+                    left: Box::new(right.clone()),
+                    op: BinaryOp::Sub,
+                    right: Box::new(left.clone()),
+                }),
+            };
+            UnpackedDimension {
+                left,
+                right,
+                width: add_expr(width, ConstExpr::Literal("1".to_string())),
             }
         })
         .collect()
@@ -4007,11 +4200,15 @@ fn function_from_declaration(
                 type_aliases,
             )?;
             let mut function_packed_dimensions = packed_dimensions.clone();
-            function_packed_dimensions.extend(
-                params
-                    .iter()
-                    .map(|param| (param.name.clone(), param.packed_dimensions.clone())),
-            );
+            function_packed_dimensions.extend(params.iter().map(|param| {
+                (
+                    param.name.clone(),
+                    VariableDimensions {
+                        packed: param.packed_dimensions.clone(),
+                        unpacked: Vec::new(),
+                    },
+                )
+            }));
             function_packed_dimensions.extend(function_local_packed_dimensions_from_block_items(
                 &body.nodes.5,
                 syntax_tree,
@@ -4058,11 +4255,15 @@ fn function_from_declaration(
                 type_aliases,
             )?;
             let mut function_packed_dimensions = packed_dimensions.clone();
-            function_packed_dimensions.extend(
-                params
-                    .iter()
-                    .map(|param| (param.name.clone(), param.packed_dimensions.clone())),
-            );
+            function_packed_dimensions.extend(params.iter().map(|param| {
+                (
+                    param.name.clone(),
+                    VariableDimensions {
+                        packed: param.packed_dimensions.clone(),
+                        unpacked: Vec::new(),
+                    },
+                )
+            }));
             function_packed_dimensions.extend(
                 function_local_packed_dimensions_from_block_item_iter(
                     block_items.iter().copied(),
@@ -4145,7 +4346,10 @@ fn function_local_packed_dimensions_from_block_item_iter<'a>(
         dimensions.extend(signals.into_iter().map(|signal| {
             (
                 signal.name().to_string(),
-                function_packed_dimension_widths(signal.r#type().packed_ranges()),
+                VariableDimensions {
+                    packed: function_packed_dimension_widths(signal.r#type().packed_ranges()),
+                    unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
+                },
             )
         }));
     }
@@ -6721,6 +6925,40 @@ fn conditional_assignments_from_statement(
                 assignments,
             )?;
         }
+        sv_parser::StatementItem::LoopStatement(loop_statement) => {
+            let (name, values) = static_for_loop_iterations(loop_statement, syntax_tree, const_env)
+                .ok_or_else(|| {
+                    AnalyzerError::Unsupported("unsupported procedural for loop".to_string())
+                })?;
+            let body = match &**loop_statement {
+                sv_parser::LoopStatement::For(loop_statement) => &loop_statement.nodes.2,
+                _ => unreachable!(),
+            };
+            for value in values {
+                let mut loop_env = const_env.clone();
+                loop_env.insert(name.clone(), value);
+                let start = assignments.len();
+                conditional_assignments_from_statement_or_null(
+                    body,
+                    condition.clone(),
+                    syntax_tree,
+                    &loop_env,
+                    packed_dimensions,
+                    assignments,
+                )?;
+                for assignment in &mut assignments[start..] {
+                    assignment.condition = assignment.condition.take().map(|condition| {
+                        substitute_expr_constants_with_parameter_literals(
+                            condition,
+                            &loop_env,
+                            &HashMap::default(),
+                        )
+                    });
+                    assignment.assignment =
+                        substitute_assignment_constants(assignment.assignment.clone(), &loop_env);
+                }
+            }
+        }
         _ => {
             return Err(AnalyzerError::Unsupported(
                 "unsupported statement inside always_ff".to_string(),
@@ -7071,23 +7309,47 @@ fn lvalue_from_select(
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
         let mut lsb =
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
-        if indices.is_empty()
-            && let Some([dimension]) = packed_dimensions.get(&name).map(Vec::as_slice)
-            && dimension.normalize_single
-        {
-            msb = packed_index_offset(dimension, msb);
-            lsb = packed_index_offset(dimension, lsb);
-        }
-        if !indices.is_empty() {
-            let (_, prefix_offset) = flatten_packed_select(&name, &indices, packed_dimensions)?;
-            msb = add_expr(prefix_offset.clone(), msb);
-            lsb = add_expr(prefix_offset, lsb);
-        }
+        (msb, lsb) = flatten_select_range(&name, &indices, msb, lsb, packed_dimensions)?;
         return Some(LValue::Select { name, msb, lsb });
     }
 
-    if let Some((msb, lsb)) = flatten_packed_select(&name, &indices, packed_dimensions) {
-        return Some(LValue::Select { name, msb, lsb });
+    if let Some((array_offset, packed_indices)) =
+        flatten_variable_select(&name, &indices, packed_dimensions)
+    {
+        if !packed_indices.is_empty() {
+            if let Some((msb, lsb)) =
+                flatten_packed_select(&name, &packed_indices, packed_dimensions)
+            {
+                return Some(LValue::Select {
+                    name,
+                    msb: add_expr(array_offset.clone(), msb),
+                    lsb: add_expr(array_offset, lsb),
+                });
+            }
+        } else if let Some(dimensions) = packed_dimensions.get(&name)
+            && !dimensions.unpacked.is_empty()
+            && indices.len() == dimensions.unpacked.len()
+        {
+            let width = product_expr(
+                &dimensions
+                    .packed
+                    .iter()
+                    .map(|dimension| dimension.width.clone())
+                    .collect::<Vec<_>>(),
+            );
+            return Some(LValue::Select {
+                name,
+                msb: add_expr(
+                    array_offset.clone(),
+                    ConstExpr::Binary {
+                        left: Box::new(width),
+                        op: BinaryOp::Sub,
+                        right: Box::new(ConstExpr::Literal("1".to_string())),
+                    },
+                ),
+                lsb: array_offset,
+            });
+        }
     }
     if indices.len() == 1 {
         let bit = indices[0].clone();
@@ -7125,23 +7387,47 @@ fn lvalue_from_constant_select(
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
         let mut lsb =
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
-        if indices.is_empty()
-            && let Some([dimension]) = packed_dimensions.get(&name).map(Vec::as_slice)
-            && dimension.normalize_single
-        {
-            msb = packed_index_offset(dimension, msb);
-            lsb = packed_index_offset(dimension, lsb);
-        }
-        if !indices.is_empty() {
-            let (_, prefix_offset) = flatten_packed_select(&name, &indices, packed_dimensions)?;
-            msb = add_expr(prefix_offset.clone(), msb);
-            lsb = add_expr(prefix_offset, lsb);
-        }
+        (msb, lsb) = flatten_select_range(&name, &indices, msb, lsb, packed_dimensions)?;
         return Some(LValue::Select { name, msb, lsb });
     }
 
-    if let Some((msb, lsb)) = flatten_packed_select(&name, &indices, packed_dimensions) {
-        return Some(LValue::Select { name, msb, lsb });
+    if let Some((array_offset, packed_indices)) =
+        flatten_variable_select(&name, &indices, packed_dimensions)
+    {
+        if !packed_indices.is_empty() {
+            if let Some((msb, lsb)) =
+                flatten_packed_select(&name, &packed_indices, packed_dimensions)
+            {
+                return Some(LValue::Select {
+                    name,
+                    msb: add_expr(array_offset.clone(), msb),
+                    lsb: add_expr(array_offset, lsb),
+                });
+            }
+        } else if let Some(dimensions) = packed_dimensions.get(&name)
+            && !dimensions.unpacked.is_empty()
+            && indices.len() == dimensions.unpacked.len()
+        {
+            let width = product_expr(
+                &dimensions
+                    .packed
+                    .iter()
+                    .map(|dimension| dimension.width.clone())
+                    .collect::<Vec<_>>(),
+            );
+            return Some(LValue::Select {
+                name,
+                msb: add_expr(
+                    array_offset.clone(),
+                    ConstExpr::Binary {
+                        left: Box::new(width),
+                        op: BinaryOp::Sub,
+                        right: Box::new(ConstExpr::Literal("1".to_string())),
+                    },
+                ),
+                lsb: array_offset,
+            });
+        }
     }
     if indices.len() == 1 {
         let bit = indices[0].clone();
@@ -7334,6 +7620,9 @@ fn expr_from_primary_with_types(
         sv_parser::Primary::FunctionSubroutineCall(call) => {
             expr_from_function_subroutine_call(call, syntax_tree, packed_dimensions)
         }
+        sv_parser::Primary::Cast(cast) => {
+            expr_from_expression_with_types(&cast.nodes.2.nodes.1, syntax_tree, packed_dimensions)
+        }
         sv_parser::Primary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
             sv_parser::MintypmaxExpression::Expression(expr) => {
                 expr_from_expression_with_types(expr, syntax_tree, packed_dimensions)
@@ -7445,52 +7734,10 @@ fn expr_select_from_select(
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.0), syntax_tree)?;
         let mut lsb =
             const_expr_from_ref_node(RefNode::ConstantExpression(&range.nodes.2), syntax_tree)?;
-        if indices.is_empty()
-            && let Expr::Ident(name) = &base
-            && let Some([dimension]) = packed_dimensions.get(name).map(Vec::as_slice)
-            && dimension.normalize_single
-        {
-            msb = packed_index_offset(dimension, msb);
-            lsb = packed_index_offset(dimension, lsb);
-        }
-        if !indices.is_empty() {
-            let Expr::Ident(name) = &base else {
-                return None;
-            };
-            let dimensions = packed_dimensions.get(name)?;
-            let dimension = dimensions.get(indices.len())?;
-            msb = packed_index_offset(dimension, msb);
-            lsb = packed_index_offset(dimension, lsb);
-
-            let stride = product_expr(
-                &dimensions[indices.len() + 1..]
-                    .iter()
-                    .map(|dimension| dimension.width.clone())
-                    .collect::<Vec<_>>(),
-            );
-            if !is_one(&stride) {
-                msb = add_expr(
-                    ConstExpr::Binary {
-                        left: Box::new(msb),
-                        op: BinaryOp::Mul,
-                        right: Box::new(stride.clone()),
-                    },
-                    ConstExpr::Binary {
-                        left: Box::new(stride.clone()),
-                        op: BinaryOp::Sub,
-                        right: Box::new(ConstExpr::Literal("1".to_string())),
-                    },
-                );
-                lsb = ConstExpr::Binary {
-                    left: Box::new(lsb),
-                    op: BinaryOp::Mul,
-                    right: Box::new(stride),
-                };
-            }
-            let (_, prefix_offset) = flatten_packed_select(name, &indices, packed_dimensions)?;
-            msb = add_expr(prefix_offset.clone(), msb);
-            lsb = add_expr(prefix_offset, lsb);
-        }
+        let Expr::Ident(name) = &base else {
+            return None;
+        };
+        (msb, lsb) = flatten_select_range(name, &indices, msb, lsb, packed_dimensions)?;
         return Some(Expr::Select {
             expr: Box::new(base),
             msb,
@@ -7499,12 +7746,43 @@ fn expr_select_from_select(
     }
 
     if let Expr::Ident(name) = &base {
-        if let Some((msb, lsb)) = flatten_packed_select(name, &indices, packed_dimensions) {
-            return Some(Expr::Select {
-                expr: Box::new(base),
-                msb,
-                lsb,
-            });
+        if let Some((array_offset, packed_indices)) =
+            flatten_variable_select(name, &indices, packed_dimensions)
+        {
+            if !packed_indices.is_empty()
+                && let Some((msb, lsb)) =
+                    flatten_packed_select(name, &packed_indices, packed_dimensions)
+            {
+                return Some(Expr::Select {
+                    expr: Box::new(base),
+                    msb: add_expr(array_offset.clone(), msb),
+                    lsb: add_expr(array_offset, lsb),
+                });
+            }
+            if let Some(dimensions) = packed_dimensions.get(name)
+                && !dimensions.unpacked.is_empty()
+                && indices.len() == dimensions.unpacked.len()
+            {
+                let width = product_expr(
+                    &dimensions
+                        .packed
+                        .iter()
+                        .map(|dimension| dimension.width.clone())
+                        .collect::<Vec<_>>(),
+                );
+                return Some(Expr::Select {
+                    expr: Box::new(base),
+                    msb: add_expr(
+                        array_offset.clone(),
+                        ConstExpr::Binary {
+                            left: Box::new(width),
+                            op: BinaryOp::Sub,
+                            right: Box::new(ConstExpr::Literal("1".to_string())),
+                        },
+                    ),
+                    lsb: array_offset,
+                });
+            }
         }
     }
     if indices.len() == 1 {
@@ -7519,15 +7797,108 @@ fn expr_select_from_select(
     None
 }
 
+fn flatten_variable_select(
+    name: &str,
+    indices: &[ConstExpr],
+    packed_dimensions: &PackedDimensions,
+) -> Option<(ConstExpr, Vec<ConstExpr>)> {
+    let dimensions = packed_dimensions.get(name)?;
+    let unpacked_count = dimensions.unpacked.len();
+    if indices.len() < unpacked_count {
+        return None;
+    }
+
+    let mut offset = ConstExpr::Literal("0".to_string());
+    for (index, value) in indices[..unpacked_count].iter().enumerate() {
+        let mut stride_parts = dimensions.unpacked[index + 1..]
+            .iter()
+            .map(|dimension| dimension.width.clone())
+            .collect::<Vec<_>>();
+        stride_parts.extend(
+            dimensions
+                .packed
+                .iter()
+                .map(|dimension| dimension.width.clone()),
+        );
+        let stride = product_expr(&stride_parts);
+        let index = unpacked_index_offset(&dimensions.unpacked[index], value.clone());
+        let term = if is_one(&stride) {
+            index
+        } else {
+            ConstExpr::Binary {
+                left: Box::new(index),
+                op: BinaryOp::Mul,
+                right: Box::new(stride),
+            }
+        };
+        offset = add_expr(offset, term);
+    }
+    Some((offset, indices[unpacked_count..].to_vec()))
+}
+
+fn flatten_select_range(
+    name: &str,
+    indices: &[ConstExpr],
+    mut msb: ConstExpr,
+    mut lsb: ConstExpr,
+    packed_dimensions: &PackedDimensions,
+) -> Option<(ConstExpr, ConstExpr)> {
+    let Some(dimensions) = packed_dimensions.get(name) else {
+        return indices.is_empty().then_some((msb, lsb));
+    };
+    let (array_offset, packed_indices) = flatten_variable_select(name, indices, packed_dimensions)?;
+    let dimension = dimensions.packed.get(packed_indices.len())?;
+    msb = packed_index_offset(dimension, msb);
+    lsb = packed_index_offset(dimension, lsb);
+
+    let stride = product_expr(
+        &dimensions.packed[packed_indices.len() + 1..]
+            .iter()
+            .map(|dimension| dimension.width.clone())
+            .collect::<Vec<_>>(),
+    );
+    if !is_one(&stride) {
+        msb = add_expr(
+            ConstExpr::Binary {
+                left: Box::new(msb),
+                op: BinaryOp::Mul,
+                right: Box::new(stride.clone()),
+            },
+            ConstExpr::Binary {
+                left: Box::new(stride.clone()),
+                op: BinaryOp::Sub,
+                right: Box::new(ConstExpr::Literal("1".to_string())),
+            },
+        );
+        lsb = ConstExpr::Binary {
+            left: Box::new(lsb),
+            op: BinaryOp::Mul,
+            right: Box::new(stride),
+        };
+    }
+
+    let prefix_offset = if packed_indices.is_empty() {
+        ConstExpr::Literal("0".to_string())
+    } else {
+        let (_, offset) = flatten_packed_select(name, &packed_indices, packed_dimensions)?;
+        offset
+    };
+    let offset = add_expr(array_offset, prefix_offset);
+    Some((add_expr(offset.clone(), msb), add_expr(offset, lsb)))
+}
+
 fn flatten_packed_select(
     name: &str,
     indices: &[ConstExpr],
     packed_dimensions: &PackedDimensions,
 ) -> Option<(ConstExpr, ConstExpr)> {
-    let dimensions = packed_dimensions.get(name)?;
+    let variable_dimensions = packed_dimensions.get(name)?;
+    let dimensions = &variable_dimensions.packed;
     if indices.is_empty()
         || indices.len() > dimensions.len()
-        || (dimensions.len() == 1 && !dimensions[0].normalize_single)
+        || (variable_dimensions.unpacked.is_empty()
+            && dimensions.len() == 1
+            && !dimensions[0].normalize_single)
     {
         return None;
     }
@@ -7591,6 +7962,26 @@ fn packed_index_offset(dimension: &PackedDimension, index: ConstExpr) -> ConstEx
             left: Box::new(dimension.right.clone()),
             op: BinaryOp::Sub,
             right: Box::new(index),
+        }),
+    }
+}
+
+fn unpacked_index_offset(dimension: &UnpackedDimension, index: ConstExpr) -> ConstExpr {
+    ConstExpr::Mux {
+        condition: Box::new(ConstExpr::Binary {
+            left: Box::new(dimension.left.clone()),
+            op: BinaryOp::Ge,
+            right: Box::new(dimension.right.clone()),
+        }),
+        then_expr: Box::new(ConstExpr::Binary {
+            left: Box::new(dimension.left.clone()),
+            op: BinaryOp::Sub,
+            right: Box::new(index.clone()),
+        }),
+        else_expr: Box::new(ConstExpr::Binary {
+            left: Box::new(index),
+            op: BinaryOp::Sub,
+            right: Box::new(dimension.left.clone()),
         }),
     }
 }
@@ -7978,6 +8369,11 @@ fn type_with_fallback_ranges(
     r#type
 }
 
+fn type_with_unpacked_ranges(mut r#type: Type, ranges: Vec<UnpackedRange>) -> Type {
+    r#type.unpacked_ranges.extend(ranges);
+    r#type
+}
+
 fn is_signed_from_ref_node(node: RefNode<'_>) -> Option<bool> {
     match unwrap_node!(node, Signing)? {
         RefNode::Signing(signing) => match signing {
@@ -8007,6 +8403,84 @@ fn packed_ranges_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> V
         }
     }
     ranges
+}
+
+fn unpacked_ranges_from_dimensions(
+    dimensions: &[sv_parser::UnpackedDimension],
+    syntax_tree: &SyntaxTree,
+) -> Result<Vec<UnpackedRange>, AnalyzerError> {
+    dimensions
+        .iter()
+        .map(|dimension| {
+            let (left, right) = match dimension {
+                sv_parser::UnpackedDimension::Range(range) => {
+                    let constant_range = &range.nodes.0.nodes.1;
+                    let left = const_expr_from_ref_node(
+                        RefNode::ConstantExpression(&constant_range.nodes.0),
+                        syntax_tree,
+                    );
+                    let right = const_expr_from_ref_node(
+                        RefNode::ConstantExpression(&constant_range.nodes.2),
+                        syntax_tree,
+                    );
+                    (left, right)
+                }
+                sv_parser::UnpackedDimension::Expression(expression) => {
+                    let size = const_expr_from_ref_node(
+                        RefNode::ConstantExpression(&expression.nodes.0.nodes.1),
+                        syntax_tree,
+                    );
+                    (
+                        Some(ConstExpr::Literal("0".to_string())),
+                        size.map(|size| ConstExpr::Binary {
+                            left: Box::new(size),
+                            op: BinaryOp::Sub,
+                            right: Box::new(ConstExpr::Literal("1".to_string())),
+                        }),
+                    )
+                }
+            };
+            match (left, right) {
+                (Some(left), Some(right)) => Ok(UnpackedRange::new(left, right)),
+                _ => Err(AnalyzerError::Unsupported(
+                    "unresolved unpacked array dimension".to_string(),
+                )),
+            }
+        })
+        .collect()
+}
+
+fn unpacked_ranges_from_variable_dimensions(
+    dimensions: &[sv_parser::VariableDimension],
+    syntax_tree: &SyntaxTree,
+) -> Result<Vec<UnpackedRange>, AnalyzerError> {
+    let mut ranges = Vec::new();
+    for dimension in dimensions {
+        match dimension {
+            sv_parser::VariableDimension::UnpackedDimension(dimension) => {
+                ranges.extend(unpacked_ranges_from_dimensions(
+                    std::slice::from_ref(&**dimension),
+                    syntax_tree,
+                )?);
+            }
+            sv_parser::VariableDimension::UnsizedDimension(_) => {
+                return Err(AnalyzerError::Unsupported(
+                    "unsized unpacked array dimension".to_string(),
+                ));
+            }
+            sv_parser::VariableDimension::AssociativeDimension(_) => {
+                return Err(AnalyzerError::Unsupported(
+                    "associative array dimension".to_string(),
+                ));
+            }
+            sv_parser::VariableDimension::QueueDimension(_) => {
+                return Err(AnalyzerError::Unsupported(
+                    "queue array dimension".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(ranges)
 }
 
 fn const_expr_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Option<ConstExpr> {
@@ -8086,6 +8560,10 @@ fn const_expr_from_ref_node(node: RefNode<'_>, syntax_tree: &SyntaxTree) -> Opti
                         .map(ConstExpr::Ident)
                 })
             }
+            sv_parser::ConstantPrimary::ConstantCast(cast) => const_expr_from_ref_node(
+                RefNode::ConstantExpression(&cast.nodes.2.nodes.1),
+                syntax_tree,
+            ),
             sv_parser::ConstantPrimary::MintypmaxExpression(expr) => match &expr.nodes.0.nodes.1 {
                 sv_parser::ConstantMintypmaxExpression::Unary(expr) => {
                     const_expr_from_ref_node(RefNode::ConstantExpression(expr), syntax_tree)

@@ -49,6 +49,7 @@ struct SvVariable {
     signed: bool,
     is_4state: bool,
     packed_ranges: Vec<(i128, i128)>,
+    array_dims: Vec<usize>,
     domain_kind: DomainKind,
     kind: VariableKind,
     type_kind: PortTypeKind,
@@ -66,7 +67,7 @@ impl SvVariable {
                 is_4state: self.is_4state,
                 kind: self.domain_kind,
                 type_kind: self.type_kind,
-                array_dims: Vec::new(),
+                array_dims: self.array_dims.clone(),
             },
             packed_dims: self
                 .packed_ranges
@@ -802,6 +803,7 @@ fn lower_module_with_overrides(
             signed: type_info.signed,
             is_4state: type_info.is_4state,
             packed_ranges: type_info.packed_ranges,
+            array_dims: type_info.array_dims,
             domain_kind: DomainKind::Other,
             kind,
             type_kind: type_info.type_kind,
@@ -844,6 +846,7 @@ fn lower_module_with_overrides(
             signed: type_info.signed,
             is_4state: type_info.is_4state,
             packed_ranges: type_info.packed_ranges,
+            array_dims: type_info.array_dims,
             domain_kind: DomainKind::Other,
             kind: VariableKind::Variable,
             type_kind: type_info.type_kind,
@@ -1381,6 +1384,7 @@ fn ensure_parent_output_signals(
             signed: false,
             is_4state: true,
             packed_ranges: Vec::new(),
+            array_dims: Vec::new(),
             domain_kind: DomainKind::Other,
             kind: VariableKind::Variable,
             type_kind: PortTypeKind::Logic,
@@ -2143,6 +2147,7 @@ struct SvSignalType {
     signed: bool,
     is_4state: bool,
     packed_ranges: Vec<(i128, i128)>,
+    array_dims: Vec<usize>,
     type_kind: PortTypeKind,
 }
 
@@ -2151,7 +2156,7 @@ fn signal_type_from_sv(
     constants: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Result<SvSignalType, sv::AnalyzerError> {
-    let width = if typ.packed_ranges().is_empty() {
+    let packed_width = if typ.packed_ranges().is_empty() {
         1
     } else {
         typ.packed_ranges()
@@ -2175,6 +2180,29 @@ fn signal_type_from_sv(
             })?
             .max(1)
     };
+    let array_dims = typ
+        .unpacked_ranges()
+        .iter()
+        .map(|range| {
+            let left = sv::typecheck::eval_const_expr_with_types(
+                range.left(),
+                constants,
+                parameter_types,
+            )?;
+            let right = sv::typecheck::eval_const_expr_with_types(
+                range.right(),
+                constants,
+                parameter_types,
+            )?;
+            usize::try_from(left.abs_diff(right) + 1).ok()
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            sv::AnalyzerError::Unsupported("unresolved unpacked array dimension".to_string())
+        })?;
+    let width = packed_width
+        .checked_mul(array_dims.iter().copied().product())
+        .ok_or_else(|| sv::AnalyzerError::Unsupported("signal width overflow".to_string()))?;
     let signed = typ.is_signed();
     let is_4state = !matches!(typ.kind(), sv::ir::TypeKind::Bit);
     let packed_ranges = typ
@@ -2205,6 +2233,7 @@ fn signal_type_from_sv(
         signed,
         is_4state,
         packed_ranges,
+        array_dims,
         type_kind,
     })
 }
@@ -3047,6 +3076,11 @@ fn select_sources<A: std::hash::Hash + Eq + Clone>(
 }
 
 fn packed_index_offset(variable: &SvVariable, index: i128) -> Option<usize> {
+    if !variable.array_dims.is_empty() {
+        return usize::try_from(index)
+            .ok()
+            .filter(|offset| *offset < variable.width);
+    }
     let offset = match variable.packed_ranges.as_slice() {
         [(left, right)] if left >= right => index.checked_sub(*right)?,
         [(_, right)] => right.checked_sub(index)?,
@@ -3055,6 +3089,33 @@ fn packed_index_offset(variable: &SvVariable, index: i128) -> Option<usize> {
     usize::try_from(offset)
         .ok()
         .filter(|offset| *offset < variable.width)
+}
+
+fn unpacked_element_width(variable: &SvVariable) -> Option<usize> {
+    if variable.array_dims.is_empty() {
+        return None;
+    }
+    let element_count = variable.array_dims.iter().copied().product::<usize>();
+    (element_count != 0)
+        .then(|| variable.width.checked_div(element_count))
+        .flatten()
+}
+
+fn sv_memory_offset(variable: &SvVariable, bit_offset: usize, width: usize) -> SIROffset {
+    match unpacked_element_width(variable) {
+        Some(element_width)
+            if element_width != 0
+                && width > element_width
+                && bit_offset.is_multiple_of(element_width)
+                && width.is_multiple_of(element_width) =>
+        {
+            SIROffset::PackedElements {
+                bit_offset,
+                element_width,
+            }
+        }
+        _ => SIROffset::Static(bit_offset),
+    }
 }
 
 fn packed_expr_select_offsets(
@@ -3443,7 +3504,7 @@ fn emit_ff_assignment_stores(
                 region: WORKING_REGION,
                 var_id: target_id,
             },
-            SIROffset::Static(0),
+            sv_memory_offset(variables.get(&target_id)?, 0, width),
             width,
         ));
         for assignment in process.assignments() {
@@ -4088,7 +4149,7 @@ fn lower_expr_to_sir_with_context(
                     region: STABLE_REGION,
                     var_id: id,
                 },
-                SIROffset::Static(0),
+                sv_memory_offset(var, 0, var.width),
                 var.width,
             ));
             resize_sir_register(
