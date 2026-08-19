@@ -1,6 +1,6 @@
 //! AArch64 emission for the transitional scalar MIR pipeline.
 
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 use celox_backend_x86::native::mir::MFunction as LegacyFunction;
 use celox_backend_x86::native::regalloc::AssignmentMap as LegacyAssignment;
@@ -29,6 +29,8 @@ const SCRATCH1: u8 = 17;
 // and spill store when the simulator state is larger than AArch64's immediate
 // addressing range.
 const SPILL_REG: u8 = 28;
+const STATE_PAGE_REG: u8 = 29;
+const STATE_PAGE_BYTES: i64 = 4096;
 const TEMPORARY_BYTES: usize = 16;
 
 /// Result of scalar AArch64 emission.
@@ -252,6 +254,13 @@ fn emit_function(
         .iter()
         .map(|block| (block.id, ops.new_dynamic_label()))
         .collect::<HashMap<_, _>>();
+    // Use x29 for the most frequently accessed state page so large state
+    // offsets can use ordinary AArch64 memory immediates without reducing the
+    // allocator's general-purpose register file.  The tick loop normally uses
+    // x29 for its counter; when a page base is profitable, keep that counter
+    // in an otherwise-unused SIMD scalar register instead.
+    let state_base_page = select_state_base_page(function);
+    let tick_counter_in_fp = tick_loop && state_base_page.is_some();
     let table_labels = function
         .constant_tables()
         .iter()
@@ -266,11 +275,10 @@ fn emit_function(
         .map(|(_, register)| register.number())
         .filter(|register| (19..=27).contains(register))
         .collect::<Vec<_>>();
-    if tick_loop {
-        // x29 is not allocated to MIR values and carries the native-loop
-        // counter across repeated body entries. Saving it once in the
-        // prologue avoids two FP/GPR transfers on every loop iteration.
-        callee_saved.push(29);
+    if tick_loop || state_base_page.is_some() {
+        // x29 is reserved for either the native-loop counter or the cached
+        // state-page base, so preserve the host value across the JIT call.
+        callee_saved.push(STATE_PAGE_REG);
     }
     // x28 is the fixed base for the spill/cycle-break arena, including the
     // temporary slot used by parallel-copy resolution even when no value was
@@ -297,7 +305,8 @@ fn emit_function(
     }
     if tick_loop {
         // d29 retains the simulator-state pointer across success/error return
-        // values. x29 carries the remaining tick count between body entries.
+        // values. Keep the remaining tick count in x29 unless x29 is needed
+        // for the cached state-page base.
         dynasm!(ops ; .arch aarch64 ; fmov d29, x0);
         emit_address(
             &mut ops,
@@ -306,13 +315,23 @@ fn emit_function(
         );
         emit_load(&mut ops, SCRATCH0, SCRATCH0, OpSize::S64);
         let count_ready = ops.new_dynamic_label();
-        dynasm!(ops
-            ; .arch aarch64
-            ; cbnz x16, =>count_ready
-            ; mov x16, #1
-            ; =>count_ready
-            ; mov x29, x16
-        );
+        if tick_counter_in_fp {
+            dynasm!(ops
+                ; .arch aarch64
+                ; cbnz x16, =>count_ready
+                ; mov x16, #1
+                ; =>count_ready
+                ; fmov d31, x16
+            );
+        } else {
+            dynasm!(ops
+                ; .arch aarch64
+                ; cbnz x16, =>count_ready
+                ; mov x16, #1
+                ; =>count_ready
+                ; mov x29, x16
+            );
+        }
         if check_runtime_events {
             emit_address(
                 &mut ops,
@@ -331,6 +350,9 @@ fn emit_function(
         }
     }
     emit_address_to(&mut ops, SPILL_REG, STATE_REG, spill_base as i64);
+    if let Some(page) = state_base_page {
+        emit_address_to(&mut ops, STATE_PAGE_REG, STATE_REG, page);
+    }
     for block in &function.blocks {
         let label = block_labels[&block.id];
         block_offsets.push((block.id, ops.offset().0 as u64));
@@ -354,6 +376,8 @@ fn emit_function(
                 tick_entry,
                 tick_success,
                 check_runtime_events,
+                state_base_page,
+                tick_counter_in_fp,
             )?;
         }
     }
@@ -366,11 +390,11 @@ fn emit_function(
         ; =>epilogue
     );
     if tick_loop {
-        dynasm!(ops
-            ; .arch aarch64
-            ; mov x16, x29
-            ; fmov x17, d29
-        );
+        if tick_counter_in_fp {
+            dynasm!(ops ; .arch aarch64 ; fmov x16, d31 ; fmov x17, d29);
+        } else {
+            dynasm!(ops ; .arch aarch64 ; mov x16, x29 ; fmov x17, d29);
+        }
         emit_load_imm(
             &mut ops,
             30,
@@ -437,6 +461,8 @@ fn emit_instruction(
     tick_entry: Option<DynamicLabel>,
     tick_success: Option<DynamicLabel>,
     check_runtime_events: bool,
+    state_base_page: Option<i64>,
+    tick_counter_in_fp: bool,
 ) -> Result<(), EmitError> {
     match instruction {
         MInst::Mov { dst, src } => {
@@ -462,15 +488,11 @@ fn emit_instruction(
             offset,
             size,
         } => {
-            let base_register = base_register(*base);
             let offset = base_offset(*base, *offset);
-            emit_load_at(
-                ops,
-                resolve(assignment, *dst)?,
-                base_register,
-                offset,
-                *size,
-            );
+            let destination = resolve(assignment, *dst)?;
+            let (base_register, offset) =
+                select_memory_base(*base, offset, destination, *size, false, state_base_page);
+            emit_load_at(ops, destination, base_register, offset, *size);
         }
         MInst::Store {
             base,
@@ -478,15 +500,11 @@ fn emit_instruction(
             src,
             size,
         } => {
-            let base_register = base_register(*base);
             let offset = base_offset(*base, *offset);
-            emit_store_at(
-                ops,
-                resolve(assignment, *src)?,
-                base_register,
-                offset,
-                *size,
-            );
+            let source = resolve(assignment, *src)?;
+            let (base_register, offset) =
+                select_memory_base(*base, offset, source, *size, true, state_base_page);
+            emit_store_at(ops, source, base_register, offset, *size);
         }
         MInst::LoadPtr {
             dst,
@@ -642,8 +660,15 @@ fn emit_instruction(
             size,
             imm,
         } => {
-            let base_register = base_register(*base);
             let address_offset = base_offset(*base, *offset);
+            let (base_register, address_offset) = select_memory_base(
+                *base,
+                address_offset,
+                SCRATCH1,
+                *size,
+                false,
+                state_base_page,
+            );
             if memory_access_encoding(SCRATCH1, base_register, address_offset, *size, false)
                 .is_some()
             {
@@ -961,7 +986,7 @@ fn emit_instruction(
             true_bb,
             false_bb,
         } => {
-            emit_branch_predicate(ops, *predicate, assignment)?;
+            emit_branch_predicate(ops, *predicate, assignment, state_base_page)?;
             let true_path = ops.new_dynamic_label();
             emit_conditional_branch(ops, true_path, predicate_kind(*predicate));
             emit_edge_copies(ops, plan, block, *false_bb, spill_base, temporary_offset)?;
@@ -978,11 +1003,21 @@ fn emit_instruction(
         }
         MInst::Return => {
             if let (Some(entry), Some(success)) = (tick_entry, tick_success) {
-                dynasm!(ops
-                    ; .arch aarch64
-                    ; subs x29, x29, #1
-                    ; b.eq =>success
-                );
+                if tick_counter_in_fp {
+                    dynasm!(ops
+                        ; .arch aarch64
+                        ; fmov x16, d31
+                        ; subs x16, x16, #1
+                        ; fmov d31, x16
+                        ; b.eq =>success
+                    );
+                } else {
+                    dynasm!(ops
+                        ; .arch aarch64
+                        ; subs x29, x29, #1
+                        ; b.eq =>success
+                    );
+                }
                 if check_runtime_events {
                     emit_address(
                         ops,
@@ -1007,10 +1042,19 @@ fn emit_instruction(
         }
         MInst::ReturnError { code } => {
             if tick_entry.is_some() {
-                dynasm!(ops
-                    ; .arch aarch64
-                    ; sub x29, x29, #1
-                );
+                if tick_counter_in_fp {
+                    dynasm!(ops
+                        ; .arch aarch64
+                        ; fmov x16, d31
+                        ; sub x16, x16, #1
+                        ; fmov d31, x16
+                    );
+                } else {
+                    dynasm!(ops
+                        ; .arch aarch64
+                        ; sub x29, x29, #1
+                    );
+                }
             }
             emit_load_imm(ops, STATE_REG, *code as u64);
             dynasm!(ops ; .arch aarch64 ; b =>epilogue);
@@ -1089,12 +1133,27 @@ fn emit_instruction(
             let offset = active_bits_offset
                 .checked_add(word_offset)
                 .ok_or(EmitError::Range("sparse active bitmap offset overflow"))?;
-            emit_base_address(ops, BaseReg::SimState, offset)?;
-            emit_load(ops, SCRATCH1, SCRATCH0, OpSize::S64);
+            let offset = i64::from(offset);
+            let (base, offset) = select_memory_base(
+                BaseReg::SimState,
+                offset,
+                SCRATCH1,
+                OpSize::S64,
+                false,
+                state_base_page,
+            );
+            emit_load_at(ops, SCRATCH1, base, offset, OpSize::S64);
             emit_load_imm(ops, SCRATCH0, 1_u64 << (*active_index % 64));
             dynasm!(ops ; .arch aarch64 ; orr x30, x17, x16);
-            emit_base_address(ops, BaseReg::SimState, offset)?;
-            emit_store(ops, 30, SCRATCH0, OpSize::S64);
+            let (base, offset) = select_memory_base(
+                BaseReg::SimState,
+                i64::from(*active_bits_offset) + i64::from(word_offset),
+                30,
+                OpSize::S64,
+                true,
+                state_base_page,
+            );
+            emit_store_at(ops, 30, base, offset, OpSize::S64);
         }
         MInst::SparseCommitWorklist {
             descriptor_table,
@@ -1806,6 +1865,83 @@ fn emit_mem_fill(
     }
 }
 
+fn select_state_base_page(function: &MFunction) -> Option<i64> {
+    let mut page_counts = BTreeMap::<i64, usize>::new();
+    for block in &function.blocks {
+        for instruction in &block.insts {
+            let Some(offset) = (match instruction {
+                MInst::Load {
+                    base: BaseReg::SimState,
+                    offset,
+                    ..
+                }
+                | MInst::Store {
+                    base: BaseReg::SimState,
+                    offset,
+                    ..
+                }
+                | MInst::AndStoreImm {
+                    base: BaseReg::SimState,
+                    offset,
+                    ..
+                }
+                | MInst::OrStoreImm {
+                    base: BaseReg::SimState,
+                    offset,
+                    ..
+                } => Some(i64::from(*offset)),
+                MInst::BranchPred {
+                    predicate:
+                        BranchPredicate::MemoryNonZero {
+                            base: BaseReg::SimState,
+                            offset,
+                            ..
+                        },
+                    ..
+                } => Some(i64::from(*offset)),
+                MInst::SparseMarkActive {
+                    active_index,
+                    active_bits_offset,
+                    ..
+                } => Some(i64::from(*active_bits_offset) + i64::from(*active_index / 64) * 8),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let page = offset.div_euclid(STATE_PAGE_BYTES) * STATE_PAGE_BYTES;
+            *page_counts.entry(page).or_default() += 1;
+        }
+    }
+    page_counts
+        .into_iter()
+        .filter(|(_, count)| *count >= 8)
+        .max_by_key(|(page, count)| (*count, -*page))
+        .map(|(page, _)| page)
+}
+
+fn select_memory_base(
+    base: BaseReg,
+    offset: i64,
+    register: u8,
+    size: OpSize,
+    store: bool,
+    state_base_page: Option<i64>,
+) -> (u8, i64) {
+    let normal = (base_register(base), offset);
+    if base != BaseReg::SimState {
+        return normal;
+    }
+    let Some(page) = state_base_page else {
+        return normal;
+    };
+    let relative = offset - page;
+    if memory_access_encoding(register, STATE_PAGE_REG, relative, size, store).is_some() {
+        (STATE_PAGE_REG, relative)
+    } else {
+        normal
+    }
+}
+
 fn base_register(base: BaseReg) -> u8 {
     match base {
         BaseReg::SimState => STATE_REG,
@@ -2261,6 +2397,7 @@ fn emit_branch_predicate(
     ops: &mut VecAssembler<Aarch64Relocation>,
     predicate: BranchPredicate,
     assignment: &Assignment<VReg>,
+    state_base_page: Option<i64>,
 ) -> Result<(), EmitError> {
     match predicate {
         BranchPredicate::Compare { lhs, rhs, .. } => {
@@ -2275,8 +2412,9 @@ fn emit_branch_predicate(
             }
         }
         BranchPredicate::MemoryNonZero { base, offset, size } => {
-            let base_register = base_register(base);
             let offset = base_offset(base, offset);
+            let (base_register, offset) =
+                select_memory_base(base, offset, SCRATCH0, size, false, state_base_page);
             emit_load_at(ops, SCRATCH0, base_register, offset, size);
             dynasm!(ops ; .arch aarch64 ; cmp x16, #0);
         }
@@ -2498,6 +2636,42 @@ mod tests {
         assignment.set(increment, PhysReg::RDX);
         assignment.set(result, PhysReg::RSI);
         (function, assignment)
+    }
+
+    #[test]
+    fn selects_a_state_page_base_for_repeated_accesses() {
+        let destinations = (0..8).map(crate::mir::VReg).collect::<Vec<_>>();
+        let mut insts = Vec::new();
+        for (index, dst) in destinations.into_iter().enumerate() {
+            insts.push(crate::mir::MInst::Load {
+                dst,
+                base: crate::mir::BaseReg::SimState,
+                offset: 4096 + (index as i32) * 8,
+                size: crate::mir::OpSize::S64,
+            });
+        }
+        insts.push(crate::mir::MInst::Return);
+        let function = crate::mir::MFunction::new(
+            vec![crate::mir::MBlock {
+                id: crate::mir::BlockId(0),
+                phis: Vec::new(),
+                insts,
+            }],
+            Vec::new(),
+        );
+
+        assert_eq!(select_state_base_page(&function), Some(4096));
+        assert_eq!(
+            select_memory_base(
+                crate::mir::BaseReg::SimState,
+                4112,
+                SCRATCH0,
+                crate::mir::OpSize::S64,
+                false,
+                Some(4096),
+            ),
+            (STATE_PAGE_REG, 16)
+        );
     }
 
     #[cfg(target_arch = "aarch64")]
