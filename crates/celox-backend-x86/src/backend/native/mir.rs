@@ -627,6 +627,11 @@ impl SparseCommitDescriptor {
 /// legal or profitable for this target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum X86SimdInst {
+    /// A short-lived vector temporary owned by the following recipe.
+    ///
+    /// This is a virtual value rather than a fixed physical register so the
+    /// vector allocator can keep it disjoint from the recipe's live inputs.
+    Scratch128 { dst: X86VecReg },
     /// `dst = <0, 0>`, emitted with a dependency-breaking x86 zero idiom.
     Zero128 { dst: X86VecReg },
     /// `dst = <low, high>`, with each scalar becoming one 64-bit lane.
@@ -634,6 +639,8 @@ pub enum X86SimdInst {
         dst: X86VecReg,
         low: VReg,
         high: VReg,
+        /// Required when `low != high`; defined immediately before this pack.
+        scratch: Option<X86VecReg>,
     },
     /// `dst = load 16 bytes [base + offset]`.
     Load128 {
@@ -659,7 +666,8 @@ pub enum X86SimdInst {
 impl X86SimdInst {
     pub fn def(self) -> Option<X86VecReg> {
         match self {
-            Self::Zero128 { dst }
+            Self::Scratch128 { dst }
+            | Self::Zero128 { dst }
             | Self::Pack128 { dst, .. }
             | Self::Load128 { dst, .. }
             | Self::Binary128 { dst, .. } => Some(dst),
@@ -669,7 +677,8 @@ impl X86SimdInst {
 
     pub fn uses(self) -> [Option<X86VecReg>; 2] {
         match self {
-            Self::Zero128 { .. } | Self::Pack128 { .. } | Self::Load128 { .. } => [None, None],
+            Self::Scratch128 { .. } | Self::Zero128 { .. } | Self::Load128 { .. } => [None, None],
+            Self::Pack128 { scratch, .. } => [scratch, None],
             Self::Binary128 { lhs, rhs, .. } => [Some(lhs), Some(rhs)],
             Self::Store128 { src, .. } => [Some(src), None],
         }
@@ -1083,11 +1092,22 @@ pub enum MInst {
 impl fmt::Display for MInst {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            MInst::X86Simd(X86SimdInst::Scratch128 { dst }) => {
+                write!(f, "{dst} = x86.scratch.v128")
+            }
             MInst::X86Simd(X86SimdInst::Zero128 { dst }) => {
                 write!(f, "{dst} = x86.zero.v128")
             }
-            MInst::X86Simd(X86SimdInst::Pack128 { dst, low, high }) => {
-                write!(f, "{dst} = x86.pack.v2i64 {low}, {high}")
+            MInst::X86Simd(X86SimdInst::Pack128 {
+                dst,
+                low,
+                high,
+                scratch,
+            }) => {
+                write!(
+                    f,
+                    "{dst} = x86.pack.v2i64 {low}, {high} [scratch={scratch:?}]"
+                )
             }
             MInst::X86Simd(X86SimdInst::Load128 { dst, base, offset }) => {
                 write!(f, "{dst} = x86.load.v128 [{base} + {offset}]")
@@ -1634,6 +1654,7 @@ impl MInst {
             MInst::Mov { src, .. } | MInst::Mov32 { src, .. } => Uses::one(*src),
             MInst::X86Simd(X86SimdInst::Pack128 { low, high, .. }) => Uses::two(*low, *high),
             MInst::LoadImm { .. }
+            | MInst::X86Simd(X86SimdInst::Scratch128 { .. })
             | MInst::X86Simd(X86SimdInst::Zero128 { .. })
             | MInst::X86Simd(X86SimdInst::Load128 { .. })
             | MInst::X86Simd(X86SimdInst::Binary128 { .. })
@@ -2041,6 +2062,7 @@ impl MInst {
                 }
             }
             MInst::LoadImm { .. }
+            | MInst::X86Simd(X86SimdInst::Scratch128 { .. })
             | MInst::X86Simd(X86SimdInst::Zero128 { .. })
             | MInst::X86Simd(X86SimdInst::Load128 { .. })
             | MInst::X86Simd(X86SimdInst::Binary128 { .. })
