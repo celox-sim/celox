@@ -264,12 +264,21 @@ fn emit_function(
     callee_saved.sort_unstable();
     callee_saved.dedup();
 
-    dynasm!(ops
-        ; .arch aarch64
-        ; str x30, [sp, #-16]!
-    );
-    for &register in &callee_saved {
-        dynasm!(ops ; .arch aarch64 ; str X(register), [sp, #-16]!);
+    if let Some(&first) = callee_saved.first() {
+        dynasm!(ops ; .arch aarch64 ; stp x30, X(first), [sp, #-16]!);
+        let mut index = 1;
+        while index + 1 < callee_saved.len() {
+            dynasm!(ops
+                ; .arch aarch64
+                ; stp X(callee_saved[index]), X(callee_saved[index + 1]), [sp, #-16]!
+            );
+            index += 2;
+        }
+        if index < callee_saved.len() {
+            dynasm!(ops ; .arch aarch64 ; str X(callee_saved[index]), [sp, #-16]!);
+        }
+    } else {
+        dynasm!(ops ; .arch aarch64 ; str x30, [sp, #-16]!);
     }
     if tick_loop {
         // d29 retains the simulator-state pointer across success/error return
@@ -353,10 +362,24 @@ fn emit_function(
         );
         dynasm!(ops ; .arch aarch64 ; add x17, x17, x30 ; str x16, [x17]);
     }
-    for &register in callee_saved.iter().rev() {
-        dynasm!(ops ; .arch aarch64 ; ldr X(register), [sp], #16);
+    if callee_saved.is_empty() {
+        dynasm!(ops ; .arch aarch64 ; ldr x30, [sp], #16);
+    } else {
+        let mut index = callee_saved.len();
+        if index > 1 && (index - 1) % 2 == 1 {
+            index -= 1;
+            dynasm!(ops ; .arch aarch64 ; ldr X(callee_saved[index]), [sp], #16);
+        }
+        while index > 1 {
+            index -= 2;
+            dynasm!(ops
+                ; .arch aarch64
+                ; ldp X(callee_saved[index]), X(callee_saved[index + 1]), [sp], #16
+            );
+        }
+        dynasm!(ops ; .arch aarch64 ; ldp x30, X(callee_saved[0]), [sp], #16);
     }
-    dynasm!(ops ; .arch aarch64 ; ldr x30, [sp], #16 ; ret);
+    dynasm!(ops ; .arch aarch64 ; ret);
     let text_size = ops.offset().0;
     for (index, table) in function.constant_tables().iter().enumerate() {
         let label = table_labels[index];
@@ -423,8 +446,15 @@ fn emit_instruction(
             offset,
             size,
         } => {
-            emit_base_address(ops, *base, *offset, spill_base)?;
-            emit_load(ops, resolve(assignment, *dst)?, SCRATCH0, *size);
+            let base_register = base_register(*base);
+            let offset = base_offset(*base, *offset, spill_base)?;
+            emit_load_at(
+                ops,
+                resolve(assignment, *dst)?,
+                base_register,
+                offset,
+                *size,
+            );
         }
         MInst::Store {
             base,
@@ -432,8 +462,15 @@ fn emit_instruction(
             src,
             size,
         } => {
-            emit_base_address(ops, *base, *offset, spill_base)?;
-            emit_store(ops, resolve(assignment, *src)?, SCRATCH0, *size);
+            let base_register = base_register(*base);
+            let offset = base_offset(*base, *offset, spill_base)?;
+            emit_store_at(
+                ops,
+                resolve(assignment, *src)?,
+                base_register,
+                offset,
+                *size,
+            );
         }
         MInst::LoadPtr {
             dst,
@@ -441,8 +478,13 @@ fn emit_instruction(
             offset,
             size,
         } => {
-            emit_address(ops, resolve(assignment, *ptr)?, i64::from(*offset));
-            emit_load(ops, resolve(assignment, *dst)?, SCRATCH0, *size);
+            emit_load_at(
+                ops,
+                resolve(assignment, *dst)?,
+                resolve(assignment, *ptr)?,
+                i64::from(*offset),
+                *size,
+            );
         }
         MInst::StorePtr {
             ptr,
@@ -450,8 +492,13 @@ fn emit_instruction(
             src,
             size,
         } => {
-            emit_address(ops, resolve(assignment, *ptr)?, i64::from(*offset));
-            emit_store(ops, resolve(assignment, *src)?, SCRATCH0, *size);
+            emit_store_at(
+                ops,
+                resolve(assignment, *src)?,
+                resolve(assignment, *ptr)?,
+                i64::from(*offset),
+                *size,
+            );
         }
         MInst::ReleaseStorePtr {
             ptr,
@@ -475,8 +522,13 @@ fn emit_instruction(
             let index = resolve(assignment, *index)?;
             let shift = scale.trailing_zeros();
             dynasm!(ops ; .arch aarch64 ; add x16, X(base), X(index), LSL #shift);
-            emit_add_offset(ops, i64::from(*offset));
-            emit_load(ops, resolve(assignment, *dst)?, SCRATCH0, *size);
+            emit_load_at(
+                ops,
+                resolve(assignment, *dst)?,
+                SCRATCH0,
+                i64::from(*offset),
+                *size,
+            );
         }
         MInst::StoreIndexed {
             base,
@@ -497,14 +549,28 @@ fn emit_instruction(
             let base = base_register(*base);
             let index = resolve(assignment, *index)?;
             dynasm!(ops ; .arch aarch64 ; add x16, X(base), X(index));
-            emit_add_offset(ops, i64::from(*offset));
             if matches!(instruction, MInst::OrStoreIndexed { .. }) {
-                emit_load(ops, SCRATCH1, SCRATCH0, *size);
                 let src = resolve(assignment, *src)?;
-                dynasm!(ops ; .arch aarch64 ; orr x17, x17, X(src));
-                emit_store(ops, SCRATCH1, SCRATCH0, *size);
+                if memory_access_encoding(SCRATCH1, SCRATCH0, i64::from(*offset), *size, false)
+                    .is_some()
+                {
+                    emit_load_at(ops, SCRATCH1, SCRATCH0, i64::from(*offset), *size);
+                    dynasm!(ops ; .arch aarch64 ; orr x17, x17, X(src));
+                    emit_store_at(ops, SCRATCH1, SCRATCH0, i64::from(*offset), *size);
+                } else {
+                    emit_add_offset(ops, i64::from(*offset));
+                    emit_load(ops, SCRATCH1, SCRATCH0, *size);
+                    dynasm!(ops ; .arch aarch64 ; orr x17, x17, X(src));
+                    emit_store(ops, SCRATCH1, SCRATCH0, *size);
+                }
             } else {
-                emit_store(ops, resolve(assignment, *src)?, SCRATCH0, *size);
+                emit_store_at(
+                    ops,
+                    resolve(assignment, *src)?,
+                    SCRATCH0,
+                    i64::from(*offset),
+                    *size,
+                );
             }
         }
         MInst::LoadPtrIndexed {
@@ -516,8 +582,13 @@ fn emit_instruction(
         } => {
             let (ptr, index) = (resolve(assignment, *ptr)?, resolve(assignment, *index)?);
             dynasm!(ops ; .arch aarch64 ; add x16, X(ptr), X(index));
-            emit_add_offset(ops, i64::from(*offset));
-            emit_load(ops, resolve(assignment, *dst)?, SCRATCH0, *size);
+            emit_load_at(
+                ops,
+                resolve(assignment, *dst)?,
+                SCRATCH0,
+                i64::from(*offset),
+                *size,
+            );
         }
         MInst::StorePtrIndexed {
             ptr,
@@ -535,12 +606,12 @@ fn emit_instruction(
         } => {
             let (ptr, index) = (resolve(assignment, *ptr)?, resolve(assignment, *index)?);
             dynasm!(ops ; .arch aarch64 ; add x16, X(ptr), X(index));
-            emit_add_offset(ops, i64::from(*offset));
             let src = resolve(assignment, *src)?;
             if matches!(instruction, MInst::ReleaseStorePtrIndexed { .. }) {
+                emit_add_offset(ops, i64::from(*offset));
                 emit_release_store(ops, src, SCRATCH0, *size);
             } else {
-                emit_store(ops, src, SCRATCH0, *size);
+                emit_store_at(ops, src, SCRATCH0, i64::from(*offset), *size);
             }
         }
         MInst::AndStoreImm {
@@ -555,16 +626,31 @@ fn emit_instruction(
             size,
             imm,
         } => {
-            emit_base_address(ops, *base, *offset, spill_base)?;
-            emit_load(ops, SCRATCH1, SCRATCH0, *size);
-            emit_load_imm(ops, SCRATCH0, *imm);
-            if matches!(instruction, MInst::AndStoreImm { .. }) {
-                dynasm!(ops ; .arch aarch64 ; and x30, x17, x16);
+            let base_register = base_register(*base);
+            let address_offset = base_offset(*base, *offset, spill_base)?;
+            if memory_access_encoding(SCRATCH1, base_register, address_offset, *size, false)
+                .is_some()
+            {
+                emit_load_at(ops, SCRATCH1, base_register, address_offset, *size);
+                emit_load_imm(ops, SCRATCH0, *imm);
+                if matches!(instruction, MInst::AndStoreImm { .. }) {
+                    dynasm!(ops ; .arch aarch64 ; and x30, x17, x16);
+                } else {
+                    dynasm!(ops ; .arch aarch64 ; orr x30, x17, x16);
+                }
+                emit_store_at(ops, 30, base_register, address_offset, *size);
             } else {
-                dynasm!(ops ; .arch aarch64 ; orr x30, x17, x16);
+                emit_base_address(ops, *base, *offset, spill_base)?;
+                emit_load(ops, SCRATCH1, SCRATCH0, *size);
+                emit_load_imm(ops, SCRATCH0, *imm);
+                if matches!(instruction, MInst::AndStoreImm { .. }) {
+                    dynasm!(ops ; .arch aarch64 ; and x30, x17, x16);
+                } else {
+                    dynasm!(ops ; .arch aarch64 ; orr x30, x17, x16);
+                }
+                emit_base_address(ops, *base, *offset, spill_base)?;
+                emit_store(ops, 30, SCRATCH0, *size);
             }
-            emit_base_address(ops, *base, *offset, spill_base)?;
-            emit_store(ops, 30, SCRATCH0, *size);
         }
         MInst::Add { dst, lhs, rhs }
         | MInst::Sub { dst, lhs, rhs }
@@ -1575,15 +1661,19 @@ fn emit_base_address(
     offset: i32,
     spill_base: usize,
 ) -> Result<(), EmitError> {
-    let offset = match base {
-        BaseReg::SimState => i64::from(offset),
+    let offset = base_offset(base, offset, spill_base)?;
+    emit_address(ops, STATE_REG, offset);
+    Ok(())
+}
+
+fn base_offset(base: BaseReg, offset: i32, spill_base: usize) -> Result<i64, EmitError> {
+    match base {
+        BaseReg::SimState => Ok(i64::from(offset)),
         BaseReg::StackFrame => i64::try_from(spill_base)
             .ok()
             .and_then(|base| base.checked_add(i64::from(offset)))
-            .ok_or(EmitError::Range("stack-frame address overflow"))?,
-    };
-    emit_address(ops, STATE_REG, offset);
-    Ok(())
+            .ok_or(EmitError::Range("stack-frame address overflow")),
+    }
 }
 
 fn emit_address(ops: &mut VecAssembler<Aarch64Relocation>, base: u8, offset: i64) {
@@ -1594,6 +1684,70 @@ fn emit_address(ops: &mut VecAssembler<Aarch64Relocation>, base: u8, offset: i64
         dynasm!(ops ; .arch aarch64 ; add x16, X(base), x17);
     } else {
         // The address was formed directly by ADD/SUB immediate.
+    }
+}
+
+fn memory_access_encoding(
+    register: u8,
+    base: u8,
+    offset: i64,
+    size: OpSize,
+    store: bool,
+) -> Option<u32> {
+    let (bytes, scaled_opcode, unscaled_opcode) = match (size, store) {
+        (OpSize::S8, false) => (1, 0x3940_0000, 0x3840_0000),
+        (OpSize::S8, true) => (1, 0x3900_0000, 0x3800_0000),
+        (OpSize::S16, false) => (2, 0x7940_0000, 0x7840_0000),
+        (OpSize::S16, true) => (2, 0x7900_0000, 0x7800_0000),
+        (OpSize::S32, false) => (4, 0xb940_0000, 0xb840_0000),
+        (OpSize::S32, true) => (4, 0xb900_0000, 0xb800_0000),
+        (OpSize::S64, false) => (8, 0xf940_0000, 0xf840_0000),
+        (OpSize::S64, true) => (8, 0xf900_0000, 0xf800_0000),
+    };
+    let register = u32::from(register);
+    let base = u32::from(base);
+    let registers = (base << 5) | register;
+
+    if offset >= 0 && offset % bytes == 0 {
+        let scaled = offset / bytes;
+        if scaled <= 0xfff {
+            return Some(scaled_opcode | ((scaled as u32) << 10) | registers);
+        }
+    }
+    if (-256..=255).contains(&offset) {
+        let immediate = ((offset as i32) & 0x1ff) as u32;
+        return Some(unscaled_opcode | (immediate << 12) | registers);
+    }
+    None
+}
+
+fn emit_load_at(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    destination: u8,
+    base: u8,
+    offset: i64,
+    size: OpSize,
+) {
+    if let Some(instruction) = memory_access_encoding(destination, base, offset, size, false) {
+        ops.push_u32(instruction);
+    } else {
+        emit_address(ops, base, offset);
+        emit_load(ops, destination, SCRATCH0, size);
+    }
+}
+
+fn emit_store_at(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    source: u8,
+    base: u8,
+    offset: i64,
+    size: OpSize,
+) {
+    if let Some(instruction) = memory_access_encoding(source, base, offset, size, true) {
+        ops.push_u32(instruction);
+    } else {
+        emit_address(ops, base, offset);
+        emit_store(ops, source, SCRATCH0, size);
     }
 }
 
@@ -1837,8 +1991,9 @@ fn emit_branch_predicate(
             dynasm!(ops ; .arch aarch64 ; cmp X(lhs), x16);
         }
         BranchPredicate::MemoryNonZero { base, offset, size } => {
-            emit_base_address(ops, base, offset, spill_base)?;
-            emit_load(ops, SCRATCH0, SCRATCH0, size);
+            let base_register = base_register(base);
+            let offset = base_offset(base, offset, spill_base)?;
+            emit_load_at(ops, SCRATCH0, base_register, offset, size);
             dynasm!(ops ; .arch aarch64 ; cmp x16, #0);
         }
     }
@@ -2142,6 +2297,27 @@ mod tests {
         assert_eq!(add_sub_immediate(4096), Some((false, 1, true)));
         assert_eq!(add_sub_immediate(-4096), Some((true, 1, true)));
         assert_eq!(add_sub_immediate(4097), None);
+    }
+
+    #[test]
+    fn selects_scaled_and_unscaled_memory_immediates() {
+        assert_eq!(
+            memory_access_encoding(5, 0, 16, crate::mir::OpSize::S64, false),
+            Some(0xf940_0805)
+        );
+        assert_eq!(
+            memory_access_encoding(5, 0, -8, crate::mir::OpSize::S64, false),
+            Some(0xf85f_8005)
+        );
+        assert_eq!(
+            memory_access_encoding(7, 3, 4092, crate::mir::OpSize::S32, true),
+            Some(0xb90f_fc67)
+        );
+        assert_eq!(
+            memory_access_encoding(2, 4, -1, crate::mir::OpSize::S8, true),
+            Some(0x381f_f082)
+        );
+        assert!(memory_access_encoding(5, 0, 4096, crate::mir::OpSize::S8, false).is_none());
     }
 
     #[test]
