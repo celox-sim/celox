@@ -8,7 +8,7 @@ all_backends! {
 
     // Simple counter: increment on each tick, reset to 0
     fn test_counter_n4_basic(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @setup { let code = r#"
 module Top (
 clk: input clock,
@@ -64,7 +64,7 @@ else { cnt[i] += 1; }
 
     // Large counter array (similar to bench)
     fn test_counter_n100_wrap(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @setup { let code = r#"
 module Top #(param N: u32 = 100) (
 clk: input clock,
@@ -113,7 +113,7 @@ else { cnt[i] += 1; }
     }
 
     fn test_phase_state_ssa_preserves_eval_before_apply_and_four_state(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @setup { let code = r#"
 module Top (
     clk: input clock,

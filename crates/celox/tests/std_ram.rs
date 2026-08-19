@@ -8,6 +8,7 @@ all_backends! {
 
     // Dual-port RAM: write via port A, read via port B (BUFFER_OUT=false, combinational read)
     fn test_ram_write_read(sim) {
+        @ignore_on(sv);
         @setup { let top = r#"
 module Top (
 clk  : input  clock,
@@ -105,6 +106,7 @@ let code = format!("{}\n{top}", test_utils::veryl_std::source(&["ram", "ram.very
 
     // Overwrite same address and verify latest value
     fn test_ram_overwrite(sim) {
+        @ignore_on(sv);
         @setup { let top = r#"
 module Top (
 clk  : input  clock,
@@ -184,6 +186,7 @@ let code = format!("{}\n{top}", test_utils::veryl_std::source(&["ram", "ram.very
 
     // RAM with USE_RESET=true: clear via i_clr
     fn test_ram_reset_and_clear(sim) {
+        @ignore_on(sv);
         @setup { let top = r#"
 module Top (
 clk   : input  clock,

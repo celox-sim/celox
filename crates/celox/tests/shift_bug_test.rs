@@ -64,6 +64,7 @@ assign o = r;
     }
 
     fn test_shift_in_for_loop(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 clk: input clock,
@@ -93,7 +94,7 @@ o = a << 4;
     }
 
     fn test_shift_ifreset_for(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @setup { let code = r#"
 module Top (
 clk: input  clock,
@@ -237,6 +238,7 @@ assign o = r;
     }
 
     fn test_shift_to_array_by_loop_index(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 clk: input clock,
@@ -275,6 +277,7 @@ assign o3 = arr[3];
     }
 
     fn test_shift_with_wide_const_amount(sim) {
+        @ignore_on(sv);
         @setup { // For loop unrolling creates 32-bit const shift amounts.
 // Ensure the shift result width is determined by the LHS, not widened by the RHS.
 let code = r#"

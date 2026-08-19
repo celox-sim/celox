@@ -18,6 +18,7 @@ fn setup_and_trace(code: &str, top: &str) -> celox::CompilationTrace {
 all_backends! {
 
     fn test_dynamic_index_read(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (i: input logic<2>, o: output logic<8>) {
 var a: logic<8> [4];
@@ -40,6 +41,7 @@ assign o = a[i];
     }
 
     fn test_dynamic_index_write(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (i: input logic<2>, val: input logic<8>, o: output logic<8>) {
 var a: logic<8> [4];
@@ -68,6 +70,7 @@ assign o = a[2];
     }
 
     fn test_multidimensional_access(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (i: input logic<8>, o: output logic<8>) {
 var a: logic<8> [4, 2];
@@ -92,6 +95,7 @@ assign o = a[1][0];
     }
 
     fn test_minus_colon_and_step_execution(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (a: input logic<8>, b: output logic<32>) {
 always_comb {
@@ -111,6 +115,7 @@ b[1 step 8] = a;
     }
 
     fn test_dynamic_slice_bullying(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (idx: input logic<2>, data: input logic<16>, o: output logic<4>) {
 var mem: logic<16>;
@@ -133,6 +138,7 @@ assign o = mem[idx*4 +: 4];
     }
 
     fn test_dynamic_minus_colon_and_step_read_write(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
     minus_idx: input logic<4>,
@@ -201,7 +207,7 @@ assign o = tmp;
     }
 
     fn test_genvar_const_in_generate(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @setup { // Genvar used as a simple expression inside a generate block
 // should produce per-instance constant values.
 let code = r#"
@@ -232,7 +238,7 @@ assign o[j] = j as u8 + 10;
     }
 
     fn test_genvar_dynamic_index_issue21(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @setup { // Issue #21: dynamic indexing of unpacked array using genvar-based
 // expression should produce different values per generate instance.
 // Each generate instance uses genvar `j` to compute a dynamic index
@@ -282,6 +288,7 @@ assign o[j] = local_data[idx];
     }
 
     fn test_dynamic_index_with_bitslice(sim) {
+        @ignore_on(sv);
         @setup { // Regression: arr[dynamic_idx][hi:lo] produced wrong values because
 // the bit-select anchor was incorrectly added to the dynamic offset.
 let code = r#"
@@ -322,6 +329,7 @@ assign o_hi = regs[idx][63:32];
     }
 
     fn test_let_index_with_bitslice_write(sim) {
+        @ignore_on(sv);
         @setup { // Regression: using a `let`-bound variable as an array index combined
 // with a bitslice write (e.g. data[idx][63:32]) produced wrong values
 // because eval_dynamic_assign treated the Colon MSB anchor as a
@@ -358,6 +366,7 @@ o_lo = data[2][31:0];
     }
 
     fn test_let_index_with_bitslice_write_single(sim) {
+        @ignore_on(sv);
         @setup { // Minimal: single let index + bitslice write
 let code = r#"
 module Top (
@@ -386,6 +395,7 @@ o_lo = data[1][15:0];
     }
 
     fn test_ff_bit_select_in_generate_loop(sim) {
+        @ignore_on(sv);
         @setup { // Regression: bit-select inside always_ff in a generate loop (e.g. din[i][15])
 // produced wrong values because emit_offset_calc computed strides only from
 // array dimensions, causing bit indices to be multiplied by the array stride

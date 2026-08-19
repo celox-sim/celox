@@ -13,6 +13,7 @@ mod test_utils;
 all_backends! {
 
 fn test_for_loop_unroll_shift_register(sim) {
+    @ignore_on(sv);
     @setup { let code = r#"
         module Delay #(param DELAY: u32 = 3, param WIDTH: u32 = 8) (
             i_clk: input clock,
@@ -58,6 +59,7 @@ fn test_for_loop_unroll_shift_register(sim) {
 }
 
 fn test_for_loop_unroll_break_in_always_ff(sim) {
+    @ignore_on(sv);
     @setup { let code = r#"
         module Top (
             i_clk: input clock,

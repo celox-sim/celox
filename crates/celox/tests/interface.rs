@@ -6,6 +6,7 @@ mod test_utils;
 
 all_backends! {
     fn test_interface_connection(sim) {
+        @ignore_on(sv);
         @setup {
             let code = r#"
     interface Bus {

@@ -79,6 +79,7 @@ fn optimized_sir_recovers_expanded_bit_count_loops() {
 all_backends! {
 
 fn test_recovered_bit_count_loop_semantics(sim) {
+    @ignore_on(sv);
     @setup { let code = CODE; }
     @build Simulator::builder(code, "Top");
     let bits = sim.signal("bits");

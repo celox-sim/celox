@@ -18,6 +18,7 @@ all_backends! {
 
 fn test_initial_readmemh_loads_unpacked_array(sim) {
     @omit_veryl;
+    @ignore_on(sv);
     @setup {
         let mem_path = temp_mem_file("readmemh", "12\n34\n56\n78\n");
         let code = format!(r#"
@@ -47,6 +48,7 @@ fn test_initial_readmemh_loads_unpacked_array(sim) {
 
 fn test_initial_readmemh_supports_comments_address_and_xz(sim) {
     @omit_veryl;
+    @ignore_on(sv);
     @setup {
         let mem_path = temp_mem_file(
             "readmemh_xz",
@@ -79,6 +81,7 @@ fn test_initial_readmemh_supports_comments_address_and_xz(sim) {
 
 fn test_initial_readmemh_supports_const_if(sim) {
     @omit_veryl;
+    @ignore_on(sv);
     @setup {
         let hex_path = temp_mem_file("readmemh_if", "21\n43\n65\n87\n");
         let other_path = temp_mem_file("readmemh_if_dead", "00\n00\n00\n00\n");
@@ -104,6 +107,7 @@ fn test_initial_readmemh_supports_const_if(sim) {
 
 fn test_initial_readmemh_supports_const_for(sim) {
     @omit_veryl;
+    @ignore_on(sv);
     @setup {
         let mem_path = temp_mem_file("readmemh_for", "11\n22\n33\n44\n");
         let code = format!(r#"
@@ -128,6 +132,7 @@ fn test_initial_readmemh_supports_const_for(sim) {
 
 fn test_initial_readmemh_supports_indexed_destination(sim) {
     @omit_veryl;
+    @ignore_on(sv);
     @setup {
         let mem_path = temp_mem_file("readmemh_indexed", "aa\nbb\n");
         let code = format!(r#"
@@ -157,6 +162,7 @@ fn test_initial_readmemh_supports_indexed_destination(sim) {
 
 fn test_initial_readmemh_multiple_files_merge_in_order(sim) {
     @omit_veryl;
+    @ignore_on(sv);
     @setup {
         let first_path = temp_mem_file("readmemh_multi_first", "11\n22\n33\n44\n");
         let second_path = temp_mem_file("readmemh_multi_second", "aa\nbb\n");

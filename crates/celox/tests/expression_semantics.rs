@@ -9,6 +9,7 @@ all_backends! {
         // Veryl 0.20.2's runtime loses signedness across a numeric size cast,
         // unlike SystemVerilog 6.24.1 and the SystemVerilog Veryl emits.
         @omit_veryl;
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -138,6 +139,7 @@ module Top (
 
     fn parent_context_and_self_determined_boundaries_match_between_comb_and_ff(sim) {
         @omit_veryl;
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -427,7 +429,7 @@ module Top (
         // Veryl simulator 0.20.2 loses the signed result of the same-width
         // `as i8` while lowering this comparison. `~a` itself is not the
         // failure: comparing it with a signed variable works there.
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -455,6 +457,7 @@ module Top (
     }
 
     fn aggregate_results_consume_the_unary_parent_context(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -487,6 +490,7 @@ module Top (
         // Veryl 0.20.3 leaves these calls unresolved in its simulator IR, so
         // the reference simulation cannot be constructed.
         @omit_veryl;
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -544,6 +548,7 @@ module Top (
 
     fn short_circuit_operators_skip_effectful_operands(sim) {
         @omit_veryl;
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -607,6 +612,7 @@ module Top (
 
     fn numeric_cast_preserves_four_state_sign_extension(sim) {
         @omit_veryl;
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,

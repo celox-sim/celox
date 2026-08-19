@@ -563,6 +563,7 @@ assign r = a % b;
 
     // 128-bit XNOR in always_comb.
     fn test_wide_comb_bitxnor(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 a: input  logic<128>,

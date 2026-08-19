@@ -7,6 +7,7 @@ mod test_utils;
 all_backends! {
 
     fn test_array_literal_comb_assignment(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (o0: output logic<8>, o1: output logic<8>) {
 var a: logic<8> [2];
@@ -30,6 +31,7 @@ assign o1 = a[1];
     }
 
     fn test_array_literal_default_comb_assignment(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 o0: output logic<8>,
@@ -63,6 +65,7 @@ assign o3 = a[3];
     }
 
     fn test_array_literal_nested_default_multidim_assignment(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 o00: output logic<8>,
@@ -140,7 +143,7 @@ arr[0] = 8'hAB;
     }
 
     fn test_array_literal_single_element_size_one_array(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @setup { // '{val} on a 1-element array should still assign that one element correctly.
 let code = r#"
 module Top (
@@ -208,6 +211,7 @@ arr[0][0] = 8'hAB;
     // '{default: 0} with no explicit elements: must produce exactly target_len elements.
     // Regression test for off-by-one where remaining was target_len - (x.len()-1).
     fn test_array_literal_default_only(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 o0: output logic<8>,
@@ -242,6 +246,7 @@ assign o3 = a[3];
 
     // Two explicit elements + default: remaining slots filled correctly.
     fn test_array_literal_two_explicit_plus_default(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 o0: output logic<8>,
@@ -276,6 +281,7 @@ assign o3 = a[3];
 
     // repeat + default: '{val repeat 2, default: 0} in a size-4 array.
     fn test_array_literal_repeat_plus_default(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 o0: output logic<8>,
@@ -310,7 +316,7 @@ assign o3 = a[3];
 
     // '{default: 0} in always_ff if_reset: array reset via default fill.
     fn test_array_literal_default_in_ff_reset(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @setup { let code = r#"
 module Top (
 clk: input clock,

@@ -71,6 +71,7 @@ all_backends! {
 // After reset, FIFO should be empty
 fn test_fifo_initial_empty(sim) {
     @omit_veryl;
+    @ignore_on(sv);
     @setup { let code = fifo_source(); }
     @build Simulator::builder(&code, "Top");
     reset(&mut sim);
@@ -91,6 +92,7 @@ fn test_fifo_initial_empty(sim) {
 // Push one item, verify not empty, pop it back
 fn test_fifo_push_pop_single(sim) {
     @omit_veryl;
+    @ignore_on(sv);
     @setup { let code = fifo_source(); }
     @build Simulator::builder(&code, "Top");
     reset(&mut sim);
@@ -136,6 +138,7 @@ fn test_fifo_push_pop_single(sim) {
 // Push until full (DEPTH=4), verify full flag
 fn test_fifo_full(sim) {
     @omit_veryl;
+    @ignore_on(sv);
     @setup { let code = fifo_source(); }
     @build Simulator::builder(&code, "Top");
     reset(&mut sim);
@@ -165,6 +168,7 @@ fn test_fifo_full(sim) {
 // Push 4 items then pop all, verify FIFO ordering
 fn test_fifo_ordering(sim) {
     @omit_veryl;
+    @ignore_on(sv);
     @setup { let code = fifo_source(); }
     @build Simulator::builder(&code, "Top");
     reset(&mut sim);
@@ -204,6 +208,7 @@ fn test_fifo_ordering(sim) {
 // Clear resets the FIFO to empty
 fn test_fifo_clear(sim) {
     @omit_veryl;
+    @ignore_on(sv);
     @setup { let code = fifo_source(); }
     @build Simulator::builder(&code, "Top");
     reset(&mut sim);

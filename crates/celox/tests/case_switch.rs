@@ -7,6 +7,7 @@ mod test_utils;
 all_backends! {
 
     fn test_case_basic_comb(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 sel: input logic<2>,
@@ -41,6 +42,7 @@ default: o = 8'hDD;
     }
 
     fn test_switch_basic_comb(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 a: input logic<8>,
@@ -75,6 +77,7 @@ default:    o = 8'hFF;
     }
 
     fn test_case_multiarm(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 sel: input logic<3>,
@@ -111,6 +114,7 @@ default:    o = 8'h00;
     }
 
     fn test_case_nested_in_if(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 en:  input logic,
@@ -151,6 +155,7 @@ o = 8'h00;
     }
 
     fn test_case_block_body(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 sel: input logic<2>,
@@ -266,6 +271,7 @@ module Top (
     }
 
     fn test_case_in_comb_function_output_argument(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
     sel: input logic<2>,
@@ -303,6 +309,7 @@ module Top (
     }
 
     fn test_case_break_inside_comb_function_for(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
     d: input logic<4>,

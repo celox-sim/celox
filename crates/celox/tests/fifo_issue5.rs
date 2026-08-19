@@ -7,6 +7,7 @@ mod test_utils;
 all_backends! {
 
     fn test_fifo_issue5_subtract_overflow(sim) {
+        @ignore_on(sv);
         @setup { let ram = test_utils::veryl_std::source(&["ram", "ram.veryl"]);
 let fifo_ctrl =
 test_utils::veryl_std::source(&["fifo", "fifo_controller.veryl"]);

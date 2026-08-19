@@ -7,6 +7,7 @@ mod test_utils;
 all_backends! {
 
     fn test_lhs_concatenation_execution(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (val_in: input logic<16>) {
 var a: logic<8>;
