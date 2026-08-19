@@ -1,6 +1,6 @@
 //! AArch64 emission for the transitional scalar MIR pipeline.
 
-use std::{collections::BTreeMap, fmt};
+use std::{collections::BTreeSet, fmt};
 
 use celox_backend_x86::native::mir::MFunction as LegacyFunction;
 use celox_backend_x86::native::regalloc::AssignmentMap as LegacyAssignment;
@@ -32,12 +32,40 @@ const SPILL_REG: u8 = 28;
 const STATE_PAGE_REG: u8 = 29;
 const STATE_PAGE_BYTES: i64 = 4096;
 const MAX_SECONDARY_STATE_PAGES: usize = 4;
+const MIN_STATE_PAGE_BENEFIT: usize = 8;
 const TEMPORARY_BYTES: usize = 16;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct StatePageBases {
     primary: Option<i64>,
     secondary: [Option<(u8, i64)>; MAX_SECONDARY_STATE_PAGES],
+}
+
+#[derive(Clone, Copy, Debug)]
+enum StatePageAccess {
+    Direct {
+        offset: i64,
+        size: OpSize,
+        store: bool,
+    },
+    Indexed {
+        offset: i64,
+        size: OpSize,
+        store: bool,
+    },
+    Vector {
+        offset: i64,
+    },
+}
+
+impl StatePageAccess {
+    fn offset(self) -> i64 {
+        match self {
+            Self::Direct { offset, .. }
+            | Self::Indexed { offset, .. }
+            | Self::Vector { offset } => offset,
+        }
+    }
 }
 
 /// Result of scalar AArch64 emission.
@@ -574,14 +602,8 @@ fn emit_instruction(
         } => {
             let index = resolve(assignment, *index)?;
             let destination = resolve(assignment, *dst)?;
-            let (base, offset) = select_indexed_memory_base(
-                *base,
-                i64::from(*offset),
-                destination,
-                *size,
-                false,
-                state_pages,
-            );
+            let (base, offset) =
+                select_indexed_memory_base(*base, i64::from(*offset), *size, false, state_pages);
             emit_load_indexed_at(ops, destination, base, index, offset, *scale, *size);
         }
         MInst::StoreIndexed {
@@ -606,7 +628,6 @@ fn emit_instruction(
                 let (base, offset) = select_indexed_memory_base(
                     *base,
                     i64::from(*offset),
-                    SCRATCH1,
                     *size,
                     false,
                     state_pages,
@@ -624,14 +645,8 @@ fn emit_instruction(
                 }
             } else {
                 let src = resolve(assignment, *src)?;
-                let (base, offset) = select_indexed_memory_base(
-                    *base,
-                    i64::from(*offset),
-                    src,
-                    *size,
-                    true,
-                    state_pages,
-                );
+                let (base, offset) =
+                    select_indexed_memory_base(*base, i64::from(*offset), *size, true, state_pages);
                 emit_store_indexed_at(ops, src, base, index, offset, 1, *size);
             }
         }
@@ -1243,15 +1258,15 @@ fn emit_mem_copy(
     if byte_len == 0 || src_offset == dst_offset {
         return;
     }
+    if mem_copy_uses_forward_vectors(src_offset, dst_offset, byte_len) {
+        emit_mem_copy_forward_vectors(ops, src_offset, dst_offset, byte_len, state_pages);
+        return;
+    }
     let src_end = i64::from(src_offset) + byte_len as i64;
     let dst_end = i64::from(dst_offset) + byte_len as i64;
     let copy_backward = src_end > i64::from(dst_offset)
         && dst_end > i64::from(src_offset)
         && dst_offset > src_offset;
-    if !copy_backward && (16..=256).contains(&byte_len) {
-        emit_mem_copy_forward_vectors(ops, src_offset, dst_offset, byte_len, state_pages);
-        return;
-    }
     let qwords = byte_len / 8;
     let remainder = byte_len % 8;
 
@@ -2274,126 +2289,343 @@ fn select_state_base_pages(
     function: &MFunction,
     secondary_registers: impl IntoIterator<Item = u8>,
 ) -> StatePageBases {
-    let mut page_counts = BTreeMap::<i64, usize>::new();
-    for block in &function.blocks {
-        for instruction in &block.insts {
-            match instruction {
-                MInst::Load {
-                    base: BaseReg::SimState,
-                    offset,
-                    ..
-                }
-                | MInst::Store {
-                    base: BaseReg::SimState,
-                    offset,
-                    ..
-                }
-                | MInst::AndStoreImm {
-                    base: BaseReg::SimState,
-                    offset,
-                    ..
-                }
-                | MInst::OrStoreImm {
-                    base: BaseReg::SimState,
-                    offset,
-                    ..
-                } => count_state_page_access(&mut page_counts, i64::from(*offset)),
-                MInst::LoadIndexed {
-                    base: BaseReg::SimState,
-                    offset,
-                    ..
-                }
-                | MInst::StoreIndexed {
-                    base: BaseReg::SimState,
-                    offset,
-                    ..
-                }
-                | MInst::OrStoreIndexed {
-                    base: BaseReg::SimState,
-                    offset,
-                    ..
-                } => count_state_page_access(&mut page_counts, i64::from(*offset)),
-                MInst::MemCopy {
-                    src_offset,
-                    dst_offset,
-                    ..
-                } => {
-                    count_state_page_access(&mut page_counts, i64::from(*src_offset));
-                    count_state_page_access(&mut page_counts, i64::from(*dst_offset));
-                }
-                MInst::MemFill { dst_offset, .. } => {
-                    count_state_page_access(&mut page_counts, i64::from(*dst_offset));
-                }
-                MInst::BranchPred {
-                    predicate:
-                        BranchPredicate::MemoryNonZero {
-                            base: BaseReg::SimState,
-                            offset,
-                            ..
-                        },
-                    ..
-                } => count_state_page_access(&mut page_counts, i64::from(*offset)),
-                MInst::SparseMarkActive {
-                    active_index,
-                    active_bits_offset,
-                    ..
-                } => count_state_page_access(
-                    &mut page_counts,
-                    i64::from(*active_bits_offset) + i64::from(*active_index / 64) * 8,
-                ),
-                MInst::PackedLaneCompare {
-                    offset,
-                    lane_count,
-                    element_stride,
-                    rhs,
-                    ..
-                } => {
-                    for lane in 0..*lane_count {
-                        let delta = i64::from(lane) * i64::from(*element_stride);
-                        count_state_page_access(&mut page_counts, i64::from(*offset) + delta);
-                        if let PackedLaneCompareRhs::Memory {
-                            offset: rhs_offset, ..
-                        } = rhs
-                        {
-                            count_state_page_access(
-                                &mut page_counts,
-                                i64::from(*rhs_offset) + delta,
-                            );
-                        }
-                    }
-                }
-                _ => {}
+    let accesses = collect_state_page_accesses(function);
+    let candidates = accesses
+        .iter()
+        .map(|access| access.offset().div_euclid(STATE_PAGE_BYTES) * STATE_PAGE_BYTES)
+        .collect::<BTreeSet<_>>();
+    let mut selected = Vec::new();
+    let mut current_costs = accesses
+        .iter()
+        .copied()
+        .map(state_page_baseline_cost)
+        .collect::<Vec<_>>();
+
+    // Greedily choose pages by the actual number of address-materialization
+    // instructions they remove.  A page base can cover several adjacent
+    // pages for wider accesses, so counting exact pages independently can
+    // waste preserved registers on redundant bases.
+    for _ in 0..=MAX_SECONDARY_STATE_PAGES {
+        let mut best = None;
+        for &candidate in &candidates {
+            if selected.contains(&candidate) {
+                continue;
+            }
+            let benefit = accesses
+                .iter()
+                .copied()
+                .zip(current_costs.iter().copied())
+                .map(|(access, current_cost)| {
+                    state_page_cost(access, candidate)
+                        .map_or(0, |cost| current_cost.saturating_sub(cost))
+                })
+                .sum::<usize>();
+            if best
+                .map(|(best_benefit, best_page)| {
+                    benefit > best_benefit || (benefit == best_benefit && candidate < best_page)
+                })
+                .unwrap_or(true)
+            {
+                best = Some((benefit, candidate));
+            }
+        }
+        let Some((benefit, page)) = best else {
+            break;
+        };
+        if benefit < MIN_STATE_PAGE_BENEFIT {
+            break;
+        }
+        selected.push(page);
+        for (access, current_cost) in accesses.iter().copied().zip(&mut current_costs) {
+            if let Some(cost) = state_page_cost(access, page) {
+                *current_cost = (*current_cost).min(cost);
             }
         }
     }
-    let mut pages = page_counts
-        .into_iter()
-        .filter(|(_, count)| *count >= 8)
-        .collect::<Vec<_>>();
-    pages.sort_unstable_by(|(left_page, left_count), (right_page, right_count)| {
-        right_count
-            .cmp(left_count)
-            .then_with(|| left_page.cmp(right_page))
-    });
+
     let secondary = secondary_registers
         .into_iter()
-        .zip(pages.iter().skip(1))
+        .zip(selected.iter().skip(1))
         .take(MAX_SECONDARY_STATE_PAGES)
-        .map(|(register, (page, _))| Some((register, *page)))
+        .map(|(register, page)| Some((register, *page)))
         .chain(std::iter::repeat(None))
         .take(MAX_SECONDARY_STATE_PAGES)
         .collect::<Vec<_>>()
         .try_into()
         .expect("secondary state page count is fixed");
     StatePageBases {
-        primary: pages.first().map(|(page, _)| *page),
+        primary: selected.first().copied(),
         secondary,
     }
 }
 
-fn count_state_page_access(page_counts: &mut BTreeMap<i64, usize>, offset: i64) {
-    let page = offset.div_euclid(STATE_PAGE_BYTES) * STATE_PAGE_BYTES;
-    *page_counts.entry(page).or_default() += 1;
+fn collect_state_page_accesses(function: &MFunction) -> Vec<StatePageAccess> {
+    let mut accesses = Vec::new();
+    for block in &function.blocks {
+        for instruction in &block.insts {
+            match instruction {
+                MInst::Load {
+                    base: BaseReg::SimState,
+                    offset,
+                    size,
+                    ..
+                } => accesses.push(StatePageAccess::Direct {
+                    offset: i64::from(*offset),
+                    size: *size,
+                    store: false,
+                }),
+                MInst::Store {
+                    base: BaseReg::SimState,
+                    offset,
+                    size,
+                    ..
+                } => accesses.push(StatePageAccess::Direct {
+                    offset: i64::from(*offset),
+                    size: *size,
+                    store: true,
+                }),
+                MInst::AndStoreImm {
+                    base: BaseReg::SimState,
+                    offset,
+                    size,
+                    ..
+                }
+                | MInst::OrStoreImm {
+                    base: BaseReg::SimState,
+                    offset,
+                    size,
+                    ..
+                } => {
+                    let offset = i64::from(*offset);
+                    accesses.push(StatePageAccess::Direct {
+                        offset,
+                        size: *size,
+                        store: false,
+                    });
+                    accesses.push(StatePageAccess::Direct {
+                        offset,
+                        size: *size,
+                        store: true,
+                    });
+                }
+                MInst::LoadIndexed {
+                    base: BaseReg::SimState,
+                    offset,
+                    size,
+                    ..
+                } => accesses.push(StatePageAccess::Indexed {
+                    offset: i64::from(*offset),
+                    size: *size,
+                    store: false,
+                }),
+                MInst::StoreIndexed {
+                    base: BaseReg::SimState,
+                    offset,
+                    size,
+                    ..
+                } => accesses.push(StatePageAccess::Indexed {
+                    offset: i64::from(*offset),
+                    size: *size,
+                    store: true,
+                }),
+                MInst::OrStoreIndexed {
+                    base: BaseReg::SimState,
+                    offset,
+                    size,
+                    ..
+                } => {
+                    let offset = i64::from(*offset);
+                    accesses.push(StatePageAccess::Indexed {
+                        offset,
+                        size: *size,
+                        store: false,
+                    });
+                    accesses.push(StatePageAccess::Indexed {
+                        offset,
+                        size: *size,
+                        store: true,
+                    });
+                }
+                MInst::MemCopy {
+                    src_offset,
+                    dst_offset,
+                    byte_len,
+                } if mem_copy_uses_forward_vectors(*src_offset, *dst_offset, *byte_len) => {
+                    accesses.push(StatePageAccess::Vector {
+                        offset: i64::from(*src_offset),
+                    });
+                    accesses.push(StatePageAccess::Vector {
+                        offset: i64::from(*dst_offset),
+                    });
+                }
+                MInst::MemFill { dst_offset, .. } => {
+                    accesses.push(StatePageAccess::Vector {
+                        offset: i64::from(*dst_offset),
+                    });
+                }
+                MInst::BranchPred {
+                    predicate:
+                        BranchPredicate::MemoryNonZero {
+                            base: BaseReg::SimState,
+                            offset,
+                            size,
+                        },
+                    ..
+                } => accesses.push(StatePageAccess::Direct {
+                    offset: i64::from(*offset),
+                    size: *size,
+                    store: false,
+                }),
+                MInst::SparseMarkActive {
+                    active_index,
+                    active_bits_offset,
+                    ..
+                } => {
+                    let offset = i64::from(*active_bits_offset) + i64::from(*active_index / 64) * 8;
+                    accesses.push(StatePageAccess::Direct {
+                        offset,
+                        size: OpSize::S64,
+                        store: false,
+                    });
+                    accesses.push(StatePageAccess::Direct {
+                        offset,
+                        size: OpSize::S64,
+                        store: true,
+                    });
+                }
+                MInst::PackedLaneCompare {
+                    offset,
+                    lane_count,
+                    element_stride,
+                    rhs,
+                    ..
+                } => collect_packed_lane_accesses(
+                    &mut accesses,
+                    *offset,
+                    *lane_count,
+                    *element_stride,
+                    *rhs,
+                ),
+                _ => {}
+            }
+        }
+    }
+    accesses
+}
+
+fn collect_packed_lane_accesses(
+    accesses: &mut Vec<StatePageAccess>,
+    offset: i32,
+    lane_count: u8,
+    element_stride: u8,
+    rhs: PackedLaneCompareRhs,
+) {
+    let Some(size) = packed_lane_size(element_stride) else {
+        return;
+    };
+    let lane_count = usize::from(lane_count);
+    let element_stride = usize::from(element_stride);
+    if lane_count * element_stride % 16 == 0 {
+        let lanes_per_vector = 16 / element_stride;
+        for lane_base in (0..lane_count).step_by(lanes_per_vector) {
+            let delta =
+                i64::try_from(lane_base * element_stride).expect("packed lane offset fits in i64");
+            accesses.push(StatePageAccess::Vector {
+                offset: i64::from(offset) + delta,
+            });
+            if let PackedLaneCompareRhs::Memory { offset: rhs_offset } = rhs {
+                accesses.push(StatePageAccess::Vector {
+                    offset: i64::from(rhs_offset) + delta,
+                });
+            }
+        }
+    } else {
+        for lane in 0..lane_count {
+            let delta =
+                i64::try_from(lane * element_stride).expect("packed lane offset fits in i64");
+            accesses.push(StatePageAccess::Direct {
+                offset: i64::from(offset) + delta,
+                size,
+                store: false,
+            });
+            if let PackedLaneCompareRhs::Memory { offset: rhs_offset } = rhs {
+                accesses.push(StatePageAccess::Direct {
+                    offset: i64::from(rhs_offset) + delta,
+                    size,
+                    store: false,
+                });
+            }
+        }
+    }
+}
+
+fn packed_lane_size(element_stride: u8) -> Option<OpSize> {
+    match element_stride {
+        1 => Some(OpSize::S8),
+        2 => Some(OpSize::S16),
+        4 => Some(OpSize::S32),
+        _ => None,
+    }
+}
+
+fn mem_copy_uses_forward_vectors(src_offset: i32, dst_offset: i32, byte_len: usize) -> bool {
+    if byte_len == 0 || src_offset == dst_offset {
+        return false;
+    }
+    let byte_len = byte_len as i64;
+    let src_end = i64::from(src_offset) + byte_len;
+    let dst_end = i64::from(dst_offset) + byte_len;
+    let copy_backward = src_end > i64::from(dst_offset)
+        && dst_end > i64::from(src_offset)
+        && dst_offset > src_offset;
+    !copy_backward && (16..=256).contains(&byte_len)
+}
+
+fn state_page_baseline_cost(access: StatePageAccess) -> usize {
+    match access {
+        StatePageAccess::Direct {
+            offset,
+            size,
+            store,
+        } => {
+            if memory_access_encoding(SCRATCH0, STATE_REG, offset, size, store).is_some() {
+                0
+            } else {
+                address_materialization_cost(offset)
+            }
+        }
+        StatePageAccess::Indexed {
+            offset,
+            size,
+            store,
+        } => indexed_access_cost(offset, size, store),
+        StatePageAccess::Vector { offset } => address_materialization_cost(offset),
+    }
+}
+
+fn state_page_cost(access: StatePageAccess, page: i64) -> Option<usize> {
+    let offset = access.offset() - page;
+    match access {
+        StatePageAccess::Direct { size, store, .. } => {
+            memory_access_encoding(SCRATCH0, STATE_PAGE_REG, offset, size, store).map(|_| 0)
+        }
+        StatePageAccess::Indexed { size, store, .. } => indexed_offset_cost(offset, size, store),
+        StatePageAccess::Vector { .. } => Some(address_materialization_cost(offset)),
+    }
+}
+
+fn indexed_access_cost(offset: i64, size: OpSize, store: bool) -> usize {
+    indexed_offset_cost(offset, size, store).unwrap_or_else(|| address_materialization_cost(offset))
+}
+
+fn indexed_offset_cost(offset: i64, size: OpSize, store: bool) -> Option<usize> {
+    if memory_access_encoding(SCRATCH0, SCRATCH0, offset, size, store).is_some() {
+        Some(0)
+    } else if add_sub_immediate(offset).is_some() {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 fn select_memory_base(
@@ -2426,7 +2658,6 @@ fn select_memory_base(
 fn select_indexed_memory_base(
     base: BaseReg,
     offset: i64,
-    register: u8,
     size: OpSize,
     store: bool,
     state_pages: StatePageBases,
@@ -2435,24 +2666,22 @@ fn select_indexed_memory_base(
     if base != BaseReg::SimState {
         return normal;
     }
-    if let Some(page) = state_pages.primary {
-        let relative = offset - page;
-        if indexed_offset_encoding(relative, register, size, store) {
-            return (STATE_PAGE_REG, relative);
-        }
-    }
-    for &(page_register, page) in state_pages.secondary.iter().flatten() {
-        let relative = offset - page;
-        if indexed_offset_encoding(relative, register, size, store) {
-            return (page_register, relative);
-        }
-    }
-    normal
-}
-
-fn indexed_offset_encoding(offset: i64, register: u8, size: OpSize, store: bool) -> bool {
-    add_sub_immediate(offset).is_some()
-        || memory_access_encoding(register, STATE_PAGE_REG, offset, size, store).is_some()
+    let candidates = std::iter::once((indexed_access_cost(offset, size, store), normal)).chain(
+        state_pages
+            .primary
+            .into_iter()
+            .map(|page| (STATE_PAGE_REG, page))
+            .chain(state_pages.secondary.iter().flatten().copied())
+            .filter_map(|(page_register, page)| {
+                let relative = offset - page;
+                indexed_offset_cost(relative, size, store)
+                    .map(|cost| (cost, (page_register, relative)))
+            }),
+    );
+    candidates
+        .min_by_key(|(cost, _)| *cost)
+        .map(|(_, base)| base)
+        .unwrap_or(normal)
 }
 
 fn select_vector_memory_base(base: BaseReg, offset: i64, state_pages: StatePageBases) -> (u8, i64) {
@@ -2460,19 +2689,21 @@ fn select_vector_memory_base(base: BaseReg, offset: i64, state_pages: StatePageB
     if base != BaseReg::SimState {
         return normal;
     }
-    let candidates = state_pages
-        .primary
-        .into_iter()
-        .map(|page| (STATE_PAGE_REG, page))
-        .chain(state_pages.secondary.iter().flatten().copied());
+    let candidates = std::iter::once((address_materialization_cost(offset), normal)).chain(
+        state_pages
+            .primary
+            .into_iter()
+            .map(|page| (STATE_PAGE_REG, page))
+            .chain(state_pages.secondary.iter().flatten().copied())
+            .map(|(page_register, page)| {
+                let relative = offset - page;
+                (
+                    address_materialization_cost(relative),
+                    (page_register, relative),
+                )
+            }),
+    );
     candidates
-        .map(|(page_register, page)| {
-            let relative = offset - page;
-            (
-                address_materialization_cost(relative),
-                (page_register, relative),
-            )
-        })
         .min_by_key(|(cost, _)| *cost)
         .map(|(_, base)| base)
         .unwrap_or(normal)
@@ -3274,7 +3505,7 @@ mod tests {
             insts.push(crate::mir::MInst::Load {
                 dst,
                 base: crate::mir::BaseReg::SimState,
-                offset: 4096 + (index as i32) * 8,
+                offset: 32768 + (index as i32) * 8,
                 size: crate::mir::OpSize::S64,
             });
         }
@@ -3290,17 +3521,17 @@ mod tests {
 
         assert_eq!(
             select_state_base_pages(&function, std::iter::empty::<u8>()).primary,
-            Some(4096)
+            Some(32768)
         );
         assert_eq!(
             select_memory_base(
                 crate::mir::BaseReg::SimState,
-                4112,
+                32784,
                 SCRATCH0,
                 crate::mir::OpSize::S64,
                 false,
                 StatePageBases {
-                    primary: Some(4096),
+                    primary: Some(32768),
                     ..StatePageBases::default()
                 },
             ),
@@ -3315,7 +3546,7 @@ mod tests {
                     .map(|index| crate::mir::MInst::Load {
                         dst: crate::mir::VReg(index),
                         base: crate::mir::BaseReg::SimState,
-                        offset: 4096 + (index % 8) as i32 * 8 + (index / 8) as i32 * 36864,
+                        offset: 32768 + (index % 8) as i32 * 8 + (index / 8) as i32 * 36864,
                         size: crate::mir::OpSize::S64,
                     })
                     .chain(std::iter::once(crate::mir::MInst::Return))
@@ -3324,13 +3555,13 @@ mod tests {
             Vec::new(),
         );
         let multi_page_bases = select_state_base_pages(&multi_page, [27, 26, 25, 24]);
-        assert_eq!(multi_page_bases.primary, Some(4096));
-        assert_eq!(multi_page_bases.secondary[0], Some((27, 40960)));
+        assert_eq!(multi_page_bases.primary, Some(69632));
+        assert_eq!(multi_page_bases.secondary[0], Some((27, 32768)));
         assert_eq!(multi_page_bases.secondary[1], None);
         assert_eq!(
             select_memory_base(
                 crate::mir::BaseReg::SimState,
-                40976,
+                32784,
                 SCRATCH0,
                 crate::mir::OpSize::S64,
                 false,
@@ -3339,8 +3570,50 @@ mod tests {
             (27, 16)
         );
         assert_eq!(
-            select_vector_memory_base(crate::mir::BaseReg::SimState, 40960, multi_page_bases),
-            (27, 0)
+            select_vector_memory_base(crate::mir::BaseReg::SimState, 69632, multi_page_bases),
+            (STATE_PAGE_REG, 0)
+        );
+
+        let adjacent_pages = crate::mir::MFunction::new(
+            vec![crate::mir::MBlock {
+                id: crate::mir::BlockId(0),
+                phis: Vec::new(),
+                insts: (0..16)
+                    .map(|index| crate::mir::MInst::Load {
+                        dst: crate::mir::VReg(index),
+                        base: crate::mir::BaseReg::SimState,
+                        offset: 32768 + (index % 8) as i32 * 8 + (index / 8) as i32 * 4096,
+                        size: crate::mir::OpSize::S64,
+                    })
+                    .chain(std::iter::once(crate::mir::MInst::Return))
+                    .collect(),
+            }],
+            Vec::new(),
+        );
+        let adjacent_page_bases = select_state_base_pages(&adjacent_pages, [27, 26, 25, 24]);
+        assert_eq!(adjacent_page_bases.primary, Some(32768));
+        assert_eq!(adjacent_page_bases.secondary[0], None);
+        assert_eq!(
+            select_memory_base(
+                crate::mir::BaseReg::SimState,
+                36880,
+                SCRATCH0,
+                crate::mir::OpSize::S64,
+                false,
+                adjacent_page_bases,
+            ),
+            (STATE_PAGE_REG, 4112)
+        );
+        assert_eq!(
+            select_vector_memory_base(
+                crate::mir::BaseReg::SimState,
+                0,
+                StatePageBases {
+                    primary: Some(4096),
+                    ..StatePageBases::default()
+                },
+            ),
+            (STATE_REG, 0)
         );
 
         let packed = crate::mir::MFunction::new(
