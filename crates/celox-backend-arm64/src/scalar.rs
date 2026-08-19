@@ -1473,31 +1473,82 @@ fn emit_packed_byte_affine_compare(
     rhs: u8,
     kind: CmpKind,
 ) {
-    dynasm!(ops ; .arch aarch64 ; mov x30, xzr);
-    for lane in 0..16_u32 {
-        if lane == 0 {
-            dynasm!(ops ; .arch aarch64 ; mov x16, X(base));
-        } else if !emit_add_sub_immediate(ops, SCRATCH0, base, i64::from(lane)) {
-            emit_load_imm(ops, SCRATCH1, u64::from(lane));
-            dynasm!(ops ; .arch aarch64 ; add x16, X(base), x17);
+    // This pseudo always compares exactly sixteen byte lanes.  Keep the
+    // affine sequence in NEON registers, then turn each 0xff/0x00 predicate
+    // into one bit with a byte-weighted horizontal sum.  The scalar fallback
+    // used to materialize and compare every lane independently.
+    emit_load_imm(ops, 30, 0x0706_0504_0302_0100);
+    dynasm!(ops ; .arch aarch64 ; fmov d2, x30);
+    emit_load_imm(ops, 30, 0x0f0e_0d0c_0b0a_0908);
+    dynasm!(ops
+        ; .arch aarch64
+        ; fmov d3, x30
+        ; ins v2.d[1], v3.d[0]
+        ; dup v4.b16, W(base)
+        ; dup v1.b16, W(rhs)
+        ; add v0.b16, v2.b16, v4.b16
+        ; movi v5.b16, #0
+    );
+    match kind {
+        CmpKind::Eq => {
+            dynasm!(ops ; .arch aarch64 ; cmeq v0.b16, v0.b16, v1.b16);
         }
-        dynasm!(ops ; .arch aarch64 ; mov x17, X(rhs));
-        emit_logical_immediate(ops, SCRATCH0, SCRATCH0, 0xff, 64, true);
-        emit_logical_immediate(ops, SCRATCH1, SCRATCH1, 0xff, 64, true);
-        if matches!(
-            kind,
-            CmpKind::LtS | CmpKind::LeS | CmpKind::GtS | CmpKind::GeS
-        ) {
-            dynasm!(ops ; .arch aarch64 ; sxtb x16, w16 ; sxtb x17, w17);
+        CmpKind::Ne => {
+            dynasm!(ops
+                ; .arch aarch64
+                ; cmeq v0.b16, v0.b16, v1.b16
+                ; mvn v0.b16, v0.b16
+            );
         }
-        dynasm!(ops ; .arch aarch64 ; cmp x16, x17);
-        emit_cset(ops, SCRATCH0, kind);
-        if lane != 0 {
-            dynasm!(ops ; .arch aarch64 ; lsl x16, x16, lane);
+        CmpKind::LtU | CmpKind::GeU => {
+            dynasm!(ops
+                ; .arch aarch64
+                ; uqsub v2.b16, v1.b16, v0.b16
+                ; cmeq v0.b16, v2.b16, v5.b16
+            );
+            if matches!(kind, CmpKind::LtU) {
+                dynasm!(ops ; .arch aarch64 ; mvn v0.b16, v0.b16);
+            }
         }
-        dynasm!(ops ; .arch aarch64 ; orr x30, x30, x16);
+        CmpKind::GtU | CmpKind::LeU => {
+            dynasm!(ops
+                ; .arch aarch64
+                ; uqsub v2.b16, v0.b16, v1.b16
+                ; cmeq v0.b16, v2.b16, v5.b16
+            );
+            if matches!(kind, CmpKind::GtU) {
+                dynasm!(ops ; .arch aarch64 ; mvn v0.b16, v0.b16);
+            }
+        }
+        CmpKind::LtS | CmpKind::GeS => {
+            dynasm!(ops ; .arch aarch64 ; cmgt v0.b16, v1.b16, v0.b16);
+            if matches!(kind, CmpKind::GeS) {
+                dynasm!(ops ; .arch aarch64 ; mvn v0.b16, v0.b16);
+            }
+        }
+        CmpKind::GtS | CmpKind::LeS => {
+            dynasm!(ops ; .arch aarch64 ; cmgt v0.b16, v0.b16, v1.b16);
+            if matches!(kind, CmpKind::LeS) {
+                dynasm!(ops ; .arch aarch64 ; mvn v0.b16, v0.b16);
+            }
+        }
     }
-    dynasm!(ops ; .arch aarch64 ; mov X(destination), x30);
+    emit_load_imm(ops, 30, 0x8040_2010_0804_0201);
+    dynasm!(ops
+        ; .arch aarch64
+        ; ushr v0.b16, v0.b16, #7
+        ; fmov d6, x30
+        ; dup v6.d2, v6.d[0]
+        ; mul v0.b16, v0.b16, v6.b16
+        ; addv b5, v0.b8
+        ; umov W(SCRATCH0), v5.b[0]
+        ; ext v7.b16, v0.b16, v0.b16, #8
+        ; addv b5, v7.b8
+        ; umov W(SCRATCH1), v5.b[0]
+        ; lsl x17, x17, #8
+        ; orr x30, x16, x17
+        ; mov X(destination), x30
+    );
 }
 
 fn emit_sparse_commit_worklist(
@@ -3053,8 +3104,26 @@ mod tests {
         let lanes = vregs.alloc();
         let base = vregs.alloc();
         let affine_rhs = vregs.alloc();
-        let affine = vregs.alloc();
-        let mut function = MFunction::new(vregs, vec![SpillDesc::transient(); 5]);
+        let affine_kinds = [
+            CmpKind::Eq,
+            CmpKind::Ne,
+            CmpKind::LtU,
+            CmpKind::LeU,
+            CmpKind::GtU,
+            CmpKind::GeU,
+            CmpKind::LtS,
+            CmpKind::LeS,
+            CmpKind::GtS,
+            CmpKind::GeS,
+        ];
+        let affine_outputs = affine_kinds
+            .iter()
+            .map(|_| vregs.alloc())
+            .collect::<Vec<_>>();
+        let mut function = MFunction::new(
+            vregs,
+            vec![SpillDesc::transient(); 4 + affine_outputs.len()],
+        );
         let mut block = MBlock::new(BlockId(0));
         block.push(MInst::LoadImm { dst: rhs, value: 5 });
         block.push(MInst::PackedLaneCompare {
@@ -3082,18 +3151,20 @@ mod tests {
             dst: affine_rhs,
             value: 2,
         });
-        block.push(MInst::PackedByteAffineCompare {
-            dst: affine,
-            base,
-            rhs: affine_rhs,
-            kind: CmpKind::Eq,
-        });
-        block.push(MInst::Store {
-            base: BaseReg::SimState,
-            offset: 32,
-            src: affine,
-            size: OpSize::S64,
-        });
+        for (index, (&kind, &output)) in affine_kinds.iter().zip(&affine_outputs).enumerate() {
+            block.push(MInst::PackedByteAffineCompare {
+                dst: output,
+                base,
+                rhs: affine_rhs,
+                kind,
+            });
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 32 + (index as i32 * 8),
+                src: output,
+                size: OpSize::S64,
+            });
+        }
         block.push(MInst::Return);
         function.push_block(block);
         let mut assignment = AssignmentMap::default();
@@ -3102,23 +3173,54 @@ mod tests {
             (lanes, PhysReg::RDX),
             (base, PhysReg::RSI),
             (affine_rhs, PhysReg::RDI),
-            (affine, PhysReg::R8),
         ] {
+            assignment.set(value, register);
+        }
+        for (value, register) in affine_outputs.into_iter().zip([
+            PhysReg::R8,
+            PhysReg::R9,
+            PhysReg::R10,
+            PhysReg::R11,
+            PhysReg::R12,
+            PhysReg::R13,
+            PhysReg::R14,
+            PhysReg::R15,
+            PhysReg::RBX,
+            PhysReg::RBP,
+        ]) {
             assignment.set(value, register);
         }
         let emitted = emit(&function, &assignment, 0).unwrap();
         let code = crate::jit_mem::JitCode::new(&emitted.code).unwrap();
-        let mut state = vec![0_u8; 40];
+        let mut state = vec![0_u8; 112];
         state[..16].copy_from_slice(&[5, 1, 5, 2, 3, 5, 4, 5, 6, 7, 8, 9, 5, 5, 0, 5]);
         assert_eq!(unsafe { code.call(&mut state) }, 0);
         assert_eq!(
             u64::from_le_bytes(state[24..32].try_into().unwrap()),
             0b1011_0000_1010_0101
         );
-        assert_eq!(
-            u64::from_le_bytes(state[32..40].try_into().unwrap()),
-            1 << 8
-        );
+        for (index, expected) in [
+            1 << 8,
+            0xfeff,
+            0x00c0,
+            0x01c0,
+            0xfe3f,
+            0xff3f,
+            0x00ff,
+            0x01ff,
+            0xfe00,
+            0xff00,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let offset = 32 + index * 8;
+            assert_eq!(
+                u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap()),
+                expected,
+                "packed affine kind index {index}"
+            );
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
