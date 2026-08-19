@@ -237,6 +237,12 @@ fn insert_driver_target(
 }
 
 fn validate_constant_state(value: &Constant) -> Result<(), BuildError> {
+    let width = value.value_type().width() as u64;
+    if value.payload().bits() > width || value.mask().bits() > width {
+        return Err(BuildError::ConstantOutOfRange {
+            width: value.value_type().width(),
+        });
+    }
     if !value.value_type().is_four_state() && value.mask() != &BigUint::default() {
         return Err(BuildError::TwoStateConstantMask);
     }
@@ -615,6 +621,17 @@ impl FrontendArtifact {
                             signal_width: input_type.width(),
                         });
                     }
+                    let expected_type = ValueType::new(
+                        expression.value_type().width(),
+                        false,
+                        input_type.is_four_state(),
+                    )?;
+                    if expression.value_type() != expected_type {
+                        return Err(BuildError::TypeMismatch {
+                            expected: expected_type,
+                            actual: expression.value_type(),
+                        });
+                    }
                 }
                 ExprNode::Mux {
                     condition,
@@ -881,6 +898,8 @@ pub enum BuildError {
     InvalidDriverTarget { name: String },
     #[error("two-state constants cannot contain X/Z mask bits")]
     TwoStateConstantMask,
+    #[error("constant payload or mask does not fit its declared width {width}")]
+    ConstantOutOfRange { width: usize },
     #[error("signal names `{first}` and `{second}` collide in the DUT namespace")]
     SignalNamespaceCollision { first: String, second: String },
     #[error("inout signal `{name}` is not supported by frontend artifact format version 1")]
@@ -1408,6 +1427,32 @@ mod tests {
     }
 
     #[test]
+    fn revalidates_expression_slice_type_from_json() {
+        let logic = ValueType::logic(8).unwrap();
+        let mut module = ModuleBuilder::new("SliceType").unwrap();
+        let input = module.input("input", logic).unwrap();
+        let input = module.read(input).unwrap();
+        module.expr_slice(input, 0, 4).unwrap();
+        let artifact = module.finish();
+
+        let mut signed = serde_json::to_value(&artifact).unwrap();
+        signed["expressions"][1]["value_type"]["signed"] = true.into();
+        let error = FrontendArtifact::from_json(&signed.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::TypeMismatch { .. })
+        ));
+
+        let mut two_state = serde_json::to_value(&artifact).unwrap();
+        two_state["expressions"][1]["value_type"]["four_state"] = false.into();
+        let error = FrontendArtifact::from_json(&two_state.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::TypeMismatch { .. })
+        ));
+    }
+
+    #[test]
     fn rejects_overlapping_register_and_assignment_drivers() {
         let bit = ValueType::bits(1).unwrap();
         let mut module = ModuleBuilder::new("DriverConflict").unwrap();
@@ -1515,6 +1560,32 @@ mod tests {
         assert!(matches!(
             error,
             ArtifactJsonError::InvalidArtifact(BuildError::TwoStateConstantMask)
+        ));
+    }
+
+    #[test]
+    fn rejects_out_of_range_constant_bits_from_json() {
+        let value = Constant::four_state(0xa5u8, 0u8, 8).unwrap();
+        let mut module = ModuleBuilder::new("ConstantRange").unwrap();
+        module.constant(value);
+        let artifact = module.finish();
+
+        let mut payload = serde_json::to_value(&artifact).unwrap();
+        payload["expressions"][0]["node"]["Constant"]["payload"] =
+            serde_json::to_value(BigUint::from(0x100u16)).unwrap();
+        let error = FrontendArtifact::from_json(&payload.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::ConstantOutOfRange { width: 8 })
+        ));
+
+        let mut mask = serde_json::to_value(&artifact).unwrap();
+        mask["expressions"][0]["node"]["Constant"]["mask"] =
+            serde_json::to_value(BigUint::from(0x100u16)).unwrap();
+        let error = FrontendArtifact::from_json(&mask.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::ConstantOutOfRange { width: 8 })
         ));
     }
 

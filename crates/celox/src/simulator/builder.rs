@@ -1954,25 +1954,61 @@ mod host {
                 all(target_arch = "aarch64", feature = "experimental-arm64-backend")
             )))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
-            let program_res = compile_hdl_to_sir_with_layout_mode(
-                &self.sources,
-                &self.sv_sources,
-                self.top,
-                &self.ignored_loops,
-                &self.true_loops,
-                self.options.four_state,
-                &self.options.trace,
-                Some(&mut trace),
-                self.metadata,
-                self.clock_type,
-                self.reset_type,
-                &self.param_overrides,
-                &self.options.optimize_options,
-                &self.options.diagnostics,
-                &self.injected_components.manifests(),
-                layout_mode,
-                !self.options.native_force_support,
-            );
+            let injected_manifests = self.injected_components.manifests();
+            let program_res = if let Some(artifact) = &self.frontend_artifact {
+                if self.sources.is_empty() {
+                    compile_frontend_to_sir_with_layout_mode(
+                        artifact,
+                        &self.ignored_loops,
+                        &self.true_loops,
+                        self.options.four_state,
+                        &self.options.trace,
+                        Some(&mut trace),
+                        &self.options.optimize_options,
+                        &self.options.diagnostics,
+                        layout_mode,
+                    )
+                } else {
+                    compile_frontend_testbench_to_sir_with_layout_mode(
+                        artifact,
+                        &self.sources,
+                        self.top,
+                        &self.ignored_loops,
+                        &self.true_loops,
+                        self.options.four_state,
+                        &self.options.trace,
+                        Some(&mut trace),
+                        self.metadata,
+                        self.clock_type,
+                        self.reset_type,
+                        &self.options.optimize_options,
+                        &self.options.diagnostics,
+                        &injected_manifests,
+                        layout_mode,
+                        !self.options.native_force_support,
+                    )
+                }
+            } else {
+                compile_hdl_to_sir_with_layout_mode(
+                    &self.sources,
+                    &self.sv_sources,
+                    self.top,
+                    &self.ignored_loops,
+                    &self.true_loops,
+                    self.options.four_state,
+                    &self.options.trace,
+                    Some(&mut trace),
+                    self.metadata,
+                    self.clock_type,
+                    self.reset_type,
+                    &self.param_overrides,
+                    &self.options.optimize_options,
+                    &self.options.diagnostics,
+                    &injected_manifests,
+                    layout_mode,
+                    !self.options.native_force_support,
+                )
+            };
 
             let sim_res = program_res.and_then(|(program, warnings)| {
                 let mut laid_out =

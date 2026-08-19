@@ -878,6 +878,10 @@ fn lower_registers(
         let build_eval =
             |commit: bool| -> Result<ExecutionUnit<RegionedSourceAddr>, FrontendArtifactError> {
                 let mut builder = SIRBuilder::new();
+                let target_info = artifact.signal(target.signal()).ok_or(
+                    FrontendArtifactError::UnknownSignal(target.signal().index()),
+                )?;
+                let target_type = target_info.value_type();
                 builder.emit(SIRInstruction::Commit(
                     RegionedSourceAddr {
                         region: STABLE_REGION,
@@ -892,15 +896,17 @@ fn lower_registers(
                     Vec::new(),
                 ));
                 let mut cache = HashMap::default();
-                let mut next =
-                    lower_sir_expression(artifact, register.next(), &mut builder, &mut cache)?;
+                let mut next = coerce_sir_expression(
+                    artifact,
+                    register.next(),
+                    target_type,
+                    &mut builder,
+                    &mut cache,
+                )?;
                 if let Some(enable) = register.enable() {
                     let condition =
                         lower_control(artifact, enable.signal(), enable.active(), &mut builder)?;
-                    let target_info = artifact.signal(target.signal()).ok_or(
-                        FrontendArtifactError::UnknownSignal(target.signal().index()),
-                    )?;
-                    let current = alloc_register(&mut builder, target_info.value_type());
+                    let current = alloc_register(&mut builder, target_type);
                     builder.emit(SIRInstruction::Load(
                         current,
                         RegionedSourceAddr {
@@ -910,19 +916,21 @@ fn lower_registers(
                         SIROffset::Static(0),
                         target.width(),
                     ));
-                    let selected = alloc_register(&mut builder, target_info.value_type());
+                    let selected = alloc_register(&mut builder, target_type);
                     builder.emit(SIRInstruction::Mux(selected, condition, next, current));
                     next = selected;
                 }
                 if let Some(reset) = register.async_reset() {
                     let condition =
                         lower_control(artifact, reset.signal(), reset.active(), &mut builder)?;
-                    let reset_value =
-                        lower_sir_expression(artifact, reset.value(), &mut builder, &mut cache)?;
-                    let target_info = artifact.signal(target.signal()).ok_or(
-                        FrontendArtifactError::UnknownSignal(target.signal().index()),
+                    let reset_value = coerce_sir_expression(
+                        artifact,
+                        reset.value(),
+                        target_type,
+                        &mut builder,
+                        &mut cache,
                     )?;
-                    let selected = alloc_register(&mut builder, target_info.value_type());
+                    let selected = alloc_register(&mut builder, target_type);
                     builder.emit(SIRInstruction::Mux(selected, condition, reset_value, next));
                     next = selected;
                 }

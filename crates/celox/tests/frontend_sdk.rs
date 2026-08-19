@@ -242,6 +242,74 @@ fn frontend_sequential_expressions_honor_declared_types() {
 }
 
 #[test]
+fn frontend_register_inputs_are_coerced_to_target_state_kind() {
+    let bit = ValueType::bits(1).unwrap();
+    let logic = ValueType::logic(1).unwrap();
+    let mut module = ModuleBuilder::new("RegisterStateCoercion").unwrap();
+    let clock = module.input("clock", bit).unwrap();
+    let reset = module.input("reset", bit).unwrap();
+    let d = module.input("d", logic).unwrap();
+    let q = module.output("q", bit).unwrap();
+    let d_expr = module.read(d).unwrap();
+    let reset_value = module.constant(Constant::four_state(1u8, 1u8, 1).unwrap());
+    let reset = module
+        .async_reset(reset, ActiveLevel::High, reset_value)
+        .unwrap();
+    let q_target = module.whole(q).unwrap();
+    module
+        .register(q_target, d_expr, clock, Edge::Posedge, Some(reset), None)
+        .unwrap();
+
+    let mut sim = Simulator::from_frontend(module.finish())
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    let clock = sim.event("clock");
+    let reset = sim.signal("reset");
+    let d = sim.signal("d");
+    let q = sim.signal("q");
+    sim.modify(|io| {
+        io.set(reset, 0u8);
+        io.set_four_state(d, 1u8.into(), 1u8.into());
+    })
+    .unwrap();
+    sim.tick(clock).unwrap();
+    assert_eq!(sim.get(q), 0u8.into());
+
+    sim.modify(|io| {
+        io.set(reset, 1u8);
+        io.set_four_state(d, 1u8.into(), 0u8.into());
+    })
+    .unwrap();
+    sim.tick(clock).unwrap();
+    assert_eq!(sim.get(q), 0u8.into());
+}
+
+#[test]
+fn frontend_artifacts_build_with_compilation_trace() {
+    Simulator::from_frontend(adder_artifact())
+        .build_with_trace()
+        .unwrap();
+
+    let source = r#"
+        #[test(t)]
+        module NetlistTraceTb {
+            var a: logic<8>;
+            var b: logic<8>;
+            var y: logic<8>;
+            inst dut: $sv::NetAdder (a, b, y);
+        }
+    "#;
+    Simulator::from_frontend_with_testbench(
+        adder_artifact(),
+        vec![(source, Path::new("netlist_trace_tb.veryl"))],
+        "NetlistTraceTb",
+    )
+    .build_with_trace()
+    .unwrap();
+}
+
+#[test]
 fn frontend_shared_expression_dag_is_lowered_once_per_assignment() {
     let byte = ValueType::bits(8).unwrap();
     let mut module = ModuleBuilder::new("SharedDag").unwrap();
