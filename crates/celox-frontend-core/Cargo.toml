@@ -9,6 +9,7 @@ edition.workspace = true
 
 [dependencies]
 celox-design = { path = "../celox-design" }
+celox-frontend-sdk = { path = "../celox-frontend-sdk" }
 celox-sir = { path = "../celox-sir" }
 celox-slt = { path = "../celox-slt" }
 fxhash = { workspace = true }

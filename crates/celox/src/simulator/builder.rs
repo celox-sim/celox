@@ -180,6 +180,7 @@ fn elaborate_parameterized_top(
 fn analyze(
     sources: &[(&str, &Path)],
     sv_sources: Option<&[(&str, &Path)]>,
+    external_frontend: Option<&celox_frontend_core::symbolic::artifact::ExternalHierarchy>,
     top: &str,
     ignored_loops: &[(
         (Vec<(String, usize)>, Vec<String>),
@@ -316,13 +317,12 @@ fn analyze(
     if let Some(rt) = reset_type {
         build_config.reset_type = rt;
     }
-    #[cfg(feature = "systemverilog")]
-    let sir = if let Some(sv_sources) = sv_sources {
-        parser::parse_mixed(
+    let sir = if let Some(external) = external_frontend {
+        parser::parse_with_external_hierarchy(
             &top,
             &ir,
             &loop_provenance,
-            sv_sources,
+            external,
             &build_config,
             ignored_loops,
             true_loops,
@@ -337,44 +337,68 @@ fn analyze(
             component_file_base,
         )
     } else {
-        parser::parse(
-            &top,
-            &ir,
-            &loop_provenance,
-            &build_config,
-            ignored_loops,
-            true_loops,
-            four_state,
-            trace_opts,
-            trace_out,
-            optimize_options,
-            diagnostics,
-            preserve_element_storage_layout,
-            testbench_random_seed,
-            component_libraries,
-            component_file_base,
-        )
-    };
-    #[cfg(not(feature = "systemverilog"))]
-    let sir = {
-        debug_assert!(sv_sources.is_none());
-        parser::parse(
-            &top,
-            &ir,
-            &loop_provenance,
-            &build_config,
-            ignored_loops,
-            true_loops,
-            four_state,
-            trace_opts,
-            trace_out,
-            optimize_options,
-            diagnostics,
-            preserve_element_storage_layout,
-            testbench_random_seed,
-            component_libraries,
-            component_file_base,
-        )
+        #[cfg(feature = "systemverilog")]
+        {
+            if let Some(sv_sources) = sv_sources {
+                parser::parse_mixed(
+                    &top,
+                    &ir,
+                    &loop_provenance,
+                    sv_sources,
+                    &build_config,
+                    ignored_loops,
+                    true_loops,
+                    four_state,
+                    trace_opts,
+                    trace_out,
+                    optimize_options,
+                    diagnostics,
+                    preserve_element_storage_layout,
+                    testbench_random_seed,
+                    component_libraries,
+                    component_file_base,
+                )
+            } else {
+                parser::parse(
+                    &top,
+                    &ir,
+                    &loop_provenance,
+                    &build_config,
+                    ignored_loops,
+                    true_loops,
+                    four_state,
+                    trace_opts,
+                    trace_out,
+                    optimize_options,
+                    diagnostics,
+                    preserve_element_storage_layout,
+                    testbench_random_seed,
+                    component_libraries,
+                    component_file_base,
+                )
+            }
+        }
+        #[cfg(not(feature = "systemverilog"))]
+        {
+            debug_assert!(sv_sources.is_none());
+            parser::parse(
+                &top,
+                &ir,
+                &loop_provenance,
+                &build_config,
+                ignored_loops,
+                true_loops,
+                four_state,
+                trace_opts,
+                trace_out,
+                optimize_options,
+                diagnostics,
+                preserve_element_storage_layout,
+                testbench_random_seed,
+                component_libraries,
+                component_file_base,
+            )
+        }
     };
     let sir = sir.map(|(sir, mut elaborated_diagnostics)| {
         frontend_diagnostics.append(&mut elaborated_diagnostics);
@@ -428,6 +452,168 @@ pub fn compile_to_sir(
     )
 }
 
+/// Compile an elaborated external-frontend artifact to optimized SIR.
+///
+/// The artifact carries source-independent signal reflection, so the resulting
+/// program can be used by the same Rust and TypeScript testbench APIs as a
+/// Veryl- or SystemVerilog-produced program.
+pub fn compile_frontend_to_sir(
+    artifact: &celox_frontend_sdk::FrontendArtifact,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    optimize_options: &crate::optimizer::OptimizeOptions,
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    compile_frontend_to_sir_with_layout_mode(
+        artifact,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        optimize_options,
+        &crate::RuntimeDiagnostics::default(),
+        crate::backend::memory_layout::MemoryLayoutMode::Packed,
+    )
+}
+
+fn compile_frontend_to_sir_with_layout_mode(
+    artifact: &celox_frontend_sdk::FrontendArtifact,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    mut trace_out: Option<&mut crate::debug::CompilationTrace>,
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostics: &crate::RuntimeDiagnostics,
+    layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    let lowered = celox_frontend_core::lower_frontend_artifact(artifact)?;
+    let frontend_trace_options = trace_opts.frontend(diagnostics);
+    let mut frontend_trace = celox_frontend_core::FrontendTrace::default();
+    let scheduled = celox_frontend_core::symbolic::assembly::schedule_symbolic_rtl(
+        lowered.symbolic,
+        None,
+        ignored_loops,
+        true_loops,
+        four_state,
+        &frontend_trace_options,
+        trace_out.is_some().then_some(&mut frontend_trace),
+    )
+    .map_err(celox_frontend_veryl::ParserError::from)?;
+    if let Some(trace) = trace_out.as_deref_mut() {
+        trace.absorb_frontend(frontend_trace);
+    }
+    let program = parser::finalize_scheduled_rtl(
+        scheduled,
+        None,
+        four_state,
+        trace_opts,
+        trace_out,
+        optimize_options,
+        diagnostics,
+        layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+        None,
+        Vec::new(),
+        None,
+    )?;
+    Ok((program, Vec::new()))
+}
+
+#[cfg(feature = "host-runtime")]
+fn compile_frontend_testbench_to_sir_with_layout_mode(
+    artifact: &celox_frontend_sdk::FrontendArtifact,
+    sources: &[(&str, &Path)],
+    top: &str,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    trace_out: Option<&mut crate::debug::CompilationTrace>,
+    metadata: Option<Metadata>,
+    clock_type: Option<ClockType>,
+    reset_type: Option<ResetType>,
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostics: &crate::RuntimeDiagnostics,
+    injected_manifests: &[(String, veryl_metadata::ComponentManifest)],
+    layout_mode: crate::backend::memory_layout::MemoryLayoutMode,
+    recover_comb_loops: bool,
+) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
+    let lowered = celox_frontend_core::lower_frontend_artifact(artifact)?;
+    let (sir, errors, frontend_diagnostics) = analyze(
+        sources,
+        None,
+        Some(&lowered.external),
+        top,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace_out,
+        metadata,
+        clock_type,
+        reset_type,
+        &[],
+        optimize_options,
+        diagnostics,
+        injected_manifests,
+        layout_mode == crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
+        recover_comb_loops,
+    );
+    let (real_errors, analyzer_warnings): (Vec<_>, Vec<_>) =
+        errors.into_iter().partition(AnalyzerError::is_error);
+    let (frontend_errors, frontend_warnings): (Vec<_>, Vec<_>) = frontend_diagnostics
+        .into_iter()
+        .partition(FrontendDiagnostic::is_error);
+    let warnings = analyzer_warnings
+        .into_iter()
+        .map(CompilationWarning::Analyzer)
+        .chain(
+            frontend_warnings
+                .into_iter()
+                .map(CompilationWarning::Frontend),
+        )
+        .collect::<Vec<_>>();
+    if !real_errors.is_empty() {
+        return Err(
+            SimulatorError::new(SimulatorErrorKind::Analyzer(real_errors)).with_warnings(warnings),
+        );
+    }
+    if !frontend_errors.is_empty() {
+        return Err(
+            SimulatorError::new(SimulatorErrorKind::Frontend(frontend_errors))
+                .with_warnings(warnings),
+        );
+    }
+    match sir {
+        Ok(program) => Ok((program, warnings)),
+        Err(error) => Err(SimulatorError::from(error).with_warnings(warnings)),
+    }
+}
+
 fn compile_to_sir_with_layout_mode(
     sources: &[(&str, &Path)],
     top: &str,
@@ -455,6 +641,7 @@ fn compile_to_sir_with_layout_mode(
 ) -> Result<(OptimizedSir, Vec<CompilationWarning>), SimulatorError> {
     let (sir, errors, frontend_diagnostics) = analyze(
         sources,
+        None,
         None,
         top,
         ignored_loops,
@@ -676,6 +863,7 @@ fn compile_mixed_to_sir_with_layout_mode(
     let (sir, errors, frontend_diagnostics) = analyze(
         sources,
         Some(sv_sources),
+        None,
         top,
         ignored_loops,
         true_loops,
@@ -754,7 +942,7 @@ fn compile_hdl_to_sir_with_layout_mode(
     #[cfg(not(feature = "systemverilog"))]
     {
         debug_assert!(sv_sources.is_empty());
-        return compile_to_sir_with_layout_mode(
+        compile_to_sir_with_layout_mode(
             sources,
             top,
             ignored_loops,
@@ -771,7 +959,7 @@ fn compile_hdl_to_sir_with_layout_mode(
             injected_manifests,
             layout_mode,
             recover_comb_loops,
-        );
+        )
     }
     #[cfg(feature = "systemverilog")]
     match (sources.is_empty(), sv_sources.is_empty()) {
@@ -993,6 +1181,7 @@ mod host {
         param_overrides: Vec<(String, u64)>,
         live_signals: Vec<(Vec<(String, usize)>, Vec<String>)>,
         injected_components: crate::InjectedComponents,
+        frontend_artifact: Option<celox_frontend_sdk::FrontendArtifact>,
         _marker: std::marker::PhantomData<Target>,
     }
 
@@ -1017,8 +1206,14 @@ mod host {
         }
 
         /// Returns the top module name.
-        pub fn top(&self) -> &'a str {
-            self.top
+        pub fn top(&self) -> &str {
+            if !self.sources.is_empty() {
+                self.top
+            } else {
+                self.frontend_artifact
+                    .as_ref()
+                    .map_or(self.top, celox_frontend_sdk::FrontendArtifact::module_name)
+            }
         }
 
         /// Returns whether four-state simulation is enabled for this builder.
@@ -1351,6 +1546,7 @@ mod host {
                 param_overrides: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
+                frontend_artifact: None,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -1370,6 +1566,7 @@ mod host {
                 param_overrides: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
+                frontend_artifact: None,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -1390,6 +1587,7 @@ mod host {
                 param_overrides: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
+                frontend_artifact: None,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -1414,6 +1612,56 @@ mod host {
                 param_overrides: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
+                frontend_artifact: None,
+                _marker: std::marker::PhantomData,
+            }
+        }
+
+        /// Build a simulator from a source-independent external frontend artifact.
+        pub fn from_frontend(
+            artifact: celox_frontend_sdk::FrontendArtifact,
+        ) -> SimulatorBuilder<'static, Simulator> {
+            SimulatorBuilder {
+                sources: Vec::new(),
+                sv_sources: Vec::new(),
+                top: "",
+                ignored_loops: Vec::new(),
+                true_loops: Vec::new(),
+                options: SimulatorOptions::default(),
+                vcd_path: None,
+                metadata: None,
+                clock_type: None,
+                reset_type: None,
+                param_overrides: Vec::new(),
+                live_signals: Vec::new(),
+                injected_components: Default::default(),
+                frontend_artifact: Some(artifact),
+                _marker: std::marker::PhantomData,
+            }
+        }
+
+        /// Build a Veryl native testbench whose `$sv::Module` instances are
+        /// resolved from an external frontend artifact.
+        pub fn from_frontend_with_testbench(
+            artifact: celox_frontend_sdk::FrontendArtifact,
+            sources: Vec<(&'a str, &'a Path)>,
+            top: &'a str,
+        ) -> Self {
+            Self {
+                sources,
+                sv_sources: Vec::new(),
+                top,
+                ignored_loops: Vec::new(),
+                true_loops: Vec::new(),
+                options: SimulatorOptions::default(),
+                vcd_path: None,
+                metadata: None,
+                clock_type: None,
+                reset_type: None,
+                param_overrides: Vec::new(),
+                live_signals: Vec::new(),
+                injected_components: Default::default(),
+                frontend_artifact: Some(artifact),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -1438,25 +1686,60 @@ mod host {
             let phase_timing = self.options.diagnostics.phase_timing;
             let compile_start = phase_timing.then(crate::timing::now);
             let injected_manifests = self.injected_components.manifests();
-            let (program, warnings) = compile_hdl_to_sir_with_layout_mode(
-                &self.sources,
-                &self.sv_sources,
-                self.top,
-                &self.ignored_loops,
-                &self.true_loops,
-                self.options.four_state,
-                &self.options.trace,
-                None,
-                self.metadata,
-                self.clock_type,
-                self.reset_type,
-                &self.param_overrides,
-                &self.options.optimize_options,
-                &self.options.diagnostics,
-                &injected_manifests,
-                layout_mode,
-                !self.options.native_force_support,
-            )?;
+            let (program, warnings) = if let Some(artifact) = &self.frontend_artifact {
+                if self.sources.is_empty() {
+                    compile_frontend_to_sir_with_layout_mode(
+                        artifact,
+                        &self.ignored_loops,
+                        &self.true_loops,
+                        self.options.four_state,
+                        &self.options.trace,
+                        None,
+                        &self.options.optimize_options,
+                        &self.options.diagnostics,
+                        layout_mode,
+                    )?
+                } else {
+                    compile_frontend_testbench_to_sir_with_layout_mode(
+                        artifact,
+                        &self.sources,
+                        self.top,
+                        &self.ignored_loops,
+                        &self.true_loops,
+                        self.options.four_state,
+                        &self.options.trace,
+                        None,
+                        self.metadata,
+                        self.clock_type,
+                        self.reset_type,
+                        &self.options.optimize_options,
+                        &self.options.diagnostics,
+                        &injected_manifests,
+                        layout_mode,
+                        !self.options.native_force_support,
+                    )?
+                }
+            } else {
+                compile_hdl_to_sir_with_layout_mode(
+                    &self.sources,
+                    &self.sv_sources,
+                    self.top,
+                    &self.ignored_loops,
+                    &self.true_loops,
+                    self.options.four_state,
+                    &self.options.trace,
+                    None,
+                    self.metadata,
+                    self.clock_type,
+                    self.reset_type,
+                    &self.param_overrides,
+                    &self.options.optimize_options,
+                    &self.options.diagnostics,
+                    &injected_manifests,
+                    layout_mode,
+                    !self.options.native_force_support,
+                )?
+            };
             if let Some(start) = compile_start {
                 tracing::debug!("[phase-timing] compile_to_sir: {:?}", start.elapsed());
             }
@@ -1779,6 +2062,7 @@ mod host {
                 param_overrides: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
+                frontend_artifact: None,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -1798,6 +2082,29 @@ mod host {
                 param_overrides: Vec::new(),
                 live_signals: Vec::new(),
                 injected_components: Default::default(),
+                frontend_artifact: None,
+                _marker: std::marker::PhantomData,
+            }
+        }
+
+        pub(crate) fn from_frontend(
+            artifact: celox_frontend_sdk::FrontendArtifact,
+        ) -> SimulatorBuilder<'static, crate::Simulation> {
+            SimulatorBuilder {
+                sources: Vec::new(),
+                sv_sources: Vec::new(),
+                top: "",
+                ignored_loops: Vec::new(),
+                true_loops: Vec::new(),
+                options: SimulatorOptions::default(),
+                vcd_path: None,
+                metadata: None,
+                clock_type: None,
+                reset_type: None,
+                param_overrides: Vec::new(),
+                live_signals: Vec::new(),
+                injected_components: Default::default(),
+                frontend_artifact: Some(artifact),
                 _marker: std::marker::PhantomData,
             }
         }
@@ -1816,25 +2123,39 @@ mod host {
                 all(target_arch = "aarch64", feature = "experimental-arm64-backend")
             )))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
-            let (program, warnings) = compile_hdl_to_sir_with_layout_mode(
-                &self.sources,
-                &self.sv_sources,
-                self.top,
-                &self.ignored_loops,
-                &self.true_loops,
-                self.options.four_state,
-                &self.options.trace,
-                None,
-                self.metadata,
-                self.clock_type,
-                self.reset_type,
-                &self.param_overrides,
-                &self.options.optimize_options,
-                &self.options.diagnostics,
-                &self.injected_components.manifests(),
-                layout_mode,
-                !self.options.native_force_support,
-            )?;
+            let (program, warnings) = if let Some(artifact) = &self.frontend_artifact {
+                compile_frontend_to_sir_with_layout_mode(
+                    artifact,
+                    &self.ignored_loops,
+                    &self.true_loops,
+                    self.options.four_state,
+                    &self.options.trace,
+                    None,
+                    &self.options.optimize_options,
+                    &self.options.diagnostics,
+                    layout_mode,
+                )?
+            } else {
+                compile_hdl_to_sir_with_layout_mode(
+                    &self.sources,
+                    &self.sv_sources,
+                    self.top,
+                    &self.ignored_loops,
+                    &self.true_loops,
+                    self.options.four_state,
+                    &self.options.trace,
+                    None,
+                    self.metadata,
+                    self.clock_type,
+                    self.reset_type,
+                    &self.param_overrides,
+                    &self.options.optimize_options,
+                    &self.options.diagnostics,
+                    &self.injected_components.manifests(),
+                    layout_mode,
+                    !self.options.native_force_support,
+                )?
+            };
             let mut laid_out =
                 program.into_laid_out_with_mode(self.options.four_state, layout_mode);
 

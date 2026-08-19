@@ -972,6 +972,22 @@ impl NativeSimulatorHandle {
         Self::build_and_cache(sim, opts.four_state, opts.vcd.as_deref(), Some(cache_key))
     }
 
+    /// Create a simulator from a versioned external-frontend artifact.
+    #[napi(factory)]
+    pub fn from_frontend_artifact(
+        artifact_json: String,
+        options: Option<NapiOptions>,
+    ) -> Result<Self> {
+        let opts = parse_options(&options)?;
+        let artifact = celox::FrontendArtifact::from_json(&artifact_json)
+            .map_err(|error| Error::from_reason(error.to_string()))?;
+        let builder = apply_options(celox::Simulator::from_frontend(artifact), &opts);
+        let sim = builder
+            .build()
+            .map_err(|error| Error::from_reason(error.to_string()))?;
+        Self::build_and_cache(sim, opts.four_state, opts.vcd.as_deref(), None)
+    }
+
     /// Create a new simulator from a Veryl project directory.
     ///
     /// Searches upward from `project_path` for `Veryl.toml`, gathers all
@@ -1196,6 +1212,52 @@ impl NativeSimulationHandle {
             .map_err(|e| Error::from_reason(format!("Failed to serialize events: {}", e)))?;
         let hierarchy_json = serde_json::to_string(&hierarchy_node)
             .map_err(|e| Error::from_reason(format!("Failed to serialize hierarchy: {}", e)))?;
+
+        Ok(Self {
+            sim: Some(sim),
+            layout_json,
+            events_json,
+            hierarchy_json,
+            warnings_json,
+            stable_size: stable_size as u32,
+            total_size: total_size as u32,
+            default_max_steps: None,
+        })
+    }
+
+    /// Create a timed simulation from a versioned external-frontend artifact.
+    #[napi(factory)]
+    pub fn from_frontend_artifact(
+        artifact_json: String,
+        options: Option<NapiOptions>,
+    ) -> Result<Self> {
+        let opts = parse_options(&options)?;
+        let artifact = celox::FrontendArtifact::from_json(&artifact_json)
+            .map_err(|error| Error::from_reason(error.to_string()))?;
+        let mut builder = apply_options(celox::Simulation::from_frontend(artifact), &opts);
+        if let Some(path) = &opts.vcd {
+            builder = builder.vcd(path);
+        }
+        let sim = builder
+            .build()
+            .map_err(|error| Error::from_reason(error.to_string()))?;
+
+        let warnings_json = format_warnings_json(sim.warnings());
+        let signals = sim.named_signals();
+        let events = sim.named_events();
+        let hierarchy = sim.named_hierarchy();
+        let (_, total_size) = sim.memory_as_ptr();
+        let stable_size = sim.stable_region_size();
+        let layout_map = build_signal_layout(&signals, opts.four_state);
+        let event_map = build_event_map(&events);
+        let hierarchy_node = build_hierarchy_node(&hierarchy, opts.four_state);
+        let layout_json = serde_json::to_string(&layout_map)
+            .map_err(|error| Error::from_reason(format!("Failed to serialize layout: {error}")))?;
+        let events_json = serde_json::to_string(&event_map)
+            .map_err(|error| Error::from_reason(format!("Failed to serialize events: {error}")))?;
+        let hierarchy_json = serde_json::to_string(&hierarchy_node).map_err(|error| {
+            Error::from_reason(format!("Failed to serialize hierarchy: {error}"))
+        })?;
 
         Ok(Self {
             sim: Some(sim),
@@ -2227,6 +2289,40 @@ pub fn run_test(
     let result = builder
         .run_test_detailed()
         .map_err(|e| Error::from_reason(format!("{e}")))?;
+    Ok(convert_test_result(result))
+}
+
+/// Run a Veryl native testbench against an external frontend artifact.
+#[cfg(not(target_arch = "wasm32"))]
+#[napi]
+pub fn run_test_with_frontend_artifact(
+    env: Env,
+    artifact_json: String,
+    sources: Vec<NapiSourceFile>,
+    top: String,
+    options: Option<NapiOptions>,
+    components: Option<Vec<NapiInjectedComponent>>,
+) -> Result<NapiTestResult> {
+    let opts = parse_options(&options)?;
+    let artifact = celox::FrontendArtifact::from_json(&artifact_json)
+        .map_err(|error| Error::from_reason(error.to_string()))?;
+    let mut src_pairs: Vec<(String, std::path::PathBuf)> = sources
+        .into_iter()
+        .map(|source| (source.content, std::path::PathBuf::from(source.path)))
+        .collect();
+    append_extra_source(&mut src_pairs, &opts.extra_source);
+    let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
+        .iter()
+        .map(|(source, path)| (source.as_str(), path.as_path()))
+        .collect();
+    let builder = apply_options(
+        celox::Simulator::from_frontend_with_testbench(artifact, source_refs, &top),
+        &opts,
+    )
+    .with_injected_components(injected_components(env, components)?);
+    let result = builder
+        .run_test_detailed()
+        .map_err(|error| Error::from_reason(error.to_string()))?;
     Ok(convert_test_result(result))
 }
 

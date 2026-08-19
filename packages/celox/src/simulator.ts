@@ -252,6 +252,56 @@ export class Simulator<P = Record<string, unknown>> {
 	}
 
 	/**
+	 * Create a Simulator from a versioned artifact emitted by an external
+	 * frontend built with `celox-frontend-sdk`.
+	 */
+	static fromFrontendArtifact<P = Record<string, unknown>>(
+		artifactJson: string,
+		options?: SimulatorOptions & { nativeAddonPath?: string },
+	): Simulator<P> {
+		const addon = loadNativeAddon(options?.nativeAddonPath);
+		const factory = addon.NativeSimulatorHandle.fromFrontendArtifact;
+		if (!factory) {
+			throw new Error(
+				"The loaded Celox native addon does not support frontend artifacts.",
+			);
+		}
+		const raw = factory.call(
+			addon.NativeSimulatorHandle,
+			artifactJson,
+			buildNapiOpts(options),
+		);
+		const layout = parseNapiLayout(raw.layoutJson);
+		const events: Record<string, number> = JSON.parse(raw.eventsJson);
+		const hierarchy = filterHierarchyForDse(
+			parseHierarchyLayout(raw.hierarchyJson, events),
+			options?.deadStorePolicy,
+		);
+		const ports = buildPortsFromLayout(hierarchy.signals, events);
+		const buffer = raw.sharedMemory!().buffer;
+		const handle = wrapDirectSimulatorHandle(raw);
+		const state: DirtyState = { dirty: false };
+		const dut = createDut<P>(
+			buffer,
+			layout.forDut,
+			ports,
+			handle,
+			state,
+			hierarchy,
+		);
+		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
+		return new Simulator<P>(
+			handle,
+			dut,
+			events,
+			state,
+			buffer,
+			layout.forDut,
+			warnings,
+		);
+	}
+
+	/**
 	 * Create a Simulator from a Veryl project directory.
 	 *
 	 * Searches upward from `projectPath` for `Veryl.toml`, gathers all

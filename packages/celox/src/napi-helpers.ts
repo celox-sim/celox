@@ -206,6 +206,10 @@ export interface RawNapiAddon {
 			top: string,
 			options?: NapiOptions,
 		): RawNapiSimulatorHandle;
+		fromFrontendArtifact(
+			artifactJson: string,
+			options?: NapiOptions,
+		): RawNapiSimulatorHandle;
 	};
 	NativeSimulationHandle: {
 		new (
@@ -218,10 +222,21 @@ export interface RawNapiAddon {
 			top: string,
 			options?: NapiOptions,
 		): RawNapiSimulationHandle;
+		fromFrontendArtifact(
+			artifactJson: string,
+			options?: NapiOptions,
+		): RawNapiSimulationHandle;
 	};
 	genTs(projectPath: string, components?: NapiInjectedManifest[]): string;
 	clearJitCache(): void;
 	runTest(
+		sources: NapiSourceFile[],
+		top: string,
+		options?: NapiOptions,
+		components?: NapiInjectedComponent[],
+	): NapiTestResult;
+	runTestWithFrontendArtifact(
+		artifactJson: string,
 		sources: NapiSourceFile[],
 		top: string,
 		options?: NapiOptions,

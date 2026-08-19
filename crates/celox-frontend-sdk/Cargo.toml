@@ -1,0 +1,20 @@
+[package]
+name = "celox-frontend-sdk"
+version = "0.1.0"
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Stable authoring SDK for external Celox netlist frontends"
+readme = "README.md"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fxhash = { workspace = true }
+num-bigint = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

@@ -285,7 +285,7 @@ fn verify_region_contract(
     Ok(())
 }
 
-fn finalize_scheduled_rtl(
+pub(crate) fn finalize_scheduled_rtl(
     mut scheduled: celox_frontend_core::ScheduledRtlOutput,
     mut testbench_source: Option<celox_frontend_veryl::VerylTestbenchSource>,
     four_state: bool,
@@ -622,10 +622,62 @@ pub fn parse_mixed(
                     None,
                 ),
             })?;
-    let symbolic = celox_frontend_veryl::parse_ir_with_external_hierarchy(
+    parse_with_external_hierarchy(
+        top,
         ir,
         loop_provenance,
         &external,
+        config,
+        ignored_loops,
+        true_loops,
+        four_state,
+        trace_opts,
+        trace,
+        optimize_options,
+        diagnostics,
+        preserve_element_storage_layout,
+        testbench_random_seed,
+        component_libraries,
+        component_file_base,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn parse_with_external_hierarchy(
+    top: &StrId,
+    ir: &veryl_analyzer::ir::Ir,
+    loop_provenance: &loop_provenance::LoopProvenance,
+    external: &celox_frontend_core::symbolic::artifact::ExternalHierarchy,
+    config: &BuildConfig,
+    ignored_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+    )],
+    true_loops: &[(
+        (Vec<(String, usize)>, Vec<String>),
+        (Vec<(String, usize)>, Vec<String>),
+        usize,
+    )],
+    four_state: bool,
+    trace_opts: &crate::debug::TraceOptions,
+    mut trace: Option<&mut crate::debug::CompilationTrace>,
+    optimize_options: &crate::optimizer::OptimizeOptions,
+    diagnostics: &crate::RuntimeDiagnostics,
+    preserve_element_storage_layout: bool,
+    testbench_random_seed: Option<u64>,
+    component_libraries: Vec<celox_testbench::ComponentLibrary>,
+    component_file_base: Option<std::path::PathBuf>,
+) -> Result<
+    (
+        crate::ir::OptimizedSir,
+        Vec<celox_frontend_veryl::FrontendDiagnostic>,
+    ),
+    ParserError,
+> {
+    let symbolic = celox_frontend_veryl::parse_ir_with_external_hierarchy(
+        ir,
+        loop_provenance,
+        external,
         config,
         top,
     )?;

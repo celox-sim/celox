@@ -98,6 +98,13 @@ impl Simulation {
     ) -> crate::SimulatorBuilder<'a, Simulation> {
         crate::SimulatorBuilder::<Simulation>::from_sources(sources, top)
     }
+
+    /// Build a timed simulation from an elaborated external frontend artifact.
+    pub fn from_frontend(
+        artifact: celox_frontend_sdk::FrontendArtifact,
+    ) -> crate::SimulatorBuilder<'static, Simulation> {
+        crate::SimulatorBuilder::<Simulation>::from_frontend(artifact)
+    }
 }
 
 // ── Generic methods available for any backend ───────────────────────

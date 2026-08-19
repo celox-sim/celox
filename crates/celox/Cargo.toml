@@ -35,6 +35,7 @@ celox-analysis        = { path = "../celox-analysis" }
 celox-backend-wasm    = { path = "../celox-backend-wasm" }
 celox-design          = { path = "../celox-design" }
 celox-frontend-core   = { path = "../celox-frontend-core" }
+celox-frontend-sdk    = { path = "../celox-frontend-sdk" }
 celox-frontend-sv     = { path = "../celox-frontend-sv", optional = true }
 celox-frontend-veryl  = { path = "../celox-frontend-veryl" }
 celox-sir             = { path = "../celox-sir" }
