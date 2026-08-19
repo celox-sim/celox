@@ -1233,38 +1233,123 @@ fn emit_parallel_bits(
     mask: u8,
     deposit: bool,
 ) {
+    if destination != source && destination != mask {
+        emit_parallel_bits_loop(ops, destination, source, mask, deposit);
+        return;
+    }
+
+    emit_parallel_bits_saved_loop(ops, destination, source, mask, deposit);
+}
+
+fn emit_parallel_bits_loop(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    destination: u8,
+    source: u8,
+    mask: u8,
+    deposit: bool,
+) {
+    let loop_label = ops.new_dynamic_label();
+    let done = ops.new_dynamic_label();
+    dynasm!(ops
+        ; .arch aarch64
+        ; mov X(destination), xzr
+        ; mov x16, X(mask)
+        ; mov x17, xzr
+        ; =>loop_label
+        ; cbz x16, =>done
+        ; rbit x30, x16
+        ; clz x30, x30
+        ; fmov d4, x30
+        ; sub x30, x16, #1
+        ; and x16, x16, x30
+    );
+    if deposit {
+        // x17 counts source bits while d4 retains the destination bit
+        // selected by the lowest set mask bit. d5 protects the working mask
+        // while x16 is reused as the variable shift amount.
+        dynasm!(ops
+            ; .arch aarch64
+            ; fmov d5, x16
+            ; lsrv x30, X(source), x17
+            ; and x30, x30, #1
+            ; fmov x16, d4
+            ; lslv x30, x30, x16
+            ; orr X(destination), X(destination), x30
+            ; fmov x16, d5
+            ; add x17, x17, #1
+            ; b =>loop_label
+            ; =>done
+        );
+    } else {
+        dynasm!(ops
+            ; .arch aarch64
+            ; fmov x30, d4
+            ; lsrv x30, X(source), x30
+            ; and x30, x30, #1
+            ; lslv x30, x30, x17
+            ; orr X(destination), X(destination), x30
+            ; add x17, x17, #1
+            ; b =>loop_label
+            ; =>done
+        );
+    }
+}
+
+fn emit_parallel_bits_saved_loop(
+    ops: &mut VecAssembler<Aarch64Relocation>,
+    destination: u8,
+    source: u8,
+    mask: u8,
+    deposit: bool,
+) {
     // Save both inputs before defining the result: allocation may coalesce a
-    // dying input with the destination. The fixed unroll avoids a hidden GPR
-    // clobber while matching BMI2 semantics on baseline ARMv8-A.
+    // dying input with the destination. The result can then reuse the
+    // destination register, while d4-d7 hold the transient scalar values.
+    let loop_label = ops.new_dynamic_label();
+    let done = ops.new_dynamic_label();
     dynasm!(ops
         ; .arch aarch64
         ; fmov d6, X(source)
         ; fmov d7, X(mask)
+        ; mov X(destination), xzr
         ; mov x17, xzr
-        ; mov x30, xzr
+        ; =>loop_label
+        ; fmov x16, d7
+        ; cbz x16, =>done
+        ; rbit x30, x16
+        ; clz x30, x30
+        ; fmov d4, x30
+        ; sub x30, x16, #1
+        ; and x16, x16, x30
+        ; fmov d7, x16
     );
-    for bit in 0..64_u32 {
-        let skip = ops.new_dynamic_label();
-        dynasm!(ops ; .arch aarch64 ; fmov x16, d7 ; tbz x16, bit, =>skip ; fmov x16, d6);
-        if deposit {
-            dynasm!(ops ; .arch aarch64 ; lsr x16, x16, x17 ; and x16, x16, #1);
-            if bit != 0 {
-                dynasm!(ops ; .arch aarch64 ; lsl x16, x16, bit);
-            }
-        } else {
-            if bit != 0 {
-                dynasm!(ops ; .arch aarch64 ; lsr x16, x16, bit);
-            }
-            dynasm!(ops ; .arch aarch64 ; and x16, x16, #1 ; lsl x16, x16, x17);
-        }
+    if deposit {
         dynasm!(ops
             ; .arch aarch64
-            ; orr x30, x30, x16
+            ; fmov x16, d6
+            ; lsrv x30, x16, x17
+            ; and x30, x30, #1
+            ; fmov x16, d4
+            ; lslv x30, x30, x16
+            ; orr X(destination), X(destination), x30
             ; add x17, x17, #1
-            ; =>skip
+            ; b =>loop_label
+            ; =>done
+        );
+    } else {
+        dynasm!(ops
+            ; .arch aarch64
+            ; fmov x16, d6
+            ; fmov x30, d4
+            ; lsrv x30, x16, x30
+            ; and x30, x30, #1
+            ; lslv x30, x30, x17
+            ; orr X(destination), X(destination), x30
+            ; add x17, x17, #1
+            ; b =>loop_label
+            ; =>done
         );
     }
-    dynasm!(ops ; .arch aarch64 ; mov X(destination), x30);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2835,6 +2920,89 @@ mod tests {
         assert_eq!(unsafe { code.call(&mut state) }, 0);
         assert_eq!(u64::from_le_bytes(state[..8].try_into().unwrap()), 0b100);
         assert_eq!(u64::from_le_bytes(state[8..].try_into().unwrap()), 0b100010);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn executes_parallel_bit_extract_and_deposit_with_aliased_destination() {
+        let source = arm_mir::VReg(0);
+        let mask = arm_mir::VReg(1);
+        let deposited_source = arm_mir::VReg(2);
+        let function = arm_mir::MFunction::new(
+            vec![arm_mir::MBlock {
+                id: arm_mir::BlockId(0),
+                phis: Vec::new(),
+                insts: vec![
+                    arm_mir::MInst::Load {
+                        dst: source,
+                        base: arm_mir::BaseReg::SimState,
+                        offset: 0,
+                        size: arm_mir::OpSize::S64,
+                    },
+                    arm_mir::MInst::Load {
+                        dst: mask,
+                        base: arm_mir::BaseReg::SimState,
+                        offset: 8,
+                        size: arm_mir::OpSize::S64,
+                    },
+                    arm_mir::MInst::Pext {
+                        dst: source,
+                        src: source,
+                        mask,
+                    },
+                    arm_mir::MInst::Load {
+                        dst: deposited_source,
+                        base: arm_mir::BaseReg::SimState,
+                        offset: 24,
+                        size: arm_mir::OpSize::S64,
+                    },
+                    arm_mir::MInst::Pdep {
+                        dst: deposited_source,
+                        src: deposited_source,
+                        mask,
+                    },
+                    arm_mir::MInst::Store {
+                        base: arm_mir::BaseReg::SimState,
+                        offset: 16,
+                        src: source,
+                        size: arm_mir::OpSize::S64,
+                    },
+                    arm_mir::MInst::Store {
+                        base: arm_mir::BaseReg::SimState,
+                        offset: 32,
+                        src: deposited_source,
+                        size: arm_mir::OpSize::S64,
+                    },
+                    arm_mir::MInst::Return,
+                ],
+            }],
+            Vec::new(),
+        );
+        let mut assignment = Assignment::default();
+        assignment.set(source, Arm64Reg::new(9));
+        assignment.set(mask, Arm64Reg::new(10));
+        assignment.set(deposited_source, Arm64Reg::new(11));
+        let emitted = emit_function(
+            &function,
+            &assignment,
+            0,
+            40,
+            &EdgeCopyPlan::default(),
+            false,
+            false,
+        )
+        .unwrap();
+        let code = crate::jit_mem::JitCode::new(&emitted.code).unwrap();
+        let mut state = vec![0_u8; 40];
+        state[..8].copy_from_slice(&0b110101_u64.to_le_bytes());
+        state[8..16].copy_from_slice(&0b101010_u64.to_le_bytes());
+        state[24..32].copy_from_slice(&0b101_u64.to_le_bytes());
+        assert_eq!(unsafe { code.call(&mut state) }, 0);
+        assert_eq!(u64::from_le_bytes(state[16..24].try_into().unwrap()), 0b100);
+        assert_eq!(
+            u64::from_le_bytes(state[32..40].try_into().unwrap()),
+            0b100010
+        );
     }
 
     #[cfg(target_arch = "aarch64")]
