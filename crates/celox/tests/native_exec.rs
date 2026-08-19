@@ -16,6 +16,15 @@ fn native_compilation_can_be_initialized_later() {
 
     let compilation = Simulator::builder(code, "Top").compile_native().unwrap();
     assert!(compilation.warnings().is_empty());
+    assert!(!compilation.program_image().code_image().is_empty());
+
+    let directory = tempfile::tempdir().unwrap();
+    let image_path = directory.path().join("top.native-image");
+    compilation.write_image(&image_path).unwrap();
+    let image =
+        celox::NativeProgramImage::from_container_bytes(&std::fs::read(&image_path).unwrap())
+            .unwrap();
+    assert_eq!(image.code_image(), compilation.program_image().code_image());
 
     let mut sim = compilation.initialize().unwrap();
     assert_eq!(sim.get(sim.signal("o")), 0x5au64.into());

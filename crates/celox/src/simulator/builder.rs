@@ -879,8 +879,8 @@ mod host {
         pub dead_store_policy: DeadStorePolicy,
     }
 
-    /// A fully code-generated native simulator that has not run any simulator
-    /// initialization yet.
+    /// A code-generated native program that has not been loaded into
+    /// executable memory or initialized as a simulator yet.
     ///
     /// Keeping compilation separate from initialization lets compiler-only
     /// clients stop after native code generation without applying initial
@@ -891,7 +891,7 @@ mod host {
     ))]
     #[must_use]
     pub struct NativeCompilation {
-        backend: crate::backend::native::NativeBackend,
+        image: crate::backend::native::NativeProgramImage,
         program: LaidOutProgram,
         warnings: Vec<CompilationWarning>,
         options: SimulatorOptions,
@@ -909,18 +909,39 @@ mod host {
             &self.warnings
         }
 
-        /// Allocate and initialize the runtime state for this compiled artifact.
+        /// Pointer-free native machine-code artifact produced by this build.
+        pub fn program_image(&self) -> &crate::backend::native::NativeProgramImage {
+            &self.image
+        }
+
+        /// Consume the compilation and return its pointer-free native image.
+        pub fn into_program_image(self) -> crate::backend::native::NativeProgramImage {
+            self.image
+        }
+
+        /// Write the generated native image as a standalone binary container.
+        pub fn write_image(
+            &self,
+            output_path: impl AsRef<std::path::Path>,
+        ) -> Result<(), crate::backend::native::NativeImageContainerError> {
+            self.image.write_container(output_path)
+        }
+
+        /// Load the image into executable memory and initialize runtime state.
         pub fn initialize(
             self,
         ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
             let Self {
-                backend,
+                image,
                 program,
                 warnings,
                 options,
                 vcd_path,
                 injected_components,
             } = self;
+            // Safety: the image was produced by `compile_native` in this
+            // process and has not crossed an untrusted input boundary.
+            let backend = unsafe { crate::backend::native::NativeBackend::from_image(image)? };
             let mut sim =
                 Simulator::with_backend_and_program(backend, program.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
@@ -1574,12 +1595,12 @@ mod host {
                 );
             }
             let backend_start = phase_timing.then(crate::timing::now);
-            let backend = crate::backend::native::NativeBackend::new(&laid_out, &options)?;
+            let image = crate::backend::native::NativeBackend::compile_image(&laid_out, &options)?;
             if let Some(start) = backend_start {
-                tracing::debug!("[phase-timing] native_backend: {:?}", start.elapsed());
+                tracing::debug!("[phase-timing] native_codegen: {:?}", start.elapsed());
             }
             Ok(NativeCompilation {
-                backend,
+                image,
                 program: laid_out,
                 warnings,
                 options,

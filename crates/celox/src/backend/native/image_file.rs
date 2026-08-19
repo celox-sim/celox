@@ -95,6 +95,15 @@ impl NativeProgramImage {
         self.append_to_runtime(&[])
     }
 
+    /// Write this image as a standalone versioned binary container.
+    pub fn write_container(
+        &self,
+        output_path: impl AsRef<Path>,
+    ) -> Result<(), NativeImageContainerError> {
+        std::fs::write(output_path, self.to_container_bytes()?)?;
+        Ok(())
+    }
+
     /// Append this image to an existing precompiled runtime byte sequence.
     ///
     /// The runtime bytes are copied verbatim. A fixed-size trailer at EOF lets

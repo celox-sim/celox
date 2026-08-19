@@ -1924,14 +1924,27 @@ impl NativeBackend {
         Ok(image)
     }
 
+    /// Load a compiler-produced image into executable memory and create a
+    /// backend instance for it.
+    ///
+    /// # Safety
+    ///
+    /// The image's machine code must come from a trusted compiler or image
+    /// container. Structural validation does not authenticate code before it
+    /// is mapped executable and invoked.
+    pub unsafe fn from_image(image: NativeProgramImage) -> Result<Self, SimulatorError> {
+        // Safety: upheld by this constructor's caller.
+        let shared = Arc::new(unsafe { SharedNativeCode::from_image(image)? });
+        Ok(Self::from_shared(shared))
+    }
+
     pub fn new(
         laid_out: &LaidOutProgram,
         options: &SimulatorOptions,
     ) -> Result<Self, SimulatorError> {
         let image = Self::compile_image(laid_out, options)?;
         // Safety: `image` was produced in-process by the Celox compiler above.
-        let shared = Arc::new(unsafe { SharedNativeCode::from_image(image)? });
-        Ok(Self::from_shared(shared))
+        unsafe { Self::from_image(image) }
     }
 
     pub(crate) fn new_with_codegen_trace(
