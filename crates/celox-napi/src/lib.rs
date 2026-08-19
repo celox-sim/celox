@@ -1568,6 +1568,47 @@ impl NativeSimulatorHandle {
         })
     }
 
+    /// Create a WASM-oriented handle from a versioned external-frontend artifact.
+    #[napi(factory)]
+    pub fn from_frontend_artifact(
+        artifact_json: String,
+        options: Option<NapiOptions>,
+    ) -> Result<Self> {
+        let opts = parse_options_common(&options)?;
+        let artifact = celox::FrontendArtifact::from_json(&artifact_json)
+            .map_err(|error| Error::from_reason(error.to_string()))?;
+        let trace_opts = celox::TraceOptions::default();
+        let (program, warnings) = celox::compile_frontend_to_sir(
+            &artifact,
+            &opts.false_loops,
+            &opts.true_loops,
+            opts.four_state,
+            &trace_opts,
+            None,
+            &opts.optimize_options,
+        )
+        .map_err(|error| Error::from_reason(error.to_string()))?;
+
+        let laid_out = program.into_laid_out(opts.four_state);
+        let layout = laid_out.layout();
+        let layout_json = Self::build_layout_json(&laid_out, layout, opts.four_state);
+        let events_json = Self::build_events_json(&laid_out);
+        let warnings_json = format_warnings_json(&warnings);
+        let stable_size = layout.total_size as u32;
+        let total_size = layout.merged_total_size as u32;
+
+        Ok(Self {
+            program: laid_out,
+            four_state: opts.four_state,
+            layout_json,
+            events_json,
+            hierarchy_json: "{}".to_string(),
+            warnings_json,
+            stable_size,
+            total_size,
+        })
+    }
+
     /// Create a new simulator from a Veryl project directory.
     #[napi(factory)]
     pub fn from_project(

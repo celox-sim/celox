@@ -4,6 +4,8 @@
 //! frontend parses and elaborates its input, constructs a [`FrontendArtifact`],
 //! and hands that artifact to the public `celox` compiler API.
 
+use std::collections::BTreeMap;
+
 use fxhash::FxHashMap;
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
@@ -165,9 +167,14 @@ pub struct Constant {
 impl Constant {
     pub fn new(payload: BigUint, mask: BigUint, value_type: ValueType) -> Self {
         let bit_mask = (BigUint::from(1u8) << value_type.width()) - BigUint::from(1u8);
+        let mask = if value_type.is_four_state() {
+            mask & &bit_mask
+        } else {
+            BigUint::default()
+        };
         Self {
             payload: payload & &bit_mask,
-            mask: mask & bit_mask,
+            mask,
             value_type,
         }
     }
@@ -203,6 +210,37 @@ impl Constant {
     pub const fn value_type(&self) -> ValueType {
         self.value_type
     }
+}
+
+fn signal_name_prefixes(name: &str) -> impl Iterator<Item = &str> {
+    name.match_indices('.').map(|(index, _)| &name[..index])
+}
+
+fn insert_driver_target(
+    driver_ranges: &mut FxHashMap<SignalId, BTreeMap<usize, usize>>,
+    target: SignalSlice,
+    signal_name: &str,
+) -> Result<(), BuildError> {
+    let end = target.lsb + target.width;
+    let ranges = driver_ranges.entry(target.signal).or_default();
+    if ranges
+        .range(..end)
+        .next_back()
+        .is_some_and(|(_, existing_end)| *existing_end > target.lsb)
+    {
+        return Err(BuildError::OverlappingDrivers {
+            name: signal_name.to_string(),
+        });
+    }
+    ranges.insert(target.lsb, end);
+    Ok(())
+}
+
+fn validate_constant_state(value: &Constant) -> Result<(), BuildError> {
+    if !value.value_type().is_four_state() && value.mask() != &BigUint::default() {
+        return Err(BuildError::TwoStateConstantMask);
+    }
+    Ok(())
 }
 
 /// Binary operation in the frontend expression vocabulary.
@@ -440,7 +478,8 @@ impl FrontendArtifact {
         if self.module_name.is_empty() {
             return Err(BuildError::EmptyModuleName);
         }
-        let mut names = FxHashMap::default();
+        let mut names: FxHashMap<String, SignalId> = FxHashMap::default();
+        let mut namespace_prefixes: FxHashMap<String, String> = FxHashMap::default();
         for (index, signal) in self.signals.iter().enumerate() {
             if signal.id.index() as usize != index {
                 return Err(BuildError::InvalidSignalIdentity {
@@ -456,19 +495,40 @@ impl FrontendArtifact {
                     name: signal.name.clone(),
                 });
             }
-            if names.insert(signal.name.clone(), signal.id).is_some() {
+            if names.contains_key(&signal.name) {
                 return Err(BuildError::DuplicateSignal(signal.name.clone()));
+            }
+            if let Some(existing) = namespace_prefixes.get(&signal.name) {
+                return Err(BuildError::SignalNamespaceCollision {
+                    first: existing.clone(),
+                    second: signal.name.clone(),
+                });
+            }
+            if let Some(existing) =
+                signal_name_prefixes(&signal.name).find(|prefix| names.contains_key(*prefix))
+            {
+                return Err(BuildError::SignalNamespaceCollision {
+                    first: existing.to_string(),
+                    second: signal.name.clone(),
+                });
+            }
+            names.insert(signal.name.clone(), signal.id);
+            for prefix in signal_name_prefixes(&signal.name) {
+                namespace_prefixes
+                    .entry(prefix.to_string())
+                    .or_insert_with(|| signal.name.clone());
             }
             if signal.value_type.width() == 0 {
                 return Err(BuildError::ZeroWidth);
             }
-            if let Some(initial) = &signal.initial
-                && initial.value_type().width() != signal.value_type.width()
-            {
-                return Err(BuildError::WidthMismatch {
-                    expected: signal.value_type.width(),
-                    actual: initial.value_type().width(),
-                });
+            if let Some(initial) = &signal.initial {
+                validate_constant_state(initial)?;
+                if initial.value_type().width() != signal.value_type.width() {
+                    return Err(BuildError::WidthMismatch {
+                        expected: signal.value_type.width(),
+                        actual: initial.value_type().width(),
+                    });
+                }
             }
         }
         let validate_slice = |slice: SignalSlice| -> Result<(), BuildError> {
@@ -505,6 +565,7 @@ impl FrontendArtifact {
             match &expression.node {
                 ExprNode::Signal(slice) => validate_slice(*slice)?,
                 ExprNode::Constant(value) => {
+                    validate_constant_state(value)?;
                     if value.value_type().width() != expression.value_type.width() {
                         return Err(BuildError::WidthMismatch {
                             expected: expression.value_type.width(),
@@ -542,7 +603,51 @@ impl FrontendArtifact {
                     condition,
                     then_expr,
                     else_expr,
-                } => references.extend([*condition, *then_expr, *else_expr]),
+                } => {
+                    for reference in [*condition, *then_expr, *else_expr] {
+                        if reference.index() as usize >= index {
+                            return Err(BuildError::ForwardExpressionReference {
+                                expression: expression.id.index(),
+                                referenced: reference.index(),
+                            });
+                        }
+                    }
+                    let condition_type = self
+                        .expression(*condition)
+                        .ok_or(BuildError::UnknownExpression(condition.index()))?
+                        .value_type();
+                    if condition_type.width() != 1 {
+                        return Err(BuildError::WidthMismatch {
+                            expected: 1,
+                            actual: condition_type.width(),
+                        });
+                    }
+                    let then_type = self
+                        .expression(*then_expr)
+                        .ok_or(BuildError::UnknownExpression(then_expr.index()))?
+                        .value_type();
+                    let else_type = self
+                        .expression(*else_expr)
+                        .ok_or(BuildError::UnknownExpression(else_expr.index()))?
+                        .value_type();
+                    if then_type.width() != else_type.width() {
+                        return Err(BuildError::WidthMismatch {
+                            expected: then_type.width(),
+                            actual: else_type.width(),
+                        });
+                    }
+                    let expected_type = ValueType {
+                        width: then_type.width(),
+                        signed: then_type.is_signed() && else_type.is_signed(),
+                        four_state: then_type.is_four_state() || else_type.is_four_state(),
+                    };
+                    if expression.value_type() != expected_type {
+                        return Err(BuildError::TypeMismatch {
+                            expected: expected_type,
+                            actual: expression.value_type(),
+                        });
+                    }
+                }
                 ExprNode::Concat(parts) => references.extend(parts),
             }
             for reference in references {
@@ -554,6 +659,7 @@ impl FrontendArtifact {
                 }
             }
         }
+        let mut driver_ranges = FxHashMap::default();
         for assignment in &self.assignments {
             validate_slice(assignment.target)?;
             let expression = self
@@ -565,6 +671,10 @@ impl FrontendArtifact {
                     actual: expression.value_type.width(),
                 });
             }
+            let signal = self
+                .signal(assignment.target.signal)
+                .ok_or(BuildError::UnknownSignal(assignment.target.signal.index()))?;
+            insert_driver_target(&mut driver_ranges, assignment.target, &signal.name)?;
         }
         for register in &self.registers {
             validate_slice(register.target)?;
@@ -609,13 +719,29 @@ impl FrontendArtifact {
                     });
                 }
             }
+            insert_driver_target(&mut driver_ranges, register.target, &target.name)?;
         }
+        let mut ordered_ports = FxHashMap::default();
         for signal in &self.port_order {
             let signal = self
                 .signal(*signal)
                 .ok_or(BuildError::UnknownSignal(signal.index()))?;
             if matches!(signal.direction, Direction::Internal) {
                 return Err(BuildError::InternalSignalInPortOrder {
+                    name: signal.name.clone(),
+                });
+            }
+            if ordered_ports.insert(signal.id, ()).is_some() {
+                return Err(BuildError::DuplicatePortOrder {
+                    name: signal.name.clone(),
+                });
+            }
+        }
+        for signal in &self.signals {
+            if !matches!(signal.direction, Direction::Internal)
+                && !ordered_ports.contains_key(&signal.id)
+            {
+                return Err(BuildError::MissingPortOrder {
                     name: signal.name.clone(),
                 });
             }
@@ -676,6 +802,11 @@ pub enum BuildError {
     },
     #[error("width mismatch: expected {expected}, got {actual}")]
     WidthMismatch { expected: usize, actual: usize },
+    #[error("type mismatch: expected {expected:?}, got {actual:?}")]
+    TypeMismatch {
+        expected: ValueType,
+        actual: ValueType,
+    },
     #[error("control signal `{name}` must be one bit wide")]
     InvalidControlWidth { name: String },
     #[error("register target `{name}` must cover the complete signal")]
@@ -692,6 +823,16 @@ pub enum BuildError {
     ForwardExpressionReference { expression: u32, referenced: u32 },
     #[error("internal signal `{name}` appears in the module port order")]
     InternalSignalInPortOrder { name: String },
+    #[error("signal `{name}` appears more than once in the module port order")]
+    DuplicatePortOrder { name: String },
+    #[error("public signal `{name}` is missing from the module port order")]
+    MissingPortOrder { name: String },
+    #[error("signal `{name}` has overlapping continuous or register drivers")]
+    OverlappingDrivers { name: String },
+    #[error("two-state constants cannot contain X/Z mask bits")]
+    TwoStateConstantMask,
+    #[error("signal names `{first}` and `{second}` collide in the DUT namespace")]
+    SignalNamespaceCollision { first: String, second: String },
     #[error("inout signal `{name}` is not supported by frontend artifact format version 1")]
     UnsupportedInout { name: String },
 }
@@ -712,9 +853,11 @@ pub struct ModuleBuilder {
     name: String,
     signals: Vec<Signal>,
     signal_names: FxHashMap<String, SignalId>,
+    signal_namespace_prefixes: FxHashMap<String, String>,
     expressions: Vec<Expression>,
     assignments: Vec<Assignment>,
     registers: Vec<Register>,
+    driver_ranges: FxHashMap<SignalId, BTreeMap<usize, usize>>,
     port_order: Vec<SignalId>,
 }
 
@@ -728,9 +871,11 @@ impl ModuleBuilder {
             name,
             signals: Vec::new(),
             signal_names: FxHashMap::default(),
+            signal_namespace_prefixes: FxHashMap::default(),
             expressions: Vec::new(),
             assignments: Vec::new(),
             registers: Vec::new(),
+            driver_ranges: FxHashMap::default(),
             port_order: Vec::new(),
         })
     }
@@ -751,8 +896,27 @@ impl ModuleBuilder {
         if self.signal_names.contains_key(&name) {
             return Err(BuildError::DuplicateSignal(name));
         }
+        if let Some(existing) = self.signal_namespace_prefixes.get(&name) {
+            return Err(BuildError::SignalNamespaceCollision {
+                first: existing.clone(),
+                second: name,
+            });
+        }
+        if let Some(existing) =
+            signal_name_prefixes(&name).find(|prefix| self.signal_names.contains_key(*prefix))
+        {
+            return Err(BuildError::SignalNamespaceCollision {
+                first: existing.to_string(),
+                second: name.clone(),
+            });
+        }
         let id = SignalId(self.signals.len() as u32);
         self.signal_names.insert(name.clone(), id);
+        for prefix in signal_name_prefixes(&name) {
+            self.signal_namespace_prefixes
+                .entry(prefix.to_string())
+                .or_insert_with(|| name.clone());
+        }
         self.signals.push(Signal {
             id,
             name,
@@ -960,6 +1124,7 @@ impl ModuleBuilder {
                 actual: value_width,
             });
         }
+        self.record_driver_target(target)?;
         self.assignments.push(Assignment { target, value });
         Ok(())
     }
@@ -1001,6 +1166,7 @@ impl ModuleBuilder {
         if let Some(enable) = enable {
             self.validate_control(enable.signal)?;
         }
+        self.record_driver_target(target)?;
         self.registers.push(Register {
             target,
             next,
@@ -1083,6 +1249,11 @@ impl ModuleBuilder {
             });
         }
         Ok(())
+    }
+
+    fn record_driver_target(&mut self, target: SignalSlice) -> Result<(), BuildError> {
+        let signal_name = self.signal_info(target.signal)?.name.clone();
+        insert_driver_target(&mut self.driver_ranges, target, &signal_name)
     }
 
     fn push_expr(&mut self, node: ExprNode, value_type: ValueType) -> ExprId {
@@ -1171,6 +1342,143 @@ mod tests {
                 width: 4,
                 signal_width: 8,
             })
+        ));
+    }
+
+    #[test]
+    fn rejects_overlapping_register_and_assignment_drivers() {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("DriverConflict").unwrap();
+        let clock = module.input("clock", bit).unwrap();
+        let d = module.input("d", bit).unwrap();
+        let q = module.output("q", bit).unwrap();
+        let d_expr = module.read(d).unwrap();
+        let q_target = module.whole(q).unwrap();
+        module.assign(q_target, d_expr).unwrap();
+        let error = module
+            .register(q_target, d_expr, clock, Edge::Posedge, None, None)
+            .unwrap_err();
+        assert!(matches!(error, BuildError::OverlappingDrivers { .. }));
+
+        let mut module = ModuleBuilder::new("DuplicateRegisterJson").unwrap();
+        let clock = module.input("clock", bit).unwrap();
+        let d = module.input("d", bit).unwrap();
+        let q = module.output("q", bit).unwrap();
+        let d_expr = module.read(d).unwrap();
+        let q_target = module.whole(q).unwrap();
+        module
+            .register(q_target, d_expr, clock, Edge::Posedge, None, None)
+            .unwrap();
+        let mut json = serde_json::to_value(module.finish()).unwrap();
+        let duplicate = json["registers"][0].clone();
+        json["registers"].as_array_mut().unwrap().push(duplicate);
+        let error = FrontendArtifact::from_json(&json.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::OverlappingDrivers { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_incomplete_or_duplicate_json_port_order() {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("PortOrder").unwrap();
+        module.input("a", bit).unwrap();
+        module.output("b", bit).unwrap();
+        let artifact = module.finish();
+
+        let mut duplicate = serde_json::to_value(&artifact).unwrap();
+        duplicate["port_order"] = serde_json::json!([0, 0]);
+        let error = FrontendArtifact::from_json(&duplicate.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::DuplicatePortOrder { .. })
+        ));
+
+        let mut missing = serde_json::to_value(&artifact).unwrap();
+        missing["port_order"] = serde_json::json!([0]);
+        let error = FrontendArtifact::from_json(&missing.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::MissingPortOrder { .. })
+        ));
+    }
+
+    #[test]
+    fn revalidates_mux_types_from_json() {
+        let bit = ValueType::bits(1).unwrap();
+        let byte = ValueType::bits(8).unwrap();
+        let mut module = ModuleBuilder::new("MuxJson").unwrap();
+        let condition = module.input("condition", bit).unwrap();
+        let a = module.input("a", byte).unwrap();
+        let b = module.input("b", byte).unwrap();
+        let condition = module.read(condition).unwrap();
+        let a = module.read(a).unwrap();
+        let b = module.read(b).unwrap();
+        module.mux(condition, a, b).unwrap();
+        let artifact = module.finish();
+
+        let mut wide_condition = serde_json::to_value(&artifact).unwrap();
+        wide_condition["expressions"][3]["node"]["Mux"]["condition"] = 1.into();
+        let error = FrontendArtifact::from_json(&wide_condition.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::WidthMismatch {
+                expected: 1,
+                actual: 8,
+            })
+        ));
+
+        let mut wrong_result = serde_json::to_value(&artifact).unwrap();
+        wrong_result["expressions"][3]["value_type"]["width"] = 4.into();
+        let error = FrontendArtifact::from_json(&wrong_result.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::TypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn normalizes_two_state_constant_masks_and_rejects_them_in_json() {
+        let byte = ValueType::bits(8).unwrap();
+        let value = Constant::new(BigUint::from(0xa5u8), BigUint::from(0xffu8), byte);
+        assert_eq!(value.mask(), &BigUint::default());
+
+        let mut module = ModuleBuilder::new("ConstantMaskJson").unwrap();
+        module.constant(value);
+        let mut json = serde_json::to_value(module.finish()).unwrap();
+        json["expressions"][0]["node"]["Constant"]["mask"] =
+            serde_json::to_value(BigUint::from(1u8)).unwrap();
+        let error = FrontendArtifact::from_json(&json.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::TwoStateConstantMask)
+        ));
+    }
+
+    #[test]
+    fn rejects_signal_namespace_prefix_collisions() {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("NamespaceBuilder").unwrap();
+        module.input("bus", bit).unwrap();
+        let error = module.input("bus.member", bit).unwrap_err();
+        assert!(matches!(error, BuildError::SignalNamespaceCollision { .. }));
+
+        let mut reverse = ModuleBuilder::new("ReverseNamespaceBuilder").unwrap();
+        reverse.input("bus.member", bit).unwrap();
+        let error = reverse.input("bus", bit).unwrap_err();
+        assert!(matches!(error, BuildError::SignalNamespaceCollision { .. }));
+
+        let mut module = ModuleBuilder::new("NamespaceJson").unwrap();
+        module.input("first", bit).unwrap();
+        module.input("second", bit).unwrap();
+        let mut json = serde_json::to_value(module.finish()).unwrap();
+        json["signals"][0]["name"] = "bus".into();
+        json["signals"][1]["name"] = "bus.member".into();
+        let error = FrontendArtifact::from_json(&json.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::SignalNamespaceCollision { .. })
         ));
     }
 }

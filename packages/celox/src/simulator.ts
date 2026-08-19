@@ -271,15 +271,31 @@ export class Simulator<P = Record<string, unknown>> {
 			artifactJson,
 			buildNapiOpts(options),
 		);
-		const layout = parseNapiLayout(raw.layoutJson);
+		const isWasm = isWasmHandle(raw);
+		const layout =
+			isWasm && options?.fourState
+				? recoverWasmFourStateLayout(parseNapiLayout(raw.layoutJson))
+				: parseNapiLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
 		const hierarchy = filterHierarchyForDse(
 			parseHierarchyLayout(raw.hierarchyJson, events),
 			options?.deadStorePolicy,
 		);
-		const ports = buildPortsFromLayout(hierarchy.signals, events);
-		const buffer = raw.sharedMemory!().buffer;
-		const handle = wrapDirectSimulatorHandle(raw);
+		const hasHierarchySignals = Object.keys(hierarchy.signals).length > 0;
+		const ports = hasHierarchySignals
+			? buildPortsFromLayout(hierarchy.signals, events)
+			: buildPortsFromLayout(layout.signals, events);
+
+		let buffer: ArrayBuffer | SharedArrayBuffer;
+		let handle: NativeSimulatorHandle;
+		if (isWasm) {
+			const bridge = createWasmSimulatorBridge(raw);
+			buffer = bridge.sharedMemory.buffer;
+			handle = bridge.handle;
+		} else {
+			buffer = raw.sharedMemory!().buffer;
+			handle = wrapDirectSimulatorHandle(raw);
+		}
 		const state: DirtyState = { dirty: false };
 		const dut = createDut<P>(
 			buffer,
@@ -287,7 +303,7 @@ export class Simulator<P = Record<string, unknown>> {
 			ports,
 			handle,
 			state,
-			hierarchy,
+			hasHierarchySignals ? hierarchy : undefined,
 		);
 		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
 		return new Simulator<P>(
