@@ -225,6 +225,7 @@ module Top (
 all_backends! {
 
 fn test_large_scc_dynamic_loop_convergence(sim) {
+    @ignore_on(sv);
     @setup {
     let chain_size = 20;
     let mut assignments = String::new();

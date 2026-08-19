@@ -123,6 +123,7 @@ fn axl_read(sim: &mut Simulator, addr: u32) -> u32 {
 all_backends! {
 
     fn fill_one_literal_multi_branch(sim) {
+        @ignore_on(sv);
         @setup { // Verify '1 fill-literal: unwritten bits should be 1, not 0.
 let code = r#"
 module Top (

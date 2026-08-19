@@ -78,6 +78,7 @@ proptest   = "1.10"
 test-case  = "3"
 tempfile.workspace = true
 veryl-std = { workspace = true }
+veryl-emitter = { workspace = true }
 veryl-simulator = { workspace = true }
 
 [[bench]]

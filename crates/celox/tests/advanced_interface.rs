@@ -8,6 +8,7 @@ all_backends! {
 
     // Interface with multiple modport signals and bidirectional data flow.
     fn test_interface_bidirectional(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 interface Handshake {
 var req:  logic;
@@ -87,6 +88,7 @@ got:  got,
 
     // Multiple interface instances used in parallel.
     fn test_multiple_interface_instances(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 interface DataBus {
 var data: logic<8>;
@@ -149,6 +151,7 @@ inst r1: Reader (bus: bus1, out: o1);
 
     // Interface with wide (multi-bit) signals.
     fn test_interface_wide_signal(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 interface WideBus {
 var data: logic<32>;
@@ -200,6 +203,7 @@ inst dst_inst: Sink   (bus: wb, out: out);
     // Parametric interface array: verify array_dims are populated for parametric-type members.
     fn test_parametric_interface_array(sim) {
         @omit_veryl;
+        @ignore_on(sv);
         @setup { let code = r#"
 interface Bus::<T: type> {
 var data:  T;
@@ -250,6 +254,7 @@ assign out = bus[0].data + bus[1].data;
     // Tests that generic type parameters are correctly propagated across multiple
     // levels of the module hierarchy (a pattern that has been buggy in the past).
     fn test_transitive_generics(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 interface DataBus::<T: type> {
 var data: T;

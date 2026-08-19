@@ -7,6 +7,7 @@ mod test_utils;
 all_backends! {
 
     fn test_enum_case_match(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 sel: input logic<2>,
@@ -46,6 +47,7 @@ default:     o = 8'h01;
     }
 
     fn test_enum_ff_state_machine(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 clk:   input clock,
@@ -123,6 +125,7 @@ assign state_out = state;
     // Enum-typed variables can be assigned from logic inputs
     // and compared against enum members.
     fn test_enum_assign_and_compare(sim) {
+        @ignore_on(sv);
         @setup {
             let code = r#"
         module Top (

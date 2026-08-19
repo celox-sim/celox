@@ -706,6 +706,7 @@ assign o = a >> amt;
     // Without padding, load_or_default reads uninitialised memory beyond the
     // source slot, producing garbage in the upper chunks.
     fn test_narrow_source_wide_dest_shift_left(sim) {
+        @ignore_on(sv);
         @setup { // dst is 512-bit (8 chunks), lhs is 256-bit (4 chunks).
 // common_logical_width = max(512, 256, 64) = 512 → num_chunks = 8.
 // Source slot must be 8 chunks with chunks 4..7 zeroed.
@@ -751,6 +752,7 @@ assign o = (a as 512) << amt;
     }
 
     fn test_narrow_source_wide_dest_shift_right(sim) {
+        @ignore_on(sv);
         @setup { // dst is 512-bit, lhs is 256-bit (cast up).
 // Right-shifting should see zeros in the upper chunks, not garbage.
 let code = r#"

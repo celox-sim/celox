@@ -461,6 +461,7 @@ dependencies = [
  "tracing",
  "veryl-analyzer",
  "veryl-component-sys",
+ "veryl-emitter",
  "veryl-metadata",
  "veryl-parser",
  "veryl-path",

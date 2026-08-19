@@ -7,6 +7,7 @@ mod test_utils;
 all_backends! {
 
     fn test_struct_constructor_comb_assignment(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 a: input logic<4>,
@@ -38,6 +39,7 @@ o = S'{x: a, y: b};
     }
 
     fn test_struct_constructor_member_width_adjustment(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 module Top (
 narrow: input logic<4>,

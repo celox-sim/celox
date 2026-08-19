@@ -44,6 +44,7 @@ module BramTdp #(
 all_backends! {
 
 fn bram_rewrite_no_corruption_all_opts(sim) {
+    @ignore_on(sv);
     @build Simulator::builder(BRAM_CODE, "BramTdp")
         .optimize_options(OptimizeOptions::all());
 
@@ -117,6 +118,7 @@ fn bram_rewrite_no_corruption_all_opts(sim) {
 }
 
 fn bram_rewrite_no_corruption_no_opts(sim) {
+    @ignore_on(sv);
     @build Simulator::builder(BRAM_CODE, "BramTdp")
         .optimize_options(OptimizeOptions::none());
 

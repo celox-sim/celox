@@ -7,6 +7,7 @@ mod test_utils;
 all_backends! {
     fn type_cast_clears_unknown_bits_in_comb_and_ff(sim) {
         @omit_veryl;
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -87,6 +88,7 @@ module Top (
 
     fn constant_type_cast_clears_unknown_bits(sim) {
         @omit_veryl;
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -120,6 +122,7 @@ module Top (
 
     fn function_formal_type_clears_unknown_bits(sim) {
         @omit_veryl;
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -158,6 +161,7 @@ module Top (
     }
 
     fn signed_four_state_function_formal_preserves_unknown_bits(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -198,7 +202,7 @@ module Top (
 
     fn implicit_assignment_to_bit_clears_unknowns_without_mutating_source(sim) {
         // Veryl 0.20.3 retains the X/Z mask when assigning logic to bit.
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,

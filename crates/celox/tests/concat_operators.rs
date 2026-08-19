@@ -143,7 +143,7 @@ assign o = {(if sel ? a : b), (if !sel ? a : b)};
     }
 
     fn test_as_cast_in_concat(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @setup { let code = r#"
 module Top (
 a: input logic<16>,

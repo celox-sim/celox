@@ -33,7 +33,7 @@ module Top (
     }
 
     fn test_comb_function_body_onehot_system_function(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -66,6 +66,7 @@ module Top (
     }
 
     fn test_direct_comb_bits_system_function(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -82,7 +83,7 @@ module Top (
     }
 
     fn test_direct_comb_size_system_function(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @build Simulator::builder(r#"
 module Top (
     d: input logic<8>[4],
@@ -127,7 +128,7 @@ module Top (
     }
 
     fn test_comb_function_body_clog2_system_function(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -161,7 +162,7 @@ module Top (
     }
 
     fn test_comb_function_body_bits_size_system_functions(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @build Simulator::builder(r#"
 module Top (
     d: input logic<8>[4],
@@ -194,6 +195,7 @@ module Top (
     }
 
     fn test_direct_comb_signed_system_function_sign_extends_to_context(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -213,6 +215,7 @@ module Top (
     }
 
     fn test_direct_comb_unsigned_system_function_zero_extends_to_context(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -232,7 +235,7 @@ module Top (
     }
 
     fn test_direct_comb_signed_unsigned_system_functions_affect_comparison(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -262,6 +265,7 @@ module Top (
     }
 
     fn test_comb_function_body_signed_unsigned_system_functions(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     d: input logic<8>,
@@ -297,6 +301,7 @@ module Top (
     }
 
     fn test_direct_comb_bits_type_system_function(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     q: output logic<32>,
@@ -312,6 +317,7 @@ module Top (
     }
 
     fn test_direct_ff_bits_system_function(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -332,6 +338,7 @@ module Top (
     }
 
     fn test_direct_ff_bits_type_system_function(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -351,7 +358,7 @@ module Top (
     }
 
     fn test_direct_ff_bits_array_system_function(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -372,7 +379,7 @@ module Top (
     }
 
     fn test_direct_ff_size_system_function(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -393,6 +400,7 @@ module Top (
     }
 
     fn test_direct_ff_size_type_system_function(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -484,7 +492,7 @@ module Top (
     }
 
     fn test_ff_function_body_clog2_system_function(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -521,6 +529,7 @@ module Top (
     }
 
     fn test_direct_ff_signed_system_function(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -543,6 +552,7 @@ module Top (
     }
 
     fn test_direct_ff_signed_system_function_sign_extends_to_context(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -565,6 +575,7 @@ module Top (
     }
 
     fn test_direct_ff_unsigned_system_function(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -587,6 +598,7 @@ module Top (
     }
 
     fn test_direct_ff_unsigned_system_function_zero_extends_to_context(sim) {
+        @ignore_on(sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,
@@ -639,7 +651,7 @@ module Top (
     }
 
     fn test_ff_function_body_onehot_system_function(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @build Simulator::builder(r#"
 module Top (
     clk: input clock,

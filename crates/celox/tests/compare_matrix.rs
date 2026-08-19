@@ -239,6 +239,7 @@ all_backends! {
     // Tests that two different packages can instantiate the same generic module,
     // each getting a unique ModuleId.
     fn test_generic_module_instantiation(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 proto package DataType {
 type data;
@@ -303,6 +304,7 @@ inst wp: WordPass (i: c, o: d);
 
     // Tests proto package function resolution (E::gt → IntElement::gt).
     fn test_proto_function_basic(sim) {
+        @ignore_on(sv);
         @setup { let code = r#"
 proto package Element {
 type data;
@@ -360,6 +362,7 @@ inst inner: GenericCompare::<IntElement> (a, b, r);
 
     // Tests proto constant (E::max_value) resolution.
     fn test_proto_const_max_value(sim) {
+        @ignore_on(sv);
         @setup { let code = format!(
 "{COMPARE_MATRIX_CODE}\n{}",
 r#"
@@ -388,7 +391,7 @@ inst t: TestConst::<IntElement> (out);
     // Tests the compare matrix scoring module (CompareMatrixStage1CM).
     // Input 4 values, verify scores reflect sorted order.
     fn test_compare_matrix_stage1cm(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @setup { let code = format!(
 "{COMPARE_MATRIX_CODE}\n{}",
 r#"
@@ -420,7 +423,7 @@ inst cm: CompareMatrixStage1CM::<IntElement> #(P: 4) (in_data, out_score);
 
     // Tests the compare matrix selector module (through wrapper, verifying parameter forwarding).
     fn test_compare_matrix_selector(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @setup { let top = r#"
 module Top #(
 param P: u32 = 4,
@@ -457,7 +460,7 @@ let code = format!("{COMPARE_MATRIX_CODE}\n{top}"); }
     // Tests full sorting via CompareMatrixStage1 (scoring + selection through wrapper chain).
     // Input unsorted values, output sorted ascending.
     fn test_compare_matrix_stage1_sort(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @setup { let top = r#"
 module Top #(
 param P: u32 = 4,
@@ -490,7 +493,7 @@ let code = format!("{COMPARE_MATRIX_CODE}\n{top}"); }
     // Tests the compare matrix merger.
     // Two sorted ascending arrays in, one merged sorted ascending array out.
     fn test_compare_matrix_merger(sim) {
-        @ignore_on(veryl);
+        @ignore_on(veryl, sv);
         @setup { let top = r#"
 module Top #(
 param A: u32 = 3,
