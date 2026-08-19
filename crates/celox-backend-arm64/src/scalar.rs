@@ -2623,6 +2623,8 @@ fn indexed_offset_cost(offset: i64, size: OpSize, store: bool) -> Option<usize> 
         Some(0)
     } else if add_sub_immediate(offset).is_some() {
         Some(1)
+    } else if add_sub_immediate_pair(offset).is_some() {
+        Some(2)
     } else {
         None
     }
@@ -2714,6 +2716,8 @@ fn address_materialization_cost(offset: i64) -> usize {
         0
     } else if add_sub_immediate(offset).is_some() {
         1
+    } else if add_sub_immediate_pair(offset).is_some() {
+        2
     } else {
         move_wide_plan(offset as u64).instruction_count + 1
     }
@@ -2755,8 +2759,13 @@ fn emit_address_to(
     if offset == 0 {
         dynasm!(ops ; .arch aarch64 ; mov X(destination), X(base));
     } else if !emit_add_sub_immediate(ops, destination, base, offset) {
-        emit_load_imm(ops, SCRATCH1, offset as u64);
-        dynasm!(ops ; .arch aarch64 ; add X(destination), X(base), x17);
+        if let Some((high, low)) = add_sub_immediate_pair(offset) {
+            let _ = emit_add_sub_immediate(ops, destination, base, high);
+            let _ = emit_add_sub_immediate(ops, destination, destination, low);
+        } else {
+            emit_load_imm(ops, SCRATCH1, offset as u64);
+            dynasm!(ops ; .arch aarch64 ; add X(destination), X(base), x17);
+        }
     }
 }
 
@@ -2909,8 +2918,13 @@ fn indexed_address_shift(scale: u8, size: OpSize) -> Option<u32> {
 fn emit_add_offset(ops: &mut VecAssembler<Aarch64Relocation>, offset: i64) {
     if offset != 0 {
         if !emit_add_sub_immediate(ops, SCRATCH0, SCRATCH0, offset) {
-            emit_load_imm(ops, SCRATCH1, offset as u64);
-            dynasm!(ops ; .arch aarch64 ; add x16, x16, x17);
+            if let Some((high, low)) = add_sub_immediate_pair(offset) {
+                let _ = emit_add_sub_immediate(ops, SCRATCH0, SCRATCH0, high);
+                let _ = emit_add_sub_immediate(ops, SCRATCH0, SCRATCH0, low);
+            } else {
+                emit_load_imm(ops, SCRATCH1, offset as u64);
+                dynasm!(ops ; .arch aarch64 ; add x16, x16, x17);
+            }
         }
     }
 }
@@ -2928,6 +2942,19 @@ fn add_sub_immediate(offset: i64) -> Option<(bool, u32, bool)> {
         return Some((subtract, (magnitude / 0x1000) as u32, true));
     }
     None
+}
+
+fn add_sub_immediate_pair(offset: i64) -> Option<(i64, i64)> {
+    let magnitude = offset.unsigned_abs();
+    let high = magnitude & !0xfff;
+    let low = magnitude & 0xfff;
+    if high == 0 || low == 0 {
+        return None;
+    }
+    let sign = if offset < 0 { -1_i64 } else { 1_i64 };
+    let high = i64::try_from(high).ok()?.checked_mul(sign)?;
+    let low = i64::try_from(low).ok()?.checked_mul(sign)?;
+    (add_sub_immediate(high).is_some() && add_sub_immediate(low).is_some()).then_some((high, low))
 }
 
 fn add_sub_immediate_encoding(
@@ -3555,13 +3582,13 @@ mod tests {
             Vec::new(),
         );
         let multi_page_bases = select_state_base_pages(&multi_page, [27, 26, 25, 24]);
-        assert_eq!(multi_page_bases.primary, Some(69632));
-        assert_eq!(multi_page_bases.secondary[0], Some((27, 32768)));
+        assert_eq!(multi_page_bases.primary, Some(32768));
+        assert_eq!(multi_page_bases.secondary[0], Some((27, 69632)));
         assert_eq!(multi_page_bases.secondary[1], None);
         assert_eq!(
             select_memory_base(
                 crate::mir::BaseReg::SimState,
-                32784,
+                69648,
                 SCRATCH0,
                 crate::mir::OpSize::S64,
                 false,
@@ -3571,7 +3598,7 @@ mod tests {
         );
         assert_eq!(
             select_vector_memory_base(crate::mir::BaseReg::SimState, 69632, multi_page_bases),
-            (STATE_PAGE_REG, 0)
+            (27, 0)
         );
 
         let adjacent_pages = crate::mir::MFunction::new(
@@ -3745,6 +3772,9 @@ mod tests {
         assert_eq!(add_sub_immediate(4096), Some((false, 1, true)));
         assert_eq!(add_sub_immediate(-4096), Some((true, 1, true)));
         assert_eq!(add_sub_immediate(4097), None);
+        assert_eq!(add_sub_immediate_pair(0x123456), Some((0x123000, 0x456)));
+        assert_eq!(add_sub_immediate_pair(-0x123456), Some((-0x123000, -0x456)));
+        assert_eq!(address_materialization_cost(0x123456), 2);
         assert_eq!(
             add_sub_immediate_encoding(31, 1, -4095, true),
             Some(0xf13f_fc3f)
