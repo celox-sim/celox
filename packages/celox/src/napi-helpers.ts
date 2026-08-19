@@ -595,7 +595,7 @@ export function buildPortsFromLayout(
 	_events: Record<string, number>,
 ): Record<string, PortInfo> {
 	// Step 1: Build flat PortInfo for every signal name
-	const flat: Record<string, PortInfo> = {};
+	const flat = Object.create(null) as Record<string, PortInfo>;
 
 	for (const [name, sig] of Object.entries(signals)) {
 		const typeKind = sig.typeKind;
@@ -626,7 +626,7 @@ export function buildPortsFromLayout(
 	// Veryl interface ports are exactly one level deep, so "bus.data" → parent "bus",
 	// member "data". The parent entry receives an `interface` map of its members;
 	// the flat layout keys are kept as-is so createNestedDut can look them up.
-	const ports: Record<string, PortInfo> = {};
+	const ports = Object.create(null) as Record<string, PortInfo>;
 	const ifMaps = new Map<string, Record<string, PortInfo>>();
 
 	for (const [name, port] of Object.entries(flat)) {
@@ -639,7 +639,7 @@ export function buildPortsFromLayout(
 		const parentName = name.slice(0, dotIdx);
 		const memberName = name.slice(dotIdx + 1);
 		if (!ifMaps.has(parentName)) {
-			const ifMap: Record<string, PortInfo> = {};
+			const ifMap = Object.create(null) as Record<string, PortInfo>;
 			ifMaps.set(parentName, ifMap);
 			ports[parentName] = {
 				direction: "inout",

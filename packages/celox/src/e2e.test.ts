@@ -12,6 +12,7 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { readFourState } from "./dut.js";
 import {
+	buildPortsFromLayout,
 	createSimulatorBridge,
 	loadNativeAddon,
 	type NapiTestResult,
@@ -2209,6 +2210,30 @@ module Top (
     assign out = sig.data;
 }
 `;
+
+test("port layout maps preserve prototype-key signal names", () => {
+	const signal = {
+		offset: 0,
+		width: 1,
+		byteSize: 1,
+		is4state: false,
+		direction: "input" as const,
+		typeKind: "bit",
+	};
+	const signals = Object.fromEntries([
+		["__proto__", signal],
+		["bus.__proto__", { ...signal, offset: 1 }],
+	]);
+	const ports = buildPortsFromLayout(signals, {});
+
+	expect(Object.getPrototypeOf(ports)).toBeNull();
+	expect(Object.hasOwn(ports, "__proto__")).toBe(true);
+	expect(Reflect.get(ports, "__proto__")).toEqual(
+		expect.objectContaining({ type: "bit" }),
+	);
+	expect(Object.getPrototypeOf(ports.bus.interface)).toBeNull();
+	expect(Object.hasOwn(ports.bus.interface!, "__proto__")).toBe(true);
+});
 
 // A module that uses two instances connected via an interface so we can verify
 // that the hierarchy DUT also exposes nested accessors correctly.

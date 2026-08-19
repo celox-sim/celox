@@ -77,6 +77,74 @@ const INITIALIZED_ARTIFACT = JSON.stringify({
   port_order: [0],
 });
 
+const TWO_STATE_RESET_ARTIFACT = JSON.stringify({
+  format_version: 1,
+  module_name: "TwoStateReset",
+  signals: [
+    {
+      id: 0,
+      name: "reset",
+      direction: "Input",
+      value_type: { width: 1, signed: false, four_state: false },
+      initial: null,
+    },
+    {
+      id: 1,
+      name: "q",
+      direction: "Output",
+      value_type: { width: 1, signed: false, four_state: false },
+      initial: {
+        payload: [1],
+        mask: [],
+        value_type: { width: 1, signed: false, four_state: false },
+      },
+    },
+    {
+      id: 2,
+      name: "clock",
+      direction: "Input",
+      value_type: { width: 1, signed: false, four_state: false },
+      initial: null,
+    },
+  ],
+  expressions: [
+    {
+      id: 0,
+      node: {
+        Constant: {
+          payload: [],
+          mask: [],
+          value_type: { width: 1, signed: false, four_state: false },
+        },
+      },
+      value_type: { width: 1, signed: false, four_state: false },
+    },
+    {
+      id: 1,
+      node: {
+        Constant: {
+          payload: [1],
+          mask: [],
+          value_type: { width: 1, signed: false, four_state: false },
+        },
+      },
+      value_type: { width: 1, signed: false, four_state: false },
+    },
+  ],
+  assignments: [],
+  registers: [
+    {
+      target: { signal: 1, lsb: 0, width: 1 },
+      next: 1,
+      clock: 2,
+      edge: "Posedge",
+      async_reset: { signal: 0, active: "High", value: 0 },
+      enable: null,
+    },
+  ],
+  port_order: [0, 1, 2],
+});
+
 const isWasm =
   !!process.env.NAPI_RS_WASI_FLAVOR ||
   process.env.NAPI_RS_FORCE_WASI === "true" ||
@@ -102,6 +170,19 @@ describe.skipIf(!isWasm)("External frontend artifact (WASM bridge)", () => {
     );
 
     expect(sim.dut.q).toBe(0xa5n);
+    sim.dispose();
+  });
+
+  test("preserves two-state reset layout in four-state WASM mode", () => {
+    const sim = Simulator.fromFrontendArtifact<{
+      reset: bigint;
+      readonly q: bigint;
+      clock: bigint;
+    }>(TWO_STATE_RESET_ARTIFACT, { fourState: true });
+
+    expect(sim.dut.q).toBe(1n);
+    sim.dut.reset = 1n;
+    expect(sim.dut.q).toBe(1n);
     sim.dispose();
   });
 });

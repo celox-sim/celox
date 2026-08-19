@@ -286,6 +286,85 @@ fn frontend_register_inputs_are_coerced_to_target_state_kind() {
 }
 
 #[test]
+fn frontend_mux_infers_four_state_from_its_condition() {
+    let logic = ValueType::logic(1).unwrap();
+    let mut module = ModuleBuilder::new("MuxConditionState").unwrap();
+    let condition = module.input("condition", logic).unwrap();
+    let y = module.output("y", logic).unwrap();
+    let condition = module.read(condition).unwrap();
+    let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+    let zero = module.constant(Constant::two_state(0u8, 1).unwrap());
+    let selected = module.mux(condition, one, zero).unwrap();
+    let y_target = module.whole(y).unwrap();
+    module.assign(y_target, selected).unwrap();
+    let artifact = module.finish();
+    assert_eq!(
+        artifact.expressions()[selected.index() as usize].value_type(),
+        logic
+    );
+
+    let mut sim = Simulator::from_frontend(artifact)
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    let condition = sim.signal("condition");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set_four_state(condition, 1u8.into(), 1u8.into()))
+        .unwrap();
+    let (_, mask) = sim.get_four_state(y);
+    assert_eq!(mask, 1u8.into());
+}
+
+#[test]
+fn frontend_active_low_unknown_controls_remain_inactive() {
+    let bit = ValueType::bits(1).unwrap();
+    let logic = ValueType::logic(1).unwrap();
+    let mut module = ModuleBuilder::new("ActiveLowUnknown").unwrap();
+    let clock = module.input("clock", bit).unwrap();
+    let reset_n = module.input("reset_n", logic).unwrap();
+    let enable_n = module.input("enable_n", logic).unwrap();
+    let q_reset = module.output("q_reset", bit).unwrap();
+    let q_enable = module.output("q_enable", bit).unwrap();
+    let one = module.constant(Constant::two_state(1u8, 1).unwrap());
+    let zero = module.constant(Constant::two_state(0u8, 1).unwrap());
+    let reset = module.async_reset(reset_n, ActiveLevel::Low, zero).unwrap();
+    let enable = module.enable(enable_n, ActiveLevel::Low).unwrap();
+    let q_reset_target = module.whole(q_reset).unwrap();
+    let q_enable_target = module.whole(q_enable).unwrap();
+    module
+        .register(q_reset_target, one, clock, Edge::Posedge, Some(reset), None)
+        .unwrap();
+    module
+        .register(
+            q_enable_target,
+            one,
+            clock,
+            Edge::Posedge,
+            None,
+            Some(enable),
+        )
+        .unwrap();
+
+    let mut sim = Simulator::from_frontend(module.finish())
+        .four_state(true)
+        .build_cranelift()
+        .unwrap();
+    let clock = sim.event("clock");
+    let reset_n = sim.signal("reset_n");
+    let enable_n = sim.signal("enable_n");
+    let q_reset = sim.signal("q_reset");
+    let q_enable = sim.signal("q_enable");
+    sim.modify(|io| {
+        io.set_four_state(reset_n, 1u8.into(), 1u8.into());
+        io.set_four_state(enable_n, 1u8.into(), 1u8.into());
+    })
+    .unwrap();
+    sim.tick(clock).unwrap();
+    assert_eq!(sim.get(q_reset), 1u8.into());
+    assert_eq!(sim.get(q_enable), 0u8.into());
+}
+
+#[test]
 fn frontend_artifacts_build_with_compilation_trace() {
     Simulator::from_frontend(adder_artifact())
         .build_with_trace()

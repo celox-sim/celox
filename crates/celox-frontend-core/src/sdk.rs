@@ -791,23 +791,27 @@ fn lower_control(
         SIROffset::Static(0),
         1,
     ));
-    let two_state = if signal_info.value_type().is_four_state() {
-        let result = builder.alloc_bit(1, false);
-        builder.emit(SIRInstruction::Unary(result, UnaryOp::ToTwoState, loaded));
-        result
+    let polarized = if active == ActiveLevel::Low {
+        let inverted = alloc_register(
+            builder,
+            ValueType::new(1, false, signal_info.value_type().is_four_state())?,
+        );
+        builder.emit(SIRInstruction::Unary(inverted, UnaryOp::LogicNot, loaded));
+        inverted
     } else {
         loaded
     };
-    if active == ActiveLevel::High {
-        return Ok(two_state);
+    if signal_info.value_type().is_four_state() {
+        let result = builder.alloc_bit(1, false);
+        builder.emit(SIRInstruction::Unary(
+            result,
+            UnaryOp::ToTwoState,
+            polarized,
+        ));
+        Ok(result)
+    } else {
+        Ok(polarized)
     }
-    let inverted = builder.alloc_bit(1, false);
-    builder.emit(SIRInstruction::Unary(
-        inverted,
-        UnaryOp::LogicNot,
-        two_state,
-    ));
-    Ok(inverted)
 }
 
 fn seal_builder(mut builder: SIRBuilder<RegionedSourceAddr>) -> ExecutionUnit<RegionedSourceAddr> {

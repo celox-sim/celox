@@ -272,10 +272,9 @@ export class Simulator<P = Record<string, unknown>> {
 			buildNapiOpts(options),
 		);
 		const isWasm = isWasmHandle(raw);
-		const layout =
-			isWasm && options?.fourState
-				? recoverWasmFourStateLayout(parseNapiLayout(raw.layoutJson))
-				: parseNapiLayout(raw.layoutJson);
+		// Frontend artifacts carry an exact state kind for every signal, including
+		// clock/reset ports. Do not apply the legacy WASM type-kind inference here.
+		const layout = parseNapiLayout(raw.layoutJson);
 		const events: Record<string, number> = JSON.parse(raw.eventsJson);
 		const hierarchy = filterHierarchyForDse(
 			parseHierarchyLayout(raw.hierarchyJson, events),

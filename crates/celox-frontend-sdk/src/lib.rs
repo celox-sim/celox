@@ -673,7 +673,9 @@ impl FrontendArtifact {
                     let expected_type = ValueType {
                         width: then_type.width(),
                         signed: then_type.is_signed() && else_type.is_signed(),
-                        four_state: then_type.is_four_state() || else_type.is_four_state(),
+                        four_state: condition_type.is_four_state()
+                            || then_type.is_four_state()
+                            || else_type.is_four_state(),
                     };
                     if expression.value_type() != expected_type {
                         return Err(BuildError::TypeMismatch {
@@ -1134,7 +1136,9 @@ impl ModuleBuilder {
         let result_type = ValueType::new(
             then_type.width(),
             then_type.is_signed() && else_type.is_signed(),
-            then_type.is_four_state() || else_type.is_four_state(),
+            condition_type.is_four_state()
+                || then_type.is_four_state()
+                || else_type.is_four_state(),
         )?;
         Ok(self.push_expr(
             ExprNode::Mux {
@@ -1513,10 +1517,10 @@ mod tests {
 
     #[test]
     fn revalidates_mux_types_from_json() {
-        let bit = ValueType::bits(1).unwrap();
+        let logic = ValueType::logic(1).unwrap();
         let byte = ValueType::bits(8).unwrap();
         let mut module = ModuleBuilder::new("MuxJson").unwrap();
-        let condition = module.input("condition", bit).unwrap();
+        let condition = module.input("condition", logic).unwrap();
         let a = module.input("a", byte).unwrap();
         let b = module.input("b", byte).unwrap();
         let condition = module.read(condition).unwrap();
@@ -1524,6 +1528,7 @@ mod tests {
         let b = module.read(b).unwrap();
         module.mux(condition, a, b).unwrap();
         let artifact = module.finish();
+        assert!(artifact.expressions()[3].value_type().is_four_state());
 
         let mut wide_condition = serde_json::to_value(&artifact).unwrap();
         wide_condition["expressions"][3]["node"]["Mux"]["condition"] = 1.into();
@@ -1539,6 +1544,14 @@ mod tests {
         let mut wrong_result = serde_json::to_value(&artifact).unwrap();
         wrong_result["expressions"][3]["value_type"]["width"] = 4.into();
         let error = FrontendArtifact::from_json(&wrong_result.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::TypeMismatch { .. })
+        ));
+
+        let mut wrong_state = serde_json::to_value(&artifact).unwrap();
+        wrong_state["expressions"][3]["value_type"]["four_state"] = false.into();
+        let error = FrontendArtifact::from_json(&wrong_state.to_string()).unwrap_err();
         assert!(matches!(
             error,
             ArtifactJsonError::InvalidArtifact(BuildError::TypeMismatch { .. })
