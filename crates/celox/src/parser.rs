@@ -591,7 +591,7 @@ pub fn parse_mixed(
     )],
     four_state: bool,
     trace_opts: &crate::debug::TraceOptions,
-    mut trace: Option<&mut crate::debug::CompilationTrace>,
+    trace: Option<&mut crate::debug::CompilationTrace>,
     optimize_options: &crate::optimizer::OptimizeOptions,
     diagnostics: &crate::RuntimeDiagnostics,
     preserve_element_storage_layout: bool,
