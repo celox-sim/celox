@@ -56,6 +56,7 @@ export interface RawWasmSimulatorHandle {
 	readonly warningsJson: string;
 	readonly stableSize: number;
 	readonly totalSize: number;
+	initialMemoryBytes(): Uint8Array | number[];
 	combWasmBytes(): Uint8Array | number[];
 	eventWasmBytes(name: string): Uint8Array | number[];
 	dispose(): void;
@@ -114,6 +115,9 @@ export function createWasmSimulatorBridge(
 	// Create shared WebAssembly.Memory
 	const pages = Math.max(1, Math.ceil(totalSize / 65536));
 	const memory = new WebAssembly.Memory({ initial: pages });
+	new Uint8Array(memory.buffer, 0, totalSize).set(
+		new Uint8Array(raw.initialMemoryBytes()),
+	);
 
 	// Compile and instantiate comb WASM module (synchronous)
 	const combBytes = new Uint8Array(raw.combWasmBytes());
@@ -177,6 +181,9 @@ export async function createWasmSimulatorBridgeAsync(
 
 	const pages = Math.max(1, Math.ceil(totalSize / 65536));
 	const memory = new WebAssembly.Memory({ initial: pages });
+	new Uint8Array(memory.buffer, 0, totalSize).set(
+		new Uint8Array(raw.initialMemoryBytes()),
+	);
 
 	// Compile comb module
 	const combBytes = new Uint8Array(raw.combWasmBytes());

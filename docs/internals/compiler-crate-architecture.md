@@ -8,15 +8,15 @@ refactors.
 ## Pipeline
 
 ```text
-Veryl source ─────────────► celox-frontend-veryl ──┐
-                                                   ├─► celox-frontend-core
-SystemVerilog source ─► celox-sv-analyzer          │          │
-                               │                   │          ▼
-                               └► celox-frontend-sv ┘     SymbolicRtl
-                                                              │
-                                                         celox-slt
-                                                              ▼
-                                                         ScheduledRtl
+Veryl source ----------> celox-frontend-veryl --------------------\
+SystemVerilog source --> celox-sv-analyzer --> celox-frontend-sv --+--> celox-frontend-core
+External frontend -----> celox-frontend-sdk artifact -------------/             |
+                                                                                 v
+                                                                            SymbolicRtl
+                                                                                 |
+                                                                            celox-slt
+                                                                                 v
+                                                                            ScheduledRtl
                                                               │
                                                         UnoptimizedSir
                                                               │
@@ -44,8 +44,11 @@ not depend on the facade. `celox-backend-x86` and `celox-backend-arm64` depend o
 `celox-backend-common` for allocation machinery; that crate is a compile-time
 library, not another pipeline artifact.
 
-The frontend boundary is split into one source-independent crate and one adapter
-crate per source language. `celox-frontend-core` owns the symbolic assembly,
+The frontend boundary is split into a published authoring contract, one
+source-independent adapter crate, and parser-backed adapters for bundled source
+languages. `celox-frontend-sdk` owns a versioned, serializable artifact that an
+external frontend can construct without depending on Celox compiler internals.
+`celox-frontend-core` owns the symbolic assembly,
 flattening, source lookup, tracing, and scheduled output contracts shared by all
 adapters. It must not depend on a parser, analyzer, or language adapter.
 
@@ -111,6 +114,7 @@ for.
 | `celox-analysis` | Reusable graph and data-flow algorithms | Veryl or backend-specific types |
 | `celox-design` | Source-independent design identities, hierarchy, events, and runtime schema | Parser nodes or physical addresses |
 | `celox-sv-analyzer` | Reusable SystemVerilog syntax and semantic analysis | Celox scheduling or Veryl dependencies |
+| `celox-frontend-sdk` | Published, versioned frontend artifact schema and validated module builder | Parser types, Celox compiler internals, or backend policy |
 | `celox-frontend-core` | Source lookup, shared symbolic assembly, flattening, tracing, and scheduled frontend contracts | Parser, analyzer, or language-adapter dependencies |
 | `celox-frontend-sv` | SystemVerilog hierarchy preparation and lowering into frontend-core contracts | Veryl dependencies, optimization, or target code generation |
 | `celox-frontend-veryl` | Veryl analysis, lowering, diagnostics, and testbench source sidecars | SystemVerilog dependencies, optimization, or target code generation |
@@ -175,16 +179,19 @@ The following rules define the intended architecture:
 1. Source-language types stop at the frontend boundary. One language adapter
    must not depend on another language frontend; shared assembly belongs in
    `celox-frontend-core`.
-2. Semantic state identities remain distinct from physical memory offsets until
+2. External frontends depend only on `celox-frontend-sdk` and exchange a
+   versioned artifact; internal symbolic and scheduled types are not a public
+   compatibility surface.
+3. Semantic state identities remain distinct from physical memory offsets until
    layout finalization.
-3. SIR optimizations are independent of any concrete backend.
-4. Target MIR, allocation policy, ABI handling, and emission remain private to
+4. SIR optimizations are independent of any concrete backend.
+5. Target MIR, allocation policy, ABI handling, and emission remain private to
    their backend; target-independent allocation mechanisms belong in
    `celox-backend-common`.
-5. Runtime code depends on backend contracts, not concrete compiler pipelines.
-6. Testbench execution uses source-independent bytecode; only the frontend parses
+6. Runtime code depends on backend contracts, not concrete compiler pipelines.
+7. Testbench execution uses source-independent bytecode; only the frontend parses
    Veryl testbench syntax.
-7. The facade coordinates phases but does not become a second owner of their
+8. The facade coordinates phases but does not become a second owner of their
    algorithms or data structures.
 
 These rules are enforced primarily by Cargo dependencies and artifact types. A
@@ -200,6 +207,9 @@ is therefore an architectural change, not a convenient shortcut.
   `celox-frontend-sv`.
 - Source-independent frontend lookup, symbolic assembly, flattening, and tracing
   belong in `celox-frontend-core`.
+- Stable external-frontend construction and serialization belong in
+  `celox-frontend-sdk`; a netlist parser or other source-specific analysis stays
+  in the independently developed frontend.
 - A symbolic scheduling rule belongs in `celox-slt`.
 - A backend-independent instruction or CFG rule belongs in `celox-sir`.
 - A backend-independent transformation belongs in `celox-sir-opt`.

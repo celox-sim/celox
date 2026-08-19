@@ -102,6 +102,7 @@ impl miette::Diagnostic for CompilationWarning {
 /// The specific kind of simulator error.
 #[derive(Debug)]
 pub enum SimulatorErrorKind {
+    FrontendArtifact(crate::FrontendArtifactError),
     SIRParser(crate::ParserError),
     Analyzer(Vec<veryl_analyzer::AnalyzerError>),
     Frontend(Vec<celox_frontend_veryl::FrontendDiagnostic>),
@@ -232,6 +233,7 @@ impl SimulatorError {
 impl fmt::Display for SimulatorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind.as_ref() {
+            SimulatorErrorKind::FrontendArtifact(error) => write!(f, "{error}")?,
             SimulatorErrorKind::SIRParser(e) => f.write_str(&render_diagnostic(e))?,
             SimulatorErrorKind::Analyzer(errors) => {
                 for (i, e) in errors.iter().enumerate() {
@@ -268,11 +270,18 @@ impl fmt::Display for SimulatorError {
 impl std::error::Error for SimulatorError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self.kind.as_ref() {
+            SimulatorErrorKind::FrontendArtifact(error) => Some(error),
             SimulatorErrorKind::SIRParser(e) => Some(e),
             SimulatorErrorKind::Runtime(e) => Some(e),
             SimulatorErrorKind::Codegen(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+impl From<crate::FrontendArtifactError> for SimulatorError {
+    fn from(error: crate::FrontendArtifactError) -> Self {
+        SimulatorError::new(SimulatorErrorKind::FrontendArtifact(error))
     }
 }
 

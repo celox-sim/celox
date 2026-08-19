@@ -429,6 +429,7 @@ dependencies = [
  "celox-backend-x86",
  "celox-design",
  "celox-frontend-core",
+ "celox-frontend-sdk",
  "celox-frontend-sv",
  "celox-frontend-veryl",
  "celox-macros",
@@ -585,6 +586,7 @@ name = "celox-frontend-core"
 version = "0.0.0"
 dependencies = [
  "celox-design",
+ "celox-frontend-sdk",
  "celox-sir",
  "celox-slt",
  "fxhash",
@@ -592,6 +594,17 @@ dependencies = [
  "num-bigint",
  "thiserror 2.0.20",
  "tracing",
+]
+
+[[package]]
+name = "celox-frontend-sdk"
+version = "0.1.0"
+dependencies = [
+ "fxhash",
+ "num-bigint",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -651,6 +664,7 @@ name = "celox-napi"
 version = "0.0.0"
 dependencies = [
  "celox",
+ "celox-design",
  "celox-ts-gen",
  "fxhash",
  "globset",

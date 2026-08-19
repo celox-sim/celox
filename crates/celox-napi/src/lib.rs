@@ -972,6 +972,22 @@ impl NativeSimulatorHandle {
         Self::build_and_cache(sim, opts.four_state, opts.vcd.as_deref(), Some(cache_key))
     }
 
+    /// Create a simulator from a versioned external-frontend artifact.
+    #[napi(factory)]
+    pub fn from_frontend_artifact(
+        artifact_json: String,
+        options: Option<NapiOptions>,
+    ) -> Result<Self> {
+        let opts = parse_options(&options)?;
+        let artifact = celox::FrontendArtifact::from_json(&artifact_json)
+            .map_err(|error| Error::from_reason(error.to_string()))?;
+        let builder = apply_options(celox::Simulator::from_frontend(artifact), &opts);
+        let sim = builder
+            .build()
+            .map_err(|error| Error::from_reason(error.to_string()))?;
+        Self::build_and_cache(sim, opts.four_state, opts.vcd.as_deref(), None)
+    }
+
     /// Create a new simulator from a Veryl project directory.
     ///
     /// Searches upward from `project_path` for `Veryl.toml`, gathers all
@@ -1196,6 +1212,52 @@ impl NativeSimulationHandle {
             .map_err(|e| Error::from_reason(format!("Failed to serialize events: {}", e)))?;
         let hierarchy_json = serde_json::to_string(&hierarchy_node)
             .map_err(|e| Error::from_reason(format!("Failed to serialize hierarchy: {}", e)))?;
+
+        Ok(Self {
+            sim: Some(sim),
+            layout_json,
+            events_json,
+            hierarchy_json,
+            warnings_json,
+            stable_size: stable_size as u32,
+            total_size: total_size as u32,
+            default_max_steps: None,
+        })
+    }
+
+    /// Create a timed simulation from a versioned external-frontend artifact.
+    #[napi(factory)]
+    pub fn from_frontend_artifact(
+        artifact_json: String,
+        options: Option<NapiOptions>,
+    ) -> Result<Self> {
+        let opts = parse_options(&options)?;
+        let artifact = celox::FrontendArtifact::from_json(&artifact_json)
+            .map_err(|error| Error::from_reason(error.to_string()))?;
+        let mut builder = apply_options(celox::Simulation::from_frontend(artifact), &opts);
+        if let Some(path) = &opts.vcd {
+            builder = builder.vcd(path);
+        }
+        let sim = builder
+            .build()
+            .map_err(|error| Error::from_reason(error.to_string()))?;
+
+        let warnings_json = format_warnings_json(sim.warnings());
+        let signals = sim.named_signals();
+        let events = sim.named_events();
+        let hierarchy = sim.named_hierarchy();
+        let (_, total_size) = sim.memory_as_ptr();
+        let stable_size = sim.stable_region_size();
+        let layout_map = build_signal_layout(&signals, opts.four_state);
+        let event_map = build_event_map(&events);
+        let hierarchy_node = build_hierarchy_node(&hierarchy, opts.four_state);
+        let layout_json = serde_json::to_string(&layout_map)
+            .map_err(|error| Error::from_reason(format!("Failed to serialize layout: {error}")))?;
+        let events_json = serde_json::to_string(&event_map)
+            .map_err(|error| Error::from_reason(format!("Failed to serialize events: {error}")))?;
+        let hierarchy_json = serde_json::to_string(&hierarchy_node).map_err(|error| {
+            Error::from_reason(format!("Failed to serialize hierarchy: {error}"))
+        })?;
 
         Ok(Self {
             sim: Some(sim),
@@ -1506,6 +1568,47 @@ impl NativeSimulatorHandle {
         })
     }
 
+    /// Create a WASM-oriented handle from a versioned external-frontend artifact.
+    #[napi(factory)]
+    pub fn from_frontend_artifact(
+        artifact_json: String,
+        options: Option<NapiOptions>,
+    ) -> Result<Self> {
+        let opts = parse_options_common(&options)?;
+        let artifact = celox::FrontendArtifact::from_json(&artifact_json)
+            .map_err(|error| Error::from_reason(error.to_string()))?;
+        let trace_opts = celox::TraceOptions::default();
+        let (program, warnings) = celox::compile_frontend_to_sir(
+            &artifact,
+            &opts.false_loops,
+            &opts.true_loops,
+            opts.four_state,
+            &trace_opts,
+            None,
+            &opts.optimize_options,
+        )
+        .map_err(|error| Error::from_reason(error.to_string()))?;
+
+        let laid_out = program.into_laid_out(opts.four_state);
+        let layout = laid_out.layout();
+        let layout_json = Self::build_layout_json(&laid_out, layout, opts.four_state);
+        let events_json = Self::build_events_json(&laid_out);
+        let warnings_json = format_warnings_json(&warnings);
+        let stable_size = layout.total_size as u32;
+        let total_size = layout.merged_total_size as u32;
+
+        Ok(Self {
+            program: laid_out,
+            four_state: opts.four_state,
+            layout_json,
+            events_json,
+            hierarchy_json: "{}".to_string(),
+            warnings_json,
+            stable_size,
+            total_size,
+        })
+    }
+
     /// Create a new simulator from a Veryl project directory.
     #[napi(factory)]
     pub fn from_project(
@@ -1591,6 +1694,12 @@ impl NativeSimulatorHandle {
         )
     }
 
+    /// Return a complete initialized memory image for the TypeScript WASM bridge.
+    #[napi]
+    pub fn initial_memory_bytes(&self) -> Vec<u8> {
+        Self::build_initial_memory_bytes(&self.program, self.program.layout(), self.four_state)
+    }
+
     /// Returns the instance hierarchy as a JSON string.
     #[napi(getter)]
     pub fn hierarchy_json(&self) -> String {
@@ -1665,6 +1774,119 @@ impl NativeSimulatorHandle {
 
 #[cfg(target_arch = "wasm32")]
 impl NativeSimulatorHandle {
+    fn write_memory_bit(memory: &mut [u8], byte: usize, bit: usize, value: bool) {
+        let mask = 1u8 << bit;
+        if value {
+            memory[byte] |= mask;
+        } else {
+            memory[byte] &= !mask;
+        }
+    }
+
+    fn byte_bit(bytes: &[u8], bit: usize) -> bool {
+        bytes
+            .get(bit / 8)
+            .is_some_and(|byte| byte & (1u8 << (bit % 8)) != 0)
+    }
+
+    fn build_initial_memory_bytes(
+        program: &celox::LaidOutProgram,
+        layout: &celox::MemoryLayout,
+        four_state: bool,
+    ) -> Vec<u8> {
+        let mut memory = vec![0u8; layout.merged_total_size];
+
+        if four_state {
+            for (address, &offset) in &layout.offsets {
+                if layout.is_4states.get(address).copied().unwrap_or(false) {
+                    let plane_size = layout.plane_size(address);
+                    memory[offset..offset + plane_size * 2].fill(0xff);
+                }
+            }
+            for (address, &relative_offset) in &layout.working_offsets {
+                if layout.is_4states.get(address).copied().unwrap_or(false) {
+                    let offset = layout.working_base_offset + relative_offset;
+                    let plane_size = layout.plane_size(address);
+                    memory[offset..offset + plane_size * 2].fill(0xff);
+                }
+            }
+        }
+
+        for initial in &program.design.initial_state {
+            let Some(&offset) = layout.offsets.get(&initial.address) else {
+                continue;
+            };
+            let width = layout.widths[&initial.address];
+            let plane_size = layout.plane_size(&initial.address);
+            let write_mask = four_state
+                && layout
+                    .is_4states
+                    .get(&initial.address)
+                    .copied()
+                    .unwrap_or(false);
+
+            match &initial.data {
+                celox_design::InitialStateData::Packed {
+                    value,
+                    mask,
+                    written_mask,
+                } => {
+                    let value = value.to_bytes_le();
+                    let mask = mask.to_bytes_le();
+                    let written_mask = written_mask.to_bytes_le();
+                    for bit in 0..width {
+                        if !Self::byte_bit(&written_mask, bit) {
+                            continue;
+                        }
+                        let (byte, intra) = layout.map_static_bit_offset(&initial.address, bit);
+                        let is_unknown = Self::byte_bit(&mask, bit);
+                        Self::write_memory_bit(
+                            &mut memory,
+                            offset + byte,
+                            intra,
+                            Self::byte_bit(&value, bit) && (write_mask || !is_unknown),
+                        );
+                        if write_mask {
+                            Self::write_memory_bit(
+                                &mut memory,
+                                offset + plane_size + byte,
+                                intra,
+                                is_unknown,
+                            );
+                        }
+                    }
+                }
+                celox_design::InitialStateData::Writes(runs) => {
+                    for run in runs {
+                        for relative_bit in 0..run.bit_width {
+                            let bit = run.bit_offset + relative_bit;
+                            if bit >= width {
+                                break;
+                            }
+                            let (byte, intra) = layout.map_static_bit_offset(&initial.address, bit);
+                            Self::write_memory_bit(
+                                &mut memory,
+                                offset + byte,
+                                intra,
+                                Self::byte_bit(&run.value_bytes, relative_bit),
+                            );
+                            if write_mask {
+                                Self::write_memory_bit(
+                                    &mut memory,
+                                    offset + plane_size + byte,
+                                    intra,
+                                    Self::byte_bit(&run.mask_bytes, relative_bit),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        memory
+    }
+
     fn build_four_state_init_regions_json(
         program: &celox::LaidOutProgram,
         layout: &celox::MemoryLayout,
@@ -1760,12 +1982,10 @@ impl NativeSimulatorHandle {
         use std::collections::BTreeMap;
 
         let mut events: BTreeMap<String, usize> = BTreeMap::new();
-        let mut next_id = 0usize;
 
-        for addr in program.sir.eval_apply_ffs.keys() {
+        for (next_id, addr) in program.sir.eval_apply_ffs.keys().enumerate() {
             let name = program.get_path(addr);
             events.insert(name, next_id);
-            next_id += 1;
         }
 
         serde_json::to_string(&events).unwrap_or_else(|_| "{}".to_string())
@@ -2227,6 +2447,40 @@ pub fn run_test(
     let result = builder
         .run_test_detailed()
         .map_err(|e| Error::from_reason(format!("{e}")))?;
+    Ok(convert_test_result(result))
+}
+
+/// Run a Veryl native testbench against an external frontend artifact.
+#[cfg(not(target_arch = "wasm32"))]
+#[napi]
+pub fn run_test_with_frontend_artifact(
+    env: Env,
+    artifact_json: String,
+    sources: Vec<NapiSourceFile>,
+    top: String,
+    options: Option<NapiOptions>,
+    components: Option<Vec<NapiInjectedComponent>>,
+) -> Result<NapiTestResult> {
+    let opts = parse_options(&options)?;
+    let artifact = celox::FrontendArtifact::from_json(&artifact_json)
+        .map_err(|error| Error::from_reason(error.to_string()))?;
+    let mut src_pairs: Vec<(String, std::path::PathBuf)> = sources
+        .into_iter()
+        .map(|source| (source.content, std::path::PathBuf::from(source.path)))
+        .collect();
+    append_extra_source(&mut src_pairs, &opts.extra_source);
+    let source_refs: Vec<(&str, &std::path::Path)> = src_pairs
+        .iter()
+        .map(|(source, path)| (source.as_str(), path.as_path()))
+        .collect();
+    let builder = apply_options(
+        celox::Simulator::from_frontend_with_testbench(artifact, source_refs, &top),
+        &opts,
+    )
+    .with_injected_components(injected_components(env, components)?);
+    let result = builder
+        .run_test_detailed()
+        .map_err(|error| Error::from_reason(error.to_string()))?;
     Ok(convert_test_result(result))
 }
 

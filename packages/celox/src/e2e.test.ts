@@ -12,6 +12,7 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { readFourState } from "./dut.js";
 import {
+	buildPortsFromLayout,
 	createSimulatorBridge,
 	loadNativeAddon,
 	type NapiTestResult,
@@ -22,7 +23,12 @@ import {
 } from "./napi-helpers.js";
 import { Simulation } from "./simulation.js";
 import { Simulator } from "./simulator.js";
-import { defineTbComponent, runTest, runTestFromProject } from "./testbench.js";
+import {
+	defineTbComponent,
+	runTest,
+	runTestFromProject,
+	runTestWithFrontendArtifact,
+} from "./testbench.js";
 import {
 	FourState,
 	type FourStateSignalValue,
@@ -77,6 +83,79 @@ module Counter (
 
     always_comb {
         count = count_r;
+    }
+}
+`;
+
+// JSON emitted by crates/celox-frontend-sdk/examples/adder_json.rs. Keeping the
+// serialized boundary in this test verifies what an independently published
+// frontend actually sends to the TypeScript runtime.
+const FRONTEND_ADDER_ARTIFACT = JSON.stringify({
+	format_version: 1,
+	module_name: "NetAdder",
+	signals: [
+		{
+			id: 0,
+			name: "a",
+			direction: "Input",
+			value_type: { width: 8, signed: false, four_state: false },
+			initial: null,
+		},
+		{
+			id: 1,
+			name: "b",
+			direction: "Input",
+			value_type: { width: 8, signed: false, four_state: false },
+			initial: null,
+		},
+		{
+			id: 2,
+			name: "y",
+			direction: "Output",
+			value_type: { width: 8, signed: false, four_state: false },
+			initial: null,
+		},
+	],
+	expressions: [
+		{
+			id: 0,
+			node: { Signal: { signal: 0, lsb: 0, width: 8 } },
+			value_type: { width: 8, signed: false, four_state: false },
+		},
+		{
+			id: 1,
+			node: { Signal: { signal: 1, lsb: 0, width: 8 } },
+			value_type: { width: 8, signed: false, four_state: false },
+		},
+		{
+			id: 2,
+			node: { Binary: { op: "Add", lhs: 0, rhs: 1 } },
+			value_type: { width: 8, signed: false, four_state: false },
+		},
+	],
+	assignments: [
+		{
+			target: { signal: 2, lsb: 0, width: 8 },
+			value: 2,
+		},
+	],
+	registers: [],
+	port_order: [0, 1, 2],
+});
+
+const FRONTEND_ADDER_TB = `
+#[test(t)]
+module NetlistTb {
+    var a: logic<8>;
+    var b: logic<8>;
+    var y: logic<8>;
+    inst dut: $sv::NetAdder (a, b, y);
+
+    initial {
+        a = 8'd10;
+        b = 8'd23;
+        $assert(y == 8'd33, "external frontend artifact");
+        $finish();
     }
 }
 `;
@@ -186,6 +265,35 @@ module MuxX (
 // ---------------------------------------------------------------------------
 // Simulator (event-based) e2e tests — fromSource API
 // ---------------------------------------------------------------------------
+
+describe("E2E: external frontend artifact", () => {
+	test("drives a frontend SDK design from a TypeScript testbench", () => {
+		interface AdderPorts {
+			a: bigint;
+			b: bigint;
+			readonly y: bigint;
+		}
+
+		const sim = Simulator.fromFrontendArtifact<AdderPorts>(
+			FRONTEND_ADDER_ARTIFACT,
+		);
+		sim.dut.a = 10n;
+		sim.dut.b = 23n;
+		expect(sim.dut.y).toBe(33n);
+		sim.dispose();
+	});
+
+	test("runs a Veryl native testbench against a frontend SDK design", () => {
+		const result = runTestWithFrontendArtifact(
+			FRONTEND_ADDER_ARTIFACT,
+			[{ content: FRONTEND_ADDER_TB, path: "netlist_tb.veryl" }],
+			"NetlistTb",
+		);
+		expect(result.passed).toBe(true);
+		expect(result.assertions).toHaveLength(1);
+		expect(result.assertions[0]?.passed).toBe(true);
+	});
+});
 
 describe("E2E: Simulator.fromSource (event-based)", () => {
 	test("combinational adder: a + b = sum", () => {
@@ -2102,6 +2210,30 @@ module Top (
     assign out = sig.data;
 }
 `;
+
+test("port layout maps preserve prototype-key signal names", () => {
+	const signal = {
+		offset: 0,
+		width: 1,
+		byteSize: 1,
+		is4state: false,
+		direction: "input" as const,
+		typeKind: "bit",
+	};
+	const signals = Object.fromEntries([
+		["__proto__", signal],
+		["bus.__proto__", { ...signal, offset: 1 }],
+	]);
+	const ports = buildPortsFromLayout(signals, {});
+
+	expect(Object.getPrototypeOf(ports)).toBeNull();
+	expect(Object.hasOwn(ports, "__proto__")).toBe(true);
+	expect(Reflect.get(ports, "__proto__")).toEqual(
+		expect.objectContaining({ type: "bit" }),
+	);
+	expect(Object.getPrototypeOf(ports.bus.interface)).toBeNull();
+	expect(Object.hasOwn(ports.bus.interface!, "__proto__")).toBe(true);
+});
 
 // A module that uses two instances connected via an interface so we can verify
 // that the hierarchy DUT also exposes nested accessors correctly.

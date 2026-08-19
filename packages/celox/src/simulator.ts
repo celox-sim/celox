@@ -252,6 +252,71 @@ export class Simulator<P = Record<string, unknown>> {
 	}
 
 	/**
+	 * Create a Simulator from a versioned artifact emitted by an external
+	 * frontend built with `celox-frontend-sdk`.
+	 */
+	static fromFrontendArtifact<P = Record<string, unknown>>(
+		artifactJson: string,
+		options?: SimulatorOptions & { nativeAddonPath?: string },
+	): Simulator<P> {
+		const addon = loadNativeAddon(options?.nativeAddonPath);
+		const factory = addon.NativeSimulatorHandle.fromFrontendArtifact;
+		if (!factory) {
+			throw new Error(
+				"The loaded Celox native addon does not support frontend artifacts.",
+			);
+		}
+		const raw = factory.call(
+			addon.NativeSimulatorHandle,
+			artifactJson,
+			buildNapiOpts(options),
+		);
+		const isWasm = isWasmHandle(raw);
+		// Frontend artifacts carry an exact state kind for every signal, including
+		// clock/reset ports. Do not apply the legacy WASM type-kind inference here.
+		const layout = parseNapiLayout(raw.layoutJson);
+		const events: Record<string, number> = JSON.parse(raw.eventsJson);
+		const hierarchy = filterHierarchyForDse(
+			parseHierarchyLayout(raw.hierarchyJson, events),
+			options?.deadStorePolicy,
+		);
+		const hasHierarchySignals = Object.keys(hierarchy.signals).length > 0;
+		const ports = hasHierarchySignals
+			? buildPortsFromLayout(hierarchy.signals, events)
+			: buildPortsFromLayout(layout.signals, events);
+
+		let buffer: ArrayBuffer | SharedArrayBuffer;
+		let handle: NativeSimulatorHandle;
+		if (isWasm) {
+			const bridge = createWasmSimulatorBridge(raw);
+			buffer = bridge.sharedMemory.buffer;
+			handle = bridge.handle;
+		} else {
+			buffer = raw.sharedMemory!().buffer;
+			handle = wrapDirectSimulatorHandle(raw);
+		}
+		const state: DirtyState = { dirty: isWasm };
+		const dut = createDut<P>(
+			buffer,
+			layout.forDut,
+			ports,
+			handle,
+			state,
+			hasHierarchySignals ? hierarchy : undefined,
+		);
+		const warnings: string[] = JSON.parse(raw.warningsJson ?? "[]");
+		return new Simulator<P>(
+			handle,
+			dut,
+			events,
+			state,
+			buffer,
+			layout.forDut,
+			warnings,
+		);
+	}
+
+	/**
 	 * Create a Simulator from a Veryl project directory.
 	 *
 	 * Searches upward from `projectPath` for `Veryl.toml`, gathers all
