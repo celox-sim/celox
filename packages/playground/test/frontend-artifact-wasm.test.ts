@@ -55,6 +55,28 @@ const FRONTEND_ADDER_ARTIFACT = JSON.stringify({
   port_order: [0, 1, 2],
 });
 
+const INITIALIZED_ARTIFACT = JSON.stringify({
+  format_version: 1,
+  module_name: "Initialized",
+  signals: [
+    {
+      id: 0,
+      name: "q",
+      direction: "Output",
+      value_type: { width: 8, signed: false, four_state: false },
+      initial: {
+        payload: [0xa5],
+        mask: [],
+        value_type: { width: 8, signed: false, four_state: false },
+      },
+    },
+  ],
+  expressions: [],
+  assignments: [],
+  registers: [],
+  port_order: [0],
+});
+
 const isWasm =
   !!process.env.NAPI_RS_WASI_FLAVOR ||
   process.env.NAPI_RS_FORCE_WASI === "true" ||
@@ -71,6 +93,15 @@ describe.skipIf(!isWasm)("External frontend artifact (WASM bridge)", () => {
     sim.dut.a = 10n;
     sim.dut.b = 23n;
     expect(sim.dut.y).toBe(33n);
+    sim.dispose();
+  });
+
+  test("applies artifact initial values to WASM memory", () => {
+    const sim = Simulator.fromFrontendArtifact<{ readonly q: bigint }>(
+      INITIALIZED_ARTIFACT,
+    );
+
+    expect(sim.dut.q).toBe(0xa5n);
     sim.dispose();
   });
 });

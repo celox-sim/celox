@@ -664,6 +664,7 @@ name = "celox-napi"
 version = "0.0.0"
 dependencies = [
  "celox",
+ "celox-design",
  "celox-ts-gen",
  "fxhash",
  "globset",

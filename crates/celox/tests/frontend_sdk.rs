@@ -2,7 +2,7 @@ use std::path::Path;
 
 use celox::Simulator;
 use celox::frontend_sdk::{
-    ActiveLevel, BinaryOp, Constant, Direction, Edge, ModuleBuilder, ValueType,
+    ActiveLevel, BinaryOp, Constant, Direction, Edge, ModuleBuilder, UnaryOp, ValueType,
 };
 
 fn adder_artifact() -> celox::FrontendArtifact {
@@ -170,6 +170,75 @@ fn frontend_expression_result_width_is_preserved() {
     .unwrap();
     assert_eq!(sim.get(y), 65_025u16.into());
     assert_eq!(sim.get(signed_y), 0xfffeu16.into());
+}
+
+#[test]
+fn frontend_sequential_expressions_honor_declared_types() {
+    let bit = ValueType::bits(1).unwrap();
+    let byte = ValueType::bits(8).unwrap();
+    let word = ValueType::bits(16).unwrap();
+    let mut module = ModuleBuilder::new("SequentialTypes").unwrap();
+    let clock = module.input("clock", bit).unwrap();
+    let input = module.input("input", byte).unwrap();
+    let divisor = module.input("divisor", byte).unwrap();
+    let negated = module.output("negated", word).unwrap();
+    let quotient = module.output("quotient", word).unwrap();
+    let equal = module.output("equal", word).unwrap();
+
+    let input_expr = module.read(input).unwrap();
+    let divisor_expr = module.read(divisor).unwrap();
+    let negate_expr = module.unary(UnaryOp::Negate, input_expr, word).unwrap();
+    let quotient_expr = module
+        .binary(BinaryOp::DivUnsigned, input_expr, divisor_expr, word)
+        .unwrap();
+    let equal_expr = module
+        .binary(BinaryOp::Equal, input_expr, divisor_expr, word)
+        .unwrap();
+    let negated_target = module.whole(negated).unwrap();
+    let quotient_target = module.whole(quotient).unwrap();
+    let equal_target = module.whole(equal).unwrap();
+    module
+        .register(
+            negated_target,
+            negate_expr,
+            clock,
+            Edge::Posedge,
+            None,
+            None,
+        )
+        .unwrap();
+    module
+        .register(
+            quotient_target,
+            quotient_expr,
+            clock,
+            Edge::Posedge,
+            None,
+            None,
+        )
+        .unwrap();
+    module
+        .register(equal_target, equal_expr, clock, Edge::Posedge, None, None)
+        .unwrap();
+
+    let mut sim = Simulator::from_frontend(module.finish())
+        .build_cranelift()
+        .unwrap();
+    let clock = sim.event("clock");
+    let input = sim.signal("input");
+    let divisor = sim.signal("divisor");
+    let negated = sim.signal("negated");
+    let quotient = sim.signal("quotient");
+    let equal = sim.signal("equal");
+    sim.modify(|io| {
+        io.set(input, 0xf0u8);
+        io.set(divisor, 0x0fu8);
+    })
+    .unwrap();
+    sim.tick(clock).unwrap();
+    assert_eq!(sim.get(negated), 0xff10u16.into());
+    assert_eq!(sim.get(quotient), 16u16.into());
+    assert_eq!(sim.get(equal), 0u16.into());
 }
 
 #[test]

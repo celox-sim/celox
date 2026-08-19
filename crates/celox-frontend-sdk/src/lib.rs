@@ -563,13 +563,30 @@ impl FrontendArtifact {
             }
             let mut references = Vec::new();
             match &expression.node {
-                ExprNode::Signal(slice) => validate_slice(*slice)?,
+                ExprNode::Signal(slice) => {
+                    validate_slice(*slice)?;
+                    let signal_type = self
+                        .signal(slice.signal)
+                        .ok_or(BuildError::UnknownSignal(slice.signal.index()))?
+                        .value_type();
+                    let expected_type = ValueType::new(
+                        slice.width,
+                        signal_type.is_signed() && slice.width == signal_type.width(),
+                        signal_type.is_four_state(),
+                    )?;
+                    if expression.value_type() != expected_type {
+                        return Err(BuildError::TypeMismatch {
+                            expected: expected_type,
+                            actual: expression.value_type(),
+                        });
+                    }
+                }
                 ExprNode::Constant(value) => {
                     validate_constant_state(value)?;
-                    if value.value_type().width() != expression.value_type.width() {
-                        return Err(BuildError::WidthMismatch {
-                            expected: expression.value_type.width(),
-                            actual: value.value_type().width(),
+                    if value.value_type() != expression.value_type() {
+                        return Err(BuildError::TypeMismatch {
+                            expected: value.value_type(),
+                            actual: expression.value_type(),
                         });
                     }
                 }
@@ -648,7 +665,36 @@ impl FrontendArtifact {
                         });
                     }
                 }
-                ExprNode::Concat(parts) => references.extend(parts),
+                ExprNode::Concat(parts) => {
+                    if parts.is_empty() {
+                        return Err(BuildError::ZeroWidth);
+                    }
+                    let mut width = 0usize;
+                    let mut four_state = false;
+                    for part in parts {
+                        if part.index() as usize >= index {
+                            return Err(BuildError::ForwardExpressionReference {
+                                expression: expression.id.index(),
+                                referenced: part.index(),
+                            });
+                        }
+                        let part_type = self
+                            .expression(*part)
+                            .ok_or(BuildError::UnknownExpression(part.index()))?
+                            .value_type();
+                        width = width
+                            .checked_add(part_type.width())
+                            .ok_or(BuildError::ZeroWidth)?;
+                        four_state |= part_type.is_four_state();
+                    }
+                    let expected_type = ValueType::new(width, false, four_state)?;
+                    if expression.value_type() != expected_type {
+                        return Err(BuildError::TypeMismatch {
+                            expected: expected_type,
+                            actual: expression.value_type(),
+                        });
+                    }
+                }
             }
             for reference in references {
                 if reference.index() as usize >= index {
@@ -674,6 +720,7 @@ impl FrontendArtifact {
             let signal = self
                 .signal(assignment.target.signal)
                 .ok_or(BuildError::UnknownSignal(assignment.target.signal.index()))?;
+            validate_driver_target(signal)?;
             insert_driver_target(&mut driver_ranges, assignment.target, &signal.name)?;
         }
         for register in &self.registers {
@@ -681,6 +728,7 @@ impl FrontendArtifact {
             let target = self
                 .signal(register.target.signal)
                 .ok_or(BuildError::UnknownSignal(register.target.signal.index()))?;
+            validate_driver_target(target)?;
             if register.target.lsb != 0 || register.target.width != target.value_type.width() {
                 return Err(BuildError::PartialRegisterTarget {
                     name: target.name.clone(),
@@ -829,6 +877,8 @@ pub enum BuildError {
     MissingPortOrder { name: String },
     #[error("signal `{name}` has overlapping continuous or register drivers")]
     OverlappingDrivers { name: String },
+    #[error("input signal `{name}` cannot be driven by artifact logic")]
+    InvalidDriverTarget { name: String },
     #[error("two-state constants cannot contain X/Z mask bits")]
     TwoStateConstantMask,
     #[error("signal names `{first}` and `{second}` collide in the DUT namespace")]
@@ -1117,6 +1167,7 @@ impl ModuleBuilder {
 
     pub fn assign(&mut self, target: SignalSlice, value: ExprId) -> Result<(), BuildError> {
         self.validate_slice(target)?;
+        validate_driver_target(self.signal_info(target.signal)?)?;
         let value_width = self.expr_info(value)?.value_type.width();
         if target.width != value_width {
             return Err(BuildError::WidthMismatch {
@@ -1140,6 +1191,7 @@ impl ModuleBuilder {
     ) -> Result<(), BuildError> {
         self.validate_slice(target)?;
         let target_signal = self.signal_info(target.signal)?;
+        validate_driver_target(target_signal)?;
         if target.lsb != 0 || target.width != target_signal.value_type.width() {
             return Err(BuildError::PartialRegisterTarget {
                 name: target_signal.name.clone(),
@@ -1264,6 +1316,16 @@ impl ModuleBuilder {
             value_type,
         });
         id
+    }
+}
+
+fn validate_driver_target(signal: &Signal) -> Result<(), BuildError> {
+    if matches!(signal.direction, Direction::Output | Direction::Internal) {
+        Ok(())
+    } else {
+        Err(BuildError::InvalidDriverTarget {
+            name: signal.name.clone(),
+        })
     }
 }
 
@@ -1479,6 +1541,107 @@ mod tests {
         assert!(matches!(
             error,
             ArtifactJsonError::InvalidArtifact(BuildError::SignalNamespaceCollision { .. })
+        ));
+    }
+
+    #[test]
+    fn revalidates_leaf_expression_types_from_json() {
+        let byte = ValueType::bits(8).unwrap();
+        let mut module = ModuleBuilder::new("LeafTypes").unwrap();
+        let input = module.input("input", byte).unwrap();
+        module.read(input).unwrap();
+        module.constant(Constant::two_state(0xa5u8, 8).unwrap());
+        let artifact = module.finish();
+
+        let mut signal = serde_json::to_value(&artifact).unwrap();
+        signal["expressions"][0]["value_type"]["width"] = 4.into();
+        let error = FrontendArtifact::from_json(&signal.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::TypeMismatch { .. })
+        ));
+
+        let mut constant = serde_json::to_value(&artifact).unwrap();
+        constant["expressions"][1]["value_type"]["four_state"] = true.into();
+        let error = FrontendArtifact::from_json(&constant.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::TypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn revalidates_concat_types_from_json() {
+        let bit = ValueType::bits(1).unwrap();
+        let logic = ValueType::logic(1).unwrap();
+        let mut module = ModuleBuilder::new("ConcatTypes").unwrap();
+        let a = module.input("a", bit).unwrap();
+        let b = module.input("b", logic).unwrap();
+        let a = module.read(a).unwrap();
+        let b = module.read(b).unwrap();
+        module.concat(vec![a, b]).unwrap();
+        let artifact = module.finish();
+
+        let mut wrong_type = serde_json::to_value(&artifact).unwrap();
+        wrong_type["expressions"][2]["value_type"]["four_state"] = false.into();
+        let error = FrontendArtifact::from_json(&wrong_type.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::TypeMismatch { .. })
+        ));
+
+        let mut empty = serde_json::to_value(&artifact).unwrap();
+        empty["expressions"][2]["node"]["Concat"] = serde_json::json!([]);
+        let error = FrontendArtifact::from_json(&empty.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::ZeroWidth)
+        ));
+    }
+
+    #[test]
+    fn rejects_input_driver_targets_in_builder_and_json() {
+        let bit = ValueType::bits(1).unwrap();
+        let mut module = ModuleBuilder::new("InputDriver").unwrap();
+        let clock = module.input("clock", bit).unwrap();
+        let input = module.input("input", bit).unwrap();
+        let value = module.constant(Constant::two_state(1u8, 1).unwrap());
+        let target = module.whole(input).unwrap();
+        let error = module.assign(target, value).unwrap_err();
+        assert!(matches!(error, BuildError::InvalidDriverTarget { .. }));
+        let error = module
+            .register(target, value, clock, Edge::Posedge, None, None)
+            .unwrap_err();
+        assert!(matches!(error, BuildError::InvalidDriverTarget { .. }));
+
+        let mut valid = ModuleBuilder::new("InputDriverJson").unwrap();
+        let input = valid.input("input", bit).unwrap();
+        let output = valid.output("output", bit).unwrap();
+        let value = valid.read(input).unwrap();
+        valid.assign(valid.whole(output).unwrap(), value).unwrap();
+        let mut json = serde_json::to_value(valid.finish()).unwrap();
+        json["assignments"][0]["target"]["signal"] = input.index().into();
+        let error = FrontendArtifact::from_json(&json.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::InvalidDriverTarget { .. })
+        ));
+
+        let mut valid = ModuleBuilder::new("InputRegisterJson").unwrap();
+        let clock = valid.input("clock", bit).unwrap();
+        let input = valid.input("input", bit).unwrap();
+        let output = valid.output("output", bit).unwrap();
+        let value = valid.read(input).unwrap();
+        let output_target = valid.whole(output).unwrap();
+        valid
+            .register(output_target, value, clock, Edge::Posedge, None, None)
+            .unwrap();
+        let mut json = serde_json::to_value(valid.finish()).unwrap();
+        json["registers"][0]["target"]["signal"] = input.index().into();
+        let error = FrontendArtifact::from_json(&json.to_string()).unwrap_err();
+        assert!(matches!(
+            error,
+            ArtifactJsonError::InvalidArtifact(BuildError::InvalidDriverTarget { .. })
         ));
     }
 }

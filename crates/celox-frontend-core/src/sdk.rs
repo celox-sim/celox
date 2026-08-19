@@ -363,6 +363,97 @@ fn alloc_register(
     }
 }
 
+fn coerce_sir_register(
+    builder: &mut SIRBuilder<RegionedSourceAddr>,
+    input: RegisterId,
+    input_type: ValueType,
+    target_type: ValueType,
+) -> Result<RegisterId, FrontendArtifactError> {
+    let mut current = input;
+    let mut current_type = input_type;
+
+    if current_type.width() > target_type.width() {
+        let narrowed_type = ValueType::new(
+            target_type.width(),
+            current_type.is_signed(),
+            current_type.is_four_state(),
+        )?;
+        let narrowed = alloc_register(builder, narrowed_type);
+        builder.emit(SIRInstruction::Slice(
+            narrowed,
+            current,
+            0,
+            target_type.width(),
+        ));
+        current = narrowed;
+        current_type = narrowed_type;
+    } else if current_type.width() < target_type.width() {
+        let extension_width = target_type.width() - current_type.width();
+        let extension_type = ValueType::new(extension_width, false, current_type.is_four_state())?;
+        let extension = alloc_register(builder, extension_type);
+        if current_type.is_signed() {
+            let sign_type = ValueType::new(1, false, current_type.is_four_state())?;
+            let sign = alloc_register(builder, sign_type);
+            builder.emit(SIRInstruction::Slice(
+                sign,
+                current,
+                current_type.width() - 1,
+                1,
+            ));
+            builder.emit(SIRInstruction::Concat(
+                extension,
+                vec![sign; extension_width],
+            ));
+        } else {
+            builder.emit(SIRInstruction::Imm(extension, SIRValue::new(0u8)));
+        }
+        let widened_type = ValueType::new(
+            target_type.width(),
+            current_type.is_signed(),
+            current_type.is_four_state(),
+        )?;
+        let widened = alloc_register(builder, widened_type);
+        builder.emit(SIRInstruction::Concat(widened, vec![extension, current]));
+        current = widened;
+        current_type = widened_type;
+    }
+
+    if current_type.is_four_state() && !target_type.is_four_state() {
+        let converted = alloc_register(builder, target_type);
+        builder.emit(SIRInstruction::Unary(
+            converted,
+            UnaryOp::ToTwoState,
+            current,
+        ));
+        return Ok(converted);
+    }
+
+    if current_type.is_four_state() != target_type.is_four_state()
+        || (!target_type.is_four_state() && current_type.is_signed() != target_type.is_signed())
+    {
+        let converted = alloc_register(builder, target_type);
+        builder.emit(SIRInstruction::Unary(converted, UnaryOp::Ident, current));
+        return Ok(converted);
+    }
+
+    Ok(current)
+}
+
+fn coerce_sir_expression(
+    artifact: &FrontendArtifact,
+    id: ExprId,
+    target_type: ValueType,
+    builder: &mut SIRBuilder<RegionedSourceAddr>,
+    cache: &mut HashMap<ExprId, RegisterId>,
+) -> Result<RegisterId, FrontendArtifactError> {
+    let input_type = artifact
+        .expression(id)
+        .ok_or(FrontendArtifactError::UnknownExpression(id.index()))?
+        .value_type();
+    let input = lower_sir_expression(artifact, id, builder, cache)?;
+    coerce_sir_register(builder, input, input_type, target_type)
+}
+
 fn lower_sir_expression(
     artifact: &FrontendArtifact,
     id: ExprId,
@@ -375,58 +466,308 @@ fn lower_sir_expression(
     let expression = artifact
         .expression(id)
         .ok_or(FrontendArtifactError::UnknownExpression(id.index()))?;
-    let result = alloc_register(builder, expression.value_type());
-    match expression.node() {
-        ExprNode::Signal(slice) => builder.emit(SIRInstruction::Load(
-            result,
-            RegionedSourceAddr {
-                region: STABLE_REGION,
-                var_id: source_id(slice.signal()),
-            },
-            SIROffset::Static(slice.lsb()),
-            slice.width(),
-        )),
-        ExprNode::Constant(value) => builder.emit(SIRInstruction::Imm(
-            result,
-            SIRValue::new_four_state(value.payload().clone(), value.mask().clone()),
-        )),
+    let result = match expression.node() {
+        ExprNode::Signal(slice) => {
+            let result = alloc_register(builder, expression.value_type());
+            builder.emit(SIRInstruction::Load(
+                result,
+                RegionedSourceAddr {
+                    region: STABLE_REGION,
+                    var_id: source_id(slice.signal()),
+                },
+                SIROffset::Static(slice.lsb()),
+                slice.width(),
+            ));
+            result
+        }
+        ExprNode::Constant(value) => {
+            let result = alloc_register(builder, expression.value_type());
+            builder.emit(SIRInstruction::Imm(
+                result,
+                SIRValue::new_four_state(value.payload().clone(), value.mask().clone()),
+            ));
+            result
+        }
         ExprNode::Binary { op, lhs, rhs } => {
-            let lhs = lower_sir_expression(artifact, *lhs, builder, cache)?;
-            let rhs = lower_sir_expression(artifact, *rhs, builder, cache)?;
-            builder.emit(SIRInstruction::Binary(result, lhs, binary_op(*op)?, rhs));
+            use celox_frontend_sdk::BinaryOp as SdkBinaryOp;
+
+            let lhs_type = artifact
+                .expression(*lhs)
+                .ok_or(FrontendArtifactError::UnknownExpression(lhs.index()))?
+                .value_type();
+            let rhs_type = artifact
+                .expression(*rhs)
+                .ok_or(FrontendArtifactError::UnknownExpression(rhs.index()))?
+                .value_type();
+            let (lhs, rhs) = match op {
+                SdkBinaryOp::ShiftLeft
+                | SdkBinaryOp::ShiftRight
+                | SdkBinaryOp::ArithmeticShiftRight => (
+                    coerce_sir_expression(
+                        artifact,
+                        *lhs,
+                        ValueType::new(
+                            expression.value_type().width(),
+                            lhs_type.is_signed(),
+                            lhs_type.is_four_state(),
+                        )?,
+                        builder,
+                        cache,
+                    )?,
+                    lower_sir_expression(artifact, *rhs, builder, cache)?,
+                ),
+                SdkBinaryOp::Equal
+                | SdkBinaryOp::NotEqual
+                | SdkBinaryOp::CaseEqual
+                | SdkBinaryOp::CaseNotEqual
+                | SdkBinaryOp::LessUnsigned
+                | SdkBinaryOp::LessSigned
+                | SdkBinaryOp::LessEqualUnsigned
+                | SdkBinaryOp::LessEqualSigned
+                | SdkBinaryOp::GreaterUnsigned
+                | SdkBinaryOp::GreaterSigned
+                | SdkBinaryOp::GreaterEqualUnsigned
+                | SdkBinaryOp::GreaterEqualSigned => {
+                    let width = lhs_type.width().max(rhs_type.width());
+                    (
+                        coerce_sir_expression(
+                            artifact,
+                            *lhs,
+                            ValueType::new(width, lhs_type.is_signed(), lhs_type.is_four_state())?,
+                            builder,
+                            cache,
+                        )?,
+                        coerce_sir_expression(
+                            artifact,
+                            *rhs,
+                            ValueType::new(width, rhs_type.is_signed(), rhs_type.is_four_state())?,
+                            builder,
+                            cache,
+                        )?,
+                    )
+                }
+                SdkBinaryOp::LogicAnd | SdkBinaryOp::LogicOr => (
+                    lower_sir_expression(artifact, *lhs, builder, cache)?,
+                    lower_sir_expression(artifact, *rhs, builder, cache)?,
+                ),
+                _ => (
+                    coerce_sir_expression(
+                        artifact,
+                        *lhs,
+                        ValueType::new(
+                            expression.value_type().width(),
+                            lhs_type.is_signed(),
+                            lhs_type.is_four_state(),
+                        )?,
+                        builder,
+                        cache,
+                    )?,
+                    coerce_sir_expression(
+                        artifact,
+                        *rhs,
+                        ValueType::new(
+                            expression.value_type().width(),
+                            rhs_type.is_signed(),
+                            rhs_type.is_four_state(),
+                        )?,
+                        builder,
+                        cache,
+                    )?,
+                ),
+            };
+            let is_boolean = matches!(
+                op,
+                SdkBinaryOp::Equal
+                    | SdkBinaryOp::NotEqual
+                    | SdkBinaryOp::CaseEqual
+                    | SdkBinaryOp::CaseNotEqual
+                    | SdkBinaryOp::LessUnsigned
+                    | SdkBinaryOp::LessSigned
+                    | SdkBinaryOp::LessEqualUnsigned
+                    | SdkBinaryOp::LessEqualSigned
+                    | SdkBinaryOp::GreaterUnsigned
+                    | SdkBinaryOp::GreaterSigned
+                    | SdkBinaryOp::GreaterEqualUnsigned
+                    | SdkBinaryOp::GreaterEqualSigned
+                    | SdkBinaryOp::LogicAnd
+                    | SdkBinaryOp::LogicOr
+            );
+            let case_equality = matches!(op, SdkBinaryOp::CaseEqual | SdkBinaryOp::CaseNotEqual);
+            let operation_four_state = expression.value_type().is_four_state()
+                || (!case_equality && (lhs_type.is_four_state() || rhs_type.is_four_state()));
+            let operation_type = ValueType::new(
+                if is_boolean {
+                    1
+                } else {
+                    expression.value_type().width()
+                },
+                !is_boolean && expression.value_type().is_signed(),
+                operation_four_state,
+            )?;
+            let operation_result = alloc_register(builder, operation_type);
+            builder.emit(SIRInstruction::Binary(
+                operation_result,
+                lhs,
+                binary_op(*op)?,
+                rhs,
+            ));
+            coerce_sir_register(
+                builder,
+                operation_result,
+                operation_type,
+                expression.value_type(),
+            )?
         }
         ExprNode::Unary { op, input } => {
-            let input = lower_sir_expression(artifact, *input, builder, cache)?;
-            builder.emit(SIRInstruction::Unary(result, unary_op(*op)?, input));
+            use celox_frontend_sdk::UnaryOp as SdkUnaryOp;
+
+            let input_type = artifact
+                .expression(*input)
+                .ok_or(FrontendArtifactError::UnknownExpression(input.index()))?
+                .value_type();
+            let (input, operation_type) = match op {
+                SdkUnaryOp::Negate | SdkUnaryOp::BitNot => (
+                    coerce_sir_expression(
+                        artifact,
+                        *input,
+                        ValueType::new(
+                            expression.value_type().width(),
+                            input_type.is_signed(),
+                            input_type.is_four_state(),
+                        )?,
+                        builder,
+                        cache,
+                    )?,
+                    ValueType::new(
+                        expression.value_type().width(),
+                        expression.value_type().is_signed(),
+                        expression.value_type().is_four_state() || input_type.is_four_state(),
+                    )?,
+                ),
+                SdkUnaryOp::LogicNot
+                | SdkUnaryOp::ReduceAnd
+                | SdkUnaryOp::ReduceOr
+                | SdkUnaryOp::ReduceXor => (
+                    lower_sir_expression(artifact, *input, builder, cache)?,
+                    ValueType::new(
+                        1,
+                        false,
+                        expression.value_type().is_four_state() || input_type.is_four_state(),
+                    )?,
+                ),
+                SdkUnaryOp::ToTwoState => (
+                    lower_sir_expression(artifact, *input, builder, cache)?,
+                    ValueType::new(input_type.width(), input_type.is_signed(), false)?,
+                ),
+                SdkUnaryOp::PopCount
+                | SdkUnaryOp::CountLeadingZeros
+                | SdkUnaryOp::CountTrailingZeros => (
+                    lower_sir_expression(artifact, *input, builder, cache)?,
+                    ValueType::new(
+                        unary_op(*op)?.result_width(input_type.width()),
+                        false,
+                        expression.value_type().is_four_state() || input_type.is_four_state(),
+                    )?,
+                ),
+                _ => return Err(FrontendArtifactError::UnsupportedOperation),
+            };
+            let operation_result = alloc_register(builder, operation_type);
+            builder.emit(SIRInstruction::Unary(
+                operation_result,
+                unary_op(*op)?,
+                input,
+            ));
+            coerce_sir_register(
+                builder,
+                operation_result,
+                operation_type,
+                expression.value_type(),
+            )?
         }
         ExprNode::Mux {
             condition,
             then_expr,
             else_expr,
         } => {
+            let condition_type = artifact
+                .expression(*condition)
+                .ok_or(FrontendArtifactError::UnknownExpression(condition.index()))?
+                .value_type();
             let condition = lower_sir_expression(artifact, *condition, builder, cache)?;
-            let then_expr = lower_sir_expression(artifact, *then_expr, builder, cache)?;
-            let else_expr = lower_sir_expression(artifact, *else_expr, builder, cache)?;
-            builder.emit(SIRInstruction::Mux(result, condition, then_expr, else_expr));
+            let then_type = artifact
+                .expression(*then_expr)
+                .ok_or(FrontendArtifactError::UnknownExpression(then_expr.index()))?
+                .value_type();
+            let else_type = artifact
+                .expression(*else_expr)
+                .ok_or(FrontendArtifactError::UnknownExpression(else_expr.index()))?
+                .value_type();
+            let then_expr = coerce_sir_expression(
+                artifact,
+                *then_expr,
+                ValueType::new(
+                    expression.value_type().width(),
+                    then_type.is_signed(),
+                    then_type.is_four_state(),
+                )?,
+                builder,
+                cache,
+            )?;
+            let else_expr = coerce_sir_expression(
+                artifact,
+                *else_expr,
+                ValueType::new(
+                    expression.value_type().width(),
+                    else_type.is_signed(),
+                    else_type.is_four_state(),
+                )?,
+                builder,
+                cache,
+            )?;
+            let operation_type = ValueType::new(
+                expression.value_type().width(),
+                expression.value_type().is_signed(),
+                expression.value_type().is_four_state()
+                    || condition_type.is_four_state()
+                    || then_type.is_four_state()
+                    || else_type.is_four_state(),
+            )?;
+            let operation_result = alloc_register(builder, operation_type);
+            builder.emit(SIRInstruction::Mux(
+                operation_result,
+                condition,
+                then_expr,
+                else_expr,
+            ));
+            coerce_sir_register(
+                builder,
+                operation_result,
+                operation_type,
+                expression.value_type(),
+            )?
         }
         ExprNode::Concat(parts) => {
             let parts = parts
                 .iter()
                 .map(|part| lower_sir_expression(artifact, *part, builder, cache))
                 .collect::<Result<Vec<_>, _>>()?;
+            let result = alloc_register(builder, expression.value_type());
             builder.emit(SIRInstruction::Concat(result, parts));
+            result
         }
         ExprNode::Slice { input, lsb } => {
             let input = lower_sir_expression(artifact, *input, builder, cache)?;
+            let result = alloc_register(builder, expression.value_type());
             builder.emit(SIRInstruction::Slice(
                 result,
                 input,
                 *lsb,
                 expression.value_type().width(),
             ));
+            result
         }
         _ => return Err(FrontendArtifactError::UnsupportedOperation),
-    }
+    };
     cache.insert(id, result);
     Ok(result)
 }

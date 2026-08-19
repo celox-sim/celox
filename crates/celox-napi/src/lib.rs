@@ -1694,6 +1694,12 @@ impl NativeSimulatorHandle {
         )
     }
 
+    /// Return a complete initialized memory image for the TypeScript WASM bridge.
+    #[napi]
+    pub fn initial_memory_bytes(&self) -> Vec<u8> {
+        Self::build_initial_memory_bytes(&self.program, self.program.layout(), self.four_state)
+    }
+
     /// Returns the instance hierarchy as a JSON string.
     #[napi(getter)]
     pub fn hierarchy_json(&self) -> String {
@@ -1768,6 +1774,119 @@ impl NativeSimulatorHandle {
 
 #[cfg(target_arch = "wasm32")]
 impl NativeSimulatorHandle {
+    fn write_memory_bit(memory: &mut [u8], byte: usize, bit: usize, value: bool) {
+        let mask = 1u8 << bit;
+        if value {
+            memory[byte] |= mask;
+        } else {
+            memory[byte] &= !mask;
+        }
+    }
+
+    fn byte_bit(bytes: &[u8], bit: usize) -> bool {
+        bytes
+            .get(bit / 8)
+            .is_some_and(|byte| byte & (1u8 << (bit % 8)) != 0)
+    }
+
+    fn build_initial_memory_bytes(
+        program: &celox::LaidOutProgram,
+        layout: &celox::MemoryLayout,
+        four_state: bool,
+    ) -> Vec<u8> {
+        let mut memory = vec![0u8; layout.merged_total_size];
+
+        if four_state {
+            for (address, &offset) in &layout.offsets {
+                if layout.is_4states.get(address).copied().unwrap_or(false) {
+                    let plane_size = layout.plane_size(address);
+                    memory[offset..offset + plane_size * 2].fill(0xff);
+                }
+            }
+            for (address, &relative_offset) in &layout.working_offsets {
+                if layout.is_4states.get(address).copied().unwrap_or(false) {
+                    let offset = layout.working_base_offset + relative_offset;
+                    let plane_size = layout.plane_size(address);
+                    memory[offset..offset + plane_size * 2].fill(0xff);
+                }
+            }
+        }
+
+        for initial in &program.design.initial_state {
+            let Some(&offset) = layout.offsets.get(&initial.address) else {
+                continue;
+            };
+            let width = layout.widths[&initial.address];
+            let plane_size = layout.plane_size(&initial.address);
+            let write_mask = four_state
+                && layout
+                    .is_4states
+                    .get(&initial.address)
+                    .copied()
+                    .unwrap_or(false);
+
+            match &initial.data {
+                celox_design::InitialStateData::Packed {
+                    value,
+                    mask,
+                    written_mask,
+                } => {
+                    let value = value.to_bytes_le();
+                    let mask = mask.to_bytes_le();
+                    let written_mask = written_mask.to_bytes_le();
+                    for bit in 0..width {
+                        if !Self::byte_bit(&written_mask, bit) {
+                            continue;
+                        }
+                        let (byte, intra) = layout.map_static_bit_offset(&initial.address, bit);
+                        let is_unknown = Self::byte_bit(&mask, bit);
+                        Self::write_memory_bit(
+                            &mut memory,
+                            offset + byte,
+                            intra,
+                            Self::byte_bit(&value, bit) && (write_mask || !is_unknown),
+                        );
+                        if write_mask {
+                            Self::write_memory_bit(
+                                &mut memory,
+                                offset + plane_size + byte,
+                                intra,
+                                is_unknown,
+                            );
+                        }
+                    }
+                }
+                celox_design::InitialStateData::Writes(runs) => {
+                    for run in runs {
+                        for relative_bit in 0..run.bit_width {
+                            let bit = run.bit_offset + relative_bit;
+                            if bit >= width {
+                                break;
+                            }
+                            let (byte, intra) = layout.map_static_bit_offset(&initial.address, bit);
+                            Self::write_memory_bit(
+                                &mut memory,
+                                offset + byte,
+                                intra,
+                                Self::byte_bit(&run.value_bytes, relative_bit),
+                            );
+                            if write_mask {
+                                Self::write_memory_bit(
+                                    &mut memory,
+                                    offset + plane_size + byte,
+                                    intra,
+                                    Self::byte_bit(&run.mask_bytes, relative_bit),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        memory
+    }
+
     fn build_four_state_init_regions_json(
         program: &celox::LaidOutProgram,
         layout: &celox::MemoryLayout,
@@ -1863,12 +1982,10 @@ impl NativeSimulatorHandle {
         use std::collections::BTreeMap;
 
         let mut events: BTreeMap<String, usize> = BTreeMap::new();
-        let mut next_id = 0usize;
 
-        for addr in program.sir.eval_apply_ffs.keys() {
+        for (next_id, addr) in program.sir.eval_apply_ffs.keys().enumerate() {
             let name = program.get_path(addr);
             events.insert(name, next_id);
-            next_id += 1;
         }
 
         serde_json::to_string(&events).unwrap_or_else(|_| "{}".to_string())
