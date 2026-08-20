@@ -1052,6 +1052,7 @@ mod host {
         pub cranelift_options: crate::backend::CraneliftOptions,
         #[cfg(any(
             target_arch = "x86_64",
+            feature = "arm64-codegen",
             all(target_arch = "aarch64", feature = "experimental-arm64-backend")
         ))]
         pub x86_options: crate::backend::X86BackendOptions,
@@ -1067,19 +1068,20 @@ mod host {
         pub dead_store_policy: DeadStorePolicy,
     }
 
-    /// A fully code-generated native simulator that has not run any simulator
-    /// initialization yet.
+    /// A code-generated native program that has not been loaded into
+    /// executable memory or initialized as a simulator yet.
     ///
     /// Keeping compilation separate from initialization lets compiler-only
     /// clients stop after native code generation without applying initial
     /// values or executing the first combinational settle.
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     #[must_use]
     pub struct NativeCompilation {
-        backend: crate::backend::native::NativeBackend,
+        image: crate::backend::native::NativeProgramImage,
         program: LaidOutProgram,
         warnings: Vec<CompilationWarning>,
         options: SimulatorOptions,
@@ -1089,6 +1091,82 @@ mod host {
 
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
+    fn initialize_native_backend(
+        backend: crate::backend::native::NativeBackend,
+        program: crate::ir::RuntimeProgram,
+        warnings: Vec<CompilationWarning>,
+        options: SimulatorOptions,
+        vcd_path: Option<std::path::PathBuf>,
+        injected_components: crate::InjectedComponents,
+    ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
+        let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
+        sim.components.set_injected(injected_components);
+        sim.diagnostics = options.diagnostics.clone();
+        if let Some(path) = vcd_path {
+            let descs = sim.build_vcd_descs(options.four_state);
+            let vcd_writer = crate::VcdWriter::new(path, &descs)
+                .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
+            sim.vcd_writer = Some(vcd_writer);
+        }
+        let apply_initial_start = options.diagnostics.phase_timing.then(crate::timing::now);
+        sim.apply_initial_values();
+        if let Some(start) = apply_initial_start {
+            tracing::debug!("[phase-timing] apply_initial_values: {:?}", start.elapsed());
+        }
+        let settle_start = options.diagnostics.phase_timing.then(crate::timing::now);
+        sim.modify(|_| {}).map_err(SimulatorError::from)?;
+        if let Some(start) = settle_start {
+            tracing::debug!("[phase-timing] initial_settle: {:?}", start.elapsed());
+        }
+        Ok(sim)
+    }
+
+    #[cfg(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
+    #[allow(unreachable_code)]
+    fn initialize_native_image(
+        image: crate::backend::native::NativeProgramImage,
+        program: LaidOutProgram,
+        warnings: Vec<CompilationWarning>,
+        options: SimulatorOptions,
+        vcd_path: Option<std::path::PathBuf>,
+        injected_components: crate::InjectedComponents,
+    ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
+        #[cfg(all(feature = "arm64-codegen", not(target_arch = "aarch64")))]
+        {
+            let _ = (
+                image,
+                program,
+                warnings,
+                options,
+                vcd_path,
+                injected_components,
+            );
+            return Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError));
+        }
+
+        // Safety: callers either produced the image in this process or loaded
+        // it from an explicitly trusted native-image artifact.
+        let backend = unsafe { crate::backend::native::NativeBackend::from_image(image)? };
+        initialize_native_backend(
+            backend,
+            program.into_runtime(),
+            warnings,
+            options,
+            vcd_path,
+            injected_components,
+        )
+    }
+
+    #[cfg(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     impl NativeCompilation {
@@ -1097,39 +1175,44 @@ mod host {
             &self.warnings
         }
 
-        /// Allocate and initialize the runtime state for this compiled artifact.
+        /// Pointer-free native machine-code artifact produced by this build.
+        pub fn program_image(&self) -> &crate::backend::native::NativeProgramImage {
+            &self.image
+        }
+
+        /// Consume the compilation and return its pointer-free native image.
+        pub fn into_program_image(self) -> crate::backend::native::NativeProgramImage {
+            self.image
+        }
+
+        /// Write the generated native image as a standalone binary container.
+        pub fn write_image(
+            &self,
+            output_path: impl AsRef<std::path::Path>,
+        ) -> Result<(), crate::backend::native::NativeImageContainerError> {
+            self.image.write_container(output_path)
+        }
+
+        /// Load the image into executable memory and initialize runtime state.
         pub fn initialize(
             self,
         ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
             let Self {
-                backend,
+                image,
                 program,
                 warnings,
                 options,
                 vcd_path,
                 injected_components,
             } = self;
-            let mut sim =
-                Simulator::with_backend_and_program(backend, program.into_runtime(), warnings);
-            sim.components.set_injected(injected_components);
-            sim.diagnostics = options.diagnostics.clone();
-            if let Some(path) = vcd_path {
-                let descs = sim.build_vcd_descs(options.four_state);
-                let vcd_writer = crate::VcdWriter::new(path, &descs)
-                    .map_err(|_| SimulatorError::from(crate::RuntimeErrorCode::InternalError))?;
-                sim.vcd_writer = Some(vcd_writer);
-            }
-            let apply_initial_start = options.diagnostics.phase_timing.then(crate::timing::now);
-            sim.apply_initial_values();
-            if let Some(start) = apply_initial_start {
-                tracing::debug!("[phase-timing] apply_initial_values: {:?}", start.elapsed());
-            }
-            let settle_start = options.diagnostics.phase_timing.then(crate::timing::now);
-            sim.modify(|_| {}).map_err(SimulatorError::from)?;
-            if let Some(start) = settle_start {
-                tracing::debug!("[phase-timing] initial_settle: {:?}", start.elapsed());
-            }
-            Ok(sim)
+            initialize_native_image(
+                image,
+                program,
+                warnings,
+                options,
+                vcd_path,
+                injected_components,
+            )
         }
     }
 
@@ -1142,6 +1225,7 @@ mod host {
                 cranelift_options: crate::backend::CraneliftOptions::default(),
                 #[cfg(any(
                     target_arch = "x86_64",
+                    feature = "arm64-codegen",
                     all(target_arch = "aarch64", feature = "experimental-arm64-backend")
                 ))]
                 x86_options: crate::backend::X86BackendOptions::default(),
@@ -1338,6 +1422,7 @@ mod host {
 
         #[cfg(any(
             target_arch = "x86_64",
+            feature = "arm64-codegen",
             all(target_arch = "aarch64", feature = "experimental-arm64-backend")
         ))]
         pub fn x86_slp(mut self, enable: bool) -> Self {
@@ -1347,6 +1432,7 @@ mod host {
 
         #[cfg(not(any(
             target_arch = "x86_64",
+            feature = "arm64-codegen",
             all(target_arch = "aarch64", feature = "experimental-arm64-backend")
         )))]
         pub fn x86_slp(self, enable: bool) -> Self {
@@ -1407,6 +1493,7 @@ mod host {
             self.options.cranelift_options.diagnostics = diagnostics.cranelift;
             #[cfg(any(
                 target_arch = "x86_64",
+                feature = "arm64-codegen",
                 all(target_arch = "aarch64", feature = "experimental-arm64-backend")
             ))]
             {
@@ -1773,18 +1860,19 @@ mod host {
         }
 
         /// Compiles the Veryl source and constructs the simulator.
-        /// Uses a custom native backend on x86-64 and opt-in AArch64, Cranelift elsewhere.
+        /// Uses a custom native backend when it matches the host, Cranelift
+        /// for cross-codegen builds.
         pub fn build(self) -> Result<Simulator<crate::DefaultBackend>, SimulatorError> {
             #[cfg(any(
-                target_arch = "x86_64",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             ))]
             {
                 self.build_native()
             }
             #[cfg(not(any(
-                target_arch = "x86_64",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             )))]
             {
                 self.build_cranelift()
@@ -1841,6 +1929,7 @@ mod host {
         /// Compiles using the custom native backend for this host architecture.
         #[cfg(any(
             target_arch = "x86_64",
+            feature = "arm64-codegen",
             all(target_arch = "aarch64", feature = "experimental-arm64-backend")
         ))]
         pub fn compile_native(self) -> Result<NativeCompilation, SimulatorError> {
@@ -1857,12 +1946,12 @@ mod host {
                 );
             }
             let backend_start = phase_timing.then(crate::timing::now);
-            let backend = crate::backend::native::NativeBackend::new(&laid_out, &options)?;
+            let image = crate::backend::native::NativeBackend::compile_image(&laid_out, &options)?;
             if let Some(start) = backend_start {
-                tracing::debug!("[phase-timing] native_backend: {:?}", start.elapsed());
+                tracing::debug!("[phase-timing] native_codegen: {:?}", start.elapsed());
             }
             Ok(NativeCompilation {
-                backend,
+                image,
                 program: laid_out,
                 warnings,
                 options,
@@ -1874,12 +1963,56 @@ mod host {
         /// Compiles using the custom native backend and initializes the simulator.
         #[cfg(any(
             target_arch = "x86_64",
+            feature = "arm64-codegen",
             all(target_arch = "aarch64", feature = "experimental-arm64-backend")
         ))]
         pub fn build_native(
             self,
         ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
             self.compile_native()?.initialize()
+        }
+
+        /// Load a previously generated native image without running source
+        /// parsing, SIR construction, layout, or native machine-code
+        /// generation here.
+        ///
+        /// This is the execution-side half of the host-codegen/QEMU workflow:
+        /// source-independent runtime metadata and the semantic testbench are
+        /// restored from `image`, while the target machine code is taken
+        /// entirely from it.
+        #[cfg(any(
+            target_arch = "x86_64",
+            feature = "arm64-codegen",
+            all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        ))]
+        #[allow(unreachable_code)]
+        pub fn build_native_from_image(
+            self,
+            image: crate::backend::native::NativeProgramImage,
+        ) -> Result<Simulator<crate::backend::native::NativeBackend>, SimulatorError> {
+            let mut options = self.options;
+            options.four_state = image.four_state();
+            let vcd_path = self.vcd_path;
+            let injected_components = self.injected_components;
+
+            #[cfg(all(feature = "arm64-codegen", not(target_arch = "aarch64")))]
+            {
+                let _ = (image, options, vcd_path, injected_components);
+                return Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError));
+            }
+
+            let program = image.runtime_program();
+            // Safety: the caller is explicitly loading a trusted native-image
+            // artifact, and `from_image` validates its structure first.
+            let backend = unsafe { crate::backend::native::NativeBackend::from_image(image)? };
+            initialize_native_backend(
+                backend,
+                program,
+                Vec::new(),
+                options,
+                vcd_path,
+                injected_components,
+            )
         }
 
         /// Compiles using the Wasmtime WASM backend.
@@ -1917,6 +2050,7 @@ mod host {
         /// Compiles and runs a testbench using the custom native backend.
         #[cfg(any(
             target_arch = "x86_64",
+            feature = "arm64-codegen",
             all(target_arch = "aarch64", feature = "experimental-arm64-backend")
         ))]
         pub fn run_test_native(self) -> Result<crate::testbench::TestResult, SimulatorError> {
@@ -1945,13 +2079,13 @@ mod host {
             self.enforce_native_force_optimizer();
             let mut trace = crate::debug::CompilationTrace::default();
             #[cfg(any(
-                target_arch = "x86_64",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             ))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
             #[cfg(not(any(
-                target_arch = "x86_64",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             )))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
             let injected_manifests = self.injected_components.manifests();
@@ -2019,8 +2153,8 @@ mod host {
                 }
 
                 #[cfg(any(
-                    target_arch = "x86_64",
-                    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                    all(target_arch = "aarch64", feature = "arm64-codegen")
                 ))]
                 let backend = if self.options.trace.mir
                     || !self.options.trace.native_profile_blocks.is_empty()
@@ -2039,8 +2173,8 @@ mod host {
                     crate::backend::native::NativeBackend::new(&laid_out, &self.options)?
                 };
                 #[cfg(not(any(
-                    target_arch = "x86_64",
-                    all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                    all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                    all(target_arch = "aarch64", feature = "arm64-codegen")
                 )))]
                 let backend = JitBackend::new(&laid_out, &self.options, None)?;
 
@@ -2150,13 +2284,13 @@ mod host {
             self.options.emit_triggers = true;
             self.enforce_native_force_optimizer();
             #[cfg(any(
-                target_arch = "x86_64",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             ))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
             #[cfg(not(any(
-                target_arch = "x86_64",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             )))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
             let (program, warnings) = if let Some(artifact) = &self.frontend_artifact {
@@ -2199,13 +2333,13 @@ mod host {
                 run_dead_store_elimination(&mut laid_out, &self.live_signals, &self.options);
             }
             #[cfg(any(
-                target_arch = "x86_64",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             ))]
             let backend = crate::backend::native::NativeBackend::new(&laid_out, &self.options)?;
             #[cfg(not(any(
-                target_arch = "x86_64",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             )))]
             let backend = crate::backend::JitBackend::new(&laid_out, &self.options, None)?;
 

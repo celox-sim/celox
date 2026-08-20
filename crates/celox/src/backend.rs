@@ -3,6 +3,7 @@ pub(crate) mod memory_layout;
     feature = "host-runtime",
     any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     )
 ))]
@@ -29,6 +30,7 @@ mod host {
 
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub use celox_backend_x86::{NativeDiagnostics, NativeDumpOptions, X86BackendOptions};

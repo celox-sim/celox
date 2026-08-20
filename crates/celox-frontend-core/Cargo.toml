@@ -15,6 +15,7 @@ celox-slt = { path = "../celox-slt" }
 fxhash = { workspace = true }
 miette = { workspace = true }
 num-bigint = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

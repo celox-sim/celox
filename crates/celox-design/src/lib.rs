@@ -36,7 +36,7 @@ pub enum PortTypeKind {
 ///
 /// Source IDs, source paths, and declaration syntax belong to the frontend and
 /// deliberately are not part of this type.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VariableMetadata {
     pub width: usize,
     pub is_4state: bool,

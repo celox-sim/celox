@@ -16,16 +16,47 @@ CELOX_OPT_LEVEL="${CELOX_OPT_LEVEL:-O2}"
 CELOX_SIR_PASS_OVERRIDES="${CELOX_SIR_PASS_OVERRIDES:-}"
 HELIODOR_CELOX_CARGO_PROFILE="${HELIODOR_CELOX_CARGO_PROFILE:-heliodor-dev}"
 HELIODOR_CELOX_CARGO_FEATURES="${HELIODOR_CELOX_CARGO_FEATURES:-}"
-CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-$CELOX_ROOT/target/$HELIODOR_CELOX_CARGO_PROFILE/celox-heliodor}"
+CELOX_RUNNER_BIN="${CELOX_RUNNER_BIN:-}"
+CELOX_CODEGEN_RUNNER_BIN="${CELOX_CODEGEN_RUNNER_BIN:-}"
 VERYL_TIMED_RUNNER_BIN="${VERYL_TIMED_RUNNER_BIN:-$CELOX_ROOT/target/$HELIODOR_CELOX_CARGO_PROFILE/veryl-heliodor}"
 HELIODOR_BUILD_CELOX_RUNNER="${HELIODOR_BUILD_CELOX_RUNNER:-1}"
 HELIODOR_CELOX_TARGET_DIR="${HELIODOR_CELOX_TARGET_DIR:-}"
+HELIODOR_CELOX_NATIVE_IMAGE_MODE="${HELIODOR_CELOX_NATIVE_IMAGE_MODE:-off}"
+HELIODOR_CELOX_NATIVE_IMAGE_DIR="${HELIODOR_CELOX_NATIVE_IMAGE_DIR:-$HELIODOR_RESULTS_DIR/native-images}"
+HELIODOR_CELOX_CODEGEN_CARGO_FEATURES="${HELIODOR_CELOX_CODEGEN_CARGO_FEATURES:-arm64-codegen}"
+HELIODOR_CELOX_EXECUTION_TARGET="${HELIODOR_CELOX_EXECUTION_TARGET:-}"
+HELIODOR_CELOX_EXECUTION_PREFIX="${HELIODOR_CELOX_EXECUTION_PREFIX:-}"
+if [[ "$HELIODOR_CELOX_NATIVE_IMAGE_MODE" == host-qemu ]]; then
+    HELIODOR_CELOX_EXECUTION_TARGET="${HELIODOR_CELOX_EXECUTION_TARGET:-aarch64-unknown-linux-gnu}"
+    HELIODOR_CELOX_EXECUTION_CARGO_FEATURES="${HELIODOR_CELOX_EXECUTION_CARGO_FEATURES:-experimental-arm64-backend}"
+else
+    HELIODOR_CELOX_EXECUTION_CARGO_FEATURES="${HELIODOR_CELOX_EXECUTION_CARGO_FEATURES:-$HELIODOR_CELOX_CARGO_FEATURES}"
+fi
+CELOX_TARGET_ROOT="${HELIODOR_CELOX_TARGET_DIR:-$CELOX_ROOT/target}"
+if [[ -z "$CELOX_RUNNER_BIN" ]]; then
+    if [[ -n "$HELIODOR_CELOX_EXECUTION_TARGET" ]]; then
+        CELOX_RUNNER_BIN="$CELOX_TARGET_ROOT/$HELIODOR_CELOX_EXECUTION_TARGET/$HELIODOR_CELOX_CARGO_PROFILE/celox-heliodor"
+    else
+        CELOX_RUNNER_BIN="$CELOX_TARGET_ROOT/$HELIODOR_CELOX_CARGO_PROFILE/celox-heliodor"
+    fi
+fi
+if [[ -z "$CELOX_CODEGEN_RUNNER_BIN" ]]; then
+    CELOX_CODEGEN_RUNNER_BIN="$CELOX_TARGET_ROOT/$HELIODOR_CELOX_CARGO_PROFILE/celox-heliodor"
+fi
+if [[ -z "$VERYL_TIMED_RUNNER_BIN" ]]; then
+    VERYL_TIMED_RUNNER_BIN="$CELOX_TARGET_ROOT/$HELIODOR_CELOX_CARGO_PROFILE/veryl-heliodor"
+fi
 HELIODOR_COMPILE_ONLY="${HELIODOR_COMPILE_ONLY:-${HELIODOR_CELOX_COMPILE_ONLY:-0}}"
 HELIODOR_COMPILE_TIMEOUT_SEC="${HELIODOR_COMPILE_TIMEOUT_SEC:-${HELIODOR_CELOX_COMPILE_TIMEOUT_SEC:-}}"
 HELIODOR_CELOX_TIMEOUT_MULTIPLIER="${HELIODOR_CELOX_TIMEOUT_MULTIPLIER:-2}"
 HELIODOR_INSTALL_TOOLS="${HELIODOR_INSTALL_TOOLS:-1}"
 HELIODOR_VERYL_VERSION="${HELIODOR_VERYL_VERSION:-0.20.3}"
 VERYL_BIN="${VERYL_BIN:-}"
+
+declare -a CELOX_EXECUTION_PREFIX=()
+if [[ -n "$HELIODOR_CELOX_EXECUTION_PREFIX" ]]; then
+    read -r -a CELOX_EXECUTION_PREFIX <<<"$HELIODOR_CELOX_EXECUTION_PREFIX"
+fi
 
 readonly GATE_HELIODOR_REF=94e9c5821c24a8941c3ddc3b76daddc7124a855a
 readonly GATE_TEST=test_soc_linux_boot
@@ -79,12 +110,27 @@ Environment:
   CELOX_SIR_PASS_OVERRIDES
                        space-separated SIR pass overrides, e.g. "-vectorize_concat +gvn"
   CELOX_RUNNER_BIN     prebuilt Celox runner path
+  CELOX_CODEGEN_RUNNER_BIN
+                       host runner used by host-qemu native-image mode
   VERYL_TIMED_RUNNER_BIN
                        prebuilt synchronous Veryl-CC timing runner path
   HELIODOR_CELOX_CARGO_PROFILE
                        Cargo profile for the Celox runner (default: heliodor-dev)
   HELIODOR_CELOX_CARGO_FEATURES
                        optional Cargo features for the Celox runner
+  HELIODOR_CELOX_NATIVE_IMAGE_MODE
+                       off or host-qemu; generate ARM images on the host and run them through the execution prefix
+  HELIODOR_CELOX_NATIVE_IMAGE_DIR
+                       directory for host-generated native images
+  HELIODOR_CELOX_CODEGEN_CARGO_FEATURES
+                       Cargo features for the host codegen runner (default: arm64-codegen)
+  HELIODOR_CELOX_EXECUTION_CARGO_FEATURES
+                       Cargo features for the execution runner
+  HELIODOR_CELOX_EXECUTION_TARGET
+                       target triple for the execution runner, e.g. aarch64-unknown-linux-gnu
+                       (defaults to aarch64-unknown-linux-gnu in host-qemu mode)
+  HELIODOR_CELOX_EXECUTION_PREFIX
+                       command prefix for execution, e.g. "qemu-aarch64 -L /usr/aarch64-linux-gnu"
   HELIODOR_BUILD_CELOX_RUNNER
                        build CELOX_RUNNER_BIN before Celox runs (default: 1)
   HELIODOR_CELOX_TARGET_DIR
@@ -1010,6 +1056,35 @@ runner_enabled() {
     return 1
 }
 
+validate_native_image_mode() {
+    case "$HELIODOR_CELOX_NATIVE_IMAGE_MODE" in
+        off)
+            ;;
+        host-qemu)
+            if ! runner_enabled celox; then
+                echo "error: host-qemu native-image mode requires the celox runner" >&2
+                return 2
+            fi
+            if [[ "$HELIODOR_COMPILE_ONLY" == 1 ]]; then
+                echo "error: host-qemu native-image mode is an execution benchmark and cannot use compile-only" >&2
+                return 2
+            fi
+            if [[ -z "$HELIODOR_CELOX_EXECUTION_PREFIX" ]]; then
+                echo "error: host-qemu native-image mode requires HELIODOR_CELOX_EXECUTION_PREFIX" >&2
+                return 2
+            fi
+            if [[ "$HELIODOR_CELOX_EXECUTION_TARGET" != aarch64-* ]]; then
+                echo "error: host-qemu native-image mode requires an AArch64 execution target" >&2
+                return 2
+            fi
+            ;;
+        *)
+            echo "error: HELIODOR_CELOX_NATIVE_IMAGE_MODE must be off or host-qemu" >&2
+            return 2
+            ;;
+    esac
+}
+
 any_veryl_runner_enabled() {
     local runner
     for runner in $HELIODOR_RUNNERS; do
@@ -1025,6 +1100,7 @@ build_celox_runner() {
     local log="$HELIODOR_RESULTS_DIR/celox_runner_build.log"
     local -a feature_args=()
     local -a target_dir_args=()
+    local -a target_args=()
     if [[ "$HELIODOR_BUILD_CELOX_RUNNER" != 1 ]]; then
         if [[ ! -x "$CELOX_RUNNER_BIN" ]]; then
             echo "error: HELIODOR_BUILD_CELOX_RUNNER=0 but CELOX_RUNNER_BIN is not executable: $CELOX_RUNNER_BIN" >&2
@@ -1040,6 +1116,48 @@ build_celox_runner() {
     if [[ -n "$HELIODOR_CELOX_CARGO_FEATURES" ]]; then
         feature_args=(--features "$HELIODOR_CELOX_CARGO_FEATURES")
     fi
+    if [[ "$HELIODOR_CELOX_NATIVE_IMAGE_MODE" == host-qemu ]]; then
+        feature_args=()
+        target_args=()
+        if [[ -n "$HELIODOR_CELOX_EXECUTION_CARGO_FEATURES" ]]; then
+            feature_args=(--features "$HELIODOR_CELOX_EXECUTION_CARGO_FEATURES")
+        fi
+        if [[ -n "$HELIODOR_CELOX_EXECUTION_TARGET" ]]; then
+            target_args=(--target "$HELIODOR_CELOX_EXECUTION_TARGET")
+        fi
+    fi
+    if ! env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET \
+        cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox-bench \
+        --bin celox-heliodor --profile "$HELIODOR_CELOX_CARGO_PROFILE" --locked \
+        "${feature_args[@]}" "${target_args[@]}" "${target_dir_args[@]}" >"$log" 2>&1; then
+        tail -n 80 "$log" >&2 || true
+        return 1
+    fi
+    if [[ ! -f "$CELOX_RUNNER_BIN" || ! -x "$CELOX_RUNNER_BIN" ]]; then
+        echo "error: Celox build did not produce the selected runner: $CELOX_RUNNER_BIN" >&2
+        return 1
+    fi
+}
+
+build_celox_codegen_runner() {
+    local log="$HELIODOR_RESULTS_DIR/celox_codegen_runner_build.log"
+    local -a feature_args=()
+    local -a target_dir_args=()
+    if [[ "$HELIODOR_BUILD_CELOX_RUNNER" != 1 ]]; then
+        if [[ ! -x "$CELOX_CODEGEN_RUNNER_BIN" ]]; then
+            echo "error: HELIODOR_BUILD_CELOX_RUNNER=0 but CELOX_CODEGEN_RUNNER_BIN is not executable: $CELOX_CODEGEN_RUNNER_BIN" >&2
+            return 127
+        fi
+        echo "Using prebuilt Celox host codegen runner: $CELOX_CODEGEN_RUNNER_BIN"
+        return
+    fi
+    echo "Building Celox host codegen runner: $CELOX_CODEGEN_RUNNER_BIN"
+    if [[ -n "$HELIODOR_CELOX_TARGET_DIR" ]]; then
+        target_dir_args=(--target-dir "$HELIODOR_CELOX_TARGET_DIR")
+    fi
+    if [[ -n "$HELIODOR_CELOX_CODEGEN_CARGO_FEATURES" ]]; then
+        feature_args=(--features "$HELIODOR_CELOX_CODEGEN_CARGO_FEATURES")
+    fi
     if ! env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET \
         cargo build --manifest-path "$CELOX_ROOT/Cargo.toml" -p celox-bench \
         --bin celox-heliodor --profile "$HELIODOR_CELOX_CARGO_PROFILE" --locked \
@@ -1047,8 +1165,8 @@ build_celox_runner() {
         tail -n 80 "$log" >&2 || true
         return 1
     fi
-    if [[ ! -f "$CELOX_RUNNER_BIN" || ! -x "$CELOX_RUNNER_BIN" ]]; then
-        echo "error: Celox build did not produce the selected runner: $CELOX_RUNNER_BIN" >&2
+    if [[ ! -f "$CELOX_CODEGEN_RUNNER_BIN" || ! -x "$CELOX_CODEGEN_RUNNER_BIN" ]]; then
+        echo "error: host codegen build did not produce the selected runner: $CELOX_CODEGEN_RUNNER_BIN" >&2
         return 1
     fi
 }
@@ -1226,6 +1344,7 @@ run_one() {
     local test="$2"
     local stamp log process_status start end process_elapsed timeout_sec
     local semantic_status reported_elapsed compile_elapsed execute_elapsed jit_execute_elapsed full_elapsed result_valid
+    local native_image_path="" native_codegen_log=""
     local veryl_aot_cache_dir=""
     local -a source_files celox_args timed_veryl_args
     collect_test_source_files "$test" source_files || return "$?"
@@ -1246,6 +1365,14 @@ run_one() {
     fi
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     log="$HELIODOR_RESULTS_DIR/${stamp}_${runner}_${test}.log"
+    if [[ "$runner" == celox && "$HELIODOR_CELOX_NATIVE_IMAGE_MODE" == host-qemu ]]; then
+        if ! mkdir -p "$HELIODOR_CELOX_NATIVE_IMAGE_DIR"; then
+            echo "error: could not create native image directory: $HELIODOR_CELOX_NATIVE_IMAGE_DIR" >&2
+            return 1
+        fi
+        native_image_path="$(realpath -m "$HELIODOR_CELOX_NATIVE_IMAGE_DIR/${test}.native-image")"
+        native_codegen_log="${log}.host-codegen"
+    fi
     timeout_sec="$(timeout_sec_for "$runner" "$test")"
     if [[ ("$runner" == celox* || "$runner" == veryl-cc-sync) && "$HELIODOR_COMPILE_ONLY" == 1 ]]; then
         if [[ -n "$timeout_sec" && "$timeout_sec" != 0 ]]; then
@@ -1275,10 +1402,32 @@ run_one() {
     set +e
     case "$runner" in
         celox)
-            run_in_heliodor "$timeout_sec" "$log" \
-                "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
-                "${celox_args[@]}" --backend native --opt-level "${CELOX_OPT_LEVEL,,}"
-            process_status="$?"
+            if [[ "$HELIODOR_CELOX_NATIVE_IMAGE_MODE" == host-qemu ]]; then
+                run_in_heliodor "$timeout_sec" "$native_codegen_log" \
+                    "$CELOX_CODEGEN_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
+                    "${celox_args[@]}" --backend native --opt-level "${CELOX_OPT_LEVEL,,}" \
+                    --compile-only --native-image-output "$native_image_path"
+                process_status="$?"
+                if [[ "$process_status" == 0 ]]; then
+                    if ! start="$(monotonic_ns)" || ! is_uint "$start"; then
+                        echo "error: could not read a monotonic execution start timestamp" >&2
+                        return 1
+                    fi
+                    run_in_heliodor "$timeout_sec" "$log" \
+                        "${CELOX_EXECUTION_PREFIX[@]}" "$CELOX_RUNNER_BIN" \
+                        --project "$HELIODOR_DIR" --test "$test" \
+                        "${celox_args[@]}" --backend native --opt-level "${CELOX_OPT_LEVEL,,}" \
+                        --native-image-input "$native_image_path"
+                    process_status="$?"
+                else
+                    cp "$native_codegen_log" "$log"
+                fi
+            else
+                run_in_heliodor "$timeout_sec" "$log" \
+                    "$CELOX_RUNNER_BIN" --project "$HELIODOR_DIR" --test "$test" \
+                    "${celox_args[@]}" --backend native --opt-level "${CELOX_OPT_LEVEL,,}"
+                process_status="$?"
+            fi
             ;;
         celox-cranelift)
             run_in_heliodor "$timeout_sec" "$log" \
@@ -1399,11 +1548,15 @@ run_one() {
 }
 
 run_all() {
+    validate_native_image_mode || return "$?"
     prepare
     mkdir -p "$HELIODOR_RESULTS_DIR"
     ensure_results_schema "$HELIODOR_RESULTS_DIR/results.tsv" || return "$?"
     if runner_enabled celox || runner_enabled celox-cranelift; then
         build_celox_runner
+    fi
+    if [[ "$HELIODOR_CELOX_NATIVE_IMAGE_MODE" == host-qemu ]]; then
+        build_celox_codegen_runner
     fi
     if runner_enabled veryl-cc-sync; then
         build_timed_veryl_runner
@@ -1730,7 +1883,9 @@ run_gate() {
     HELIODOR_CELOX_CARGO_PROFILE=release
     HELIODOR_CELOX_CARGO_FEATURES=""
     HELIODOR_CELOX_TARGET_DIR=""
+    HELIODOR_CELOX_NATIVE_IMAGE_MODE=off
     CELOX_RUNNER_BIN=""
+    CELOX_CODEGEN_RUNNER_BIN=""
     VERYL_TIMED_RUNNER_BIN=""
 
     gate_record_celox_checkout || return "$?"

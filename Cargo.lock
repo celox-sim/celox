@@ -592,6 +592,7 @@ dependencies = [
  "fxhash",
  "miette",
  "num-bigint",
+ "serde",
  "thiserror 2.0.20",
  "tracing",
 ]
@@ -768,6 +769,7 @@ version = "0.0.0"
 dependencies = [
  "num-bigint",
  "num-traits",
+ "serde",
 ]
 
 [[package]]

@@ -30,6 +30,12 @@ struct Cli {
     four_state: bool,
     #[arg(long)]
     compile_only: bool,
+    /// Write a pointer-free native image during compile-only mode.
+    #[arg(long, value_name = "PATH")]
+    native_image_output: Option<PathBuf>,
+    /// Load a pointer-free native image instead of generating machine code.
+    #[arg(long, value_name = "PATH")]
+    native_image_input: Option<PathBuf>,
     #[arg(long, value_parser = parse_positive_u64)]
     tick_limit: Option<u64>,
     #[arg(long)]
@@ -54,6 +60,8 @@ struct Options {
     backend: Backend,
     four_state: bool,
     compile_only: bool,
+    native_image_output: Option<PathBuf>,
+    native_image_input: Option<PathBuf>,
     tick_limit: Option<u64>,
     dump_ir_dir: Option<PathBuf>,
     dump_ir_and_run: bool,
@@ -75,6 +83,13 @@ enum CeloxHeliodorError {
         #[source]
         source: celox::SimulatorError,
     },
+    #[cfg(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
+    #[error("native image container failed: {0}")]
+    NativeImage(#[from] celox::NativeImageContainerError),
     #[error("{message}")]
     InvalidConfiguration { message: &'static str },
     #[error("{artifact} trace was not captured")]
@@ -140,13 +155,15 @@ fn run() -> Result<(), CeloxHeliodorError> {
         backend: cli.backend,
         four_state: cli.four_state,
         compile_only: cli.compile_only,
+        native_image_output: cli.native_image_output,
+        native_image_input: cli.native_image_input,
         tick_limit: cli.tick_limit,
         dump_ir_dir: cli.dump_ir_dir,
         dump_ir_and_run: cli.dump_ir_and_run,
         native_profile_blocks: cli.native_profile_blocks,
         pass_overrides: cli.pass_overrides,
         native_memory_width: cli.native_memory_width.unwrap_or({
-            if cfg!(target_arch = "x86_64") {
+            if cfg!(all(target_arch = "x86_64", not(feature = "arm64-codegen"))) {
                 128
             } else {
                 64
@@ -155,8 +172,38 @@ fn run() -> Result<(), CeloxHeliodorError> {
         x86_slp: cli
             .x86_slp
             .map(|value| matches!(value, OnOff::On))
-            .unwrap_or(cfg!(target_arch = "x86_64")),
+            .unwrap_or(cfg!(all(
+                target_arch = "x86_64",
+                not(feature = "arm64-codegen")
+            ))),
     };
+    if opts.native_image_output.is_some() && !opts.compile_only {
+        return Err(CeloxHeliodorError::InvalidConfiguration {
+            message: "--native-image-output requires --compile-only",
+        });
+    }
+    if opts.native_image_input.is_some() && opts.compile_only {
+        return Err(CeloxHeliodorError::InvalidConfiguration {
+            message: "--native-image-input cannot be used with --compile-only",
+        });
+    }
+    if opts.native_image_input.is_some() && opts.native_image_output.is_some() {
+        return Err(CeloxHeliodorError::InvalidConfiguration {
+            message: "--native-image-input and --native-image-output are mutually exclusive",
+        });
+    }
+    if (opts.native_image_input.is_some() || opts.native_image_output.is_some())
+        && matches!(opts.backend, Backend::Cranelift)
+    {
+        return Err(CeloxHeliodorError::InvalidConfiguration {
+            message: "native image options require --backend native",
+        });
+    }
+    if opts.native_image_input.is_some() && opts.dump_ir_dir.is_some() {
+        return Err(CeloxHeliodorError::InvalidConfiguration {
+            message: "--native-image-input cannot be combined with --dump-ir-dir",
+        });
+    }
     if !opts.native_profile_blocks.is_empty() && opts.dump_ir_dir.is_none() {
         return Err(CeloxHeliodorError::InvalidConfiguration {
             message: "--native-profile-block requires --dump-ir-dir",
@@ -167,8 +214,15 @@ fn run() -> Result<(), CeloxHeliodorError> {
             message: "--dump-ir-and-run requires --dump-ir-dir",
         });
     }
+    #[cfg(all(target_arch = "x86_64", feature = "arm64-codegen"))]
+    if opts.dump_ir_dir.is_some() {
+        return Err(CeloxHeliodorError::InvalidConfiguration {
+            message: "--dump-ir-dir is unavailable when generating AArch64 code on x86-64",
+        });
+    }
     #[cfg(not(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     )))]
     if matches!(opts.backend, Backend::Native) {
@@ -176,7 +230,34 @@ fn run() -> Result<(), CeloxHeliodorError> {
             message: "the custom native backend is unavailable; enable experimental-arm64-backend on AArch64",
         });
     }
-    let (sources, metadata) = load_sources(&opts.project, &opts.source_files)?;
+    #[cfg(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    ))]
+    let mut native_image = match &opts.native_image_input {
+        Some(path) => Some(celox::NativeProgramImage::from_container_bytes(&fs::read(
+            path,
+        )?)?),
+        None => None,
+    };
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        feature = "arm64-codegen",
+        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+    )))]
+    let native_image: Option<()> = None;
+    let (sources, metadata): (Vec<(String, PathBuf)>, Option<Metadata>) = if native_image.is_some()
+    {
+        // The image contains the target-specific machine code and all
+        // source-independent runtime/testbench metadata needed to execute
+        // it. The execution side therefore does not need the project
+        // sources at all.
+        (Vec::new(), None)
+    } else {
+        let (sources, metadata) = load_sources(&opts.project, &opts.source_files)?;
+        (sources, Some(metadata))
+    };
     let source_refs: Vec<(&str, &Path)> = sources
         .iter()
         .map(|(source, path)| (source.as_str(), path.as_path()))
@@ -193,8 +274,11 @@ fn run() -> Result<(), CeloxHeliodorError> {
     let total_start = Instant::now();
     let optimize_options =
         OptimizeOptions::new(opts.opt_level).with_max_native_memory_width(opts.native_memory_width);
-    let mut builder = Simulator::from_sources(source_refs, &opts.test)
-        .with_metadata(metadata)
+    let mut builder = Simulator::from_sources(source_refs, &opts.test);
+    if let Some(metadata) = metadata {
+        builder = builder.with_metadata(metadata);
+    }
+    let mut builder = builder
         .opt_level(opts.opt_level)
         .optimize_options(optimize_options)
         .x86_slp(opts.x86_slp)
@@ -320,8 +404,8 @@ fn run() -> Result<(), CeloxHeliodorError> {
             let testbench =
                 compile_initial_testbench(&sim).ok_or(CeloxHeliodorError::MissingInitialBlock)?;
             #[cfg(any(
-                target_arch = "x86_64",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             ))]
             sim.start_native_execution_timing();
             let execute_cpu_start = process_cpu_time();
@@ -333,16 +417,16 @@ fn run() -> Result<(), CeloxHeliodorError> {
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
             #[cfg(any(
-                target_arch = "x86_64",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             ))]
             let jit_execute_elapsed = sim
                 .finish_native_execution_timing()
                 .expect("native execution timing was started")
                 .elapsed();
             #[cfg(not(any(
-                target_arch = "x86_64",
-                all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+                all(target_arch = "aarch64", feature = "arm64-codegen")
             )))]
             let jit_execute_elapsed = Duration::ZERO;
             let execute_elapsed = execute_start.elapsed();
@@ -402,13 +486,29 @@ fn run() -> Result<(), CeloxHeliodorError> {
         match opts.backend {
             #[cfg(any(
                 target_arch = "x86_64",
+                feature = "arm64-codegen",
                 all(target_arch = "aarch64", feature = "experimental-arm64-backend")
             ))]
             Backend::Native => {
-                let _compiled = builder.compile_native()?;
+                let compiled = builder.compile_native()?;
+                if let Some(output_path) = &opts.native_image_output {
+                    if let Some(parent) = output_path
+                        .parent()
+                        .filter(|path| !path.as_os_str().is_empty())
+                    {
+                        fs::create_dir_all(parent)?;
+                    }
+                    compiled.write_image(output_path)?;
+                    println!(
+                        "CELOX_NATIVE_IMAGE test={} mode=generated path={}",
+                        opts.test,
+                        output_path.display()
+                    );
+                }
             }
             #[cfg(not(any(
                 target_arch = "x86_64",
+                feature = "arm64-codegen",
                 all(target_arch = "aarch64", feature = "experimental-arm64-backend")
             )))]
             Backend::Native => unreachable!("native backend availability checked above"),
@@ -445,10 +545,23 @@ fn run() -> Result<(), CeloxHeliodorError> {
     ) = match opts.backend {
         #[cfg(any(
             target_arch = "x86_64",
+            feature = "arm64-codegen",
             all(target_arch = "aarch64", feature = "experimental-arm64-backend")
         ))]
         Backend::Native => {
-            let mut sim = builder.build_native()?;
+            let mut sim = if let Some(image_path) = &opts.native_image_input {
+                let image = native_image
+                    .take()
+                    .expect("native image was loaded before builder construction");
+                println!(
+                    "CELOX_NATIVE_IMAGE test={} mode=loaded path={}",
+                    opts.test,
+                    image_path.display()
+                );
+                builder.build_native_from_image(image)?
+            } else {
+                builder.build_native()?
+            };
             let testbench =
                 compile_initial_testbench(&sim).ok_or(CeloxHeliodorError::MissingInitialBlock)?;
             let compile_elapsed = compile_start.elapsed();
@@ -479,6 +592,7 @@ fn run() -> Result<(), CeloxHeliodorError> {
         }
         #[cfg(not(any(
             target_arch = "x86_64",
+            feature = "arm64-codegen",
             all(target_arch = "aarch64", feature = "experimental-arm64-backend")
         )))]
         Backend::Native => unreachable!("native backend availability checked above"),

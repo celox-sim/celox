@@ -65,6 +65,7 @@ mod host_api {
     pub use crate::simulation::Simulation;
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub use crate::simulator::NativeCompilation;
@@ -101,6 +102,7 @@ mod host_api {
 
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub mod native_backend {
@@ -110,11 +112,13 @@ mod host_api {
 
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub use crate::backend::native::backend::NativeEventRef;
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub use crate::backend::native::{
@@ -124,20 +128,21 @@ mod host_api {
     };
     #[cfg(any(
         target_arch = "x86_64",
+        feature = "arm64-codegen",
         all(target_arch = "aarch64", feature = "experimental-arm64-backend")
     ))]
     pub use crate::backend::{NativeDiagnostics, NativeDumpOptions};
 
-    /// Default simulation backend: custom native on x86-64 and opt-in AArch64,
-    /// Cranelift elsewhere.
+    /// Default simulation backend: custom native on a matching host, and
+    /// Cranelift when `arm64-codegen` is used for cross-compilation.
     #[cfg(any(
-        target_arch = "x86_64",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+        all(target_arch = "aarch64", feature = "arm64-codegen")
     ))]
     pub type DefaultBackend = NativeBackend;
     #[cfg(not(any(
-        target_arch = "x86_64",
-        all(target_arch = "aarch64", feature = "experimental-arm64-backend")
+        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+        all(target_arch = "aarch64", feature = "arm64-codegen")
     )))]
     pub type DefaultBackend = JitBackend;
 
