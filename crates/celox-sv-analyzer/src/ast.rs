@@ -7210,13 +7210,15 @@ fn conditional_assignments_from_statement(
             for value in values {
                 let mut loop_env = const_env.clone();
                 loop_env.insert(name.clone(), value);
+                let mut loop_packed_dimensions = packed_dimensions.clone();
+                loop_packed_dimensions.const_env = loop_env.clone();
                 let start = assignments.len();
                 conditional_assignments_from_statement_or_null(
                     body,
                     condition.clone(),
                     syntax_tree,
                     &loop_env,
-                    packed_dimensions,
+                    &loop_packed_dimensions,
                     assignments,
                 )?;
                 for assignment in &mut assignments[start..] {
@@ -7631,6 +7633,13 @@ fn lvalue_from_select(
             });
         }
     }
+    if !indices.is_empty()
+        && packed_dimensions
+            .get(&name)
+            .is_some_and(|dimensions| !dimensions.unpacked.is_empty())
+    {
+        return None;
+    }
     if indices.len() == 1 {
         let bit = indices[0].clone();
         return Some(LValue::Select {
@@ -7714,6 +7723,13 @@ fn lvalue_from_constant_select(
                 lsb: array_offset,
             });
         }
+    }
+    if !indices.is_empty()
+        && packed_dimensions
+            .get(&name)
+            .is_some_and(|dimensions| !dimensions.unpacked.is_empty())
+    {
+        return None;
     }
     if indices.len() == 1 {
         let bit = indices[0].clone();

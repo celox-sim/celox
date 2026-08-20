@@ -4222,6 +4222,33 @@ fn lower_expr_to_sir_with_context(
             lsb,
             signed,
         } => {
+            let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
+            let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
+            let (msb, lsb) = packed_expr_select_offsets(expr, msb, lsb, variables, name_to_id)?;
+            let high = msb.max(lsb);
+            let low = msb.min(lsb);
+            let width = high - low + 1;
+            if let sv::ir::Expr::Ident(name) = &**expr
+                && let Some(var) = name_to_id.get(name).and_then(|id| variables.get(id))
+                && !var.array_dims.is_empty()
+            {
+                let reg = builder.alloc_logic(width);
+                builder.emit(SIRInstruction::Load(
+                    reg,
+                    RegionedVarAddrBase {
+                        region: STABLE_REGION,
+                        var_id: *name_to_id.get(name)?,
+                    },
+                    sv_memory_offset(var, low, width),
+                    width,
+                ));
+                return resize_sir_register(
+                    builder,
+                    reg,
+                    context_width.unwrap_or(width),
+                    context_signed.unwrap_or(*signed),
+                );
+            }
             let inner = lower_expr_to_sir_with_context(
                 builder,
                 expr,
@@ -4232,12 +4259,6 @@ fn lower_expr_to_sir_with_context(
                 None,
                 None,
             )?;
-            let msb = sv::typecheck::eval_const_expr_with_types(msb, constants, parameter_types)?;
-            let lsb = sv::typecheck::eval_const_expr_with_types(lsb, constants, parameter_types)?;
-            let (msb, lsb) = packed_expr_select_offsets(expr, msb, lsb, variables, name_to_id)?;
-            let high = msb.max(lsb);
-            let low = msb.min(lsb);
-            let width = high - low + 1;
             let reg = builder.alloc_logic(width);
             builder.emit(SIRInstruction::Slice(reg, inner, low, width));
             resize_sir_register(

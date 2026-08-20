@@ -807,6 +807,24 @@ fn preserves_named_zero_cast_width() {
 }
 
 #[test]
+fn rejects_loop_substituted_out_of_range_array_indices() {
+    let error = cranelift_build_error(
+        r#"
+        module Top(input logic clk);
+            logic [7:0] a[0:1][0:2];
+            always_ff @(posedge clk) begin
+                for (int i = 3; i < 4; i++) a[0][i] <= 8'hff;
+            end
+        endmodule
+        "#,
+    );
+    assert!(
+        error.contains("always_ff assignment lowering"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn uses_the_first_always_ff_event_as_a_negedge_clock() {
     let source = r#"
         module Top(input logic clk, input logic rst, input logic d, output logic q);
